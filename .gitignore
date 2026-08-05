@@ -1,4 +1,5 @@
 # Go
+backend/cerbix
 backend/bin/
 backend/dist/
 backend/.cache/
@@ -11,6 +12,7 @@ frontend/dist/
 frontend/.vite/
 
 # Local
+.claude/
 *.log
 .env
 .DS_Store

@@ -1,13 +1,26 @@
-# Local development stack for cerbix with static IP allocations.
+# cerbix single-geo stack (one region) with static IPs and compose profiles.
 #
-#   docker compose -f deploy/docker-compose.yml up --build
+# Infra (postgres, rabbitmq) always starts; pick HOW cerbix runs via profiles:
+#
+#   docker compose -f deploy/docker-compose.yml --profile single up -d --build
+#       one process, --role all, UI/API on :8080
+#
+#   docker compose -f deploy/docker-compose.yml --profile distributed up -d --build
+#       scheduler + api (:8082) + worker as separate processes over RabbitMQ;
+#       apply migrations ONCE first (roles racing a new migration fail):
+#       docker compose -f deploy/docker-compose.yml --profile distributed \
+#         run --rm api migrate --config /etc/cerbix/config.yaml
+#
+#   add --profile sso to either to also start Keycloak (:8081) + MariaDB.
+#
+# `single` and `distributed` are mutually exclusive — start one or the other.
 #
 # Static IP map (subnet 10.5.0.0/16):
-#   10.5.0.10  postgres
-#   10.5.0.11  rabbitmq
-#   10.5.0.12  mariadb
-#   10.5.0.13  keycloak
-#   10.5.0.14  cerbix
+#   10.5.0.10  postgres        10.5.0.20  scheduler   (distributed)
+#   10.5.0.11  rabbitmq        10.5.0.21  api         (distributed)
+#   10.5.0.12  mariadb  (sso)  10.5.0.22  worker      (distributed)
+#   10.5.0.13  keycloak (sso)
+#   10.5.0.14  cerbix   (single)
 
 x-netCaps: &netCaps
   cap_drop:
@@ -28,9 +41,18 @@ x-dataCaps: &dataCaps
     - SETGID
     - SETUID
 
+x-cerbix-build: &cerbixBuild
+  # Root context: the backend Dockerfile builds the SPA and embeds it into the
+  # binary, so one image serves API + auth + SPA (no separate nginx).
+  build:
+    context: ..
+    dockerfile: backend/Dockerfile
+  image: cerbix-cerbix
+
 name: cerbix
 
 services:
+  # ---- infrastructure (no profile: always starts) --------------------------
   postgres:
     image: timescale/timescaledb:2.17.2-pg16
     <<: [*netCaps, *logging, *dataCaps]
@@ -72,9 +94,75 @@ services:
       timeout: 5s
       retries: 10
 
+  # ---- profile: single (everything in one process) -------------------------
+  cerbix:
+    <<: [*cerbixBuild, *netCaps, *logging]
+    profiles: ["single"]
+    command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "all"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      default:
+        ipv4_address: 10.5.0.14
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.dev.yaml:/etc/cerbix/config.yaml:ro
+
+  # ---- profile: distributed (roles as separate processes) ------------------
+  scheduler:
+    <<: [*cerbixBuild, *netCaps, *logging]
+    profiles: ["distributed"]
+    command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "scheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      default:
+        ipv4_address: 10.5.0.20
+    volumes:
+      - ./config.dev.yaml:/etc/cerbix/config.yaml:ro
+
+  api:
+    <<: [*cerbixBuild, *netCaps, *logging]
+    profiles: ["distributed"]
+    command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "api"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      default:
+        ipv4_address: 10.5.0.21
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./config.dev.yaml:/etc/cerbix/config.yaml:ro
+
+  worker:
+    <<: [*cerbixBuild, *netCaps, *logging]
+    profiles: ["distributed"]
+    command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "core"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      default:
+        ipv4_address: 10.5.0.22
+    volumes:
+      - ./config.worker.yaml:/etc/cerbix/worker.yaml:ro
+
+  # ---- profile: sso (optional Keycloak OIDC) --------------------------------
   mariadb:
     image: mariadb:10.9
     <<: [*netCaps, *logging, *dataCaps]
+    profiles: ["sso"]
     volumes:
       - mysql_data:/var/lib/mysql
     environment:
@@ -96,6 +184,7 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:18.0.0
     <<: [*netCaps, *logging]
+    profiles: ["sso"]
     environment:
       KC_HOSTNAME: 10.5.0.13
       KC_HOSTNAME_PORT: 8080
@@ -114,7 +203,7 @@ services:
       default:
         ipv4_address: 10.5.0.13
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080/health/ready" ]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
       interval: 15s
       timeout: 2s
       retries: 15
@@ -126,32 +215,6 @@ services:
     depends_on:
       mariadb:
         condition: service_healthy
-
-  cerbix:
-    build:
-      context: ..
-      dockerfile: backend/Dockerfile
-    <<: [*netCaps, *logging]
-    command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "all"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-    healthcheck:
-      test: [ "CMD", "wget", "-qO-", "http://localhost:8080/healthz" ]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    networks:
-      default:
-        ipv4_address: 10.5.0.14
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./config.dev.yaml:/etc/cerbix/config.yaml:ro
 
 networks:
   default:

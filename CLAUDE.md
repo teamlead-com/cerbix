@@ -36,12 +36,13 @@ docker run --rm -v "$PWD":/app -v "$PWD/../openapi.yaml":/openapi.yaml -w /app n
 ### Image & stacks (from repo root)
 
 ```bash
-docker compose -f deploy/docker-compose.yml build cerbix     # multi-stage: node builds SPA → embedded → distroless
-docker compose -f deploy/docker-compose.yml up -d            # dev: single process --role all, :8080 (static IPs 10.5.0.x)
-# Distributed overlay (api :8082) — migrate ONCE first, roles racing a new migration fail with "relation already exists":
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.distributed.yml run --rm api migrate --config /etc/cerbix/config.yaml
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.distributed.yml up -d scheduler api worker-core worker-geo1 worker-geo2
-# deploy/docker-compose.geo.yml  — geo demo, 3 isolated subnets (central/geo1/geo2), proves the network boundary
+docker compose -f deploy/docker-compose.yml build            # multi-stage: node builds SPA → embedded → distroless
+# Single-geo file is profile-driven; `single` and `distributed` are mutually exclusive:
+docker compose -f deploy/docker-compose.yml --profile single up -d          # one process --role all, :8080 (static IPs 10.5.0.x)
+docker compose -f deploy/docker-compose.yml --profile distributed run --rm api migrate --config /etc/cerbix/config.yaml  # migrate ONCE first — roles racing a new migration fail with "relation already exists"
+docker compose -f deploy/docker-compose.yml --profile distributed up -d     # scheduler + api (:8082) + worker
+# add --profile sso to either for Keycloak (:8081) + MariaDB
+# deploy/docker-compose.geo.yml  — multi-geo: central always, remote sites via --profile geo1/geo2 (3 isolated subnets)
 # deploy/docker-compose.prod.yml — prod role=all, secrets from deploy/.env (see .env.prod.example)
 ```
 

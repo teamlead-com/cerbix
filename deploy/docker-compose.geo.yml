@@ -1,6 +1,10 @@
 # cerbix geo-distributed demo — local build, static IPs, network-isolated per geo.
 #
-#   docker compose -f deploy/docker-compose.geo.yml up --build -d
+# Central site (postgres, rabbitmq, scheduler, api, worker-core) always starts;
+# remote sites are opt-in via profiles:
+#
+#   docker compose -f deploy/docker-compose.geo.yml up -d --build                  # central only
+#   docker compose -f deploy/docker-compose.geo.yml --profile geo1 --profile geo2 up -d --build
 #
 # Reproduces the production topology on one host using THREE isolated networks, so
 # remote roles reach only what they would across a real geo boundary:
@@ -127,6 +131,7 @@ services:
   # ---- remote geo-1: AMQP worker, broker-only, DB-less ----
   worker-geo1:
     <<: *cerbix
+    profiles: ["geo1"]
     command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "geo1"]
     depends_on:
       rabbitmq:
@@ -140,6 +145,7 @@ services:
   # ---- remote geo-2: HTTP-pull agent, API-only, DB-less & broker-less ----
   worker-geo2:
     <<: *cerbix
+    profiles: ["geo2"]
     command: ["serve", "--config", "/etc/cerbix/agent.yaml", "--role", "agent", "--region", "geo2"]
     depends_on:
       api:

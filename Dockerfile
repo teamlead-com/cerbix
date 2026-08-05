@@ -2,9 +2,8 @@
 # into the Go binary (internal/web/dist via go:embed), so this single image serves
 # the whole app — REST API, /auth, public status pages, and the SPA — with no nginx.
 #
-# Build context is the REPO ROOT (see deploy/docker-compose.yml: context .. /
-# dockerfile backend/Dockerfile), because this Dockerfile needs both frontend/ and
-# backend/.
+# Build context is the REPO ROOT (see deploy/docker-compose.yml: context ..),
+# because this Dockerfile needs both frontend/ and the Go module at the root.
 
 # Stage 1 — build the SPA.
 FROM node:22-alpine AS spa
@@ -17,9 +16,10 @@ RUN npm run build
 # Stage 2 — build the Go binary with the freshly-built SPA embedded.
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
-COPY backend/go.mod backend/go.sum ./
+COPY go.mod go.sum ./
 RUN go mod download
-COPY backend/ ./
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
 # Replace the committed SPA snapshot with the just-built one before embedding.
 RUN rm -rf internal/web/dist
 COPY --from=spa /app/dist ./internal/web/dist

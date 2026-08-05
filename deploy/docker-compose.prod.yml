@@ -66,7 +66,7 @@ services:
     image: ${CERBIX_IMAGE:-cerbix:latest}
     build:
       context: ..
-      dockerfile: backend/Dockerfile
+      dockerfile: Dockerfile
     restart: unless-stopped
     <<: *logging
     cap_drop: [ALL]

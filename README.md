@@ -102,8 +102,8 @@ notes. The API contract lives in [`openapi.yaml`](openapi.yaml).
 ```bash
 # Native (no Docker): frontend → embedded assets, then the Go binary.
 cd frontend && npm install && npm run build
-rm -rf ../backend/internal/web/dist && cp -r dist ../backend/internal/web/dist
-cd ../backend && go build -o cerbix ./cmd/cerbix
+rm -rf ../internal/web/dist && cp -r dist ../internal/web/dist
+cd .. && go build -o cerbix ./cmd/cerbix
 
 # Or build the image (multi-stage: SPA + binary → distroless):
 docker compose -f deploy/docker-compose.yml build

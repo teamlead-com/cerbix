@@ -1,8 +1,8 @@
 # Go
-backend/cerbix
-backend/bin/
-backend/dist/
-backend/.cache/
+/cerbix
+/bin/
+/dist/
+/.cache/
 *.test
 *.out
 

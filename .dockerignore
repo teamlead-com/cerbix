@@ -1,11 +1,14 @@
-# Keep the (now repo-root) Docker build context lean. The backend Dockerfile
-# builds the SPA from frontend/ and the Go binary from backend/.
+# Keep the repo-root Docker build context lean. The Dockerfile builds the SPA
+# from frontend/ and the Go binary from cmd/ + internal/.
 .git
+.github
+.claude
 **/node_modules
-backend/.cache
-backend/dist
+.cache
+bin
+dist
 frontend/dist
 **/*.log
-scratchpad
 docs
 .ci
+deploy/.env

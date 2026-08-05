@@ -67,4 +67,4 @@ backend-build:
   artifacts:
     expire_in: 30 days
     paths:
-      - backend/dist/release/
+      - dist/release/

@@ -2,7 +2,7 @@
 
 Internal uptime & SLA monitoring: monitors → heartbeats → SLA/incidents/status
 pages, with OpenID Connect (any issuer) + local login, org→project multi-tenancy and role-based access control (Global/Org/Project roles). Go backend,
-Postgres, RabbitMQ, Vue 3 SPA. Monorepo: `backend/`, `frontend/`, `docs/`, `deploy/`.
+Postgres, RabbitMQ, Vue 3 SPA. Monorepo: the Go module at the root (`cmd/`, `internal/`), `frontend/`, `docs/`, `deploy/`.
 
 ## 1. Read this first
 
@@ -22,7 +22,6 @@ Postgres, RabbitMQ, Vue 3 SPA. Monorepo: `backend/`, `frontend/`, `docs/`, `depl
 docker compose -f deploy/docker-compose.yml up --build
 
 # or just the backend against your own Postgres:
-cd backend
 ./bin/cerbix migrate --config deploy/config.example.yaml
 ./bin/cerbix serve   --config deploy/config.example.yaml --role all
 # :8080/healthz  /readyz  /metrics ; SPA at /
@@ -62,7 +61,7 @@ OIDC IdP/local ─▶ api (REST + SSE, RBAC, serves SPA, consumes results)
   provider-neutral sign-in button (label from `oidc.button_label`, default "Continue with SSO"). The user
   identity column is `oidc_sub`, JIT-provisioned via `store.UpsertUserByOIDCSub`. See D-0043/D-0044/D-0045.
 
-Package map (`backend/internal/`): `config` `logging` `metrics` `httpsrv` · `auth` `authz` ·
+Package map (`internal/`): `config` `logging` `metrics` `httpsrv` · `auth` `authz` ·
 `store` (pgx + goose migrations) `domain` · `dispatch` `scheduler` `worker` `prober` `ingest` ·
 `sla` `notify` `webhook` `outbox` `secret` · `api` `web` `feed`.
 

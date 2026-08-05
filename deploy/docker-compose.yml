@@ -46,7 +46,7 @@ x-cerbix-build: &cerbixBuild
   # binary, so one image serves API + auth + SPA (no separate nginx).
   build:
     context: ..
-    dockerfile: backend/Dockerfile
+    dockerfile: Dockerfile
   image: cerbix-cerbix
 
 name: cerbix

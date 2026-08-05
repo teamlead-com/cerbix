@@ -31,12 +31,12 @@ Before creating a new doc, decide which folder it belongs to based on lifetime.
 
 cerbix is a monorepo: a Go backend and a Vue 3 frontend.
 
-- `backend/cmd/cerbix/`: CLI entrypoint (`serve --role`, `version`).
-- `backend/internal/<pkg>/`: service packages (`config`, `logging`, `metrics`,
+- `cmd/cerbix/`: CLI entrypoint (`serve --role`, `version`).
+- `internal/<pkg>/`: service packages (`config`, `logging`, `metrics`,
   `buildinfo`, `httpsrv`, `cli`, and later `auth`, `authz`, `store`, `domain`,
   `dispatch`, `scheduler`, `worker`, `prober`, `mq`, `sla`, `notify`, `statuspage`,
   `incidents`, `apitoken`, `api`). **No `pkg/`.**
-- `backend/packaging/`: `config.example.yaml` and deployable assets.
+- `deploy/`: compose stacks, role configs, and `config.example.yaml`.
 - `frontend/`: Vue 3 + TS SPA (Vite), embedded into the binary via `embed.FS`.
 - `deploy/`: `docker-compose.yml` local dev stack.
 - `docs/`: PRD, TZ, status, traceability, decisions, runbook, iteration reports.
@@ -103,7 +103,7 @@ authorized `org_id`/`project_id` set. A missing filter is a security defect.
 
 ## Build, Test, and Development Commands
 
-From `backend/`:
+From the repo root:
 
 - `make test` / `go test ./...` — unit and fake-backed integration tests.
 - `make race` / `go test -race ./...` — concurrency checks (scheduler, worker, SSE).

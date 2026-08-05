@@ -23,7 +23,7 @@ x-cerbix: &cerbix
   image: cerbix:local
   build:
     context: ..
-    dockerfile: backend/Dockerfile
+    dockerfile: Dockerfile
   cap_drop: [ALL]
   logging:
     driver: json-file

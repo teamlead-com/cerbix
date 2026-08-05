@@ -1,0 +1,10 @@
+# Normalize line endings (LF in the repo, always).
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.woff2 binary
+
+# Generated files: collapsed in diffs and excluded from language statistics.
+backend/internal/web/dist/** linguist-generated=true
+frontend/src/api/schema.d.ts linguist-generated=true
+frontend/package-lock.json linguist-generated=true

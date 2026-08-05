@@ -36,3 +36,12 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+
+  # Maintain GitHub Actions versions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"

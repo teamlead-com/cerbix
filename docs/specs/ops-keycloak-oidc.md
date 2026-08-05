@@ -295,7 +295,7 @@ Instead of manual UI configuration, you can import this complete realm configura
 
 ## ⚙️ cerbix Side Configuration (`config.yaml`)
 
-Edit your cerbix configuration file (e.g. `backend/packaging/config.example.yaml` or `config.yaml`):
+Edit your cerbix configuration file (e.g. `deploy/config.example.yaml` or `config.yaml`):
 
 ### Docker Compose Static IP Map (`subnet: 10.5.0.0/16`)
 

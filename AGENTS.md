@@ -108,7 +108,7 @@ From `backend/`:
 - `make test` / `go test ./...` — unit and fake-backed integration tests.
 - `make race` / `go test -race ./...` — concurrency checks (scheduler, worker, SSE).
 - `make build` — builds `bin/cerbix` with version/commit ldflags.
-- `./bin/cerbix serve --config packaging/config.example.yaml --role all` — run locally.
+- `./bin/cerbix serve --config deploy/config.example.yaml --role all` — run locally.
 - `make lint` / `golangci-lint run ./...` — required when configured.
 - `gofmt -w <files>` — format changed Go files before review.
 

@@ -23,8 +23,8 @@ docker compose -f deploy/docker-compose.yml up --build
 
 # or just the backend against your own Postgres:
 cd backend
-./bin/cerbix migrate --config packaging/config.example.yaml
-./bin/cerbix serve   --config packaging/config.example.yaml --role all
+./bin/cerbix migrate --config deploy/config.example.yaml
+./bin/cerbix serve   --config deploy/config.example.yaml --role all
 # :8080/healthz  /readyz  /metrics ; SPA at /
 ```
 

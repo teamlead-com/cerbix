@@ -66,7 +66,7 @@ migrations apply themselves on startup and a bootstrap admin is created from con
 
 ```bash
 # From the repo root — builds the SPA + Go binary into one image and runs the dev stack.
-docker compose -f deploy/docker-compose.yml up --build
+docker compose -f deploy/docker-compose.yml --profile single up -d --build
 # UI + API on http://localhost:8080 — log in with the bootstrap admin from deploy/config.dev.yaml.
 ```
 
@@ -92,7 +92,7 @@ cerbix serve --config config.yaml --role all
 # Ops endpoints: /healthz  /readyz  /metrics
 ```
 
-See [`backend/packaging/config.example.yaml`](backend/packaging/config.example.yaml) for
+See [`deploy/config.example.yaml`](deploy/config.example.yaml) for
 every option (RabbitMQ, OIDC, mail, secrets-at-rest, geo/pull transport), and
 [`docs/overview.md`](docs/overview.md) for architecture, the deployment map, and design
 notes. The API contract lives in [`openapi.yaml`](openapi.yaml).
@@ -125,7 +125,7 @@ Detailed architecture diagrams and workflows live in [`docs/architecture.md`](do
 Design and status live under [`docs/`](docs/): [`architecture.md`](docs/architecture.md)
 (system topology, data flow, geo-distribution, auth, escalation & database ERD),
 [`ops-keycloak-oidc.md`](docs/specs/ops-keycloak-oidc.md) (Keycloak & OIDC setup guide),
-[`overview.md`](docs/overview.md) (deployment map, competitor comparison), `decisions.md` (the numbered decision log), `traceability.md`, and `status.md` (the live FR/NFR checklist).
+[`overview.md`](docs/overview.md) (deployment map), `decisions.md` (the numbered decision log), `traceability.md`, and `status.md` (the live FR/NFR checklist).
 
 ## Community & Contributing
 

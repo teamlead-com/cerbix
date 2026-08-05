@@ -1,4 +1,7 @@
-# cerbix example configuration (strict-only: unknown keys are rejected).
+# cerbix — full example configuration (every section and key, with defaults).
+# The config is strict: unknown keys or invalid values fail startup fast.
+# ${ENV_VAR} references are expanded from the process environment at load time,
+# so secrets can live in an .env / the deployment environment instead of here.
 
 server:
   listen: ":8080"
@@ -17,9 +20,9 @@ database:
 # Optional. When empty, the in-process dispatcher is used (local dev).
 # Required for the distributed roles: --role api | scheduler | worker.
 rabbitmq:
-  url: ""            # e.g. amqp://golang:pass@localhost:5672/
-  management_url: "" # optional; derived from url (5672→15672 / amqps 5671→15671) if empty.
-                     # Used by the API to list live worker-pool regions (region picker).
+  url: ""             # e.g. amqp://golang:pass@localhost:5672/
+  management_url: ""  # optional; derived from url (5672→15672 / amqps 5671→15671) if empty.
+                      # Used by the API to list live worker-pool regions (region picker).
 
 # OpenID Connect login — any OIDC-compliant provider (Keycloak, Auth0, Okta,
 # Google, Entra ID, …). When issuer is empty, OIDC login is disabled (scaffold
@@ -105,5 +108,8 @@ mail:
 pull:
   regions: []             # central: e.g. ["geo-1"]
   token: ""               # central catch-all / agent secret
-  agents: []              # central: e.g. [{ region: "geo-1", token: "geo1-secret" }]
+  agents: []              # central: per-region tokens, e.g.
+                          #   agents:
+                          #     - region: "geo-1"
+                          #       token: "geo1-secret"
   server_url: ""          # agent: e.g. https://cerbix.core

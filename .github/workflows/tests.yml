@@ -1,0 +1,72 @@
+name: Tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (build, vet, gofmt, race tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: cerbixtest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: Tests (-race, DB-gated suites against the service container)
+        env:
+          CERBIX_TEST_DATABASE_DSN: postgres://test:test@localhost:5432/cerbixtest?sslmode=disable
+        run: go test -race -count=1 ./...
+
+  frontend:
+    name: Frontend (type-check, build, schema drift)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Type-check + build
+        run: npm run build
+      - name: API schema drift (openapi.yaml changed without regenerating schema.d.ts?)
+        run: |
+          npm run gen:api
+          git diff --exit-code src/api/schema.d.ts \
+            || (echo "::error::schema.d.ts is stale — run 'npm run gen:api' after editing openapi.yaml" && exit 1)

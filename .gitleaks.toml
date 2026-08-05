@@ -1,0 +1,14 @@
+# gitleaks configuration: default rules + allowlist for documentation phrases
+# that the generic-api-key heuristic mistakes for secrets (plain English around
+# the word "token"/"key" in docs/, not credentials).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documentation false positives"
+regexes = [
+  '''issuance/revocation''',
+  '''RS256-signed''',
+  '''parent/child''',
+]
+paths = []

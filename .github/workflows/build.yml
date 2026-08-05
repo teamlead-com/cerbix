@@ -79,3 +79,5 @@ jobs:
         with:
           files: out/*
           generate_release_notes: true
+          # -alpha / -beta / -rc tags publish as pre-releases automatically
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // dnsProber resolves a hostname's A/AAAA records. Success (no conditions) = at

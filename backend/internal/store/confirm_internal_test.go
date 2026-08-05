@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // TestRecordCheckStatusConfirmNotify proves the confirmation-phase wake signal:

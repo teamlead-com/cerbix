@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 const channelColumns = "id, project_id, type, name, config, enabled, created_at"

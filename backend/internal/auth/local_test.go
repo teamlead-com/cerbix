@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/config"
-	"git.example.com/monitoring/cerbix/internal/store"
-	"git.example.com/monitoring/cerbix/internal/totp"
+	"github.com/teamlead-com/cerbix/internal/config"
+	"github.com/teamlead-com/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/totp"
 )
 
 // localAuthenticator builds an OIDC-disabled, local-login-enabled Authenticator.

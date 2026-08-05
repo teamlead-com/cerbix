@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 type fakeStore struct{ emails []string }

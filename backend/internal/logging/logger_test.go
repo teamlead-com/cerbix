@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/config"
+	"github.com/teamlead-com/cerbix/internal/config"
 )
 
 func TestNewJSONLoggerUsesConfiguredLevel(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // syntheticProber runs a scripted multi-step HTTP scenario. Steps execute in order

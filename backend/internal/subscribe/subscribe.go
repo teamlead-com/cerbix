@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // Store lists the confirmed subscriber emails affected by an incident's project.

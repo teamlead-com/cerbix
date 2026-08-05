@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"git.example.com/monitoring/cerbix/internal/authz"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // requireGlobalAdmin returns the principal if it may manage global resources,

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/auth"
-	"git.example.com/monitoring/cerbix/internal/authz"
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/totp"
+	"github.com/teamlead-com/cerbix/internal/auth"
+	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/totp"
 )
 
 // localUser is a principal for the seeded local account u1 with a password on file.

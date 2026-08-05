@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // resetTokenTTL is how long a password-reset link stays valid.

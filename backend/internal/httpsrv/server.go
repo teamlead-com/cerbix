@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"git.example.com/monitoring/cerbix/internal/config"
-	"git.example.com/monitoring/cerbix/internal/metrics"
+	"github.com/teamlead-com/cerbix/internal/config"
+	"github.com/teamlead-com/cerbix/internal/metrics"
 )
 
 // Server wraps the operational HTTP server.

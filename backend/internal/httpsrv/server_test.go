@@ -5,9 +5,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/buildinfo"
-	"git.example.com/monitoring/cerbix/internal/config"
-	"git.example.com/monitoring/cerbix/internal/metrics"
+	"github.com/teamlead-com/cerbix/internal/buildinfo"
+	"github.com/teamlead-com/cerbix/internal/config"
+	"github.com/teamlead-com/cerbix/internal/metrics"
 )
 
 func newTestServer(ready bool) *Server {

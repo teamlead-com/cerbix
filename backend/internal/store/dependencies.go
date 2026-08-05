@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // Dependency-graph errors surfaced to the API as 400s.

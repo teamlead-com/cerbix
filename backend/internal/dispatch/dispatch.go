@@ -8,7 +8,7 @@ package dispatch
 import (
 	"context"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // CheckJob carries a monitor snapshot to execute. The snapshot is taken at

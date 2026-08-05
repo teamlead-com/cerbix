@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // sshProber checks an SSH server by connecting through the SSRF guard and reading

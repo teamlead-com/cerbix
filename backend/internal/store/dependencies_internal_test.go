@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // TestMonitorDependencies covers the graph invariants and the suppression

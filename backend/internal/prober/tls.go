@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // tlsProber connects to a TLS endpoint (host:port, default 443) through the SSRF

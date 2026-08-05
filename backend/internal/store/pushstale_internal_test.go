@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // TestStalePushMonitors covers the batched dead-man's-switch query: only enabled,

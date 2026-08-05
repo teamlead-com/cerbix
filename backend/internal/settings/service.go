@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // refreshEvery is how often the snapshot is reloaded so cross-replica writes land.

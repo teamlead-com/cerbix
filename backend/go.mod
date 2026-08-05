@@ -1,4 +1,4 @@
-module git.example.com/monitoring/cerbix
+module github.com/teamlead-com/cerbix
 
 go 1.25.7
 

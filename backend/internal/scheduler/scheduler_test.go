@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/dispatch"
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/metrics"
+	"github.com/teamlead-com/cerbix/internal/dispatch"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/metrics"
 )
 
 type fakeStore struct {

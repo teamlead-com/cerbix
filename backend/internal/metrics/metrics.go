@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/buildinfo"
+	"github.com/teamlead-com/cerbix/internal/buildinfo"
 )
 
 // Registry holds process-level metrics and readiness state.

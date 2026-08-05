@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // TestEvaluateBurnAlerts covers the edge-triggered SLO burn-rate evaluation: an

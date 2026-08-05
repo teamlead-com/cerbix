@@ -12,11 +12,11 @@ import (
 	"net/http"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/auth"
-	"git.example.com/monitoring/cerbix/internal/authz"
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/settings"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/auth"
+	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/settings"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // Store is the persistence surface the API needs.

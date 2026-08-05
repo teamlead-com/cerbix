@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // acceptOnce accepts a single connection and hands it to fn, returning the

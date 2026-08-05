@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/secret"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/secret"
 )
 
 func TestSecretsEncryptedAtRest(t *testing.T) {

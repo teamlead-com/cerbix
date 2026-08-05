@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/buildinfo"
+	"github.com/teamlead-com/cerbix/internal/buildinfo"
 )
 
 func TestWritePrometheusEmitsCoreSeries(t *testing.T) {

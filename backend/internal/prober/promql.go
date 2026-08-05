@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // promqlProber evaluates a PromQL query against a Prometheus server (through the

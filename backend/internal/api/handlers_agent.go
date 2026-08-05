@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // agentLongPollHold bounds how long GET /agent/jobs holds an empty request waiting for a

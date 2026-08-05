@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/authz"
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // Service-account principals (as the auth middleware would build from a token).

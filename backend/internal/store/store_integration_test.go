@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/dispatch"
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/ingest"
-	"git.example.com/monitoring/cerbix/internal/prober"
-	"git.example.com/monitoring/cerbix/internal/scheduler"
-	"git.example.com/monitoring/cerbix/internal/store"
-	"git.example.com/monitoring/cerbix/internal/worker"
+	"github.com/teamlead-com/cerbix/internal/dispatch"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/ingest"
+	"github.com/teamlead-com/cerbix/internal/prober"
+	"github.com/teamlead-com/cerbix/internal/scheduler"
+	"github.com/teamlead-com/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/worker"
 )
 
 // These tests require a real Postgres. They are opt-in via CERBIX_TEST_DATABASE_DSN

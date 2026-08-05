@@ -26,7 +26,7 @@ COPY --from=spa /app/dist ./internal/web/dist
 ARG VERSION=dev
 ARG COMMIT=unknown
 RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath \
-    -ldflags "-s -w -X git.example.com/monitoring/cerbix/internal/buildinfo.Version=${VERSION} -X git.example.com/monitoring/cerbix/internal/buildinfo.Commit=${COMMIT}" \
+    -ldflags "-s -w -X github.com/teamlead-com/cerbix/internal/buildinfo.Version=${VERSION} -X github.com/teamlead-com/cerbix/internal/buildinfo.Commit=${COMMIT}" \
     -o /out/cerbix ./cmd/cerbix
 
 FROM gcr.io/distroless/static-debian12:nonroot

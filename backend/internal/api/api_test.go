@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/api"
-	"git.example.com/monitoring/cerbix/internal/auth"
-	"git.example.com/monitoring/cerbix/internal/authz"
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/auth"
+	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // fakeStore implements api.Store in memory for hermetic handler tests.

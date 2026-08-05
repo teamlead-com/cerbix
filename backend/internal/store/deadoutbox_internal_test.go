@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func TestDeadOutboxListAndReplay(t *testing.T) {

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/store"
-	"git.example.com/monitoring/cerbix/internal/totp"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/totp"
 )
 
 // secondFactorOK validates a login's second factor: a current TOTP code, or a

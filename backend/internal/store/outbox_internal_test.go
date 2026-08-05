@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func outboxTestStore(t *testing.T) (*Store, context.Context) {

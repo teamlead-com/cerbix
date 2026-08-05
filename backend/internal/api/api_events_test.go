@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/api"
-	"git.example.com/monitoring/cerbix/internal/auth"
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/events"
+	"github.com/teamlead-com/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/auth"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/events"
 )
 
 func TestEventsDisabledWithoutSource(t *testing.T) {

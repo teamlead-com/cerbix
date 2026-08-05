@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // GetInstanceSettings reads the singleton settings row and decodes every group.

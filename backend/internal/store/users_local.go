@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // LocalCredential is the minimal record needed to authenticate a local login.

@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/authz"
 )
 
 func TestClientCredentialsBearer(t *testing.T) {

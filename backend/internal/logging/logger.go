@@ -6,7 +6,7 @@ import (
 	"io"
 	"log/slog"
 
-	"git.example.com/monitoring/cerbix/internal/config"
+	"github.com/teamlead-com/cerbix/internal/config"
 )
 
 // LevelCritical is a custom level above Error for unrecoverable conditions.

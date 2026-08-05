@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 const statusPageColumns = "id, org_id, project_id, slug, title, visibility, unlisted_token, created_at, updated_at"

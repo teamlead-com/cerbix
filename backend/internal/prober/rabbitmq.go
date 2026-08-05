@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // amqpProtocolHeader is the AMQP 0-9-1 protocol header a client sends on connect.

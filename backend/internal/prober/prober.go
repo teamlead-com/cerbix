@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 const maxBodyBytes = 1 << 20 // 1 MiB cap on read body for condition evaluation

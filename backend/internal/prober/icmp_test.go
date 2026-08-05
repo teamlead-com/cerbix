@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // TestICMPProbeLoopback pings 127.0.0.1. ICMP needs a permitted socket

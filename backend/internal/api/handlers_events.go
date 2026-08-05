@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/events"
+	"github.com/teamlead-com/cerbix/internal/events"
 )
 
 // events streams live monitor status changes as Server-Sent Events, filtered to

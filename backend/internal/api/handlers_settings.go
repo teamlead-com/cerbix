@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // settingsReady guards the instance-settings endpoints when the service isn't wired.

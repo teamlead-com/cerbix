@@ -2,7 +2,7 @@
 # Build a native cerbix binary with version/commit embedded via ldflags.
 set -euo pipefail
 
-PKG="git.example.com/monitoring/cerbix"
+PKG="github.com/teamlead-com/cerbix"
 VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
 COMMIT="${COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
 GOOS="${GOOS:-linux}"

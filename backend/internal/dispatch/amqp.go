@@ -11,7 +11,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // dialAttempts/dialBackoff bound the startup wait for the broker to become

@@ -4,8 +4,8 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/secret"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/secret"
 )
 
 func randKey(t *testing.T) []byte {

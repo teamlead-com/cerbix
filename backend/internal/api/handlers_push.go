@@ -6,8 +6,8 @@ import (
 	"errors"
 	"net/http"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // pushHeartbeat is the unauthenticated push endpoint for dead-man's-switch

@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"git.example.com/monitoring/cerbix/internal/cli"
+	"github.com/teamlead-com/cerbix/internal/cli"
 )
 
 func main() {

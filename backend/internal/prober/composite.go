@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // compositeProber derives a monitor's status from its child monitors' current

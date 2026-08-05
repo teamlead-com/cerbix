@@ -6,7 +6,7 @@ New decisions append here; do not rewrite history.
 ## D-0001 — Monorepo (backend + frontend)
 
 **Context:** cerbix ships a Go backend and a Vue SPA.
-**Decision:** single repo `git.example.com/monitoring/cerbix` with `backend/` and
+**Decision:** single repo `github.com/teamlead-com/cerbix` with `backend/` and
 `frontend/`; the SPA is embedded into the binary via `embed.FS`.
 **Consequence:** atomic API+UI changes, one release; CI jobs are path-scoped.
 
@@ -42,8 +42,8 @@ validated snapshot, no inline env reads. No self-healing/fallback.
 ## D-0006 — Go module rooted at `backend/`
 
 **Context:** monorepo with mixed toolchains.
-**Decision:** `go.mod` module path `git.example.com/monitoring/cerbix` lives in `backend/`;
-imports are `git.example.com/monitoring/cerbix/internal/...`.
+**Decision:** `go.mod` module path `github.com/teamlead-com/cerbix` lives in `backend/`;
+imports are `github.com/teamlead-com/cerbix/internal/...`.
 **Consequence:** clean import paths; frontend tooling stays out of the Go module.
 
 ## D-0007 — Status page default visibility is `internal`

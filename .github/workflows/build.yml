@@ -46,8 +46,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           COMMIT="${GITHUB_SHA::12}"
           LDFLAGS="-s -w \
-            -X git.example.com/monitoring/cerbix/internal/buildinfo.Version=${VERSION} \
-            -X git.example.com/monitoring/cerbix/internal/buildinfo.Commit=${COMMIT}"
+            -X github.com/teamlead-com/cerbix/internal/buildinfo.Version=${VERSION} \
+            -X github.com/teamlead-com/cerbix/internal/buildinfo.Commit=${COMMIT}"
           mkdir -p ../out
           for target in linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64; do
             GOOS="${target%/*}" GOARCH="${target#*/}"

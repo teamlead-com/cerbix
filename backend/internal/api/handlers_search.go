@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // search returns projects, monitors and incidents matching ?q, restricted to what

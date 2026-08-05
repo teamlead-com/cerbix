@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func TestDeadOutboxAdminOnly(t *testing.T) {

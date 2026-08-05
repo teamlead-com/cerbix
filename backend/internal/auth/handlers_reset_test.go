@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/mailer"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/mailer"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 func resetAuthenticator(t *testing.T, fs *fakeStore, withMail bool) *Authenticator {

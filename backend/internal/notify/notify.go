@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // telegramAPI is the Telegram Bot API base; a var so tests can point it at a stub.

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // redisProber checks a Redis server by AUTH-ing (when a password is set) and

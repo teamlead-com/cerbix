@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // regionProject is one project's monitor count within a region.

@@ -9,9 +9,9 @@ import (
 	"log/slog"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/dispatch"
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/metrics"
+	"github.com/teamlead-com/cerbix/internal/dispatch"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/metrics"
 )
 
 // advisoryLockKey is the well-known key for scheduler leadership.

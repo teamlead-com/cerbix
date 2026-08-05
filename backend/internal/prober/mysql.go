@@ -12,7 +12,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // mysqlGuardDial routes go-sql-driver connections through the SSRF guard. The

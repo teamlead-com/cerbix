@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // rollupTestStore is an in-package (unexported-field) test harness, opt-in via

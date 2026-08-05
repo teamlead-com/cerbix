@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/api"
 )
 
 type fakeOIDC struct {

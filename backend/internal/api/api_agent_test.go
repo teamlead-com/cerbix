@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/api"
 )
 
 func agentReq(h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {

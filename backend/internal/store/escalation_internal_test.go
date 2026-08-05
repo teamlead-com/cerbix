@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // TestAdvanceEscalations covers the on-call ladder lifecycle: step 0 fires promptly,

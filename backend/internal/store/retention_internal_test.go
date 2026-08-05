@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func (s *Store) partitionExists(ctx context.Context, t *testing.T, name string) bool {

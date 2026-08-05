@@ -11,7 +11,7 @@ incident and postmortem communication.
 
 ## Constraints
 
-- **Backend:** Go (`git.example.com/monitoring/cerbix`, layout `cmd/`+`internal/`, no `pkg/`).
+- **Backend:** Go (`github.com/teamlead-com/cerbix`, layout `cmd/`+`internal/`, no `pkg/`).
 - **Database:** Postgres — heartbeats use native daily RANGE partitioning plus a
   daily-availability rollup table for cheap long-window SLA (no TimescaleDB dependency, D-0037).
 - **Broker:** RabbitMQ (jobs/results) — designed in from the start for horizontal growth.

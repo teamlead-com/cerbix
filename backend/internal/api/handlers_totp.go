@@ -6,9 +6,9 @@ import (
 	"errors"
 	"net/http"
 
-	"git.example.com/monitoring/cerbix/internal/auth"
-	"git.example.com/monitoring/cerbix/internal/store"
-	"git.example.com/monitoring/cerbix/internal/totp"
+	"github.com/teamlead-com/cerbix/internal/auth"
+	"github.com/teamlead-com/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/totp"
 )
 
 const totpIssuer = "cerbix"

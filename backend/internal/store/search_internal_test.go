@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func TestSearch(t *testing.T) {

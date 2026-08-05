@@ -10,7 +10,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // Routes registers the auth endpoints on mux, conditionally on which methods are

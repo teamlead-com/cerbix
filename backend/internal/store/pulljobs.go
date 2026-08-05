@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/metrics"
+	"github.com/teamlead-com/cerbix/internal/metrics"
 )
 
 // EnqueuePullJob stores a check-job payload for a pull-served region with a TTL

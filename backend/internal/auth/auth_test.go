@@ -16,8 +16,8 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
-	"git.example.com/monitoring/cerbix/internal/config"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/config"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // mockOIDC is a minimal, hermetic OIDC provider: discovery + JWKS + token.

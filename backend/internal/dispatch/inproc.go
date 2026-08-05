@@ -3,7 +3,7 @@ package dispatch
 import (
 	"context"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // InProc is an in-process Dispatcher backed by buffered channels. It is valid

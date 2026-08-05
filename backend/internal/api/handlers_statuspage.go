@@ -8,10 +8,10 @@ import (
 	"sort"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/authz"
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/sla"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/sla"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // statusPageAccess loads a status page and checks the caller may see it (org

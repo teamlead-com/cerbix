@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // GetOIDCSettings returns the instance-wide OIDC override, or ErrNotFound if none

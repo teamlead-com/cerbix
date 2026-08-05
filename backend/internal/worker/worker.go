@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"git.example.com/monitoring/cerbix/internal/dispatch"
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/dispatch"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // Runner executes a single monitor check.

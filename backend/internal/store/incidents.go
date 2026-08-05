@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 const incidentColumns = "id, project_id, monitor_id, title, status, impact, source, external_key, started_at, resolved_at, acknowledged_at, acknowledged_by, created_at, updated_at"

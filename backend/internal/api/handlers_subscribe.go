@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // subscribe registers an email subscriber to a public/unlisted status page and

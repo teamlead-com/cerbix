@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/authz"
 )
 
 const (

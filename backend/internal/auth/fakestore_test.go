@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
-	"git.example.com/monitoring/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // fakeStore is an in-memory auth.Store for hermetic tests.

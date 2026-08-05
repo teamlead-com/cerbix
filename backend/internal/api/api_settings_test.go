@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/api"
-	"git.example.com/monitoring/cerbix/internal/settings"
+	"github.com/teamlead-com/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/settings"
 )
 
 // newSettingsRouters builds one settings-backed handler and returns both routers so

@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"git.example.com/monitoring/cerbix/internal/secret"
+	"github.com/teamlead-com/cerbix/internal/secret"
 )
 
 // ErrNotFound is returned when a lookup matches no row.

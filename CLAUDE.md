@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-cerbix — self-hosted uptime & SLA monitoring. One static Go binary embeds the Vue 3 SPA, REST API, and goose migrations. Monorepo: `backend/` (Go 1.25), `frontend/` (Vue 3 + Vite + TS), `docs/`, `deploy/`, `openapi.yaml` (source of truth for the API). Module path is `git.example.com/monitoring/cerbix` (sanitized on purpose — keep it).
+cerbix — self-hosted uptime & SLA monitoring. One static Go binary embeds the Vue 3 SPA, REST API, and goose migrations. Monorepo: `backend/` (Go 1.25), `frontend/` (Vue 3 + Vite + TS), `docs/`, `deploy/`, `openapi.yaml` (source of truth for the API). Module path is `github.com/teamlead-com/cerbix` (matches the GitHub repo; the repo is private, so external consumers need `GOPRIVATE=github.com/teamlead-com`).
 
 ## Commands
 

@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/api"
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func TestCreateMonitorMethodAndGrace(t *testing.T) {

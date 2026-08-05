@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"git.example.com/monitoring/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // Incident lifecycle events are now enqueued to the transactional outbox by the

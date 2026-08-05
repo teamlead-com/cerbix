@@ -7,7 +7,7 @@
 // membership in (global admins excepted).
 package authz
 
-import "git.example.com/monitoring/cerbix/internal/domain"
+import "github.com/teamlead-com/cerbix/internal/domain"
 
 // Action is a permission checked by handlers.
 type Action string

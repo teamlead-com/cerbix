@@ -127,8 +127,8 @@ func New(_ context.Context, cfg *config.Config, st Store, logger *slog.Logger) (
 		configOIDC:        cfg.OIDC,
 		sessionCfg:        cfg.Session,
 		local:             cfg.Local.Enabled,
-		localBootEmail:    cfg.Local.BootstrapAdminEmail,
-		localBootPassword: cfg.Local.BootstrapAdminPassword,
+		localBootEmail:    cfg.Security.AdminEmail,
+		localBootPassword: cfg.Security.AdminPassword,
 		minPasswordLen:    cfg.Local.MinPasswordLength,
 		loginLimiter:      newLoginLimiter(cfg.Local.LoginRateLimitPerMinute),
 	}

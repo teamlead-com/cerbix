@@ -70,7 +70,7 @@ Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and 
 | --- | --- | --- |
 | AC-0003-1 | OIDC login (`/auth/login`) starts Authorization Code + PKCE with state/nonce stored in `auth_flows`. | DONE |
 | AC-0003-2 | `/auth/callback` verifies the ID token (sig/iss/aud/nonce), JIT-provisions the user, creates a session, sets the cookie. | DONE |
-| AC-0003-3 | `bootstrap_admin_emails` promotes matching users to global admin on login. | DONE |
+| AC-0003-3 | `admin_emails` promotes matching users to global admin on login. | DONE |
 | AC-0003-4 | `RequireAuth` resolves the session cookie to a Principal or returns 401; `/auth/logout` revokes the session. | DONE |
 | AC-0003-5 | authz matrix + `Can` unit-tested; global-admin bypass; scope rules enforced. | DONE |
 | AC-0003-6 | API enforces isolation: non-members get 404 (hidden), insufficient in-org role gets 403; list endpoints filter by visibility. | DONE |

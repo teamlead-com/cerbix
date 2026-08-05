@@ -20,9 +20,10 @@ func localAuthenticator(t *testing.T, fs *fakeStore, bootEmail, bootPass string)
 	t.Helper()
 	cfg := &config.Config{
 		Local: config.LocalAuthConfig{
-			Enabled: true, BootstrapAdminEmail: bootEmail, BootstrapAdminPassword: bootPass, MinPasswordLength: 8,
+			Enabled: true, MinPasswordLength: 8,
 		},
-		Session: config.SessionConfig{CookieName: "cerbix_session", TTL: config.Duration(time.Hour), Secure: false},
+		Security: config.SecurityConfig{AdminEmail: bootEmail, AdminPassword: bootPass},
+		Session:  config.SessionConfig{CookieName: "cerbix_session", TTL: config.Duration(time.Hour), Secure: false},
 	}
 	a, err := New(context.Background(), cfg, fs, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {

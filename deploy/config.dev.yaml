@@ -24,8 +24,6 @@ oidc:
 
 local:
   enabled: true
-  bootstrap_admin_email: "admin@cerbix.local"
-  bootstrap_admin_password: "devpassword123"
   min_password_length: 8
 
 # HTTP-pull transport (demo). NOTE: single-process --role=all does NOT route pull
@@ -35,3 +33,7 @@ local:
 pull:
   regions: ["pull1", "geo2"]
   token: "devpulltoken"
+
+security:
+  admin_email: "admin@cerbix.local"
+  admin_password: "devpassword123"

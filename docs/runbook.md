@@ -101,15 +101,15 @@ enabled: `POST /auth/local/login` (`{"username","password"}` → session cookie)
 `POST /api/v1/me/password` (change own password). Passwords are argon2id-hashed; only the
 hash is stored; failures return a uniform 401.
 
-Bootstrap the first admin without Keycloak: set `local.bootstrap_admin_email` and
-`local.bootstrap_admin_password`; on an empty system a global admin is created at startup
+Bootstrap the first admin without Keycloak: set `security.admin_email` and
+`security.admin_password`; on an empty system a global admin is created at startup
 (`bootstrap_admin_created`). The password is taken from config and **never generated or
 logged** — if it is unset, no admin is created (`bootstrap_admin_skipped`). Rotate it via
 `/api/v1/me/password` after first login. (Local-login rate limiting is not yet implemented.)
 
 ### Keycloak bootstrap
 
-Bootstrap the first global admin by listing their email in `oidc.bootstrap_admin_emails`;
+Bootstrap the first global admin by listing their email in `oidc.admin_emails`;
 they are promoted on their next login. Sessions live in Postgres (`sessions`, hashed
 tokens); expired sessions and `auth_flows` can be swept via
 `DeleteExpiredSessions`/`DeleteExpiredAuthFlows` (wired to a scheduled sweep in a later

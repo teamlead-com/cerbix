@@ -209,27 +209,30 @@ func TestLocalRequiresDatabase(t *testing.T) {
 	}
 }
 
-func TestLocalBootstrapPasswordLength(t *testing.T) {
+func TestAdminPasswordLength(t *testing.T) {
 	yaml := "database:\n  dsn: postgres://x/y\n" +
-		"local:\n  enabled: true\n  bootstrap_admin_email: a@x\n  bootstrap_admin_password: short\n"
+		"local:\n  enabled: true\n" +
+		"security:\n  admin_email: a@x\n  admin_password: short\n"
 	_, err := Parse([]byte(yaml))
 	if err == nil || !strings.Contains(err.Error(), "shorter than") {
 		t.Fatalf("expected short-password error, got %v", err)
 	}
 }
 
-func TestLocalBootstrapPasswordNeedsEmail(t *testing.T) {
+func TestAdminPasswordNeedsEmail(t *testing.T) {
 	yaml := "database:\n  dsn: postgres://x/y\n" +
-		"local:\n  enabled: true\n  bootstrap_admin_password: longenough1\n"
+		"local:\n  enabled: true\n" +
+		"security:\n  admin_password: longenough1\n"
 	_, err := Parse([]byte(yaml))
-	if err == nil || !strings.Contains(err.Error(), "bootstrap_admin_email is required") {
+	if err == nil || !strings.Contains(err.Error(), "admin_email is required") {
 		t.Fatalf("expected email-required error, got %v", err)
 	}
 }
 
 func TestLocalValid(t *testing.T) {
 	yaml := "database:\n  dsn: postgres://x/y\n" +
-		"local:\n  enabled: true\n  bootstrap_admin_email: a@x\n  bootstrap_admin_password: longenough1\n"
+		"local:\n  enabled: true\n" +
+		"security:\n  admin_email: a@x\n  admin_password: longenough1\n"
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
 		t.Fatalf("valid local config rejected: %v", err)

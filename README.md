@@ -79,8 +79,9 @@ database:
   dsn: "postgres://cerbix:pass@localhost:5432/cerbix?sslmode=disable"
 local:
   enabled: true
-  bootstrap_admin_email: "admin@example.com"
-  bootstrap_admin_password: "change-me-please"   # creates a global admin on an empty system
+security:
+  admin_email: "admin@example.com"
+  admin_password: "change-me-please"   # creates the global admin on an empty system
 session:
   secure: false   # http dev only; behind TLS set true
 ```

@@ -57,8 +57,8 @@ Top-level `Config` sections (`internal/config`):
 | `log` | `level`, `format` | `log/slog`, JSON. |
 | `database` | `dsn` | Postgres (pgx). Empty → scaffold mode without a DB. |
 | `rabbitmq` | `url` | AMQP for distributed roles. |
-| `oidc` | `issuer`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `button_label`, `bootstrap_admin_emails` | Bootstrap OIDC (overridable from the UI, see instance-settings). |
-| `local` | `enabled`, `bootstrap_admin_email/password`, `min_password_length`, `login_rate_limit_per_minute` | Local login (password + TOTP), brute-force limit. |
+| `oidc` | `issuer`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `button_label`, `admin_emails` | Bootstrap OIDC (overridable from the UI, see instance-settings). |
+| `local` | `enabled`, `admin_email/password`, `min_password_length`, `login_rate_limit_per_minute` | Local login (password + TOTP), brute-force limit. |
 | `session` | `cookie_name`, `ttl`, `secure` | Server-side sessions (cookie). |
 | `prober` | `allow_private_ips`, `allow_metadata_ips` | SSRF guard: what workers are allowed to resolve. |
 | `heartbeats` | `retention_days` | Retention period for raw heartbeats (partitions are dropped by the leader). |

@@ -106,10 +106,8 @@ func (o OIDCConfig) Enabled() bool { return o.Issuer != "" }
 // LocalAuthConfig controls the built-in username/password login, available
 // alongside or instead of an OIDC provider.
 type LocalAuthConfig struct {
-	Enabled                bool   `yaml:"enabled"`
-	BootstrapAdminEmail    string `yaml:"bootstrap_admin_email"`
-	BootstrapAdminPassword string `yaml:"bootstrap_admin_password"`
-	MinPasswordLength      int    `yaml:"min_password_length"`
+	Enabled           bool `yaml:"enabled"`
+	MinPasswordLength int  `yaml:"min_password_length"`
 	// LoginRateLimitPerMinute bounds local-login attempts per client IP per
 	// minute (brute-force mitigation). 0 disables the limit.
 	LoginRateLimitPerMinute int `yaml:"login_rate_limit_per_minute"`
@@ -148,6 +146,12 @@ type HeartbeatsConfig struct {
 type SecurityConfig struct {
 	EncryptionKey string   `yaml:"encryption_key"`
 	PreviousKeys  []string `yaml:"previous_keys"`
+	// AdminEmail/AdminPassword define the instance's global admin account,
+	// created once on an empty system at first startup (requires local login to
+	// be enabled). The password is never generated or logged; rotate it via the
+	// UI/API after first login.
+	AdminEmail    string `yaml:"admin_email"`
+	AdminPassword string `yaml:"admin_password"`
 }
 
 // MailConfig configures outbound email for status-page subscribers (confirmation
@@ -338,11 +342,11 @@ func (c *Config) Validate() error {
 		if c.Local.MinPasswordLength < 1 {
 			return fmt.Errorf("local.min_password_length must be positive")
 		}
-		if c.Local.BootstrapAdminPassword != "" && len(c.Local.BootstrapAdminPassword) < c.Local.MinPasswordLength {
-			return fmt.Errorf("local.bootstrap_admin_password is shorter than local.min_password_length")
+		if c.Security.AdminPassword != "" && len(c.Security.AdminPassword) < c.Local.MinPasswordLength {
+			return fmt.Errorf("security.admin_password is shorter than local.min_password_length")
 		}
-		if c.Local.BootstrapAdminPassword != "" && c.Local.BootstrapAdminEmail == "" {
-			return fmt.Errorf("local.bootstrap_admin_email is required when bootstrap_admin_password is set")
+		if c.Security.AdminPassword != "" && c.Security.AdminEmail == "" {
+			return fmt.Errorf("security.admin_email is required when security.admin_password is set")
 		}
 	}
 	if c.Session.TTL.Std() <= 0 {

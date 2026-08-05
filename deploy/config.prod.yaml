@@ -19,12 +19,12 @@ rabbitmq:
 # Encrypts stored notification-channel credentials and TOTP secrets at rest.
 # 32-byte base64 key — generate once: openssl rand -base64 32
 security:
+  admin_email: "${CERBIX_ADMIN_EMAIL}"
+  admin_password: "${CERBIX_ADMIN_PASSWORD}"
   encryption_key: "${CERBIX_ENCRYPTION_KEY}"
 
 local:
   enabled: true
-  bootstrap_admin_email: "${CERBIX_ADMIN_EMAIL}"
-  bootstrap_admin_password: "${CERBIX_ADMIN_PASSWORD}"
   min_password_length: 12
 
 # Mail (status-page subscriptions) is configured at runtime from the Settings UI.

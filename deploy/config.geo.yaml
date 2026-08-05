@@ -15,8 +15,6 @@ rabbitmq:
 
 local:
   enabled: true
-  bootstrap_admin_email: "admin@cerbix.local"
-  bootstrap_admin_password: "devpassword123"
   min_password_length: 8
 
 # geo1 is an AMQP region (checks.jobs.geo1). geo2 is a pull region: the scheduler
@@ -24,3 +22,7 @@ local:
 pull:
   regions: ["geo2"]
   token: "devpulltoken"
+
+security:
+  admin_email: "admin@cerbix.local"
+  admin_password: "devpassword123"

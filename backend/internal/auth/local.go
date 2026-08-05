@@ -104,7 +104,7 @@ func (a *Authenticator) EnsureBootstrapAdmin(ctx context.Context) error {
 		return nil
 	}
 	if a.localBootPassword == "" {
-		a.logger.Info("bootstrap_admin_skipped", "reason", "local.bootstrap_admin_password not set")
+		a.logger.Info("bootstrap_admin_skipped", "reason", "security.admin_password not set")
 		return nil
 	}
 	n, err := a.store.CountUsers(ctx)

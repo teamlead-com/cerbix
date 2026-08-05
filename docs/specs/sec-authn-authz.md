@@ -17,7 +17,7 @@ local login, API tokens and machine access. The provider is **not hardcoded** (D
   `oidc.button_label` (default "Continue with SSO"). The local form — only if `local`.
 - **JIT provisioning**: `UpsertUserByOIDCSub(sub, email, name)` on first login; identity
   is keyed on the `oidc_sub` claim (column `users.oidc_sub`, D-0044).
-- **Bootstrap**: an email from `oidc.bootstrap_admin_emails` receives `is_global_admin` on login.
+- **Bootstrap**: an email from `oidc.admin_emails` receives `is_global_admin` on login.
 - **Sessions**: server-side; a cookie (HttpOnly, SameSite=Lax, Secure per config) holds
   an opaque token; the DB stores only the SHA-256 hash (`sessions.token_hash`). TTL from config.
 - Code: `internal/auth/*` (incl. `handlers.go` `ConfigHandler`),
@@ -48,7 +48,7 @@ Implementation:
 - **Hashing**: **argon2id** (`internal/auth/password.go`), PHC encoding, a random
   salt, constant-time comparison; only the hash is stored; passwords/hashes are not logged.
 - **Bootstrap admin**: on startup, if local login is enabled and the system is empty,
-  an `is_global_admin` is created from `local.bootstrap_admin_email`+`_password`. The password is **not generated
+  an `is_global_admin` is created from `security.admin_email`+`_password`. The password is **not generated
   and not logged** — if it is not set, the admin is not created (log `bootstrap_admin_skipped`).
 - **Endpoints**: `POST /auth/local/login` (username(email)+password[+`totp`] → session+cookie),
   the shared `/auth/logout`; password change — `POST /api/v1/me/password` (verification of the current one,
@@ -74,7 +74,7 @@ Implementation:
   secret+codes). With 2FA enabled, after a correct password a valid TOTP **or** an
   unused recovery code is required; otherwise `401 {"totp_required":true}` (an incorrect **password**
   remains a uniform 401 without a hint). `/api/v1/me` returns `totp_enabled`.
-- **Config** (`local`): `enabled`, `bootstrap_admin_email`, `bootstrap_admin_password`,
+- **Config** (`local`): `enabled`, `security.admin_email`, `security.admin_password`,
   `min_password_length` (default 8), `login_rate_limit_per_minute` (default 10, 0=off).
   Validation: `local ⇒ database`.
 - **Compatibility**: OIDC and local login work simultaneously; `auth.New` builds OIDC

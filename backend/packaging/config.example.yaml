@@ -40,8 +40,6 @@ oidc:
 # generated or logged).
 local:
   enabled: false
-  bootstrap_admin_email: ""
-  bootstrap_admin_password: ""
   min_password_length: 8
 
 # Server-side session cookie settings.
@@ -72,6 +70,8 @@ heartbeats:
 # the prior behavior). Turning it on encrypts new/updated secrets; existing
 # plaintext rows stay readable. Losing the key makes encrypted secrets unreadable.
 security:
+  admin_email: ""
+  admin_password: ""
   encryption_key: ""      # primary key: used to encrypt
   # Rotation: set a new encryption_key, move the old key here so existing data
   # stays readable, run `cerbix reencrypt`, then drop the old key from this list.

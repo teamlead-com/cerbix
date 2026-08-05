@@ -69,4 +69,4 @@ org visibility under any membership (including project-only).
 
 - Inviting users: currently `POST members` accepts an existing `user_id`
   (the user appears after their first login). Invitation by email — later.
-- Bootstrap Global Admin — via `oidc.bootstrap_admin_emails` (promotion on login). DONE.
+- Bootstrap Global Admin — via `oidc.admin_emails` (promotion on login). DONE.

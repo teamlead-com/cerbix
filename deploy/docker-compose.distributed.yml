@@ -16,8 +16,10 @@ services:
     image: cerbix-cerbix
     command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "scheduler"]
     depends_on:
-      postgres: { condition: service_healthy }
-      rabbitmq: { condition: service_healthy }
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     networks:
       default:
         ipv4_address: 10.5.0.20
@@ -28,9 +30,12 @@ services:
     image: cerbix-cerbix
     command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "api"]
     depends_on:
-      postgres: { condition: service_healthy }
-      rabbitmq: { condition: service_healthy }
-      keycloak: { condition: service_healthy }
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
     networks:
       default:
         ipv4_address: 10.5.0.21
@@ -43,7 +48,8 @@ services:
     image: cerbix-cerbix
     command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "core"]
     depends_on:
-      rabbitmq: { condition: service_healthy }
+      rabbitmq:
+        condition: service_healthy
     networks:
       default:
         ipv4_address: 10.5.0.22
@@ -54,7 +60,8 @@ services:
     image: cerbix-cerbix
     command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "geo1"]
     depends_on:
-      rabbitmq: { condition: service_healthy }
+      rabbitmq:
+        condition: service_healthy
     networks:
       default:
         ipv4_address: 10.5.0.23
@@ -65,7 +72,8 @@ services:
     image: cerbix-cerbix
     command: ["serve", "--config", "/etc/cerbix/agent.yaml", "--role", "agent", "--region", "geo2"]
     depends_on:
-      api: { condition: service_started }
+      api:
+        condition: service_started
     networks:
       default:
         ipv4_address: 10.5.0.24

@@ -12,7 +12,9 @@ name: cerbix-prod
 x-logging: &logging
   logging:
     driver: json-file
-    options: { max-size: "100m", max-file: "5" }
+    options:
+      max-size: "100m"
+      max-file: "5"
 
 x-dataCaps: &dataCaps
   cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
@@ -36,7 +38,8 @@ services:
       retries: 10
     deploy:
       resources:
-        limits: { memory: 1g }
+        limits:
+          memory: 1g
 
   rabbitmq:
     image: rabbitmq:3.12-management
@@ -56,7 +59,8 @@ services:
       retries: 10
     deploy:
       resources:
-        limits: { memory: 512m }
+        limits:
+          memory: 512m
 
   cerbix:
     image: ${CERBIX_IMAGE:-cerbix:latest}
@@ -78,8 +82,10 @@ services:
       CERBIX_ADMIN_EMAIL: ${CERBIX_ADMIN_EMAIL:-admin@example.com}
       CERBIX_ADMIN_PASSWORD: ${CERBIX_ADMIN_PASSWORD:?set CERBIX_ADMIN_PASSWORD in .env}
     depends_on:
-      postgres: { condition: service_healthy }
-      rabbitmq: { condition: service_healthy }
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       # Localhost-only by default: put a TLS reverse proxy in front. Override the
       # bind (e.g. 0.0.0.0:8080) via CERBIX_HTTP_BIND in .env only if intended.
@@ -88,11 +94,14 @@ services:
       - ./config.prod.yaml:/etc/cerbix/config.yaml:ro
     deploy:
       resources:
-        limits: { memory: 512m }
+        limits:
+          memory: 512m
 
 volumes:
-  pgdata: { driver: local }
-  rabbit_volume: { driver: local }
+  pgdata:
+    driver: local
+  rabbit_volume:
+    driver: local
 
 networks:
   default:

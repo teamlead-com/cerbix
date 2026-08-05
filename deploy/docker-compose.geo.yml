@@ -23,7 +23,9 @@ x-cerbix: &cerbix
   cap_drop: [ALL]
   logging:
     driver: json-file
-    options: { max-size: "100m", max-file: "3" }
+    options:
+      max-size: "100m"
+      max-file: "3"
 
 x-dataCaps: &dataCaps
   cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
@@ -32,7 +34,9 @@ x-infraLog: &infraLog
   cap_drop: [ALL]
   logging:
     driver: json-file
-    options: { max-size: "100m", max-file: "3" }
+    options:
+      max-size: "100m"
+      max-file: "3"
 
 services:
   # ---- central site (geo-2 in the real deployment) ----
@@ -46,7 +50,8 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
-      central: { ipv4_address: 10.6.0.10 }
+      central:
+        ipv4_address: 10.6.0.10
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cerbix"]
       interval: 5s
@@ -65,8 +70,10 @@ services:
     volumes:
       - rabbit_volume:/var/lib/rabbitmq
     networks:
-      central: { ipv4_address: 10.6.0.11 }
-      geo1: { ipv4_address: 10.6.1.11 }   # broker reachable from geo1 (WG-tunnel stand-in)
+      central:
+        ipv4_address: 10.6.0.11
+      geo1:   # broker reachable from geo1 (WG-tunnel stand-in)
+        ipv4_address: 10.6.1.11
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -77,10 +84,13 @@ services:
     <<: *cerbix
     command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "scheduler"]
     depends_on:
-      postgres: { condition: service_healthy }
-      rabbitmq: { condition: service_healthy }
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     networks:
-      central: { ipv4_address: 10.6.0.20 }
+      central:
+        ipv4_address: 10.6.0.20
     volumes:
       - ./config.geo.yaml:/etc/cerbix/config.yaml:ro
 
@@ -88,13 +98,17 @@ services:
     <<: *cerbix
     command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "api"]
     depends_on:
-      postgres: { condition: service_healthy }
-      rabbitmq: { condition: service_healthy }
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       - "8082:8080"
     networks:
-      central: { ipv4_address: 10.6.0.21 }
-      geo2: { ipv4_address: 10.6.2.21 }   # API reachable from geo2 (HTTPS stand-in)
+      central:
+        ipv4_address: 10.6.0.21
+      geo2:   # API reachable from geo2 (HTTPS stand-in)
+        ipv4_address: 10.6.2.21
     volumes:
       - ./config.geo.yaml:/etc/cerbix/config.yaml:ro
 
@@ -102,9 +116,11 @@ services:
     <<: *cerbix
     command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "core"]
     depends_on:
-      rabbitmq: { condition: service_healthy }
+      rabbitmq:
+        condition: service_healthy
     networks:
-      central: { ipv4_address: 10.6.0.22 }
+      central:
+        ipv4_address: 10.6.0.22
     volumes:
       - ./config.worker.yaml:/etc/cerbix/worker.yaml:ro
 
@@ -113,9 +129,11 @@ services:
     <<: *cerbix
     command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "geo1"]
     depends_on:
-      rabbitmq: { condition: service_healthy }
+      rabbitmq:
+        condition: service_healthy
     networks:
-      geo1: { ipv4_address: 10.6.1.30 }
+      geo1:
+        ipv4_address: 10.6.1.30
     volumes:
       - ./config.worker.yaml:/etc/cerbix/worker.yaml:ro
 
@@ -124,9 +142,11 @@ services:
     <<: *cerbix
     command: ["serve", "--config", "/etc/cerbix/agent.yaml", "--role", "agent", "--region", "geo2"]
     depends_on:
-      api: { condition: service_started }
+      api:
+        condition: service_started
     networks:
-      geo2: { ipv4_address: 10.6.2.40 }
+      geo2:
+        ipv4_address: 10.6.2.40
     volumes:
       - ./config.agent.yaml:/etc/cerbix/agent.yaml:ro
 
@@ -134,16 +154,24 @@ networks:
   central:
     name: cerbix-geo-central
     driver: bridge
-    ipam: { config: [{ subnet: 10.6.0.0/24 }] }
+    ipam:
+      config:
+        - subnet: 10.6.0.0/24
   geo1:
     name: cerbix-geo-geo1
     driver: bridge
-    ipam: { config: [{ subnet: 10.6.1.0/24 }] }
+    ipam:
+      config:
+        - subnet: 10.6.1.0/24
   geo2:
     name: cerbix-geo-geo2
     driver: bridge
-    ipam: { config: [{ subnet: 10.6.2.0/24 }] }
+    ipam:
+      config:
+        - subnet: 10.6.2.0/24
 
 volumes:
-  pgdata: { driver: local }
-  rabbit_volume: { driver: local }
+  pgdata:
+    driver: local
+  rabbit_volume:
+    driver: local

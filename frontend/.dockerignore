@@ -1,0 +1,9 @@
+node_modules
+dist
+.env.local
+docker-compose*
+.dockerignore
+.gitignore
+.gitlab-ci.yml
+Makefile
+*.log

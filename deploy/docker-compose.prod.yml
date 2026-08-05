@@ -1,0 +1,100 @@
+# cerbix production stack — single-process (--role all) + Postgres + RabbitMQ.
+#
+#   cp deploy/.env.prod.example deploy/.env      # then fill in secrets
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d --build
+#
+# Hardened for prod: secrets come from .env (never committed), containers restart
+# unless-stopped, memory is capped, and only the API port is published — bound to
+# localhost by default, to sit behind a TLS-terminating reverse proxy. Postgres and
+# RabbitMQ are reachable only on the internal network.
+name: cerbix-prod
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: { max-size: "100m", max-file: "5" }
+
+x-dataCaps: &dataCaps
+  cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    restart: unless-stopped
+    <<: [*logging, *dataCaps]
+    cap_drop: [ALL]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cerbix}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-cerbix}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cerbix}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits: { memory: 1g }
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    restart: unless-stopped
+    <<: [*logging, *dataCaps]
+    cap_drop: [ALL]
+    hostname: cerbix-rabbit
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-cerbix}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+    volumes:
+      - rabbit_volume:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    deploy:
+      resources:
+        limits: { memory: 512m }
+
+  cerbix:
+    image: ${CERBIX_IMAGE:-cerbix:latest}
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    <<: *logging
+    cap_drop: [ALL]
+    command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "all"]
+    # Passed into the container so config.Load can expand ${VAR} in config.prod.yaml.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cerbix}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-cerbix}
+      RABBITMQ_USER: ${RABBITMQ_USER:-cerbix}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+      CERBIX_ENCRYPTION_KEY: "${CERBIX_ENCRYPTION_KEY:?generate with openssl rand -base64 32}"
+      CERBIX_ADMIN_EMAIL: ${CERBIX_ADMIN_EMAIL:-admin@example.com}
+      CERBIX_ADMIN_PASSWORD: ${CERBIX_ADMIN_PASSWORD:?set CERBIX_ADMIN_PASSWORD in .env}
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    ports:
+      # Localhost-only by default: put a TLS reverse proxy in front. Override the
+      # bind (e.g. 0.0.0.0:8080) via CERBIX_HTTP_BIND in .env only if intended.
+      - "${CERBIX_HTTP_BIND:-127.0.0.1:8080}:8080"
+    volumes:
+      - ./config.prod.yaml:/etc/cerbix/config.yaml:ro
+    deploy:
+      resources:
+        limits: { memory: 512m }
+
+volumes:
+  pgdata: { driver: local }
+  rabbit_volume: { driver: local }
+
+networks:
+  default:
+    name: cerbix-prod
+    driver: bridge

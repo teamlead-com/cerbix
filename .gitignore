@@ -1,0 +1,17 @@
+# Go
+backend/bin/
+backend/dist/
+backend/.cache/
+*.test
+*.out
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local
+*.log
+.env
+.DS_Store
+frontend/tsconfig.tsbuildinfo

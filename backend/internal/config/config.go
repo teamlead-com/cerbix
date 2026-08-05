@@ -1,0 +1,374 @@
+// Package config loads and strictly validates the cerbix service configuration.
+//
+// Configuration is strict-only: the loader fails fast on unknown keys, invalid
+// values, or missing required fields. There is no runtime self-healing, silent
+// downgrade, or warn-and-continue behavior. Defaults are applied only here, in
+// the central loader, and only for optional fields.
+package config
+
+import (
+	"encoding/base64"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config is the validated configuration snapshot used by the runtime.
+type Config struct {
+	Server     ServerConfig     `yaml:"server"`
+	Log        LogConfig        `yaml:"log"`
+	Database   DatabaseConfig   `yaml:"database"`
+	RabbitMQ   RabbitMQConfig   `yaml:"rabbitmq"`
+	OIDC       OIDCConfig       `yaml:"oidc"`
+	Local      LocalAuthConfig  `yaml:"local"`
+	Session    SessionConfig    `yaml:"session"`
+	Prober     ProberConfig     `yaml:"prober"`
+	Heartbeats HeartbeatsConfig `yaml:"heartbeats"`
+	Security   SecurityConfig   `yaml:"security"`
+	Mail       MailConfig       `yaml:"mail"`
+	Pull       PullConfig       `yaml:"pull"`
+}
+
+// PullConfig configures the HTTP-pull transport (an alternative to RabbitMQ for a geo
+// that must not reach the broker). On the central side (api/scheduler): Regions lists
+// the regions served by pull agents; Token is an optional catch-all secret that
+// authorizes any region; Agents scopes a token to a single region (an agent with a
+// per-region token can only claim/heartbeat that region). On the agent side
+// (--role agent): ServerURL is the central base URL and Token the agent's secret; the
+// region comes from --region.
+type PullConfig struct {
+	Regions   []string    `yaml:"regions"`
+	Token     string      `yaml:"token"`
+	Agents    []PullAgent `yaml:"agents"`
+	ServerURL string      `yaml:"server_url"`
+}
+
+// PullAgent binds a per-region agent token: this token authorizes only Region.
+type PullAgent struct {
+	Region string `yaml:"region"`
+	Token  string `yaml:"token"`
+}
+
+// ServerConfig holds HTTP listener settings.
+type ServerConfig struct {
+	Listen      string `yaml:"listen"`
+	HealthzPath string `yaml:"healthz_path"`
+	ReadyzPath  string `yaml:"readyz_path"`
+	MetricsPath string `yaml:"metrics_path"`
+}
+
+// LogConfig controls structured logging.
+type LogConfig struct {
+	Level  string `yaml:"level"`
+	Format string `yaml:"format"`
+}
+
+// DatabaseConfig holds the Postgres connection. Optional in early iterations:
+// when DSN is empty the service runs without a database (scaffold mode).
+type DatabaseConfig struct {
+	DSN string `yaml:"dsn"`
+}
+
+// RabbitMQConfig holds the broker connection. Optional in early iterations:
+// when URL is empty the service uses the in-process dispatcher.
+type RabbitMQConfig struct {
+	URL string `yaml:"url"`
+	// ManagementURL is the RabbitMQ HTTP management API base (e.g.
+	// http://user:pass@host:15672). Optional: when empty it is derived from URL
+	// (scheme amqp→http / amqps→https, port 5672→15672 / 5671→15671). Used by the
+	// API to list live worker-pool regions (queues with active consumers).
+	ManagementURL string `yaml:"management_url"`
+}
+
+// OIDCConfig holds the OpenID Connect provider settings. Any OIDC-compliant
+// issuer works (Keycloak, Auth0, Okta, Google, Entra ID, …). Optional: when
+// Issuer is empty, OIDC login is disabled (scaffold / local-only mode).
+type OIDCConfig struct {
+	Issuer                string   `yaml:"issuer"`
+	ClientID              string   `yaml:"client_id"`
+	ClientSecret          string   `yaml:"client_secret"`
+	RedirectURL           string   `yaml:"redirect_url"`
+	Scopes                []string `yaml:"scopes"`
+	PostLogoutRedirectURL string   `yaml:"post_logout_redirect_url"`
+	// ButtonLabel is the text shown on the OIDC sign-in button (e.g. "Continue
+	// with Okta"). Defaults to "Continue with SSO".
+	ButtonLabel string `yaml:"button_label"`
+	// BootstrapAdminEmails are promoted to global admin on login (JIT).
+	BootstrapAdminEmails []string `yaml:"bootstrap_admin_emails"`
+}
+
+// Enabled reports whether OIDC login is configured.
+func (o OIDCConfig) Enabled() bool { return o.Issuer != "" }
+
+// LocalAuthConfig controls the built-in username/password login, available
+// alongside or instead of an OIDC provider.
+type LocalAuthConfig struct {
+	Enabled                bool   `yaml:"enabled"`
+	BootstrapAdminEmail    string `yaml:"bootstrap_admin_email"`
+	BootstrapAdminPassword string `yaml:"bootstrap_admin_password"`
+	MinPasswordLength      int    `yaml:"min_password_length"`
+	// LoginRateLimitPerMinute bounds local-login attempts per client IP per
+	// minute (brute-force mitigation). 0 disables the limit.
+	LoginRateLimitPerMinute int `yaml:"login_rate_limit_per_minute"`
+}
+
+// SessionConfig controls server-side session cookies.
+type SessionConfig struct {
+	CookieName string   `yaml:"cookie_name"`
+	TTL        Duration `yaml:"ttl"`
+	Secure     bool     `yaml:"secure"`
+}
+
+// ProberConfig is the SSRF policy for probe targets. cerbix monitors internal
+// services, so allow_private_ips defaults on; allow_metadata_ips defaults off to
+// block link-local / cloud instance metadata (169.254.169.254).
+type ProberConfig struct {
+	AllowPrivateIPs  bool `yaml:"allow_private_ips"`
+	AllowMetadataIPs bool `yaml:"allow_metadata_ips"`
+}
+
+// HeartbeatsConfig controls raw heartbeat retention. RetentionDays bounds how many
+// days of raw heartbeats are kept (older daily partitions are dropped); it also
+// bounds the daily-availability rollup's recompute window, so the rollup never
+// touches days whose raw data has been dropped (long-range availability lives in
+// the frozen rollup rows).
+type HeartbeatsConfig struct {
+	RetentionDays int `yaml:"retention_days"`
+}
+
+// SecurityConfig controls encryption of secrets stored at rest (webhook signing
+// secrets, notification-channel credentials). EncryptionKey is the primary
+// base64-encoded 32-byte (AES-256) key used to encrypt; empty disables encryption
+// (secrets stored as plaintext, the pre-existing behavior). PreviousKeys are
+// additional keys tried on decrypt during a rotation — data still encrypted under
+// an old key stays readable until `cerbix reencrypt` migrates it to the primary.
+type SecurityConfig struct {
+	EncryptionKey string   `yaml:"encryption_key"`
+	PreviousKeys  []string `yaml:"previous_keys"`
+}
+
+// MailConfig configures outbound email for status-page subscribers (confirmation
+// and incident notifications). Optional: when unset, subscription endpoints
+// report that email is not configured. public_base_url builds confirm/unsubscribe
+// links, so it is required when mail is enabled.
+type MailConfig struct {
+	SMTPHost      string `yaml:"smtp_host"`
+	SMTPPort      int    `yaml:"smtp_port"`
+	SMTPUsername  string `yaml:"smtp_username"`
+	SMTPPassword  string `yaml:"smtp_password"`
+	From          string `yaml:"from"`
+	PublicBaseURL string `yaml:"public_base_url"`
+}
+
+// Enabled reports whether outbound email is configured.
+func (m MailConfig) Enabled() bool { return m.SMTPHost != "" && m.From != "" }
+
+// EncryptionKeyBytes decodes and validates the primary key, or returns nil when
+// none is set. Errors on a present-but-malformed key.
+func (s SecurityConfig) EncryptionKeyBytes() ([]byte, error) {
+	if s.EncryptionKey == "" {
+		return nil, nil
+	}
+	return decodeKey("security.encryption_key", s.EncryptionKey)
+}
+
+// Keys returns the full keyring (primary first, then previous keys) for building a
+// Cipher, or nil when encryption is disabled. All keys are validated; previous_keys
+// without a primary is a configuration error.
+func (s SecurityConfig) Keys() ([][]byte, error) {
+	primary, err := s.EncryptionKeyBytes()
+	if err != nil {
+		return nil, err
+	}
+	if primary == nil {
+		if len(s.PreviousKeys) > 0 {
+			return nil, fmt.Errorf("security.previous_keys set without security.encryption_key")
+		}
+		return nil, nil
+	}
+	keys := [][]byte{primary}
+	for i, pk := range s.PreviousKeys {
+		k, err := decodeKey(fmt.Sprintf("security.previous_keys[%d]", i), pk)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+func decodeKey(name, b64 string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be base64: %w", name, err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("%s must decode to 32 bytes, got %d", name, len(key))
+	}
+	return key, nil
+}
+
+// Duration is a time.Duration that unmarshals from a YAML string like "24h".
+type Duration time.Duration
+
+// UnmarshalYAML parses a Go duration string.
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+// Std returns the standard library duration.
+func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+var (
+	validLogLevels  = map[string]bool{"debug": true, "info": true, "error": true, "critical": true}
+	validLogFormats = map[string]bool{"json": true, "text": true}
+)
+
+// Load reads and validates the config file at path. It fails fast on any
+// contract violation and never returns a partially-usable config.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	// Expand ${VAR} / $VAR from the process environment before parsing, so secrets
+	// (DB/broker passwords, tokens) can be injected at runtime — e.g. from a compose
+	// .env in production — instead of being committed to the config file. A literal
+	// '$' in a value must be escaped as '$$'. Expansion is a single pass, so injected
+	// values are never re-expanded.
+	return Parse([]byte(os.ExpandEnv(string(data))))
+}
+
+// Parse validates raw YAML bytes into a Config. Unknown keys are rejected.
+func Parse(data []byte) (*Config, error) {
+	cfg := defaults()
+	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("decode config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func defaults() *Config {
+	return &Config{
+		Server: ServerConfig{
+			Listen:      ":8080",
+			HealthzPath: "/healthz",
+			ReadyzPath:  "/readyz",
+			MetricsPath: "/metrics",
+		},
+		Log: LogConfig{
+			Level:  "info",
+			Format: "json",
+		},
+		OIDC: OIDCConfig{
+			Scopes:      []string{"openid", "email", "profile"},
+			ButtonLabel: "Continue with SSO",
+		},
+		Local: LocalAuthConfig{
+			MinPasswordLength:       8,
+			LoginRateLimitPerMinute: 10,
+		},
+		Session: SessionConfig{
+			CookieName: "cerbix_session",
+			TTL:        Duration(24 * time.Hour),
+			Secure:     true,
+		},
+		Prober: ProberConfig{
+			AllowPrivateIPs:  true,  // this tool monitors internal apps
+			AllowMetadataIPs: false, // block cloud-metadata / link-local
+		},
+		Heartbeats: HeartbeatsConfig{
+			RetentionDays: 30,
+		},
+	}
+}
+
+// Validate enforces the config contract. Each rule has a single owner here at
+// the infra/bootstrap boundary; business rules live in their own layers.
+func (c *Config) Validate() error {
+	if strings.TrimSpace(c.Server.Listen) == "" {
+		return fmt.Errorf("server.listen must not be empty")
+	}
+	for name, p := range map[string]string{
+		"server.healthz_path": c.Server.HealthzPath,
+		"server.readyz_path":  c.Server.ReadyzPath,
+		"server.metrics_path": c.Server.MetricsPath,
+	} {
+		if !strings.HasPrefix(p, "/") {
+			return fmt.Errorf("%s must start with '/': %q", name, p)
+		}
+	}
+	if !validLogLevels[c.Log.Level] {
+		return fmt.Errorf("log.level must be one of debug|info|error|critical: %q", c.Log.Level)
+	}
+	if !validLogFormats[c.Log.Format] {
+		return fmt.Errorf("log.format must be one of json|text: %q", c.Log.Format)
+	}
+	// OIDC is optional, but if enabled all required fields and a database (for
+	// sessions/JIT users) must be present.
+	if c.OIDC.Enabled() {
+		if c.OIDC.ClientID == "" || c.OIDC.RedirectURL == "" {
+			return fmt.Errorf("oidc.client_id and oidc.redirect_url are required when oidc.issuer is set")
+		}
+		if c.Database.DSN == "" {
+			return fmt.Errorf("database.dsn is required when oidc is enabled (sessions and users need Postgres)")
+		}
+	}
+	if c.Local.Enabled {
+		if c.Database.DSN == "" {
+			return fmt.Errorf("database.dsn is required when local login is enabled")
+		}
+		if c.Local.MinPasswordLength < 1 {
+			return fmt.Errorf("local.min_password_length must be positive")
+		}
+		if c.Local.BootstrapAdminPassword != "" && len(c.Local.BootstrapAdminPassword) < c.Local.MinPasswordLength {
+			return fmt.Errorf("local.bootstrap_admin_password is shorter than local.min_password_length")
+		}
+		if c.Local.BootstrapAdminPassword != "" && c.Local.BootstrapAdminEmail == "" {
+			return fmt.Errorf("local.bootstrap_admin_email is required when bootstrap_admin_password is set")
+		}
+	}
+	if c.Session.TTL.Std() <= 0 {
+		return fmt.Errorf("session.ttl must be positive")
+	}
+	if strings.TrimSpace(c.Session.CookieName) == "" {
+		return fmt.Errorf("session.cookie_name must not be empty")
+	}
+	// Retention also bounds the rollup recompute window, so a day of margin is the
+	// practical minimum.
+	if c.Heartbeats.RetentionDays < 2 {
+		return fmt.Errorf("heartbeats.retention_days must be at least 2")
+	}
+	if _, err := c.Security.Keys(); err != nil {
+		return err
+	}
+	if c.Mail.Enabled() {
+		if c.Mail.SMTPPort <= 0 {
+			return fmt.Errorf("mail.smtp_port must be positive when mail is enabled")
+		}
+		if strings.TrimSpace(c.Mail.PublicBaseURL) == "" {
+			return fmt.Errorf("mail.public_base_url is required when mail is enabled (it builds confirm/unsubscribe links)")
+		}
+	}
+	return nil
+}
+
+// HTTPReadTimeout is a conservative default used by the HTTP server.
+const HTTPReadTimeout = 15 * time.Second

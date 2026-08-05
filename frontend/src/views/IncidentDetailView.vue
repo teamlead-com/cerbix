@@ -1,0 +1,257 @@
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref } from "vue";
+import { useRoute } from "vue-router";
+import { api } from "@/api/client";
+import type { components } from "@/api/schema";
+import AppShell from "@/components/AppShell.vue";
+import { useSession } from "@/stores/session";
+import { useWorkspace } from "@/stores/workspace";
+import { STATUS_ORDER, impactBadge, relTime, statusBadge } from "@/lib/incident";
+import { PM_SECTIONS, emptySections, parsePostmortem, renderSections, serializePostmortem } from "@/lib/postmortem";
+
+type Incident = components["schemas"]["Incident"];
+type IncidentUpdate = components["schemas"]["IncidentUpdate"];
+type Postmortem = components["schemas"]["Postmortem"];
+
+const route = useRoute();
+const ws = useWorkspace();
+const session = useSession();
+const id = route.params.id as string;
+
+const loading = ref(true);
+const incident = ref<Incident | null>(null);
+const canWrite = computed(() => !!incident.value && session.canProjectWrite(ws.orgId, incident.value.project_id ?? ""));
+const updates = ref<IncidentUpdate[]>([]);
+const postmortem = ref<Postmortem | null>(null);
+
+const isResolved = computed(() => incident.value?.status === "resolved");
+const isAcked = computed(() => !!incident.value?.acknowledged_at);
+
+async function acknowledge() {
+  if (!incident.value) return;
+  posting.value = true;
+  const res = await api.POST("/api/v1/incidents/{incidentID}/acknowledge", {
+    params: { path: { incidentID: id } },
+  });
+  if (!res.error && res.data) incident.value = res.data as Incident;
+  posting.value = false;
+}
+
+async function load() {
+  loading.value = true;
+  const [inc, ups, pm] = await Promise.all([
+    api.GET("/api/v1/incidents/{incidentID}", { params: { path: { incidentID: id } } }),
+    api.GET("/api/v1/incidents/{incidentID}/updates", { params: { path: { incidentID: id } } }),
+    api.GET("/api/v1/incidents/{incidentID}/postmortem", { params: { path: { incidentID: id } } }),
+  ]);
+  incident.value = inc.data ?? null;
+  updates.value = ups.data ?? [];
+  postmortem.value = pm.error ? null : (pm.data ?? null);
+  loading.value = false;
+}
+
+// Add-update composer.
+const composer = reactive({ status: "" as string, body: "" });
+const posting = ref(false);
+const updateError = ref("");
+// Selected target status (defaults to the incident's current one), and whether
+// posting will actually change it — drives the segmented picker + button label.
+const nextStatus = computed(() => composer.status || incident.value?.status || "investigating");
+const willChangeStatus = computed(() => !!composer.status && composer.status !== incident.value?.status);
+
+async function addUpdate(forceResolve = false) {
+  posting.value = true;
+  updateError.value = "";
+  const status = forceResolve ? "resolved" : composer.status || incident.value?.status || "investigating";
+  const body = forceResolve ? (composer.body || "Resolved.") : composer.body;
+  try {
+    const res = await api.POST("/api/v1/incidents/{incidentID}/updates", {
+      params: { path: { incidentID: id } },
+      body: { status: status as IncidentUpdate["status"], body },
+    });
+    if (res.error) {
+      updateError.value = (res.error as { error?: string })?.error || "Could not post the update.";
+      return;
+    }
+    composer.body = "";
+    composer.status = "";
+    await load();
+  } finally {
+    posting.value = false;
+  }
+}
+
+// Structured postmortem composer (serialized to the single markdown body).
+const pm = reactive(emptySections());
+const editingPm = ref(false);
+const pmPosting = ref(false);
+const pmError = ref("");
+const pmSections = computed(() => PM_SECTIONS);
+const publishedSections = computed(() => renderSections(postmortem.value?.body ?? ""));
+const pmHasContent = computed(() => PM_SECTIONS.some((s) => pm[s.key].trim()));
+
+function startEditPm() {
+  Object.assign(pm, postmortem.value ? parsePostmortem(postmortem.value.body) : emptySections());
+  pmError.value = "";
+  editingPm.value = true;
+}
+function cancelEditPm() {
+  editingPm.value = false;
+  pmError.value = "";
+}
+
+async function publishPostmortem() {
+  if (!pmHasContent.value) return;
+  pmPosting.value = true;
+  pmError.value = "";
+  try {
+    const res = await api.PUT("/api/v1/incidents/{incidentID}/postmortem", {
+      params: { path: { incidentID: id } },
+      body: { body: serializePostmortem(pm) },
+    });
+    if (res.error || !res.data) {
+      pmError.value = (res.error as { error?: string })?.error || "Could not publish the postmortem.";
+      return;
+    }
+    postmortem.value = res.data;
+    editingPm.value = false;
+  } finally {
+    pmPosting.value = false;
+  }
+}
+
+onMounted(() => {
+  ws.init();
+  load();
+});
+</script>
+
+<template>
+  <AppShell active="incidents" :crumbs="['incidents', incident?.title || '…']">
+    <template #actions>
+      <button
+        v-if="incident && !isResolved && !isAcked && canWrite"
+        type="button"
+        class="h-[34px] rounded-sm border border-border px-[13px] text-[13px] text-ink-2 hover:border-accent/60 hover:text-accent disabled:opacity-50"
+        :disabled="posting"
+        title="Stop on-call escalation for this incident"
+        @click="acknowledge"
+      >
+        Acknowledge
+      </button>
+      <button
+        v-if="incident && !isResolved && canWrite"
+        type="button"
+        class="h-[34px] rounded-sm border border-border px-[13px] text-[13px] text-ink-2 hover:border-up/60 hover:text-up disabled:opacity-50"
+        :disabled="posting"
+        @click="addUpdate(true)"
+      >
+        Resolve
+      </button>
+    </template>
+
+    <div class="mx-auto max-w-[900px] px-[22px] pb-16 pt-6">
+      <div v-if="incident" class="mb-5">
+        <div class="flex flex-wrap items-center gap-[10px]">
+          <h1 class="text-[22px] font-semibold tracking-tight">{{ incident.title }}</h1>
+          <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="statusBadge(incident.status).cls">{{ statusBadge(incident.status).label }}</span>
+          <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="impactBadge(incident.impact).cls">{{ impactBadge(incident.impact).label }}</span>
+          <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ incident.source }}</span>
+        </div>
+        <div class="mt-[7px] flex flex-wrap gap-x-4 text-[13px] text-ink-3">
+          <span>started <span class="font-mono text-ink-2">{{ relTime(incident.started_at) }}</span></span>
+          <span v-if="incident.acknowledged_at">acknowledged <span class="font-mono text-ink-2">{{ relTime(incident.acknowledged_at) }}</span></span>
+          <span v-if="incident.resolved_at">resolved <span class="font-mono text-ink-2">{{ relTime(incident.resolved_at) }}</span></span>
+        </div>
+      </div>
+
+      <!-- timeline -->
+      <section class="mb-5 rounded border border-border bg-surface shadow-card">
+        <div class="border-b border-border px-4 py-[13px] text-[13px] font-semibold">Timeline</div>
+        <ol class="flex flex-col">
+          <li v-for="(u, i) in updates" :key="i" class="flex gap-3 border-b border-border px-4 py-[13px] last:border-b-0">
+            <span class="mt-[3px] h-[9px] w-[9px] shrink-0 rounded-full" :class="statusBadge(u.status).cls"></span>
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="text-[12.5px] font-medium">{{ statusBadge(u.status).label }}</span>
+                <span class="font-mono text-[11px] text-ink-3">{{ relTime(u.created_at) }}</span>
+                <span v-if="u.author" class="font-mono text-[11px] text-ink-3">· {{ u.author }}</span>
+              </div>
+              <p v-if="u.body" class="mt-1 whitespace-pre-wrap text-[13px] text-ink-2">{{ u.body }}</p>
+            </div>
+          </li>
+          <li v-if="!updates.length && !loading" class="px-4 py-6 text-center text-[13px] text-ink-3">No updates yet.</li>
+        </ol>
+      </section>
+
+      <!-- add update -->
+      <section v-if="incident && !isResolved && canWrite" class="mb-5 flex flex-col gap-3 rounded border border-border bg-surface p-4 shadow-card">
+        <div class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Post an update</div>
+        <!-- status as a one-click segmented picker (current is highlighted) -->
+        <div class="flex flex-wrap items-center gap-[6px]">
+          <span class="mr-1 text-[12px] text-ink-3">Status</span>
+          <button
+            v-for="s in STATUS_ORDER"
+            :key="s"
+            type="button"
+            class="rounded-sm border px-[11px] py-[6px] text-[12.5px] font-medium transition-colors"
+            :class="nextStatus === s ? 'border-accent bg-accent-weak text-accent' : 'border-border text-ink-2 hover:border-border-strong hover:text-ink'"
+            @click="composer.status = s"
+          >{{ statusBadge(s).label }}</button>
+        </div>
+        <textarea v-model="composer.body" rows="3" placeholder="What changed (optional, markdown)." class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13.5px] outline-none focus:border-accent"></textarea>
+        <div v-if="updateError" class="text-[12.5px] text-down">{{ updateError }}</div>
+        <div>
+          <button type="button" :disabled="posting" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="addUpdate(false)">
+            {{ posting ? "Posting…" : willChangeStatus ? `Change to ${statusBadge(composer.status).label}` : "Post update" }}
+          </button>
+        </div>
+      </section>
+
+      <!-- postmortem -->
+      <section class="rounded border border-border bg-surface p-4 shadow-card">
+        <div class="mb-3 flex items-center gap-[10px]">
+          <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Postmortem</span>
+          <button
+            v-if="postmortem && !editingPm && canWrite"
+            type="button"
+            class="ml-auto inline-flex h-[28px] items-center gap-[6px] rounded-sm border border-border px-[10px] text-[12.5px] text-ink-2 hover:border-border-strong"
+            @click="startEditPm"
+          >
+            <svg viewBox="0 0 24 24" class="h-[13px] w-[13px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z" /></svg>
+            Edit
+          </button>
+        </div>
+
+        <!-- published view (structured sections) -->
+        <div v-if="postmortem && !editingPm">
+          <div class="mb-3 font-mono text-[11px] text-ink-3">published {{ relTime(postmortem.published_at) }} · {{ postmortem.author }}</div>
+          <div class="flex flex-col gap-3">
+            <div v-for="sec in publishedSections" :key="sec.heading">
+              <h4 class="mb-1 text-[12px] font-semibold uppercase tracking-[0.05em] text-ink-3">{{ sec.heading }}</h4>
+              <p class="whitespace-pre-wrap text-[13.5px] leading-relaxed text-ink-2">{{ sec.content }}</p>
+            </div>
+            <p v-if="!publishedSections.length" class="text-[13px] text-ink-3">No content.</p>
+          </div>
+        </div>
+
+        <!-- structured editor (new, or editing an existing one) -->
+        <div v-else-if="canWrite && (editingPm || isResolved)" class="flex flex-col gap-4">
+          <label v-for="sec in pmSections" :key="sec.key" class="flex flex-col gap-[6px]">
+            <span class="text-[12px] font-semibold text-ink-2">{{ sec.heading }}</span>
+            <textarea v-model="pm[sec.key]" rows="3" :placeholder="sec.placeholder" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13.5px] outline-none focus:border-accent"></textarea>
+          </label>
+          <div v-if="pmError" class="text-[12.5px] text-down">{{ pmError }}</div>
+          <div class="flex items-center gap-2">
+            <button type="button" :disabled="pmPosting || !pmHasContent" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="publishPostmortem">
+              {{ pmPosting ? "Saving…" : postmortem ? "Save postmortem" : "Publish postmortem" }}
+            </button>
+            <button v-if="editingPm && postmortem" type="button" class="h-[34px] rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong" @click="cancelEditPm">Cancel</button>
+          </div>
+        </div>
+
+        <p v-else class="text-[13px] text-ink-3">A postmortem can be published once the incident is resolved.</p>
+      </section>
+    </div>
+  </AppShell>
+</template>

@@ -1,0 +1,21 @@
+# Local development: the Vite dev server runs inside a node container with hot
+# reload. Source is bind-mounted; node_modules live in a named volume so the host
+# never needs Node installed.  `make dev` → http://localhost:5173
+services:
+  frontend-dev:
+    image: docker.io/library/node:22-alpine
+    container_name: cerbix-frontend-dev
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host --port 5173"
+    env_file:
+      - .env.development
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  node_modules:

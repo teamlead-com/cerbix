@@ -1,0 +1,109 @@
+# cerbix example configuration (strict-only: unknown keys are rejected).
+
+server:
+  listen: ":8080"
+  healthz_path: "/healthz"
+  readyz_path: "/readyz"
+  metrics_path: "/metrics"
+
+log:
+  level: "info"      # debug|info|error|critical
+  format: "json"     # json|text
+
+# Optional in early iterations. When empty, the service runs without a database.
+database:
+  dsn: ""            # e.g. postgres://cerbix:pass@localhost:5432/cerbix?sslmode=disable
+
+# Optional. When empty, the in-process dispatcher is used (local dev).
+# Required for the distributed roles: --role api | scheduler | worker.
+rabbitmq:
+  url: ""            # e.g. amqp://golang:pass@localhost:5672/
+  management_url: "" # optional; derived from url (5672→15672 / amqps 5671→15671) if empty.
+                     # Used by the API to list live worker-pool regions (region picker).
+
+# OpenID Connect login — any OIDC-compliant provider (Keycloak, Auth0, Okta,
+# Google, Entra ID, …). When issuer is empty, OIDC login is disabled (scaffold
+# mode). When enabled, database.dsn is required (sessions and users need Postgres).
+oidc:
+  issuer: ""         # e.g. https://id.example.com/realms/main or https://accounts.google.com
+  client_id: ""
+  client_secret: ""
+  redirect_url: ""   # e.g. https://cerbix.example.com/auth/callback
+  scopes: ["openid", "email", "profile"]
+  button_label: "Continue with SSO"  # text on the login-page OIDC button, e.g. "Continue with Okta"
+  post_logout_redirect_url: ""     # where /auth/logout sends the browser
+  bootstrap_admin_emails: []       # these emails become global admins on login
+
+# Built-in username/password login, usable alongside or instead of OIDC.
+# When enabled, database.dsn is required. Bootstrap creates a global-admin on an
+# empty system only when both email and password are set (the password is never
+# generated or logged).
+local:
+  enabled: false
+  bootstrap_admin_email: ""
+  bootstrap_admin_password: ""
+  min_password_length: 8
+
+# Server-side session cookie settings.
+session:
+  cookie_name: "cerbix_session"
+  ttl: "24h"
+  secure: true       # set false only for local http dev
+
+# Prober SSRF policy for monitor targets. cerbix monitors internal services, so
+# private/RFC1918 targets are allowed by default; link-local and cloud instance
+# metadata (169.254.169.254) are blocked by default. The guard validates the
+# resolved connect IP, so it holds across HTTP redirects and DNS rebinding.
+prober:
+  allow_private_ips: true    # 10/8, 172.16/12, 192.168/16, loopback, ULA — the product's job
+  allow_metadata_ips: false  # 169.254.0.0/16, fe80::/10 — keep off unless you truly need it
+
+# Raw heartbeat retention. Heartbeats are stored in daily range partitions; the
+# scheduler leader pre-creates upcoming partitions and drops those older than the
+# window (a cheap DROP, not a big DELETE). retention_days also bounds the
+# daily-availability rollup's recompute window, so long-range availability (kept in
+# the rollup) is never wiped when old raw data is dropped. Minimum 2.
+heartbeats:
+  retention_days: 30
+
+# Encryption of secrets stored at rest (webhook signing secrets, notification
+# channel credentials). encryption_key is base64 of 32 bytes (AES-256); generate
+# with `head -c 32 /dev/urandom | base64`. Empty disables encryption (plaintext,
+# the prior behavior). Turning it on encrypts new/updated secrets; existing
+# plaintext rows stay readable. Losing the key makes encrypted secrets unreadable.
+security:
+  encryption_key: ""      # primary key: used to encrypt
+  # Rotation: set a new encryption_key, move the old key here so existing data
+  # stays readable, run `cerbix reencrypt`, then drop the old key from this list.
+  previous_keys: []
+
+# Outbound email for status-page subscribers (confirmation + incident emails) and
+# self-service password reset for local accounts (the reset link uses
+# public_base_url + /reset). Optional: leave smtp_host/from empty to disable both.
+# When enabled, public_base_url is required (it builds confirm/unsubscribe/reset links).
+mail:
+  smtp_host: ""           # e.g. mail.internal
+  smtp_port: 587
+  smtp_username: ""
+  smtp_password: ""
+  from: ""                # e.g. status@example.com
+  public_base_url: ""     # e.g. https://status.example.com
+
+# HTTP-pull transport: an alternative to a RabbitMQ worker for a geo that must not
+# reach the broker. Only outbound HTTPS from the agent to the central API is needed.
+# Two sides, one schema:
+#   Central (--role scheduler routes pull regions; --role api serves the agent endpoints):
+#     - regions: which regions are pull-served (their jobs go to pull_jobs, not AMQP).
+#     - token:   optional catch-all agent secret (authorizes any region).
+#     - agents:  per-region tokens (an agent with one may claim/heartbeat only its region).
+#     Tokens can also be issued/revoked at runtime via POST/DELETE /api/v1/agent-tokens.
+#   Agent (--role agent, DB-less & broker-less; region comes from --region):
+#     - server_url: central base URL.
+#     - token:      this agent's secret (matches central `token` or a `agents[].token`).
+# Note: single-process --role=all runs the in-process worker and does NOT route pull
+# regions (only --role scheduler does); pull needs the distributed roles.
+pull:
+  regions: []             # central: e.g. ["geo-1"]
+  token: ""               # central catch-all / agent secret
+  agents: []              # central: e.g. [{ region: "geo-1", token: "geo1-secret" }]
+  server_url: ""          # agent: e.g. https://cerbix.core

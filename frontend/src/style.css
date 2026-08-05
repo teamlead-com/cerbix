@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens — see docs/design/notes.md. Theme flips via prefers-color-scheme
+   and a [data-theme] attribute that wins in both directions. Tailwind semantic
+   colors resolve from these variables. */
+:root {
+  --bg: #fafafb; --surface: #ffffff; --surface-2: #f5f5f8; --inset: #f0f0f4;
+  --border: #e9e9ef; --border-strong: #dadae4;
+  --ink: #17171f; --ink-2: #55556a; --ink-3: #8a8a9d;
+  --accent: #5854f2; --accent-2: #7a77ff; --accent-ink: #ffffff; --accent-weak: rgba(88, 84, 242, 0.1);
+  --focus: #5854f2;
+  --up: #12a05c; --up-weak: rgba(18, 160, 92, 0.12);
+  --down: #e0393f; --down-weak: rgba(224, 57, 63, 0.12);
+  --degraded: #b97800; --degraded-weak: rgba(185, 120, 0, 0.13);
+  --maint: #3a7de5; --maint-weak: rgba(58, 125, 229, 0.12);
+  --pending: #8a8a9d; --pending-weak: rgba(138, 138, 157, 0.14);
+  --shadow: 0 1px 2px rgba(20, 20, 40, 0.04), 0 4px 16px rgba(20, 20, 40, 0.04);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b0b0f; --surface: #141419; --surface-2: #1a1a20; --inset: #101015;
+    --border: #262630; --border-strong: #34343f;
+    --ink: #f2f2f6; --ink-2: #a4a4b6; --ink-3: #6c6c7e;
+    --accent: #7d79ff; --accent-2: #928fff; --accent-ink: #0b0b0f; --accent-weak: rgba(125, 121, 255, 0.15);
+    --focus: #7d79ff;
+    --up: #35c67f; --up-weak: rgba(53, 198, 127, 0.15);
+    --down: #ff5f64; --down-weak: rgba(255, 95, 100, 0.15);
+    --degraded: #e0a53a; --degraded-weak: rgba(224, 165, 58, 0.15);
+    --maint: #5c9bff; --maint-weak: rgba(92, 155, 255, 0.15);
+    --pending: #6c6c7e; --pending-weak: rgba(108, 108, 126, 0.18);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.3);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0b0b0f; --surface: #141419; --surface-2: #1a1a20; --inset: #101015;
+  --border: #262630; --border-strong: #34343f;
+  --ink: #f2f2f6; --ink-2: #a4a4b6; --ink-3: #6c6c7e;
+  --accent: #7d79ff; --accent-2: #928fff; --accent-ink: #0b0b0f; --accent-weak: rgba(125, 121, 255, 0.15);
+  --focus: #7d79ff;
+  --up: #35c67f; --up-weak: rgba(53, 198, 127, 0.15);
+  --down: #ff5f64; --down-weak: rgba(255, 95, 100, 0.15);
+  --degraded: #e0a53a; --degraded-weak: rgba(224, 165, 58, 0.15);
+  --maint: #5c9bff; --maint-weak: rgba(92, 155, 255, 0.15);
+  --pending: #6c6c7e; --pending-weak: rgba(108, 108, 126, 0.18);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.3);
+  color-scheme: dark;
+}
+
+@layer base {
+  body {
+    @apply bg-bg text-ink font-sans antialiased;
+    margin: 0;
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@layer utilities {
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}

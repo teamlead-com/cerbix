@@ -1,0 +1,77 @@
+name: 🐛 Bug Report
+description: Create a report to help us fix a bug in cerbix
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please search existing issues to see if it has already been reported.
+        For security-related issues, please refer to our [Security Policy](https://github.com/your-org/cerbix/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe what happened and what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce the issue?
+      placeholder: |
+        1. Create a monitor of type 'http' with target '...'
+        2. Set interval to 30s
+        3. Observe the heartbeat status...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: A clear description of what you expected to happen.
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: cerbix Version & Deployment Role
+      description: What version of cerbix are you running (`cerbix version`) and in what role (`all`, `api`, `scheduler`, `worker`, `agent`)?
+      placeholder: e.g. v1.0.0, role: all (docker compose)
+    validations:
+      required: true
+
+  - type: input
+    id: os_db
+    attributes:
+      label: OS & PostgreSQL Version
+      description: What operating system and database version are you using?
+      placeholder: e.g. Ubuntu 24.04, PostgreSQL 16, RabbitMQ 3.12
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: Copy and paste relevant logs from cerbix (with secret tokens redacted).
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of Conduct & Rules
+      description: By submitting this issue, you agree to follow our Code of Conduct.
+      options:
+        - label: I have searched existing issues and confirmed this is not a duplicate.
+          required: true
+        - label: I agree to follow cerbix's [Code of Conduct](https://github.com/your-org/cerbix/blob/main/CODE_OF_CONDUCT.md).
+          required: true

@@ -1,0 +1,12 @@
+# cerbix remote worker (DB-less): only the central RabbitMQ + probe policy.
+# Launched with: serve --config … --role worker --region <name>
+server:
+  listen: ":8080"        # ops endpoints only (/healthz /readyz /metrics)
+log:
+  level: "info"
+  format: "json"
+rabbitmq:
+  url: "amqp://golang:golang@rabbitmq:5672/"   # central broker
+prober:
+  allow_private_ips: true                       # internal targets
+  allow_metadata_ips: false

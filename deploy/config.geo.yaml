@@ -1,0 +1,26 @@
+# cerbix geo-demo — CENTRAL site config (scheduler + api).
+# Has the DB and the central broker; routes geo2 monitors over the pull transport.
+# Workers/agents use their own configs (config.worker.yaml / config.agent.yaml).
+server:
+  listen: ":8080"
+log:
+  level: "info"
+  format: "json"
+
+database:
+  dsn: "postgres://cerbix:cerbix@postgres:5432/cerbix?sslmode=disable"
+
+rabbitmq:
+  url: "amqp://golang:golang@rabbitmq:5672/"
+
+local:
+  enabled: true
+  bootstrap_admin_email: "admin@cerbix.local"
+  bootstrap_admin_password: "devpassword123"
+  min_password_length: 8
+
+# geo1 is an AMQP region (checks.jobs.geo1). geo2 is a pull region: the scheduler
+# routes its jobs to pull_jobs and the agent claims them over HTTP.
+pull:
+  regions: ["geo2"]
+  token: "devpulltoken"

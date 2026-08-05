@@ -1,0 +1,35 @@
+# Frontend CI. The SPA is served by the cerbix backend from embed.FS (the backend
+# Docker image builds and embeds it), so there is no separate frontend image to
+# build here — this job just validates that the SPA type-checks and builds.
+# Runs only when frontend files change.
+.frontend-changes:
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - frontend/**/*
+        - .ci/.gitlab-ci-frontend.yml
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+frontend-check:
+  stage: build
+  image: node:22-alpine
+  extends:
+    - .build-runner
+    - .frontend-changes
+  cache:
+    key: "$CI_JOB_IMAGE-npm"
+    paths:
+      - frontend/node_modules/
+  before_script:
+    - cd frontend
+  script:
+    # `npm run build` runs vue-tsc type-check + vite build (see package.json).
+    - npm install
+    - npm run build
+  # Export dist/ so backend-build can embed the freshly-built SPA into the native
+  # binary (the backend Docker image builds its own SPA and doesn't need this).
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - frontend/dist/

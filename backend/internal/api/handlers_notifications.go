@@ -1,0 +1,139 @@
+package api
+
+import (
+	"errors"
+	"net/http"
+
+	"git.example.com/monitoring/cerbix/internal/authz"
+	"git.example.com/monitoring/cerbix/internal/domain"
+	"git.example.com/monitoring/cerbix/internal/store"
+)
+
+// listChannels lists a project's notification channels (viewer+).
+func (h *Handler) listChannels(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectRead)
+	if !ok {
+		return
+	}
+	channels, err := h.store.ListChannelsByProject(r.Context(), proj.ID)
+	if err != nil {
+		h.serverError(w, "list_channels", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, channels)
+}
+
+// createChannel creates a notification channel (editor+).
+func (h *Handler) createChannel(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectWrite)
+	if !ok {
+		return
+	}
+	var body struct {
+		Type    string            `json:"type"`
+		Name    string            `json:"name"`
+		Config  map[string]string `json:"config"`
+		Enabled *bool             `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	enabled := true
+	if body.Enabled != nil {
+		enabled = *body.Enabled
+	}
+	ch := domain.NotificationChannel{
+		ProjectID: proj.ID,
+		Type:      domain.ChannelType(body.Type),
+		Name:      body.Name,
+		Config:    body.Config,
+		Enabled:   enabled,
+	}
+	if err := ch.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	created, err := h.store.CreateNotificationChannel(r.Context(), ch)
+	if err != nil {
+		h.serverError(w, "create_channel", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+// deleteChannel removes a notification channel (editor+ on its project).
+func (h *Handler) deleteChannel(w http.ResponseWriter, r *http.Request) {
+	ch, err := h.store.GetNotificationChannel(r.Context(), r.PathValue("channelID"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		h.serverError(w, "get_channel", err)
+		return
+	}
+	if _, ok := h.projectAccess(w, r, ch.ProjectID, authz.ActionProjectWrite); !ok {
+		return
+	}
+	if err := h.store.DeleteNotificationChannel(r.Context(), ch.ID); err != nil {
+		h.serverError(w, "delete_channel", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// listMonitorChannels lists the channels linked to a monitor (viewer+).
+func (h *Handler) listMonitorChannels(w http.ResponseWriter, r *http.Request) {
+	mon, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
+	if !ok {
+		return
+	}
+	channels, err := h.store.ListMonitorChannels(r.Context(), mon.ID)
+	if err != nil {
+		h.serverError(w, "list_monitor_channels", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, channels)
+}
+
+// linkMonitorChannel links a channel to a monitor (editor+). The channel must be
+// in the monitor's project.
+func (h *Handler) linkMonitorChannel(w http.ResponseWriter, r *http.Request) {
+	mon, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
+	if !ok {
+		return
+	}
+	var body struct {
+		ChannelID string `json:"channel_id"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	ch, err := h.store.GetNotificationChannel(r.Context(), body.ChannelID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && ch.ProjectID != mon.ProjectID) {
+		writeError(w, http.StatusBadRequest, "channel is not in this monitor's project")
+		return
+	}
+	if err != nil {
+		h.serverError(w, "get_channel", err)
+		return
+	}
+	if err := h.store.LinkMonitorChannel(r.Context(), mon.ID, ch.ID); err != nil {
+		h.serverError(w, "link_monitor_channel", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// unlinkMonitorChannel removes a monitor↔channel link (editor+).
+func (h *Handler) unlinkMonitorChannel(w http.ResponseWriter, r *http.Request) {
+	mon, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
+	if !ok {
+		return
+	}
+	if err := h.store.UnlinkMonitorChannel(r.Context(), mon.ID, r.PathValue("channelID")); err != nil {
+		h.serverError(w, "unlink_monitor_channel", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

@@ -1,0 +1,149 @@
+# cerbix geo-distributed demo — local build, static IPs, network-isolated per geo.
+#
+#   docker compose -f deploy/docker-compose.geo.yml up --build -d
+#
+# Reproduces the production topology on one host using THREE isolated networks, so
+# remote roles reach only what they would across a real geo boundary:
+#
+#   central (10.6.0.0/24)   postgres .10  rabbitmq .11  scheduler .20  api .21  worker-core .22
+#   geo1    (10.6.1.0/24)   rabbitmq .11  worker-geo1 .30        (AMQP worker → central broker only)
+#   geo2    (10.6.2.0/24)   api      .21  worker-geo2 .40        (pull agent  → central API only)
+#
+# Isolation is the point: worker-geo1 sits ONLY on geo1 (sees the broker, never the
+# DB); the geo2 agent sits ONLY on geo2 (sees the API, never the DB or broker). The
+# broker and API are multi-homed, standing in for the WireGuard / HTTPS link to each
+# remote site. DNS resolves per-network, so each role hits the correct interface.
+name: cerbix-geo
+
+x-cerbix: &cerbix
+  image: cerbix:local
+  build:
+    context: ..
+    dockerfile: backend/Dockerfile
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: { max-size: "100m", max-file: "3" }
+
+x-dataCaps: &dataCaps
+  cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+
+x-infraLog: &infraLog
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: { max-size: "100m", max-file: "3" }
+
+services:
+  # ---- central site (geo-2 in the real deployment) ----
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    <<: [*infraLog, *dataCaps]
+    environment:
+      POSTGRES_USER: cerbix
+      POSTGRES_PASSWORD: cerbix
+      POSTGRES_DB: cerbix
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      central: { ipv4_address: 10.6.0.10 }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cerbix"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    <<: [*infraLog, *dataCaps]
+    hostname: cerbix-rabbit
+    environment:
+      RABBITMQ_DEFAULT_USER: golang
+      RABBITMQ_DEFAULT_PASS: golang
+    ports:
+      - "15672:15672"   # management UI (debug)
+    volumes:
+      - rabbit_volume:/var/lib/rabbitmq
+    networks:
+      central: { ipv4_address: 10.6.0.11 }
+      geo1: { ipv4_address: 10.6.1.11 }   # broker reachable from geo1 (WG-tunnel stand-in)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  scheduler:
+    <<: *cerbix
+    command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "scheduler"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks:
+      central: { ipv4_address: 10.6.0.20 }
+    volumes:
+      - ./config.geo.yaml:/etc/cerbix/config.yaml:ro
+
+  api:
+    <<: *cerbix
+    command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "api"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    ports:
+      - "8082:8080"
+    networks:
+      central: { ipv4_address: 10.6.0.21 }
+      geo2: { ipv4_address: 10.6.2.21 }   # API reachable from geo2 (HTTPS stand-in)
+    volumes:
+      - ./config.geo.yaml:/etc/cerbix/config.yaml:ro
+
+  worker-core:
+    <<: *cerbix
+    command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "core"]
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+    networks:
+      central: { ipv4_address: 10.6.0.22 }
+    volumes:
+      - ./config.worker.yaml:/etc/cerbix/worker.yaml:ro
+
+  # ---- remote geo-1: AMQP worker, broker-only, DB-less ----
+  worker-geo1:
+    <<: *cerbix
+    command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "geo1"]
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+    networks:
+      geo1: { ipv4_address: 10.6.1.30 }
+    volumes:
+      - ./config.worker.yaml:/etc/cerbix/worker.yaml:ro
+
+  # ---- remote geo-2: HTTP-pull agent, API-only, DB-less & broker-less ----
+  worker-geo2:
+    <<: *cerbix
+    command: ["serve", "--config", "/etc/cerbix/agent.yaml", "--role", "agent", "--region", "geo2"]
+    depends_on:
+      api: { condition: service_started }
+    networks:
+      geo2: { ipv4_address: 10.6.2.40 }
+    volumes:
+      - ./config.agent.yaml:/etc/cerbix/agent.yaml:ro
+
+networks:
+  central:
+    name: cerbix-geo-central
+    driver: bridge
+    ipam: { config: [{ subnet: 10.6.0.0/24 }] }
+  geo1:
+    name: cerbix-geo-geo1
+    driver: bridge
+    ipam: { config: [{ subnet: 10.6.1.0/24 }] }
+  geo2:
+    name: cerbix-geo-geo2
+    driver: bridge
+    ipam: { config: [{ subnet: 10.6.2.0/24 }] }
+
+volumes:
+  pgdata: { driver: local }
+  rabbit_volume: { driver: local }

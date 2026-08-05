@@ -1,0 +1,172 @@
+# Local development stack for cerbix with static IP allocations.
+#
+#   docker compose -f deploy/docker-compose.yml up --build
+#
+# Static IP map (subnet 10.5.0.0/16):
+#   10.5.0.10  postgres
+#   10.5.0.11  rabbitmq
+#   10.5.0.12  mariadb
+#   10.5.0.13  keycloak
+#   10.5.0.14  cerbix
+
+x-netCaps: &netCaps
+  cap_drop:
+    - ALL
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "1g"
+      max-file: "5"
+
+x-dataCaps: &dataCaps
+  cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - SETGID
+    - SETUID
+
+name: cerbix
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    <<: [*netCaps, *logging, *dataCaps]
+    environment:
+      POSTGRES_USER: cerbix
+      POSTGRES_PASSWORD: cerbix
+      POSTGRES_DB: cerbix
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      default:
+        ipv4_address: 10.5.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cerbix"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    <<: [*netCaps, *logging, *dataCaps]
+    hostname: cerbix-rabbit
+    environment:
+      RABBITMQ_DEFAULT_USER: golang
+      RABBITMQ_DEFAULT_PASS: golang
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbit_volume:/var/lib/rabbitmq
+    networks:
+      default:
+        ipv4_address: 10.5.0.11
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mariadb:
+    image: mariadb:10.9
+    <<: [*netCaps, *logging, *dataCaps]
+    volumes:
+      - mysql_data:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: keycloak
+      MYSQL_USER: keycloak
+      MYSQL_PASSWORD: keycloak
+    networks:
+      default:
+        ipv4_address: 10.5.0.12
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    ports:
+      - "3306:3306"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:18.0.0
+    <<: [*netCaps, *logging]
+    environment:
+      KC_HOSTNAME: 10.5.0.13
+      KC_HOSTNAME_PORT: 8080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
+      KC_DB: mariadb
+      KC_DB_URL: jdbc:mariadb://10.5.0.12/keycloak?characterEncoding=UTF-8
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KC_PROXY: edge
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: 7362
+      KC_HEALTH_ENABLED: "true"
+      KC_LOG_LEVEL: info
+    networks:
+      default:
+        ipv4_address: 10.5.0.13
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health/ready" ]
+      interval: 15s
+      timeout: 2s
+      retries: 15
+    command: start-dev --import-realm
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./keycloak/cerbix-realm.json:/opt/keycloak/data/import/cerbix-realm.json:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+
+  cerbix:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    <<: [*netCaps, *logging]
+    command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "all"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "http://localhost:8080/healthz" ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      default:
+        ipv4_address: 10.5.0.14
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.dev.yaml:/etc/cerbix/config.yaml:ro
+
+networks:
+  default:
+    name: cerbix
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.5.0.0/16
+          gateway: 10.5.0.1
+
+volumes:
+  pgdata:
+    driver: local
+  mysql_data:
+    driver: local
+  rabbit_volume:
+    driver: local

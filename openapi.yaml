@@ -1,0 +1,2549 @@
+openapi: 3.0.3
+info:
+  title: cerbix API
+  version: 0.19.0
+  description: >
+    Internal uptime & SLA monitoring API. Authentication is via a server-side
+    session cookie established by an OIDC provider (`/auth/login` → `/auth/callback`)
+    or local login (`/auth/local/login`). All `/api/v1/*` endpoints require a
+    valid session and enforce tenant isolation: callers only see and mutate the
+    organizations/projects they are authorized for (non-members receive 404;
+    insufficient in-org role receives 403).
+
+servers:
+  - url: /
+    description: Same-origin (SPA is served by the API binary)
+
+tags:
+  - name: auth
+  - name: me
+  - name: organizations
+  - name: projects
+  - name: monitors
+  - name: sla
+  - name: incidents
+  - name: status-pages
+  - name: tokens
+  - name: webhooks
+  - name: notifications
+  - name: search
+  - name: admin
+
+# Endpoints accept either an interactive session cookie or a service-account
+# bearer token; authorization is role-driven regardless of which was presented.
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+
+paths:
+  /auth/local/login:
+    post:
+      tags: [auth]
+      summary: Local username/password login (issues a session cookie)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated; sets the session cookie.
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/local/reset/request:
+    post:
+      tags: [auth]
+      summary: Request a password-reset link (local accounts)
+      security: []
+      description: >
+        Emails a one-time reset link if the address belongs to a local account.
+        Always returns 200 with a generic body so it cannot enumerate accounts.
+        Requires outbound email (mail) to be configured; see /auth/config
+        password_reset.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: Accepted (whether or not the address exists).
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+        '429': { description: Too many requests. }
+
+  /auth/local/reset/confirm:
+    post:
+      tags: [auth]
+      summary: Complete a password reset with a token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token: { type: string, description: The token from the reset link. }
+                new_password: { type: string, format: password }
+      responses:
+        '204': { description: Password changed. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /auth/config:
+    get:
+      tags: [auth]
+      summary: Which sign-in methods this instance offers (for the login page)
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  local: { type: boolean, description: Local username/password login is enabled. }
+                  oidc: { type: boolean, description: OIDC login is enabled. }
+                  oidc_button_label: { type: string, description: Text for the OIDC sign-in button. }
+                  password_reset: { type: boolean, description: Self-service password reset is available (local login + mail configured). }
+
+  /auth/login:
+    get:
+      tags: [auth]
+      summary: Begin OIDC login (redirects to the configured identity provider)
+      security: []
+      parameters:
+        - in: query
+          name: redirect
+          schema: { type: string }
+          description: Local path to return to after login.
+      responses:
+        '302': { description: Redirect to the identity provider. }
+
+  /auth/callback:
+    get:
+      tags: [auth]
+      summary: OIDC redirect URI (exchanges code, sets the session cookie)
+      security: []
+      responses:
+        '302': { description: Redirect to the post-login path. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the session and clear the cookie
+      responses:
+        '302': { description: Redirect to the post-logout path. }
+
+  /api/v1/me:
+    get:
+      tags: [me]
+      summary: Current user and memberships
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/me/password:
+    post:
+      tags: [me]
+      summary: Change the current local user's password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
+      responses:
+        '204': { description: Password changed. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/me/totp/enroll:
+    post:
+      tags: [me]
+      summary: Begin two-factor (TOTP) enrollment
+      description: >
+        Generates a pending TOTP secret for the current local user (2FA not yet
+        active) and returns it plus an otpauth:// URI for an authenticator app.
+        Confirm with POST /api/v1/me/totp/enable.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TOTPEnrollResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/me/totp/enable:
+    post:
+      tags: [me]
+      summary: Confirm and enable two-factor authentication
+      description: >
+        Verifies a code against the pending secret, enables 2FA, and returns
+        single-use recovery codes (shown once).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TOTPEnableRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TOTPEnableResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/me/totp/disable:
+    post:
+      tags: [me]
+      summary: Disable two-factor authentication
+      description: Turns off 2FA after re-verifying the account password.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TOTPDisableRequest' }
+      responses:
+        '204': { description: Two-factor disabled. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/organizations:
+    get:
+      tags: [organizations]
+      summary: List organizations visible to the caller
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Organization' } }
+    post:
+      tags: [organizations]
+      summary: Create an organization (global admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOrganization' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organization' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgID}:
+    parameters: [ { $ref: '#/components/parameters/OrgID' } ]
+    get:
+      tags: [organizations]
+      summary: Get an organization
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organization' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgID}/projects:
+    parameters: [ { $ref: '#/components/parameters/OrgID' } ]
+    get:
+      tags: [projects]
+      summary: List projects of an organization visible to the caller
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Project' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [projects]
+      summary: Create a project (org admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateProject' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgID}/members:
+    parameters: [ { $ref: '#/components/parameters/OrgID' } ]
+    get:
+      tags: [organizations]
+      summary: List org members with identity (org admin)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Member' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [organizations]
+      summary: Add a membership (org admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddMember' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Membership' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgID}/audit:
+    parameters:
+      - { $ref: '#/components/parameters/OrgID' }
+      - in: query
+        name: limit
+        required: false
+        schema: { type: integer, default: 100 }
+    get:
+      tags: [organizations]
+      summary: Recent audit entries (org admin) — member and token changes
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AuditEntry' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgID}/members/{membershipID}:
+    parameters:
+      - { $ref: '#/components/parameters/OrgID' }
+      - { $ref: '#/components/parameters/MembershipID' }
+    patch:
+      tags: [organizations]
+      summary: Change a member's role (org admin)
+      description: The last org-level admin cannot be demoted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateMember' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Membership' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [organizations]
+      summary: Remove a member (org admin)
+      description: The last org-level admin cannot be removed.
+      responses:
+        '204': { description: No Content }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [projects]
+      summary: Get a project
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/regions:
+    get:
+      tags: [monitors]
+      summary: List worker-pool regions for the monitor region picker
+      description: >
+        Worker-pool regions in use (assigned to monitors, always incl. core) unioned
+        with regions that have a live worker (an active consumer on checks.jobs.*, via
+        the RabbitMQ management API), each flagged with its live status. Any
+        authenticated caller may read it.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  regions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        live: { type: boolean, description: 'A worker for this region is currently connected.' }
+
+  /api/v1/projects/{projectID}/monitors:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [monitors]
+      summary: List a project's monitors
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Monitor' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [monitors]
+      summary: Create a monitor (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateMonitor' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Monitor' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/monitors/test:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    post:
+      tags: [monitors]
+      summary: Test a monitor spec with a one-off probe before saving (editor+)
+      description: >
+        Runs a single probe against the given spec and returns the result. The probe
+        is dispatched to a worker in the spec's `region`, so a geo target is tested
+        from its own region rather than from core. Push and composite monitors are not
+        testable (400). If no worker in the target region answers, returns 502 — the
+        result is unknown (start a worker with `--region <name>`), not a target outage.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateMonitor' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  up: { type: boolean }
+                  latency_ms: { type: integer, format: int64 }
+                  code: { type: integer }
+                  msg: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502':
+          description: No worker in the target region answered the test probe.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/sla:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [sla]
+      summary: Project-level SLI over standard windows
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectSLA' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/sla-report:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    put:
+      tags: [sla]
+      summary: Toggle a project's weekly SLA report (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sla_report_weekly: { type: boolean }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/maintenance:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [sla]
+      summary: List maintenance windows
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/MaintenanceWindow' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [sla]
+      summary: Schedule a maintenance window (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateMaintenance' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MaintenanceWindow' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/monitors/{monitorID}:
+    parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
+    get:
+      tags: [monitors]
+      summary: Get a monitor
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Monitor' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [monitors]
+      summary: Update a monitor's mutable fields (editor+). Type is immutable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateMonitor' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Monitor' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [monitors]
+      summary: Delete a monitor (editor+)
+      responses:
+        '204': { description: Deleted. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/monitors/{monitorID}/heartbeats:
+    parameters:
+      - { $ref: '#/components/parameters/MonitorID' }
+      - in: query
+        name: limit
+        schema: { type: integer, default: 100, maximum: 1000 }
+    get:
+      tags: [monitors]
+      summary: Recent heartbeats (newest first)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Heartbeat' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/monitors/{monitorID}/sla:
+    parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
+    get:
+      tags: [sla]
+      summary: Monitor SLI over standard windows, with error budget if a target is set
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MonitorSLA' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/monitors/{monitorID}/availability:
+    parameters:
+      - { $ref: '#/components/parameters/MonitorID' }
+      - { $ref: '#/components/parameters/AvailabilityDays' }
+    get:
+      tags: [sla]
+      summary: Per-day availability (rollup + today), oldest first
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/DailyAvailability' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/availability:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/AvailabilityDays' }
+    get:
+      tags: [sla]
+      summary: Per-day availability across a project's monitors, oldest first
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/DailyAvailability' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/monitors/{monitorID}/sla-target:
+    parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
+    put:
+      tags: [sla]
+      summary: Set a monitor's SLO objective for a window (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetSLATarget' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SLATarget' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/maintenance/{maintenanceID}:
+    parameters:
+      - in: path
+        name: maintenanceID
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [sla]
+      summary: Delete a maintenance window (editor+)
+      responses:
+        '204': { description: Deleted. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/incidents:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [incidents]
+      summary: List a project's incidents (newest first)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Incident' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [incidents]
+      summary: Open an incident with an opening timeline update (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateIncident' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Incident' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/alerts/alertmanager:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    post:
+      tags: [incidents]
+      summary: Alertmanager webhook receiver — firing opens incidents, resolved closes them (editor+)
+      description: >
+        Point a Prometheus Alertmanager webhook_config here with a service-account
+        bearer token in its http_config. Alerts are correlated by fingerprint: a
+        firing alert opens an incident (idempotent per fingerprint), a resolved alert
+        closes the incident it opened.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertmanagerPayload' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  opened: { type: integer }
+                  resolved: { type: integer }
+                  ignored: { type: integer }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/incidents/{incidentID}:
+    parameters: [ { $ref: '#/components/parameters/IncidentID' } ]
+    get:
+      tags: [incidents]
+      summary: Get an incident
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Incident' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/incidents/{incidentID}/updates:
+    parameters: [ { $ref: '#/components/parameters/IncidentID' } ]
+    get:
+      tags: [incidents]
+      summary: List an incident's timeline (chronological)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/IncidentUpdate' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [incidents]
+      summary: Append a timeline update, advancing status (editor+). Rejected once resolved.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddIncidentUpdate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IncidentUpdate' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/incidents/{incidentID}/postmortem:
+    parameters: [ { $ref: '#/components/parameters/IncidentID' } ]
+    get:
+      tags: [incidents]
+      summary: Get an incident's postmortem
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Postmortem' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [incidents]
+      summary: Attach or replace the postmortem for a resolved incident (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PutPostmortem' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Postmortem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/incidents/{incidentID}/acknowledge:
+    parameters: [ { $ref: '#/components/parameters/IncidentID' } ]
+    post:
+      tags: [incidents]
+      summary: Acknowledge an incident, stopping on-call escalation (editor+)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Incident' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: The incident is already resolved. }
+
+  /api/v1/projects/{projectID}/escalation-policies:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [escalation]
+      summary: List a project's escalation policies (viewer+)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/EscalationPolicy' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [escalation]
+      summary: Create an escalation policy (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateEscalationPolicy' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EscalationPolicy' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/escalation-policies/{policyID}:
+    parameters: [ { name: policyID, in: path, required: true, schema: { type: string } } ]
+    put:
+      tags: [escalation]
+      summary: Update an escalation policy (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateEscalationPolicy' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EscalationPolicy' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [escalation]
+      summary: Delete an escalation policy (editor+)
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/oncall-schedules:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [escalation]
+      summary: List a project's on-call schedules (viewer+)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/OnCallSchedule' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [escalation]
+      summary: Create an on-call schedule (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOnCallSchedule' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnCallSchedule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/oncall-schedules/{scheduleID}/current:
+    parameters: [ { name: scheduleID, in: path, required: true, schema: { type: string } } ]
+    get:
+      tags: [escalation]
+      summary: Who is on call now for a schedule (honors overrides)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedule_id: { type: string }
+                  channel_id: { type: string, description: 'the notification_channel on call now (empty if none)' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/oncall-schedules/{scheduleID}/overrides:
+    parameters: [ { name: scheduleID, in: path, required: true, schema: { type: string } } ]
+    get:
+      tags: [escalation]
+      summary: List a schedule's on-call overrides (viewer+)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/OnCallOverride' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [escalation]
+      summary: Add a vacation-cover override to a schedule (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOnCallOverride' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnCallOverride' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/oncall-overrides/{overrideID}:
+    parameters: [ { name: overrideID, in: path, required: true, schema: { type: string } } ]
+    delete:
+      tags: [escalation]
+      summary: Remove an on-call override (editor+)
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/oncall-schedules/{scheduleID}:
+    parameters: [ { name: scheduleID, in: path, required: true, schema: { type: string } } ]
+    put:
+      tags: [escalation]
+      summary: Update an on-call schedule (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOnCallSchedule' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnCallSchedule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [escalation]
+      summary: Delete an on-call schedule (editor+)
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgID}/status-pages:
+    parameters: [ { $ref: '#/components/parameters/OrgID' } ]
+    get:
+      tags: [status-pages]
+      summary: List an organization's status pages (org member)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/StatusPage' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [status-pages]
+      summary: Create a status page (org admin). Unlisted pages get a generated token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStatusPage' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/status-pages/{pageID}:
+    parameters: [ { $ref: '#/components/parameters/PageID' } ]
+    get:
+      tags: [status-pages]
+      summary: Get a status page's configuration (org member)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusPage' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [status-pages]
+      summary: Update a status page's title/visibility (org admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateStatusPage' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [status-pages]
+      summary: Delete a status page and its components (org admin)
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/status-pages/{pageID}/render:
+    parameters: [ { $ref: '#/components/parameters/PageID' } ]
+    get:
+      tags: [status-pages]
+      summary: Render a page for an authenticated org member (any visibility)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusPageRender' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/status-pages/{pageID}/feed:
+    parameters:
+      - { $ref: '#/components/parameters/PageID' }
+      - { $ref: '#/components/parameters/FeedFormat' }
+    get:
+      tags: [status-pages]
+      summary: Incident feed for an org member (JSON Feed / RSS / Atom)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/feed+json: { schema: { type: string } }
+            application/rss+xml: { schema: { type: string } }
+            application/atom+xml: { schema: { type: string } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/status-pages/{pageID}/components:
+    parameters: [ { $ref: '#/components/parameters/PageID' } ]
+    get:
+      tags: [status-pages]
+      summary: List a page's components (org member)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Component' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [status-pages]
+      summary: Add a component (org admin). A monitor-backed component must be in the page's org.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateComponent' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Component' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/components/{componentID}:
+    parameters:
+      - in: path
+        name: componentID
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [status-pages]
+      summary: Delete a component (org admin)
+      responses:
+        '204': { description: Deleted. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/public/status-pages/{slug}:
+    parameters:
+      - in: path
+        name: slug
+        required: true
+        schema: { type: string }
+      - in: query
+        name: token
+        required: false
+        schema: { type: string }
+        description: Required for unlisted pages.
+    get:
+      tags: [status-pages]
+      security: []
+      summary: >
+        Public (unauthenticated) render. Public pages are served to anyone;
+        unlisted pages require the matching token; internal pages return 404.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusPageRender' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/public/status-pages/{slug}/feed:
+    parameters:
+      - in: path
+        name: slug
+        required: true
+        schema: { type: string }
+      - in: query
+        name: token
+        required: false
+        schema: { type: string }
+        description: Required for unlisted pages.
+      - { $ref: '#/components/parameters/FeedFormat' }
+    get:
+      tags: [status-pages]
+      security: []
+      summary: >
+        Public (unauthenticated) incident feed. Same visibility gate as the
+        public render; format via ?format=rss|atom|json (default rss).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/feed+json: { schema: { type: string } }
+            application/rss+xml: { schema: { type: string } }
+            application/atom+xml: { schema: { type: string } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/public/status-pages/{slug}/subscribers:
+    parameters:
+      - in: path
+        name: slug
+        required: true
+        schema: { type: string }
+      - in: query
+        name: token
+        required: false
+        schema: { type: string }
+        description: Unlisted-page access token, if the page is unlisted.
+    post:
+      tags: [status-pages]
+      security: []
+      summary: Subscribe an email to a status page (double opt-in; sends a confirmation email)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Subscribe' }
+      responses:
+        '202': { description: Confirmation email sent. }
+        '200': { description: Already subscribed. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { description: Email subscriptions are not enabled. }
+
+  /api/v1/public/subscriptions/{token}/confirm:
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema: { type: string }
+    post:
+      tags: [status-pages]
+      security: []
+      summary: Confirm an email subscription (double opt-in)
+      responses:
+        '200': { description: Confirmed. }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/public/subscriptions/{token}:
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [status-pages]
+      security: []
+      summary: Unsubscribe by token
+      responses:
+        '204': { description: Unsubscribed. }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/public/push/{token}:
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema: { type: string }
+      - in: query
+        name: status
+        required: false
+        schema: { type: string, enum: [up, down], default: up }
+      - in: query
+        name: msg
+        required: false
+        schema: { type: string }
+    post:
+      tags: [monitors]
+      security: []
+      summary: >
+        Push heartbeat for a dead-man's-switch monitor (unauthenticated). The
+        watched service POSTs here every interval; silence past the interval marks
+        the monitor down.
+      responses:
+        '200':
+          description: Recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  monitor_id: { type: string, format: uuid }
+                  up: { type: boolean }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgID}/tokens:
+    parameters: [ { $ref: '#/components/parameters/OrgID' } ]
+    get:
+      tags: [tokens]
+      summary: List an org's service-account tokens (org admin). Secrets are never returned.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/ApiToken' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [tokens]
+      summary: Issue a service-account token (org admin). The secret is returned once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateApiToken' }
+      responses:
+        '201':
+          description: Created. The `token` field is the only time the secret is shown.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatedApiToken' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/tokens/{tokenID}:
+    parameters:
+      - in: path
+        name: tokenID
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [tokens]
+      summary: Revoke a service-account token (org admin)
+      responses:
+        '204': { description: Revoked. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/agent-tokens:
+    get:
+      tags: [agent]
+      summary: List database-managed pull-agent tokens (global admin). Secrets are not returned.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AgentToken' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [agent]
+      summary: Issue a per-region pull-agent token (global admin). The secret is returned once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, region]
+              properties:
+                name: { type: string }
+                region: { type: string }
+      responses:
+        '201':
+          description: Created — set `token` as the agent's pull.token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  name: { type: string }
+                  region: { type: string }
+                  token: { type: string, description: 'Plaintext secret, shown only here.' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/agent-tokens/{tokenID}:
+    parameters: [ { name: tokenID, in: path, required: true, schema: { type: string, format: uuid } } ]
+    delete:
+      tags: [agent]
+      summary: Revoke a pull-agent token (global admin)
+      responses:
+        '204': { description: Revoked. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgID}/webhooks:
+    parameters: [ { $ref: '#/components/parameters/OrgID' } ]
+    get:
+      tags: [webhooks]
+      summary: List an org's webhook subscriptions (org admin). Secrets are not returned.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Webhook' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [webhooks]
+      summary: Register a webhook (org admin). A signing secret is generated if omitted and returned once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateWebhook' }
+      responses:
+        '201':
+          description: Created. The response includes the signing secret (only here).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Webhook' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/webhooks/{webhookID}:
+    parameters:
+      - in: path
+        name: webhookID
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [webhooks]
+      summary: Delete a webhook subscription (org admin)
+      responses:
+        '204': { description: Deleted. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/notification-channels:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [notifications]
+      summary: List a project's notification channels (viewer+)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/NotificationChannel' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [notifications]
+      summary: Create a notification channel (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateNotificationChannel' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationChannel' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/notification-channels/{channelID}:
+    parameters:
+      - in: path
+        name: channelID
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [notifications]
+      summary: Delete a notification channel (editor+)
+      responses:
+        '204': { description: Deleted. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/monitors/{monitorID}/notifications:
+    parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
+    get:
+      tags: [notifications]
+      summary: List the channels linked to a monitor (viewer+)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/NotificationChannel' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [notifications]
+      summary: Link a channel to a monitor (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel_id]
+              properties:
+                channel_id: { type: string, format: uuid }
+      responses:
+        '204': { description: Linked. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/monitors/{monitorID}/notifications/{channelID}:
+    parameters:
+      - { $ref: '#/components/parameters/MonitorID' }
+      - in: path
+        name: channelID
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [notifications]
+      summary: Unlink a channel from a monitor (editor+)
+      responses:
+        '204': { description: Unlinked. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/search:
+    get:
+      tags: [search]
+      summary: Search projects, monitors and incidents (scoped to the caller)
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string, minLength: 2 }
+          description: Case-insensitive substring; a query under 2 chars returns no hits.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query: { type: string }
+                  hits: { type: array, items: { $ref: '#/components/schemas/SearchHit' } }
+
+  /api/v1/events:
+    get:
+      tags: [monitors]
+      summary: >
+        Stream live monitor status changes as Server-Sent Events (text/event-stream),
+        filtered to the projects the caller may see. Consume with EventSource; each
+        `status` event's data is a JSON object {type, monitor_id, project_id, status,
+        latency_ms, ts}. 501 if realtime is not enabled.
+      responses:
+        '200':
+          description: An event stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '501': { description: Realtime events are not enabled. }
+
+  /api/v1/settings/oidc:
+    get:
+      tags: [admin]
+      summary: Read the instance-wide OIDC configuration (global admin only)
+      description: >
+        Returns the DB override (client secret redacted) if one is saved, else
+        configured=false meaning the config-file bootstrap is in effect.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OIDCSettingsView' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin]
+      summary: Save the OIDC configuration and rebuild the provider (global admin only)
+      description: >
+        Persists the instance-wide OIDC override — which then takes precedence over
+        the YAML oidc: block — and rebuilds the live provider. A blank/omitted
+        client_secret preserves the stored one. If the provider can't be built (e.g.
+        the IdP is unreachable) the settings are still saved and active is false;
+        the background reloader keeps retrying.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetOIDCSettings' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OIDCSettingsView' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/settings/branding:
+    get:
+      tags: [admin]
+      summary: Read branding (global admin only)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Branding' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin]
+      summary: Save branding (global admin only)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Branding' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Branding' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/settings/auth-policy:
+    get:
+      tags: [admin]
+      summary: Read auth policy (global admin only)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AuthPolicy' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin]
+      summary: Save auth policy (global admin only)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AuthPolicy' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AuthPolicy' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/settings/alerting:
+    get:
+      tags: [admin]
+      summary: Read alerting controls (global admin only)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Alerting' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin]
+      summary: Save alerting controls (global admin only)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Alerting' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Alerting' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/settings/monitor-defaults:
+    get:
+      tags: [admin]
+      summary: Read monitor defaults (global admin only)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MonitorDefaults' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin]
+      summary: Save monitor defaults (global admin only)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MonitorDefaults' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MonitorDefaults' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/settings/mail:
+    get:
+      tags: [admin]
+      summary: Read mail/SMTP settings (global admin only, password redacted)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MailSettingsView' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin]
+      summary: Save mail/SMTP settings and re-point the live mailer (global admin only)
+      description: 'A blank/omitted smtp_password preserves the stored one. The mailer resolves this per send, so changes apply immediately.'
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SetMailSettings' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MailSettingsView' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/public/branding:
+    get:
+      tags: [public]
+      summary: Public branding (unauthenticated) for the login page and status pages
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PublicBranding' } } } }
+
+  /api/v1/admin/outbox/dead:
+    get:
+      tags: [admin]
+      summary: List dead-lettered outbox events (global admin only)
+      description: >
+        Outbound events (incident webhooks, monitor-transition notifications) that
+        exhausted their delivery retries. System-wide; requires a global admin.
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, default: 100 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/OutboxEvent' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/admin/outbox/dead/replay-all:
+    post:
+      tags: [admin]
+      summary: Requeue every dead outbox event (global admin only)
+      responses:
+        '200':
+          description: Number of events requeued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { replayed: { type: integer } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/admin/outbox/dead/{eventID}/replay:
+    parameters:
+      - in: path
+        name: eventID
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [admin]
+      summary: Requeue one dead outbox event for delivery (global admin only)
+      responses:
+        '204': { description: Requeued. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: cerbix_session
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "Machine auth via Authorization: Bearer. Either a cerbix service-account token (cbx_...) or an OIDC client-credentials access token (a realm-issued JWT, when OIDC is enabled); the JWT subject is JIT-provisioned and access is membership-gated."
+
+  parameters:
+    OrgID:
+      in: path
+      name: orgID
+      required: true
+      schema: { type: string, format: uuid }
+    ProjectID:
+      in: path
+      name: projectID
+      required: true
+      schema: { type: string, format: uuid }
+    MembershipID:
+      in: path
+      name: membershipID
+      required: true
+      schema: { type: string, format: uuid }
+    MonitorID:
+      in: path
+      name: monitorID
+      required: true
+      schema: { type: string, format: uuid }
+    IncidentID:
+      in: path
+      name: incidentID
+      required: true
+      schema: { type: string, format: uuid }
+    PageID:
+      in: path
+      name: pageID
+      required: true
+      schema: { type: string, format: uuid }
+    FeedFormat:
+      in: query
+      name: format
+      required: false
+      schema: { type: string, enum: [rss, atom, json], default: rss }
+      description: Feed serialization; defaults to RSS 2.0.
+    AvailabilityDays:
+      in: query
+      name: days
+      required: false
+      schema: { type: integer, default: 90, maximum: 365 }
+      description: Number of trailing days of availability to return.
+
+  responses:
+    Unauthorized:
+      description: No or invalid session.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated but insufficient role.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Not found or not visible to the caller (existence hidden).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, description: Email of the local account. }
+        password: { type: string, format: password }
+        totp: { type: string, description: 'TOTP code or a recovery code, required when 2FA is enabled.' }
+    TOTPEnrollResponse:
+      type: object
+      properties:
+        secret: { type: string, description: Base32 TOTP secret to enter manually. }
+        uri: { type: string, description: 'otpauth:// URI for authenticator apps (QR).' }
+    TOTPEnableRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, description: Current 6-digit code from the authenticator. }
+    TOTPEnableResponse:
+      type: object
+      properties:
+        recovery_codes:
+          type: array
+          items: { type: string }
+          description: Single-use recovery codes, shown only once.
+    TOTPDisableRequest:
+      type: object
+      required: [password]
+      properties:
+        password: { type: string, format: password, description: Account password, re-verified before disabling 2FA. }
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string, format: password }
+        new_password: { type: string, format: password }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        oidc_sub: { type: string }
+        email: { type: string }
+        display_name: { type: string }
+        is_global_admin: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Me:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        memberships: { type: array, items: { $ref: '#/components/schemas/Membership' } }
+        totp_enabled: { type: boolean, description: Whether two-factor authentication is active for this account. }
+    Organization:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateOrganization:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: { type: string }
+        name: { type: string }
+    Project:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateProject:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: { type: string }
+        name: { type: string }
+    Membership:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid, nullable: true }
+        role: { $ref: '#/components/schemas/Role' }
+        created_at: { type: string, format: date-time }
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        actor_user_id: { type: string, format: uuid }
+        actor_email: { type: string }
+        actor_name: { type: string }
+        via_token: { type: boolean }
+        action: { type: string, description: 'e.g. member.add, member.role_change, member.remove, token.create, token.delete' }
+        target: { type: string }
+        created_at: { type: string, format: date-time }
+    Member:
+      type: object
+      description: A membership enriched with the user's identity for the members UI.
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid, nullable: true }
+        role: { $ref: '#/components/schemas/Role' }
+        created_at: { type: string, format: date-time }
+        email: { type: string }
+        display_name: { type: string }
+        last_active_at: { type: string, format: date-time, nullable: true, description: 'Most recent session; absent if never signed in.' }
+    AddMember:
+      type: object
+      required: [role]
+      description: Identify the member by user_id or email (the user must have signed in at least once).
+      properties:
+        user_id: { type: string, format: uuid }
+        email: { type: string, description: 'Alternative to user_id; resolved to an existing user.' }
+        project_id: { type: string, format: uuid }
+        role: { $ref: '#/components/schemas/Role' }
+    UpdateMember:
+      type: object
+      required: [role]
+      properties:
+        role: { $ref: '#/components/schemas/Role' }
+    Role:
+      type: string
+      enum: [org_admin, project_admin, editor, viewer]
+    Monitor:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        name: { type: string }
+        type: { type: string, enum: [http, tcp, icmp, dns, tls, grpc, composite, postgres, mysql, redis, promql, rabbitmq, websocket, ssh, synthetic, push] }
+        target: { type: string }
+        method: { type: string, enum: [GET, POST, HEAD, PUT, DELETE], description: 'HTTP request method (http monitors).' }
+        interval_seconds: { type: integer }
+        timeout_seconds: { type: integer }
+        retries: { type: integer }
+        failure_threshold: { type: integer, description: 'Consecutive failed checks before "down" (confirmations); default 1.' }
+        confirm_interval_seconds: { type: integer, description: 'Accelerated probe interval while confirming a failure (first fail → verdict). 0 = off; clamped to [5, interval]; effective with failure_threshold > 1.' }
+        depends_on:
+          type: array
+          items: { type: string, format: uuid }
+          description: 'Parent monitors (same project). While any transitive parent is down, alerts for this monitor are suppressed; data keeps recording. Must stay acyclic.'
+        consecutive_failures: { type: integer, readOnly: true, description: 'Live confirmation counter ("confirming N/M" when > 0 and status is up).' }
+        renotify_seconds: { type: integer, description: 'Re-send the down alert every N seconds while down (0 = off).' }
+        grace_seconds: { type: integer, description: 'Push monitors: extra tolerance beyond the interval before "down".' }
+        conditions: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string }, description: 'Free-form labels (env:prod, team:x) for filtering.' }
+        region: { type: string, description: 'Worker-pool region that probes this monitor; default core. Composite monitors must be core.' }
+        config: { type: object, additionalProperties: { type: string }, description: 'Per-type config; for composite: {children:"id1,id2", mode:"all|any"}.' }
+        enabled: { type: boolean }
+        auto_incident: { type: boolean, description: 'When true, an incident opens automatically when this monitor goes down.' }
+        escalation_policy_id: { type: string, description: 'On-call escalation policy for down alerts. Empty = flat notification to all linked channels.' }
+        status: { type: string, enum: [pending, up, down] }
+        push_token: { type: string, description: 'Set for push monitors; the secret in their heartbeat URL.' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateMonitor:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [http, tcp, icmp, dns, tls, grpc, composite, postgres, mysql, redis, promql, rabbitmq, websocket, ssh, synthetic, push] }
+        target: { type: string }
+        method: { type: string, enum: [GET, POST, HEAD, PUT, DELETE], description: 'HTTP request method; defaults to GET.' }
+        interval_seconds: { type: integer, default: 60 }
+        timeout_seconds: { type: integer, default: 10 }
+        retries: { type: integer, default: 0 }
+        failure_threshold: { type: integer, default: 1, description: 'Consecutive failed checks before "down".' }
+        confirm_interval_seconds: { type: integer, default: 10, description: 'Faster probes while confirming a failure. 0 = off; clamped to [5, interval].' }
+        depends_on:
+          type: array
+          items: { type: string, format: uuid }
+          description: 'Parent monitors of the same project; cycles are rejected (400).'
+        renotify_seconds: { type: integer, default: 0, description: 'Re-send the down alert every N seconds while down (0 = off).' }
+        grace_seconds: { type: integer, default: 0, description: 'Push monitors: extra tolerance beyond the interval.' }
+        conditions:
+          type: array
+          items: { type: string }
+          example: ["[STATUS] == 200", "[RESPONSE_TIME] < 500"]
+        tags: { type: array, items: { type: string }, description: 'Free-form labels (env:prod, team:x) for filtering.' }
+        region: { type: string, description: 'Worker-pool region that probes this monitor; default core. Composite monitors must be core.' }
+        config: { type: object, additionalProperties: { type: string }, description: 'Per-type config; for composite: {children:"id1,id2", mode:"all|any"}.' }
+        enabled: { type: boolean, default: true }
+        auto_incident: { type: boolean, default: true, description: 'Open an incident automatically when this monitor goes down.' }
+        escalation_policy_id: { type: string, description: 'On-call escalation policy for down alerts (requires auto_incident). Empty = flat notification.' }
+    UpdateMonitor:
+      type: object
+      description: Partial update; omitted fields are unchanged. Type is immutable.
+      properties:
+        name: { type: string }
+        target: { type: string }
+        method: { type: string, enum: [GET, POST, HEAD, PUT, DELETE] }
+        interval_seconds: { type: integer }
+        timeout_seconds: { type: integer }
+        retries: { type: integer }
+        failure_threshold: { type: integer }
+        confirm_interval_seconds: { type: integer }
+        depends_on:
+          type: array
+          items: { type: string, format: uuid }
+        renotify_seconds: { type: integer }
+        grace_seconds: { type: integer }
+        conditions: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string }, description: 'Free-form labels (env:prod, team:x) for filtering.' }
+        region: { type: string, description: 'Worker-pool region that probes this monitor; default core. Composite monitors must be core.' }
+        config: { type: object, additionalProperties: { type: string }, description: 'Per-type config; for composite: {children:"id1,id2", mode:"all|any"}.' }
+        enabled: { type: boolean }
+        auto_incident: { type: boolean }
+        escalation_policy_id: { type: string }
+    Heartbeat:
+      type: object
+      properties:
+        monitor_id: { type: string, format: uuid }
+        ts: { type: string, format: date-time }
+        up: { type: boolean }
+        latency_ms: { type: integer, format: int64 }
+        code: { type: integer }
+        msg: { type: string }
+    WindowSLA:
+      type: object
+      properties:
+        window: { type: string, enum: ['24h', '7d', '30d', '90d'] }
+        total: { type: integer, format: int64 }
+        up: { type: integer, format: int64 }
+        uptime_percent: { type: number, format: double }
+        avg_latency_ms: { type: number, format: double }
+        p95_latency_ms: { type: number, format: double }
+        objective: { type: number, format: double, nullable: true }
+        error_budget: { $ref: '#/components/schemas/ErrorBudget' }
+        burn_alert: { type: boolean, description: 'Burn-rate alerting is enabled for this window.' }
+        burn_firing: { type: boolean, description: 'At least one burn rule is currently firing.' }
+        burn_rules:
+          type: array
+          items: { $ref: '#/components/schemas/BurnRule' }
+    ErrorBudget:
+      type: object
+      properties:
+        objective: { type: number, format: double }
+        allowed_downtime_ratio: { type: number, format: double }
+        actual_downtime_ratio: { type: number, format: double }
+        remaining_ratio: { type: number, format: double }
+        burned_percent: { type: number, format: double }
+        met: { type: boolean }
+    MonitorSLA:
+      type: object
+      properties:
+        monitor_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, up, down] }
+        windows: { type: array, items: { $ref: '#/components/schemas/WindowSLA' } }
+    DailyAvailability:
+      type: object
+      properties:
+        day: { type: string, format: date-time }
+        up: { type: integer, format: int64 }
+        total: { type: integer, format: int64 }
+        uptime_percent: { type: number, format: double }
+    ProjectSLA:
+      type: object
+      properties:
+        project_id: { type: string, format: uuid }
+        windows: { type: array, items: { $ref: '#/components/schemas/WindowSLA' } }
+        sla_report_weekly: { type: boolean, description: 'Weekly SLA report is enabled for this project.' }
+    BurnRule:
+      type: object
+      description: >
+        One multi-window burn-rate rule (Google SRE): fires when the error-budget
+        burn rate is at/over threshold in BOTH windows. firing is server-owned.
+      required: [long_window_seconds, short_window_seconds, threshold, severity]
+      properties:
+        long_window_seconds: { type: integer, description: 'Noise-filtering window, must exceed the short one (max 7d).' }
+        short_window_seconds: { type: integer, minimum: 60, description: 'Confirmation window ("still burning right now").' }
+        threshold: { type: number, format: double, description: 'Burn-rate multiple that trips the rule (e.g. 14.4).' }
+        severity: { type: string, enum: [page, ticket] }
+        firing: { type: boolean, readOnly: true, description: 'Edge latch; ignored on input.' }
+    SLATarget:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        monitor_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        objective: { type: number, format: double }
+        window: { type: string }
+        burn_alert_enabled: { type: boolean }
+        burn_rules:
+          type: array
+          items: { $ref: '#/components/schemas/BurnRule' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SetSLATarget:
+      type: object
+      required: [objective]
+      properties:
+        objective: { type: number, format: double, description: 'Target uptime percent, (0,100].' }
+        window: { type: string, enum: ['24h', '7d', '30d', '90d'], default: '30d' }
+        burn_alert: { type: boolean, description: 'Enable burn-rate alerting for this objective.' }
+        burn_rules:
+          type: array
+          maxItems: 4
+          items: { $ref: '#/components/schemas/BurnRule' }
+          description: 'Replace the rule set. Omit to keep existing rules (enabling with none seeds the SRE default pair: page 14.4x over 1h∧5m, ticket 6x over 6h∧30m).'
+    MaintenanceWindow:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        monitor_id: { type: string, format: uuid, nullable: true }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+    CreateMaintenance:
+      type: object
+      required: [starts_at, ends_at]
+      properties:
+        monitor_id: { type: string, format: uuid, description: 'Omit for a project-wide window.' }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        reason: { type: string }
+    Incident:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        monitor_id: { type: string, format: uuid, description: 'Set for auto-incidents opened from a monitor going down.' }
+        external_key: { type: string, description: 'Correlation key for externally-sourced incidents (e.g. an Alertmanager fingerprint).' }
+        title: { type: string }
+        status: { $ref: '#/components/schemas/IncidentStatus' }
+        impact: { $ref: '#/components/schemas/IncidentImpact' }
+        source: { type: string, enum: [manual, api, auto] }
+        started_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        acknowledged_at: { type: string, format: date-time, nullable: true, description: 'Set when acknowledged; stops on-call escalation.' }
+        acknowledged_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    EscalationTarget:
+      type: object
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [channel, schedule] }
+        id: { type: string, description: 'notification_channel id or oncall_schedule id' }
+    EscalationStep:
+      type: object
+      required: [after_seconds, targets]
+      properties:
+        after_seconds: { type: integer, description: 'Offset from incident start at which this step fires (non-decreasing across steps).' }
+        targets: { type: array, items: { $ref: '#/components/schemas/EscalationTarget' } }
+    EscalationPolicy:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        name: { type: string }
+        repeat_last: { type: boolean, description: 'Repeat the last step on the monitor renotify cadence until acknowledged.' }
+        steps: { type: array, items: { $ref: '#/components/schemas/EscalationStep' } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateEscalationPolicy:
+      type: object
+      required: [name, steps]
+      properties:
+        name: { type: string }
+        repeat_last: { type: boolean }
+        steps: { type: array, items: { $ref: '#/components/schemas/EscalationStep' } }
+    OnCallSchedule:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        name: { type: string }
+        shift_seconds: { type: integer, description: 'Rotation period; e.g. 604800 for weekly.' }
+        anchor_at: { type: string, format: date-time, description: 'Rotation epoch (slot 0 starts here).' }
+        participants: { type: array, items: { type: string }, description: 'Ordered notification_channel ids in the rotation.' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateOnCallSchedule:
+      type: object
+      required: [name, shift_seconds, anchor_at, participants]
+      properties:
+        name: { type: string }
+        shift_seconds: { type: integer }
+        anchor_at: { type: string, format: date-time }
+        participants: { type: array, items: { type: string } }
+    OnCallOverride:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        schedule_id: { type: string, format: uuid }
+        channel_id: { type: string, format: uuid }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    CreateOnCallOverride:
+      type: object
+      required: [channel_id, starts_at, ends_at]
+      properties:
+        channel_id: { type: string, description: 'notification_channel id that covers during the window' }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+    Announcement:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        text: { type: string }
+        level: { type: string, enum: [info, warning, critical] }
+    Branding:
+      type: object
+      properties:
+        configured: { type: boolean, readOnly: true }
+        product_name: { type: string }
+        accent_color: { type: string, description: '6-digit hex like #3b5bdb' }
+        logo_url: { type: string }
+        footer_text: { type: string }
+        support_url: { type: string }
+        announcement: { $ref: '#/components/schemas/Announcement' }
+    PublicBranding:
+      type: object
+      properties:
+        product_name: { type: string }
+        accent_color: { type: string }
+        logo_url: { type: string }
+        footer_text: { type: string }
+        support_url: { type: string }
+        announcement: { $ref: '#/components/schemas/Announcement' }
+    AuthPolicy:
+      type: object
+      properties:
+        configured: { type: boolean, readOnly: true }
+        min_password_len: { type: integer }
+        session_ttl_seconds: { type: integer }
+        require_totp: { type: string, enum: [none, admins, all] }
+        allowed_email_domains: { type: array, items: { type: string } }
+    GlobalSilence:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        until: { type: string, format: date-time, nullable: true }
+    Alerting:
+      type: object
+      properties:
+        configured: { type: boolean, readOnly: true }
+        global_silence: { $ref: '#/components/schemas/GlobalSilence' }
+    MonitorDefaults:
+      type: object
+      properties:
+        configured: { type: boolean, readOnly: true }
+        interval_seconds: { type: integer }
+        timeout_seconds: { type: integer }
+        retries: { type: integer }
+        failure_threshold: { type: integer }
+        renotify_seconds: { type: integer }
+        auto_incident: { type: boolean }
+    MailSettingsView:
+      type: object
+      properties:
+        configured: { type: boolean, readOnly: true }
+        enabled: { type: boolean }
+        smtp_host: { type: string }
+        smtp_port: { type: integer }
+        smtp_username: { type: string }
+        smtp_password_set: { type: boolean }
+        from: { type: string }
+        public_base_url: { type: string }
+        deliverable: { type: boolean, readOnly: true }
+    SetMailSettings:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        smtp_host: { type: string }
+        smtp_port: { type: integer }
+        smtp_username: { type: string }
+        smtp_password: { type: string, nullable: true, description: 'Omit or send empty to keep the stored password.' }
+        from: { type: string }
+        public_base_url: { type: string }
+    OIDCSettingsView:
+      type: object
+      description: Redacted read model for the OIDC settings API. The client secret is never returned, only whether one is stored.
+      properties:
+        configured: { type: boolean, description: 'A DB override row exists (the config file is no longer in effect).' }
+        active: { type: boolean, description: 'The provider is currently built and serving logins.' }
+        enabled: { type: boolean }
+        issuer: { type: string }
+        client_id: { type: string }
+        client_secret_set: { type: boolean }
+        redirect_url: { type: string }
+        scopes: { type: array, items: { type: string } }
+        post_logout_url: { type: string }
+        button_label: { type: string }
+        bootstrap_admins: { type: array, items: { type: string } }
+        reload_error: { type: string, description: 'Set when a save could not build the provider (e.g. IdP unreachable).' }
+    SetOIDCSettings:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        issuer: { type: string, description: 'Required when enabled.' }
+        client_id: { type: string, description: 'Required when enabled.' }
+        client_secret: { type: string, nullable: true, description: 'Omit or send empty to keep the stored secret.' }
+        redirect_url: { type: string, description: 'Required when enabled.' }
+        scopes: { type: array, items: { type: string } }
+        post_logout_url: { type: string }
+        button_label: { type: string }
+        bootstrap_admins: { type: array, items: { type: string } }
+    AlertmanagerPayload:
+      type: object
+      description: Subset of the Prometheus Alertmanager webhook payload (schema v4) consumed by the receiver.
+      properties:
+        alerts:
+          type: array
+          items:
+            type: object
+            properties:
+              status: { type: string, enum: [firing, resolved] }
+              fingerprint: { type: string, description: 'Stable per-alert identity used to correlate firing/resolved.' }
+              labels: { type: object, additionalProperties: { type: string } }
+              annotations: { type: object, additionalProperties: { type: string } }
+    IncidentStatus:
+      type: string
+      enum: [investigating, identified, monitoring, resolved]
+    IncidentImpact:
+      type: string
+      enum: [none, minor, major, critical]
+    CreateIncident:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string }
+        status: { $ref: '#/components/schemas/IncidentStatus' }
+        impact: { $ref: '#/components/schemas/IncidentImpact' }
+        body: { type: string, description: 'Opening timeline message (markdown).' }
+        monitor_id: { type: string, format: uuid, description: 'Optional affected monitor; must belong to this project.' }
+    IncidentUpdate:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        incident_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/IncidentStatus' }
+        body: { type: string }
+        author: { type: string }
+        created_at: { type: string, format: date-time }
+    AddIncidentUpdate:
+      type: object
+      properties:
+        status: { $ref: '#/components/schemas/IncidentStatus', description: 'Omit to keep the current status (a plain comment).' }
+        body: { type: string, description: 'Markdown.' }
+    Postmortem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        incident_id: { type: string, format: uuid }
+        body: { type: string }
+        author: { type: string }
+        published_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    IncidentDetail:
+      description: A resolved incident with its timeline and (optional) postmortem, for the status page's past-incidents accordion.
+      allOf:
+        - $ref: '#/components/schemas/Incident'
+        - type: object
+          properties:
+            updates: { type: array, items: { $ref: '#/components/schemas/IncidentUpdate' } }
+            postmortem: { $ref: '#/components/schemas/Postmortem' }
+    Subscribe:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+    PutPostmortem:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, description: 'Markdown analysis.' }
+    Visibility:
+      type: string
+      enum: [public, internal, unlisted]
+    ComponentStatus:
+      type: string
+      enum: [operational, degraded, partial_outage, major_outage, maintenance]
+    StatusPage:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid, nullable: true }
+        slug: { type: string }
+        title: { type: string }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        unlisted_token: { type: string, description: 'Present only for unlisted pages.' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateStatusPage:
+      type: object
+      required: [slug, title]
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        project_id: { type: string, format: uuid, description: 'Omit for an org-level page.' }
+    UpdateStatusPage:
+      type: object
+      description: 'Partial update; slug and org are immutable. Switching to unlisted mints a token, switching away clears it.'
+      properties:
+        title: { type: string }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+    Component:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status_page_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        group: { type: string }
+        position: { type: integer }
+        monitor_id: { type: string, format: uuid, description: 'Set to derive status from a monitor.' }
+        manual_status: { $ref: '#/components/schemas/ComponentStatus' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateComponent:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        group: { type: string }
+        position: { type: integer }
+        monitor_id: { type: string, format: uuid }
+        manual_status: { $ref: '#/components/schemas/ComponentStatus' }
+    ComponentDay:
+      type: object
+      description: One day of a component's 90-day availability strip.
+      properties:
+        day: { type: string, description: 'YYYY-MM-DD (UTC)' }
+        uptime_percent: { type: number, format: double }
+        total: { type: integer, format: int64 }
+    ComponentView:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        group: { type: string }
+        status: { $ref: '#/components/schemas/ComponentStatus' }
+        uptime_90d: { type: number, format: double, nullable: true }
+        daily: { type: array, items: { $ref: '#/components/schemas/ComponentDay' }, description: 'Per-day availability; empty for manual components.' }
+    StatusPageRender:
+      type: object
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        summary: { $ref: '#/components/schemas/ComponentStatus' }
+        components: { type: array, items: { $ref: '#/components/schemas/ComponentView' } }
+        active_incidents: { type: array, items: { $ref: '#/components/schemas/IncidentDetail' } }
+        recent_incidents: { type: array, items: { $ref: '#/components/schemas/IncidentDetail' }, description: 'Resolved in the last 90 days, newest first; each carries its timeline and postmortem (if published).' }
+        maintenance: { type: array, items: { $ref: '#/components/schemas/MaintenanceWindow' }, description: 'Active or scheduled maintenance.' }
+        updated_at: { type: string, format: date-time }
+    AgentToken:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        region: { type: string }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+    ApiToken:
+      type: object
+      description: Service-account token metadata (never includes the secret).
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid, description: 'Set for a project-scoped token.' }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        created_by: { type: string }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+    CreateApiToken:
+      type: object
+      required: [name, role]
+      properties:
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        project_id: { type: string, format: uuid, description: 'Omit for an org-scoped token.' }
+    CreatedApiToken:
+      type: object
+      description: Issue response — the plaintext secret is present only here.
+      properties:
+        token: { type: string, description: 'The bearer secret. Shown once; store it now.' }
+        api_token: { $ref: '#/components/schemas/ApiToken' }
+    Webhook:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid, description: 'Set for a project-scoped webhook.' }
+        url: { type: string }
+        secret: { type: string, description: 'Present only in the create response.' }
+        enabled: { type: boolean }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+    CreateWebhook:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, description: 'http(s) endpoint to POST events to.' }
+        secret: { type: string, description: 'HMAC signing secret; generated if omitted.' }
+        project_id: { type: string, format: uuid, description: 'Omit for an org-wide webhook.' }
+        enabled: { type: boolean, default: true }
+    NotificationChannel:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        type: { type: string, enum: [webhook, slack, telegram, email] }
+        name: { type: string }
+        config: { type: object, additionalProperties: { type: string }, description: 'Type-specific: url, or bot_token + chat_id.' }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+    CreateNotificationChannel:
+      type: object
+      required: [type, name, config]
+      properties:
+        type: { type: string, enum: [webhook, slack, telegram, email] }
+        name: { type: string }
+        config: { type: object, additionalProperties: { type: string } }
+        enabled: { type: boolean, default: true }
+    OutboxEvent:
+      type: object
+      description: A durably-queued outbound event (dead-letter view).
+      properties:
+        id: { type: string, format: uuid }
+        topic: { type: string, enum: [incident_event, monitor_transition] }
+        status: { type: string, enum: [pending, delivered, dead] }
+        attempts: { type: integer }
+        last_error: { type: string }
+        payload: { type: object, description: 'Raw event payload (topic-specific).' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SearchHit:
+      type: object
+      description: One search result, scoped to what the caller may see.
+      properties:
+        type: { type: string, enum: [monitor, project, incident] }
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        label: { type: string }
+        sub: { type: string }

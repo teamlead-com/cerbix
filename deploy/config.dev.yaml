@@ -1,0 +1,37 @@
+# cerbix local-dev config (used by deploy/docker-compose.yml).
+server:
+  listen: ":8080"
+  healthz_path: "/healthz"
+  readyz_path: "/readyz"
+  metrics_path: "/metrics"
+
+log:
+  level: "debug"
+  format: "json"
+
+# Wired in later iterations; present here so the dev stack is representative.
+database:
+  dsn: "postgres://cerbix:cerbix@10.5.0.10:5432/cerbix?sslmode=disable"
+
+rabbitmq:
+  url: "amqp://golang:golang@10.5.0.11:5672/"
+
+oidc:
+  issuer: "http://10.5.0.13:8080/realms/cerbix"
+  client_id: "cerbix"
+  client_secret: "secret"
+  redirect_url: "http://localhost:8082/auth/callback"
+
+local:
+  enabled: true
+  bootstrap_admin_email: "admin@cerbix.local"
+  bootstrap_admin_password: "devpassword123"
+  min_password_length: 8
+
+# HTTP-pull transport (demo). NOTE: single-process --role=all does NOT route pull
+# regions (its in-process worker probes them); this block just enables the agent
+# endpoints so an agent container can be tested against the dev stack. Real pull
+# routing (jobs → pull_jobs) requires the distributed --role scheduler.
+pull:
+  regions: ["pull1", "geo2"]
+  token: "devpulltoken"

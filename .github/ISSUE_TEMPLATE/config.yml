@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🛡️ Security Vulnerability Reporting
+    url: https://github.com/your-org/cerbix/blob/main/SECURITY.md
+    about: Please report security vulnerabilities privately according to our Security Policy.
+  - name: 💬 Q&A & Community Support
+    url: https://github.com/your-org/cerbix/discussions
+    about: Ask questions, get help, or chat with the community.

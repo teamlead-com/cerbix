@@ -1,0 +1,56 @@
+{
+  "realm": "cerbix",
+  "enabled": true,
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": true,
+  "rememberMe": true,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "clients": [
+    {
+      "clientId": "cerbix",
+      "name": "cerbix Monitoring",
+      "description": "OIDC Client for cerbix Uptime & SLA Monitoring",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "secret",
+      "redirectUris": [
+        "http://localhost:8080/auth/callback",
+        "http://10.5.0.14:8080/auth/callback",
+        "https://cerbix.example.com/auth/callback",
+        "http://127.0.0.1:8080/auth/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8080",
+        "http://10.5.0.14:8080",
+        "https://cerbix.example.com",
+        "+"
+      ],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true
+    }
+  ],
+  "users": [
+    {
+      "username": "testuser@example.com",
+      "email": "testuser@example.com",
+      "firstName": "Test",
+      "lastName": "User",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

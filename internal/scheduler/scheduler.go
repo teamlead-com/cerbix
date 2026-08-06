@@ -228,7 +228,7 @@ func (s *Scheduler) lead(ctx context.Context) {
 	// signal — a recovery stops the signals, so acceleration decays on its own;
 	// the snapshot refresh prunes it authoritatively).
 	confirmFast := map[string]time.Time{}
-	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats time.Time
+	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn time.Time
 	ticker := time.NewTicker(s.tick)
 	defer ticker.Stop()
 	for {
@@ -344,6 +344,7 @@ func (s *Scheduler) lead(ctx context.Context) {
 				}
 			}
 			// Publish due active checks from the in-memory snapshot (no DB scan).
+			publishFailed, publishErr := 0, ""
 			for _, m := range monitors {
 				if m.Type == domain.MonitorPush || !m.Type.Active() {
 					continue
@@ -380,10 +381,17 @@ func (s *Scheduler) lead(ctx context.Context) {
 					if ctx.Err() != nil {
 						return
 					}
-					s.logger.Error("publish_job_failed", "monitor_id", m.ID, "error", err.Error())
+					// During a broker outage every due monitor fails — aggregate
+					// into one line per tick instead of a line per monitor.
+					publishFailed++
+					publishErr = err.Error()
 					continue
 				}
 				nextRun[m.ID] = now.Add(iv)
+			}
+			if publishFailed > 0 && now.Sub(lastPublishWarn) >= 10*time.Second {
+				lastPublishWarn = now
+				s.logger.Warn("jobs_publish_failed", "count", publishFailed, "error", publishErr)
 			}
 		}
 	}

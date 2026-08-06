@@ -66,7 +66,14 @@ func testsQueueForRegion(region string) string {
 // interval — and this keeps the transport seam free of an ack concept the
 // Dispatcher interface does not expose.
 type AMQP struct {
+	url string // kept for the supervisor's redial loop
+
+	connMu sync.RWMutex // guards conn and reconnectedCh
 	conn   *amqp.Connection
+	// reconnectedCh is closed (and replaced) each time the supervisor completes
+	// a redial — consumers wait on it to resubscribe after a broker loss.
+	reconnectedCh chan struct{}
+
 	pubCh  *amqp.Channel
 	pubMu  sync.Mutex
 	logger *slog.Logger
@@ -85,14 +92,38 @@ type AMQP struct {
 	testsOnce   sync.Once // guards the per-region test-RPC server (worker side)
 }
 
-// NewAMQP dials the broker and declares the durable job/result queues.
+// dialAndSetup opens a connection plus the publish channel and declares the
+// durable results queue — the shared setup for the initial dial and every
+// supervisor redial.
+func dialAndSetup(url string) (*amqp.Connection, *amqp.Channel, error) {
+	conn, err := amqp.Dial(url)
+	if err != nil {
+		return nil, nil, err
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("dispatch: amqp channel: %w", err)
+	}
+	// Results share a single queue; per-region job queues are declared on demand
+	// (by the publisher before publishing, and by a worker before consuming).
+	if _, err := ch.QueueDeclare(resultsQueue, true, false, false, false, nil); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("dispatch: declare %s: %w", resultsQueue, err)
+	}
+	return conn, ch, nil
+}
+
+// NewAMQP dials the broker, declares the durable job/result queues, and starts
+// the connection supervisor (runtime broker loss → redial + resubscribe).
 func NewAMQP(url string, logger *slog.Logger) (*AMQP, error) {
 	var (
 		conn *amqp.Connection
+		ch   *amqp.Channel
 		err  error
 	)
 	for attempt := 1; attempt <= dialAttempts; attempt++ {
-		if conn, err = amqp.Dial(url); err == nil {
+		if conn, ch, err = dialAndSetup(url); err == nil {
 			break
 		}
 		if logger != nil {
@@ -103,29 +134,99 @@ func NewAMQP(url string, logger *slog.Logger) (*AMQP, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: amqp dial after %d attempts: %w", dialAttempts, err)
 	}
-	ch, err := conn.Channel()
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("dispatch: amqp channel: %w", err)
-	}
-	// Results share a single queue; per-region job queues are declared on demand
-	// (by the publisher before publishing, and by a worker before consuming).
-	if _, err := ch.QueueDeclare(resultsQueue, true, false, false, false, nil); err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("dispatch: declare %s: %w", resultsQueue, err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &AMQP{
-		conn:      conn,
-		pubCh:     ch,
-		logger:    logger,
-		ctx:       ctx,
-		cancel:    cancel,
-		jobRegion: domain.DefaultRegion,
-		declared:  map[string]bool{},
-		jobsCh:    make(chan CheckJob, forwardBuffer),
-		resultsCh: make(chan domain.Heartbeat, forwardBuffer),
-	}, nil
+	d := &AMQP{
+		url:           url,
+		conn:          conn,
+		reconnectedCh: make(chan struct{}),
+		pubCh:         ch,
+		logger:        logger,
+		ctx:           ctx,
+		cancel:        cancel,
+		jobRegion:     domain.DefaultRegion,
+		declared:      map[string]bool{},
+		jobsCh:        make(chan CheckJob, forwardBuffer),
+		resultsCh:     make(chan domain.Heartbeat, forwardBuffer),
+	}
+	go d.supervise()
+	return d, nil
+}
+
+// current returns the live connection and the signal channel that closes when
+// the NEXT successful reconnect completes.
+func (d *AMQP) current() (*amqp.Connection, <-chan struct{}) {
+	d.connMu.RLock()
+	defer d.connMu.RUnlock()
+	return d.conn, d.reconnectedCh
+}
+
+// supervise watches the connection and redials on broker loss: exactly one
+// broker_lost per outage, sparse broker_reconnecting during the backoff loop,
+// one broker_reconnected on recovery. Graceful shutdown (ctx cancelled) is not
+// a loss. Consumers never see their forwarding Go channels close — they wait
+// on the reconnect signal and resubscribe.
+func (d *AMQP) supervise() {
+	for {
+		conn, _ := d.current()
+		closed := conn.NotifyClose(make(chan *amqp.Error, 1))
+		select {
+		case <-d.ctx.Done():
+			return
+		case amqpErr := <-closed:
+			if d.ctx.Err() != nil {
+				return // our own Close(), not a broker loss
+			}
+			reason := "connection closed"
+			if amqpErr != nil {
+				reason = amqpErr.Error()
+			}
+			d.logger.Warn("broker_lost", "error", reason)
+			if !d.redial() {
+				return // shutdown while reconnecting
+			}
+		}
+	}
+}
+
+// redial loops with exponential backoff (1s → 30s cap) until the broker is
+// back or the dispatcher is closed. On success it swaps the connection and
+// publish channel, resets the queue-declare cache, and wakes every waiting
+// consumer. Returns false when interrupted by shutdown.
+func (d *AMQP) redial() bool {
+	backoff := time.Second
+	for attempt := 1; ; attempt++ {
+		select {
+		case <-d.ctx.Done():
+			return false
+		case <-time.After(backoff):
+		}
+		conn, ch, err := dialAndSetup(d.url)
+		if err != nil {
+			// Sparse progress lines: first attempt, then roughly every fifth.
+			if attempt == 1 || attempt%5 == 0 {
+				d.logger.Warn("broker_reconnecting", "attempt", attempt, "error", err.Error())
+			}
+			if backoff *= 2; backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			continue
+		}
+		d.connMu.Lock()
+		d.conn = conn
+		wake := d.reconnectedCh
+		d.reconnectedCh = make(chan struct{})
+		d.connMu.Unlock()
+		d.pubMu.Lock()
+		d.pubCh = ch
+		d.pubMu.Unlock()
+		// Queues must be re-declared against the new connection.
+		d.declaredMu.Lock()
+		d.declared = map[string]bool{}
+		d.declaredMu.Unlock()
+		close(wake)
+		d.logger.Info("broker_reconnected", "attempts", attempt)
+		return true
+	}
 }
 
 // WithJobRegion sets which region's jobs queue Jobs() consumes (a worker's
@@ -205,11 +306,7 @@ func (d *AMQP) PublishResult(_ context.Context, hb domain.Heartbeat) error {
 func (d *AMQP) Jobs() <-chan CheckJob {
 	d.jobsOnce.Do(func() {
 		queue := jobsQueueForRegion(d.jobRegion)
-		if err := d.declareJobQueue(queue); err != nil {
-			d.logger.Error("dispatch_declare_jobs", "queue", queue, "error", err.Error())
-			return
-		}
-		go consume(d, queue, func(body []byte) bool {
+		go consume(d, queue, true, func(body []byte) bool {
 			var job CheckJob
 			if err := json.Unmarshal(body, &job); err != nil {
 				d.logger.Error("dispatch_bad_job", "error", err.Error())
@@ -230,7 +327,7 @@ func (d *AMQP) Jobs() <-chan CheckJob {
 // forwarding channel. Only call it in a role that ingests results (api).
 func (d *AMQP) Results() <-chan domain.Heartbeat {
 	d.resultsOnce.Do(func() {
-		go consume(d, resultsQueue, func(body []byte) bool {
+		go consume(d, resultsQueue, false, func(body []byte) bool {
 			var hb domain.Heartbeat
 			if err := json.Unmarshal(body, &hb); err != nil {
 				d.logger.Error("dispatch_bad_result", "error", err.Error())
@@ -263,7 +360,8 @@ func (d *AMQP) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat,
 	// A dedicated channel keeps this RPC off the shared publish channel; the
 	// exclusive, auto-delete reply queue self-cleans when the channel closes, and
 	// its uniqueness makes any delivery on it unambiguously our reply.
-	ch, err := d.conn.Channel()
+	conn, _ := d.current()
+	ch, err := conn.Channel()
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: test channel: %w", err)
 	}
@@ -320,56 +418,94 @@ func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain
 	d.testsOnce.Do(func() {
 		queue := testsQueueForRegion(d.jobRegion)
 		go func() {
-			ch, err := d.conn.Channel()
-			if err != nil {
-				d.logger.Error("dispatch_test_channel", "queue", queue, "error", err.Error())
-				return
-			}
-			defer ch.Close()
-			if _, err := ch.QueueDeclare(queue, false, true, false, false, nil); err != nil {
-				d.logger.Error("dispatch_declare_tests", "queue", queue, "error", err.Error())
-				return
-			}
-			msgs, err := ch.Consume(queue, "", false, false, false, false, nil)
-			if err != nil {
-				d.logger.Error("dispatch_consume_tests", "queue", queue, "error", err.Error())
-				return
-			}
 			for {
+				conn, wake := d.current()
+				serveTestsOnce(d, conn, queue, run)
 				select {
 				case <-d.ctx.Done():
 					return
-				case m, ok := <-msgs:
-					if !ok {
-						return
-					}
-					var job CheckJob
-					if err := json.Unmarshal(m.Body, &job); err != nil {
-						d.logger.Error("dispatch_bad_test", "error", err.Error())
-						_ = m.Nack(false, false)
-						continue
-					}
-					hb := run(d.ctx, job.Monitor)
-					if m.ReplyTo != "" {
-						if reply, err := json.Marshal(hb); err == nil {
-							_ = ch.PublishWithContext(d.ctx, "", m.ReplyTo, false, false, amqp.Publishing{
-								ContentType: "application/json",
-								Body:        reply,
-							})
-						}
-					}
-					_ = m.Ack(false)
+				case <-wake:
+					// Broker is back — re-declare the auto-delete queue and resume.
 				}
 			}
 		}()
 	})
 }
 
-// consume opens a dedicated channel, consumes queue with manual ack + prefetch,
-// and calls handle for each body; handle returns whether the delivery was
-// forwarded (ack) or should be dropped (nack, no requeue for a bad payload).
-func consume(d *AMQP, queue string, handle func(body []byte) bool) {
-	ch, err := d.conn.Channel()
+// serveTestsOnce runs one test-RPC consume session on conn; returns on
+// shutdown or when the delivery channel dies.
+func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx context.Context, m domain.Monitor) domain.Heartbeat) {
+	ch, err := conn.Channel()
+	if err != nil {
+		d.logger.Error("dispatch_test_channel", "queue", queue, "error", err.Error())
+		return
+	}
+	defer ch.Close()
+	if _, err := ch.QueueDeclare(queue, false, true, false, false, nil); err != nil {
+		d.logger.Error("dispatch_declare_tests", "queue", queue, "error", err.Error())
+		return
+	}
+	msgs, err := ch.Consume(queue, "", false, false, false, false, nil)
+	if err != nil {
+		d.logger.Error("dispatch_consume_tests", "queue", queue, "error", err.Error())
+		return
+	}
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case m, ok := <-msgs:
+			if !ok {
+				return
+			}
+			var job CheckJob
+			if err := json.Unmarshal(m.Body, &job); err != nil {
+				d.logger.Error("dispatch_bad_test", "error", err.Error())
+				_ = m.Nack(false, false)
+				continue
+			}
+			hb := run(d.ctx, job.Monitor)
+			if m.ReplyTo != "" {
+				if reply, err := json.Marshal(hb); err == nil {
+					_ = ch.PublishWithContext(d.ctx, "", m.ReplyTo, false, false, amqp.Publishing{
+						ContentType: "application/json",
+						Body:        reply,
+					})
+				}
+			}
+			_ = m.Ack(false)
+		}
+	}
+}
+
+// consume keeps a manual-ack consumer alive across broker outages: each pass
+// runs on the current connection until its delivery channel dies, then waits
+// for the supervisor's reconnect signal and resubscribes. The forwarding Go
+// channel the caller reads never closes — a worker rides the outage out.
+func consume(d *AMQP, queue string, declare bool, handle func(body []byte) bool) {
+	for {
+		conn, wake := d.current()
+		if declare {
+			// Re-declare against the (possibly new) connection; the cache is
+			// reset on every reconnect.
+			if err := d.declareJobQueue(queue); err != nil {
+				d.logger.Error("dispatch_declare_jobs", "queue", queue, "error", err.Error())
+			}
+		}
+		consumeOnce(d, conn, queue, handle)
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-wake:
+			// Broker is back — resubscribe on the fresh connection.
+		}
+	}
+}
+
+// consumeOnce runs one consume session; it returns when the dispatcher shuts
+// down or the delivery channel dies (broker loss or channel error).
+func consumeOnce(d *AMQP, conn *amqp.Connection, queue string, handle func(body []byte) bool) {
+	ch, err := conn.Channel()
 	if err != nil {
 		d.logger.Error("dispatch_consumer_channel", "queue", queue, "error", err.Error())
 		return

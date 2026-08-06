@@ -2226,3 +2226,11 @@ Comments keep proxies happy but are invisible to EventSource JS, which made sile
 undetectable and any silence-based watchdog a flap machine on quiet systems. The keepalive is now
 a real ping event and the client recreates the stream after two missed pings — the existing
 reconnecting chip covers the gap. Native EventSource retry still handles the error-ful cases.
+
+## D-0129 — The AMQP link heals itself (iter-0071)
+Runtime broker loss used to be a silent, permanent consumer death behind a green /healthz. A
+NotifyClose-driven supervisor now redials with capped backoff and resubscribes every consumer;
+internal forwarding channels never close, so roles ride outages out without restarts. Logging is
+state-transition (one broker_lost, one broker_reconnected, sparse progress lines) and the
+scheduler compresses outage publish failures to an aggregated line per 10s — the reviewer's
+"rate-limited logging" concern falls out as a side effect of fixing the real defect.

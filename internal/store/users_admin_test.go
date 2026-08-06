@@ -122,3 +122,24 @@ func TestCountGlobalAdminsAndNullOrgAudit(t *testing.T) {
 		t.Fatalf("null-org audit: %v", err)
 	}
 }
+
+func TestInsertHeartbeatForDeletedMonitor(t *testing.T) {
+	st, ctx := testStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "gone", Type: domain.MonitorTCP, Target: "localhost:1",
+		IntervalSeconds: 30, TimeoutSeconds: 5, Region: domain.DefaultRegion,
+	})
+	if err != nil {
+		t.Fatalf("create monitor: %v", err)
+	}
+	if err := st.DeleteMonitor(ctx, mon.ID); err != nil {
+		t.Fatalf("delete monitor: %v", err)
+	}
+	// The in-flight result must be dropped as a quiet not-found, not an error.
+	err = st.InsertHeartbeat(ctx, domain.Heartbeat{MonitorID: mon.ID, Up: true})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("insert after delete = %v, want ErrNotFound", err)
+	}
+}

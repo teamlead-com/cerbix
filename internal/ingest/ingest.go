@@ -83,6 +83,12 @@ func (c *Consumer) Run(ctx context.Context) {
 
 func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 	if err := c.store.InsertHeartbeat(ctx, hb); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// The monitor was deleted while the probe was in flight; the
+			// scheduler drops it on its next snapshot refresh.
+			c.logger.Info("heartbeat_for_deleted_monitor", "monitor_id", hb.MonitorID)
+			return
+		}
 		c.logger.Error("insert_heartbeat_failed", "monitor_id", hb.MonitorID, "error", err.Error())
 		return
 	}

@@ -57,7 +57,10 @@ test.describe("settings", () => {
     }
     const r = await apiSend(page, "post", `/api/v1/organizations/${orgID}/tokens`, { name: "e2e-token", role: "viewer" });
     expect(r.status()).toBe(201);
-    const tok = await r.json();
+    // The create response is {token: <plaintext>, api_token: {...}} — the row
+    // id lives in api_token (a wrong path here once produced DELETE /tokens/undefined).
+    const tok = (await r.json()).api_token;
+    expect(tok.id).toBeTruthy();
     try {
       await page.goto("/settings?tab=tokens");
       const row = page.locator("tr", { hasText: "e2e-token" }).first();

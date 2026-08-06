@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -28,6 +31,13 @@ func (s *Store) InsertHeartbeat(ctx context.Context, hb domain.Heartbeat) error 
 		 ON CONFLICT (monitor_id, ts) DO NOTHING`,
 		hb.MonitorID, hbTime(hb), hb.Up, hb.LatencyMS, hb.Code, hb.Msg)
 	if err != nil {
+		// A result landing after its monitor was deleted is an expected race
+		// (the scheduler snapshot keeps probing until the next refresh) — let
+		// the caller drop it quietly instead of treating it as a failure.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" && strings.Contains(pgErr.ConstraintName, "monitor_id_fkey") {
+			return ErrNotFound
+		}
 		return fmt.Errorf("store: insert heartbeat: %w", err)
 	}
 	return nil

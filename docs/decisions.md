@@ -2206,3 +2206,9 @@ profile `mail`), and time-based flows — measured confirm-phase acceleration an
 lifecycle with RFC 6238 generated in-test. Region-affinity assertions are transport-aware by
 design: the inproc dev dispatcher ignores regions, AMQP/pull enforce them. Runtime ~2min; still a
 local/pre-release gate, not CI.
+
+## D-0126 — In-flight results for deleted monitors are a fact of life (iter-0067)
+The scheduler-snapshot design (D-era refresh ≤15s) means results can always arrive after a
+monitor's deletion; that is a benign race, not a failure. The store now names it (FK 23503 on the
+monitor FK → ErrNotFound) and ingest logs one INFO instead of ERROR-per-probe. The FK also loses
+its heartbeats_new_ prefix (00043 swap leftover) via guarded migration 00048.

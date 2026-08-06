@@ -26,6 +26,19 @@ const id = route.params.id as string;
 const loading = ref(true);
 const monitor = ref<Monitor | null>(null);
 const escalationPolicyName = ref("");
+const pushCopied = ref(false);
+const pushUrl = computed(() =>
+  monitor.value?.push_token ? `${window.location.origin}/api/v1/public/push/${monitor.value.push_token}` : "",
+);
+async function copyPushUrl() {
+  try {
+    await navigator.clipboard.writeText(pushUrl.value);
+    pushCopied.value = true;
+    setTimeout(() => (pushCopied.value = false), 1500);
+  } catch {
+    /* clipboard blocked; the URL is shown for manual copy */
+  }
+}
 const windows = ref<WindowSLA[]>([]);
 const heartbeats = ref<Heartbeat[]>([]);
 const availability = ref<DailyAvailability[]>([]);
@@ -369,6 +382,29 @@ watch(
               <div class="text-[14px] font-semibold">{{ openIncident.title }}</div>
               <div class="mt-1 font-mono text-[12px] text-ink-3">opened {{ relTime(openIncident.started_at) }} ago · {{ openIncident.source }}</div>
             </RouterLink>
+          </section>
+
+          <!-- push endpoint: the heartbeat URL is the whole point of a push monitor -->
+          <section v-if="monitor && isPush && monitor.push_token" class="rounded border border-border bg-surface shadow-card">
+            <div class="flex items-center gap-2 border-b border-border px-4 py-[13px]">
+              <h3 class="text-[13px] font-semibold">Push endpoint</h3>
+              <span class="rounded-full bg-accent-weak px-[9px] py-px text-[10.5px] font-semibold uppercase tracking-[0.04em] text-accent">dead-man's switch</span>
+            </div>
+            <div class="flex flex-col gap-3 px-4 py-[14px]">
+              <div>
+                <div class="mb-[5px] text-[10.5px] font-semibold uppercase tracking-[0.06em] text-ink-3">Heartbeat URL — POST at least every {{ monitor.interval_seconds }}s</div>
+                <div class="flex items-center gap-2">
+                  <code class="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-sm border border-border bg-inset px-[11px] py-[9px] font-mono text-[12.5px]">{{ pushUrl }}</code>
+                  <button type="button" class="h-[34px] flex-none rounded-sm border border-border-strong px-3 text-[12.5px] text-ink-2 hover:border-ink-3" @click="copyPushUrl">{{ pushCopied ? "Copied ✓" : "Copy" }}</button>
+                </div>
+              </div>
+              <pre class="overflow-x-auto rounded-sm border border-border bg-inset px-3 py-[10px] font-mono text-[12px] text-ink-2">*/1 * * * * curl -fsS -X POST {{ pushUrl }} &gt;/dev/null</pre>
+              <p class="text-[12px] leading-relaxed text-ink-3">
+                The monitor stays <b class="font-medium text-up">up</b> while heartbeats keep arriving; miss
+                <span class="font-mono text-ink-2">interval + grace ({{ monitor.interval_seconds }}s + {{ monitor.grace_seconds || 0 }}s)</span>
+                and it goes <b class="font-medium text-down">down</b>. The token is a secret — the URL needs no other authentication.
+              </p>
+            </div>
           </section>
 
           <section v-if="monitor" class="rounded border border-border bg-surface shadow-card">

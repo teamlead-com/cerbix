@@ -2106,3 +2106,9 @@ rendered nowhere. It now has a form input and three consumers — sidebar, sign-
 status-page header — each with the existing accent glyph as the empty-value fallback, so default
 installs look exactly as before. The sign-in card also stops hardcoding "cerbix" and uses the
 branding product name.
+
+## D-0111 — Push endpoint panel on the monitor page (iter-0049)
+A push monitor's entire contract is "POST this URL or be declared down", and the SPA never showed
+the URL. The detail page now presents it front and center for push monitors — copyable URL, cron
+one-liner, and the up/down rule spelled out (interval + grace). No backend change: the token was
+already served; this closes the audit's top finding.

@@ -209,12 +209,25 @@ type RegionTester interface {
 	RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error)
 }
 
-// New builds an API handler. minPasswordLen bounds local password changes.
+// New builds an API handler. minPasswordLen bounds local password changes
+// until the settings service is wired — from then on the live auth policy
+// (DB → config → default) is authoritative, so a UI change applies instantly.
 func New(store Store, logger *slog.Logger, minPasswordLen int) *Handler {
 	if minPasswordLen < 1 {
 		minPasswordLen = 8
 	}
 	return &Handler{store: store, logger: logger, minPasswordLen: minPasswordLen}
+}
+
+// effectiveMinPasswordLen resolves the live policy value, falling back to the
+// construction-time config value when no settings service is attached.
+func (h *Handler) effectiveMinPasswordLen() int {
+	if h.settings != nil {
+		if n := h.settings.AuthPolicy().MinPasswordLen; n > 0 {
+			return n
+		}
+	}
+	return h.minPasswordLen
 }
 
 // WithMetrics attaches an observability recorder and returns the handler for

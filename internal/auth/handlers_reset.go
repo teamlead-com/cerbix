@@ -76,7 +76,8 @@ func (a *Authenticator) ResetConfirmHandler(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if len(body.NewPassword) < a.minPasswordLen {
+	// Live policy (DB → config → default), not the startup config snapshot.
+	if len(body.NewPassword) < a.authPolicy().MinPasswordLen {
 		writeJSONError(w, http.StatusBadRequest, "new password too short")
 		return
 	}

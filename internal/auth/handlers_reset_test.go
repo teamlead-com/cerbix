@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/mailer"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
@@ -128,5 +129,39 @@ func TestResetConfirm(t *testing.T) {
 		strings.NewReader(`{"token":"shortpwtok","new_password":"short"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("short password code = %d, want 400", rec.Code)
+	}
+}
+
+// fakePolicy is a PolicySource returning a fixed live policy.
+type fakePolicy struct{ min int }
+
+func (p fakePolicy) AuthPolicy() domain.AuthPolicy {
+	return domain.AuthPolicy{MinPasswordLen: p.min, RequireTOTP: domain.TOTPNone}
+}
+
+func TestResetConfirmUsesLivePolicyMinLength(t *testing.T) {
+	fs := newFakeStore()
+	hash, _ := HashPassword("pw12345678")
+	u, _ := fs.CreateLocalUser(context.Background(), "user@x", "User", hash, false)
+	a := resetAuthenticator(t, fs, true)
+	// The instance policy raises the minimum beyond the config default (8).
+	a.WithSettings(fakePolicy{min: 12})
+
+	tok := "tok-live-policy"
+	_ = fs.CreatePasswordResetToken(context.Background(), u.ID, store.HashToken(tok), time.Now().Add(time.Hour))
+
+	// 10 chars passes the config default but must fail the live policy.
+	rec := httptest.NewRecorder()
+	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm",
+		strings.NewReader(`{"token":"`+tok+`","new_password":"pw12345678"}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("short-for-policy password = %d, want 400", rec.Code)
+	}
+	// 12 chars passes.
+	rec = httptest.NewRecorder()
+	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm",
+		strings.NewReader(`{"token":"`+tok+`","new_password":"pw1234567890"}`)))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("policy-length password = %d, want 204 (body: %s)", rec.Code, rec.Body.String())
 	}
 }

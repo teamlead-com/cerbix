@@ -372,7 +372,7 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if len(body.NewPassword) < h.minPasswordLen {
+	if len(body.NewPassword) < h.effectiveMinPasswordLen() {
 		writeError(w, http.StatusBadRequest, "new password too short")
 		return
 	}

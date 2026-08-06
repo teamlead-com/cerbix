@@ -2079,3 +2079,11 @@ scheduler leader's hourly maintenance tick next to partition/retention/pull-queu
 (warn-on-error: maintenance is never fatal to scheduling). Also dropped `ListMembershipsByOrg`
 from the api Store interface — zero callers since `ListOrgMembers` took over; the store method
 itself stays for tests.
+
+## D-0108 — Minimum password length reads the live policy (iter-0046)
+`auth_policy.min_password_len` was the only auth-policy field enforced from the startup config
+instead of the settings snapshot: the UI saved it, nothing read it. Both enforcement points now
+resolve the live value (api password change via a small `effectiveMinPasswordLen()` accessor —
+the settings service when wired, else the config value; reset-confirm via the existing
+`authPolicy()` fallback chain). YAML stays the pre-first-save seed, matching the resolver
+contract everywhere else. No migration; instant effect on save.

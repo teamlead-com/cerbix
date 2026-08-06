@@ -2220,3 +2220,9 @@ principal-stamped lifecycle events for every mutation (logEvent helper — the o
 of the audit trail), monitor_status_changed at the ingest transition, outbox_delivered on
 success, and context.Canceled demoted out of the ERROR stream. log.level stays the single knob;
 request IDs/tracing remain a future OTEL story.
+
+## D-0128 — SSE keepalive the client can see (iter-0070)
+Comments keep proxies happy but are invisible to EventSource JS, which made silent socket death
+undetectable and any silence-based watchdog a flap machine on quiet systems. The keepalive is now
+a real ping event and the client recreates the stream after two missed pings — the existing
+reconnecting chip covers the gap. Native EventSource retry still handles the error-ful cases.

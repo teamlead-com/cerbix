@@ -9,6 +9,12 @@ export interface LiveStatus {
 
 // The EventSource is a process singleton kept outside reactive state.
 let es: EventSource | null = null;
+// Watchdog against silent socket death (mobile Wi-Fi → LTE switches kill the
+// TCP connection without firing onerror): the server pings every 25s as a real
+// SSE event, so >75s of total silence means the stream is dead.
+let watchdog: ReturnType<typeof setInterval> | null = null;
+let lastSeen = 0;
+const SILENCE_LIMIT_MS = 75_000;
 
 export const useLive = defineStore("live", {
   state: () => ({
@@ -22,8 +28,10 @@ export const useLive = defineStore("live", {
     connect() {
       if (es) return; // already streaming
       this.started = true;
+      lastSeen = Date.now();
       es = new EventSource("/api/v1/events");
       es.addEventListener("status", (e) => {
+        lastSeen = Date.now();
         try {
           const d = JSON.parse((e as MessageEvent).data) as { monitor_id?: string } & LiveStatus;
           if (d.monitor_id) {
@@ -33,15 +41,37 @@ export const useLive = defineStore("live", {
           /* ignore malformed frames */
         }
       });
+      // The server's keepalive: proves the socket is alive on a quiet system.
+      es.addEventListener("ping", () => {
+        lastSeen = Date.now();
+        this.connected = true;
+      });
       es.onopen = () => {
+        lastSeen = Date.now();
         this.connected = true;
       };
       es.onerror = () => {
         // EventSource auto-reconnects; just reflect the transient drop.
         this.connected = false;
       };
+      // Silent-death watchdog: onerror never fires when the TCP connection dies
+      // under the browser (network switch), so recreate on prolonged silence.
+      // `started` stays true → the header's reconnecting chip shows meanwhile.
+      if (watchdog === null) {
+        watchdog = setInterval(() => {
+          if (!es || Date.now() - lastSeen < SILENCE_LIMIT_MS) return;
+          this.connected = false;
+          es.close();
+          es = null;
+          this.connect();
+        }, 10_000);
+      }
     },
     disconnect() {
+      if (watchdog !== null) {
+        clearInterval(watchdog);
+        watchdog = null;
+      }
       es?.close();
       es = null;
       this.connected = false;

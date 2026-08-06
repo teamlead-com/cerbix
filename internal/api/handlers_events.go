@@ -57,7 +57,11 @@ func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-ping.C:
-			fmt.Fprint(w, ": ping\n\n")
+			// A real named event, not an SSE comment: comments never reach the
+			// browser's EventSource API, so the client watchdog could not tell
+			// a healthy-quiet stream from a dead socket. Any bytes keep
+			// proxies from idling the connection out.
+			fmt.Fprint(w, "event: ping\ndata: {}\n\n")
 			flusher.Flush()
 		case ev, ok := <-sub:
 			if !ok {

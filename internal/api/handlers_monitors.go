@@ -190,10 +190,10 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 		Method             string            `json:"method"`
 		IntervalSeconds    int               `json:"interval_seconds"`
 		TimeoutSeconds     int               `json:"timeout_seconds"`
-		Retries            *int              `json:"retries"`          // nil = instance default; 0 is a real value
+		Retries            *int              `json:"retries"` // nil = instance default; 0 is a real value
 		FailureThreshold   int               `json:"failure_threshold"`
 		ConfirmInterval    *int              `json:"confirm_interval_seconds"` // nil = default 10; 0 = off
-		RenotifySeconds    *int              `json:"renotify_seconds"` // nil = instance default; 0 = never re-notify
+		RenotifySeconds    *int              `json:"renotify_seconds"`         // nil = instance default; 0 = never re-notify
 		GraceSeconds       int               `json:"grace_seconds"`
 		Conditions         []string          `json:"conditions"`
 		Tags               []string          `json:"tags"`

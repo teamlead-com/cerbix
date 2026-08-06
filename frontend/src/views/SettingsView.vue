@@ -539,6 +539,34 @@ async function addWebhook() {
   }
 }
 
+// Toggles pause delivery without losing the secret/config; on failure the
+// switch snaps back via a reload.
+async function toggleWebhook(h: Webhook) {
+  const res = await api.PATCH("/api/v1/webhooks/{webhookID}", {
+    params: { path: { webhookID: h.id! } },
+    body: { enabled: !h.enabled },
+  });
+  if (res.error || !res.data) {
+    webhooksError.value = (res.error as { error?: string })?.error || "Could not update the webhook.";
+    await loadWebhooks();
+    return;
+  }
+  h.enabled = res.data.enabled;
+}
+
+async function toggleChannel(c: Channel) {
+  const res = await api.PATCH("/api/v1/notification-channels/{channelID}", {
+    params: { path: { channelID: c.id! } },
+    body: { enabled: !c.enabled },
+  });
+  if (res.error || !res.data) {
+    channelsError.value = (res.error as { error?: string })?.error || "Could not update the channel.";
+    await loadChannels();
+    return;
+  }
+  c.enabled = res.data.enabled;
+}
+
 async function deleteWebhook(h: Webhook) {
   if (!h.id || !confirm(`Delete webhook to ${h.url}?`)) return;
   const res = await api.DELETE("/api/v1/webhooks/{webhookID}", { params: { path: { webhookID: h.id } } });
@@ -797,7 +825,18 @@ watch(tab, loadActive);
               <tr v-for="c in channels" :key="c.id" class="hover:bg-surface-2">
                 <td class="border-b border-border px-4 py-[11px] font-medium">{{ c.name }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-ink-2">{{ c.type }}</td>
-                <td class="border-b border-border px-4 py-[11px]"><span class="text-ink-2">{{ c.enabled ? "enabled" : "disabled" }}</span></td>
+                <td class="border-b border-border px-4 py-[11px]">
+                  <button
+                    v-if="canWriteChannels"
+                    type="button"
+                    class="inline-flex h-[19px] w-[34px] items-center rounded-full transition-colors"
+                    :class="c.enabled ? 'bg-up' : 'bg-border-strong'"
+                    :title="c.enabled ? 'Click to pause this channel' : 'Paused — click to resume'"
+                    :aria-label="c.enabled ? 'Disable channel' : 'Enable channel'"
+                    @click="toggleChannel(c)"
+                  ><span class="block h-[15px] w-[15px] rounded-full bg-white transition-transform" :class="c.enabled ? 'translate-x-[17px]' : 'translate-x-[2px]'"></span></button>
+                  <span v-else class="text-ink-2">{{ c.enabled ? "enabled" : "disabled" }}</span>
+                </td>
                 <td class="border-b border-border px-4 py-[11px] text-right"><button v-if="canWriteChannels" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteChannel(c)">Delete</button></td>
               </tr>
               <tr v-if="!channels.length && !loading"><td colspan="4" class="px-4 py-10 text-center text-[13px] text-ink-3">No channels yet. Link one to a monitor from its detail page.</td></tr>
@@ -1216,7 +1255,18 @@ watch(tab, loadActive);
                 <td class="border-b border-border px-4 py-[11px] font-mono text-[12px] text-ink-2">{{ h.url }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-ink-2">{{ projectName(h.project_id) }}</td>
                 <td class="border-b border-border px-4 py-[11px] font-mono text-[12px] text-ink-3">{{ h.created_by_email || "—" }}</td>
-                <td class="border-b border-border px-4 py-[11px] text-ink-2">{{ h.enabled ? "enabled" : "disabled" }}</td>
+                <td class="border-b border-border px-4 py-[11px]">
+                  <button
+                    v-if="canManageOrg"
+                    type="button"
+                    class="inline-flex h-[19px] w-[34px] items-center rounded-full transition-colors"
+                    :class="h.enabled ? 'bg-up' : 'bg-border-strong'"
+                    :title="h.enabled ? 'Click to pause deliveries' : 'Paused — click to resume'"
+                    :aria-label="h.enabled ? 'Disable webhook' : 'Enable webhook'"
+                    @click="toggleWebhook(h)"
+                  ><span class="block h-[15px] w-[15px] rounded-full bg-white transition-transform" :class="h.enabled ? 'translate-x-[17px]' : 'translate-x-[2px]'"></span></button>
+                  <span v-else class="text-ink-2">{{ h.enabled ? "enabled" : "disabled" }}</span>
+                </td>
                 <td class="border-b border-border px-4 py-[11px] text-right"><button v-if="canManageOrg" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteWebhook(h)">Delete</button></td>
               </tr>
               <tr v-if="!webhooks.length && !loading"><td colspan="5" class="px-4 py-10 text-center text-[13px] text-ink-3">No webhooks yet.</td></tr>

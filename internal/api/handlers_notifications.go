@@ -62,6 +62,39 @@ func (h *Handler) createChannel(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteChannel removes a notification channel (editor+ on its project).
+// updateChannel toggles a notification channel (editor+). Disabled is not
+// deleted — the config survives a pause; delivery skips disabled channels.
+func (h *Handler) updateChannel(w http.ResponseWriter, r *http.Request) {
+	ch, err := h.store.GetNotificationChannel(r.Context(), r.PathValue("channelID"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		h.serverError(w, "get_channel", err)
+		return
+	}
+	if _, ok := h.projectAccess(w, r, ch.ProjectID, authz.ActionProjectWrite); !ok {
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+	if err := h.store.SetNotificationChannelEnabled(r.Context(), ch.ID, *body.Enabled); err != nil {
+		h.serverError(w, "set_channel_enabled", err)
+		return
+	}
+	ch.Enabled = *body.Enabled
+	writeJSON(w, http.StatusOK, ch)
+}
+
 func (h *Handler) deleteChannel(w http.ResponseWriter, r *http.Request) {
 	ch, err := h.store.GetNotificationChannel(r.Context(), r.PathValue("channelID"))
 	if errors.Is(err, store.ErrNotFound) {

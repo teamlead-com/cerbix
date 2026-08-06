@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -100,6 +101,47 @@ func (h *Handler) createWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteWebhook removes a webhook (org admin on its org).
+// updateWebhook toggles deliveries for a webhook (org admin). Disabled is not
+// deleted — the secret and config survive a pause.
+func (h *Handler) updateWebhook(w http.ResponseWriter, r *http.Request) {
+	hook, err := h.store.GetWebhook(r.Context(), r.PathValue("webhookID"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		h.serverError(w, "get_webhook", err)
+		return
+	}
+	p, _ := h.principal(r)
+	if !p.InOrg(hook.OrgID) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if !p.Can(authz.ActionOrgManage, hook.OrgID, "") {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+	if err := h.store.SetWebhookEnabled(r.Context(), hook.ID, *body.Enabled); err != nil {
+		h.serverError(w, "set_webhook_enabled", err)
+		return
+	}
+	h.audit(r, hook.OrgID, "webhook.toggle", hook.URL+" → enabled="+strconv.FormatBool(*body.Enabled))
+	hook.Enabled = *body.Enabled
+	hook.Secret = ""
+	writeJSON(w, http.StatusOK, hook)
+}
+
 func (h *Handler) deleteWebhook(w http.ResponseWriter, r *http.Request) {
 	hook, err := h.store.GetWebhook(r.Context(), r.PathValue("webhookID"))
 	if errors.Is(err, store.ErrNotFound) {

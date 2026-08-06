@@ -3414,7 +3414,36 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        patch?: never;
+        /** Pause or resume webhook deliveries (org admin) */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    webhookID: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ToggleEnabled"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Webhook"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
         trace?: never;
     };
     "/api/v1/projects/{projectID}/notification-channels": {
@@ -3524,7 +3553,36 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        patch?: never;
+        /** Pause or resume a notification channel (editor+) */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    channelID: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ToggleEnabled"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["NotificationChannel"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
         trace?: never;
     };
     "/api/v1/monitors/{monitorID}/notifications": {
@@ -4458,6 +4516,9 @@ export interface components {
             last_active_at?: string | null;
             /** @description Empty for users outside any organization. */
             memberships?: components["schemas"]["AdminUserMembership"][];
+        };
+        ToggleEnabled: {
+            enabled: boolean;
         };
         UpdateAdminUser: {
             is_global_admin: boolean;

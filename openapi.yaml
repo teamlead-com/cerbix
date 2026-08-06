@@ -1415,6 +1415,19 @@ paths:
         name: webhookID
         required: true
         schema: { type: string, format: uuid }
+    patch:
+      tags: [webhooks]
+      summary: Pause or resume webhook deliveries (org admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ToggleEnabled' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Webhook' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [webhooks]
       summary: Delete a webhook subscription (org admin)
@@ -1459,6 +1472,19 @@ paths:
         name: channelID
         required: true
         schema: { type: string, format: uuid }
+    patch:
+      tags: [notifications]
+      summary: Pause or resume a notification channel (editor+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ToggleEnabled' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationChannel' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [notifications]
       summary: Delete a notification channel (editor+)
@@ -1926,6 +1952,11 @@ components:
               type: array
               description: Empty for users outside any organization.
               items: { $ref: '#/components/schemas/AdminUserMembership' }
+    ToggleEnabled:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
     UpdateAdminUser:
       type: object
       required: [is_global_admin]

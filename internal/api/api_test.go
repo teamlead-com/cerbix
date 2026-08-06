@@ -859,6 +859,24 @@ func (f *fakeStore) CreateWebhook(_ context.Context, h domain.Webhook) (domain.W
 	f.webhooks[h.ID] = h
 	return h, nil
 }
+func (f *fakeStore) SetWebhookEnabled(_ context.Context, id string, enabled bool) error {
+	h, ok := f.webhooks[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	h.Enabled = enabled
+	f.webhooks[id] = h
+	return nil
+}
+func (f *fakeStore) SetNotificationChannelEnabled(_ context.Context, id string, enabled bool) error {
+	c, ok := f.channels[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	c.Enabled = enabled
+	f.channels[id] = c
+	return nil
+}
 func (f *fakeStore) GetWebhook(_ context.Context, id string) (domain.Webhook, error) {
 	h, ok := f.webhooks[id]
 	if !ok {

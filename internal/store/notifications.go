@@ -188,3 +188,16 @@ func prefixed(cols, alias string) string {
 	}
 	return strings.Join(parts, ", ")
 }
+
+// SetNotificationChannelEnabled pauses or resumes a channel; delivery listing
+// filters on the flag already.
+func (s *Store) SetNotificationChannelEnabled(ctx context.Context, id string, enabled bool) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE notification_channels SET enabled = $2 WHERE id = $1`, id, enabled)
+	if err != nil {
+		return fmt.Errorf("store: set channel enabled: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

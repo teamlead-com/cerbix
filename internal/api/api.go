@@ -121,10 +121,12 @@ type Store interface {
 	DeleteApiToken(ctx context.Context, id string) error
 	CreateWebhook(ctx context.Context, h domain.Webhook) (domain.Webhook, error)
 	GetWebhook(ctx context.Context, id string) (domain.Webhook, error)
+	SetWebhookEnabled(ctx context.Context, id string, enabled bool) error
 	ListWebhooksByOrg(ctx context.Context, orgID string) ([]domain.Webhook, error)
 	DeleteWebhook(ctx context.Context, id string) error
 	CreateNotificationChannel(ctx context.Context, ch domain.NotificationChannel) (domain.NotificationChannel, error)
 	GetNotificationChannel(ctx context.Context, id string) (domain.NotificationChannel, error)
+	SetNotificationChannelEnabled(ctx context.Context, id string, enabled bool) error
 	ListChannelsByProject(ctx context.Context, projectID string) ([]domain.NotificationChannel, error)
 	DeleteNotificationChannel(ctx context.Context, id string) error
 	LinkMonitorChannel(ctx context.Context, monitorID, channelID string) error
@@ -393,9 +395,11 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/tokens/{tokenID}", h.deleteApiToken)
 	mux.HandleFunc("GET /api/v1/organizations/{orgID}/webhooks", h.listWebhooks)
 	mux.HandleFunc("POST /api/v1/organizations/{orgID}/webhooks", h.createWebhook)
+	mux.HandleFunc("PATCH /api/v1/webhooks/{webhookID}", h.updateWebhook)
 	mux.HandleFunc("DELETE /api/v1/webhooks/{webhookID}", h.deleteWebhook)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/notification-channels", h.listChannels)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/notification-channels", h.createChannel)
+	mux.HandleFunc("PATCH /api/v1/notification-channels/{channelID}", h.updateChannel)
 	mux.HandleFunc("DELETE /api/v1/notification-channels/{channelID}", h.deleteChannel)
 	mux.HandleFunc("GET /api/v1/monitors/{monitorID}/notifications", h.listMonitorChannels)
 	mux.HandleFunc("POST /api/v1/monitors/{monitorID}/notifications", h.linkMonitorChannel)

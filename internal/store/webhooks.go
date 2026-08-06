@@ -125,3 +125,17 @@ func (s *Store) DeleteWebhook(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
+// SetWebhookEnabled pauses or resumes deliveries for a webhook. Disabled is
+// not deleted: the secret and config survive; delivery listing filters on
+// the flag already.
+func (s *Store) SetWebhookEnabled(ctx context.Context, id string, enabled bool) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE webhooks SET enabled = $2 WHERE id = $1`, id, enabled)
+	if err != nil {
+		return fmt.Errorf("store: set webhook enabled: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

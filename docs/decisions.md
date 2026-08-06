@@ -2118,3 +2118,9 @@ already served; this closes the audit's top finding.
 the UI's toggle-only PUT decoded into a fresh Alerting object and nulled an API-set expiry. The
 Alerting tab now exposes an optional Until field and always round-trips the full object. Facts
 keep recording regardless — only delivery is muted, per the outbox suppression contract.
+
+## D-0113 — Pause, don't delete: webhook/channel toggles (iter-0051)
+The Status column implied an ability the API did not have. Both resources now take a PATCH
+`{enabled}` (delivery already filtered on the flag — the change is pure management surface), so a
+noisy integration is paused without losing its signing secret or config. Webhook toggles are
+audited (`webhook.toggle`); channels follow project-write like the rest of channel management.

@@ -2175,3 +2175,8 @@ default, 0 → 0), and the form now prefills new monitors from a lightweight aut
 /api/v1/monitor-defaults instead of a hardcoded copy — so the Settings page finally shapes what
 operators create. Interval/timeout/failure_threshold keep the zero-sentinel: zero is not a valid
 value for them, so the sentinel is unambiguous there.
+
+## D-0122 — Escalation objects become editable; deletes state their blast radius (iter-0060)
+"Fix a typo by deleting the schedule" destroyed its overrides and detached monitors without a
+word. The composer now doubles as the editor (POST↔PUT switch), and both deletes require an
+inline confirm that quantifies the consequence. Frontend-only: the PUT endpoints were waiting.

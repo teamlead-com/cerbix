@@ -29,14 +29,16 @@ const targetLabel = (t: Target) =>
 async function loadAll() {
   loading.value = true;
   if (ws.projectId) {
-    const [ch, pol, sch] = await Promise.all([
+    const [ch, pol, sch, mons] = await Promise.all([
       api.GET("/api/v1/projects/{projectID}/notification-channels", { params: { path: { projectID: ws.projectId } } }),
       api.GET("/api/v1/projects/{projectID}/escalation-policies", { params: { path: { projectID: ws.projectId } } }),
       api.GET("/api/v1/projects/{projectID}/oncall-schedules", { params: { path: { projectID: ws.projectId } } }),
+      api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID: ws.projectId } } }),
     ]);
     channels.value = ch.data ?? [];
     policies.value = pol.data ?? [];
     schedules.value = sch.data ?? [];
+    projectMonitors.value = mons.data ?? [];
     await loadScheduleExtras();
   }
   loading.value = false;
@@ -124,6 +126,33 @@ function setTargetValue(t: Target, v: string) {
   t.id = id;
 }
 
+const projectMonitors = ref<components["schemas"]["Monitor"][]>([]);
+const monitorsUsingPolicy = (id?: string) => projectMonitors.value.filter((m) => m.escalation_policy_id === id).length;
+
+// Edit mode: the same composer, prefilled; save switches POST → PUT.
+const editingPolicyId = ref("");
+const editingPolicyName = ref("");
+function startEditPolicy(p: Policy) {
+  editingPolicyId.value = p.id ?? "";
+  editingPolicyName.value = p.name ?? "";
+  policyForm.name = p.name ?? "";
+  policyForm.repeat_last = !!p.repeat_last;
+  policyForm.steps = (p.steps ?? []).map((st) => ({
+    after_seconds: st.after_seconds ?? 0,
+    targets: (st.targets ?? []).map((t) => ({ type: t.type as Target["type"], id: t.id ?? "" })),
+  }));
+  if (!policyForm.steps.length) policyForm.steps = [{ after_seconds: 0, targets: [] }];
+  policyError.value = "";
+}
+function resetPolicyForm() {
+  editingPolicyId.value = "";
+  editingPolicyName.value = "";
+  policyForm.name = "";
+  policyForm.repeat_last = false;
+  policyForm.steps = [{ after_seconds: 0, targets: [] }];
+  policyError.value = "";
+}
+
 async function createPolicy() {
   policyError.value = "";
   if (!policyForm.name.trim()) {
@@ -135,23 +164,24 @@ async function createPolicy() {
     return;
   }
   savingPolicy.value = true;
-  const res = await api.POST("/api/v1/projects/{projectID}/escalation-policies", {
-    params: { path: { projectID: ws.projectId } },
-    body: { name: policyForm.name.trim(), repeat_last: policyForm.repeat_last, steps: policyForm.steps },
-  });
+  const body = { name: policyForm.name.trim(), repeat_last: policyForm.repeat_last, steps: policyForm.steps };
+  const res = editingPolicyId.value
+    ? await api.PUT("/api/v1/escalation-policies/{policyID}", { params: { path: { policyID: editingPolicyId.value } }, body })
+    : await api.POST("/api/v1/projects/{projectID}/escalation-policies", { params: { path: { projectID: ws.projectId } }, body });
   savingPolicy.value = false;
   if (res.error) {
-    policyError.value = (res.error as { error?: string })?.error || "Could not create the policy.";
+    policyError.value = (res.error as { error?: string })?.error || "Could not save the policy.";
     return;
   }
-  policyForm.name = "";
-  policyForm.repeat_last = false;
-  policyForm.steps = [{ after_seconds: 0, targets: [] }];
+  resetPolicyForm();
   await loadAll();
 }
 
+const confirmDeletePolicyId = ref("");
 async function deletePolicy(id: string) {
   await api.DELETE("/api/v1/escalation-policies/{policyID}", { params: { path: { policyID: id } } });
+  confirmDeletePolicyId.value = "";
+  if (editingPolicyId.value === id) resetPolicyForm();
   await loadAll();
 }
 
@@ -174,6 +204,26 @@ function toggleParticipant(id: string) {
   if (i >= 0) scheduleForm.participants.splice(i, 1);
   else scheduleForm.participants.push(id);
 }
+const editingScheduleId = ref("");
+const editingScheduleName = ref("");
+function startEditSchedule(sc: Schedule) {
+  editingScheduleId.value = sc.id ?? "";
+  editingScheduleName.value = sc.name ?? "";
+  scheduleForm.name = sc.name ?? "";
+  scheduleForm.shift_seconds = sc.shift_seconds ?? 604800;
+  scheduleForm.anchor_at = sc.anchor_at ? sc.anchor_at.slice(0, 16) : "";
+  scheduleForm.participants = [...(sc.participants ?? [])];
+  scheduleError.value = "";
+}
+function resetScheduleForm() {
+  editingScheduleId.value = "";
+  editingScheduleName.value = "";
+  scheduleForm.name = "";
+  scheduleForm.participants = [];
+  scheduleForm.anchor_at = "";
+  scheduleError.value = "";
+}
+
 async function createSchedule() {
   scheduleError.value = "";
   if (!scheduleForm.name.trim() || scheduleForm.participants.length === 0) {
@@ -182,27 +232,28 @@ async function createSchedule() {
   }
   const anchor = scheduleForm.anchor_at ? new Date(scheduleForm.anchor_at).toISOString() : new Date().toISOString();
   savingSchedule.value = true;
-  const res = await api.POST("/api/v1/projects/{projectID}/oncall-schedules", {
-    params: { path: { projectID: ws.projectId } },
-    body: {
-      name: scheduleForm.name.trim(),
-      shift_seconds: scheduleForm.shift_seconds,
-      anchor_at: anchor,
-      participants: scheduleForm.participants,
-    },
-  });
+  const body = {
+    name: scheduleForm.name.trim(),
+    shift_seconds: scheduleForm.shift_seconds,
+    anchor_at: anchor,
+    participants: scheduleForm.participants,
+  };
+  const res = editingScheduleId.value
+    ? await api.PUT("/api/v1/oncall-schedules/{scheduleID}", { params: { path: { scheduleID: editingScheduleId.value } }, body })
+    : await api.POST("/api/v1/projects/{projectID}/oncall-schedules", { params: { path: { projectID: ws.projectId } }, body });
   savingSchedule.value = false;
   if (res.error) {
-    scheduleError.value = (res.error as { error?: string })?.error || "Could not create the schedule.";
+    scheduleError.value = (res.error as { error?: string })?.error || "Could not save the schedule.";
     return;
   }
-  scheduleForm.name = "";
-  scheduleForm.participants = [];
-  scheduleForm.anchor_at = "";
+  resetScheduleForm();
   await loadAll();
 }
+const confirmDeleteScheduleId = ref("");
 async function deleteSchedule(id: string) {
   await api.DELETE("/api/v1/oncall-schedules/{scheduleID}", { params: { path: { scheduleID: id } } });
+  confirmDeleteScheduleId.value = "";
+  if (editingScheduleId.value === id) resetScheduleForm();
   await loadAll();
 }
 
@@ -240,7 +291,17 @@ const selectCls =
               <div class="flex items-center gap-2">
                 <b class="text-[13.5px]">{{ p.name }}</b>
                 <span v-if="p.repeat_last" class="rounded-xs border border-border px-[6px] py-px text-[10.5px] text-ink-3">repeats last</span>
-                <button v-if="canWrite" class="ml-auto text-[12px] text-ink-3 hover:text-down" @click="deletePolicy(p.id ?? '')">Delete</button>
+                <template v-if="canWrite">
+                  <button class="ml-auto text-[12px] text-ink-3 hover:text-accent" @click="startEditPolicy(p)">Edit</button>
+                  <button class="text-[12px] text-ink-3 hover:text-down" @click="confirmDeletePolicyId = p.id ?? ''">Delete</button>
+                </template>
+              </div>
+              <div v-if="confirmDeletePolicyId === p.id" class="mt-2 rounded-sm bg-down-weak px-3 py-2 text-[12.5px] text-down">
+                Delete "{{ p.name }}"?
+                <template v-if="monitorsUsingPolicy(p.id)"><b>{{ monitorsUsingPolicy(p.id) }} monitor(s)</b> use this policy — they will silently fall back to flat notifications.</template>
+                <template v-else>No monitors currently use it.</template>
+                <button type="button" class="ml-2 h-[24px] rounded-sm bg-down px-[8px] text-[11.5px] font-medium text-white hover:opacity-90" @click="deletePolicy(p.id ?? '')">Confirm delete</button>
+                <button type="button" class="ml-1 h-[24px] rounded-sm border border-border px-[8px] text-[11.5px] text-ink-2" @click="confirmDeletePolicyId = ''">Cancel</button>
               </div>
               <ol class="mt-1 flex flex-col gap-[3px] text-[12.5px] text-ink-2">
                 <li v-for="(s, i) in p.steps" :key="i" class="flex gap-2">
@@ -254,7 +315,10 @@ const selectCls =
 
           <!-- create policy -->
           <form v-if="canWrite" class="flex flex-col gap-3 border-t border-border bg-surface-2/40 p-4" @submit.prevent="createPolicy">
-            <div class="text-[12px] font-semibold uppercase tracking-[0.05em] text-ink-3">New policy</div>
+            <div class="flex items-center gap-2 text-[12px] font-semibold uppercase tracking-[0.05em] text-ink-3">
+              {{ editingPolicyId ? "Edit policy: " + editingPolicyName : "New policy" }}
+              <span v-if="editingPolicyId" class="rounded-full bg-accent-weak px-[8px] py-px text-[10px] font-bold text-accent">editing</span>
+            </div>
             <div v-if="!channels.length && !schedules.length" class="rounded-sm border border-degraded/40 bg-degraded-weak px-3 py-2 text-[12.5px] text-ink-2">
               No notification channels yet — a step's target is a channel or an on-call schedule, and schedules are built from channels too. Add channels in
               <RouterLink :to="{ name: 'settings' }" class="text-accent hover:underline">Settings</RouterLink> first.
@@ -290,9 +354,12 @@ const selectCls =
               </label>
             </div>
             <p v-if="policyError" class="text-[12.5px] text-down">{{ policyError }}</p>
-            <button type="submit" :disabled="savingPolicy" class="h-[34px] self-start rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50">
-              {{ savingPolicy ? "Saving…" : "Create policy" }}
-            </button>
+            <div class="flex items-center gap-2">
+              <button type="submit" :disabled="savingPolicy" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50">
+                {{ savingPolicy ? "Saving…" : editingPolicyId ? "Save changes" : "Create policy" }}
+              </button>
+              <button v-if="editingPolicyId" type="button" class="h-[34px] rounded-sm border border-border px-3 text-[13px] text-ink-2 hover:border-border-strong" @click="resetPolicyForm">Cancel</button>
+            </div>
           </form>
         </section>
 
@@ -304,7 +371,17 @@ const selectCls =
               <div class="flex items-center gap-2">
                 <b class="text-[13.5px]">{{ s.name }}</b>
                 <span class="rounded-xs border border-border px-[6px] py-px text-[10.5px] text-ink-3">{{ shiftLabel(s.shift_seconds ?? 0) }} rotation</span>
-                <button v-if="canWrite" class="ml-auto text-[12px] text-ink-3 hover:text-down" @click="deleteSchedule(s.id ?? '')">Delete</button>
+                <template v-if="canWrite">
+                  <button class="ml-auto text-[12px] text-ink-3 hover:text-accent" @click="startEditSchedule(s)">Edit</button>
+                  <button class="text-[12px] text-ink-3 hover:text-down" @click="confirmDeleteScheduleId = s.id ?? ''">Delete</button>
+                </template>
+              </div>
+              <div v-if="confirmDeleteScheduleId === s.id" class="mt-2 rounded-sm bg-down-weak px-3 py-2 text-[12.5px] text-down">
+                Delete "{{ s.name }}"?
+                <template v-if="(overrides[s.id ?? ''] ?? []).length"><b>{{ (overrides[s.id ?? ''] ?? []).length }} override(s)</b> (vacation cover) will be deleted with it.</template>
+                Policies targeting it will skip this step.
+                <button type="button" class="ml-2 h-[24px] rounded-sm bg-down px-[8px] text-[11.5px] font-medium text-white hover:opacity-90" @click="deleteSchedule(s.id ?? '')">Confirm delete</button>
+                <button type="button" class="ml-1 h-[24px] rounded-sm border border-border px-[8px] text-[11.5px] text-ink-2" @click="confirmDeleteScheduleId = ''">Cancel</button>
               </div>
               <div class="mt-1 text-[12.5px] text-ink-2">{{ (s.participants ?? []).map(channelName).join(" → ") }}</div>
               <div v-if="onCallNow[s.id ?? '']" class="mt-[6px] text-[12px]">
@@ -339,7 +416,10 @@ const selectCls =
 
           <!-- create schedule -->
           <form v-if="canWrite" class="flex flex-col gap-3 border-t border-border bg-surface-2/40 p-4" @submit.prevent="createSchedule">
-            <div class="text-[12px] font-semibold uppercase tracking-[0.05em] text-ink-3">New schedule</div>
+            <div class="flex items-center gap-2 text-[12px] font-semibold uppercase tracking-[0.05em] text-ink-3">
+              {{ editingScheduleId ? "Edit schedule: " + editingScheduleName : "New schedule" }}
+              <span v-if="editingScheduleId" class="rounded-full bg-accent-weak px-[8px] py-px text-[10px] font-bold text-accent">editing</span>
+            </div>
             <input v-model="scheduleForm.name" :class="inputCls" placeholder="Schedule name (e.g. primary rotation)" />
             <div class="flex items-center gap-2 text-[12.5px]">
               <span class="text-ink-3">Rotate</span>
@@ -364,9 +444,12 @@ const selectCls =
               </div>
             </div>
             <p v-if="scheduleError" class="text-[12.5px] text-down">{{ scheduleError }}</p>
-            <button type="submit" :disabled="savingSchedule" class="h-[34px] self-start rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50">
-              {{ savingSchedule ? "Saving…" : "Create schedule" }}
-            </button>
+            <div class="flex items-center gap-2">
+              <button type="submit" :disabled="savingSchedule" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50">
+                {{ savingSchedule ? "Saving…" : editingScheduleId ? "Save changes" : "Create schedule" }}
+              </button>
+              <button v-if="editingScheduleId" type="button" class="h-[34px] rounded-sm border border-border px-3 text-[13px] text-ink-2 hover:border-border-strong" @click="resetScheduleForm">Cancel</button>
+            </div>
           </form>
         </section>
       </div>

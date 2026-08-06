@@ -498,3 +498,36 @@ func randomToken() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// listSubscribers returns a page's subscribers, confirmed and pending alike
+// (org admin) — the owner-facing view of who receives incident emails.
+func (h *Handler) listSubscribers(w http.ResponseWriter, r *http.Request) {
+	sp, ok := h.statusPageAccess(w, r, true)
+	if !ok {
+		return
+	}
+	subs, err := h.store.ListSubscribersByPage(r.Context(), sp.ID)
+	if err != nil {
+		h.serverError(w, "list_subscribers", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, subs)
+}
+
+// deleteSubscriber removes a subscriber from a page (org admin).
+func (h *Handler) deleteSubscriber(w http.ResponseWriter, r *http.Request) {
+	sp, ok := h.statusPageAccess(w, r, true)
+	if !ok {
+		return
+	}
+	if err := h.store.DeleteSubscriber(r.Context(), sp.ID, r.PathValue("subscriberID")); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		h.serverError(w, "delete_subscriber", err)
+		return
+	}
+	h.audit(r, sp.OrgID, "subscriber.remove", "page "+sp.Slug)
+	w.WriteHeader(http.StatusNoContent)
+}

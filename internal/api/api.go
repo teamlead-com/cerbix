@@ -137,6 +137,8 @@ type Store interface {
 	ReplayAllDeadOutbox(ctx context.Context) (int, error)
 	Search(ctx context.Context, q string, limit int) ([]domain.SearchHit, error)
 	CreateSubscriber(ctx context.Context, sub domain.Subscriber) (domain.Subscriber, error)
+	ListSubscribersByPage(ctx context.Context, pageID string) ([]domain.Subscriber, error)
+	DeleteSubscriber(ctx context.Context, pageID, id string) error
 	ConfirmSubscriber(ctx context.Context, token string) (domain.Subscriber, error)
 	DeleteSubscriberByToken(ctx context.Context, token string) error
 	EnqueueOutbox(ctx context.Context, topic string, payload []byte) error
@@ -387,6 +389,8 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/status-pages/{pageID}", h.deleteStatusPage)
 	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/render", h.renderStatusPageAuthed)
 	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/feed", h.renderFeedAuthed)
+	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/subscribers", h.listSubscribers)
+	mux.HandleFunc("DELETE /api/v1/status-pages/{pageID}/subscribers/{subscriberID}", h.deleteSubscriber)
 	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/components", h.listComponents)
 	mux.HandleFunc("POST /api/v1/status-pages/{pageID}/components", h.createComponent)
 	mux.HandleFunc("DELETE /api/v1/components/{componentID}", h.deleteComponent)

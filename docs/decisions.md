@@ -2137,3 +2137,10 @@ DB-managed pull-agent tokens (D-issued for broker-less regions) had API+spec and
 Administration tab lists/issues/revokes them, with the show-once secret contract shared with API
 tokens and revoked rows kept visible as history. Pure frontend — the endpoints were already
 guarded by requireGlobalAdmin.
+
+## D-0116 — Owners can finally see their subscribers (iter-0054)
+The subscribe flow wrote rows nobody could read back: no list endpoint, no UI. The status-page
+editor now shows the audience (count, confirmed vs pending-confirm — the latter doubling as an
+SMTP-deliverability signal) and lets an org admin remove an address; the confirm token stays
+server-side. This closes the audit-gap package: all eleven findings of the "saved/served but
+never used" class are resolved (D-0106…D-0116).

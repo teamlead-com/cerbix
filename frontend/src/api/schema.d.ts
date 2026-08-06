@@ -2678,6 +2678,85 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/status-pages/{pageID}/subscribers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List a page's subscribers, confirmed and pending (org admin) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    pageID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Subscriber"][];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/status-pages/{pageID}/subscribers/{subscriberID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a subscriber from a page (org admin) */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    pageID: string;
+                    subscriberID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/status-pages/{pageID}/components": {
         parameters: {
             query?: never;
@@ -4516,6 +4595,17 @@ export interface components {
             last_active_at?: string | null;
             /** @description Empty for users outside any organization. */
             memberships?: components["schemas"]["AdminUserMembership"][];
+        };
+        Subscriber: {
+            /** Format: uuid */
+            id?: string;
+            /** Format: uuid */
+            status_page_id?: string;
+            email?: string;
+            /** Format: date-time */
+            confirmed_at?: string | null;
+            /** Format: date-time */
+            created_at?: string;
         };
         ToggleEnabled: {
             enabled: boolean;

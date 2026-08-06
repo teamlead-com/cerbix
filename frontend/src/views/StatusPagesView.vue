@@ -52,12 +52,31 @@ async function loadPages() {
 async function select(page: StatusPage | null) {
   selected.value = page;
   componentsList.value = [];
+  subscribers.value = [];
   editing.value = false;
   confirmDelete.value = false;
   if (!page) return;
   const res = await api.GET("/api/v1/status-pages/{pageID}/components", { params: { path: { pageID: page.id! } } });
   componentsList.value = res.data ?? [];
+  if (canManage.value) {
+    const subs = await api.GET("/api/v1/status-pages/{pageID}/subscribers", { params: { path: { pageID: page.id! } } });
+    subscribers.value = subs.data ?? [];
+  }
 }
+
+// Subscribers (org admin): who receives incident emails for this page.
+const subscribers = ref<components["schemas"]["Subscriber"][]>([]);
+const confirmRemoveSub = ref("");
+const confirmedCount = computed(() => subscribers.value.filter((s) => s.confirmed_at).length);
+async function removeSubscriber(id: string) {
+  if (!selected.value) return;
+  const res = await api.DELETE("/api/v1/status-pages/{pageID}/subscribers/{subscriberID}", {
+    params: { path: { pageID: selected.value.id!, subscriberID: id } },
+  });
+  if (!res.error) subscribers.value = subscribers.value.filter((s) => s.id !== id);
+  confirmRemoveSub.value = "";
+}
+const fmtSubDate = (ts?: string) => (ts ? new Date(ts).toISOString().slice(0, 10) : "—");
 
 // Create page.
 const showCreate = ref(false);
@@ -371,6 +390,43 @@ watch(() => ws.orgId, loadPages);
               <button type="button" :disabled="addingComp || !compForm.name.trim()" class="h-[38px] rounded-sm border border-border px-4 text-[13px] hover:border-accent hover:text-accent disabled:opacity-50" @click="addComponent">Add</button>
             </div>
             <div v-if="compError" class="px-4 pb-3 text-[12.5px] text-down">{{ compError }}</div>
+          </div>
+
+          <!-- subscribers (org admin) -->
+          <div v-if="canManage" class="mt-4 rounded border border-border bg-surface shadow-card">
+            <div class="flex items-center gap-2 border-b border-border px-4 py-[13px]">
+              <h3 class="text-[13px] font-semibold">Subscribers</h3>
+              <span class="font-mono text-[12px] text-ink-3">{{ subscribers.length }} · {{ confirmedCount }} confirmed</span>
+            </div>
+            <table class="w-full text-[13px]">
+              <thead>
+                <tr class="text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                  <th class="border-b border-border px-4 py-[9px] text-left">Email</th>
+                  <th class="border-b border-border px-4 py-[9px] text-left">Status</th>
+                  <th class="border-b border-border px-4 py-[9px] text-left">Subscribed</th>
+                  <th class="border-b border-border px-4 py-[9px]"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="s in subscribers" :key="s.id" class="hover:bg-surface-2">
+                  <td class="border-b border-border px-4 py-[10px] font-mono text-[12.5px]">{{ s.email }}</td>
+                  <td class="border-b border-border px-4 py-[10px]">
+                    <span v-if="s.confirmed_at" class="rounded-full bg-up-weak px-[9px] py-[2px] text-[11px] font-semibold text-up">confirmed</span>
+                    <span v-else class="rounded-full bg-degraded-weak px-[9px] py-[2px] text-[11px] font-semibold text-degraded" title="The confirmation email was sent but its link has not been clicked">pending confirm</span>
+                  </td>
+                  <td class="border-b border-border px-4 py-[10px] font-mono text-[12px] text-ink-3">{{ fmtSubDate(s.created_at) }}</td>
+                  <td class="border-b border-border px-4 py-[10px] text-right">
+                    <template v-if="confirmRemoveSub === s.id">
+                      <span class="mr-2 text-[12px] text-ink-3">Remove?</span>
+                      <button type="button" class="mr-1 h-[26px] rounded-sm bg-down px-[9px] text-[12px] font-medium text-white hover:opacity-90" @click="removeSubscriber(s.id!)">Confirm</button>
+                      <button type="button" class="h-[26px] rounded-sm border border-border px-[9px] text-[12px] text-ink-2 hover:border-border-strong" @click="confirmRemoveSub = ''">Cancel</button>
+                    </template>
+                    <button v-else type="button" class="text-[12.5px] text-down hover:underline" @click="confirmRemoveSub = s.id ?? ''">Remove</button>
+                  </td>
+                </tr>
+                <tr v-if="!subscribers.length"><td colspan="4" class="px-4 py-6 text-center text-[13px] text-ink-3">No subscribers yet — the subscribe form lives on the public page.</td></tr>
+              </tbody>
+            </table>
           </div>
         </section>
 

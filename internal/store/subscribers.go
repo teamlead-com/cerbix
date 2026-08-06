@@ -102,3 +102,39 @@ func (s *Store) ConfirmedSubscriberEmailsForProject(ctx context.Context, project
 	}
 	return out, nil
 }
+
+// ListSubscribersByPage returns a page's subscribers, newest first — the
+// owner-facing view (confirmed and pending alike).
+func (s *Store) ListSubscribersByPage(ctx context.Context, pageID string) ([]domain.Subscriber, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+subscriberColumns+` FROM subscribers WHERE status_page_id = $1 ORDER BY created_at DESC`, pageID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list subscribers: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Subscriber
+	for rows.Next() {
+		sub, err := scanSubscriber(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan subscriber: %w", err)
+		}
+		out = append(out, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate subscribers: %w", err)
+	}
+	return out, nil
+}
+
+// DeleteSubscriber removes a subscriber of the given page (the page id guards
+// against cross-page deletion by id).
+func (s *Store) DeleteSubscriber(ctx context.Context, pageID, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM subscribers WHERE id = $1 AND status_page_id = $2`, id, pageID)
+	if err != nil {
+		return fmt.Errorf("store: delete subscriber: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

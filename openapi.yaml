@@ -1099,6 +1099,33 @@ paths:
             application/atom+xml: { schema: { type: string } }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/status-pages/{pageID}/subscribers:
+    get:
+      tags: [status-pages]
+      summary: List a page's subscribers, confirmed and pending (org admin)
+      parameters:
+        - { in: path, name: pageID, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Subscriber' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/status-pages/{pageID}/subscribers/{subscriberID}:
+    delete:
+      tags: [status-pages]
+      summary: Remove a subscriber from a page (org admin)
+      parameters:
+        - { in: path, name: pageID, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: subscriberID, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Removed }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/v1/status-pages/{pageID}/components:
     parameters: [ { $ref: '#/components/parameters/PageID' } ]
     get:
@@ -1952,6 +1979,14 @@ components:
               type: array
               description: Empty for users outside any organization.
               items: { $ref: '#/components/schemas/AdminUserMembership' }
+    Subscriber:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status_page_id: { type: string, format: uuid }
+        email: { type: string }
+        confirmed_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
     ToggleEnabled:
       type: object
       required: [enabled]

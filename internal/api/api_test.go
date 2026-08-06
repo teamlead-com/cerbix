@@ -1380,6 +1380,26 @@ func TestAddMemberAuthz(t *testing.T) {
 	}
 }
 
+func (f *fakeStore) ListSubscribersByPage(_ context.Context, pageID string) ([]domain.Subscriber, error) {
+	var out []domain.Subscriber
+	for _, sub := range f.subscribers {
+		if sub.StatusPageID == pageID {
+			out = append(out, sub)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Email < out[j].Email })
+	return out, nil
+}
+func (f *fakeStore) DeleteSubscriber(_ context.Context, pageID, id string) error {
+	// The fake map is keyed by confirm token; match on the row id.
+	for tok, sub := range f.subscribers {
+		if sub.ID == id && sub.StatusPageID == pageID {
+			delete(f.subscribers, tok)
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
 func (f *fakeStore) CreateSubscriber(_ context.Context, sub domain.Subscriber) (domain.Subscriber, error) {
 	// Emulate ON CONFLICT (page,email): reuse an existing row, re-issue the token.
 	for tok, s := range f.subscribers {

@@ -2180,3 +2180,11 @@ value for them, so the sentinel is unambiguous there.
 "Fix a typo by deleting the schedule" destroyed its overrides and detached monitors without a
 word. The composer now doubles as the editor (POST↔PUT switch), and both deletes require an
 inline confirm that quantifies the consequence. Frontend-only: the PUT endpoints were waiting.
+
+## D-0123 — require_totp scope: local sign-ins, by contract (iter-0061)
+The re-audit flagged that SSO logins bypass the TOTP policy. Considered enforcing it after the
+OIDC callback and rejected it: the IdP is the authority on how its users authenticate (Keycloak
+et al. enforce MFA natively), and a second, application-level TOTP on top of SSO is UX-hostile
+duplication. The scope is now written down (domain doc + the Settings hint) instead of implied,
+and the previously unhandled totp_setup_required lockout finally tells the user their options.
+This closes func-audit-gaps-2 (D-0117…D-0123).

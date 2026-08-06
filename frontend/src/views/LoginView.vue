@@ -74,6 +74,14 @@ async function submitLocal() {
       totp.value = "";
       return;
     }
+    // The instance policy demands 2FA but this account never enrolled: a dead
+    // end without guidance — say what the ways out are.
+    if (res.status === 401 && data?.totp_setup_required) {
+      error.value =
+        "Two-factor authentication is now required for your account, but you haven't set it up yet. " +
+        "Sign in via SSO if it is enabled (then enroll 2FA under Settings → Security), or ask an administrator to temporarily relax the requirement.";
+      return;
+    }
     error.value = "Invalid email or password.";
   } catch {
     error.value = "Could not reach the server.";

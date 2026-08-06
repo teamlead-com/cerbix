@@ -59,7 +59,9 @@ const (
 	TOTPAll    = "all"
 )
 
-// AuthPolicy is instance-wide login policy.
+// AuthPolicy is instance-wide login policy. RequireTOTP applies to LOCAL
+// sign-ins only — SSO users authenticate at the identity provider, which owns
+// their multi-factor enforcement (deliberate scope, see D-0123).
 type AuthPolicy struct {
 	Configured          bool     `json:"configured"`
 	MinPasswordLen      int      `json:"min_password_len"`

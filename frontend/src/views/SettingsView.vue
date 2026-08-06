@@ -998,7 +998,7 @@ watch(tab, loadActive);
             <select v-model="authPolicy.form.require_totp" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent max-w-[240px]">
               <option value="none">Not required</option><option value="admins">Global admins</option><option value="all">Everyone</option>
             </select>
-            <span v-if="authPolicy.form.require_totp !== 'none'" class="text-[11.5px] text-degraded">⚠ Users without 2FA set up will be unable to sign in locally.</span>
+            <span v-if="authPolicy.form.require_totp !== 'none'" class="text-[11.5px] text-degraded">⚠ Applies to local sign-ins only: users without 2FA set up cannot sign in with a password until they enroll. SSO users are unaffected — multi-factor for them is enforced by your identity provider.</span>
           </label>
           <div class="flex flex-col gap-[6px]">
             <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Allowed email domains<span class="ml-1 font-normal normal-case text-ink-3">(empty = any)</span></span>

@@ -11,7 +11,8 @@
 #       docker compose -f deploy/docker-compose.yml --profile distributed \
 #         run --rm api migrate --config /etc/cerbix/config.yaml
 #
-#   add --profile sso to either to also start Keycloak (:8081) + MariaDB.
+#   add --profile sso to either to also start Keycloak (:8081) + MariaDB;
+#   add --profile mail for Mailpit (:8025 UI/API, :1025 SMTP) — mail-flow E2E/dev.
 #
 # `single` and `distributed` are mutually exclusive — start one or the other.
 #
@@ -19,7 +20,7 @@
 #   10.5.0.10  postgres        10.5.0.20  scheduler   (distributed)
 #   10.5.0.11  rabbitmq        10.5.0.21  api         (distributed)
 #   10.5.0.12  mariadb  (sso)  10.5.0.22  worker      (distributed)
-#   10.5.0.13  keycloak (sso)
+#   10.5.0.13  keycloak (sso)  10.5.0.15  mailpit (mail)
 #   10.5.0.14  cerbix   (single)
 
 x-netCaps: &netCaps
@@ -157,6 +158,21 @@ services:
         ipv4_address: 10.5.0.22
     volumes:
       - ./config.worker.yaml:/etc/cerbix/worker.yaml:ro
+
+  # ---- profile: mail (optional Mailpit for mail-flow E2E/dev) ---------------
+  mailpit:
+    image: axllent/mailpit:v1.21
+    <<: [*netCaps, *logging]
+    profiles: ["mail"]
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    networks:
+      default:
+        ipv4_address: 10.5.0.15
+    ports:
+      - "8025:8025"   # web UI + API
+      - "1025:1025"   # SMTP
 
   # ---- profile: sso (optional Keycloak OIDC) --------------------------------
   mariadb:

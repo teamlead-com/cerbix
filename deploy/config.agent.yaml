@@ -5,7 +5,7 @@ log: { level: info, format: json }
 server:
   listen: ":8080"          # ops endpoints only (/healthz /readyz /metrics)
 pull:
-  server_url: "http://api:8080"   # central cerbix (api)
+  server_url: "http://api:8080"      # central cerbix (api)
   token: "devpulltoken"              # this agent's token (matches central pull.token OR a pull.agents[].token)
 # On the CENTRAL side, scope a token to one region instead of a shared catch-all:
 #   pull:

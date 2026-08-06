@@ -36,8 +36,8 @@ docker run --rm -v "$PWD":/app -v "$PWD/../openapi.yaml":/openapi.yaml -w /app n
 ### E2E (from repo root) — Playwright in docker, against a LIVE stack
 
 ```bash
-# Stack must be up first (single profile; + sso for the OIDC spec):
-./e2e/run.sh                          # full suite (~12s, 23 tests)
+# Stack must be up first (single profile; + sso for the OIDC spec, + mail for mail flows):
+./e2e/run.sh                          # full suite (~2min, 34 tests)
 ./e2e/run.sh tests/monitors.spec.ts   # one spec
 CERBIX_URL=http://host:8080 ./e2e/run.sh
 ```

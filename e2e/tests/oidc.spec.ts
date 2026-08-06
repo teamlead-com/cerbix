@@ -8,7 +8,9 @@ test.describe("OIDC login (sso profile)", () => {
   test("full authorization-code round-trip via Keycloak", async ({ page }) => {
     await page.goto("/login");
     const sso = page.locator("button", { hasText: /SSO|Keycloak/ });
-    test.skip(!(await sso.count()), "OIDC is not configured on this instance");
+    // The button appears after /auth/config resolves — wait, don't race it.
+    const configured = await sso.waitFor({ state: "visible", timeout: 8_000 }).then(() => true).catch(() => false);
+    test.skip(!configured, "OIDC is not configured on this instance");
     await sso.click();
     await page.waitForURL(/realms\/cerbix/, { timeout: 15_000 });
     await page.fill("#username", "testuser@example.com");

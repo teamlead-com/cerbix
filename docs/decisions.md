@@ -2197,3 +2197,12 @@ session (local logins are rate-limited — per-test logins are the primary flake
 23 tests over auth/monitors/incidents/escalation/settings/admin/status-pages/OIDC. Deliberately
 not wired into CI: the suite needs a live stack and the CI policy is build-only (D-0087-era);
 `./e2e/run.sh` is the local/pre-release gate.
+
+## D-0125 — E2E coverage expansion (iter-0063…0066)
+The suite grows 23 → 34 tests along the priority ladder from func-e2e-coverage: Alertmanager
+ingest, SLA editor, probers exercised against the stack itself (conditions engine both ways,
+instant test-connection, composite quorum), mail flows through a Mailpit sidecar (new dev-compose
+profile `mail`), and time-based flows — measured confirm-phase acceleration and a full TOTP
+lifecycle with RFC 6238 generated in-test. Region-affinity assertions are transport-aware by
+design: the inproc dev dispatcher ignores regions, AMQP/pull enforce them. Runtime ~2min; still a
+local/pre-release gate, not CI.

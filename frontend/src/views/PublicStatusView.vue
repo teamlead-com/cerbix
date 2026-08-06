@@ -18,6 +18,8 @@ const { toggle } = useTheme();
 const branding = useBranding(); // loaded app-wide in App.vue (public endpoint)
 const slug = route.params.slug as string;
 const token = (route.query.token as string) || "";
+const previewID = (route.query.preview as string) || "";
+const internalPreview = ref(false);
 
 const loading = ref(true);
 const notFound = ref(false);
@@ -29,6 +31,19 @@ async function load() {
     params: { path: { slug }, query: token ? { token } : {} },
   });
   if (res.error || !res.data) {
+    // Internal pages 404 publicly by design; signed-in members preview them
+    // through the authed render endpoint when the editor link carries the id.
+    if (previewID) {
+      const auth = await api.GET("/api/v1/status-pages/{pageID}/render", {
+        params: { path: { pageID: previewID } },
+      });
+      if (!auth.error && auth.data) {
+        page.value = auth.data;
+        internalPreview.value = true;
+        loading.value = false;
+        return;
+      }
+    }
     notFound.value = true;
   } else {
     page.value = res.data;
@@ -220,6 +235,9 @@ onMounted(async () => {
     </header>
 
     <main class="mx-auto max-w-[820px] px-5 pb-16 pt-[26px]">
+      <div v-if="internalPreview" class="mb-4 flex items-center gap-2 rounded border border-degraded/40 bg-degraded-weak px-4 py-2 text-[12.5px] font-medium text-degraded">
+        🔒 Internal page — visible to signed-in members only; anonymous visitors get 404.
+      </div>
       <div v-if="loading" class="text-[13px] text-ink-3">Loading…</div>
 
       <div v-else-if="notFound" class="rounded-lg border border-border bg-surface p-10 text-center shadow-card">
@@ -305,6 +323,7 @@ onMounted(async () => {
           <div v-for="c in g.comps" :key="c.id" class="border-b border-border px-[18px] py-[14px] last:border-b-0">
             <div class="mb-[9px] flex items-center gap-[10px]">
               <span class="text-[14px] font-medium">{{ c.name }}</span>
+              <span v-if="c.description" class="min-w-0 truncate text-[12px] text-ink-3">{{ c.description }}</span>
               <span class="ml-auto inline-flex items-center gap-[7px] text-[12.5px] font-semibold" :class="componentMeta(c.status).text"><span class="h-[8px] w-[8px] rounded-full" :class="componentMeta(c.status).dot"></span>{{ componentMeta(c.status).label }}</span>
             </div>
             <!-- per-day 90-day availability strip (aggregate meter fallback for manual components) -->

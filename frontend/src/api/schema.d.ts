@@ -5288,6 +5288,7 @@ export interface components {
             id?: string;
             name?: string;
             group?: string;
+            description?: string;
             status?: components["schemas"]["ComponentStatus"];
             /** Format: double */
             uptime_90d?: number | null;

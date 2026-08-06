@@ -2124,3 +2124,10 @@ The Status column implied an ability the API did not have. Both resources now ta
 `{enabled}` (delivery already filtered on the flag — the change is pure management surface), so a
 noisy integration is paused without losing its signing secret or config. Webhook toggles are
 audited (`webhook.toggle`); channels follow project-write like the rest of channel management.
+
+## D-0114 — Status-page preview that opens, components that group (iter-0052)
+The default-created status page had a broken preview link (internal → public 404) and the grouping
+feature existed only for curl users. Preview now rides the previously-unused authed render
+endpoint via `?preview=<id>` (with an explicit members-only banner; the public endpoint still
+404s anonymously), unlisted links carry their token, and the component form finally exposes
+group/description/position — with `description` added to the render DTO so it can actually show.

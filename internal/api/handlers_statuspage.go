@@ -321,12 +321,13 @@ type dayPoint struct {
 }
 
 type componentView struct {
-	ID        string                 `json:"id"`
-	Name      string                 `json:"name"`
-	Group     string                 `json:"group,omitempty"`
-	Status    domain.ComponentStatus `json:"status"`
-	Uptime90d *float64               `json:"uptime_90d,omitempty"`
-	Daily     []dayPoint             `json:"daily,omitempty"`
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Group       string                 `json:"group,omitempty"`
+	Description string                 `json:"description,omitempty"`
+	Status      domain.ComponentStatus `json:"status"`
+	Uptime90d   *float64               `json:"uptime_90d,omitempty"`
+	Daily       []dayPoint             `json:"daily,omitempty"`
 }
 
 type statusPageRender struct {
@@ -428,7 +429,7 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 			status = c.ManualStatus // explicit manual override wins
 		}
 		statuses = append(statuses, status)
-		views = append(views, componentView{ID: c.ID, Name: c.Name, Group: c.GroupName, Status: status, Uptime90d: uptime, Daily: days})
+		views = append(views, componentView{ID: c.ID, Name: c.Name, Group: c.GroupName, Description: c.Description, Status: status, Uptime90d: uptime, Daily: days})
 	}
 	// Active incidents, resolved-incident history (last 90 days), and active or
 	// upcoming maintenance across the projects the components draw from.

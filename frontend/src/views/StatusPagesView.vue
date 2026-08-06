@@ -91,7 +91,9 @@ async function createPage() {
 }
 
 // Add component.
-const compForm = reactive({ name: "", monitor_id: "", manual_status: "" });
+const compForm = reactive({ name: "", monitor_id: "", manual_status: "", group: "", description: "", position: 0 });
+// Groups already in use on this page — offered as datalist suggestions.
+const usedGroups = computed(() => [...new Set(componentsList.value.map((c) => c.group).filter(Boolean))] as string[]);
 const addingComp = ref(false);
 const compError = ref("");
 
@@ -102,6 +104,9 @@ async function addComponent() {
   const body: components["schemas"]["CreateComponent"] = { name: compForm.name.trim() };
   if (compForm.monitor_id) body.monitor_id = compForm.monitor_id;
   if (compForm.manual_status) body.manual_status = compForm.manual_status as Component["manual_status"];
+  if (compForm.group.trim()) body.group = compForm.group.trim();
+  if (compForm.description.trim()) body.description = compForm.description.trim();
+  if (compForm.position) body.position = compForm.position;
   try {
     const res = await api.POST("/api/v1/status-pages/{pageID}/components", {
       params: { path: { pageID: selected.value.id! } },
@@ -115,6 +120,9 @@ async function addComponent() {
     compForm.name = "";
     compForm.monitor_id = "";
     compForm.manual_status = "";
+    compForm.group = "";
+    compForm.description = "";
+    compForm.position = 0;
   } finally {
     addingComp.value = false;
   }
@@ -183,7 +191,16 @@ async function removePage() {
   }
 }
 
-const publicPath = computed(() => (selected.value ? `/status/${selected.value.slug}` : ""));
+// Preview path that actually opens: unlisted carries its token, internal falls
+// back to the authed render endpoint via ?preview=<pageID> (members only).
+const publicPath = computed(() => {
+  const p = selected.value;
+  if (!p) return "";
+  const base = `/status/${p.slug}`;
+  if (p.visibility === "unlisted" && p.unlisted_token) return `${base}?token=${p.unlisted_token}`;
+  if (p.visibility === "internal") return `${base}?preview=${p.id}`;
+  return base;
+});
 const monitorName = (id?: string) => monitors.value.find((m) => m.id === id)?.name ?? "—";
 
 onMounted(loadPages);
@@ -337,6 +354,19 @@ watch(() => ws.orgId, loadPages);
                   <option value="major_outage">{{ componentMeta("major_outage").label }}</option>
                   <option value="maintenance">{{ componentMeta("maintenance").label }}</option>
                 </select>
+              </label>
+              <label class="flex flex-col gap-[6px]">
+                <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Group <span class="font-normal normal-case tracking-normal">— optional</span></span>
+                <input v-model="compForm.group" type="text" placeholder="Services" list="comp-groups" class="w-[150px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
+                <datalist id="comp-groups"><option v-for="g in usedGroups" :key="g" :value="g" /></datalist>
+              </label>
+              <label class="flex flex-col gap-[6px]">
+                <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Description <span class="font-normal normal-case tracking-normal">— optional</span></span>
+                <input v-model="compForm.description" type="text" placeholder="Public REST API" class="w-[190px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
+              </label>
+              <label class="flex flex-col gap-[6px]">
+                <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Position</span>
+                <input v-model.number="compForm.position" type="number" min="0" class="w-[80px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
               </label>
               <button type="button" :disabled="addingComp || !compForm.name.trim()" class="h-[38px] rounded-sm border border-border px-4 text-[13px] hover:border-accent hover:text-accent disabled:opacity-50" @click="addComponent">Add</button>
             </div>

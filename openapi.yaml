@@ -2573,6 +2573,7 @@ components:
         id: { type: string, format: uuid }
         name: { type: string }
         group: { type: string }
+        description: { type: string }
         status: { $ref: '#/components/schemas/ComponentStatus' }
         uptime_90d: { type: number, format: double, nullable: true }
         daily: { type: array, items: { $ref: '#/components/schemas/ComponentDay' }, description: 'Per-day availability; empty for manual components.' }

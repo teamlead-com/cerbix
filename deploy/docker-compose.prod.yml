@@ -88,7 +88,7 @@ services:
         condition: service_healthy
     ports:
       # Localhost-only by default: put a TLS reverse proxy in front. Override the
-      # bind (e.g. 0.0.0.0:8080) via CERBIX_HTTP_BIND in .env only if intended.
+      # bind (e.g. 0.0.0.0:8080) via CERBIX_HTTP_BIND in .env only if intended, or add traefik labels and comment\delete ports section.
       - "${CERBIX_HTTP_BIND:-127.0.0.1:8080}:8080"
     volumes:
       - ./config.prod.yaml:/etc/cerbix/config.yaml:ro

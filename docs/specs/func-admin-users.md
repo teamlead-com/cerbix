@@ -58,9 +58,11 @@ nullable; `RecordAudit` maps an empty org to NULL. New actions: `user.global_adm
   group, first position). Table: search box, user (avatar/initials, name, email),
   auth-type pill (local/OIDC), membership chips per org (`Acme (org_admin)`), a
   **"no organization"** warning badge for org-less users, last active, global-admin star.
-  Row actions: Grant/Revoke admin (confirm), Add to org (org picker from `ws.orgs` —
-  global admin sees all orgs — plus org-scope role picker), Delete (confirm; destructive
-  styling). Self row: admin toggle and delete disabled with a tooltip.
+  Row actions: Grant/Revoke admin (confirm), Add to org (multi-select org chips from
+  `ws.orgs` — global admin sees all orgs; orgs the user is already in are disabled —
+  plus one org-scope role applied to every picked org, one membership call per org with
+  per-org failure reporting), Delete (confirm; destructive styling). Self row: admin
+  toggle and delete disabled with a tooltip.
 - 403 → existing friendly-message pattern (non-admins never see the tab anyway).
 
 ## Out of scope

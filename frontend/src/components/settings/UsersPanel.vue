@@ -113,36 +113,57 @@ async function removeUser(u: AdminUser) {
   }
 }
 
-// "Add to org" grants an org-scoped membership, so the role choices are the
+// "Add to org" grants org-scoped memberships, so the role choices are the
 // org-scope set (project_admin is granted from Members with a project scope).
 // The form renders as a panel above the table — a popover would be clipped by
-// the table's overflow container.
+// the table's overflow container. Several orgs can be picked at once (chips);
+// the grant is one membership call per org with the same role.
 const orgRoles: Role[] = ["viewer", "editor", "org_admin"];
 const addTarget = ref<AdminUser | null>(null);
-const add = reactive<{ org_id: string; role: Role }>({ org_id: "", role: "editor" });
+const add = reactive<{ orgIds: string[]; role: Role }>({ orgIds: [], role: "editor" });
 const adding = ref(false);
 function openAdd(u: AdminUser) {
   addTarget.value = u;
-  add.org_id = ws.orgs[0]?.id ?? "";
+  add.orgIds = [];
   add.role = "editor";
   actionError.value = "";
 }
+// Orgs where the user already holds an org-level grant — offered as disabled chips.
+const memberOrgIds = computed(() => {
+  const u = addTarget.value;
+  return new Set((u?.memberships ?? []).filter((m) => !m.project_id).map((m) => m.org_id));
+});
+const isMemberOrg = (id?: string) => !!id && memberOrgIds.value.has(id);
+const isPickedOrg = (id?: string) => !!id && add.orgIds.includes(id);
+function toggleOrg(id?: string) {
+  if (!id) return;
+  const i = add.orgIds.indexOf(id);
+  if (i >= 0) add.orgIds.splice(i, 1);
+  else add.orgIds.push(id);
+}
 async function submitAdd() {
   const u = addTarget.value;
-  if (!u || !add.org_id || adding.value) return;
+  if (!u || !add.orgIds.length || adding.value) return;
   adding.value = true;
   actionError.value = "";
+  const failed: string[] = [];
   try {
-    const res = await api.POST("/api/v1/organizations/{orgID}/members", {
-      params: { path: { orgID: add.org_id } },
-      body: { user_id: u.id, role: add.role },
-    });
-    if (res.error || !res.data) {
-      actionError.value = (res.error as { error?: string })?.error || "Could not add the user to the organization.";
-      return;
+    for (const orgID of add.orgIds) {
+      const res = await api.POST("/api/v1/organizations/{orgID}/members", {
+        params: { path: { orgID } },
+        body: { user_id: u.id, role: add.role },
+      });
+      if (res.error || !res.data) {
+        const o = ws.orgs.find((x) => x.id === orgID);
+        failed.push(o?.name || o?.slug || orgID);
+      }
     }
-    addTarget.value = null;
-    await load(); // refresh membership chips
+    if (failed.length) {
+      actionError.value = `Could not add the user to: ${failed.join(", ")}.`;
+    } else {
+      addTarget.value = null;
+    }
+    await load(); // refresh membership chips (partial success included)
   } finally {
     adding.value = false;
   }
@@ -170,24 +191,39 @@ onMounted(load);
 
     <!-- add-to-org panel (opened from a row action) -->
     <section v-if="addTarget && !error" class="mb-4 rounded border border-border bg-surface shadow-card">
-      <div class="grid grid-cols-[2fr_1fr_1fr_auto_auto] items-end gap-3 p-4 max-[900px]:grid-cols-1">
+      <div class="grid grid-cols-[1.4fr_2fr_1fr_auto_auto] items-end gap-3 p-4 max-[900px]:grid-cols-1">
         <div class="flex flex-col gap-[6px]">
-          <span class="text-[11.5px] font-semibold text-ink-2">Add to organization</span>
-          <span class="flex h-[38px] items-center rounded-sm border border-border bg-inset px-[11px] font-mono text-[13px] text-ink-2">{{ addTarget.email }}</span>
+          <span class="text-[11.5px] font-semibold text-ink-2">Add to organizations</span>
+          <span class="flex h-[38px] items-center truncate rounded-sm border border-border bg-inset px-[11px] font-mono text-[13px] text-ink-2">{{ addTarget.email }}</span>
         </div>
-        <label class="flex flex-col gap-[6px]">
-          <span class="text-[11.5px] font-semibold text-ink-2">Organization</span>
-          <select v-model="add.org_id" class="h-[38px] rounded-sm border border-border bg-surface-2 px-[11px] text-[13px] outline-none focus:border-accent focus:bg-surface">
-            <option v-for="o in ws.orgs" :key="o.id" :value="o.id">{{ o.name || o.slug }}</option>
-          </select>
-        </label>
+        <div class="flex flex-col gap-[6px]">
+          <span class="text-[11.5px] font-semibold text-ink-2">Organizations <span class="font-normal text-ink-3">— pick one or more</span></span>
+          <div class="flex min-h-[38px] flex-wrap items-center gap-[6px]">
+            <button
+              v-for="o in ws.orgs"
+              :key="o.id"
+              type="button"
+              class="inline-flex h-[30px] items-center gap-[6px] rounded-full border px-[11px] text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-45"
+              :class="isPickedOrg(o.id) ? 'border-accent bg-accent-weak font-medium text-accent' : 'border-border bg-surface-2 text-ink-2 hover:border-border-strong'"
+              :disabled="isMemberOrg(o.id)"
+              :title="isMemberOrg(o.id) ? 'Already a member of this organization' : ''"
+              @click="toggleOrg(o.id)"
+            >
+              <svg v-if="isPickedOrg(o.id)" viewBox="0 0 24 24" class="h-[12px] w-[12px]" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7" /></svg>
+              {{ o.name || o.slug }}
+            </button>
+            <span v-if="!ws.orgs.length" class="text-[12.5px] text-ink-3">No organizations yet.</span>
+          </div>
+        </div>
         <label class="flex flex-col gap-[6px]">
           <span class="text-[11.5px] font-semibold text-ink-2">Role</span>
           <select v-model="add.role" class="h-[38px] rounded-sm border border-border bg-surface-2 px-[11px] text-[13px] outline-none focus:border-accent focus:bg-surface">
             <option v-for="r in orgRoles" :key="r" :value="r">{{ r }}</option>
           </select>
         </label>
-        <button type="button" :disabled="!add.org_id || adding" class="inline-flex h-[38px] items-center rounded-sm bg-accent px-[15px] text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="submitAdd">{{ adding ? "Adding…" : "Add" }}</button>
+        <button type="button" :disabled="!add.orgIds.length || adding" class="inline-flex h-[38px] items-center rounded-sm bg-accent px-[15px] text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="submitAdd">
+          {{ adding ? "Adding…" : add.orgIds.length > 1 ? `Add to ${add.orgIds.length} orgs` : "Add" }}
+        </button>
         <button type="button" class="inline-flex h-[38px] items-center rounded-sm border border-border px-[13px] text-[13px] text-ink-2 hover:border-border-strong" @click="addTarget = null">Cancel</button>
       </div>
     </section>

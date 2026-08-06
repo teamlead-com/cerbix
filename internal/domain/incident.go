@@ -92,9 +92,13 @@ type Incident struct {
 	AcknowledgedAt *time.Time     `json:"acknowledged_at,omitempty"` // set when someone takes ownership; stops escalation
 	AcknowledgedBy string         `json:"acknowledged_by,omitempty"`
 	// AcknowledgedByName resolves the actor for display (detail endpoint only).
-	AcknowledgedByName string    `json:"acknowledged_by_name,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	AcknowledgedByName string `json:"acknowledged_by_name,omitempty"`
+	// EscalationStep / LastEscalatedAt expose how far the escalation engine has
+	// walked the policy — what an on-call responder weighs before acknowledging.
+	EscalationStep  int        `json:"escalation_step,omitempty"`
+	LastEscalatedAt *time.Time `json:"last_escalated_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // Validate enforces incident invariants (domain-owned).

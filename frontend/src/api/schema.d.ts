@@ -5036,6 +5036,10 @@ export interface components {
             acknowledged_by?: string;
             /** @description Resolved actor (detail endpoint only). */
             acknowledged_by_name?: string;
+            /** @description How many escalation steps have fired (0 = none yet). */
+            escalation_step?: number;
+            /** Format: date-time */
+            last_escalated_at?: string | null;
             /** Format: date-time */
             created_at?: string;
             /** Format: date-time */

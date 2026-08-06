@@ -11,7 +11,7 @@ import (
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
-const incidentColumns = "id, project_id, monitor_id, title, status, impact, source, external_key, started_at, resolved_at, acknowledged_at, acknowledged_by, created_at, updated_at"
+const incidentColumns = "id, project_id, monitor_id, title, status, impact, source, external_key, started_at, resolved_at, acknowledged_at, acknowledged_by, escalation_step, last_escalated_at, created_at, updated_at"
 
 func scanIncident(row pgx.Row) (domain.Incident, error) {
 	var (
@@ -21,11 +21,14 @@ func scanIncident(row pgx.Row) (domain.Incident, error) {
 		resolved    *time.Time
 		ackedAt     *time.Time
 		ackedBy     *string
+		lastEsc     *time.Time
 	)
 	if err := row.Scan(&inc.ID, &inc.ProjectID, &monitorID, &inc.Title, &inc.Status, &inc.Impact,
-		&inc.Source, &externalKey, &inc.StartedAt, &resolved, &ackedAt, &ackedBy, &inc.CreatedAt, &inc.UpdatedAt); err != nil {
+		&inc.Source, &externalKey, &inc.StartedAt, &resolved, &ackedAt, &ackedBy,
+		&inc.EscalationStep, &lastEsc, &inc.CreatedAt, &inc.UpdatedAt); err != nil {
 		return domain.Incident{}, err
 	}
+	inc.LastEscalatedAt = lastEsc
 	if monitorID != nil {
 		inc.MonitorID = *monitorID
 	}

@@ -2162,3 +2162,8 @@ endpoint for internal (session-gated), token-carrying public URL for unlisted.
 A hard 30-row cut with no affordance is indistinguishable from "that's all there is". The list now
 steps 30 → 100 → 500 via an explicit Show-more; 500 is the backend cap, so deeper forensics stays
 a DB query by design.
+
+## D-0120 — Escalation progress is visible where it matters (iter-0058)
+The columns existed since 00035; only the read path was missing. The incident now carries
+step/last-escalated, and the detail header shows the pill exactly in the window where it informs a
+decision (open + unacknowledged + step>0).

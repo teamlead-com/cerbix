@@ -157,6 +157,11 @@ onMounted(() => {
           <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="statusBadge(incident.status).cls">{{ statusBadge(incident.status).label }}</span>
           <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="impactBadge(incident.impact).cls">{{ impactBadge(incident.impact).label }}</span>
           <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ incident.source }}</span>
+          <span
+            v-if="(incident.escalation_step ?? 0) > 0 && !incident.acknowledged_at && incident.status !== 'resolved'"
+            class="rounded-full bg-degraded-weak px-[9px] py-[2px] text-[11.5px] font-medium text-degraded"
+            :title="'The escalation engine has notified ' + incident.escalation_step + ' step(s) of the policy'"
+          >⛑ escalated to step {{ incident.escalation_step }}<template v-if="incident.last_escalated_at"> · {{ relTime(incident.last_escalated_at) }}</template></span>
         </div>
         <div class="mt-[7px] flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-ink-3">
           <span>started <span class="font-mono text-ink-2">{{ relTime(incident.started_at) }}</span></span>

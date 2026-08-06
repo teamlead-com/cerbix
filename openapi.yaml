@@ -2299,6 +2299,8 @@ components:
         acknowledged_at: { type: string, format: date-time, nullable: true, description: 'Set when acknowledged; stops on-call escalation.' }
         acknowledged_by: { type: string }
         acknowledged_by_name: { type: string, description: 'Resolved actor (detail endpoint only).' }
+        escalation_step: { type: integer, description: 'How many escalation steps have fired (0 = none yet).' }
+        last_escalated_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     EscalationTarget:

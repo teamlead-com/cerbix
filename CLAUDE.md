@@ -33,6 +33,19 @@ docker run --rm -v "$PWD":/app -w /app node:22-alpine sh -c "npm run build"   # 
 docker run --rm -v "$PWD":/app -v "$PWD/../openapi.yaml":/openapi.yaml -w /app node:22-alpine npm run gen:api
 ```
 
+### E2E (from repo root) — Playwright in docker, against a LIVE stack
+
+```bash
+# Stack must be up first (single profile; + sso for the OIDC spec):
+./e2e/run.sh                          # full suite (~12s, 23 tests)
+./e2e/run.sh tests/monitors.spec.ts   # one spec
+CERBIX_URL=http://host:8080 ./e2e/run.sh
+```
+
+The suite signs in ONCE (local logins are rate-limited — never add per-test logins;
+reuse the stored session, and never call `/auth/logout` from a spec that shares it).
+Tests create `e2e-`prefixed entities and clean them up — dev stacks only.
+
 ### Image & stacks (from repo root)
 
 ```bash

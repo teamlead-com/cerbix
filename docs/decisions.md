@@ -2188,3 +2188,12 @@ et al. enforce MFA natively), and a second, application-level TOTP on top of SSO
 duplication. The scope is now written down (domain doc + the Settings hint) instead of implied,
 and the previously unhandled totp_setup_required lockout finally tells the user their options.
 This closes func-audit-gaps-2 (D-0117…D-0123).
+
+## D-0124 — A committed E2E suite replaces ad-hoc scripts (iter-0062)
+Every iteration was E2E-verified with throwaway Playwright scripts; the knowledge kept evaporating.
+`e2e/` makes it durable: dockerized Playwright against a live stack, one shared authenticated
+session (local logins are rate-limited — per-test logins are the primary flake source, and
+`/auth/logout` from a shared-session spec kills the whole run), self-cleaning `e2e-`prefixed data,
+23 tests over auth/monitors/incidents/escalation/settings/admin/status-pages/OIDC. Deliberately
+not wired into CI: the suite needs a live stack and the CI policy is build-only (D-0087-era);
+`./e2e/run.sh` is the local/pre-release gate.

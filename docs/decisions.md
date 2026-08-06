@@ -2152,3 +2152,8 @@ needing RabbitMQ — it is broker-less by definition; an inline command that exi
 --region/dsn notes; mail key notation), the scheme-vs-port management-URL comment, the dead
 OIDCSettings.UpdatedAt scan, and explicit test-support labels on the four caller-less store
 functions so they stop tripping audits.
+
+## D-0118 — Feed links follow the page's visibility (iter-0056)
+Fixing the preview in D-0114 but not the feed links left half the job: RSS/Atom/JSON still 404'd
+for internal/unlisted pages. Both link builders now mirror the preview logic — authed feed
+endpoint for internal (session-gated), token-carrying public URL for unlisted.

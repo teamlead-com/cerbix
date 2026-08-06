@@ -210,6 +210,16 @@ async function removePage() {
   }
 }
 
+// Feed link that actually opens, mirroring publicPath: unlisted carries its
+// token, internal uses the authed feed endpoint (members only).
+function feedHref(fmt: string): string {
+  const p = selected.value;
+  if (!p) return "";
+  if (p.visibility === "internal") return `/api/v1/status-pages/${p.id}/feed?format=${fmt}`;
+  const tok = p.visibility === "unlisted" && p.unlisted_token ? `&token=${p.unlisted_token}` : "";
+  return `/api/v1/public/status-pages/${p.slug}/feed?format=${fmt}${tok}`;
+}
+
 // Preview path that actually opens: unlisted carries its token, internal falls
 // back to the authed render endpoint via ?preview=<pageID> (members only).
 const publicPath = computed(() => {
@@ -330,9 +340,9 @@ watch(() => ws.orgId, loadPages);
 
             <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12.5px]">
               <RouterLink :to="publicPath" class="text-accent hover:underline">View public page ↗</RouterLink>
-              <a :href="`/api/v1/public/status-pages/${selected.slug}/feed?format=rss`" class="font-mono text-ink-3 hover:text-accent">rss</a>
-              <a :href="`/api/v1/public/status-pages/${selected.slug}/feed?format=atom`" class="font-mono text-ink-3 hover:text-accent">atom</a>
-              <a :href="`/api/v1/public/status-pages/${selected.slug}/feed?format=json`" class="font-mono text-ink-3 hover:text-accent">json</a>
+              <a :href="feedHref('rss')" class="font-mono text-ink-3 hover:text-accent">rss</a>
+              <a :href="feedHref('atom')" class="font-mono text-ink-3 hover:text-accent">atom</a>
+              <a :href="feedHref('json')" class="font-mono text-ink-3 hover:text-accent">json</a>
             </div>
             <p v-if="selected.unlisted_token" class="mt-2 font-mono text-[11.5px] text-ink-3">unlisted token: {{ selected.unlisted_token }}</p>
           </div>

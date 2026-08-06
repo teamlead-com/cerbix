@@ -54,7 +54,11 @@ async function load() {
 function pct(n?: number | null) {
   return n === null || n === undefined ? null : `${n.toFixed(2)}%`;
 }
-const feed = (fmt: string) => `/api/v1/public/status-pages/${slug}/feed?format=${fmt}${token ? "&token=" + token : ""}`;
+// In internal-preview mode the public feed 404s — use the authed feed endpoint.
+const feed = (fmt: string) =>
+  internalPreview.value && previewID
+    ? `/api/v1/status-pages/${previewID}/feed?format=${fmt}`
+    : `/api/v1/public/status-pages/${slug}/feed?format=${fmt}${token ? "&token=" + token : ""}`;
 
 // Banner sub-line derived from the page summary (no dedicated backend copy field).
 const summarySub = computed(() => {

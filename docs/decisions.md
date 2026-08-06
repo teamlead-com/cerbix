@@ -2061,3 +2061,13 @@ NOT public — version disclosure on an unauthenticated endpoint is a fingerprin
 release workflows), and the SPA sidebar footer shows `cerbix <version>` with the commit in the
 tooltip. Fetched once per session (cached in the session store). Dev builds honestly show `dev`;
 tagged images get the real tag/sha from the GHCR workflow build-args.
+
+## D-0106 — Audit-gap package: fix the config docs first (iter-0044)
+The 2026-08 audit found zero dead config fields but real documentation drift, and with the strict
+loader (`KnownFields(true)`) drift is not cosmetic: `oidc.admin_emails` from docs/overview.md does
+not decode (real key: `bootstrap_admin_emails`), and `admin_email/password` were filed under
+`local:` while living under `security:` — both copy-paste paths ended in a startup failure. Fixed
+the table, added the missing `pull` section row and `local.login_rate_limit_per_minute` to
+config.example.yaml (the only undocumented working key), and repaired the runnable worker command
+(missing `serve`, missing `agent` in the role list). The package plan lives in
+specs/func-audit-gaps.md; iterations run easiest → hardest.

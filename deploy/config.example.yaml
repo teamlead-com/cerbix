@@ -44,6 +44,8 @@ oidc:
 local:
   enabled: false
   min_password_length: 8
+  # Failed sign-in / password-reset attempts allowed per client IP per minute.
+  login_rate_limit_per_minute: 10
 
 # Server-side session cookie settings.
 session:

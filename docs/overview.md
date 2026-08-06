@@ -19,7 +19,7 @@ A single binary; behavior is selected by subcommand and flags.
 
 | Command | Purpose | Flags |
 |---|---|---|
-| `cerbix serve` | Start the operational server in the selected role. | `--config <path>` (required), `--role all\|api\|scheduler\|worker` (default `all`) |
+| `cerbix serve` | Start the operational server in the selected role. | `--config <path>` (required), `--role all\|api\|scheduler\|worker\|agent` (default `all`) |
 | `cerbix migrate` | Apply DB migrations (goose, embedded) and exit. | `--config <path>` (required; needs `database.dsn`) |
 | `cerbix reencrypt` | Re-encrypt all at-rest secrets under the current primary key (after key rotation). | `--config <path>` (required; needs `security.encryption_key`) |
 | `cerbix version` | Print build info (version, commit) as JSON and exit. | — |
@@ -56,14 +56,15 @@ Top-level `Config` sections (`internal/config`):
 | `server` | `listen`, `healthz_path`, `readyz_path`, `metrics_path` | Address and paths of the operational endpoints. |
 | `log` | `level`, `format` | `log/slog`, JSON. |
 | `database` | `dsn` | Postgres (pgx). Empty → scaffold mode without a DB. |
-| `rabbitmq` | `url` | AMQP for distributed roles. |
-| `oidc` | `issuer`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `button_label`, `admin_emails` | Bootstrap OIDC (overridable from the UI, see instance-settings). |
-| `local` | `enabled`, `admin_email/password`, `min_password_length`, `login_rate_limit_per_minute` | Local login (password + TOTP), brute-force limit. |
+| `rabbitmq` | `url`, `management_url` | AMQP for distributed roles (+ management API for worker-liveness alerts). |
+| `oidc` | `issuer`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `button_label`, `post_logout_redirect_url`, `bootstrap_admin_emails` | Bootstrap OIDC (overridable from the UI, see instance-settings). |
+| `local` | `enabled`, `min_password_length`, `login_rate_limit_per_minute` | Local login (password + TOTP), brute-force limit. |
 | `session` | `cookie_name`, `ttl`, `secure` | Server-side sessions (cookie). |
 | `prober` | `allow_private_ips`, `allow_metadata_ips` | SSRF guard: what workers are allowed to resolve. |
 | `heartbeats` | `retention_days` | Retention period for raw heartbeats (partitions are dropped by the leader). |
-| `security` | `encryption_key`, `previous_keys` | AES-256-GCM keyring for at-rest secrets + rotation. |
+| `security` | `encryption_key`, `previous_keys`, `admin_email`, `admin_password` | AES-256-GCM keyring for at-rest secrets + rotation; global-admin bootstrap on an empty system. |
 | `mail` | `smtp_host/port/username/password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). |
+| `pull` | `regions`, `token`, `agents`, `server_url` | HTTP-pull transport: broker-less regions (server side) and agent credentials (agent side). |
 
 Many settings (OIDC, branding, auth-policy, alerting, monitor-defaults, mail), once first
 saved in the UI, live in the DB (singleton `instance_settings` / `oidc_settings`) and **override**
@@ -294,7 +295,7 @@ to check internal targets of the "far" geo **from inside** it, without deploying
 of its region. RabbitMQ is **one, central**; only the **`worker`** role (DB-less) is distributed.
 
 ```bash
-cerbix --role worker --region geo1 --config worker.geo1.yaml     # in geo-1, prober only
+cerbix serve --role worker --region geo1 --config worker.geo1.yaml     # in geo-1, prober only
 ```
 
 Minimal worker config (DB-less; everything else — defaults):

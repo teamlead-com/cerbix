@@ -38,12 +38,17 @@ CERBIX_ADMIN_PASSWORD=<strong password>
 ### 2. Start
 
 ```bash
-docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d --build
+docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d
 ```
 
-This builds the image (SPA + binary, distroless) and starts `postgres`, `rabbitmq`, and
+This pulls `ghcr.io/teamlead-com/cerbix` (SPA + binary in one distroless image; pin a
+version via `CERBIX_IMAGE` in `deploy/.env`) and starts `postgres`, `rabbitmq`, and
 `cerbix` (`--role all`). Migrations apply automatically; the admin account is created on
 the first start against an empty database.
+
+> While the repository is private, pulling needs `docker login ghcr.io` with a PAT
+> (`read:packages`). Alternatively build the image from source:
+> `docker build -t ghcr.io/teamlead-com/cerbix:latest .` at the repo root.
 
 Verify:
 
@@ -67,8 +72,9 @@ these live in the database and override the config file from then on.
 ### Upgrading
 
 ```bash
-git pull
-docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d --build
+# bump CERBIX_IMAGE in deploy/.env to the new tag, then:
+docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml pull cerbix
+docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d
 ```
 
 New migrations apply on startup. Data lives in the named volumes `pgdata` and

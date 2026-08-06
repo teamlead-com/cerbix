@@ -1,7 +1,7 @@
 # cerbix production stack — single-process (--role all) + Postgres + RabbitMQ.
 #
 #   cp deploy/.env.prod.example deploy/.env      # then fill in secrets
-#   docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d --build
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d
 #
 # Hardened for prod: secrets come from .env (never committed), containers restart
 # unless-stopped, memory is capped, and only the API port is published — bound to
@@ -70,10 +70,10 @@ services:
           memory: 512m
 
   cerbix:
-    image: ${CERBIX_IMAGE:-cerbix:latest}
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    # Published by .github/workflows/image.yml on v* tags. Pin a version via
+    # CERBIX_IMAGE in .env (e.g. ghcr.io/teamlead-com/cerbix:v0.1.0); while the
+    # repository is private, `docker login ghcr.io` with a PAT is required to pull.
+    image: ${CERBIX_IMAGE:-ghcr.io/teamlead-com/cerbix:latest}
     restart: unless-stopped
     <<: [*netCaps, *logging]
     command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "all"]

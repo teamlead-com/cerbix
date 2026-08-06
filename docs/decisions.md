@@ -2071,3 +2071,11 @@ the table, added the missing `pull` section row and `local.login_rate_limit_per_
 config.example.yaml (the only undocumented working key), and repaired the runnable worker command
 (missing `serve`, missing `agent` in the role list). The package plan lives in
 specs/func-audit-gaps.md; iterations run easiest → hardest.
+
+## D-0107 — Auth housekeeping joins the leader maintenance tick (iter-0045)
+The audit found two unbounded tables: expired `sessions` rows and abandoned `auth_flows` were
+never deleted — the purge functions existed, were tested, and had no caller. They now run in the
+scheduler leader's hourly maintenance tick next to partition/retention/pull-queue housekeeping
+(warn-on-error: maintenance is never fatal to scheduling). Also dropped `ListMembershipsByOrg`
+from the api Store interface — zero callers since `ListOrgMembers` took over; the store method
+itself stays for tests.

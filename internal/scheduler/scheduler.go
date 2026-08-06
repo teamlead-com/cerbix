@@ -34,6 +34,8 @@ type Store interface {
 	PurgeExpiredPullJobs(ctx context.Context) (int, error)
 	PurgeExpiredPullTests(ctx context.Context) (int, error)
 	PurgeStaleAgentHeartbeats(ctx context.Context, olderThan time.Duration) (int, error)
+	DeleteExpiredSessions(ctx context.Context) (int64, error)
+	DeleteExpiredAuthFlows(ctx context.Context) (int64, error)
 	PullQueueStats(ctx context.Context) ([]metrics.PullStat, error)
 }
 
@@ -478,6 +480,18 @@ func (s *Scheduler) maintainPartitions(ctx context.Context, now time.Time) {
 		s.logger.Warn("purge_agent_heartbeats_failed", "error", err.Error())
 	} else if purged > 0 {
 		s.logger.Info("agent_heartbeats_purged", "count", purged)
+	}
+	// Auth housekeeping: expired session rows and abandoned OIDC login flows
+	// otherwise accumulate forever.
+	if purged, err := s.store.DeleteExpiredSessions(ctx); err != nil {
+		s.logger.Warn("purge_sessions_failed", "error", err.Error())
+	} else if purged > 0 {
+		s.logger.Info("expired_sessions_purged", "count", purged)
+	}
+	if purged, err := s.store.DeleteExpiredAuthFlows(ctx); err != nil {
+		s.logger.Warn("purge_auth_flows_failed", "error", err.Error())
+	} else if purged > 0 {
+		s.logger.Info("expired_auth_flows_purged", "count", purged)
 	}
 }
 

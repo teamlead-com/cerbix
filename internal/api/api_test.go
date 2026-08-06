@@ -168,9 +168,6 @@ func (f *fakeStore) CreateMembership(_ context.Context, m domain.Membership) (do
 	m.ID = "m-new"
 	return m, nil
 }
-func (f *fakeStore) ListMembershipsByOrg(_ context.Context, orgID string) ([]domain.Membership, error) {
-	return f.members[orgID], nil
-}
 func (f *fakeStore) ListOrgMembers(_ context.Context, orgID string) ([]domain.Member, error) {
 	var out []domain.Member
 	for _, m := range f.members[orgID] {

@@ -30,7 +30,6 @@ type Store interface {
 	GetProject(ctx context.Context, id string) (domain.Project, error)
 	ListProjectsForUser(ctx context.Context, userID string) ([]domain.Project, error)
 	CreateMembership(ctx context.Context, m domain.Membership) (domain.Membership, error)
-	ListMembershipsByOrg(ctx context.Context, orgID string) ([]domain.Membership, error)
 	ListOrgMembers(ctx context.Context, orgID string) ([]domain.Member, error)
 	GetMembership(ctx context.Context, id string) (domain.Membership, error)
 	UpdateMembershipRole(ctx context.Context, id string, role domain.Role) (domain.Membership, error)

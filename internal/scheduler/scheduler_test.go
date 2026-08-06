@@ -15,12 +15,14 @@ import (
 )
 
 type fakeStore struct {
-	monitors  []domain.Monitor
-	stalePush []domain.Monitor
-	leader    bool
-	elections int32
-	ensured   int32
-	purged    int32
+	monitors      []domain.Monitor
+	stalePush     []domain.Monitor
+	leader        bool
+	elections     int32
+	ensured       int32
+	purged        int32
+	sessionPurges int32
+	flowPurges    int32
 }
 
 func (f *fakeStore) ListEnabledMonitors(context.Context) ([]domain.Monitor, error) {
@@ -62,6 +64,14 @@ func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error {
 func (f *fakeStore) PurgeExpiredPullJobs(context.Context) (int, error)         { return 0, nil }
 func (f *fakeStore) PurgeExpiredPullTests(context.Context) (int, error)        { return 0, nil }
 func (f *fakeStore) PurgeStaleAgentHeartbeats(context.Context, time.Duration) (int, error) {
+	return 0, nil
+}
+func (f *fakeStore) DeleteExpiredSessions(context.Context) (int64, error) {
+	atomic.AddInt32(&f.sessionPurges, 1)
+	return 0, nil
+}
+func (f *fakeStore) DeleteExpiredAuthFlows(context.Context) (int64, error) {
+	atomic.AddInt32(&f.flowPurges, 1)
 	return 0, nil
 }
 func (f *fakeStore) PullQueueStats(context.Context) ([]metrics.PullStat, error) {
@@ -107,13 +117,15 @@ func TestSchedulerLeaderMaintainsPartitions(t *testing.T) {
 
 	deadline := time.After(3 * time.Second)
 	for {
-		if atomic.LoadInt32(&fs.ensured) >= 1 && atomic.LoadInt32(&fs.purged) >= 1 {
-			return // leader ran partition maintenance + retention on becoming leader
+		if atomic.LoadInt32(&fs.ensured) >= 1 && atomic.LoadInt32(&fs.purged) >= 1 &&
+			atomic.LoadInt32(&fs.sessionPurges) >= 1 && atomic.LoadInt32(&fs.flowPurges) >= 1 {
+			return // leader ran partition maintenance + retention + auth housekeeping
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("leader did not run partition maintenance: ensured=%d purged=%d",
-				atomic.LoadInt32(&fs.ensured), atomic.LoadInt32(&fs.purged))
+			t.Fatalf("leader did not run maintenance: ensured=%d purged=%d sessions=%d flows=%d",
+				atomic.LoadInt32(&fs.ensured), atomic.LoadInt32(&fs.purged),
+				atomic.LoadInt32(&fs.sessionPurges), atomic.LoadInt32(&fs.flowPurges))
 		case <-time.After(20 * time.Millisecond):
 		}
 	}

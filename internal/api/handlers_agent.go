@@ -286,6 +286,7 @@ func (h *Handler) createAgentToken(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "create_agent_token", err)
 		return
 	}
+	h.logEvent(r, "agent_token_issued", "token_id", created.ID, "name", created.Name, "region", created.Region)
 	// The secret is shown only here — configure it as the agent's pull.token.
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": created.ID, "name": created.Name, "region": created.Region, "token": plaintext,

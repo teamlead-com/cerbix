@@ -2212,3 +2212,11 @@ The scheduler-snapshot design (D-era refresh ≤15s) means results can always ar
 monitor's deletion; that is a benign race, not a failure. The store now names it (FK 23503 on the
 monitor FK → ErrNotFound) and ingest logs one INFO instead of ERROR-per-probe. The FK also loses
 its heartbeats_new_ prefix (00043 swap leftover) via guarded migration 00048.
+
+## D-0127 — The log tells the story, not just the failures (iter-0068/0069)
+An operator could not reconstruct events from cerbix logs: no requests, no actors, no
+transitions. Added an access-log middleware (API/auth at INFO, static at DEBUG, SSE excluded),
+principal-stamped lifecycle events for every mutation (logEvent helper — the operator-side twin
+of the audit trail), monitor_status_changed at the ingest transition, outbox_delivered on
+success, and context.Canceled demoted out of the ERROR stream. log.level stays the single knob;
+request IDs/tracing remain a future OTEL story.

@@ -288,6 +288,7 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	h.logEvent(r, "monitor_created", "monitor_id", created.ID, "name", created.Name, "type", string(created.Type), "project_id", created.ProjectID)
 	writeJSON(w, http.StatusCreated, created.Redacted())
 }
 
@@ -462,6 +463,7 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "update_monitor", err)
 		return
 	}
+	h.logEvent(r, "monitor_updated", "monitor_id", updated.ID, "name", updated.Name, "enabled", updated.Enabled, "project_id", updated.ProjectID)
 	writeJSON(w, http.StatusOK, updated.Redacted())
 }
 
@@ -474,6 +476,7 @@ func (h *Handler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "delete_monitor", err)
 		return
 	}
+	h.logEvent(r, "monitor_deleted", "monitor_id", mon.ID, "name", mon.Name, "project_id", mon.ProjectID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

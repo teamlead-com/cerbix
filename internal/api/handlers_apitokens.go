@@ -112,6 +112,7 @@ func (h *Handler) createApiToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, orgID, "token.create", string(created.Role)+" · "+created.Name)
+	h.logEvent(r, "api_token_issued", "token_id", created.ID, "name", created.Name, "org_id", orgID)
 	// The only response that ever carries the secret.
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"token":     plaintext,
@@ -144,6 +145,7 @@ func (h *Handler) deleteApiToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, tok.OrgID, "token.delete", tok.Name)
+	h.logEvent(r, "api_token_revoked", "token_id", tok.ID, "name", tok.Name, "org_id", tok.OrgID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

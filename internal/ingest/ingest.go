@@ -96,6 +96,7 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 	if err != nil {
 		c.logger.Error("record_check_status_failed", "monitor_id", hb.MonitorID, "error", err.Error())
 	} else if prev != cur {
+		c.logger.Info("monitor_status_changed", "monitor_id", hb.MonitorID, "prev", string(prev), "cur", string(cur), "suppressed", suppressed)
 		c.reconcileTransition(ctx, hb, prev, cur, suppressed)
 	}
 	if c.recorder != nil {

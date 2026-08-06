@@ -507,7 +507,8 @@ func runServe(args []string) int {
 			return 1
 		}
 		appMux.Handle("/", spa) // catch-all: serve the embedded SPA
-		app = appMux
+		// Access log around the whole app: API/auth at INFO, static at DEBUG.
+		app = logging.AccessLog(logger, appMux)
 		logger.Info("auth_enabled", "oidc_active", authn.OIDCActive(), "local", cfg.Local.Enabled)
 	}
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -355,6 +356,7 @@ func (h *Handler) addMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, orgID, "member.add", string(created.Role)+" · user "+created.UserID)
+	h.logEvent(r, "member_added", "org_id", orgID, "target_user_id", created.UserID, "role", string(created.Role))
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -412,7 +414,21 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
+// logEvent records an operational INFO event stamped with the acting principal
+// — the log-side counterpart of the tenant-facing audit trail.
+func (h *Handler) logEvent(r *http.Request, msg string, kv ...any) {
+	p, _ := h.principal(r)
+	h.logger.Info(msg, append([]any{"user_id", p.UserID}, kv...)...)
+}
+
 func (h *Handler) serverError(w http.ResponseWriter, op string, err error) {
+	// A client abandoning the request (page closed mid-load) is not a server
+	// failure — keep it out of the ERROR stream.
+	if errors.Is(err, context.Canceled) {
+		h.logger.Debug("request_canceled", "op", op)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	h.logger.Error("api_error", "op", op, "error", err.Error())
 	writeError(w, http.StatusInternalServerError, "internal error")
 }

@@ -99,6 +99,7 @@ func (h *Handler) createIncident(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "create_incident", err)
 		return
 	}
+	h.logEvent(r, "incident_opened", "incident_id", created.ID, "title", created.Title, "impact", string(created.Impact), "source", string(created.Source), "project_id", created.ProjectID)
 	if h.metrics != nil {
 		h.metrics.RecordIncidentOpened()
 	}
@@ -176,6 +177,7 @@ func (h *Handler) addIncidentUpdate(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "add_incident_update", err)
 		return
 	}
+	h.logEvent(r, "incident_update_posted", "incident_id", upd.IncidentID, "status", string(created.Status))
 	// The lifecycle event (updated/resolved) is enqueued transactionally by
 	// AddIncidentUpdate; the outbox worker delivers it.
 	writeJSON(w, http.StatusCreated, created)

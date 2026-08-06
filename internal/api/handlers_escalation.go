@@ -300,6 +300,9 @@ func (h *Handler) acknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _ := h.principal(r)
 	acked, err := h.store.AcknowledgeIncident(r.Context(), inc.ID, p.UserID)
+	if err == nil {
+		h.logEvent(r, "incident_acknowledged", "incident_id", inc.ID)
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusConflict, "incident is already resolved")
 		return

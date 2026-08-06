@@ -41,6 +41,7 @@ func (h *Handler) putBranding(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "save_branding", err)
 		return
 	}
+	h.logEvent(r, "settings_saved", "group", "branding")
 	writeJSON(w, http.StatusOK, h.settings.Branding())
 }
 
@@ -88,6 +89,7 @@ func (h *Handler) putAuthPolicy(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "save_auth_policy", err)
 		return
 	}
+	h.logEvent(r, "settings_saved", "group", "auth_policy")
 	writeJSON(w, http.StatusOK, h.settings.AuthPolicy())
 }
 
@@ -116,6 +118,7 @@ func (h *Handler) putAlerting(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "save_alerting", err)
 		return
 	}
+	h.logEvent(r, "settings_saved", "group", "alerting")
 	writeJSON(w, http.StatusOK, h.settings.Alerting())
 }
 
@@ -144,6 +147,7 @@ func (h *Handler) putMonitorDefaults(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "save_monitor_defaults", err)
 		return
 	}
+	h.logEvent(r, "settings_saved", "group", "monitor_defaults")
 	writeJSON(w, http.StatusOK, h.settings.MonitorDefaults())
 }
 
@@ -215,5 +219,6 @@ func (h *Handler) putMail(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "save_mail", err)
 		return
 	}
+	h.logEvent(r, "settings_saved", "group", "mail")
 	writeJSON(w, http.StatusOK, mailView(h.settings.Mail()))
 }

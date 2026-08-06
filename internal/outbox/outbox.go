@@ -142,6 +142,7 @@ func (w *Worker) process(ctx context.Context, e domain.OutboxEvent) {
 		if w.metrics != nil {
 			w.metrics.RecordOutboxDelivered()
 		}
+		w.logger.Info("outbox_delivered", "id", e.ID, "topic", e.Topic, "attempt", e.Attempts+1)
 		return
 	}
 	if ferr := w.store.FailOutbox(ctx, e.ID, err.Error(), maxAttempts); ferr != nil {

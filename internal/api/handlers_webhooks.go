@@ -137,6 +137,7 @@ func (h *Handler) updateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, hook.OrgID, "webhook.toggle", hook.URL+" → enabled="+strconv.FormatBool(*body.Enabled))
+	h.logEvent(r, "webhook_toggled", "webhook_id", hook.ID, "enabled", *body.Enabled, "org_id", hook.OrgID)
 	hook.Enabled = *body.Enabled
 	hook.Secret = ""
 	writeJSON(w, http.StatusOK, hook)

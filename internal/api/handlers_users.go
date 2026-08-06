@@ -75,6 +75,7 @@ func (h *Handler) updateAdminUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "", "user.global_admin", fmt.Sprintf("%s · user %s → %v", u.Email, userID, *body.IsGlobalAdmin))
+	h.logEvent(r, "user_global_admin_changed", "target_user_id", userID, "email", u.Email, "is_global_admin", *body.IsGlobalAdmin)
 	u.IsGlobalAdmin = *body.IsGlobalAdmin
 	writeJSON(w, http.StatusOK, u)
 }
@@ -121,5 +122,6 @@ func (h *Handler) deleteAdminUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "", "user.delete", u.Email+" · user "+userID)
+	h.logEvent(r, "user_deleted", "target_user_id", userID, "email", u.Email)
 	w.WriteHeader(http.StatusNoContent)
 }

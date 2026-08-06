@@ -31,6 +31,7 @@ export const useBranding = defineStore("branding", {
   state: () => ({
     productName: "cerbix",
     accentColor: "",
+    logoUrl: "",
     footerText: "",
     supportUrl: "",
     announcement: { enabled: false, text: "", level: "info" } as Announcement,
@@ -43,6 +44,7 @@ export const useBranding = defineStore("branding", {
         const b = (res.data ?? {}) as PublicBranding;
         this.productName = b.product_name?.trim() || "cerbix";
         this.accentColor = b.accent_color || "";
+        this.logoUrl = b.logo_url || "";
         this.footerText = b.footer_text || "";
         this.supportUrl = b.support_url || "";
         this.announcement = b.announcement ?? { enabled: false, text: "", level: "info" };

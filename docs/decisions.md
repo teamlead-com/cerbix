@@ -2099,3 +2099,10 @@ in the list handlers). Two dead store states got their consumers: `live.connecte
 header "reconnecting" chip (with a new `started` flag so unsubscribed pages stay quiet) and
 `workspace.loading` drives an org-switcher skeleton. Enrichment is handler-level and best-effort —
 deleted users resolve to nothing rather than failing the request.
+
+## D-0110 — Branding logo becomes real (iter-0048)
+`logo_url` was the worst of the dead-settings class: settable only via curl, publicly served,
+rendered nowhere. It now has a form input and three consumers — sidebar, sign-in card, public
+status-page header — each with the existing accent glyph as the empty-value fallback, so default
+installs look exactly as before. The sign-in card also stops hardcoding "cerbix" and uses the
+branding product name.

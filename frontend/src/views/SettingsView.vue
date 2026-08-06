@@ -972,6 +972,9 @@ watch(tab, loadActive);
                 <span class="h-[26px] w-[26px] rounded-sm border border-border" :style="{ background: /^#[0-9a-fA-F]{6}$/.test(brand.form.accent_color) ? brand.form.accent_color : 'transparent' }"></span>
               </div></label>
           </div>
+          <label class="flex flex-col gap-[6px]"><span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Logo URL</span>
+            <input v-model="brand.form.logo_url" type="text" placeholder="https://cdn.example.com/mark.svg" class="rounded-sm border border-border bg-surface-2 px-3 py-2 font-mono text-[12.5px] outline-none focus:border-accent" />
+            <span class="text-[11.5px] font-normal normal-case tracking-normal text-ink-3">Square image (SVG/PNG) — shown in the sidebar, on the sign-in page and on public status pages. Empty keeps the default mark.</span></label>
           <label class="flex flex-col gap-[6px]"><span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Support URL</span>
             <input v-model="brand.form.support_url" type="text" placeholder="https://…" class="rounded-sm border border-border bg-surface-2 px-3 py-2 font-mono text-[12.5px] outline-none focus:border-accent" /></label>
           <label class="flex flex-col gap-[6px]"><span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Footer text</span>

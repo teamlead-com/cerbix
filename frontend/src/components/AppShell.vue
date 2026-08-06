@@ -90,7 +90,8 @@ const settingsIcon: Shape[] = [
   <div class="grid min-h-screen grid-cols-[240px_1fr] max-[900px]:grid-cols-1">
     <aside class="sticky top-0 flex h-screen flex-col gap-1 border-r border-border bg-surface p-3 max-[900px]:hidden">
       <div class="flex items-center gap-[9px] px-2 pb-3 pt-[6px]">
-        <span class="grid h-[26px] w-[26px] place-items-center rounded-sm bg-accent text-accent-ink">
+        <img v-if="branding.logoUrl" :src="branding.logoUrl" alt="" class="h-[26px] w-[26px] rounded-sm object-contain" />
+        <span v-else class="grid h-[26px] w-[26px] place-items-center rounded-sm bg-accent text-accent-ink">
           <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" /><path d="M8.5 12l2 2 4.5-4.5" />
           </svg>

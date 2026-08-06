@@ -202,7 +202,8 @@ onMounted(async () => {
     <!-- sticky public header -->
     <header class="sticky top-0 z-10 border-b border-border bg-surface/80 backdrop-blur">
       <div class="mx-auto flex h-[60px] max-w-[820px] items-center gap-3 px-5">
-        <span class="grid h-[28px] w-[28px] place-items-center rounded-md bg-accent text-accent-ink">
+        <img v-if="branding.logoUrl" :src="branding.logoUrl" alt="" class="h-[28px] w-[28px] rounded-md object-contain" />
+        <span v-else class="grid h-[28px] w-[28px] place-items-center rounded-md bg-accent text-accent-ink">
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" /><path d="M8.5 12l2 2 4.5-4.5" /></svg>
         </span>
         <b class="text-[15px] font-semibold tracking-tight">{{ page?.title || "Status" }}</b>

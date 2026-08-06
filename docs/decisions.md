@@ -2053,3 +2053,11 @@ yet removing just the membership was refused. The guard's real invariant is "the
 locked out of management" — and for a global admin it never is, because global admins manage every
 org and can appoint a replacement. So both member endpoints skip the check when the principal is a
 global admin and keep it for org_admins acting within their org (they *would* lock the org out).
+
+## D-0105 — Build version in the SPA sidebar
+The running build is now visible in the product: `GET /api/v1/version` (session-auth, deliberately
+NOT public — version disclosure on an unauthenticated endpoint is a fingerprinting gift) returns
+`buildinfo.Current()` (version/commit/go, already injected via ldflags by the Dockerfile and the
+release workflows), and the SPA sidebar footer shows `cerbix <version>` with the commit in the
+tooltip. Fetched once per session (cached in the session store). Dev builds honestly show `dev`;
+tagged images get the real tag/sha from the GHCR workflow build-args.

@@ -159,6 +159,18 @@ paths:
               schema: { $ref: '#/components/schemas/Me' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /api/v1/version:
+    get:
+      tags: [me]
+      summary: Running build info (version, commit)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BuildInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /api/v1/me/password:
     post:
       tags: [me]
@@ -1919,6 +1931,12 @@ components:
       required: [is_global_admin]
       properties:
         is_global_admin: { type: boolean }
+    BuildInfo:
+      type: object
+      properties:
+        version: { type: string }
+        commit: { type: string }
+        go_version: { type: string }
     Me:
       type: object
       properties:

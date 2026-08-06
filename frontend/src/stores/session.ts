@@ -12,10 +12,12 @@ interface State {
   memberships: Membership[];
   totpEnabled: boolean;
   loaded: boolean;
+  version: string;
+  commit: string;
 }
 
 export const useSession = defineStore("session", {
-  state: (): State => ({ user: null, memberships: [], totpEnabled: false, loaded: false }),
+  state: (): State => ({ user: null, memberships: [], totpEnabled: false, loaded: false, version: "", commit: "" }),
   getters: {
     isAuthed: (s) => s.user !== null,
     isGlobalAdmin: (s) => s.user?.is_global_admin === true,
@@ -63,6 +65,13 @@ export const useSession = defineStore("session", {
       this.memberships = data.memberships ?? [];
       this.totpEnabled = data.totp_enabled ?? false;
       return this.user !== null;
+    },
+    // Build info for the sidebar footer — fetched once per session.
+    async fetchVersion() {
+      if (this.version) return;
+      const { data } = await api.GET("/api/v1/version");
+      this.version = data?.version ?? "";
+      this.commit = data?.commit ?? "";
     },
     async logout() {
       useLive().disconnect(); // close the SSE stream before the session ends

@@ -309,6 +309,7 @@ func (h *Handler) WithAgentDBTokens() *Handler {
 func (h *Handler) Router() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/me", h.me)
+	mux.HandleFunc("GET /api/v1/version", h.version)
 	mux.HandleFunc("POST /api/v1/me/password", h.changePassword)
 	mux.HandleFunc("POST /api/v1/me/totp/enroll", h.totpEnroll)
 	mux.HandleFunc("POST /api/v1/me/totp/enable", h.totpEnable)

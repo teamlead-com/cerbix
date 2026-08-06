@@ -8,9 +8,16 @@ import (
 
 	"github.com/teamlead-com/cerbix/internal/auth"
 	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/buildinfo"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
+
+// version returns the running build (any authenticated user) — surfaced in
+// the SPA sidebar footer.
+func (h *Handler) version(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, buildinfo.Current())
+}
 
 // me returns the current user and their memberships.
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {

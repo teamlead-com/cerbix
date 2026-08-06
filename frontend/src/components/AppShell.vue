@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { RouterLink, useRouter } from "vue-router";
 import CreateDialog from "@/components/CreateDialog.vue";
 import SearchBox from "@/components/SearchBox.vue";
@@ -27,6 +27,7 @@ const announceCls: Record<string, string> = {
   critical: "bg-down-weak text-down",
 };
 const initials = computed(() => session.initials || "··");
+onMounted(() => session.fetchVersion()); // cached in the store — one request per session
 const canManageOrg = computed(() => !!ws.orgId && session.isOrgAdmin(ws.orgId));
 
 function openCreate(kind: "org" | "project") {
@@ -212,6 +213,11 @@ const settingsIcon: Shape[] = [
         </svg>
         Settings
       </RouterLink>
+      <div
+        v-if="session.version"
+        class="px-[10px] pb-[2px] pt-[6px] font-mono text-[10.5px] text-ink-3"
+        :title="session.commit && session.commit !== 'unknown' ? 'commit ' + session.commit : ''"
+      >cerbix {{ session.version }}</div>
     </aside>
 
     <main class="min-w-0">

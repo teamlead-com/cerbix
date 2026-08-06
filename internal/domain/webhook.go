@@ -10,16 +10,16 @@ import (
 // on every incident lifecycle event within its scope (a project, or org-wide when
 // ProjectID is empty). Secret is used to HMAC-sign deliveries.
 type Webhook struct {
-	ID        string    `json:"id"`
-	OrgID     string    `json:"org_id"`
-	ProjectID string    `json:"project_id,omitempty"`
-	URL       string    `json:"url"`
-	Secret    string    `json:"secret,omitempty"` // returned only at creation
-	Enabled   bool      `json:"enabled"`
-	CreatedBy string    `json:"created_by,omitempty"`
+	ID        string `json:"id"`
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id,omitempty"`
+	URL       string `json:"url"`
+	Secret    string `json:"secret,omitempty"` // returned only at creation
+	Enabled   bool   `json:"enabled"`
+	CreatedBy string `json:"created_by,omitempty"`
 	// CreatedByEmail resolves the issuer for display (list endpoint only).
-	CreatedByEmail string `json:"created_by_email,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedByEmail string    `json:"created_by_email,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // Validate enforces webhook invariants.

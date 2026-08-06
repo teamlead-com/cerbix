@@ -11,16 +11,16 @@ import (
 // as a bearer credential. Only a hash of the secret is stored; the plaintext is
 // shown once at creation.
 type ApiToken struct {
-	ID         string     `json:"id"`
-	OrgID      string     `json:"org_id"`
-	ProjectID  string     `json:"project_id,omitempty"`
-	Name       string     `json:"name"`
-	Role       Role       `json:"role"`
-	CreatedBy  string     `json:"created_by,omitempty"`
+	ID        string `json:"id"`
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id,omitempty"`
+	Name      string `json:"name"`
+	Role      Role   `json:"role"`
+	CreatedBy string `json:"created_by,omitempty"`
 	// CreatedByEmail resolves the issuer for display (list endpoint only).
-	CreatedByEmail string `json:"created_by_email,omitempty"`
-	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	CreatedByEmail string     `json:"created_by_email,omitempty"`
+	LastUsedAt     *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // Scope returns the scope implied by whether ProjectID is set.

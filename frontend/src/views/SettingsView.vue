@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
+import MembersPanel from "@/components/settings/MembersPanel.vue";
 import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -27,6 +29,7 @@ type Tab =
   | "alerting"
   | "monitordefaults"
   | "email"
+  | "members"
   | "tokens"
   | "webhooks"
   | "security";
@@ -42,21 +45,29 @@ const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
   { key: "incoming", label: "Incoming alerts", scope: "project" },
   // Instance-wide settings — global-admin only.
   ...(session.isGlobalAdmin ? instanceTabs : []),
+  { key: "members", label: "Members", scope: "org" },
   { key: "tokens", label: "API tokens", scope: "org" },
   { key: "webhooks", label: "Webhooks", scope: "org" },
   { key: "security", label: "Security", scope: "account" },
 ]);
 const tab = ref<Tab>("channels");
 
+// Deep links: /settings?tab=members. Invalid or forbidden keys fall back to the default.
+const route = useRoute();
+const queryTab = route.query.tab;
+if (typeof queryTab === "string" && tabs.value.some((t) => t.key === queryTab)) {
+  tab.value = queryTab as Tab;
+}
+
 // Group the nav by scope so the (now ~10) settings don't sprawl across one row.
 const scopeLabels: Record<string, string> = {
   project: "Project",
-  instance: "Instance",
+  instance: "Administration",
   org: "Organization",
   account: "Account",
 };
 const tabGroups = computed(() =>
-  ["project", "instance", "org", "account"]
+  ["project", "org", "instance", "account"]
     .map((s) => ({ scope: s, label: scopeLabels[s], items: tabs.value.filter((t) => t.scope === s) }))
     .filter((g) => g.items.length),
 );
@@ -646,7 +657,7 @@ async function loadActive() {
   else if (tab.value === "email") await loadMail();
   else if (tab.value === "tokens") await loadTokens();
   else if (tab.value === "webhooks") await loadWebhooks();
-  // "security" reads from the session store; nothing to fetch here.
+  // "security" reads from the session store; "members" is a self-loading panel.
 }
 
 async function load() {
@@ -688,7 +699,7 @@ watch(tab, loadActive);
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]">
       <div class="mb-5">
         <h1 class="text-[21px] font-semibold tracking-tight">Settings</h1>
-        <p class="mt-[3px] text-[13px] text-ink-3">Notification channels, API tokens and outbound webhooks.</p>
+        <p class="mt-[3px] text-[13px] text-ink-3">Project, organization and instance configuration.</p>
       </div>
 
       <div class="grid grid-cols-[210px_1fr] gap-7 max-[820px]:grid-cols-1 max-[820px]:gap-4">
@@ -1067,6 +1078,9 @@ watch(tab, loadActive);
         </section>
         <div v-else class="text-[13px] text-ink-3">Loading…</div>
       </template>
+
+      <!-- ── Members (org-scoped, self-loading panel) ── -->
+      <MembersPanel v-else-if="tab === 'members'" />
 
       <!-- ── Tokens ── -->
       <template v-else-if="tab === 'tokens' && !activeError">

@@ -76,15 +76,6 @@ const sections: { label: string; items: NavItem[] }[] = [
       { key: "status", label: "Status pages", to: { name: "status" }, icon: [{ t: "rect", x: 3, y: 4, w: 18, h: 16, rx: 2 }, { t: "path", d: "M3 9h18" }] },
     ],
   },
-  {
-    label: "Manage",
-    items: [
-      { key: "members", label: "Members", to: { name: "members" }, icon: [
-        { t: "circle", cx: 9, cy: 8, r: 3 }, { t: "path", d: "M3 20a6 6 0 0 1 12 0" },
-        { t: "circle", cx: 17, cy: 9, r: 2.2 }, { t: "path", d: "M15 20a5 5 0 0 1 6-4" },
-      ] },
-    ],
-  },
 ];
 const settingsIcon: Shape[] = [
   { t: "circle", cx: 12, cy: 12, r: 3.2 },

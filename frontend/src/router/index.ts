@@ -52,9 +52,9 @@ const routes: RouteRecordRaw[] = [
     component: () => import("@/views/SlaView.vue"),
   },
   {
+    // Members moved into Settings → Organization; keep old bookmarks working.
     path: "/members",
-    name: "members",
-    component: () => import("@/views/MembersView.vue"),
+    redirect: { path: "/settings", query: { tab: "members" } },
   },
   {
     path: "/settings",

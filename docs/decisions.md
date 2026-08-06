@@ -2014,3 +2014,17 @@ API calls with a rollback of what was created on error. A `quorum M/N` badge in 
 M>N → 400. **Revisit triggers for option A:** mass multi-region public targets
 for which per-region timelines/SLA are needed within one monitor, or an OSS positioning
 that requires per-monitor multi-region out of the box.
+
+## D-0102 — Members lives in Settings; the global-admin group is "Administration" (iter-0042)
+The sidebar section "Manage" held exactly one item (Members) while the screen itself was already
+org-scoped end to end (`ws.orgId` drives every call), i.e. it *is* organization settings — so it
+moved into Settings as the first tab of the Organization group, next to API tokens and Webhooks,
+and the one-item sidebar section was removed. The instance-wide tab group is renamed
+**Administration**: the old label "Instance" described where a setting lives, the new one describes
+who uses the group — and with the Users page (D-0103) it stops being purely configuration. The
+scope *key* stays `instance` in code (display-only rename, zero data/API impact). Deep links:
+`SettingsView` reads `?tab=<key>` (validated against the tabs visible to the current user) and
+`/members` redirects to `/settings?tab=members`, so old bookmarks survive. The panel itself was
+extracted as a self-loading `MembersPanel.vue` instead of inlining ~370 lines into the already
+monolithic SettingsView — the pattern for every future heavy tab (Users follows it in iter-0043).
+Frontend-only: all four `/organizations/{orgID}/members` endpoints are untouched.

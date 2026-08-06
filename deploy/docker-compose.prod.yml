@@ -9,6 +9,10 @@
 # RabbitMQ are reachable only on the internal network.
 name: cerbix-prod
 
+x-netCaps: &netCaps
+  cap_drop:
+    - ALL
+
 x-logging: &logging
   logging:
     driver: json-file
@@ -17,14 +21,18 @@ x-logging: &logging
       max-file: "5"
 
 x-dataCaps: &dataCaps
-  cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+  cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - SETGID
+    - SETUID
 
 services:
   postgres:
     image: timescale/timescaledb:2.17.2-pg16
     restart: unless-stopped
-    <<: [*logging, *dataCaps]
-    cap_drop: [ALL]
+    <<: [*netCaps, *logging, *dataCaps]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-cerbix}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -44,8 +52,7 @@ services:
   rabbitmq:
     image: rabbitmq:3.12-management
     restart: unless-stopped
-    <<: [*logging, *dataCaps]
-    cap_drop: [ALL]
+    <<: [*netCaps, *logging, *dataCaps]
     hostname: cerbix-rabbit
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-cerbix}
@@ -68,8 +75,7 @@ services:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
-    <<: *logging
-    cap_drop: [ALL]
+    <<: [*netCaps, *logging]
     command: ["serve", "--config", "/etc/cerbix/config.yaml", "--role", "all"]
     # Passed into the container so config.Load can expand ${VAR} in config.prod.yaml.
     environment:

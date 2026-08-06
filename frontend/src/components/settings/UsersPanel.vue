@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import { useSession } from "@/stores/session";
@@ -115,17 +115,24 @@ async function removeUser(u: AdminUser) {
 
 // "Add to org" grants org-scoped memberships, so the role choices are the
 // org-scope set (project_admin is granted from Members with a project scope).
-// The form renders as a panel above the table — a popover would be clipped by
-// the table's overflow container. Several orgs can be picked at once (chips);
-// the grant is one membership call per org with the same role.
+// The form is an inline expansion row under the user (a floating popover would
+// be clipped by the table's overflow container): chips pick the organizations,
+// the role is set per organization in the picked list — no ordering, no
+// "default role" mode. Submit is one membership call per org, each with its
+// own role, reporting per-org failures.
 const orgRoles: Role[] = ["viewer", "editor", "org_admin"];
 const addTarget = ref<AdminUser | null>(null);
-const add = reactive<{ orgIds: string[]; role: Role }>({ orgIds: [], role: "editor" });
+const picks = ref<{ org_id: string; role: Role }[]>([]);
+const bulkRole = ref(""); // "Set all to" — an explicit bulk action, resets to the placeholder
 const adding = ref(false);
 function openAdd(u: AdminUser) {
+  if (addTarget.value?.id === u.id) {
+    addTarget.value = null;
+    return;
+  }
   addTarget.value = u;
-  add.orgIds = [];
-  add.role = "editor";
+  picks.value = [];
+  bulkRole.value = "";
   actionError.value = "";
 }
 // Orgs where the user already holds an org-level grant — offered as disabled chips.
@@ -134,36 +141,45 @@ const memberOrgIds = computed(() => {
   return new Set((u?.memberships ?? []).filter((m) => !m.project_id).map((m) => m.org_id));
 });
 const isMemberOrg = (id?: string) => !!id && memberOrgIds.value.has(id);
-const isPickedOrg = (id?: string) => !!id && add.orgIds.includes(id);
+const isPickedOrg = (id?: string) => !!id && picks.value.some((p) => p.org_id === id);
 function toggleOrg(id?: string) {
   if (!id) return;
-  const i = add.orgIds.indexOf(id);
-  if (i >= 0) add.orgIds.splice(i, 1);
-  else add.orgIds.push(id);
+  const i = picks.value.findIndex((p) => p.org_id === id);
+  if (i >= 0) picks.value.splice(i, 1);
+  else picks.value.push({ org_id: id, role: "editor" });
+}
+function setAllRoles() {
+  if (!bulkRole.value) return;
+  for (const p of picks.value) p.role = bulkRole.value as Role;
+  bulkRole.value = "";
+}
+function orgLabel(id: string): string {
+  const o = ws.orgs.find((x) => x.id === id);
+  return o?.name || o?.slug || id;
 }
 async function submitAdd() {
   const u = addTarget.value;
-  if (!u || !add.orgIds.length || adding.value) return;
+  if (!u || !picks.value.length || adding.value) return;
   adding.value = true;
   actionError.value = "";
-  const failed: string[] = [];
+  const failedPicks: { org_id: string; role: Role }[] = [];
   try {
-    for (const orgID of add.orgIds) {
+    for (const p of picks.value) {
       const res = await api.POST("/api/v1/organizations/{orgID}/members", {
-        params: { path: { orgID } },
-        body: { user_id: u.id, role: add.role },
+        params: { path: { orgID: p.org_id } },
+        body: { user_id: u.id, role: p.role },
       });
-      if (res.error || !res.data) {
-        const o = ws.orgs.find((x) => x.id === orgID);
-        failed.push(o?.name || o?.slug || orgID);
-      }
+      if (res.error || !res.data) failedPicks.push(p);
     }
-    if (failed.length) {
-      actionError.value = `Could not add the user to: ${failed.join(", ")}.`;
+    await load(); // refresh membership chips (partial success included)
+    if (failedPicks.length) {
+      actionError.value = `Could not add the user to: ${failedPicks.map((p) => orgLabel(p.org_id)).join(", ")}.`;
+      // Keep the form open with only the failed picks; re-point at the fresh row.
+      picks.value = failedPicks;
+      addTarget.value = users.value.find((x) => x.id === u.id) ?? null;
     } else {
       addTarget.value = null;
     }
-    await load(); // refresh membership chips (partial success included)
   } finally {
     adding.value = false;
   }
@@ -189,44 +205,6 @@ onMounted(load);
     <div v-if="error" class="mb-4 rounded border border-border bg-surface p-4 text-[13px] text-ink-3 shadow-card">{{ error }}</div>
     <div v-if="actionError" class="mb-4 rounded-sm border border-down/40 bg-down-weak px-4 py-2 text-[13px] text-down">{{ actionError }}</div>
 
-    <!-- add-to-org panel (opened from a row action) -->
-    <section v-if="addTarget && !error" class="mb-4 rounded border border-border bg-surface shadow-card">
-      <div class="grid grid-cols-[1.4fr_2fr_1fr_auto_auto] items-end gap-3 p-4 max-[900px]:grid-cols-1">
-        <div class="flex flex-col gap-[6px]">
-          <span class="text-[11.5px] font-semibold text-ink-2">Add to organizations</span>
-          <span class="flex h-[38px] items-center truncate rounded-sm border border-border bg-inset px-[11px] font-mono text-[13px] text-ink-2">{{ addTarget.email }}</span>
-        </div>
-        <div class="flex flex-col gap-[6px]">
-          <span class="text-[11.5px] font-semibold text-ink-2">Organizations <span class="font-normal text-ink-3">— pick one or more</span></span>
-          <div class="flex min-h-[38px] flex-wrap items-center gap-[6px]">
-            <button
-              v-for="o in ws.orgs"
-              :key="o.id"
-              type="button"
-              class="inline-flex h-[30px] items-center gap-[6px] rounded-full border px-[11px] text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-45"
-              :class="isPickedOrg(o.id) ? 'border-accent bg-accent-weak font-medium text-accent' : 'border-border bg-surface-2 text-ink-2 hover:border-border-strong'"
-              :disabled="isMemberOrg(o.id)"
-              :title="isMemberOrg(o.id) ? 'Already a member of this organization' : ''"
-              @click="toggleOrg(o.id)"
-            >
-              <svg v-if="isPickedOrg(o.id)" viewBox="0 0 24 24" class="h-[12px] w-[12px]" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7" /></svg>
-              {{ o.name || o.slug }}
-            </button>
-            <span v-if="!ws.orgs.length" class="text-[12.5px] text-ink-3">No organizations yet.</span>
-          </div>
-        </div>
-        <label class="flex flex-col gap-[6px]">
-          <span class="text-[11.5px] font-semibold text-ink-2">Role</span>
-          <select v-model="add.role" class="h-[38px] rounded-sm border border-border bg-surface-2 px-[11px] text-[13px] outline-none focus:border-accent focus:bg-surface">
-            <option v-for="r in orgRoles" :key="r" :value="r">{{ r }}</option>
-          </select>
-        </label>
-        <button type="button" :disabled="!add.orgIds.length || adding" class="inline-flex h-[38px] items-center rounded-sm bg-accent px-[15px] text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="submitAdd">
-          {{ adding ? "Adding…" : add.orgIds.length > 1 ? `Add to ${add.orgIds.length} orgs` : "Add" }}
-        </button>
-        <button type="button" class="inline-flex h-[38px] items-center rounded-sm border border-border px-[13px] text-[13px] text-ink-2 hover:border-border-strong" @click="addTarget = null">Cancel</button>
-      </div>
-    </section>
 
     <section v-if="!error" class="rounded border border-border bg-surface shadow-card">
       <div class="flex items-center gap-[10px] px-4 pb-3 pt-[14px]">
@@ -245,7 +223,8 @@ onMounted(load);
             </tr>
           </thead>
           <tbody>
-            <tr v-for="u in filtered" :key="u.id" class="hover:bg-surface-2">
+            <template v-for="u in filtered" :key="u.id">
+            <tr class="hover:bg-surface-2">
               <td class="border-b border-border px-4 py-[11px]">
                 <div class="flex items-center gap-[11px]">
                   <span class="grid h-8 w-8 flex-none place-items-center rounded-full text-[11.5px] font-semibold text-white" :style="{ background: avatarColor(u.id) }">{{ initials(u) }}</span>
@@ -286,8 +265,8 @@ onMounted(load);
                   <button
                     type="button"
                     class="h-[26px] rounded-sm bg-accent px-[9px] text-[12px] font-medium text-accent-ink hover:bg-accent-2"
-                    @click="addTarget?.id === u.id ? (addTarget = null) : openAdd(u)"
-                  >Add to org</button>
+                    @click="openAdd(u)"
+                  >{{ addTarget?.id === u.id ? "Add to org ▴" : "Add to org" }}</button>
                   <button
                     type="button"
                     class="h-[26px] rounded-sm border border-down/50 px-[9px] text-[12px] text-down hover:bg-down-weak disabled:cursor-not-allowed disabled:opacity-45"
@@ -298,6 +277,67 @@ onMounted(load);
                 </div>
               </td>
             </tr>
+
+            <!-- inline add-to-orgs expansion -->
+            <tr v-if="addTarget?.id === u.id">
+              <td colspan="5" class="border-b border-l-[3px] border-border border-l-accent bg-inset px-4 pb-4 pt-[14px]">
+                <div class="mb-[10px] flex flex-wrap items-baseline gap-2">
+                  <b class="text-[13px] font-semibold">Add to organizations</b>
+                  <span class="font-mono text-[12px] text-ink-3">{{ u.email }}</span>
+                </div>
+                <div class="mb-[6px] text-[11px] font-semibold uppercase tracking-[0.05em] text-ink-2">
+                  Organizations <span class="font-normal normal-case tracking-normal text-ink-3">— pick one or more, then set a role per organization below</span>
+                </div>
+                <div class="flex min-h-[32px] flex-wrap items-center gap-[6px]">
+                  <button
+                    v-for="o in ws.orgs"
+                    :key="o.id"
+                    type="button"
+                    class="inline-flex h-[28px] items-center gap-[6px] rounded-full border px-[11px] text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-45"
+                    :class="isPickedOrg(o.id) ? 'border-accent bg-accent-weak font-medium text-accent' : 'border-border-strong bg-surface text-ink-2 hover:border-ink-3'"
+                    :disabled="isMemberOrg(o.id)"
+                    :title="isMemberOrg(o.id) ? 'Already a member of this organization' : ''"
+                    @click="toggleOrg(o.id)"
+                  >
+                    <svg v-if="isPickedOrg(o.id)" viewBox="0 0 24 24" class="h-[12px] w-[12px]" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7" /></svg>
+                    {{ o.name || o.slug }}
+                  </button>
+                  <span v-if="!ws.orgs.length" class="text-[12.5px] text-ink-3">No organizations yet.</span>
+                </div>
+
+                <div class="mt-3 border-t border-dashed border-border-strong pt-[10px]">
+                  <div v-if="!picks.length" class="py-[6px] text-[12.5px] text-ink-3">Pick organizations above — each appears here with its own role.</div>
+                  <template v-else>
+                    <div class="flex items-center gap-3 pb-2">
+                      <span class="text-[11px] font-semibold uppercase tracking-[0.05em] text-ink-2">Roles</span>
+                      <span class="ml-auto flex items-center gap-[6px] text-[11px] text-ink-3">
+                        Set all to:
+                        <select v-model="bulkRole" class="h-[28px] rounded-sm border border-border-strong bg-surface px-[6px] text-[12px] outline-none focus:border-accent" @change="setAllRoles">
+                          <option value="" disabled>…</option>
+                          <option v-for="r in orgRoles" :key="r" :value="r">{{ r }}</option>
+                        </select>
+                      </span>
+                    </div>
+                    <div v-for="p in picks" :key="p.org_id" class="flex items-center gap-3 py-[5px]">
+                      <span class="min-w-[120px] text-[13px] font-medium">{{ orgLabel(p.org_id) }}</span>
+                      <select v-model="p.role" class="h-[30px] w-[150px] rounded-sm border border-border-strong bg-surface px-[8px] text-[12.5px] outline-none focus:border-accent">
+                        <option v-for="r in orgRoles" :key="r" :value="r">{{ r }}</option>
+                      </select>
+                      <button type="button" class="ml-auto px-1 text-[14px] text-ink-3 hover:text-down" title="Remove from the selection" @click="toggleOrg(p.org_id)">✕</button>
+                    </div>
+                  </template>
+                </div>
+
+                <div class="mt-3 flex justify-end gap-2">
+                  <button type="button" class="h-[34px] rounded-sm border border-border px-[14px] text-[13px] text-ink-2 hover:border-border-strong" @click="addTarget = null">Cancel</button>
+                  <button type="button" :disabled="!picks.length || adding" class="h-[34px] rounded-sm bg-accent px-[15px] text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="submitAdd">
+                    {{ adding ? "Adding…" : picks.length > 1 ? `Add to ${picks.length} orgs` : "Add" }}
+                  </button>
+                </div>
+              </td>
+            </tr>
+            </template>
+
             <tr v-if="!filtered.length && !loading">
               <td colspan="5" class="px-4 py-10 text-center text-[13px] text-ink-3">{{ users.length ? "No users match your search." : "No users yet." }}</td>
             </tr>

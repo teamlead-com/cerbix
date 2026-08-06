@@ -4119,6 +4119,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/monitor-defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Effective instance monitor defaults (any authenticated user)
+         * @description The resolved defaults (DB -> config seed -> built-ins) the monitor form prefills from; editing them stays on the admin-only settings endpoint.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MonitorDefaults"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings/monitor-defaults": {
         parameters: {
             query?: never;

@@ -740,10 +740,25 @@ async function testConnection() {
   }
 }
 
+// Prefill a NEW monitor from the instance defaults (Settings → Monitor
+// defaults) — the local literals above are only the pre-fetch fallback.
+async function applyInstanceDefaults() {
+  const res = await api.GET("/api/v1/monitor-defaults", {});
+  const d = res.data;
+  if (!d) return;
+  if (d.interval_seconds) form.interval_seconds = d.interval_seconds;
+  if (d.timeout_seconds) form.timeout_seconds = d.timeout_seconds;
+  if (d.retries !== undefined) form.retries = d.retries;
+  if (d.failure_threshold) form.failure_threshold = d.failure_threshold;
+  if (d.renotify_seconds !== undefined) form.renotify_seconds = d.renotify_seconds;
+  if (d.auto_incident !== undefined) form.auto_incident = d.auto_incident;
+}
+
 onMounted(async () => {
   await ws.init();
   await Promise.all([loadChannels(), loadEscalationPolicies(), loadProjectMonitors(), loadRegions()]);
   if (isEdit.value) await loadForEdit();
+  else await applyInstanceDefaults();
 });
 
 const inputCls =

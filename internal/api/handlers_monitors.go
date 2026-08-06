@@ -190,10 +190,10 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 		Method             string            `json:"method"`
 		IntervalSeconds    int               `json:"interval_seconds"`
 		TimeoutSeconds     int               `json:"timeout_seconds"`
-		Retries            int               `json:"retries"`
+		Retries            *int              `json:"retries"`          // nil = instance default; 0 is a real value
 		FailureThreshold   int               `json:"failure_threshold"`
 		ConfirmInterval    *int              `json:"confirm_interval_seconds"` // nil = default 10; 0 = off
-		RenotifySeconds    int               `json:"renotify_seconds"`
+		RenotifySeconds    *int              `json:"renotify_seconds"` // nil = instance default; 0 = never re-notify
 		GraceSeconds       int               `json:"grace_seconds"`
 		Conditions         []string          `json:"conditions"`
 		Tags               []string          `json:"tags"`
@@ -218,14 +218,18 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 	if body.TimeoutSeconds == 0 {
 		body.TimeoutSeconds = def.TimeoutSeconds
 	}
-	if body.Retries == 0 {
-		body.Retries = def.Retries
+	// Pointer-typed so an explicit 0 survives (0 retries / never re-notify are
+	// real choices, unlike the zero-sentinel int fields above).
+	retries := def.Retries
+	if body.Retries != nil {
+		retries = *body.Retries
 	}
 	if body.FailureThreshold == 0 {
 		body.FailureThreshold = def.FailureThreshold
 	}
-	if body.RenotifySeconds == 0 {
-		body.RenotifySeconds = def.RenotifySeconds
+	renotify := def.RenotifySeconds
+	if body.RenotifySeconds != nil {
+		renotify = *body.RenotifySeconds
 	}
 	enabled := true
 	if body.Enabled != nil {
@@ -247,10 +251,10 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 		Method:                 body.Method,
 		IntervalSeconds:        body.IntervalSeconds,
 		TimeoutSeconds:         body.TimeoutSeconds,
-		Retries:                body.Retries,
+		Retries:                retries,
 		FailureThreshold:       body.FailureThreshold,
 		ConfirmIntervalSeconds: confirmInterval,
-		RenotifySeconds:        body.RenotifySeconds,
+		RenotifySeconds:        renotify,
 		GraceSeconds:           body.GraceSeconds,
 		Conditions:             body.Conditions,
 		Tags:                   body.Tags,
@@ -490,4 +494,15 @@ func (h *Handler) listHeartbeats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, hbs)
+}
+
+// effectiveMonitorDefaults returns the resolved instance defaults (DB → config
+// seed → built-ins) for any authenticated user: the monitor form prefills from
+// them so Settings → Monitor defaults actually shapes UI-created monitors.
+func (h *Handler) effectiveMonitorDefaults(w http.ResponseWriter, r *http.Request) {
+	def := domain.MonitorDefaults{IntervalSeconds: 60, TimeoutSeconds: 10, FailureThreshold: 1, AutoIncident: true}
+	if h.settings != nil {
+		def = h.settings.MonitorDefaults()
+	}
+	writeJSON(w, http.StatusOK, def)
 }

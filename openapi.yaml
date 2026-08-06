@@ -1686,6 +1686,17 @@ paths:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Alerting' } } } }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /api/v1/monitor-defaults:
+    get:
+      tags: [monitors]
+      summary: Effective instance monitor defaults (any authenticated user)
+      description: >
+        The resolved defaults (DB -> config seed -> built-ins) the monitor form
+        prefills from; editing them stays on the admin-only settings endpoint.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MonitorDefaults' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /api/v1/settings/monitor-defaults:
     get:
       tags: [admin]

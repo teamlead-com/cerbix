@@ -2167,3 +2167,11 @@ a DB query by design.
 The columns existed since 00035; only the read path was missing. The incident now carries
 step/last-escalated, and the detail header shows the pill exactly in the window where it informs a
 decision (open + unacknowledged + step>0).
+
+## D-0121 — Monitor defaults reach the UI path; zero becomes a real value (iter-0059)
+The zero-sentinel pattern in the create body made two different intentions collide: "use the
+instance default" and "explicitly zero". retries/renotify_seconds switch to pointers (absent →
+default, 0 → 0), and the form now prefills new monitors from a lightweight authed
+/api/v1/monitor-defaults instead of a hardcoded copy — so the Settings page finally shapes what
+operators create. Interval/timeout/failure_threshold keep the zero-sentinel: zero is not a valid
+value for them, so the sentinel is unambiguous there.

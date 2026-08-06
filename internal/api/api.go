@@ -419,6 +419,9 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/settings/alerting", h.getAlerting)
 	mux.HandleFunc("PUT /api/v1/settings/alerting", h.putAlerting)
 	mux.HandleFunc("GET /api/v1/settings/monitor-defaults", h.getMonitorDefaults)
+	// Effective defaults for any authenticated user — the monitor form prefills
+	// from these (the admin-gated settings endpoint above is for editing them).
+	mux.HandleFunc("GET /api/v1/monitor-defaults", h.effectiveMonitorDefaults)
 	mux.HandleFunc("PUT /api/v1/settings/monitor-defaults", h.putMonitorDefaults)
 	mux.HandleFunc("GET /api/v1/settings/mail", h.getMail)
 	mux.HandleFunc("PUT /api/v1/settings/mail", h.putMail)

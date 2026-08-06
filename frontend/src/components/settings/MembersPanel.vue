@@ -308,11 +308,18 @@ watch(() => ws.orgId, load);
               <td class="border-b border-border px-4 py-[11px] font-mono text-[12.5px] text-ink-3" :title="'added ' + fmtDate(m.created_at)">{{ lastActive(m.last_active_at) }}</td>
               <td v-if="canManage" class="border-b border-border px-4 py-[11px] text-right">
                 <template v-if="confirmRemoveId === m.id">
-                  <span class="mr-2 text-[12px] text-ink-3">Remove?</span>
+                  <span class="mr-2 text-[12px] text-ink-3">Remove from {{ ws.orgName || "this org" }}? The account is kept.</span>
                   <button type="button" class="mr-1 h-[26px] rounded-sm bg-down px-[9px] text-[12px] font-medium text-white hover:opacity-90" @click="removeMember(m)">Confirm</button>
                   <button type="button" class="h-[26px] rounded-sm border border-border px-[9px] text-[12px] text-ink-2 hover:border-border-strong" @click="confirmRemoveId = ''">Cancel</button>
                 </template>
-                <button v-else type="button" class="text-ink-3 hover:text-down" aria-label="Remove member" @click="confirmRemoveId = m.id ?? ''">
+                <button
+                  v-else
+                  type="button"
+                  class="text-ink-3 hover:text-down"
+                  aria-label="Remove from the organization"
+                  :title="`Remove from ${ws.orgName || 'the organization'} — only the membership is revoked, the user account is kept`"
+                  @click="confirmRemoveId = m.id ?? ''"
+                >
                   <svg viewBox="0 0 24 24" class="h-[16px] w-[16px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" /></svg>
                 </button>
               </td>

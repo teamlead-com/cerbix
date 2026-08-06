@@ -17,10 +17,10 @@ func (s *Store) GetOIDCSettings(ctx context.Context) (domain.OIDCSettings, error
 	)
 	err := s.pool.QueryRow(ctx,
 		`SELECT enabled, issuer, client_id, client_secret, redirect_url, scopes,
-		        post_logout_url, button_label, bootstrap_admins, updated_at
+		        post_logout_url, button_label, bootstrap_admins
 		   FROM oidc_settings WHERE id = true`).
 		Scan(&st.Enabled, &st.Issuer, &st.ClientID, &secret, &st.RedirectURL, &st.Scopes,
-			&st.PostLogoutURL, &st.ButtonLabel, &st.BootstrapAdmins, &st.UpdatedAt)
+			&st.PostLogoutURL, &st.ButtonLabel, &st.BootstrapAdmins)
 	if noRows(err) {
 		return domain.OIDCSettings{}, ErrNotFound
 	}

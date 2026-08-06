@@ -273,7 +273,8 @@ func (s *Store) StalePushMonitors(ctx context.Context) ([]domain.Monitor, error)
 
 // SetMonitorStatus updates a monitor's last-known status and returns the previous
 // status, so callers can detect up/down transitions. ErrNotFound if the monitor
-// is gone.
+// is gone. Test support: production writes status through RecordCheckStatus
+// (ingest); integration tests use this to arrange transition scenarios.
 func (s *Store) SetMonitorStatus(ctx context.Context, id string, status domain.MonitorStatus) (domain.MonitorStatus, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

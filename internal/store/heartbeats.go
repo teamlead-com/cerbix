@@ -89,6 +89,7 @@ func (s *Store) ListRecentHeartbeats(ctx context.Context, monitorID string, limi
 }
 
 // LatestHeartbeat returns the most recent heartbeat for a monitor, or ErrNotFound.
+// Test support (assertion helper); no production caller.
 func (s *Store) LatestHeartbeat(ctx context.Context, monitorID string) (domain.Heartbeat, error) {
 	var hb domain.Heartbeat
 	err := s.pool.QueryRow(ctx,

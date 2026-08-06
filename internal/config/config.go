@@ -78,7 +78,8 @@ type RabbitMQConfig struct {
 	URL string `yaml:"url"`
 	// ManagementURL is the RabbitMQ HTTP management API base (e.g.
 	// http://user:pass@host:15672). Optional: when empty it is derived from URL
-	// (scheme amqp→http / amqps→https, port 5672→15672 / 5671→15671). Used by the
+	// by scheme (amqp→http://host:15672, amqps→https://host:15671 — a non-standard
+	// AMQP port is not carried over). Used by the
 	// API to list live worker-pool regions (queues with active consumers).
 	ManagementURL string `yaml:"management_url"`
 }

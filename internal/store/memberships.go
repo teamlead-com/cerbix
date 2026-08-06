@@ -51,6 +51,7 @@ func (s *Store) CreateMembership(ctx context.Context, m domain.Membership) (doma
 }
 
 // ListMembershipsByOrg returns every membership within an organization.
+// Test support; the API serves the enriched ListOrgMembers.
 func (s *Store) ListMembershipsByOrg(ctx context.Context, orgID string) ([]domain.Membership, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+membershipColumns+` FROM memberships WHERE org_id = $1 ORDER BY project_id NULLS FIRST, user_id`,

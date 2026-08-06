@@ -19,9 +19,9 @@ A single binary; behavior is selected by subcommand and flags.
 
 | Command | Purpose | Flags |
 |---|---|---|
-| `cerbix serve` | Start the operational server in the selected role. | `--config <path>` (required), `--role all\|api\|scheduler\|worker\|agent` (default `all`) |
+| `cerbix serve` | Start the operational server in the selected role. | `--config <path>` (required), `--role all\|api\|scheduler\|worker\|agent` (default `all`), `--region <name>` (worker/agent pool, default `core`) |
 | `cerbix migrate` | Apply DB migrations (goose, embedded) and exit. | `--config <path>` (required; needs `database.dsn`) |
-| `cerbix reencrypt` | Re-encrypt all at-rest secrets under the current primary key (after key rotation). | `--config <path>` (required; needs `security.encryption_key`) |
+| `cerbix reencrypt` | Re-encrypt all at-rest secrets under the current primary key (after key rotation). | `--config <path>` (required; needs `security.encryption_key` and `database.dsn`) |
 | `cerbix version` | Print build info (version, commit) as JSON and exit. | — |
 | `cerbix help` / `-h` / `--help` | Usage. | — |
 
@@ -41,11 +41,11 @@ A single binary; behavior is selected by subcommand and flags.
 | `api` | HTTP: REST + SSE + SPA serving; ingest (result consumer → heartbeats/statuses/incidents); outbox delivery. | AMQP | yes | yes |
 | `scheduler` | Leader scheduler (Postgres advisory lock): publishes due jobs; rollup/retention; renotify; burn-eval; SLA reports; region-worker-alert; escalation-advance. | AMQP | yes | yes |
 | `worker` | Prober pool: pulls jobs, executes the probe with a timeout, publishes the result. Stateless. | AMQP | no | yes |
-| `agent` | HTTP pull prober for geos without a broker: pulls its region's jobs over HTTPS, probes, posts results. DB-less, broker-less. | HTTP-pull | no | yes |
+| `agent` | HTTP pull prober for geos without a broker: pulls its region's jobs over HTTPS, probes, posts results. DB-less, broker-less. | HTTP-pull | no | no |
 
 Every role starts an operational HTTP server with `/healthz`, `/readyz`, `/metrics`. `all` is for local
-development (`docker compose`); distributed roles (`api`/`scheduler`/`worker`/`agent`) require
-`rabbitmq.url`.
+development (`docker compose`); the broker-backed distributed roles (`api`/`scheduler`/`worker`)
+require `rabbitmq.url`; `agent` needs neither a broker nor a database.
 
 ## 1.2 Configuration (strict YAML)
 
@@ -63,7 +63,7 @@ Top-level `Config` sections (`internal/config`):
 | `prober` | `allow_private_ips`, `allow_metadata_ips` | SSRF guard: what workers are allowed to resolve. |
 | `heartbeats` | `retention_days` | Retention period for raw heartbeats (partitions are dropped by the leader). |
 | `security` | `encryption_key`, `previous_keys`, `admin_email`, `admin_password` | AES-256-GCM keyring for at-rest secrets + rotation; global-admin bootstrap on an empty system. |
-| `mail` | `smtp_host/port/username/password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). |
+| `mail` | `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). |
 | `pull` | `regions`, `token`, `agents`, `server_url` | HTTP-pull transport: broker-less regions (server side) and agent credentials (agent side). |
 
 Many settings (OIDC, branding, auth-policy, alerting, monitor-defaults, mail), once first
@@ -345,7 +345,7 @@ Do not expose the broker to the public internet without TLS/segmentation.
 
 **The broker-less alternative in a geo — the HTTP pull agent.** If exposing RabbitMQ to another geo is not an option, the region
 is declared pull-served in the central config (`pull.regions`), and its jobs go into the DB queue
-`pull_jobs` instead of AMQP. In the geo you run `cerbix --role agent --region <r>` (DB-less, broker-less): it
+`pull_jobs` instead of AMQP. In the geo you run `cerbix serve --role agent --region <r> --config agent.yaml` (DB-less, broker-less): it
 uses **only outbound HTTPS** to the center to fetch jobs (`GET /agent/jobs`, atomic claim `FOR UPDATE SKIP
 LOCKED`), runs them through its prober, and posts heartbeats (`POST /agent/results`, the same ingest). Authentication — a bearer token:
 a shared `pull.token` (catch-all), a per-region token (`pull.agents: [{region, token}]`, an agent sees only its own

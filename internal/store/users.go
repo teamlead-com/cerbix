@@ -68,6 +68,7 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (domain.User, 
 }
 
 // GetUserByOIDCSub returns a user by OIDC subject.
+// Test support; the login path uses UpsertUserByOIDCSub.
 func (s *Store) GetUserByOIDCSub(ctx context.Context, sub string) (domain.User, error) {
 	row := s.pool.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE oidc_sub = $1`, sub)
 	u, err := scanUser(row)

@@ -2144,3 +2144,11 @@ editor now shows the audience (count, confirmed vs pending-confirm — the latte
 SMTP-deliverability signal) and lets an org admin remove an address; the confirm token stays
 server-side. This closes the audit-gap package: all eleven findings of the "saved/served but
 never used" class are resolved (D-0106…D-0116).
+
+## D-0117 — Package 2 opens with the paper cuts (iter-0055)
+The re-audit (three sweeps after D-0106…D-0116) confirmed the first package closed and surfaced a
+second layer (spec func-audit-gaps-2). Its easiest slice: overview.md misstatements (agent role
+needing RabbitMQ — it is broker-less by definition; an inline command that exits 2; missing
+--region/dsn notes; mail key notation), the scheme-vs-port management-URL comment, the dead
+OIDCSettings.UpdatedAt scan, and explicit test-support labels on the four caller-less store
+functions so they stop tripping audits.

@@ -2131,3 +2131,9 @@ feature existed only for curl users. Preview now rides the previously-unused aut
 endpoint via `?preview=<id>` (with an explicit members-only banner; the public endpoint still
 404s anonymously), unlisted links carry their token, and the component form finally exposes
 group/description/position — with `description` added to the render DTO so it can actually show.
+
+## D-0115 — Agent tokens get an admin surface (iter-0053)
+DB-managed pull-agent tokens (D-issued for broker-less regions) had API+spec and no UI. A new
+Administration tab lists/issues/revokes them, with the show-once secret contract shared with API
+tokens and revoked rows kept visible as history. Pure frontend — the endpoints were already
+guarded by requireGlobalAdmin.

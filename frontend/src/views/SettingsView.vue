@@ -4,6 +4,7 @@ import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
+import AgentTokensPanel from "@/components/settings/AgentTokensPanel.vue";
 import MembersPanel from "@/components/settings/MembersPanel.vue";
 import UsersPanel from "@/components/settings/UsersPanel.vue";
 import { useBranding } from "@/stores/branding";
@@ -31,6 +32,7 @@ type Tab =
   | "monitordefaults"
   | "email"
   | "users"
+  | "agenttokens"
   | "members"
   | "tokens"
   | "webhooks"
@@ -42,6 +44,7 @@ const instanceTabs: { key: Tab; label: string; scope: string }[] = [
   { key: "alerting", label: "Alerting", scope: "instance" },
   { key: "monitordefaults", label: "Monitor defaults", scope: "instance" },
   { key: "email", label: "Email", scope: "instance" },
+  { key: "agenttokens", label: "Agent tokens", scope: "instance" },
 ];
 const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
   { key: "channels", label: "Notification channels", scope: "project" },
@@ -1152,6 +1155,9 @@ watch(tab, loadActive);
 
       <!-- ── Users (instance-wide, global admin, self-loading panel) ── -->
       <UsersPanel v-else-if="tab === 'users'" />
+
+      <!-- ── Agent tokens (instance-wide, global admin, self-loading panel) ── -->
+      <AgentTokensPanel v-else-if="tab === 'agenttokens'" />
 
       <!-- ── Tokens ── -->
       <template v-else-if="tab === 'tokens' && !activeError">

@@ -38,6 +38,10 @@ type Store interface {
 	CountOrgAdmins(ctx context.Context, orgID string) (int, error)
 	GetUser(ctx context.Context, id string) (domain.User, error)
 	GetUserByEmail(ctx context.Context, email string) (domain.User, error)
+	ListAllUsers(ctx context.Context, q string) ([]domain.AdminUser, error)
+	SetGlobalAdmin(ctx context.Context, id string, admin bool) error
+	DeleteUser(ctx context.Context, id string) error
+	CountGlobalAdmins(ctx context.Context) (int, error)
 	ListMonitorsByProject(ctx context.Context, projectID string) ([]domain.Monitor, error)
 	ListRegions(ctx context.Context) ([]string, error)
 	CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error)
@@ -397,6 +401,9 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("PUT /api/v1/settings/monitor-defaults", h.putMonitorDefaults)
 	mux.HandleFunc("GET /api/v1/settings/mail", h.getMail)
 	mux.HandleFunc("PUT /api/v1/settings/mail", h.putMail)
+	mux.HandleFunc("GET /api/v1/admin/users", h.listAllUsers)
+	mux.HandleFunc("PATCH /api/v1/admin/users/{userID}", h.updateAdminUser)
+	mux.HandleFunc("DELETE /api/v1/admin/users/{userID}", h.deleteAdminUser)
 	mux.HandleFunc("GET /api/v1/admin/outbox/dead", h.listDeadOutbox)
 	mux.HandleFunc("POST /api/v1/admin/outbox/dead/replay-all", h.replayAllDeadOutbox)
 	mux.HandleFunc("POST /api/v1/admin/outbox/dead/{eventID}/replay", h.replayDeadOutbox)

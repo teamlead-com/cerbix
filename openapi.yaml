@@ -1661,6 +1661,62 @@ paths:
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PublicBranding' } } } }
 
+  /api/v1/admin/users:
+    get:
+      tags: [admin]
+      summary: List every user of the instance (global admin only)
+      description: >
+        User-keyed rows with aggregated memberships across all organizations —
+        including users outside any organization (empty memberships list), who
+        are invisible in the org-scoped member lists.
+      parameters:
+        - in: query
+          name: q
+          required: false
+          description: Case-insensitive substring filter on email or display name.
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AdminUser' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/admin/users/{userID}:
+    patch:
+      tags: [admin]
+      summary: Grant or revoke the global-admin flag (global admin only)
+      description: >
+        Changing your own flag is rejected, and the last global admin cannot be
+        demoted (400 in both cases).
+      parameters:
+        - { in: path, name: userID, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateAdminUser' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [admin]
+      summary: Delete a user (global admin only)
+      description: >
+        Memberships and sessions cascade in the database; audit entries keep a
+        NULL actor. Self-deletion and deleting the last global admin are
+        rejected (400).
+      parameters:
+        - { in: path, name: userID, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/v1/admin/outbox/dead:
     get:
       tags: [admin]
@@ -1836,6 +1892,33 @@ components:
         is_global_admin: { type: boolean }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    AdminUserMembership:
+      type: object
+      properties:
+        org_id: { type: string, format: uuid }
+        org_name: { type: string }
+        project_id: { type: string, format: uuid }
+        project_name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+    AdminUser:
+      allOf:
+        - $ref: '#/components/schemas/User'
+        - type: object
+          properties:
+            auth_type:
+              type: string
+              enum: [local, oidc, both, none]
+              description: How the account can sign in (password, OIDC, or both).
+            last_active_at: { type: string, format: date-time, nullable: true }
+            memberships:
+              type: array
+              description: Empty for users outside any organization.
+              items: { $ref: '#/components/schemas/AdminUserMembership' }
+    UpdateAdminUser:
+      type: object
+      required: [is_global_admin]
+      properties:
+        is_global_admin: { type: boolean }
     Me:
       type: object
       properties:

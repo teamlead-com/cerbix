@@ -106,7 +106,7 @@ flowchart LR
 | `cli` | Entry point, command/flag parsing, role wiring, graceful shutdown. |
 | `config` | Strict YAML, `Validate()`, single snapshot. |
 | `httpsrv` | Operational server `/healthz` `/readyz` `/metrics`. |
-| `api` | REST handlers (orgs/projects/monitors/incidents/sla/status-pages/settings…), SSE, secret redaction, SPA serving. |
+| `api` | REST handlers (orgs/projects/monitors/incidents/sla/status-pages/settings…), SSE, secret redaction, SPA serving; global-admin surface `/api/v1/admin/*` (users, outbox dead-letter). |
 | `auth` | OIDC login (live-reconfigurable, atomic provider), local login + TOTP, sessions, JIT provisioning, middleware. |
 | `authz` | Roles and `Can(user, action, scope)`; tenant isolation. |
 | `store` | pgx + goose migrations; repositories; encryption of secret fields. |

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -233,6 +234,59 @@ func (f *fakeStore) GetUserByEmail(_ context.Context, email string) (domain.User
 		}
 	}
 	return domain.User{}, store.ErrNotFound
+}
+func (f *fakeStore) ListAllUsers(_ context.Context, q string) ([]domain.AdminUser, error) {
+	var out []domain.AdminUser
+	for _, u := range f.users {
+		if q != "" && !strings.Contains(strings.ToLower(u.Email+" "+u.DisplayName), strings.ToLower(q)) {
+			continue
+		}
+		au := domain.AdminUser{User: u, AuthType: "local", Memberships: []domain.AdminUserMembership{}}
+		for _, ms := range f.members {
+			for _, m := range ms {
+				if m.UserID == u.ID {
+					au.Memberships = append(au.Memberships, domain.AdminUserMembership{OrgID: m.OrgID, ProjectID: m.ProjectID, Role: m.Role})
+				}
+			}
+		}
+		out = append(out, au)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Email < out[j].Email })
+	return out, nil
+}
+func (f *fakeStore) SetGlobalAdmin(_ context.Context, id string, admin bool) error {
+	u, ok := f.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.IsGlobalAdmin = admin
+	f.users[id] = u
+	return nil
+}
+func (f *fakeStore) DeleteUser(_ context.Context, id string) error {
+	if _, ok := f.users[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.users, id)
+	for orgID, ms := range f.members {
+		kept := ms[:0]
+		for _, m := range ms {
+			if m.UserID != id {
+				kept = append(kept, m)
+			}
+		}
+		f.members[orgID] = kept
+	}
+	return nil
+}
+func (f *fakeStore) CountGlobalAdmins(_ context.Context) (int, error) {
+	n := 0
+	for _, u := range f.users {
+		if u.IsGlobalAdmin {
+			n++
+		}
+	}
+	return n, nil
 }
 func (f *fakeStore) ListMonitorsByProject(_ context.Context, projectID string) ([]domain.Monitor, error) {
 	var out []domain.Monitor

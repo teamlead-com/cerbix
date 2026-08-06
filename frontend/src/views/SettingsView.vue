@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import MembersPanel from "@/components/settings/MembersPanel.vue";
+import UsersPanel from "@/components/settings/UsersPanel.vue";
 import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -29,11 +30,13 @@ type Tab =
   | "alerting"
   | "monitordefaults"
   | "email"
+  | "users"
   | "members"
   | "tokens"
   | "webhooks"
   | "security";
 const instanceTabs: { key: Tab; label: string; scope: string }[] = [
+  { key: "users", label: "Users", scope: "instance" },
   { key: "authentication", label: "Authentication", scope: "instance" },
   { key: "branding", label: "Branding", scope: "instance" },
   { key: "alerting", label: "Alerting", scope: "instance" },
@@ -1081,6 +1084,9 @@ watch(tab, loadActive);
 
       <!-- ── Members (org-scoped, self-loading panel) ── -->
       <MembersPanel v-else-if="tab === 'members'" />
+
+      <!-- ── Users (instance-wide, global admin, self-loading panel) ── -->
+      <UsersPanel v-else-if="tab === 'users'" />
 
       <!-- ── Tokens ── -->
       <template v-else-if="tab === 'tokens' && !activeError">

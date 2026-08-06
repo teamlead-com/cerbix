@@ -2028,3 +2028,19 @@ scope *key* stays `instance` in code (display-only rename, zero data/API impact)
 extracted as a self-loading `MembersPanel.vue` instead of inlining ~370 lines into the already
 monolithic SettingsView — the pattern for every future heavy tab (Users follows it in iter-0043).
 Frontend-only: all four `/organizations/{orgID}/members` endpoints are untouched.
+
+## D-0103 — Instance-wide Users administration for the global admin (iter-0043)
+Users only surfaced through org member lists (`ListOrgMembers` INNER JOINs `memberships`), so an
+OIDC JIT-provisioned account with no membership could sign in yet was invisible on every screen —
+exactly the account an admin most needs to see. The new Settings → Administration → Users page
+lists **every** user (user-keyed `AdminUser` DTO with aggregated memberships — one row per user,
+unlike the membership-keyed `Member`) and manages them: global-admin toggle, add-to-org, delete.
+Guard rails live server-side: you cannot change your own flag or delete yourself (anti-lockout),
+and the last global admin can be neither demoted nor deleted (`CountGlobalAdmins`). Deletion is a
+plain `DELETE FROM users` — every FK already cascades and the audit actor is `SET NULL`; deleting
+the sole org_admin of an org is deliberately allowed (the global admin appoints a replacement).
+Global actions are audited with `org_id = NULL` (migration 00047 relaxes the NOT NULL; empty-org
+maps to NULL in `RecordAudit`, mirroring the NULL-actor pattern) — recorded now, a viewer UI can
+come later. "Add to org" reuses `POST /organizations/{orgID}/members` with `user_id` instead of a
+new endpoint, grants org-scope roles only (`project_admin` stays in the Members project-scope
+flow), and no invitation flow was added: users exist only after their first sign-in.

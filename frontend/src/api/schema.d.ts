@@ -4110,6 +4110,123 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List every user of the instance (global admin only)
+         * @description User-keyed rows with aggregated memberships across all organizations — including users outside any organization (empty memberships list), who are invisible in the org-scoped member lists.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Case-insensitive substring filter on email or display name. */
+                    q?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AdminUser"][];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/users/{userID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a user (global admin only)
+         * @description Memberships and sessions cascade in the database; audit entries keep a NULL actor. Self-deletion and deleting the last global admin are rejected (400).
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    userID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Grant or revoke the global-admin flag (global admin only)
+         * @description Changing your own flag is rejected, and the last global admin cannot be demoted (400 in both cases).
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    userID: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateAdminUser"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["User"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        trace?: never;
+    };
     "/api/v1/admin/outbox/dead": {
         parameters: {
             query?: never;
@@ -4284,6 +4401,29 @@ export interface components {
             created_at?: string;
             /** Format: date-time */
             updated_at?: string;
+        };
+        AdminUserMembership: {
+            /** Format: uuid */
+            org_id?: string;
+            org_name?: string;
+            /** Format: uuid */
+            project_id?: string;
+            project_name?: string;
+            role?: components["schemas"]["Role"];
+        };
+        AdminUser: components["schemas"]["User"] & {
+            /**
+             * @description How the account can sign in (password, OIDC, or both).
+             * @enum {string}
+             */
+            auth_type?: "local" | "oidc" | "both" | "none";
+            /** Format: date-time */
+            last_active_at?: string | null;
+            /** @description Empty for users outside any organization. */
+            memberships?: components["schemas"]["AdminUserMembership"][];
+        };
+        UpdateAdminUser: {
+            is_global_admin: boolean;
         };
         Me: {
             user?: components["schemas"]["User"];

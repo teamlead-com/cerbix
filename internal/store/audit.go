@@ -8,16 +8,20 @@ import (
 )
 
 // RecordAudit appends an audit entry. An empty ActorUserID is stored as NULL
-// (e.g. a machine actor without a resolved user).
+// (e.g. a machine actor without a resolved user); an empty OrgID too —
+// instance-level actions of a global admin have no organization.
 func (s *Store) RecordAudit(ctx context.Context, e domain.AuditEntry) error {
-	var actor *string
+	var actor, org *string
 	if e.ActorUserID != "" {
 		actor = &e.ActorUserID
+	}
+	if e.OrgID != "" {
+		org = &e.OrgID
 	}
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
 		 VALUES ($1, $2, $3, $4, $5)`,
-		e.OrgID, actor, e.ViaToken, e.Action, e.Target)
+		org, actor, e.ViaToken, e.Action, e.Target)
 	if err != nil {
 		return fmt.Errorf("store: record audit: %w", err)
 	}

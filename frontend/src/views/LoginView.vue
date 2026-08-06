@@ -2,12 +2,14 @@
 import { onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useTheme } from "@/composables/useTheme";
+import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
 
 const router = useRouter();
 const route = useRoute();
 const session = useSession();
 const { toggle } = useTheme();
+const branding = useBranding(); // loaded app-wide in App.vue (public endpoint)
 
 const email = ref("");
 const password = ref("");
@@ -192,6 +194,10 @@ function oidcLogin() {
           </span>
           <span class="ml-auto font-mono">99.99%</span>
         </div>
+      </div>
+      <div v-if="branding.footerText || branding.supportUrl" class="mt-4 text-center text-[12px] text-ink-3">
+        <p v-if="branding.footerText">{{ branding.footerText }}</p>
+        <a v-if="branding.supportUrl" :href="branding.supportUrl" target="_blank" rel="noopener" class="text-ink-2 underline decoration-border-strong underline-offset-2 hover:text-accent">Support</a>
       </div>
     </div>
   </main>

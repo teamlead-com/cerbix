@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import { useTheme } from "@/composables/useTheme";
 import { componentMeta, summaryHeadline } from "@/lib/statuspage";
+import { useBranding } from "@/stores/branding";
 import { impactBadge, relTime, statusBadge } from "@/lib/incident";
 import { renderSections } from "@/lib/postmortem";
 
@@ -14,6 +15,7 @@ type ComponentDay = components["schemas"]["ComponentDay"];
 
 const route = useRoute();
 const { toggle } = useTheme();
+const branding = useBranding(); // loaded app-wide in App.vue (public endpoint)
 const slug = route.params.slug as string;
 const token = (route.query.token as string) || "";
 
@@ -389,9 +391,13 @@ onMounted(async () => {
           </div>
         </div>
         <div class="mt-[22px] text-center text-[12px] text-ink-3">
-          Powered by
-          <span class="inline-flex translate-y-[3px] text-accent"><svg viewBox="0 0 24 24" class="h-[14px] w-[14px]" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" /><path d="M8.5 12l2 2 4.5-4.5" /></svg></span>
-          <b class="text-ink-2">cerbix</b>
+          <p v-if="branding.footerText" class="mb-[6px]">{{ branding.footerText }}</p>
+          <a v-if="branding.supportUrl" :href="branding.supportUrl" target="_blank" rel="noopener" class="mb-[6px] inline-block text-ink-2 underline decoration-border-strong underline-offset-2 hover:text-accent">Support</a>
+          <div>
+            Powered by
+            <span class="inline-flex translate-y-[3px] text-accent"><svg viewBox="0 0 24 24" class="h-[14px] w-[14px]" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" /><path d="M8.5 12l2 2 4.5-4.5" /></svg></span>
+            <b class="text-ink-2">cerbix</b>
+          </div>
         </div>
       </template>
     </main>

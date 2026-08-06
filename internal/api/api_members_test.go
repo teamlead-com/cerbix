@@ -90,3 +90,18 @@ func TestLastOrgAdminGuard(t *testing.T) {
 		t.Fatalf("demote with two admins = %d, want 200", rec.Code)
 	}
 }
+
+func TestLastOrgAdminGuardSkippedForGlobalAdmin(t *testing.T) {
+	// A global admin may demote or remove an org's sole org_admin — the org is
+	// never locked out because the global admin can appoint a replacement
+	// (consistent with deleting the account from the Users page).
+	fs := seededStore()
+	fs.members["o1"] = append(fs.members["o1"], domain.Membership{ID: "adm1", OrgID: "o1", UserID: "oa", Role: domain.RoleOrgAdmin})
+	h := newHandler(fs)
+	if rec := do(h, globalAdmin, http.MethodPatch, "/api/v1/organizations/o1/members/adm1", `{"role":"viewer"}`); rec.Code != http.StatusOK {
+		t.Fatalf("global-admin demote last org admin = %d, want 200", rec.Code)
+	}
+	if rec := do(h, globalAdmin, http.MethodDelete, "/api/v1/organizations/o1/members/adm1", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("global-admin remove last org admin = %d, want 204", rec.Code)
+	}
+}

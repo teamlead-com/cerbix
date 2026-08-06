@@ -2044,3 +2044,12 @@ maps to NULL in `RecordAudit`, mirroring the NULL-actor pattern) — recorded no
 come later. "Add to org" reuses `POST /organizations/{orgID}/members` with `user_id` instead of a
 new endpoint, grants org-scope roles only (`project_admin` stays in the Members project-scope
 flow), and no invitation flow was added: users exist only after their first sign-in.
+
+## D-0104 — The last-org-admin guard does not bind a global admin
+`isLastOrgAdmin` (400 on demoting or removing an org's sole org_admin) exists to keep an org
+manageable from the inside. After D-0103 it became incoherent: a global admin could delete the
+same user entirely from the Users page (memberships cascade, the org loses its only org_admin),
+yet removing just the membership was refused. The guard's real invariant is "the org must not be
+locked out of management" — and for a global admin it never is, because global admins manage every
+org and can appoint a replacement. So both member endpoints skip the check when the principal is a
+global admin and keep it for org_admins acting within their org (they *would* lock the org out).

@@ -239,7 +239,9 @@ func (h *Handler) updateMember(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid role")
 		return
 	}
-	if role != domain.RoleOrgAdmin {
+	// A global admin may demote an org's last org_admin (and appoint a new
+	// one afterwards) — consistent with deleting the user account entirely.
+	if p, _ := h.principal(r); role != domain.RoleOrgAdmin && !p.IsGlobalAdmin {
 		last, err := h.isLastOrgAdmin(r, m)
 		if err != nil {
 			h.serverError(w, "count_org_admins", err)
@@ -273,14 +275,18 @@ func (h *Handler) removeMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	last, err := h.isLastOrgAdmin(r, m)
-	if err != nil {
-		h.serverError(w, "count_org_admins", err)
-		return
-	}
-	if last {
-		writeError(w, http.StatusBadRequest, "cannot remove the last org admin")
-		return
+	// A global admin may leave an org without an org_admin (and appoint a new
+	// one afterwards) — consistent with deleting the user account entirely.
+	if p, _ := h.principal(r); !p.IsGlobalAdmin {
+		last, err := h.isLastOrgAdmin(r, m)
+		if err != nil {
+			h.serverError(w, "count_org_admins", err)
+			return
+		}
+		if last {
+			writeError(w, http.StatusBadRequest, "cannot remove the last org admin")
+			return
+		}
 	}
 	if err := h.store.DeleteMembership(r.Context(), m.ID); err != nil {
 		h.serverError(w, "remove_member", err)

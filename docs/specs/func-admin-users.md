@@ -32,7 +32,9 @@ Settings → **Administration** → Users (see `func-settings-members` for the I
 4. "Add to organization" reuses `POST /organizations/{orgID}/members`: `AddMember` gains
    an optional `user_id` that takes precedence over `email` (email lookup is LIMIT 1 and
    ambiguous when a local and an OIDC account share an address). A global admin passes the
-   existing `InOrg` check unconditionally. `isLastOrgAdmin` guard untouched.
+   existing `InOrg` check unconditionally. The `isLastOrgAdmin` guard (no demoting/removing
+   an org's sole org_admin) does **not** bind a global admin: an org without an org_admin is
+   always recoverable by the global admin, consistent with deleting the account entirely.
 
 ### Audit
 

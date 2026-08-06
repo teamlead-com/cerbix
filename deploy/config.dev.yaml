@@ -20,7 +20,7 @@ oidc:
   issuer: "http://10.5.0.13:8080/realms/cerbix"
   client_id: "cerbix"
   client_secret: "secret"
-  redirect_url: "http://localhost:8082/auth/callback"
+  redirect_url: "http://localhost:8080/auth/callback"
 
 local:
   enabled: true

@@ -177,7 +177,14 @@ const brand = reactive({
   form: { product_name: "", accent_color: "", logo_url: "", footer_text: "", support_url: "",
     announcement: { enabled: false, text: "", level: "info" } },
 });
-const alerting = reactive({ loaded: false, saving: false, saved: false, enabled: false });
+const alerting = reactive({ loaded: false, saving: false, saved: false, enabled: false, until: "" });
+// <input type=datetime-local> speaks local time without a zone; the API speaks RFC 3339.
+function isoToLocalInput(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 const monDefaults = reactive({
   loaded: false, saving: false, error: "", saved: false,
   form: { interval_seconds: 60, timeout_seconds: 10, retries: 0, failure_threshold: 1, renotify_seconds: 0, auto_incident: true },
@@ -214,13 +221,20 @@ async function saveBranding() {
 async function loadAlerting() {
   const res = await api.GET("/api/v1/settings/alerting");
   alerting.enabled = res.data?.global_silence?.enabled ?? false;
+  alerting.until = isoToLocalInput(res.data?.global_silence?.until);
   alerting.loaded = true;
 }
 async function saveAlerting(enabled: boolean) {
   alerting.saving = true;
   try {
-    const res = await api.PUT("/api/v1/settings/alerting", { body: { global_silence: { enabled } } as never });
-    if (!res.error) { alerting.enabled = res.data?.global_silence?.enabled ?? enabled; flash(alerting); }
+    // Round-trip the full object — sending only {enabled} used to wipe `until`.
+    const until = alerting.until ? new Date(alerting.until).toISOString() : undefined;
+    const res = await api.PUT("/api/v1/settings/alerting", { body: { global_silence: { enabled, until } } as never });
+    if (!res.error) {
+      alerting.enabled = res.data?.global_silence?.enabled ?? enabled;
+      alerting.until = isoToLocalInput(res.data?.global_silence?.until);
+      flash(alerting);
+    }
   } finally { alerting.saving = false; }
 }
 
@@ -1013,7 +1027,16 @@ watch(tab, loadActive);
               </span>
             </button>
           </div>
-          <div v-if="alerting.enabled" class="rounded bg-down-weak px-3 py-2 text-[12.5px] text-down">Alerts are currently silenced instance-wide.</div>
+          <div v-if="alerting.enabled" class="flex flex-col gap-2 rounded border border-border bg-surface-2 p-4">
+            <label class="flex flex-col gap-[6px]">
+              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Until <span class="font-normal normal-case tracking-normal">— optional</span></span>
+              <input v-model="alerting.until" type="datetime-local" class="max-w-[240px] rounded-sm border border-border bg-surface px-3 py-2 text-[12.5px] outline-none focus:border-accent" @change="saveAlerting(true)" />
+            </label>
+            <span class="text-[12px] text-ink-3">Empty — silenced until switched off manually. With a date, alert delivery resumes automatically (facts keep recording either way).</span>
+          </div>
+          <div v-if="alerting.enabled" class="rounded bg-down-weak px-3 py-2 text-[12.5px] text-down">
+            Alerts are currently silenced instance-wide{{ alerting.until ? " until " + new Date(alerting.until).toLocaleString() : "" }}.
+          </div>
           <span v-if="alerting.saved" class="text-[12.5px] text-up">✓ Saved</span>
         </section>
         <div v-else class="text-[13px] text-ink-3">Loading…</div>

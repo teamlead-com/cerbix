@@ -2112,3 +2112,9 @@ A push monitor's entire contract is "POST this URL or be declared down", and the
 the URL. The detail page now presents it front and center for push monitors — copyable URL, cron
 one-liner, and the up/down rule spelled out (interval + grace). No backend change: the token was
 already served; this closes the audit's top finding.
+
+## D-0112 — Silence expiry is settable where the silence is (iter-0050)
+`global_silence.until` was HIDDEN (backend honored it, UI couldn't set it) with a data-loss twist:
+the UI's toggle-only PUT decoded into a fresh Alerting object and nulled an API-set expiry. The
+Alerting tab now exposes an optional Until field and always round-trips the full object. Facts
+keep recording regardless — only delivery is muted, per the outbox suppression contract.

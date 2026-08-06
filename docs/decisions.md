@@ -2157,3 +2157,8 @@ functions so they stop tripping audits.
 Fixing the preview in D-0114 but not the feed links left half the job: RSS/Atom/JSON still 404'd
 for internal/unlisted pages. Both link builders now mirror the preview logic — authed feed
 endpoint for internal (session-gated), token-carrying public URL for unlisted.
+
+## D-0119 — The audit window widens on demand (iter-0057)
+A hard 30-row cut with no affordance is indistinguishable from "that's all there is". The list now
+steps 30 → 100 → 500 via an explicit Show-more; 500 is the backend cap, so deeper forensics stays
+a DB query by design.

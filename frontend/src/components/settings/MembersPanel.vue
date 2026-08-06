@@ -139,8 +139,7 @@ async function load() {
     }
     members.value = res.data ?? [];
     if (canManage.value) {
-      const a = await api.GET("/api/v1/organizations/{orgID}/audit", { params: { path: { orgID: ws.orgId }, query: { limit: 30 } } });
-      audit.value = a.data ?? [];
+      await loadAudit();
     } else {
       audit.value = [];
     }
@@ -151,8 +150,22 @@ async function load() {
   }
 }
 
-// Audit trail (org admin): recent member/token changes.
+// Audit trail (org admin): recent member/token changes. The window widens on
+// demand (30 → 100 → 500, the backend cap) instead of a silent 30-row cut.
 const audit = ref<AuditEntry[]>([]);
+const auditLimit = ref(30);
+const AUDIT_STEPS = [30, 100, 500];
+async function loadAudit() {
+  if (!ws.orgId) return;
+  const a = await api.GET("/api/v1/organizations/{orgID}/audit", { params: { path: { orgID: ws.orgId }, query: { limit: auditLimit.value } } });
+  audit.value = a.data ?? [];
+}
+// More rows may exist when the response filled the whole window.
+const auditHasMore = computed(() => audit.value.length >= auditLimit.value && auditLimit.value < 500);
+async function moreAudit() {
+  auditLimit.value = AUDIT_STEPS[Math.min(AUDIT_STEPS.indexOf(auditLimit.value) + 1, AUDIT_STEPS.length - 1)];
+  await loadAudit();
+}
 const actionLabel: Record<string, string> = {
   "member.add": "added a member",
   "member.role_change": "changed a member's role",
@@ -378,6 +391,11 @@ watch(() => ws.orgId, load);
             <span class="ml-auto flex-none font-mono text-[11.5px] text-ink-3">{{ relTime(e.created_at) }}</span>
           </li>
           <li v-if="!audit.length" class="px-4 py-6 text-center text-[13px] text-ink-3">No recorded changes yet.</li>
+          <li v-if="auditHasMore" class="flex justify-center px-4 py-[10px]">
+            <button type="button" class="h-[32px] rounded-sm border border-border-strong px-[14px] text-[12.5px] text-ink-2 hover:border-accent hover:text-accent" @click="moreAudit">
+              Show more ({{ audit.length }} shown)
+            </button>
+          </li>
         </ul>
       </section>
     </div>

@@ -5,6 +5,7 @@ import CreateDialog from "@/components/CreateDialog.vue";
 import SearchBox from "@/components/SearchBox.vue";
 import { useTheme } from "@/composables/useTheme";
 import { useBranding } from "@/stores/branding";
+import { useLive } from "@/stores/live";
 import { useSession } from "@/stores/session";
 import { useUi } from "@/stores/ui";
 import { useWorkspace } from "@/stores/workspace";
@@ -19,6 +20,7 @@ const session = useSession();
 const ws = useWorkspace();
 const ui = useUi();
 const branding = useBranding();
+const live = useLive();
 const router = useRouter();
 
 const announceCls: Record<string, string> = {
@@ -106,7 +108,11 @@ const settingsIcon: Shape[] = [
           <span class="grid h-[22px] w-[22px] place-items-center rounded-[6px] bg-gradient-to-br from-accent to-accent-2 text-[11px] font-bold text-white">
             {{ (ws.orgName[0] || "·").toUpperCase() }}
           </span>
-          <span class="flex min-w-0 flex-col leading-tight">
+          <span v-if="ws.loading && !ws.orgId" class="flex min-w-0 flex-1 flex-col gap-[5px] py-[2px]" aria-label="Loading workspace">
+            <span class="h-[10px] w-[70%] animate-pulse rounded bg-inset motion-reduce:animate-none"></span>
+            <span class="h-[9px] w-[45%] animate-pulse rounded bg-inset motion-reduce:animate-none"></span>
+          </span>
+          <span v-else class="flex min-w-0 flex-col leading-tight">
             <b class="truncate text-[13px] font-semibold">{{ ws.orgName || "—" }}</b>
             <span class="truncate text-[11px] text-ink-3">{{ ws.projectName || "organization" }}</span>
           </span>
@@ -236,6 +242,14 @@ const settingsIcon: Shape[] = [
           </template>
         </nav>
         <div class="ml-auto flex items-center gap-2">
+          <span
+            v-if="live.started && !live.connected"
+            class="inline-flex items-center gap-[7px] rounded-full bg-degraded-weak px-[11px] py-[3px] text-[12px] font-medium text-degraded"
+            title="The live update stream dropped — statuses may be stale until it reconnects"
+          >
+            <span class="h-2 w-2 animate-pulse rounded-full bg-degraded motion-reduce:animate-none"></span>
+            Live updates reconnecting…
+          </span>
           <SearchBox />
           <slot name="actions" />
           <button class="grid h-[34px] w-[34px] place-items-center rounded-sm border border-border bg-surface text-ink-2 hover:border-border-strong hover:text-ink" type="button" aria-label="Toggle theme" @click="toggle">

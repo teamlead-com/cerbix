@@ -17,6 +17,8 @@ type ApiToken struct {
 	Name       string     `json:"name"`
 	Role       Role       `json:"role"`
 	CreatedBy  string     `json:"created_by,omitempty"`
+	// CreatedByEmail resolves the issuer for display (list endpoint only).
+	CreatedByEmail string `json:"created_by_email,omitempty"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 }

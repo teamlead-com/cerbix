@@ -113,6 +113,15 @@ func (h *Handler) getIncident(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Resolve the acknowledging actor for display; best-effort (the user may be gone).
+	if inc.AcknowledgedBy != "" {
+		if u, err := h.store.GetUser(r.Context(), inc.AcknowledgedBy); err == nil {
+			inc.AcknowledgedByName = u.DisplayName
+			if inc.AcknowledgedByName == "" {
+				inc.AcknowledgedByName = u.Email
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, inc)
 }
 

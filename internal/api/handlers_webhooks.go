@@ -29,8 +29,14 @@ func (h *Handler) listWebhooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Never expose secrets in a listing.
+	emails := h.resolveUserEmails(r, func(yield func(string)) {
+		for _, wh := range hooks {
+			yield(wh.CreatedBy)
+		}
+	})
 	for i := range hooks {
 		hooks[i].Secret = ""
+		hooks[i].CreatedByEmail = emails[hooks[i].CreatedBy]
 	}
 	writeJSON(w, http.StatusOK, hooks)
 }

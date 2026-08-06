@@ -17,6 +17,8 @@ type Webhook struct {
 	Secret    string    `json:"secret,omitempty"` // returned only at creation
 	Enabled   bool      `json:"enabled"`
 	CreatedBy string    `json:"created_by,omitempty"`
+	// CreatedByEmail resolves the issuer for display (list endpoint only).
+	CreatedByEmail string `json:"created_by_email,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

@@ -4883,6 +4883,8 @@ export interface components {
              */
             acknowledged_at?: string | null;
             acknowledged_by?: string;
+            /** @description Resolved actor (detail endpoint only). */
+            acknowledged_by_name?: string;
             /** Format: date-time */
             created_at?: string;
             /** Format: date-time */
@@ -5269,6 +5271,8 @@ export interface components {
             name?: string;
             role?: components["schemas"]["Role"];
             created_by?: string;
+            /** @description Resolved issuer (list endpoint only). */
+            created_by_email?: string;
             /** Format: date-time */
             last_used_at?: string | null;
             /** Format: date-time */
@@ -5304,6 +5308,8 @@ export interface components {
             secret?: string;
             enabled?: boolean;
             created_by?: string;
+            /** @description Resolved issuer (list endpoint only). */
+            created_by_email?: string;
             /** Format: date-time */
             created_at?: string;
         };

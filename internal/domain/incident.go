@@ -91,6 +91,8 @@ type Incident struct {
 	ResolvedAt     *time.Time     `json:"resolved_at,omitempty"`
 	AcknowledgedAt *time.Time     `json:"acknowledged_at,omitempty"` // set when someone takes ownership; stops escalation
 	AcknowledgedBy string         `json:"acknowledged_by,omitempty"`
+	// AcknowledgedByName resolves the actor for display (detail endpoint only).
+	AcknowledgedByName string `json:"acknowledged_by_name,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 }

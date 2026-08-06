@@ -1127,6 +1127,7 @@ watch(tab, loadActive);
                 <th class="border-b border-border px-4 py-[10px] text-left">Name</th>
                 <th class="border-b border-border px-4 py-[10px] text-left">Scope</th>
                 <th class="border-b border-border px-4 py-[10px] text-left">Role</th>
+                <th class="border-b border-border px-4 py-[10px] text-left">Created by</th>
                 <th class="border-b border-border px-4 py-[10px] text-left">Last used</th>
                 <th class="border-b border-border px-4 py-[10px]"></th>
               </tr>
@@ -1136,10 +1137,11 @@ watch(tab, loadActive);
                 <td class="border-b border-border px-4 py-[11px] font-medium">{{ t.name }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-ink-2">{{ projectName(t.project_id) }}</td>
                 <td class="border-b border-border px-4 py-[11px]"><span class="rounded-full border border-border px-[9px] py-[2px] text-[11.5px] font-medium text-ink-2">{{ roleLabel(t.role) }}</span></td>
+                <td class="border-b border-border px-4 py-[11px] font-mono text-[12px] text-ink-3">{{ t.created_by_email || "—" }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-ink-3">{{ t.last_used_at ? new Date(t.last_used_at).toLocaleString() : "never" }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-right"><button v-if="canManageOrg" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteToken(t)">Revoke</button></td>
               </tr>
-              <tr v-if="!tokens.length && !loading"><td colspan="5" class="px-4 py-10 text-center text-[13px] text-ink-3">No tokens yet.</td></tr>
+              <tr v-if="!tokens.length && !loading"><td colspan="6" class="px-4 py-10 text-center text-[13px] text-ink-3">No tokens yet.</td></tr>
             </tbody>
           </table>
         </section>
@@ -1178,6 +1180,7 @@ watch(tab, loadActive);
               <tr class="text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
                 <th class="border-b border-border px-4 py-[10px] text-left">URL</th>
                 <th class="border-b border-border px-4 py-[10px] text-left">Scope</th>
+                <th class="border-b border-border px-4 py-[10px] text-left">Created by</th>
                 <th class="border-b border-border px-4 py-[10px] text-left">Status</th>
                 <th class="border-b border-border px-4 py-[10px]"></th>
               </tr>
@@ -1186,10 +1189,11 @@ watch(tab, loadActive);
               <tr v-for="h in webhooks" :key="h.id" class="hover:bg-surface-2">
                 <td class="border-b border-border px-4 py-[11px] font-mono text-[12px] text-ink-2">{{ h.url }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-ink-2">{{ projectName(h.project_id) }}</td>
+                <td class="border-b border-border px-4 py-[11px] font-mono text-[12px] text-ink-3">{{ h.created_by_email || "—" }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-ink-2">{{ h.enabled ? "enabled" : "disabled" }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-right"><button v-if="canManageOrg" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteWebhook(h)">Delete</button></td>
               </tr>
-              <tr v-if="!webhooks.length && !loading"><td colspan="4" class="px-4 py-10 text-center text-[13px] text-ink-3">No webhooks yet.</td></tr>
+              <tr v-if="!webhooks.length && !loading"><td colspan="5" class="px-4 py-10 text-center text-[13px] text-ink-3">No webhooks yet.</td></tr>
             </tbody>
           </table>
         </section>

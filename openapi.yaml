@@ -2232,6 +2232,7 @@ components:
         resolved_at: { type: string, format: date-time, nullable: true }
         acknowledged_at: { type: string, format: date-time, nullable: true, description: 'Set when acknowledged; stops on-call escalation.' }
         acknowledged_by: { type: string }
+        acknowledged_by_name: { type: string, description: 'Resolved actor (detail endpoint only).' }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     EscalationTarget:
@@ -2574,6 +2575,7 @@ components:
         name: { type: string }
         role: { $ref: '#/components/schemas/Role' }
         created_by: { type: string }
+        created_by_email: { type: string, description: 'Resolved issuer (list endpoint only).' }
         last_used_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
     CreateApiToken:
@@ -2599,6 +2601,7 @@ components:
         secret: { type: string, description: 'Present only in the create response.' }
         enabled: { type: boolean }
         created_by: { type: string }
+        created_by_email: { type: string, description: 'Resolved issuer (list endpoint only).' }
         created_at: { type: string, format: date-time }
     CreateWebhook:
       type: object

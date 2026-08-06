@@ -158,10 +158,14 @@ onMounted(() => {
           <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="impactBadge(incident.impact).cls">{{ impactBadge(incident.impact).label }}</span>
           <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ incident.source }}</span>
         </div>
-        <div class="mt-[7px] flex flex-wrap gap-x-4 text-[13px] text-ink-3">
+        <div class="mt-[7px] flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-ink-3">
           <span>started <span class="font-mono text-ink-2">{{ relTime(incident.started_at) }}</span></span>
-          <span v-if="incident.acknowledged_at">acknowledged <span class="font-mono text-ink-2">{{ relTime(incident.acknowledged_at) }}</span></span>
+          <span v-if="incident.acknowledged_at">acknowledged
+            <template v-if="incident.acknowledged_by_name">by <b class="font-medium text-ink-2">{{ incident.acknowledged_by_name }}</b> ·</template>
+            <span class="font-mono text-ink-2">{{ relTime(incident.acknowledged_at) }}</span></span>
           <span v-if="incident.resolved_at">resolved <span class="font-mono text-ink-2">{{ relTime(incident.resolved_at) }}</span></span>
+          <RouterLink v-if="incident.monitor_id" :to="{ name: 'monitor', params: { id: incident.monitor_id } }" class="text-accent hover:underline">monitor →</RouterLink>
+          <span v-if="incident.external_key" class="rounded-xs border border-border bg-inset px-[6px] py-px font-mono text-[11px]" :title="'External correlation key'">{{ incident.external_key }}</span>
         </div>
       </div>
 

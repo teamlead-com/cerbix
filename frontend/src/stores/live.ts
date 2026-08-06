@@ -14,10 +14,14 @@ export const useLive = defineStore("live", {
   state: () => ({
     statuses: {} as Record<string, LiveStatus>,
     connected: false,
+    // started distinguishes "stream was requested and dropped" (show the
+    // reconnecting chip) from "no view has asked for live updates yet".
+    started: false,
   }),
   actions: {
     connect() {
       if (es) return; // already streaming
+      this.started = true;
       es = new EventSource("/api/v1/events");
       es.addEventListener("status", (e) => {
         try {
@@ -41,6 +45,7 @@ export const useLive = defineStore("live", {
       es?.close();
       es = null;
       this.connected = false;
+      this.started = false;
     },
   },
 });

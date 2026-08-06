@@ -13,6 +13,27 @@ import (
 
 // listApiTokens lists an org's service-account tokens (org admin). Secrets are
 // never returned — only metadata.
+// resolveUserEmails maps the distinct user ids produced by iter to emails,
+// best-effort (deleted users simply resolve to nothing). Lists here are small
+// (tokens/webhooks of one org), so per-id lookups are fine.
+func (h *Handler) resolveUserEmails(r *http.Request, iter func(yield func(string))) map[string]string {
+	out := map[string]string{}
+	iter(func(id string) {
+		if id == "" {
+			return
+		}
+		if _, seen := out[id]; seen {
+			return
+		}
+		if u, err := h.store.GetUser(r.Context(), id); err == nil {
+			out[id] = u.Email
+		} else {
+			out[id] = ""
+		}
+	})
+	return out
+}
+
 func (h *Handler) listApiTokens(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
 	orgID := r.PathValue("orgID")
@@ -28,6 +49,14 @@ func (h *Handler) listApiTokens(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.serverError(w, "list_api_tokens", err)
 		return
+	}
+	emails := h.resolveUserEmails(r, func(yield func(string)) {
+		for _, t := range tokens {
+			yield(t.CreatedBy)
+		}
+	})
+	for i := range tokens {
+		tokens[i].CreatedByEmail = emails[tokens[i].CreatedBy]
 	}
 	writeJSON(w, http.StatusOK, tokens)
 }

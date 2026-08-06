@@ -2087,3 +2087,15 @@ resolve the live value (api password change via a small `effectiveMinPasswordLen
 the settings service when wired, else the config value; reset-confirm via the existing
 `authPolicy()` fallback chain). YAML stays the pre-first-save seed, matching the resolver
 contract everywhere else. No migration; instant effect on save.
+
+## D-0109 — Render what the API already serves (iter-0047)
+The audit's largest class was data served but never rendered. Now shown: HTTP method (the detail
+page hardcoded "GET" for every http monitor — actively misleading for POST/HEAD checks), the full
+alerting config on the monitor card (failure threshold / confirm / re-notify / push grace /
+escalation policy / updated_at), who acknowledged an incident (new `acknowledged_by_name`
+enrichment on the detail endpoint — the raw field is a UUID), the incident → monitor link and the
+Alertmanager `external_key`, and who issued each API token/webhook (`created_by_email`, resolved
+in the list handlers). Two dead store states got their consumers: `live.connected` drives a
+header "reconnecting" chip (with a new `started` flag so unsubscribed pages stay quiet) and
+`workspace.loading` drives an org-switcher skeleton. Enrichment is handler-level and best-effort —
+deleted users resolve to nothing rather than failing the request.

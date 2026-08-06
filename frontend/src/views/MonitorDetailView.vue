@@ -25,6 +25,7 @@ const id = route.params.id as string;
 
 const loading = ref(true);
 const monitor = ref<Monitor | null>(null);
+const escalationPolicyName = ref("");
 const windows = ref<WindowSLA[]>([]);
 const heartbeats = ref<Heartbeat[]>([]);
 const availability = ref<DailyAvailability[]>([]);
@@ -147,6 +148,11 @@ async function load() {
     availability.value = av.data ?? [];
     projectMonitors.value = mons.data ?? [];
     openIncident.value = (inc.data ?? []).find((i) => i.monitor_id === id && i.status !== "resolved") ?? null;
+    // Resolve the attached escalation policy's name for the Configuration card.
+    if (monitor.value?.escalation_policy_id) {
+      const pol = await api.GET("/api/v1/projects/{projectID}/escalation-policies", { params: { path: { projectID: pid } } });
+      escalationPolicyName.value = (pol.data ?? []).find((p) => p.id === monitor.value?.escalation_policy_id)?.name ?? "";
+    }
   }
   loading.value = false;
 }
@@ -202,7 +208,7 @@ watch(
             <span v-if="!monitor.enabled" class="rounded-full bg-pending-weak px-[9px] py-px text-[11.5px] font-medium text-ink-3">Paused</span>
           </div>
           <div class="mt-[7px] flex flex-wrap items-center gap-x-[10px] gap-y-1 text-[13px] text-ink-3">
-            <span class="font-mono text-ink-2">{{ monitor.type === "http" ? "GET " : "" }}{{ monitor.target || "push heartbeat" }}</span>
+            <span class="font-mono text-ink-2">{{ monitor.type === "http" ? (monitor.method || "GET") + " " : "" }}{{ monitor.target || "push heartbeat" }}</span>
             <template v-if="!isPush">
               <span class="inline-block h-[3px] w-[3px] rounded-full bg-border-strong"></span>
               <span>every <span class="font-mono text-ink-2">{{ monitor.interval_seconds }}s</span></span>
@@ -370,10 +376,27 @@ watch(
             <dl class="grid grid-cols-[auto_1fr] gap-x-[14px] gap-y-[9px] px-4 py-[14px] text-[13px]">
               <dt class="text-ink-3">Target</dt><dd class="m-0 break-all text-right font-mono text-[12.5px] text-ink-2">{{ monitor.target || "—" }}</dd>
               <dt class="text-ink-3">Type</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.type }}</dd>
+              <template v-if="monitor.type === 'http'">
+                <dt class="text-ink-3">Method</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.method || "GET" }}</dd>
+              </template>
               <template v-if="!isPush">
                 <dt class="text-ink-3">Interval</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.interval_seconds }}s</dd>
                 <dt class="text-ink-3">Timeout</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.timeout_seconds }}s</dd>
                 <dt class="text-ink-3">Retries</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.retries }}</dd>
+                <dt class="text-ink-3">Failure threshold</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.failure_threshold || 1 }} checks</dd>
+                <template v-if="monitor.confirm_interval_seconds">
+                  <dt class="text-ink-3">Confirm interval</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.confirm_interval_seconds }}s</dd>
+                </template>
+                <template v-if="monitor.renotify_seconds">
+                  <dt class="text-ink-3">Re-notify</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">every {{ monitor.renotify_seconds }}s while down</dd>
+                </template>
+              </template>
+              <template v-if="isPush">
+                <dt class="text-ink-3">Grace period</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.grace_seconds || 0 }}s</dd>
+              </template>
+              <template v-if="monitor.escalation_policy_id">
+                <dt class="text-ink-3">Escalation policy</dt>
+                <dd class="m-0 text-right text-[12.5px]"><RouterLink :to="{ name: 'escalation' }" class="text-accent hover:underline">{{ escalationPolicyName || "attached" }}</RouterLink></dd>
               </template>
               <dt class="text-ink-3">Auto-incident</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.auto_incident === false ? "off" : "on" }}</dd>
               <template v-if="!isPush">
@@ -387,6 +410,7 @@ watch(
               </template>
               <dt class="text-ink-3">Project</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ projectName }}</dd>
               <dt class="text-ink-3">Created</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ fmtDate(monitor.created_at) }}</dd>
+              <dt class="text-ink-3">Updated</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ fmtDate(monitor.updated_at) }}</dd>
             </dl>
           </section>
         </div>

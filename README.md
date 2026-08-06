@@ -61,6 +61,8 @@ serves the SPA; put Traefik / your ingress in front for TLS.
 
 Everything app-side is in the binary. The only external dependency is **PostgreSQL**;
 migrations apply themselves on startup and a bootstrap admin is created from config.
+Full step-by-step production guides (Docker Compose and bare binary + systemd) live in
+[`INSTALL.md`](INSTALL.md).
 
 ### With Docker Compose (single node)
 

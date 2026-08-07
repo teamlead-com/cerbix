@@ -68,16 +68,19 @@ func (s *Store) InsertHeartbeatsBulk(ctx context.Context, hbs []domain.Heartbeat
 	if err != nil {
 		return 0, fmt.Errorf("store: bulk insert filter: %w", err)
 	}
+	// defer is the idiomatic close: pgxpool's poolRows.Next() already releases the
+	// connection when it returns false (normal + iteration-error + ctx-cancel paths),
+	// so this is not a leak fix — it's hardening that also covers the scan-error early
+	// return and any (unlikely) panic mid-loop without a manual close on each path.
+	defer rows.Close()
 	live := map[string]bool{}
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
 			return 0, fmt.Errorf("store: bulk insert filter scan: %w", err)
 		}
 		live[id] = true
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("store: bulk insert filter iterate: %w", err)
 	}

@@ -46,7 +46,7 @@ type Store interface {
 	CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error)
 	UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
-	GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, error)
+	GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, time.Time, error)
 	DeleteMonitor(ctx context.Context, id string) error
 	ReplaceMonitorDependencies(ctx context.Context, monitorID, projectID string, parents []string) error
 	ListRecentHeartbeats(ctx context.Context, monitorID string, limit int) ([]domain.Heartbeat, error)
@@ -161,11 +161,20 @@ type Metrics interface {
 	RecordIncidentOpened()
 }
 
-// ResultSink publishes a heartbeat into the ingestion pipeline. Used by the push
-// endpoint so a passive heartbeat flows through the same ingest path (status
-// update, notifications, incidents) as an active check. Optional and nil-safe.
+// ResultSink publishes a heartbeat into the ingestion pipeline. Used by the AGENT results
+// endpoint so a remote-prober result flows through the scheduled ingest path (status
+// update, notifications, incidents). Optional and nil-safe. (Push no longer uses this —
+// see PushRecorder.)
 type ResultSink interface {
 	PublishResult(ctx context.Context, hb domain.Heartbeat) error
+}
+
+// PushRecorder applies a push (dead-man's-switch) heartbeat via its dedicated trusted
+// entrypoint — NOT the shared ResultSink/dispatcher. receivedAt is the ingress DB clock
+// from the token lookup; observedAt is the optional raw client timestamp (zero = absent).
+// Satisfied by *ingest.PushRecorder. Optional and nil-safe.
+type PushRecorder interface {
+	Record(ctx context.Context, monitorID string, up bool, msg string, receivedAt, observedAt time.Time)
 }
 
 // Handler holds API dependencies.
@@ -175,6 +184,7 @@ type Handler struct {
 	minPasswordLen    int
 	metrics           Metrics
 	results           ResultSink
+	pushRecorder      PushRecorder
 	mailer            Mailer
 	eventSrc          EventSource
 	oidc              OIDCController
@@ -243,10 +253,17 @@ func (h *Handler) WithMetrics(m Metrics) *Handler {
 	return h
 }
 
-// WithResultSink attaches the pipeline result publisher used by the push
+// WithResultSink attaches the pipeline result publisher used by the agent results
 // endpoint. Optional and nil-safe.
 func (h *Handler) WithResultSink(s ResultSink) *Handler {
 	h.results = s
+	return h
+}
+
+// WithPushRecorder attaches the dedicated push-result recorder used by the push endpoint.
+// Optional and nil-safe (the endpoint reports 501 when unset).
+func (h *Handler) WithPushRecorder(p PushRecorder) *Handler {
+	h.pushRecorder = p
 	return h
 }
 

@@ -118,7 +118,7 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 	if rawPushHash != HashToken("cbxp_rotate_me") {
 		t.Fatalf("push token blind index = %q, want HashToken(token)", rawPushHash)
 	}
-	if got, err := st.GetMonitorByPushToken(ctx, "cbxp_rotate_me"); err != nil || got.ID != push.ID {
+	if got, _, err := st.GetMonitorByPushToken(ctx, "cbxp_rotate_me"); err != nil || got.ID != push.ID {
 		t.Fatalf("lookup by push token after rotation: %+v err=%v", got, err)
 	}
 }

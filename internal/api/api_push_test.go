@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/api"
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
+// fakeResultSink captures results published to the ingest pipeline — still used by the
+// AGENT results endpoint (push migrated to fakePushRecorder below).
 type fakeResultSink struct {
 	mu  sync.Mutex
 	hbs []domain.Heartbeat
@@ -34,29 +37,61 @@ func (s *fakeResultSink) last() (domain.Heartbeat, bool) {
 	return s.hbs[len(s.hbs)-1], true
 }
 
-func pushHandler(fs *fakeStore, sink *fakeResultSink) http.Handler {
-	return api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithResultSink(sink).PublicRouter()
+// fakePushRecorder captures the Record calls the push handler makes (it replaces the old
+// ResultSink path: push now goes through the dedicated recorder, not the dispatcher).
+type fakePushRecorder struct {
+	mu    sync.Mutex
+	calls []pushCall
+}
+
+type pushCall struct {
+	monitorID  string
+	up         bool
+	msg        string
+	receivedAt time.Time
+}
+
+func (r *fakePushRecorder) Record(_ context.Context, monitorID string, up bool, msg string, receivedAt, _ time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, pushCall{monitorID, up, msg, receivedAt})
+}
+
+func (r *fakePushRecorder) last() (pushCall, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.calls) == 0 {
+		return pushCall{}, false
+	}
+	return r.calls[len(r.calls)-1], true
+}
+
+func pushHandler(fs *fakeStore, rec *fakePushRecorder) http.Handler {
+	return api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithPushRecorder(rec).PublicRouter()
 }
 
 func TestPushHeartbeat(t *testing.T) {
-	sink := &fakeResultSink{}
-	h := pushHandler(seededStore(), sink)
+	pr := &fakePushRecorder{}
+	h := pushHandler(seededStore(), pr)
 
-	// A push records an up heartbeat for the token's monitor.
+	// A push records an up result for the token's monitor, carrying the ingress received_at.
 	if rec := do(h, outsider, http.MethodPost, "/api/v1/public/push/tok-push", ""); rec.Code != http.StatusOK {
 		t.Fatalf("push = %d, want 200", rec.Code)
 	}
-	hb, ok := sink.last()
-	if !ok || hb.MonitorID != "monp" || !hb.Up {
-		t.Fatalf("expected an up heartbeat for monp, got %+v (ok=%v)", hb, ok)
+	c, ok := pr.last()
+	if !ok || c.monitorID != "monp" || !c.up {
+		t.Fatalf("expected an up push for monp, got %+v (ok=%v)", c, ok)
+	}
+	if c.receivedAt.IsZero() {
+		t.Fatal("push must carry the ingress received_at from the token lookup")
 	}
 
-	// ?status=down records a down heartbeat.
+	// ?status=down records a down result.
 	if rec := do(h, outsider, http.MethodPost, "/api/v1/public/push/tok-push?status=down", ""); rec.Code != http.StatusOK {
 		t.Fatalf("push down = %d, want 200", rec.Code)
 	}
-	if hb, _ := sink.last(); hb.Up {
-		t.Fatal("status=down should record a down heartbeat")
+	if c, _ := pr.last(); c.up {
+		t.Fatal("status=down should record a down result")
 	}
 
 	// An unknown token is hidden.

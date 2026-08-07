@@ -74,19 +74,25 @@ type Consumer struct {
 	store      Store
 	dispatcher dispatch.Dispatcher
 	recorder   Recorder
-	events     Publisher
+	reconciler *Reconciler
 	logger     *slog.Logger
 }
 
-// New builds a results consumer.
+// New builds a results consumer. Its post-commit reconciler shares the store/recorder;
+// attach an events publisher with WithEvents.
 func New(store Store, dispatcher dispatch.Dispatcher, recorder Recorder, logger *slog.Logger) *Consumer {
-	return &Consumer{store: store, dispatcher: dispatcher, recorder: recorder, logger: logger}
+	return &Consumer{
+		store:      store,
+		dispatcher: dispatcher,
+		recorder:   recorder,
+		reconciler: NewReconciler(store, nil, recorder, logger),
+		logger:     logger,
+	}
 }
 
-// WithEvents attaches a realtime publisher for status changes. Optional and
-// nil-safe.
+// WithEvents attaches a realtime publisher for status changes. Optional and nil-safe.
 func (c *Consumer) WithEvents(p Publisher) *Consumer {
-	c.events = p
+	c.reconciler.WithEvents(p)
 	return c
 }
 
@@ -137,111 +143,9 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 	}
 	if o.Applied && o.Prev != o.Cur {
 		c.logger.Info("monitor_status_changed", "monitor_id", hb.MonitorID, "prev", string(o.Prev), "cur", string(o.Cur), "suppressed", o.Suppressed)
-		c.reconcileTransition(ctx, hb, o.Prev, o.Cur, o.Suppressed)
+		c.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed)
 	}
 }
 
 // ReasonFutureTimestamp mirrors store.ReasonFutureTimestamp for the quarantine log branch.
 const ReasonFutureTimestamp = store.ReasonFutureTimestamp
-
-// reconcileTransition handles any monitor status change: it publishes a live
-// event for SSE subscribers, and on going down opens an auto-incident / on
-// recovery resolves it (notifying the monitor's channels). The monitor is fetched
-// once and shared. Best-effort: failures are logged, never fatal to ingestion.
-func (c *Consumer) reconcileTransition(ctx context.Context, hb domain.Heartbeat, prev, cur domain.MonitorStatus, suppressed bool) {
-	mon, err := c.store.GetMonitor(ctx, hb.MonitorID)
-	if err != nil {
-		c.logger.Error("transition_get_monitor_failed", "monitor_id", hb.MonitorID, "error", err.Error())
-		return
-	}
-	if c.events != nil {
-		c.events.Publish(events.Event{
-			Type: "status", MonitorID: mon.ID, ProjectID: mon.ProjectID,
-			Status: string(cur), LatencyMS: hb.LatencyMS, TS: hb.Ts,
-		})
-	}
-	switch {
-	case cur == domain.StatusDown && prev != domain.StatusDown:
-		// Opening is opt-out per monitor and suppressed during maintenance;
-		// resolving stays unconditional so an already-open auto-incident still
-		// closes on recovery even if auto-incidents were turned off meanwhile.
-		if mon.AutoIncident && !suppressed {
-			c.openAutoIncident(ctx, mon, hb)
-		}
-	case cur == domain.StatusUp && prev == domain.StatusDown:
-		c.resolveAutoIncident(ctx, hb)
-	}
-}
-
-func (c *Consumer) openAutoIncident(ctx context.Context, mon domain.Monitor, hb domain.Heartbeat) {
-	// Don't double-open while one is already active.
-	if _, err := c.store.FindOpenAutoIncidentByMonitor(ctx, hb.MonitorID); err == nil {
-		return
-	} else if !errors.Is(err, store.ErrNotFound) {
-		c.logger.Error("find_open_auto_incident_failed", "monitor_id", hb.MonitorID, "error", err.Error())
-		return
-	}
-	body := "Automatically opened: the monitor is failing its checks."
-	if hb.Msg != "" {
-		body = "Automatically opened: " + hb.Msg
-	}
-	inc := domain.Incident{
-		ProjectID: mon.ProjectID,
-		MonitorID: mon.ID,
-		Title:     mon.Name + " is down",
-		Status:    domain.IncidentInvestigating,
-		Impact:    domain.ImpactMajor,
-		Source:    domain.SourceAuto,
-	}
-	// Retry a transient failure: for an escalation-policy monitor the on-call ladder
-	// pages OVER this incident and the flat down-notify is suppressed, so a lost
-	// incident-create means the outage goes entirely unalerted. A bounded retry rides
-	// out a brief DB blip. (A concurrent create → ErrAlreadyOpen is success, not retried.)
-	var created domain.Incident
-	var err error
-	for attempt := 1; ; attempt++ {
-		created, err = c.store.CreateIncident(ctx, inc, body, autoIncidentAuthor)
-		if errors.Is(err, store.ErrAlreadyOpen) {
-			return // a concurrent down transition opened it first (unique index) — benign
-		}
-		if err == nil || attempt >= autoIncidentOpenAttempts {
-			break
-		}
-		c.logger.Warn("auto_incident_open_retry", "monitor_id", hb.MonitorID, "attempt", attempt, "error", err.Error())
-		if !sleepCtx(ctx, autoIncidentOpenBackoff) {
-			return // shutting down
-		}
-	}
-	if err != nil {
-		// Persistent failure: an escalation monitor's outage may go unpaged. Logged at
-		// ERROR so log-based alerting catches it (a full delivery guarantee would need
-		// the incident committed in the status-transition transaction — see D-0138).
-		c.logger.Error("auto_incident_open_failed", "monitor_id", hb.MonitorID, "escalation", mon.EscalationPolicyID != "", "error", err.Error())
-		return
-	}
-	if c.recorder != nil {
-		c.recorder.RecordIncidentOpened()
-	}
-	c.logger.Info("auto_incident_opened", "monitor_id", hb.MonitorID, "incident_id", created.ID)
-}
-
-func (c *Consumer) resolveAutoIncident(ctx context.Context, hb domain.Heartbeat) {
-	inc, err := c.store.FindOpenAutoIncidentByMonitor(ctx, hb.MonitorID)
-	if errors.Is(err, store.ErrNotFound) {
-		return // nothing open (e.g. incident was resolved manually)
-	}
-	if err != nil {
-		c.logger.Error("find_open_auto_incident_failed", "monitor_id", hb.MonitorID, "error", err.Error())
-		return
-	}
-	if _, err := c.store.AddIncidentUpdate(ctx, domain.IncidentUpdate{
-		IncidentID: inc.ID,
-		Status:     domain.IncidentResolved,
-		Body:       "Monitor recovered — automatically resolved.",
-		Author:     autoIncidentAuthor,
-	}); err != nil {
-		c.logger.Error("auto_incident_resolve_failed", "monitor_id", hb.MonitorID, "incident_id", inc.ID, "error", err.Error())
-		return
-	}
-	c.logger.Info("auto_incident_resolved", "monitor_id", hb.MonitorID, "incident_id", inc.ID)
-}

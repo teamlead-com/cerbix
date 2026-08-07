@@ -1015,11 +1015,11 @@ func TestPushMonitorToken(t *testing.T) {
 	if created.PushToken != "cbxp_secret" {
 		t.Fatalf("push_token not persisted: %q", created.PushToken)
 	}
-	got, err := st.GetMonitorByPushToken(ctx, "cbxp_secret")
+	got, _, err := st.GetMonitorByPushToken(ctx, "cbxp_secret")
 	if err != nil || got.ID != created.ID {
 		t.Fatalf("get by push token = %+v (err %v)", got, err)
 	}
-	if _, err := st.GetMonitorByPushToken(ctx, "nope"); err != store.ErrNotFound {
+	if _, _, err := st.GetMonitorByPushToken(ctx, "nope"); err != store.ErrNotFound {
 		t.Fatal("unknown push token should be ErrNotFound")
 	}
 }

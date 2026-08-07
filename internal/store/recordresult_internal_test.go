@@ -102,3 +102,55 @@ func TestRecordScheduledResultPipeline(t *testing.T) {
 		t.Fatalf("after fresh up: hb=%d, want 3", hbCount())
 	}
 }
+
+// TestRecordPushResult proves the push entrypoint (spec §4): ordering by the ingress
+// received_at, observed_at NULL (no client ts), last_result_ts advanced, and the
+// current-state re-check dropping a ping to a now-disabled monitor.
+func TestRecordPushResult(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		IntervalSeconds: 3600, FailureThreshold: 1, Enabled: true, PushToken: "cbxp_x",
+	})
+	if err != nil {
+		t.Fatalf("create push monitor: %v", err)
+	}
+	recv := time.Now().UTC().Truncate(time.Millisecond)
+
+	// A down ping applies (threshold 1), ts = received_at, observed_at NULL.
+	o, err := st.RecordPushResult(ctx, mon.ID, false, "timeout", recv, time.Time{})
+	if err != nil || !o.Applied || o.Cur != domain.StatusDown || !o.Inserted {
+		t.Fatalf("push down: %+v err=%v", o, err)
+	}
+	var gotTs time.Time
+	var obs *time.Time
+	_ = st.pool.QueryRow(ctx, `SELECT ts, observed_at FROM heartbeats WHERE monitor_id=$1`, mon.ID).Scan(&gotTs, &obs)
+	if !gotTs.Equal(recv) {
+		t.Fatalf("push ts = %v, want received_at %v", gotTs, recv)
+	}
+	if obs != nil {
+		t.Fatalf("observed_at must be NULL when no client timestamp: got %v", obs)
+	}
+	// last_result_ts advanced to received_at (so the dead-man CAS sees fresh pings).
+	var last *time.Time
+	_ = st.pool.QueryRow(ctx, `SELECT last_result_ts FROM monitors WHERE id=$1`, mon.ID).Scan(&last)
+	if last == nil || !last.Equal(recv) {
+		t.Fatalf("last_result_ts = %v, want received_at %v", last, recv)
+	}
+
+	// Disable the monitor → a later ping is dropped by the current-state re-check.
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET enabled = false WHERE id=$1`, mon.ID); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	o, err = st.RecordPushResult(ctx, mon.ID, true, "ok", recv.Add(time.Minute), time.Time{})
+	if err != nil || o.Applied || o.Inserted || o.Reason != "" {
+		t.Fatalf("push to disabled monitor must be dropped: %+v err=%v", o, err)
+	}
+
+	// A ping to a nonexistent monitor is ErrNotFound.
+	if _, err := st.RecordPushResult(ctx, "00000000-0000-0000-0000-000000000000", true, "", recv, time.Time{}); err != ErrNotFound {
+		t.Fatalf("push to missing monitor err = %v, want ErrNotFound", err)
+	}
+}

@@ -331,13 +331,13 @@ func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, er
 	}
 	return m, nil
 }
-func (f *fakeStore) GetMonitorByPushToken(_ context.Context, token string) (domain.Monitor, error) {
+func (f *fakeStore) GetMonitorByPushToken(_ context.Context, token string) (domain.Monitor, time.Time, error) {
 	for _, m := range f.monitors {
 		if m.PushToken == token {
-			return m, nil
+			return m, time.Unix(1700000000, 0), nil // fixed ingress received_at for tests
 		}
 	}
-	return domain.Monitor{}, store.ErrNotFound
+	return domain.Monitor{}, time.Time{}, store.ErrNotFound
 }
 func (f *fakeStore) UpdateMonitor(_ context.Context, m domain.Monitor) (domain.Monitor, error) {
 	if _, ok := f.monitors[m.ID]; !ok {

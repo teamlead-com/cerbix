@@ -507,6 +507,12 @@ func runServe(args []string) int {
 		if mail != nil {
 			apiHandler.WithMailer(mail)
 		}
+		if st != nil {
+			// Push results apply through a dedicated recorder (trusted entrypoint, not the
+			// shared ResultSink), running the same post-commit reconciler (SSE + incidents)
+			// as scheduled ingest and publishing status changes to the shared broker.
+			apiHandler.WithPushRecorder(ingest.NewPushRecorder(st, ingest.NewReconciler(st, broker, registry, logger), registry, logger))
+		}
 		// Region picker liveness = RabbitMQ consumers (mgmt) ∪ recent pull-agent heartbeats.
 		apiHandler.WithLiveRegions(newLiveRegions(mgmt, st))
 		// HTTP-pull agent endpoints self-authenticate with the agent token(s) and are

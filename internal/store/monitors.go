@@ -34,7 +34,10 @@ func nullableID(id string) *string {
 	return &id
 }
 
-func (s *Store) scanMonitor(row pgx.Row) (domain.Monitor, error) {
+// scanMonitor scans monitorColumns into a Monitor. extra dests are appended to the Scan,
+// letting a caller pull additional trailing columns (e.g. statement_timestamp()) selected
+// alongside monitorColumns in the same query.
+func (s *Store) scanMonitor(row pgx.Row, extra ...any) (domain.Monitor, error) {
 	var (
 		m         domain.Monitor
 		typ       string
@@ -43,9 +46,11 @@ func (s *Store) scanMonitor(row pgx.Row) (domain.Monitor, error) {
 		escPolicy *string
 	)
 	var config []byte
-	err := row.Scan(&m.ID, &m.ProjectID, &m.Name, &typ, &m.Target,
+	dests := []any{&m.ID, &m.ProjectID, &m.Name, &typ, &m.Target,
 		&m.IntervalSeconds, &m.TimeoutSeconds, &m.Retries, &m.Conditions,
-		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.DependsOn)
+		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.DependsOn}
+	dests = append(dests, extra...)
+	err := row.Scan(dests...)
 	if err != nil {
 		return domain.Monitor{}, err
 	}
@@ -170,17 +175,73 @@ func (s *Store) CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 
 // GetMonitorByPushToken returns the push monitor with the given token, or ErrNotFound.
 // Lookup is by the blind index (hash of the presented token), so the plaintext never
-// needs to be stored or compared.
-func (s *Store) GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+monitorColumns+` FROM monitors WHERE push_token_hash = $1`, HashToken(token))
-	m, err := s.scanMonitor(row)
+// needs to be stored or compared. It also returns statement_timestamp() from the SAME
+// query — the trusted ingress received_at the push handler passes to RecordPushResult, so
+// ordering never degrades into processed_at under later queue/handler delay (spec §4).
+func (s *Store) GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, time.Time, error) {
+	var receivedAt time.Time
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+monitorColumns+`, statement_timestamp() FROM monitors WHERE push_token_hash = $1`,
+		HashToken(token))
+	m, err := s.scanMonitor(row, &receivedAt)
 	if noRows(err) {
-		return domain.Monitor{}, ErrNotFound
+		return domain.Monitor{}, time.Time{}, ErrNotFound
 	}
 	if err != nil {
-		return domain.Monitor{}, fmt.Errorf("store: get monitor by push token: %w", err)
+		return domain.Monitor{}, time.Time{}, fmt.Errorf("store: get monitor by push token: %w", err)
 	}
-	return m, nil
+	return m, receivedAt, nil
+}
+
+// RecordPushResult applies a push (dead-man's-switch) heartbeat via its own trusted
+// entrypoint (spec func-result-protocol §4): revision-exempt, ordered by the server
+// receivedAt captured at ingress. In one transaction it locks the monitor, RE-CHECKS
+// type='push' AND enabled (a ping accepted just before a disable must not mutate a
+// now-disabled monitor), inserts the heartbeat (ts = receivedAt, observed_at = client ts
+// or NULL), advances last_result_ts = receivedAt (so the dead-man CAS sees fresh pings),
+// and applies the status change. A bad client clock never rejects a push — the heartbeat
+// IS the liveness signal. observedAt is the optional raw client timestamp (zero = absent).
+func (s *Store) RecordPushResult(ctx context.Context, monitorID string, up bool, msg string, receivedAt time.Time, observedAt time.Time) (ResultOutcome, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ResultOutcome{}, fmt.Errorf("store: begin push result: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	var typ string
+	var enabled bool
+	err = tx.QueryRow(ctx, `SELECT type, enabled FROM monitors WHERE id = $1 FOR UPDATE`, monitorID).Scan(&typ, &enabled)
+	if noRows(err) {
+		return ResultOutcome{}, ErrNotFound
+	}
+	if err != nil {
+		return ResultOutcome{}, fmt.Errorf("store: push result lock: %w", err)
+	}
+	// Current-state re-check: dropped if it is no longer an enabled push monitor.
+	if domain.MonitorType(typ) != domain.MonitorPush || !enabled {
+		return s.commitOutcome(ctx, tx, ResultOutcome{})
+	}
+
+	var obs *time.Time
+	if !observedAt.IsZero() {
+		obs = &observedAt
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO heartbeats (monitor_id, ts, up, msg, observed_at)
+		 VALUES ($1,$2,$3,$4,$5) ON CONFLICT (monitor_id, ts) DO NOTHING`,
+		monitorID, receivedAt, up, msg, obs); err != nil {
+		return ResultOutcome{}, fmt.Errorf("store: push result insert: %w", err)
+	}
+	prev, cur, suppressed, err := recordCheckStatusTx(ctx, tx, monitorID, up)
+	if err != nil {
+		return ResultOutcome{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE monitors SET last_result_ts = $2 WHERE id = $1`, monitorID, receivedAt); err != nil {
+		return ResultOutcome{}, fmt.Errorf("store: advance last_result_ts: %w", err)
+	}
+	return s.commitOutcome(ctx, tx, ResultOutcome{
+		Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed,
+	})
 }
 
 // UpdateMonitor updates a monitor's mutable fields (name, target, schedule,

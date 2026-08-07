@@ -207,19 +207,27 @@ func (a *Agent) poll(ctx context.Context) {
 		return
 	}
 	results := make([]domain.Heartbeat, 0, len(jobs))
-	for _, raw := range jobs {
+	// Ack ONLY the jobs we actually processed. A malformed job is NOT acked: its lease
+	// lapses and it is re-delivered (and, if persistently poison, purged at its TTL) rather
+	// than being silently deleted with no result — a correctness bug in the prior version,
+	// which acked every claimed token including a skipped one.
+	ackTokens := make([]string, 0, len(jobs))
+	for i, raw := range jobs {
 		var job dispatch.CheckJob
 		if err := json.Unmarshal(raw, &job); err != nil {
 			a.logger.Error("agent_bad_job", "error", err.Error())
 			continue
 		}
 		results = append(results, a.runner.Run(ctx, job.Monitor))
+		if i < len(tokens) {
+			ackTokens = append(ackTokens, tokens[i])
+		}
 	}
-	// The tokens ack the claimed jobs: they ride along with the results POST so the
-	// server deletes those leased jobs only once the results are accepted. If the POST
-	// fails we buffer and do NOT ack — the leases lapse server-side and the jobs are
-	// re-delivered rather than lost.
-	if err := a.postResults(ctx, results, tokens); err != nil {
+	// The tokens ack the processed jobs: they ride along with the results POST so the server
+	// deletes those leased jobs only once the results are accepted. If the POST fails we
+	// buffer and do NOT ack — the leases lapse server-side and the jobs are re-delivered
+	// rather than lost. Duplicate re-delivery is safe (RecordScheduledResult dedups).
+	if err := a.postResults(ctx, results, ackTokens); err != nil {
 		a.bufferResults(results)
 		a.logger.Warn("agent_results_buffered", "error", err.Error(), "buffered", len(a.buf))
 		return

@@ -115,3 +115,45 @@ func TestBufferRingDropsOldest(t *testing.T) {
 		t.Fatalf("dropped = %d, want 50", a.dropped)
 	}
 }
+
+// TestPollDoesNotAckMalformedJob proves a claimed-but-unparseable job is NOT acked (its
+// token is withheld), so its lease lapses and it re-delivers rather than being silently
+// deleted with no result. Only the well-formed job's token is acked.
+func TestPollDoesNotAckMalformedJob(t *testing.T) {
+	var mu sync.Mutex
+	var acked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agent/jobs":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobs": []json.RawMessage{
+					json.RawMessage(`"garbage"`), // valid JSON, wrong type → Unmarshal into CheckJob fails → skipped, token withheld
+					json.RawMessage(`{"Monitor":{"id":"good","type":"http","region":"pull1"}}`),
+				},
+				"tokens": []string{"tok-bad", "tok-good"},
+			})
+		case "/api/v1/agent/results":
+			var body struct {
+				Ack []string `json:"ack"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			acked = append(acked, body.Ack...)
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	a := New(srv.URL, "tok", "pull1", fixedRunner{hb: domain.Heartbeat{MonitorID: "good", Up: true}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.poll(context.Background())
+
+	mu.Lock()
+	got := append([]string(nil), acked...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "tok-good" {
+		t.Fatalf("ack = %v, want only [tok-good] (malformed job's token withheld)", got)
+	}
+}

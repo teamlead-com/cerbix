@@ -24,6 +24,10 @@ const agentLongPollHold = 20 * time.Second
 // job re-leases at most a few times before its TTL purges it.
 const pullJobLeaseSeconds = 30
 
+// maxAgentClaimBatch caps how many jobs one claim may lease, regardless of the ?max= the
+// agent requests, so the lease window isn't overrun by an oversized batch.
+const maxAgentClaimBatch = 64
+
 // AgentRouter registers the HTTP-pull agent endpoints, gated by a shared bearer token
 // (WithAgentToken). It is mounted outside the session-auth middleware because agents
 // are not users. Without a token configured, the endpoints are disabled (404).
@@ -105,6 +109,12 @@ func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			max = n
 		}
+	}
+	// Bound the batch so a single claim can't lease an unbounded number of jobs (which
+	// would blow past the lease window before the agent finishes and cause needless
+	// re-probing). The agent's own claimBatch is 16; 64 is generous headroom.
+	if max > maxAgentClaimBatch {
+		max = maxAgentClaimBatch
 	}
 	claimed, err := h.store.ClaimPullJobs(r.Context(), region, max, pullJobLeaseSeconds)
 	if err != nil {

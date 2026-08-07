@@ -71,6 +71,53 @@ func TestLocalLogin(t *testing.T) {
 	}
 }
 
+// TestLoginNoUserEnumerationTiming proves the anti-enumeration timing fix (CWE-203):
+// an unknown-user login runs the SAME password verification (against the decoy hash)
+// as a wrong-password attempt on a real account, so it can't be told apart by timing.
+// Uses the verifyPasswordFn seam — deterministic, not a flaky wall-clock measurement.
+func TestLoginNoUserEnumerationTiming(t *testing.T) {
+	fs := newFakeStore()
+	a := localAuthenticator(t, fs, "", "")
+	hash, _ := HashPassword("pw12345678")
+	if _, err := fs.CreateLocalUser(context.Background(), "admin@x", "Admin", hash, true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if a.decoyHash == "" {
+		t.Fatal("decoy hash must be generated at startup")
+	}
+
+	// Instrument the verifier: record (hash, called) per attempt.
+	orig := verifyPasswordFn
+	t.Cleanup(func() { verifyPasswordFn = orig })
+	var verifiedHashes []string
+	verifyPasswordFn = func(encoded, password string) (bool, error) {
+		verifiedHashes = append(verifiedHashes, encoded)
+		return orig(encoded, password)
+	}
+
+	post := func(user, pw string) {
+		rec := httptest.NewRecorder()
+		a.LocalLoginHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/login",
+			strings.NewReader(`{"username":"`+user+`","password":"`+pw+`"}`)))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: code = %d, want 401", user, rec.Code)
+		}
+	}
+
+	post("admin@x", "wrongpw")  // real user, wrong password → verify against real hash
+	post("ghost@x", "whatever") // unknown user → verify against decoy hash
+
+	if len(verifiedHashes) != 2 {
+		t.Fatalf("verify called %d times, want 2 (both paths must verify)", len(verifiedHashes))
+	}
+	if verifiedHashes[0] != hash {
+		t.Fatalf("wrong-password path must verify the real hash")
+	}
+	if verifiedHashes[1] != a.decoyHash {
+		t.Fatal("unknown-user path must verify the decoy hash (equal Argon2id work → no timing oracle)")
+	}
+}
+
 func TestLocalLoginWithTOTP(t *testing.T) {
 	fs := newFakeStore()
 	a := localAuthenticator(t, fs, "", "")

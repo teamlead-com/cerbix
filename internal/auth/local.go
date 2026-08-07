@@ -13,6 +13,11 @@ import (
 	"github.com/teamlead-com/cerbix/internal/totp"
 )
 
+// verifyPasswordFn is the password check, a var so tests can assert it is invoked on
+// BOTH the wrong-password and the unknown-user (decoy) paths — the anti-enumeration
+// timing guarantee — without flaky wall-clock measurement.
+var verifyPasswordFn = VerifyPassword
+
 // secondFactorOK validates a login's second factor: a current TOTP code, or a
 // single-use recovery code (consumed on match).
 func (a *Authenticator) secondFactorOK(ctx context.Context, cred store.LocalCredential, input string) bool {
@@ -52,48 +57,57 @@ func (a *Authenticator) LocalLoginHandler(w http.ResponseWriter, r *http.Request
 	}
 	email := strings.TrimSpace(body.Username)
 	cred, err := a.store.LocalCredentialByEmail(r.Context(), email)
-	if err == nil {
-		ok, verr := VerifyPassword(cred.PasswordHash, body.Password)
-		if verr == nil && ok {
-			pol := a.authPolicy()
-			// Instance policy: restrict which email domains may sign in.
-			if !pol.EmailAllowed(email) {
-				unauthorized(w)
-				return
-			}
-			// Second factor, when enrolled: a valid TOTP or an unused recovery code.
-			if cred.TOTPEnabled && !a.secondFactorOK(r.Context(), cred, body.TOTP) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(map[string]any{"error": "two-factor code required", "totp_required": true})
-				return
-			}
-			// Instance policy: TOTP may be mandatory even when not yet enrolled.
-			if !cred.TOTPEnabled && pol.RequireTOTP != domain.TOTPNone {
-				if u, uerr := a.store.GetUser(r.Context(), cred.UserID); uerr == nil && pol.TOTPRequiredFor(u.IsGlobalAdmin) {
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusUnauthorized)
-					_ = json.NewEncoder(w).Encode(map[string]any{"error": "two-factor is required for your account — set it up to sign in", "totp_setup_required": true})
-					return
-				}
-			}
-			if err := a.issueSession(r.Context(), w, cred.UserID); err != nil {
-				a.logger.Error("session_create_failed", "error", err.Error())
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-				return
-			}
-			a.logger.Info("local_login_success", "user_id", cred.UserID)
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-			return
-		}
-	} else if !errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) {
+		// Unknown user: still run the SAME Argon2id verification against a decoy hash
+		// so this path costs the same time as a wrong password on a real account —
+		// otherwise the skipped hash makes a fast 401 a user-enumeration timing oracle
+		// (CWE-203). Result is discarded; the decoy can never authenticate.
+		_, _ = verifyPasswordFn(a.decoyHash, body.Password)
+		unauthorized(w)
+		return
+	}
+	if err != nil {
 		a.logger.Error("local_credential_lookup_failed", "error", err.Error())
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
-	// Unknown user or bad password: uniform response.
-	unauthorized(w)
+	// Known user: a session is issued ONLY when the real hash verifies (structurally,
+	// the decoy path above can never reach here).
+	ok, verr := verifyPasswordFn(cred.PasswordHash, body.Password)
+	if verr != nil || !ok {
+		unauthorized(w)
+		return
+	}
+	pol := a.authPolicy()
+	// Instance policy: restrict which email domains may sign in.
+	if !pol.EmailAllowed(email) {
+		unauthorized(w)
+		return
+	}
+	// Second factor, when enrolled: a valid TOTP or an unused recovery code.
+	if cred.TOTPEnabled && !a.secondFactorOK(r.Context(), cred, body.TOTP) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "two-factor code required", "totp_required": true})
+		return
+	}
+	// Instance policy: TOTP may be mandatory even when not yet enrolled.
+	if !cred.TOTPEnabled && pol.RequireTOTP != domain.TOTPNone {
+		if u, uerr := a.store.GetUser(r.Context(), cred.UserID); uerr == nil && pol.TOTPRequiredFor(u.IsGlobalAdmin) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "two-factor is required for your account — set it up to sign in", "totp_setup_required": true})
+			return
+		}
+	}
+	if err := a.issueSession(r.Context(), w, cred.UserID); err != nil {
+		a.logger.Error("session_create_failed", "error", err.Error())
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	a.logger.Info("local_login_success", "user_id", cred.UserID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // EnsureBootstrapAdmin creates the configured local global-admin account when

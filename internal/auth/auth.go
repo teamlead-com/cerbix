@@ -80,6 +80,7 @@ type Authenticator struct {
 	minPasswordLen    int
 	loginLimiter      *loginLimiter
 	trustedProxies    int            // reverse-proxy hops in front (rate-limit client IP)
+	decoyHash         string         // argon2id hash verified for unknown users (anti-enumeration timing)
 	mailer            *mailer.Mailer // optional; enables self-service password reset
 	policy            PolicySource   // optional; instance-wide auth policy
 }
@@ -138,6 +139,16 @@ func New(_ context.Context, cfg *config.Config, st Store, logger *slog.Logger) (
 		minPasswordLen:    cfg.Local.MinPasswordLength,
 		loginLimiter:      newLoginLimiter(cfg.Local.LoginRateLimitPerMinute),
 		trustedProxies:    cfg.Server.TrustedProxyCount,
+	}
+	// Decoy hash for the anti-enumeration timing fix: a login for an unknown user
+	// verifies the submitted password against THIS hash so it spends the same
+	// Argon2id time as a wrong-password attempt on a real account. Generated at
+	// startup so it always carries the current Argon2 params (no drift if they change);
+	// no real password can match it (it's the hash of a random secret).
+	if secret, err := randToken(); err == nil {
+		if h, herr := HashPassword(secret); herr == nil {
+			a.decoyHash = h
+		}
 	}
 	return a, nil
 }

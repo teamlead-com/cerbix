@@ -2240,3 +2240,10 @@ The outbox worker is a single goroutine; raw smtp.SendMail with no dial timeout 
 email channel freeze all alert delivery for ~130s per event. notify now reuses mailer's
 timeout-bounded sender (the fix already shipped there for the subscribe/reset flows). First fix
 of the func-hardening package from the deep audit.
+
+## D-0131 — AMQP resilience covers channel death, not just connection loss (iter-0073)
+The D-0129 supervisor closed connection-level loss but a channel-level death (queue deleted,
+basic.cancel, 4xx, ack error) still parked consumers forever behind a live connection — the same
+silent-death symptom. The consume/serve-tests loops now also retry on a short backoff independent
+of the reconnect signal, and consumeOnce re-declares its queue every session so a deleted queue is
+recreated. Also fixed the Close()/redial data race and a nil-logger panic path.

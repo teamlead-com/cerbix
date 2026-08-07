@@ -88,3 +88,64 @@ func TestAMQPSupervisorRecovers(t *testing.T) {
 		t.Fatalf("want exactly one broker_reconnected, logs:\n%s", logs)
 	}
 }
+
+// TestAMQPConsumerSurvivesChannelDeath kills the results queue out from under a
+// live connection (a channel-level event, not connection loss) and asserts the
+// consumer resubscribes and delivery resumes — the residual silent-death gap.
+// Opt-in via CERBIX_TEST_RABBITMQ_URL.
+func TestAMQPConsumerSurvivesChannelDeath(t *testing.T) {
+	url := os.Getenv("CERBIX_TEST_RABBITMQ_URL")
+	if url == "" {
+		t.Skip("set CERBIX_TEST_RABBITMQ_URL to run the AMQP channel-death test")
+	}
+	var logBuf syncBuffer
+	d, err := NewAMQP(url, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	ctx := context.Background()
+	results := d.Results()
+
+	roundTrip := func(id string) {
+		t.Helper()
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			if err := d.PublishResult(ctx, domain.Heartbeat{MonitorID: id, Up: true}); err != nil && time.Now().After(deadline) {
+				t.Fatalf("publish %s: %v", id, err)
+			}
+			select {
+			case hb := <-results:
+				if hb.MonitorID == id {
+					return
+				}
+			case <-time.After(1 * time.Second):
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no result %s within 20s", id)
+			}
+		}
+	}
+	roundTrip("before-channel-death")
+
+	// Delete the results queue on a SEPARATE channel: the consumer's delivery
+	// channel closes (basic.cancel) but the TCP connection stays up, so the
+	// connection supervisor never fires. Recovery must come from the
+	// channelRetryBackoff leg re-declaring and resubscribing.
+	conn, _ := d.current()
+	admin, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("admin channel: %v", err)
+	}
+	if _, err := admin.QueueDelete(resultsQueue, false, false, false); err != nil {
+		t.Fatalf("delete queue: %v", err)
+	}
+	_ = admin.Close()
+
+	// Within a few backoff cycles the consumer re-declares and delivery resumes,
+	// and no connection-level broker_lost was logged.
+	roundTrip("after-channel-death")
+	if strings.Contains(logBuf.String(), "broker_lost") {
+		t.Fatalf("channel death must not report broker_lost:\n%s", logBuf.String())
+	}
+}

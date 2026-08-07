@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -37,6 +38,13 @@ const (
 	// monitor carries no explicit timeout; otherwise timeout+testRPCSlack is used.
 	testRPCTimeout = 20 * time.Second
 	testRPCSlack   = 5 * time.Second
+	// channelRetryBackoff paces a consumer's resubscribe after a CHANNEL-level
+	// death while the connection is still alive (queue deleted/recreated,
+	// basic.cancel, a 4xx channel exception, an Ack error). The connection
+	// supervisor only fires on connection loss, so without this leg such a
+	// consumer would park until the next full reconnect — the residual of the
+	// silent-death class the supervisor was meant to close.
+	channelRetryBackoff = 2 * time.Second
 )
 
 // jobsQueueForRegion returns the per-region jobs queue name (empty → core).
@@ -133,6 +141,11 @@ func NewAMQP(url string, logger *slog.Logger) (*AMQP, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: amqp dial after %d attempts: %w", dialAttempts, err)
+	}
+	if logger == nil {
+		// The supervisor/redial paths log unconditionally; a nil logger would
+		// panic on the first broker event. Default to a no-op sink.
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &AMQP{
@@ -425,7 +438,11 @@ func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain
 				case <-d.ctx.Done():
 					return
 				case <-wake:
-					// Broker is back — re-declare the auto-delete queue and resume.
+					// Connection reconnected — re-declare and resume.
+				case <-time.After(channelRetryBackoff):
+					// The auto-delete tests queue vanished on a consumer gap (a
+					// channel-level event, not connection loss) — re-declare and
+					// resume on the same connection.
 				}
 			}
 		}()
@@ -483,21 +500,18 @@ func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx c
 // for the supervisor's reconnect signal and resubscribes. The forwarding Go
 // channel the caller reads never closes — a worker rides the outage out.
 func consume(d *AMQP, queue string, declare bool, handle func(body []byte) bool) {
+	_ = declare // consumeOnce now always ensures the queue (see below)
 	for {
 		conn, wake := d.current()
-		if declare {
-			// Re-declare against the (possibly new) connection; the cache is
-			// reset on every reconnect.
-			if err := d.declareJobQueue(queue); err != nil {
-				d.logger.Error("dispatch_declare_jobs", "queue", queue, "error", err.Error())
-			}
-		}
 		consumeOnce(d, conn, queue, handle)
 		select {
 		case <-d.ctx.Done():
 			return
 		case <-wake:
-			// Broker is back — resubscribe on the fresh connection.
+			// Connection reconnected — resubscribe on the fresh connection.
+		case <-time.After(channelRetryBackoff):
+			// Channel died while the connection stayed up — resubscribe on the
+			// same live connection after a short backoff (wake would never fire).
 		}
 	}
 }
@@ -511,6 +525,13 @@ func consumeOnce(d *AMQP, conn *amqp.Connection, queue string, handle func(body 
 		return
 	}
 	defer ch.Close()
+	// Declare on every session, not via the publisher's declare cache: the
+	// reason we're (re)subscribing may be that the queue was deleted, which the
+	// cache would not know about. Durable, matching dialAndSetup/declareJobQueue.
+	if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
+		d.logger.Error("dispatch_consumer_declare", "queue", queue, "error", err.Error())
+		return
+	}
 	if err := ch.Qos(consumePrefetch, 0, false); err != nil {
 		d.logger.Error("dispatch_qos", "queue", queue, "error", err.Error())
 		return
@@ -537,14 +558,22 @@ func consumeOnce(d *AMQP, conn *amqp.Connection, queue string, handle func(body 
 	}
 }
 
-// Close stops consumers and releases the connection.
+// Close stops consumers and releases the connection. It reads conn/pubCh under
+// the same locks redial() swaps them under, so a shutdown racing a reconnect is
+// safe.
 func (d *AMQP) Close() error {
 	d.cancel()
-	if d.pubCh != nil {
-		_ = d.pubCh.Close()
+	d.pubMu.Lock()
+	pubCh := d.pubCh
+	d.pubMu.Unlock()
+	if pubCh != nil {
+		_ = pubCh.Close()
 	}
-	if d.conn != nil {
-		return d.conn.Close()
+	d.connMu.RLock()
+	conn := d.conn
+	d.connMu.RUnlock()
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }

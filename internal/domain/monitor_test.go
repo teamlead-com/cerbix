@@ -295,3 +295,31 @@ func TestMonitorRegionNormalizeAndValidate(t *testing.T) {
 		t.Fatalf("composite normalize should pin to core, got %q", comp.Region)
 	}
 }
+
+// TestMonitorResourceBounds proves the upper bounds reject pathological configs while
+// accepting realistic ones.
+func TestMonitorResourceBounds(t *testing.T) {
+	base := func() Monitor {
+		return Monitor{Name: "m", ProjectID: "p", Type: MonitorHTTP, Target: "https://x",
+			IntervalSeconds: 60, TimeoutSeconds: 5, Retries: 1}
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("realistic config rejected: %v", err)
+	}
+	cases := []struct {
+		name string
+		mut  func(*Monitor)
+	}{
+		{"interval", func(m *Monitor) { m.IntervalSeconds = maxIntervalSeconds + 1 }},
+		{"timeout", func(m *Monitor) { m.TimeoutSeconds = maxTimeoutSeconds + 1 }},
+		{"retries", func(m *Monitor) { m.Retries = maxRetries + 1 }},
+		{"grace", func(m *Monitor) { m.GraceSeconds = maxGraceSeconds + 1 }},
+	}
+	for _, c := range cases {
+		m := base()
+		c.mut(&m)
+		if err := m.Validate(); err == nil {
+			t.Fatalf("%s over cap should be rejected", c.name)
+		}
+	}
+}

@@ -201,8 +201,12 @@ func (m Monitor) Validate() error {
 		if m.TimeoutSeconds <= 0 {
 			return fmt.Errorf("monitor: timeout_seconds must be positive for synthetic monitors")
 		}
-		if _, err := ParseScenario(m.Config); err != nil {
+		sc, err := ParseScenario(m.Config)
+		if err != nil {
 			return err
+		}
+		if len(sc.Steps) > maxSyntheticSteps {
+			return fmt.Errorf("monitor: a synthetic scenario may have at most %d steps", maxSyntheticSteps)
 		}
 	}
 	if m.Type == MonitorHTTP && m.Method != "" && !httpMethods[m.Method] {
@@ -223,8 +227,33 @@ func (m Monitor) Validate() error {
 	if m.Type == MonitorComposite && region != DefaultRegion {
 		return fmt.Errorf("monitor: composite monitors must run in region %q", DefaultRegion)
 	}
+	// Upper bounds: a single editor must not be able to tie up a fixed worker pool with a
+	// pathological config (a multi-hour timeout, an enormous retry count, a huge interval).
+	if m.IntervalSeconds > maxIntervalSeconds {
+		return fmt.Errorf("monitor: interval_seconds must be at most %d", maxIntervalSeconds)
+	}
+	if m.TimeoutSeconds > maxTimeoutSeconds {
+		return fmt.Errorf("monitor: timeout_seconds must be at most %d", maxTimeoutSeconds)
+	}
+	if m.Retries > maxRetries {
+		return fmt.Errorf("monitor: retries must be at most %d", maxRetries)
+	}
+	if m.GraceSeconds > maxGraceSeconds {
+		return fmt.Errorf("monitor: grace_seconds must be at most %d", maxGraceSeconds)
+	}
 	return nil
 }
+
+// Resource bounds on a monitor's schedule/probe config. These cap the load one monitor can
+// place on the shared worker pool; they are generous (a day interval, a 5-minute timeout)
+// so no realistic config is rejected, while a pathological one is.
+const (
+	maxIntervalSeconds = 86400 // 1 day
+	maxTimeoutSeconds  = 300   // 5 minutes
+	maxRetries         = 10
+	maxGraceSeconds    = 86400 // 1 day
+	maxSyntheticSteps  = 50
+)
 
 // ChildIDs returns a composite monitor's child monitor IDs (config["children"]
 // is a comma-separated list).

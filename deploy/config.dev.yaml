@@ -34,6 +34,12 @@ pull:
   regions: ["pull1", "geo2"]
   token: "devpulltoken"
 
+# The dev/E2E stack delivers alerts and mail to INTERNAL services (mailpit at 10.5.0.15,
+# and any 10.5.0.x webhook target), so it opts into private notification egress. Production
+# keeps the deny-private default unless it genuinely delivers to internal endpoints (D-0141).
+notification_egress:
+  allow_private_ips: true
+
 security:
   admin_email: "admin@cerbix.local"
   admin_password: "devpassword123"

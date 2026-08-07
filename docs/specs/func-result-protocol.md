@@ -187,14 +187,22 @@ outage; `recordCheckStatusTx` transitions only on the first (its own `prev != cu
 so no incident churn. The instant a real ping returns, `last_result_ts` advances and the
 CAS stops firing.
 
-> **Open point — `status <> 'down'` in the predicate (I diverge).** The review suggested
-> adding it to stop a concurrent explicit push-DOWN from being re-counted. I'd NOT add it:
-> an explicit push-DOWN goes through `RecordPushResult`, which advances
-> `last_result_ts=received_at`, so the dead-man CAS (`last_result_ts < cutoff`) already
-> fails — the double-count is prevented, and both paths serialise on the same `FOR UPDATE`
-> lock. Adding `status <> 'down'` would instead convert dead-man from periodic
-> down-sampling to edge-only, REGRESSING SLA continuity during a sustained push outage
-> (the current behavior samples each tick). Flagging for your call before I lock it.
+**No `status <> 'down'` guard (resolved).** The concurrent explicit push-DOWN is already
+handled by the watermark: it goes through `RecordPushResult`, advances
+`last_result_ts=received_at`, so the dead-man CAS (`last_result_ts < cutoff`) fails; both
+paths serialise on the same `FOR UPDATE` lock.
+
+**This is an intentional SLA-semantics change, not the status quo.** Today
+`StalePushMonitors` carries `m.status <> 'down'`, so a push monitor drops out of the stale
+set after its FIRST applied DOWN — current behavior is **edge-only** (exactly one dead-man
+DOWN per outage). Moving to periodic down-sampling therefore requires removing
+`status <> 'down'` from **both** the new dead-man CAS **and** the `StalePushMonitors`
+selection query, keeping the `nextRun ≈ interval` throttle. The result:
+- a DOWN heartbeat every expected idle tick → SLA reflects the ongoing outage;
+- `last_result_ts` NOT advanced by dead-man → the CAS keeps passing until a real ping;
+- exactly one transition/outbox/incident (`recordCheckStatusTx`'s `prev != cur` guard);
+- sampling stops the instant a real push advances the watermark (next fire only after a
+  fresh `interval + grace` lapses).
 
 ### Historical backfill — a fourth, SLA-only path
 An agent buffers results during a central outage and replays them as historical backfill;
@@ -237,9 +245,12 @@ result:
 
 - `result.allowed_skew` (`Duration`): default `5m`; validation `> 0` and `<= 1h` (a larger
   window defeats the future-clock guard; reject at load).
-- `result.revision_mode` (enum): default `enforce`; only `enforce` | `observe` accepted
-  (anything else → fail-fast, no silent downgrade). `observe` is the rolling-upgrade escape
-  hatch; its removal is fixed in the decision record (§10 / D-0142).
+- `result.revision_mode` (enum): default `enforce` (including when the whole `result:`
+  block is absent — the secure default does not depend on copying the example file); only
+  `enforce` | `observe` accepted (anything else → fail-fast, no silent downgrade). Parsed
+  and validated in **P0a but inert there** — the revision gate activates in **P0b**; this
+  is what makes P0a the expand phase (§10). `observe` is the rolling-upgrade escape hatch;
+  removal fixed in the decision record (§10 / D-0142).
 
 ## 7. Schema summary
 
@@ -247,6 +258,10 @@ result:
   `last_result_ts` on bump).
 - `heartbeats.observed_at timestamptz NULL`.
 - (`monitors.last_result_ts` already exists, from migration 00051.)
+- **Behavior change (not schema):** drop `m.status <> 'down'` from `StalePushMonitors` so a
+  down push monitor stays in the stale set for periodic dead-man down-sampling (edge-only →
+  periodic; see §4 dead-man). No column change, but an intentional SLA-semantics change to
+  record in the iteration report.
 
 ## 8. Test matrix (DB-gated + unit)
 
@@ -264,10 +279,11 @@ result:
 - Push: current-state gate — a ping accepted just before a disable does NOT mutate the
   now-disabled monitor (re-check under the row lock); direct-recorder path still opens/
   resolves an auto-incident (post-commit helper runs).
-- Dead-man: synthetic DOWN dropped when a fresh ping raced in (CAS zero-rows); applied
-  when genuinely stale; INSERTS a down heartbeat so SLA drops (not just status); periodic
-  re-fire during a sustained outage samples SLA; not applied across a revision bump / after
-  disable.
+- Dead-man: synthetic DOWN dropped when a fresh ping raced in (CAS zero-rows); applied when
+  genuinely stale; INSERTS a down heartbeat so SLA drops (not just status); a sustained
+  outage yields multiple DOWN samples but **exactly one** transition/outbox/incident;
+  repeated DOWN does NOT advance `last_result_ts`; a real push halts sampling until the next
+  `interval + grace` lapses; not applied across a revision bump / after disable.
 - Backfill: mixed valid/invalid batch — future/1970/missing rows skipped, valid rows
   inserted SLA-only, live state untouched; idempotent replay (ON CONFLICT); a future row
   never reaches an SLA `ts >= since` query.
@@ -285,22 +301,30 @@ result:
 
 Two independent constraints:
 
-**Config vs strict YAML.** The loader rejects unknown keys, so a `result:` block cannot be
-pushed to an old binary that predates it — the old process would fail to start. Therefore
-the `result:` block must be **optional with safe defaults**, and binaries are upgraded
-before the block is added to their configs. To make an in-place upgrade safe without a
-config edit, **when the `result:` block is ABSENT the binary defaults `revision_mode` to
-`observe`** (an upgrade of an existing install is the likely context); a fresh install
-gets `enforce` via the shipped `config.example.yaml` template (which includes the block).
-`allowed_skew` defaults to 5m in both cases. (This is the one behavioral default I want
-confirmed — see the reply.)
+**Config vs strict YAML — expand/contract, absent → `enforce`.** The loader rejects unknown
+keys, so a `result:` block cannot be pushed to a binary that predates it. The default when
+the block is ABSENT stays the secure **`enforce`** — NOT `observe`: the loader cannot tell
+an upgrade from a minimal fresh config, so an absent→`observe` default would make the
+secure default depend on which example file was copied, contradicting the strict/fail-closed
+model. Instead, the P0a/P0b split IS the expand/contract vehicle:
 
-**Producer-before-consumer.** Revision only appears once producers (worker/scheduler/agent)
-emit it. Roll producers to the new binary first, then the API/ingest consumer; `observe`
-covers imperfect ordering during the window.
+1. **P0a** adds the `result:` block + strict validation but does NOT activate the revision
+   gate (`revision_mode` is parsed and validated, inert).
+2. Roll P0a across the whole api/scheduler/worker/agent fleet — every binary now knows the
+   key.
+3. Explicitly set `revision_mode: observe` (safe now — all binaries understand it).
+4. Roll **P0b** (activates the gate; producers emit revision).
+5. After the producer fleet is updated, queues drained, and `result_missing_revision_total`
+   is flat → explicitly set `enforce`.
+6. Remove `observe` per D-0142.
 
-`observe` mode is the rolling-upgrade escape hatch (separate role processes may run mixed
-versions mid-rollout). **Decision D-0142** fixes the `observe`-removal window: observe ships
-with P0b; it is removed **no later than iter-0089** (≈ three iterations after it lands), or
-one release after a confirmed prod `enforce` cutover, whichever comes first — so it can
-never silently become a permanent bypass.
+An old binary never sees the unknown key (it is added only after P0a is everywhere), and
+absent still means the safe `enforce`. Only if P0a and P0b are forced into one release with
+no staged rollout is absent→`observe` acceptable — and then only as a temporary compromise
+with a startup WARNING, the missing-revision metric, and hard removal at iter-0089.
+
+`allowed_skew` defaults to 5m whether or not the block is present.
+
+**Decision D-0142** fixes the `observe`-removal window: it is removed **no later than
+iter-0089** (≈ three iterations after it lands in P0b), or one release after a confirmed
+prod `enforce` cutover, whichever comes first — never a permanent bypass.

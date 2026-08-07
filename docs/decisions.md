@@ -2495,6 +2495,22 @@ ping). Full contract in `docs/specs/func-result-protocol.md`. Key rulings:
   whichever is sooner — it must never become a permanent compatibility bypass.
 - `result.allowed_skew` (default 5m, validated `>0` and `<=1h`).
 
+**Historical backfill is exempt from revision gating (explicit exception).** The general
+rule "a result of another config is invalid for SLA" applies to LIVE-state ingest.
+Historical backfill (`RecordHistoricalResults`, agent replay) preserves a fact that was
+true at its historical moment and NEVER touches current state — so revision gating (which
+exists to protect current state) does not apply; per-row timestamp bounds still do
+(missing/future/outside-retention skipped), and inserts are SLA-only + idempotent. Recorded
+here so the exemption is not read as contradicting the general rule.
+
+**Dead-man moves from edge-only to periodic down-sampling (intentional SLA change).**
+`StalePushMonitors` currently carries `m.status <> 'down'`, so a push monitor is sampled
+DOWN exactly once per outage. To make sample-based SLA reflect a sustained push outage, that
+guard is dropped from both the stale-selection query and the dead-man CAS; the dead-man
+inserts a DOWN heartbeat each idle tick (throttled by `nextRun`), does NOT advance
+`last_result_ts`, and produces exactly one transition/outbox/incident (`prev != cur` guard).
+Sampling stops the moment a real ping advances the watermark.
+
 Deferred (separate axes, not this decision): `job_id` correlation + strict
 `observed_at >= job_issued_at` (with P0b/job correlation); `state_sequence` for outbox
 delivery ordering (#4, P2) — orthogonal to `execution_revision`.

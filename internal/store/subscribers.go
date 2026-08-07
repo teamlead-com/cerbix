@@ -25,9 +25,12 @@ func scanSubscriber(row pgx.Row) (domain.Subscriber, error) {
 }
 
 // CreateSubscriber inserts a subscriber (unconfirmed) or, if the email is already
-// subscribed to the page, re-issues its confirm token (keeping any prior
-// confirmation). The returned row's ConfirmedAt tells the caller whether to send
-// a confirmation email.
+// subscribed to the page, handles a re-subscribe: it re-issues the confirm token ONLY
+// while still unconfirmed (so a fresh confirmation link is sent), but for an
+// already-confirmed subscriber it KEEPS the existing token — that same token is the
+// unsubscribe link, and silently rotating it would break the subscriber's existing
+// unsubscribe URL (no new email is sent in that case). The returned row's ConfirmedAt
+// tells the caller whether to send a confirmation email.
 func (s *Store) CreateSubscriber(ctx context.Context, sub domain.Subscriber) (domain.Subscriber, error) {
 	if err := sub.Validate(); err != nil {
 		return domain.Subscriber{}, fmt.Errorf("store: invalid subscriber: %w", err)
@@ -36,7 +39,10 @@ func (s *Store) CreateSubscriber(ctx context.Context, sub domain.Subscriber) (do
 		`INSERT INTO subscribers (status_page_id, email, confirm_token)
 		 VALUES ($1, $2, $3)
 		 ON CONFLICT (status_page_id, email)
-		 DO UPDATE SET confirm_token = EXCLUDED.confirm_token
+		 DO UPDATE SET confirm_token = CASE
+		     WHEN subscribers.confirmed_at IS NULL THEN EXCLUDED.confirm_token
+		     ELSE subscribers.confirm_token
+		   END
 		 RETURNING `+subscriberColumns,
 		sub.StatusPageID, sub.Email, sub.ConfirmToken)
 	created, err := scanSubscriber(row)

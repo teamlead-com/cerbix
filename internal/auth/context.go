@@ -27,6 +27,7 @@ type Store interface {
 	SetPassword(ctx context.Context, id, passwordHash string) error
 	CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
 	ConsumePasswordResetToken(ctx context.Context, tokenHash string) (string, error)
+	ResetPasswordWithToken(ctx context.Context, tokenHash, passwordHash string) (string, error)
 	CountUsers(ctx context.Context) (int64, error)
 	ApiTokenByHash(ctx context.Context, hash string) (domain.ApiToken, error)
 	TouchApiToken(ctx context.Context, id string) error

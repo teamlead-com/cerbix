@@ -26,6 +26,12 @@ func (h *Handler) totpEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "two-factor auth is only for local accounts")
 		return
 	}
+	// Refuse to re-enroll an already-enabled account: overwriting the live secret would
+	// break the user's authenticator and lock them out (they must disable TOTP first).
+	if _, enabled, err := h.store.GetTOTP(r.Context(), p.UserID); err == nil && enabled {
+		writeError(w, http.StatusBadRequest, "two-factor auth is already enabled; disable it before re-enrolling")
+		return
+	}
 	secret, err := totp.GenerateSecret()
 	if err != nil {
 		h.serverError(w, "totp_generate", err)
@@ -66,10 +72,10 @@ func (h *Handler) totpEnable(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "code did not match — check the time on your device")
 		return
 	}
-	if err := h.store.EnableTOTP(r.Context(), p.UserID); err != nil {
-		h.serverError(w, "totp_enable", err)
-		return
-	}
+	// Generate and store the recovery codes BEFORE flipping the enabled flag: if code
+	// generation/storage fails, the account stays not-enabled (the user can retry) rather
+	// than becoming TOTP-required with no recovery codes — a permanent lockout on a lost
+	// device. EnableTOTP is the last, committing step.
 	codes, hashes, err := generateRecoveryCodes(8)
 	if err != nil {
 		h.serverError(w, "totp_recovery_generate", err)
@@ -77,6 +83,10 @@ func (h *Handler) totpEnable(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.store.ReplaceRecoveryCodes(r.Context(), p.UserID, hashes); err != nil {
 		h.serverError(w, "totp_recovery_store", err)
+		return
+	}
+	if err := h.store.EnableTOTP(r.Context(), p.UserID); err != nil {
+		h.serverError(w, "totp_enable", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": codes})

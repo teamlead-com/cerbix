@@ -81,24 +81,22 @@ func (a *Authenticator) ResetConfirmHandler(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusBadRequest, "new password too short")
 		return
 	}
-	userID, err := a.store.ConsumePasswordResetToken(r.Context(), store.HashToken(strings.TrimSpace(body.Token)))
-	if errors.Is(err, store.ErrNotFound) {
-		writeJSONError(w, http.StatusBadRequest, "invalid or expired reset link")
-		return
-	}
-	if err != nil {
-		a.logger.Error("reset_consume_failed", "error", err.Error())
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
+	// Hash BEFORE touching the token (Argon2 can fail / be slow) — a hash failure must not
+	// consume the link. Then consume the token AND set the password atomically, so a write
+	// failure never burns a valid link with the password left unchanged.
 	hash, err := HashPassword(body.NewPassword)
 	if err != nil {
 		a.logger.Error("reset_hash_failed", "error", err.Error())
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if err := a.store.SetPassword(r.Context(), userID, hash); err != nil {
-		a.logger.Error("reset_set_password_failed", "error", err.Error())
+	userID, err := a.store.ResetPasswordWithToken(r.Context(), store.HashToken(strings.TrimSpace(body.Token)), hash)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSONError(w, http.StatusBadRequest, "invalid or expired reset link")
+		return
+	}
+	if err != nil {
+		a.logger.Error("reset_password_failed", "error", err.Error())
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}

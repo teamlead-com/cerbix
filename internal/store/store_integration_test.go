@@ -1177,6 +1177,11 @@ func TestSubscriberLifecycleAndFanout(t *testing.T) {
 	if len(emails) != 1 || emails[0] != "a@x.com" {
 		t.Fatalf("fanout = %v, want [a@x.com]", emails)
 	}
+	// Re-subscribing an ALREADY-CONFIRMED address must NOT rotate the token (that token
+	// is also the unsubscribe link) — the returned row keeps tok2 and stays confirmed.
+	if resub, _ := st.CreateSubscriber(ctx, domain.Subscriber{StatusPageID: page.ID, Email: "a@x.com", ConfirmToken: "tok3"}); resub.ConfirmToken != "tok2" || resub.ConfirmedAt == nil {
+		t.Fatalf("re-subscribe of confirmed addr = %+v, want token unchanged (tok2) + confirmed", resub)
+	}
 	if _, err := st.ConfirmSubscriber(ctx, "nope"); err != store.ErrNotFound {
 		t.Fatalf("confirm unknown = %v, want ErrNotFound", err)
 	}
@@ -1368,6 +1373,20 @@ func TestPasswordResetTokens(t *testing.T) {
 	// Unknown token → ErrNotFound.
 	if _, err := st.ConsumePasswordResetToken(ctx, store.HashToken("tok-nope")); err != store.ErrNotFound {
 		t.Fatalf("unknown token err = %v, want ErrNotFound", err)
+	}
+
+	// ResetPasswordWithToken: atomically consumes + sets the password; single-use.
+	if err := st.CreatePasswordResetToken(ctx, u.ID, store.HashToken("tok-r"), time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if uid, err := st.ResetPasswordWithToken(ctx, store.HashToken("tok-r"), "new-hash"); err != nil || uid != u.ID {
+		t.Fatalf("reset = (%q,%v), want %q/nil", uid, err, u.ID)
+	}
+	if got, _ := st.PasswordHashByID(ctx, u.ID); got != "new-hash" {
+		t.Fatalf("password not set atomically: %q", got)
+	}
+	if _, err := st.ResetPasswordWithToken(ctx, store.HashToken("tok-r"), "again"); err != store.ErrNotFound {
+		t.Fatalf("reused reset token err = %v, want ErrNotFound", err)
 	}
 }
 

@@ -257,3 +257,20 @@ func (f *fakeStore) ConsumePasswordResetToken(_ context.Context, tokenHash strin
 	f.resetTokens[tokenHash] = t
 	return t.userID, nil
 }
+
+// ResetPasswordWithToken mirrors the store's atomic consume+set-password.
+func (f *fakeStore) ResetPasswordWithToken(_ context.Context, tokenHash, passwordHash string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.resetTokens[tokenHash]
+	if !ok || t.used || t.expires.Before(time.Now()) {
+		return "", store.ErrNotFound
+	}
+	t.used = true
+	f.resetTokens[tokenHash] = t
+	if f.passwords == nil {
+		f.passwords = map[string]string{}
+	}
+	f.passwords[t.userID] = passwordHash
+	return t.userID, nil
+}

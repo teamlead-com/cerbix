@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/mailer"
 )
 
 // telegramAPI is the Telegram Bot API base; a var so tests can point it at a stub.
@@ -22,7 +23,10 @@ var telegramAPI = "https://api.telegram.org"
 
 // sendMailFunc is the SMTP sender (a var so tests can capture messages without a
 // real mail server).
-var sendMailFunc = smtp.SendMail
+// Timeout-bounded so a dead SMTP endpoint fails fast instead of hanging the
+// single outbox worker (which would freeze the whole alert pipeline). Stdlib
+// smtp.SendMail has no dial timeout; mailer.SendMailTimeout adds one.
+var sendMailFunc = mailer.SendMailTimeout
 
 // Store is the persistence surface the dispatcher needs.
 type Store interface {

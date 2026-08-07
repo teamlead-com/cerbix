@@ -2234,3 +2234,9 @@ internal forwarding channels never close, so roles ride outages out without rest
 state-transition (one broker_lost, one broker_reconnected, sparse progress lines) and the
 scheduler compresses outage publish failures to an aggregated line per 10s — the reviewer's
 "rate-limited logging" concern falls out as a side effect of fixing the real defect.
+
+## D-0130 — Email channels use the timeout-bounded SMTP sender (iter-0072)
+The outbox worker is a single goroutine; raw smtp.SendMail with no dial timeout let one dead
+email channel freeze all alert delivery for ~130s per event. notify now reuses mailer's
+timeout-bounded sender (the fix already shipped there for the subscribe/reset flows). First fix
+of the func-hardening package from the deep audit.

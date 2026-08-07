@@ -26,6 +26,14 @@ const (
 // smtp.SendMail (which itself has no dial timeout).
 var sendMailFunc = sendMailTimeout
 
+// SendMailTimeout is the exported form of the timeout-bounded SMTP send, reused
+// by internal/notify so email notification channels get the same dial/session
+// deadlines instead of stdlib smtp.SendMail's unbounded blocking (which would
+// stall the single outbox worker on a dead SMTP host).
+func SendMailTimeout(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	return sendMailTimeout(addr, auth, from, to, msg)
+}
+
 // sendMailTimeout mirrors smtp.SendMail (EHLO → STARTTLS if offered → AUTH →
 // MAIL/RCPT/DATA) but dials with a timeout and sets a session deadline so a
 // dead SMTP endpoint fails fast instead of hanging the caller. Port 465 is

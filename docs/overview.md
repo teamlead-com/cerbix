@@ -156,7 +156,7 @@ The reference point is company conventions (Go services `example-svc`), plus les
 | **Postgres advisory lock (leader election)** | No etcd in the stack; cheap, no new dependencies; survives leader failure. | The single active scheduler. |
 | **OIDC: `coreos/go-oidc` + `x/oauth2`** | Keycloak already exists; standard OIDC (Authorization Code + PKCE), ID-token/JWKS validation. | AuthN; authorization lives in the DB (own role model Global/Org/Project). |
 | **Transactional outbox** | Guaranteed delivery of notifications/webhooks without dual-write; `SKIP LOCKED` — safe on N replicas. | Reliable notifications and incident webhooks. |
-| **AES-256-GCM keyring (`secret`)** | Channel/webhook/OIDC/SMTP secrets must not be stored in plaintext; rotation support (`cerbix reencrypt`). | At-rest secret encryption. |
+| **AES-256-GCM keyring (`secret`)** | Channel/webhook/OIDC/SMTP secrets, monitor config secrets, TOTP secrets, and push tokens (blind-indexed for lookup) must not be stored in plaintext; rotation support (`cerbix reencrypt`). | At-rest secret encryption. |
 | **SSRF guard (`prober`)** | Probes hit user-supplied URLs — protection from access to metadata/internal IPs. | Validation of the resolved connect IP. |
 | **Prometheus + `slog`** | Company convention; observability. | `cerbix_*` metrics, structured logs. |
 | **Vue 3 + Vite + TS + Pinia + Tailwind** | The company's first frontend — we set the precedent; fast DX, type safety (TS client from OpenAPI). | SPA: dashboards, monitors, incidents, SLA, settings. |

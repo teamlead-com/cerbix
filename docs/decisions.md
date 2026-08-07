@@ -2412,3 +2412,48 @@ a memory optimization, not a correctness bug, deferred). Six fixed:
    not found" for a wrong-org id as for a nonexistent one, closing a cross-tenant
    enumeration oracle. (The add-member-by-email helpful message is left as an accepted UX
    affordance for semi-trusted org admins.)
+
+## D-0141 — Consilium-driven security & reliability hardening (iter-0083)
+A prioritized audit pass (run as Claude+Gemini consilium sessions) beyond the
+`func-hardening` epic. Every accepted finding fixed as its own `-race`+E2E-verified commit;
+the calibration of where the consilium's first instinct was over/under-stated is recorded
+in iter-0083 §4. Thirteen fixes across four blocks:
+
+**Secret exposure & auth.** (1) Login timing oracle (CWE-203): the not-found path now runs a
+decoy Argon2id verify (`a.decoyHash`) so response time no longer distinguishes known from
+unknown usernames. (2) `updateChannel` returns `Redacted()`; a monitor's `push_token` is
+stripped from read-only viewers (`WithoutPushToken` unless `ActionProjectWrite`). (3) OIDC
+fail-closed: an enforced email allowlist requires a non-empty *verified* permitted email
+(was a bypass), a mandatory-TOTP login refuses rather than issuing an MFA-less session when
+the user row can't be read, and the OIDC client is 15s-bounded. (4) `ReencryptSecrets` now
+covers the columns it had missed — monitor config secrets, `users.totp_secret`, and (block 4)
+`push_token_enc` — so key rotation orphans nothing.
+
+**SSRF egress & tenant scope.** (5) Webhook/notify/OIDC/SMTP delivery routes through
+`prober.Guard` (IP-pinning dialer, `Proxy=nil`, redirect cap; SMTP keeps its TLS ServerName;
+CGNAT `100.64/10` blocked) — a user-controlled destination host can no longer reach internal
+addresses. (6) Global search scopes to the caller's visible orgs/projects *in SQL* (`= ANY`)
+before ranking/LIMIT, via `authz.VisibleScope` + `store.SearchScope`, closing a cross-tenant
+result-crowding leak.
+
+**Correctness spine.** (7) Outbox claim-token CAS (migration 00050) — a stale worker's
+delivered/fail write is a no-op. (8) **RecordResult** (migration 00051): heartbeat insert +
+status flip + transition-outbox event in ONE transaction, gated by the probe timestamp
+against `last_result_ts` — a duplicate re-delivery is deduped (no double failure-count) and a
+stale/out-of-order probe is recorded for SLA but never overrides newer live state. Incident
+reconciliation stays a separate concern (D-0138). (9) AMQP publisher reopens its channel on a
+channel-level exception (connection still up) instead of wedging behind `broker_up=1`. (10)
+Pull-job **lease** (migration 00052): claims lease rather than DELETE; the agent acks by
+echoing claim tokens on its results POST; an un-acked lease lapses and re-delivers (safe now
+that #8 dedups) — at-most-once → at-least-once. The scheduler no longer advances a pull
+monitor's cadence on a failed enqueue.
+
+**Supply-chain & at-rest.** (11) Go toolchain → 1.25.12 (GO-2026-5856 crypto/tls ECH leak);
+`.ci` off EOL 1.24; the existing govulncheck CI job is the gate. (12) `MaxBytesReader` on the
+public (64 KiB) and agent (16 MiB) routers; poison AMQP messages dead-letter to a durable
+`checks.dead` queue (results keep NO time-TTL — a slow ingest must never drop real results —
+so a broker-native DLX with mutated queue args was deliberately NOT used); `Dockerfile` uses
+`npm ci` + lockfile; dependabot `gomod`/`docker` repointed `/backend`→`/` (silent no-ops
+after the module moved to root). (13) Push tokens encrypt-at-rest (migration 00053):
+`push_token` plaintext → `push_token_hash` (SHA-256 blind index, UNIQUE, for lookup) +
+`push_token_enc` (keyring-encrypted); reveal UX preserved, so no rotate/revoke UI was needed.

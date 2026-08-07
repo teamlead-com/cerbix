@@ -27,7 +27,7 @@ const pullJobLeaseSeconds = 30
 // AgentRouter registers the HTTP-pull agent endpoints, gated by a shared bearer token
 // (WithAgentToken). It is mounted outside the session-auth middleware because agents
 // are not users. Without a token configured, the endpoints are disabled (404).
-func (h *Handler) AgentRouter() *http.ServeMux {
+func (h *Handler) AgentRouter() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/agent/jobs", h.agentAuth(h.agentJobs))
 	mux.HandleFunc("POST /api/v1/agent/results", h.agentAuth(h.agentResults))
@@ -35,7 +35,7 @@ func (h *Handler) AgentRouter() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/agent/tests", h.agentAuth(h.agentTests))
 	mux.HandleFunc("POST /api/v1/agent/test-results", h.agentAuth(h.agentTestResult))
 	mux.HandleFunc("POST /api/v1/agent/heartbeat", h.agentAuth(h.agentHeartbeat))
-	return mux
+	return maxBytes(mux, agentMaxBody)
 }
 
 // agentEnabled reports whether any agent auth (config or database) is configured.

@@ -438,7 +438,7 @@ func (h *Handler) Router() *http.ServeMux {
 
 // PublicRouter registers the unauthenticated status-page rendering endpoint. It
 // is mounted outside the auth middleware; the handler enforces visibility itself.
-func (h *Handler) PublicRouter() *http.ServeMux {
+func (h *Handler) PublicRouter() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/public/status-pages/{slug}", h.renderStatusPagePublic)
 	mux.HandleFunc("GET /api/v1/public/status-pages/{slug}/feed", h.renderFeedPublic)
@@ -447,7 +447,7 @@ func (h *Handler) PublicRouter() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/public/subscriptions/{token}", h.unsubscribe)
 	mux.HandleFunc("POST /api/v1/public/push/{token}", h.pushHeartbeat)
 	mux.HandleFunc("GET /api/v1/public/branding", h.publicBranding)
-	return mux
+	return maxBytes(mux, publicMaxBody)
 }
 
 func (h *Handler) principal(r *http.Request) (authz.Principal, bool) {

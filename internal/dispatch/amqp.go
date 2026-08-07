@@ -32,8 +32,13 @@ const (
 	// request is unroutable and the caller times out ("no worker in region").
 	testsQueuePrefix = "checks.tests."
 	resultsQueue     = "checks.results"
-	consumePrefetch  = 16
-	forwardBuffer    = 256
+	// deadQueue holds poison messages (unparseable job/result bodies) that a consumer
+	// would otherwise Nack-drop and lose. Forwarding them here preserves the raw body
+	// for inspection. Results themselves carry NO time-TTL — a slow ingest must never
+	// drop results — so poison forwarding is the deliberate, only dead-letter path.
+	deadQueue       = "checks.dead"
+	consumePrefetch = 16
+	forwardBuffer   = 256
 	// testRPCTimeout bounds the wait for a region worker's test reply when the
 	// monitor carries no explicit timeout; otherwise timeout+testRPCSlack is used.
 	testRPCTimeout = 20 * time.Second
@@ -121,6 +126,11 @@ func dialAndSetup(url string) (*amqp.Connection, *amqp.Channel, error) {
 	if _, err := ch.QueueDeclare(resultsQueue, true, false, false, false, nil); err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("dispatch: declare %s: %w", resultsQueue, err)
+	}
+	// Durable dead-letter sink for poison messages (see deadQueue / deadLetter).
+	if _, err := ch.QueueDeclare(deadQueue, true, false, false, false, nil); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("dispatch: declare %s: %w", deadQueue, err)
 	}
 	return conn, ch, nil
 }
@@ -342,6 +352,24 @@ func (d *AMQP) publishTo(queue string, v any, expiration string) error {
 	})
 }
 
+// deadLetter best-effort forwards a poison message (an unparseable body a consumer
+// is about to Nack-drop) to the durable dead-letter queue, tagged with its source, so
+// it survives for inspection instead of vanishing. A failure here is logged, never
+// fatal — the message is dropped as before in that rare case.
+func (d *AMQP) deadLetter(source string, body []byte) {
+	err := d.onPubChannel(func(ch *amqp.Channel) error {
+		return ch.PublishWithContext(d.ctx, "", deadQueue, false, false, amqp.Publishing{
+			ContentType:  "application/json",
+			DeliveryMode: amqp.Persistent,
+			Headers:      amqp.Table{"x-cerbix-source": source},
+			Body:         body,
+		})
+	})
+	if err != nil {
+		d.logger.Error("dispatch_dead_letter_failed", "source", source, "error", err.Error())
+	}
+}
+
 // PublishJob routes a check job to its region's queue (checks.jobs.<region>).
 // Composite monitors are pinned to the core pool (they need the database). A TTL of
 // roughly one interval is set so a job for a region with no live worker expires
@@ -376,6 +404,7 @@ func (d *AMQP) Jobs() <-chan CheckJob {
 			var job CheckJob
 			if err := json.Unmarshal(body, &job); err != nil {
 				d.logger.Error("dispatch_bad_job", "error", err.Error())
+				d.deadLetter("jobs", body)
 				return false
 			}
 			select {
@@ -397,6 +426,7 @@ func (d *AMQP) Results() <-chan domain.Heartbeat {
 			var hb domain.Heartbeat
 			if err := json.Unmarshal(body, &hb); err != nil {
 				d.logger.Error("dispatch_bad_result", "error", err.Error())
+				d.deadLetter("results", body)
 				return false
 			}
 			select {

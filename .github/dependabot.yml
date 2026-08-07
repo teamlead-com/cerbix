@@ -2,7 +2,7 @@ version: 2
 updates:
   # Maintain dependencies for Go backend
   - package-ecosystem: "gomod"
-    directory: "/backend"
+    directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -30,7 +30,7 @@ updates:
 
   # Maintain Dockerfile base images
   - package-ecosystem: "docker"
-    directory: "/backend"
+    directory: "/"
     schedule:
       interval: "weekly"
     labels:

@@ -108,6 +108,21 @@ func TestSubscribeConfirmUnsubscribe(t *testing.T) {
 	}
 }
 
+// TestPublicBodyCap proves the public router rejects an oversized request body
+// instead of buffering it — MaxBytesReader trips the decode into a 400.
+func TestPublicBodyCap(t *testing.T) {
+	fs := seededStore()
+	h := newPublicHandlerWithMailer(fs, &fakeMailer{})
+	huge := `{"email":"` + strings.Repeat("a", 128<<10) + `@x.com"}` // 128 KiB > 64 KiB cap
+	rec := do(h, outsider, http.MethodPost, "/api/v1/public/status-pages/acme-status/subscribers", huge)
+	if rec.Code < 400 {
+		t.Fatalf("oversized body = %d, want a 4xx rejection", rec.Code)
+	}
+	if len(fs.subscribers) != 0 {
+		t.Fatalf("oversized body must not create a subscriber, got %d", len(fs.subscribers))
+	}
+}
+
 func TestSubscribeDisabledWithoutMailer(t *testing.T) {
 	h := newPublicHandlerWithMailer(seededStore(), nil)
 	if rec := do(h, outsider, http.MethodPost, "/api/v1/public/status-pages/acme-status/subscribers", `{"email":"a@x.com"}`); rec.Code != http.StatusServiceUnavailable {

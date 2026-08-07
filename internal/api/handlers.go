@@ -421,6 +421,26 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// Request-body caps for the externally reachable routers. The public router is
+// unauthenticated (status pages, push pings, subscribe) and takes only small JSON,
+// so it gets a tight cap. The agent router is token-authed but ingests batches
+// (a reconnecting agent's backfill can carry thousands of heartbeats), so it gets a
+// larger one. Both bound memory against an oversized body.
+const (
+	publicMaxBody = 64 << 10 // 64 KiB
+	agentMaxBody  = 16 << 20 // 16 MiB
+)
+
+// maxBytes caps every request body on the wrapped handler at limit bytes: a read past
+// the limit fails, which decodeJSON surfaces as a 400. Applied at the router edge so
+// it covers handlers regardless of how they read the body.
+func maxBytes(next http.Handler, limit int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
@@ -182,4 +184,57 @@ func TestAMQPPublisherReopensChannel(t *testing.T) {
 	if !strings.Contains(logBuf.String(), "publish_channel_reopened") {
 		t.Fatalf("expected publish_channel_reopened log, got: %s", logBuf.String())
 	}
+}
+
+// TestAMQPDeadLettersPoison proves an unparseable result body is forwarded to the
+// durable dead-letter queue rather than silently dropped on Nack. Opt-in via
+// CERBIX_TEST_RABBITMQ_URL.
+func TestAMQPDeadLettersPoison(t *testing.T) {
+	url := os.Getenv("CERBIX_TEST_RABBITMQ_URL")
+	if url == "" {
+		t.Skip("set CERBIX_TEST_RABBITMQ_URL to run the dead-letter test")
+	}
+	var logBuf syncBuffer
+	d, err := NewAMQP(url, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer d.Close()
+
+	// Drain the dead queue first so we assert on THIS run's poison message.
+	conn, _ := d.current()
+	pch, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("channel: %v", err)
+	}
+	defer pch.Close()
+	if _, err := pch.QueuePurge(deadQueue, false); err != nil {
+		t.Fatalf("purge dead: %v", err)
+	}
+
+	_ = d.Results() // start the results consumer (it dead-letters poison)
+
+	poison := []byte("this-is-not-json")
+	if err := pch.PublishWithContext(context.Background(), "", resultsQueue, false, false,
+		amqp.Publishing{ContentType: "application/json", Body: poison}); err != nil {
+		t.Fatalf("publish poison: %v", err)
+	}
+
+	for i := 0; i < 60; i++ {
+		msg, ok, err := pch.Get(deadQueue, true)
+		if err != nil {
+			t.Fatalf("get dead: %v", err)
+		}
+		if ok {
+			if string(msg.Body) != string(poison) {
+				t.Fatalf("dead-letter body = %q, want %q", msg.Body, poison)
+			}
+			if src, _ := msg.Headers["x-cerbix-source"].(string); src != "results" {
+				t.Fatalf("dead-letter source = %q, want results", src)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("poison message was not dead-lettered; logs: %s", logBuf.String())
 }

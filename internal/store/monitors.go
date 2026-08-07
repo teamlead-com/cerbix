@@ -13,7 +13,7 @@ import (
 
 // monitorColumns includes a correlated aggregate for depends_on; the bare `id`
 // inside it resolves to the outer monitors row under any table alias.
-const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, " +
+const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, execution_revision, " +
 	"(SELECT COALESCE(array_agg(d.depends_on_id::text ORDER BY d.created_at), '{}') FROM monitor_dependencies d WHERE d.monitor_id = id) AS depends_on"
 
 // methodOrGet keeps the NOT NULL method column concrete; the prober ignores it
@@ -48,7 +48,7 @@ func (s *Store) scanMonitor(row pgx.Row, extra ...any) (domain.Monitor, error) {
 	var config []byte
 	dests := []any{&m.ID, &m.ProjectID, &m.Name, &typ, &m.Target,
 		&m.IntervalSeconds, &m.TimeoutSeconds, &m.Retries, &m.Conditions,
-		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.DependsOn}
+		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.DependsOn}
 	dests = append(dests, extra...)
 	err := row.Scan(dests...)
 	if err != nil {
@@ -267,7 +267,13 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 	row := s.pool.QueryRow(ctx,
 		`UPDATE monitors
 		    SET name = $2, target = $3, interval_seconds = $4, timeout_seconds = $5,
-		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = $11, auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, updated_at = now()
+		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = $11, auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, updated_at = now(),
+		        -- Config generation: bump on ANY UpdateMonitor (fail-safe — a missed bump would
+		        -- reopen the stale-config vulnerability; an extra bump costs one re-probe), and
+		        -- reset the freshness watermark so the first result of the new generation is not
+		        -- rejected against the old one (spec §3). Status/counter/reencrypt writes do NOT
+		        -- touch this — they use different statements.
+		        execution_revision = execution_revision + 1, last_result_ts = NULL
 		  WHERE id = $1 RETURNING `+monitorColumns,
 		m.ID, m.Name, m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds)
 	updated, err := s.scanMonitor(row)
@@ -494,24 +500,6 @@ func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bo
 	return prev, cur, inMaint, nil
 }
 
-// RecordResult records one probe result end-to-end in a SINGLE transaction: it
-// inserts the heartbeat, then — only if that heartbeat is both new and fresh —
-// applies the live-status change and enqueues any transition-outbox event. This is
-// the correctness spine for ingest: previously the insert and the status flip were
-// two independent transactions, so a duplicate re-delivery re-bumped the failure
-// counter and a crash between them could apply a status change with no heartbeat
-// behind it.
-//
-// Freshness/dedup, driven by the probe timestamp (hbTime) against monitors.last_result_ts:
-//   - duplicate (ON CONFLICT DO NOTHING inserts 0 rows): heartbeat already recorded,
-//     status is NOT touched — applied=false;
-//   - stale (ts not strictly newer than last_result_ts): the heartbeat is kept for
-//     SLA accuracy but a late/slow probe must not override newer live state —
-//     applied=false;
-//   - otherwise the status flip runs and last_result_ts advances to this ts —
-//     applied=true, and prev/cur/suppressed carry the transition for the caller.
-//
-// A result for an already-deleted monitor returns ErrNotFound (the caller drops it).
 // Result-ingest outcome reasons (spec func-result-protocol §4/§5). Low-cardinality; the
 // caller maps them to the result_* metric families.
 const (
@@ -520,6 +508,8 @@ const (
 	ReasonOutsideRetention = "outside_retention"
 	ReasonOutOfOrder       = "out_of_order"
 	ReasonDuplicate        = "duplicate"
+	ReasonStaleRevision    = "stale_revision"
+	ReasonMissingRevision  = "missing_revision"
 )
 
 // ResultOutcome is what a scheduled/push result did. Applied = live status/counters/outbox
@@ -531,7 +521,14 @@ type ResultOutcome struct {
 	Prev, Cur  domain.MonitorStatus
 	Suppressed bool
 	Reason     string
+	// MissingRevisionObserved is set when a scheduled result carried no revision and was
+	// accepted under observe mode (the migration counter watched before switching to
+	// enforce). Orthogonal to Reason (the result is still applied/inserted normally).
+	MissingRevisionObserved bool
 }
+
+// withMissing tags the outcome as an observe-mode missing-revision acceptance.
+func (o ResultOutcome) withMissing(b bool) ResultOutcome { o.MissingRevisionObserved = b; return o }
 
 // RecordScheduledResult records a worker/agent (scheduled) probe result following the
 // ordered pipeline in spec func-result-protocol §4, in ONE transaction:
@@ -556,13 +553,14 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-	// Step 2 — lock the monitor (existence + serialise vs config writes), read the DB clock
-	// and the freshness watermark in one statement.
+	// Step 2 — lock the monitor (existence + serialise vs config writes), read the DB clock,
+	// the freshness watermark and the current config generation in one statement.
 	var lastTs *time.Time
 	var dbNow time.Time
+	var curRev int64
 	err = tx.QueryRow(ctx,
-		`SELECT last_result_ts, statement_timestamp() FROM monitors WHERE id = $1 FOR UPDATE`,
-		hb.MonitorID).Scan(&lastTs, &dbNow)
+		`SELECT last_result_ts, statement_timestamp(), execution_revision FROM monitors WHERE id = $1 FOR UPDATE`,
+		hb.MonitorID).Scan(&lastTs, &dbNow, &curRev)
 	if noRows(err) {
 		return ResultOutcome{}, ErrNotFound
 	}
@@ -570,7 +568,19 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 		return ResultOutcome{}, fmt.Errorf("store: record result lock: %w", err)
 	}
 
-	// Step 3 — revision gate: INERT in P0a (activates in P0b).
+	// Step 3 — revision gate (BEFORE any insert): a result produced under a stale config
+	// must not mutate the new one, and (in enforce) a result with no revision is a bug/old
+	// binary. Present-but-mismatched → reject ALWAYS; missing → reject in enforce, tolerated
+	// + counted in observe (rolling-upgrade window). A reject inserts nothing.
+	missingObserved := false
+	if hb.ExecutionRevision == 0 {
+		if s.resultRevisionMode != "observe" {
+			return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonMissingRevision})
+		}
+		missingObserved = true
+	} else if hb.ExecutionRevision != curRev {
+		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonStaleRevision})
+	}
 
 	// Step 4 — timestamp bounds, BEFORE the insert so a bad row never lands.
 	skew := s.resultSkew
@@ -578,10 +588,10 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 		skew = 5 * time.Minute
 	}
 	if ts.After(dbNow.Add(skew)) {
-		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonFutureTimestamp})
+		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonFutureTimestamp}.withMissing(missingObserved))
 	}
 	if s.resultRetention > 0 && ts.Before(dbNow.Add(-s.resultRetention)) {
-		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonOutsideRetention})
+		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonOutsideRetention}.withMissing(missingObserved))
 	}
 
 	// Step 5 — insert; observed_at == ts for a scheduled result.
@@ -594,13 +604,13 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	}
 	// Step 6 — duplicate re-delivery: the fact is already recorded, apply nothing.
 	if ct.RowsAffected() == 0 {
-		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonDuplicate})
+		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonDuplicate}.withMissing(missingObserved))
 	}
 
 	// Step 7 — watermark compare.
 	if lastTs != nil && !ts.After(*lastTs) {
 		// Out-of-order: heartbeat kept for SLA, live state untouched.
-		return s.commitOutcome(ctx, tx, ResultOutcome{Inserted: true, Reason: ReasonOutOfOrder})
+		return s.commitOutcome(ctx, tx, ResultOutcome{Inserted: true, Reason: ReasonOutOfOrder}.withMissing(missingObserved))
 	}
 	prev, cur, suppressed, err := recordCheckStatusTx(ctx, tx, hb.MonitorID, hb.Up)
 	if err != nil {
@@ -611,7 +621,7 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	}
 	return s.commitOutcome(ctx, tx, ResultOutcome{
 		Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed,
-	})
+	}.withMissing(missingObserved))
 }
 
 // commitOutcome commits tx and returns the outcome (or a wrapped commit error).

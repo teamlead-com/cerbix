@@ -36,6 +36,9 @@ type Recorder interface {
 	// RecordResultOutcome reports a non-applied result outcome (quarantined/ignored/
 	// rejected) by its reason; an applied or benign-duplicate outcome is a no-op.
 	RecordResultOutcome(reason string)
+	// RecordResultMissingRevision counts a scheduled result accepted with no revision under
+	// observe mode (the migration signal watched before switching to enforce).
+	RecordResultMissingRevision()
 }
 
 // autoIncidentAuthor labels timeline entries the pipeline writes.
@@ -131,6 +134,9 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 	if c.recorder != nil {
 		if o.Reason != "" {
 			c.recorder.RecordResultOutcome(o.Reason)
+		}
+		if o.MissingRevisionObserved {
+			c.recorder.RecordResultMissingRevision()
 		}
 		if o.Inserted {
 			c.recorder.RecordCheck(hb.Up) // count a real check only when a heartbeat was recorded

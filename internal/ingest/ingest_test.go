@@ -186,6 +186,7 @@ type fakeRecorder struct {
 	mu            sync.Mutex
 	up, down      int
 	incidentsOpen int
+	missingRev    int
 	outcomes      map[string]int // reason → count
 }
 
@@ -212,6 +213,12 @@ func (r *fakeRecorder) outcomeCount(reason string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.outcomes[reason]
+}
+
+func (r *fakeRecorder) RecordResultMissingRevision() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.missingRev++
 }
 
 func (r *fakeRecorder) RecordIncidentOpened() {

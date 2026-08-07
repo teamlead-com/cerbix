@@ -63,8 +63,9 @@ type Store struct {
 	// resultRetention is the lower bound below which a result is ignored (outside the raw
 	// window). Zero → sane fallbacks (skew 5m; retention floor disabled). Set via
 	// WithResultPolicy at wiring.
-	resultSkew      time.Duration
-	resultRetention time.Duration
+	resultSkew         time.Duration
+	resultRetention    time.Duration
+	resultRevisionMode string // "enforce" (default) | "observe"
 }
 
 // WithResultPolicy sets the timestamp bounds used by RecordScheduledResult. Returns the
@@ -72,6 +73,15 @@ type Store struct {
 func (s *Store) WithResultPolicy(skew, retention time.Duration) *Store {
 	s.resultSkew = skew
 	s.resultRetention = retention
+	return s
+}
+
+// WithResultRevisionMode sets the execution_revision gate mode: "observe" tolerates a
+// missing revision on a scheduled result (rolling-upgrade window), anything else enforces
+// (a missing revision is rejected). A present-but-mismatched revision is ALWAYS rejected.
+// Empty/unset behaves as enforce.
+func (s *Store) WithResultRevisionMode(mode string) *Store {
+	s.resultRevisionMode = mode
 	return s
 }
 

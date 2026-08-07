@@ -95,7 +95,7 @@ func NewRunnerWithGuard(g Guard) *Runner {
 func (r *Runner) Run(ctx context.Context, m domain.Monitor) domain.Heartbeat {
 	prober, ok := r.registry[m.Type]
 	if !ok {
-		return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), Up: false, Msg: fmt.Sprintf("unsupported monitor type %q", m.Type)}
+		return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), ExecutionRevision: m.ExecutionRevision, Up: false, Msg: fmt.Sprintf("unsupported monitor type %q", m.Type)}
 	}
 
 	attempts := m.Retries + 1
@@ -107,7 +107,7 @@ func (r *Runner) Run(ctx context.Context, m domain.Monitor) domain.Heartbeat {
 
 		up, msg := r.judge(m, res)
 		if up {
-			return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), Up: true, LatencyMS: res.LatencyMS, Code: res.Code, Msg: msg}
+			return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), ExecutionRevision: m.ExecutionRevision, Up: true, LatencyMS: res.LatencyMS, Code: res.Code, Msg: msg}
 		}
 		// Retry only makes sense if the context is still alive.
 		if ctx.Err() != nil {
@@ -118,7 +118,7 @@ func (r *Runner) Run(ctx context.Context, m domain.Monitor) domain.Heartbeat {
 	if msg == "" {
 		msg = res.Msg
 	}
-	return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), Up: false, LatencyMS: res.LatencyMS, Code: res.Code, Msg: msg}
+	return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), ExecutionRevision: m.ExecutionRevision, Up: false, LatencyMS: res.LatencyMS, Code: res.Code, Msg: msg}
 }
 
 // judge decides up/down for a probe result and returns an explanatory message.

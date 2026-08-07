@@ -98,16 +98,20 @@ type Monitor struct {
 	ConfirmIntervalSeconds int `json:"confirm_interval_seconds"`
 	// ConsecutiveFailures is the live confirmation counter (server-owned, set by
 	// RecordCheckStatus); surfaced read-only so the UI can show "confirming N/M".
-	ConsecutiveFailures int               `json:"consecutive_failures,omitempty"`
-	RenotifySeconds     int               `json:"renotify_seconds"` // re-send the down alert every N seconds while down (0 = off)
-	GraceSeconds        int               `json:"grace_seconds"`    // push: extra tolerance before "down"
-	Conditions          []string          `json:"conditions"`
-	Tags                []string          `json:"tags"`             // free-form labels (env:prod, team:x) for filtering
-	Region              string            `json:"region"`           // worker-pool region that probes this monitor; default "core"
-	Config              map[string]string `json:"config,omitempty"` // per-type config (e.g. composite children/mode)
-	Enabled             bool              `json:"enabled"`
-	AutoIncident        bool              `json:"auto_incident"`                  // open an incident automatically when this monitor goes down
-	EscalationPolicyID  string            `json:"escalation_policy_id,omitempty"` // on-call escalation ladder for down alerts (empty = flat notify)
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+	// ExecutionRevision is the monitor's config generation (server-owned). The scheduler
+	// snapshots it into each job; the prober echoes it into the result so RecordScheduledResult
+	// can reject a result produced under a stale configuration. Read-only to clients.
+	ExecutionRevision  int64             `json:"execution_revision,omitempty"`
+	RenotifySeconds    int               `json:"renotify_seconds"` // re-send the down alert every N seconds while down (0 = off)
+	GraceSeconds       int               `json:"grace_seconds"`    // push: extra tolerance before "down"
+	Conditions         []string          `json:"conditions"`
+	Tags               []string          `json:"tags"`             // free-form labels (env:prod, team:x) for filtering
+	Region             string            `json:"region"`           // worker-pool region that probes this monitor; default "core"
+	Config             map[string]string `json:"config,omitempty"` // per-type config (e.g. composite children/mode)
+	Enabled            bool              `json:"enabled"`
+	AutoIncident       bool              `json:"auto_incident"`                  // open an incident automatically when this monitor goes down
+	EscalationPolicyID string            `json:"escalation_policy_id,omitempty"` // on-call escalation ladder for down alerts (empty = flat notify)
 	// DependsOn lists parent monitors (same project) this monitor depends on.
 	// While any (transitive) parent is down, this monitor's alerts are suppressed
 	// at delivery time; data keeps recording. The graph must stay acyclic.
@@ -397,6 +401,10 @@ type Heartbeat struct {
 	LatencyMS int64     `json:"latency_ms"`
 	Code      int       `json:"code"`
 	Msg       string    `json:"msg"`
+	// ExecutionRevision is the monitor config generation this probe ran under (stamped by
+	// the prober from the job's monitor). RecordScheduledResult rejects a result whose
+	// revision no longer matches the monitor's current one. 0 = not carried (push/legacy).
+	ExecutionRevision int64 `json:"execution_revision,omitempty"`
 }
 
 // StatusFor maps an up/down boolean to a MonitorStatus.

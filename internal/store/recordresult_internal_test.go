@@ -35,6 +35,11 @@ func TestRecordScheduledResultPipeline(t *testing.T) {
 	}
 	rec := func(hb domain.Heartbeat) ResultOutcome {
 		t.Helper()
+		// Stamp the monitor's current config generation so the revision gate passes; this
+		// test exercises the timestamp pipeline, not the revision gate (see TestRevisionGate).
+		if !hb.Ts.IsZero() {
+			hb.ExecutionRevision = mon.ExecutionRevision
+		}
 		o, err := st.RecordScheduledResult(ctx, hb)
 		if err != nil {
 			t.Fatalf("record: %v", err)
@@ -152,5 +157,72 @@ func TestRecordPushResult(t *testing.T) {
 	// A ping to a nonexistent monitor is ErrNotFound.
 	if _, err := st.RecordPushResult(ctx, "00000000-0000-0000-0000-000000000000", true, "", recv, time.Time{}); err != ErrNotFound {
 		t.Fatalf("push to missing monitor err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestRevisionGate proves the execution_revision gate (spec §3): a matching revision
+// applies; a mismatched one is always rejected (stale_revision, no insert); a missing one
+// is rejected under enforce but tolerated+counted under observe; UpdateMonitor bumps the
+// revision and resets the watermark.
+func TestRevisionGate(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "r", Type: domain.MonitorTCP, Target: "10.0.0.1:80",
+		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if mon.ExecutionRevision != 1 {
+		t.Fatalf("new monitor execution_revision = %d, want 1", mon.ExecutionRevision)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	hb := func(rev int64, ts time.Time) domain.Heartbeat {
+		return domain.Heartbeat{MonitorID: mon.ID, Ts: ts, Up: true, ExecutionRevision: rev}
+	}
+
+	// enforce (default): mismatched revision → reject, no insert.
+	if o, _ := st.RecordScheduledResult(ctx, hb(2, now)); o.Reason != ReasonStaleRevision || o.Inserted {
+		t.Fatalf("mismatched revision: %+v, want stale_revision/no-insert", o)
+	}
+	// enforce: missing revision (0) → reject.
+	if o, _ := st.RecordScheduledResult(ctx, hb(0, now.Add(time.Second))); o.Reason != ReasonMissingRevision || o.Inserted {
+		t.Fatalf("missing revision (enforce): %+v, want missing_revision/no-insert", o)
+	}
+	// matching revision → applied.
+	if o, _ := st.RecordScheduledResult(ctx, hb(1, now.Add(2*time.Second))); !o.Applied {
+		t.Fatalf("matching revision: %+v, want applied", o)
+	}
+
+	// observe mode: missing revision is tolerated (applied) and flagged.
+	st.WithResultRevisionMode("observe")
+	if o, _ := st.RecordScheduledResult(ctx, hb(0, now.Add(3*time.Second))); !o.Applied || !o.MissingRevisionObserved {
+		t.Fatalf("missing revision (observe): %+v, want applied + MissingRevisionObserved", o)
+	}
+	// A PRESENT mismatch is still rejected even under observe.
+	if o, _ := st.RecordScheduledResult(ctx, hb(99, now.Add(4*time.Second))); o.Reason != ReasonStaleRevision {
+		t.Fatalf("observe present-mismatch: %+v, want stale_revision", o)
+	}
+	st.WithResultRevisionMode("enforce")
+
+	// UpdateMonitor bumps the revision and resets the watermark.
+	mon.Name = "renamed"
+	up, err := st.UpdateMonitor(ctx, mon)
+	if err != nil || up.ExecutionRevision != 2 {
+		t.Fatalf("after update, execution_revision = %d err=%v, want 2", up.ExecutionRevision, err)
+	}
+	var last *time.Time
+	_ = st.pool.QueryRow(ctx, `SELECT last_result_ts FROM monitors WHERE id=$1`, mon.ID).Scan(&last)
+	if last != nil {
+		t.Fatalf("update must reset last_result_ts, got %v", last)
+	}
+	// Old-generation result now rejected; new-generation applies.
+	if o, _ := st.RecordScheduledResult(ctx, hb(1, now.Add(5*time.Second))); o.Reason != ReasonStaleRevision {
+		t.Fatalf("old-gen result after bump: %+v, want stale_revision", o)
+	}
+	if o, _ := st.RecordScheduledResult(ctx, hb(2, now.Add(6*time.Second))); !o.Applied {
+		t.Fatalf("new-gen result after bump: %+v, want applied", o)
 	}
 }

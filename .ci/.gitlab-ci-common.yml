@@ -27,7 +27,7 @@ variables:
     - if: '$CI_COMMIT_BRANCH == "main"'
 
 .go-job:
-  image: golang:1.24-bookworm
+  image: golang:1.25.12-bookworm
   extends:
     - .build-runner
     - .backend-changes

@@ -43,19 +43,34 @@ func (s *Store) InsertHeartbeat(ctx context.Context, hb domain.Heartbeat) error 
 	return nil
 }
 
-// InsertHeartbeatsBulk appends heartbeats WITHOUT touching monitor status or the alert
-// pipeline — for a pull agent's historical backfill after a network outage. It fills the
-// SLA/SLI gap only; live status is driven by fresh probes after reconnect. Idempotent on
-// (monitor_id, ts). Returns the number of rows actually inserted (conflicts skipped).
-func (s *Store) InsertHeartbeatsBulk(ctx context.Context, hbs []domain.Heartbeat) (int, error) {
+// RecordHistoricalResults appends a pull agent's buffered historical results (replayed
+// after a network outage) WITHOUT touching monitor status or the alert pipeline — the
+// fourth, SLA/SLI-only ingest path (spec func-result-protocol §4). Live status is driven
+// by fresh probes after reconnect. Each row is timestamp-bounds-validated (missing/future-
+// beyond-skew/outside-retention are skipped, never a synthetic "now"), inserted with
+// observed_at = ts, and idempotent on (monitor_id, ts). Returns rows inserted and rows
+// skipped (deleted monitor or out-of-bounds timestamp).
+func (s *Store) RecordHistoricalResults(ctx context.Context, hbs []domain.Heartbeat) (inserted, skipped int, err error) {
 	if len(hbs) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
-	// Drop heartbeats for monitors deleted since the agent buffered them: a
-	// pgx batch is one implicit transaction, so a single FK violation (23503)
-	// aborts every insert and wedges the whole backfill on retry. Filtering by
-	// the live monitor set self-heals — the next retry excludes the confirmed
-	// deletion. (Mirrors the InsertHeartbeat 23503→ErrNotFound handling.)
+	// A backfilled result is a fact true at its historical moment; it NEVER touches live
+	// state (status/counters/incidents/watermark) — this is SLA/audit only — and revision
+	// gating (which protects live state) does not apply. But it MUST honor the same
+	// timestamp bounds as scheduled ingest, or a future/1970 row lands in the raw table and
+	// an SLA `ts >= since` query counts it (spec func-result-protocol §4).
+	var dbNow time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&dbNow); err != nil {
+		return 0, 0, fmt.Errorf("store: backfill clock: %w", err)
+	}
+	skew := s.resultSkew
+	if skew <= 0 {
+		skew = 5 * time.Minute
+	}
+
+	// Drop rows for monitors deleted since the agent buffered them: a pgx batch is one
+	// implicit transaction, so a single FK violation (23503) aborts every insert and wedges
+	// the whole backfill on retry. Filtering by the live monitor set self-heals.
 	ids := make([]string, 0, len(hbs))
 	seen := map[string]bool{}
 	for _, hb := range hbs {
@@ -66,51 +81,54 @@ func (s *Store) InsertHeartbeatsBulk(ctx context.Context, hbs []domain.Heartbeat
 	}
 	rows, err := s.pool.Query(ctx, `SELECT id FROM monitors WHERE id = ANY($1)`, ids)
 	if err != nil {
-		return 0, fmt.Errorf("store: bulk insert filter: %w", err)
+		return 0, 0, fmt.Errorf("store: backfill filter: %w", err)
 	}
-	// defer is the idiomatic close: pgxpool's poolRows.Next() already releases the
-	// connection when it returns false (normal + iteration-error + ctx-cancel paths),
-	// so this is not a leak fix — it's hardening that also covers the scan-error early
-	// return and any (unlikely) panic mid-loop without a manual close on each path.
 	defer rows.Close()
 	live := map[string]bool{}
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("store: bulk insert filter scan: %w", err)
+			return 0, 0, fmt.Errorf("store: backfill filter scan: %w", err)
 		}
 		live[id] = true
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("store: bulk insert filter iterate: %w", err)
+		return 0, 0, fmt.Errorf("store: backfill filter iterate: %w", err)
 	}
 
 	batch := &pgx.Batch{}
 	queued := 0
 	for _, hb := range hbs {
 		if !live[hb.MonitorID] {
-			continue // monitor gone — skip rather than abort the batch
+			skipped++ // monitor gone
+			continue
+		}
+		ts := hb.Ts
+		// Per-row timestamp bounds — identical to scheduled; each invalid row is skipped
+		// (never a synthetic "now").
+		if ts.IsZero() || ts.After(dbNow.Add(skew)) || (s.resultRetention > 0 && ts.Before(dbNow.Add(-s.resultRetention))) {
+			skipped++
+			continue
 		}
 		queued++
 		batch.Queue(
-			`INSERT INTO heartbeats (monitor_id, ts, up, latency_ms, code, msg) VALUES ($1,$2,$3,$4,$5,$6)
-			 ON CONFLICT (monitor_id, ts) DO NOTHING`,
-			hb.MonitorID, hbTime(hb), hb.Up, hb.LatencyMS, hb.Code, hb.Msg)
+			`INSERT INTO heartbeats (monitor_id, ts, up, latency_ms, code, msg, observed_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$2) ON CONFLICT (monitor_id, ts) DO NOTHING`,
+			hb.MonitorID, ts, hb.Up, hb.LatencyMS, hb.Code, hb.Msg)
 	}
 	if queued == 0 {
-		return 0, nil
+		return 0, skipped, nil
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer br.Close()
-	inserted := 0
 	for i := 0; i < queued; i++ {
 		ct, err := br.Exec()
 		if err != nil {
-			return inserted, fmt.Errorf("store: bulk insert heartbeat: %w", err)
+			return inserted, skipped, fmt.Errorf("store: backfill insert: %w", err)
 		}
 		inserted += int(ct.RowsAffected())
 	}
-	return inserted, nil
+	return inserted, skipped, nil
 }
 
 // ListRecentHeartbeats returns the most recent heartbeats for a monitor, newest first.

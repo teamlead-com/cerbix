@@ -218,12 +218,17 @@ func (h *Handler) agentBackfill(w http.ResponseWriter, r *http.Request) {
 	if !h.enforceRegionScope(w, r, r.URL.Query().Get("region"), body.Results) {
 		return
 	}
-	inserted, err := h.store.InsertHeartbeatsBulk(r.Context(), body.Results)
+	inserted, skipped, err := h.store.RecordHistoricalResults(r.Context(), body.Results)
 	if err != nil {
 		h.serverError(w, "agent_backfill", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"inserted": inserted, "received": len(body.Results)})
+	if skipped > 0 {
+		// Out-of-bounds (future/1970/missing) or deleted-monitor rows dropped — not applied
+		// to SLA. Surfaced for the operator (a broken agent clock shows here).
+		h.logger.Warn("agent_backfill_skipped", "skipped", skipped, "received", len(body.Results))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"inserted": inserted, "skipped": skipped, "received": len(body.Results)})
 }
 
 // agentTests hands the agent one pending "Test connection" job for its region (if any)

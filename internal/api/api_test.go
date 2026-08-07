@@ -569,9 +569,9 @@ func (f *fakeStore) RecordAgentHeartbeat(_ context.Context, region, agentID stri
 	f.agentHeartbeats[region] = agentID
 	return nil
 }
-func (f *fakeStore) InsertHeartbeatsBulk(_ context.Context, hbs []domain.Heartbeat) (int, error) {
+func (f *fakeStore) RecordHistoricalResults(_ context.Context, hbs []domain.Heartbeat) (int, int, error) {
 	f.backfilled = append(f.backfilled, hbs...)
-	return len(hbs), nil
+	return len(hbs), 0, nil
 }
 func (f *fakeStore) MonitorRegions(_ context.Context, ids []string) (map[string]string, error) {
 	out := map[string]string{}

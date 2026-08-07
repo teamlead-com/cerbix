@@ -85,7 +85,7 @@ type Store interface {
 	ClaimPullTest(ctx context.Context, region string) (id string, payload []byte, ok bool, err error)
 	SavePullTestResult(ctx context.Context, id, region string, result []byte) error
 	RecordAgentHeartbeat(ctx context.Context, region, agentID string) error
-	InsertHeartbeatsBulk(ctx context.Context, hbs []domain.Heartbeat) (int, error)
+	RecordHistoricalResults(ctx context.Context, hbs []domain.Heartbeat) (inserted, skipped int, err error)
 	MonitorRegions(ctx context.Context, ids []string) (map[string]string, error)
 	CreateAgentToken(ctx context.Context, name, region, hash string) (domain.AgentToken, error)
 	ResolveAgentTokenRegion(ctx context.Context, hash string) (region string, ok bool, err error)

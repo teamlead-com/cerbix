@@ -3,6 +3,7 @@ package store_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
@@ -162,17 +163,22 @@ func TestInsertHeartbeatsBulkSkipsDeletedMonitor(t *testing.T) {
 	if err := st.DeleteMonitor(ctx, gone.ID); err != nil {
 		t.Fatalf("delete gone: %v", err)
 	}
-	// A batch mixing a live and a deleted monitor must not abort — the live
-	// heartbeats land, the deleted one is skipped.
-	n, err := st.InsertHeartbeatsBulk(ctx, []domain.Heartbeat{
-		{MonitorID: live.ID, Up: true},
-		{MonitorID: gone.ID, Up: false},
-		{MonitorID: live.ID, Up: true}, // dup ts within the call → one lands
+	// A batch mixing a live and a deleted monitor must not abort — the live heartbeats
+	// land, the deleted one is skipped. Timestamps must be present (historical results
+	// carry a real observation time; a zero ts is dropped as out-of-bounds).
+	ts := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
+	n, skipped, err := st.RecordHistoricalResults(ctx, []domain.Heartbeat{
+		{MonitorID: live.ID, Ts: ts, Up: true},
+		{MonitorID: gone.ID, Ts: ts, Up: false}, // deleted monitor → skipped
+		{MonitorID: live.ID, Ts: ts, Up: true},  // dup (monitor,ts) → one lands
 	})
 	if err != nil {
-		t.Fatalf("bulk insert: %v", err)
+		t.Fatalf("backfill: %v", err)
 	}
-	if n < 1 {
-		t.Fatalf("expected at least the live heartbeat inserted, got %d", n)
+	if n != 1 {
+		t.Fatalf("expected exactly the live heartbeat inserted, got %d", n)
+	}
+	if skipped < 1 {
+		t.Fatalf("expected the deleted-monitor row skipped, got skipped=%d", skipped)
 	}
 }

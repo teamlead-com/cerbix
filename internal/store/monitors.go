@@ -13,7 +13,7 @@ import (
 
 // monitorColumns includes a correlated aggregate for depends_on; the bare `id`
 // inside it resolves to the outer monitors row under any table alias.
-const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, execution_revision, " +
+const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, execution_revision, state_sequence, " +
 	"(SELECT COALESCE(array_agg(d.depends_on_id::text ORDER BY d.created_at), '{}') FROM monitor_dependencies d WHERE d.monitor_id = id) AS depends_on"
 
 // methodOrGet keeps the NOT NULL method column concrete; the prober ignores it
@@ -48,7 +48,7 @@ func (s *Store) scanMonitor(row pgx.Row, extra ...any) (domain.Monitor, error) {
 	var config []byte
 	dests := []any{&m.ID, &m.ProjectID, &m.Name, &typ, &m.Target,
 		&m.IntervalSeconds, &m.TimeoutSeconds, &m.Retries, &m.Conditions,
-		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.DependsOn}
+		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.StateSequence, &m.DependsOn}
 	dests = append(dests, extra...)
 	err := row.Scan(dests...)
 	if err != nil {
@@ -389,7 +389,11 @@ func (s *Store) SetMonitorStatus(ctx context.Context, id string, status domain.M
 	// On a real transition, enqueue the raw fact in the same transaction; the
 	// outbox worker applies the notification policy. No dual-write.
 	if prev != status {
-		payload, err := json.Marshal(domain.MonitorTransition{MonitorID: id, Prev: prev, Cur: status})
+		seq, err := bumpStateSequenceTx(ctx, tx, id)
+		if err != nil {
+			return "", err
+		}
+		payload, err := json.Marshal(domain.MonitorTransition{MonitorID: id, Prev: prev, Cur: status, Seq: seq})
 		if err != nil {
 			return "", fmt.Errorf("store: marshal transition: %w", err)
 		}
@@ -496,7 +500,11 @@ func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bo
 	// even after the window closed. (Incident opening is still gated on !inMaint in
 	// ingest via the returned suppressed flag — maintenance shouldn't spawn incidents.)
 	if prev != cur {
-		payload, err := json.Marshal(domain.MonitorTransition{MonitorID: monitorID, Prev: prev, Cur: cur})
+		seq, err := bumpStateSequenceTx(ctx, tx, monitorID)
+		if err != nil {
+			return "", "", false, err
+		}
+		payload, err := json.Marshal(domain.MonitorTransition{MonitorID: monitorID, Prev: prev, Cur: cur, Seq: seq})
 		if err != nil {
 			return "", "", false, fmt.Errorf("store: marshal transition: %w", err)
 		}
@@ -505,6 +513,21 @@ func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bo
 		}
 	}
 	return prev, cur, inMaint, nil
+}
+
+// bumpStateSequenceTx increments the monitor's monotonic transition counter and
+// returns the new value, inside the caller's transaction. Callers invoke it only
+// on a real status flip (the row is already row-locked in the same tx), so the
+// counter advances exactly once per applied transition and the returned value is
+// stamped into the transition outbox event for the delivery-time staleness check.
+func bumpStateSequenceTx(ctx context.Context, tx pgx.Tx, monitorID string) (int64, error) {
+	var seq int64
+	if err := tx.QueryRow(ctx,
+		`UPDATE monitors SET state_sequence = state_sequence + 1 WHERE id = $1 RETURNING state_sequence`,
+		monitorID).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("store: bump state sequence: %w", err)
+	}
+	return seq, nil
 }
 
 // Result-ingest outcome reasons (spec func-result-protocol §4/§5). Low-cardinality; the
@@ -707,7 +730,7 @@ func (s *Store) EnqueueRenotifyReminders(ctx context.Context) (int, error) {
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
 	rows, err := tx.Query(ctx,
-		`SELECT id FROM monitors
+		`SELECT id, state_sequence FROM monitors
 		  WHERE status = 'down' AND renotify_seconds > 0 AND last_notified_at IS NOT NULL
 		    AND escalation_policy_id IS NULL
 		    AND last_notified_at <= now() - make_interval(secs => renotify_seconds)
@@ -715,35 +738,42 @@ func (s *Store) EnqueueRenotifyReminders(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("store: select renotify due: %w", err)
 	}
-	var ids []string
+	type reminderDue struct {
+		id  string
+		seq int64
+	}
+	var due []reminderDue
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var d reminderDue
+		if err := rows.Scan(&d.id, &d.seq); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("store: scan renotify id: %w", err)
 		}
-		ids = append(ids, id)
+		due = append(due, d)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("store: iterate renotify due: %w", err)
 	}
-	for _, id := range ids {
-		payload, err := json.Marshal(domain.MonitorTransition{MonitorID: id, Prev: domain.StatusDown, Cur: domain.StatusDown, Reminder: true})
+	for _, d := range due {
+		// Carry the current state_sequence (no bump — a reminder isn't a transition).
+		// If the monitor recovers before this reminder is delivered, its sequence has
+		// advanced past d.seq and the delivery worker drops the reminder as stale.
+		payload, err := json.Marshal(domain.MonitorTransition{MonitorID: d.id, Prev: domain.StatusDown, Cur: domain.StatusDown, Reminder: true, Seq: d.seq})
 		if err != nil {
 			return 0, fmt.Errorf("store: marshal reminder: %w", err)
 		}
 		if err := enqueueOutboxTx(ctx, tx, domain.TopicMonitorTransition, payload); err != nil {
 			return 0, err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE monitors SET last_notified_at = now() WHERE id = $1`, id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE monitors SET last_notified_at = now() WHERE id = $1`, d.id); err != nil {
 			return 0, fmt.Errorf("store: bump last_notified_at: %w", err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("store: commit renotify: %w", err)
 	}
-	return len(ids), nil
+	return len(due), nil
 }
 
 // DeleteMonitor removes a monitor (and its heartbeats via cascade).

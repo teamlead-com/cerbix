@@ -75,6 +75,12 @@ type MonitorTransition struct {
 	Cur       MonitorStatus `json:"cur"`
 	At        time.Time     `json:"at"`
 	Reminder  bool          `json:"reminder,omitempty"` // re-notification while still down (not a real transition)
+	// Seq is the monitor's state_sequence at enqueue time. At delivery, an event
+	// whose Seq is older than the monitor's current state_sequence is dropped as
+	// superseded — a stale DOWN or reminder can't fire after a newer transition.
+	// Zero means "unset" (legacy events pre-dating the counter): never treated as
+	// stale, always delivered.
+	Seq int64 `json:"seq,omitempty"`
 }
 
 // SLOBurnAlert is the payload for a TopicSLOBurnAlert outbox event: a monitor's

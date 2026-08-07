@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -864,6 +865,58 @@ func TestStatusPageUpdateAndDeleteCascade(t *testing.T) {
 	// Deleting a missing page is ErrNotFound.
 	if err := st.DeleteStatusPage(ctx, sp.ID); err != store.ErrNotFound {
 		t.Fatalf("delete missing = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStateSequenceIncrementsOnTransition(t *testing.T) {
+	st, ctx := testStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, _ := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "seq", Type: domain.MonitorHTTP, Target: "https://x",
+		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
+	})
+
+	// pending→down (seq 1), down→up (seq 2), up→up (no transition, seq unchanged).
+	for _, s := range []domain.MonitorStatus{domain.StatusDown, domain.StatusUp, domain.StatusUp} {
+		if _, err := st.SetMonitorStatus(ctx, mon.ID, s); err != nil {
+			t.Fatalf("set status %s: %v", s, err)
+		}
+	}
+	got, err := st.GetMonitor(ctx, mon.ID)
+	if err != nil {
+		t.Fatalf("get monitor: %v", err)
+	}
+	if got.StateSequence != 2 {
+		t.Fatalf("state_sequence = %d, want 2 (one bump per real transition, none for the no-op)", got.StateSequence)
+	}
+
+	// Each transition event carries the sequence it was stamped at (1 then 2).
+	conn, err := pgx.Connect(ctx, os.Getenv("CERBIX_TEST_DATABASE_DSN"))
+	if err != nil {
+		t.Fatalf("raw connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	rows, err := conn.Query(ctx,
+		`SELECT payload FROM outbox_events WHERE topic = 'monitor_transition' ORDER BY created_at, id`)
+	if err != nil {
+		t.Fatalf("query outbox: %v", err)
+	}
+	defer rows.Close()
+	var seqs []int64
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			t.Fatalf("scan payload: %v", err)
+		}
+		var mt domain.MonitorTransition
+		if err := json.Unmarshal(payload, &mt); err != nil {
+			t.Fatalf("unmarshal transition: %v", err)
+		}
+		seqs = append(seqs, mt.Seq)
+	}
+	if len(seqs) != 2 || seqs[0] != 1 || seqs[1] != 2 {
+		t.Fatalf("enqueued transition seqs = %v, want [1 2]", seqs)
 	}
 }
 

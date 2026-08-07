@@ -184,8 +184,49 @@ func transition(t *testing.T, monitorID string, prev, cur domain.MonitorStatus) 
 	return b
 }
 
+func transitionSeq(t *testing.T, monitorID string, prev, cur domain.MonitorStatus, seq int64, reminder bool) []byte {
+	t.Helper()
+	b, err := json.Marshal(domain.MonitorTransition{MonitorID: monitorID, Prev: prev, Cur: cur, Seq: seq, Reminder: reminder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func newWorker(fs *fakeStore, wh *fakeWebhook, nf *fakeNotify, m *fakeMetrics) *Worker {
 	return New(fs, wh, nf, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// TestStaleTransitionSuppressed covers the #2 delivery-time staleness gate: a
+// transition (or reminder) whose stamped Seq is older than the monitor's current
+// state_sequence is dropped as superseded, while an up-to-date Seq and a legacy
+// Seq==0 event both deliver.
+func TestStaleTransitionSuppressed(t *testing.T) {
+	// Monitor has since advanced to state_sequence 3 (e.g. down→up→down again).
+	fs := &fakeStore{
+		monitors: map[string]domain.Monitor{"m1": {ID: "m1", Name: "API", Status: domain.StatusDown, StateSequence: 3}},
+		pending: []domain.OutboxEvent{
+			// Stale DOWN from an earlier sequence — must be dropped (delivered, not notified).
+			{ID: "e1", Topic: domain.TopicMonitorTransition, Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 1, false), Attempts: 1},
+			// Stale reminder — must be dropped too.
+			{ID: "e2", Topic: domain.TopicMonitorTransition, Payload: transitionSeq(t, "m1", domain.StatusDown, domain.StatusDown, 2, true), Attempts: 1},
+			// Current DOWN (seq == current) — must deliver.
+			{ID: "e3", Topic: domain.TopicMonitorTransition, Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 3, false), Attempts: 1},
+			// Legacy event with no sequence — never treated as stale, must deliver.
+			{ID: "e4", Topic: domain.TopicMonitorTransition, Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 0, false), Attempts: 1},
+		},
+	}
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+	// All four events are terminally handled (delivered), none failed/retried.
+	if len(fs.delivered) != 4 || len(fs.failed) != 0 {
+		t.Fatalf("delivered=%v failed=%v, want all 4 delivered", fs.delivered, fs.failed)
+	}
+	// Only the current (e3) and legacy (e4) events actually notified.
+	if nf.called != 2 {
+		t.Fatalf("notifier called %d times, want 2 (current + legacy; stale down & reminder dropped)", nf.called)
+	}
 }
 
 func TestDeliversIncidentAndTransition(t *testing.T) {

@@ -102,7 +102,12 @@ type Monitor struct {
 	// ExecutionRevision is the monitor's config generation (server-owned). The scheduler
 	// snapshots it into each job; the prober echoes it into the result so RecordScheduledResult
 	// can reject a result produced under a stale configuration. Read-only to clients.
-	ExecutionRevision  int64             `json:"execution_revision,omitempty"`
+	ExecutionRevision int64 `json:"execution_revision,omitempty"`
+	// StateSequence is a per-monitor monotonic counter bumped on every applied
+	// status transition. It rides along in the transition outbox event and is
+	// checked at delivery so a stale DOWN (or reminder) can't fire after a newer
+	// transition has superseded it. Server-owned, read-only to clients.
+	StateSequence      int64             `json:"-"`
 	RenotifySeconds    int               `json:"renotify_seconds"` // re-send the down alert every N seconds while down (0 = off)
 	GraceSeconds       int               `json:"grace_seconds"`    // push: extra tolerance before "down"
 	Conditions         []string          `json:"conditions"`

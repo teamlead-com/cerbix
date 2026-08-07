@@ -265,6 +265,17 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		if err != nil {
 			return err
 		}
+		// Staleness gate (#2): a newer transition has superseded this event (the
+		// monitor's state_sequence advanced past the one stamped at enqueue), so
+		// delivering it now would fire a down alert (or reminder) for a state the
+		// monitor already left — e.g. a retried/reordered DOWN after the recovery was
+		// delivered. Drop it. Seq==0 is a legacy event pre-dating the counter: never
+		// stale. Recovery events lose nothing — an up that's superseded means an even
+		// newer transition will deliver the current state.
+		if mt.Seq > 0 && monitor.StateSequence > mt.Seq {
+			w.logger.Info("transition_superseded", "monitor_id", monitor.ID, "event_seq", mt.Seq, "current_seq", monitor.StateSequence, "reminder", mt.Reminder)
+			return nil
+		}
 		// A monitor with an escalation policy has its DOWN alerts driven by the on-call
 		// ladder (over its open auto-incident), so suppress the flat down-notify to
 		// avoid double-alerting. Recovery (up) still goes to all channels.

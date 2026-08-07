@@ -196,9 +196,19 @@ func TestComponentAuthzAndMonitorOrgCheck(t *testing.T) {
 	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"API","monitor_id":"mon1"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("component with in-org monitor = %d, want 201", rec.Code)
 	}
-	// Monitor mon3 is in o2 → 400.
-	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"X","monitor_id":"mon3"}`); rec.Code != http.StatusBadRequest {
-		t.Fatalf("component with cross-org monitor = %d, want 400", rec.Code)
+	// Monitor mon3 is in o2 → 400, and the message must be IDENTICAL to a truly
+	// nonexistent id so it can't be used to enumerate cross-tenant monitor ids.
+	crossOrg := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"X","monitor_id":"mon3"}`)
+	if crossOrg.Code != http.StatusBadRequest {
+		t.Fatalf("component with cross-org monitor = %d, want 400", crossOrg.Code)
+	}
+	missing := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"X","monitor_id":"does-not-exist"}`)
+	if missing.Code != http.StatusBadRequest {
+		t.Fatalf("component with missing monitor = %d, want 400", missing.Code)
+	}
+	if crossOrg.Body.String() != missing.Body.String() {
+		t.Fatalf("cross-org and missing responses must be identical (no existence oracle): %q vs %q",
+			crossOrg.Body.String(), missing.Body.String())
 	}
 }
 

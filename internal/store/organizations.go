@@ -24,6 +24,9 @@ func (s *Store) CreateOrganization(ctx context.Context, slug, name string) (doma
 		slug, name)
 	o, err := scanOrg(row)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return domain.Organization{}, ErrConflict
+		}
 		return domain.Organization{}, fmt.Errorf("store: create organization: %w", err)
 	}
 	return o, nil

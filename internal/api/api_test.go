@@ -136,6 +136,11 @@ func (f *fakeStore) ListOrganizationsForUser(_ context.Context, userID string) (
 	return f.userOrgs[userID], nil
 }
 func (f *fakeStore) CreateOrganization(_ context.Context, slug, name string) (domain.Organization, error) {
+	for _, existing := range f.orgs {
+		if existing.Slug == slug {
+			return domain.Organization{}, store.ErrConflict
+		}
+	}
 	o := domain.Organization{ID: "new", Slug: slug, Name: name}
 	f.orgs[o.ID] = o
 	return o, nil
@@ -151,6 +156,11 @@ func (f *fakeStore) ListProjectsByOrg(_ context.Context, orgID string) ([]domain
 	return f.byOrg[orgID], nil
 }
 func (f *fakeStore) CreateProject(_ context.Context, orgID, slug, name string) (domain.Project, error) {
+	for _, existing := range f.projects {
+		if existing.OrgID == orgID && existing.Slug == slug {
+			return domain.Project{}, store.ErrConflict
+		}
+	}
 	p := domain.Project{ID: "np", OrgID: orgID, Slug: slug, Name: name}
 	f.projects[p.ID] = p
 	return p, nil
@@ -1134,6 +1144,24 @@ func TestCreateOrganizationValidation(t *testing.T) {
 	}
 	if rec := do(h, globalAdmin, http.MethodPost, "/api/v1/organizations", `not json`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad json = %d, want 400", rec.Code)
+	}
+}
+
+// TestDuplicateSlugConflict proves a duplicate slug is a clean 409, not a raw 500
+// leaking the DB unique-constraint violation.
+func TestDuplicateSlugConflict(t *testing.T) {
+	h := newHandler(seededStore())
+	// "acme" is o1's slug.
+	if rec := do(h, globalAdmin, http.MethodPost, "/api/v1/organizations", `{"slug":"acme","name":"Dup"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate org slug = %d, want 409 (%s)", rec.Code, rec.Body.String())
+	}
+	// "api" is p1's slug within o1.
+	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/organizations/o1/projects", `{"slug":"api","name":"Dup"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate project slug = %d, want 409 (%s)", rec.Code, rec.Body.String())
+	}
+	// A fresh slug still succeeds.
+	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/organizations/o1/projects", `{"slug":"brand-new","name":"New"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("fresh project slug = %d, want 201 (%s)", rec.Code, rec.Body.String())
 	}
 }
 

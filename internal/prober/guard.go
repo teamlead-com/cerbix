@@ -60,6 +60,16 @@ func isMetadataIP(ip net.IP) bool {
 	return false
 }
 
+// cgnatNet is the RFC 6598 carrier-grade-NAT range 100.64.0.0/10. Go's
+// net.IP.IsPrivate() does NOT include it and IsGlobalUnicast() reports true, so
+// without an explicit check it would be treated as public — yet some clouds expose
+// internal/metadata services there. Gated by allow_private_ips like RFC1918.
+var _, cgnatNet, _ = net.ParseCIDR("100.64.0.0/10")
+
+func isCGNAT(ip net.IP) bool {
+	return cgnatNet != nil && cgnatNet.Contains(ip)
+}
+
 // checkIP returns a blockedIPError if the address is disallowed, else nil.
 // Order matters: non-routable (unspecified/multicast) is rejected outright, then
 // cloud-metadata and loopback/link-local are tested before the broader private
@@ -88,6 +98,11 @@ func (g Guard) checkIP(ip net.IP) error {
 			return nil
 		}
 		return &blockedIPError{ip, "private"}
+	case isCGNAT(ip): // 100.64.0.0/10 (RFC 6598) — not covered by IsPrivate
+		if g.allowPrivate {
+			return nil
+		}
+		return &blockedIPError{ip, "carrier-grade-nat"}
 	case !ip.IsGlobalUnicast():
 		return &blockedIPError{ip, "non-routable"}
 	default:

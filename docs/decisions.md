@@ -2383,3 +2383,32 @@ blocked, so intra-org cross-project is same-tenant by design). Four were real an
    `external_key` (e.g. an Alertmanager fingerprint) and `acknowledged_by` (a user id) to
    anyone. The public path now applies `PublicRedacted()` to incidents and maintenance
    windows; the authenticated preview keeps full detail.
+
+## D-0140 — Remaining correctness sweep (iter-0082)
+The final hardening slice — a grab-bag audit of eight items; two needed no change (SSE
+has no WriteTimeout, correct for long-lived streams; SSE filtering already happens before
+emission so there is no cross-tenant leak — pushing the project filter before buffering is
+a memory optimization, not a correctness bug, deferred). Six fixed:
+1. **Push failure_threshold** — a dead-man's-switch timeout is a single definitive signal,
+   but push monitors were routed through the confirmation-gated status machine, so a
+   threshold of N delayed "down" by N missed intervals. `Monitor.Normalize` now pins push
+   `FailureThreshold` to 1.
+2. **ICMP echo id/seq match** — the ping prober accepted any EchoReply, so a concurrent
+   ping or stray reply on a shared raw socket read as a false "up". It now sends a random
+   per-probe seq + 16-byte payload and matches seq+payload (and id on the raw socket).
+3. **SSRF CGNAT gap** — `100.64.0.0/10` (RFC 6598) is neither `IsPrivate` nor
+   non-global-unicast in Go, so it was treated as public. The guard now blocks it (gated by
+   `allow_private_ips`), alongside the already-covered RFC1918/loopback/link-local/metadata.
+4. **OIDC unbounded client on the boot path** — discovery/JWKS/exchange used
+   `http.DefaultClient` (zero timeout) and the first sync ran synchronously at startup, so a
+   hung IdP could block boot indefinitely. A 15s-bounded client is injected via
+   `oidc.ClientContext` (+ the token exchange), and the first `SyncOIDC` moved into the
+   reloader goroutine.
+5. **Shutdown goroutine drain** — background workers (outbox, ingest, scheduler, worker,
+   notifiers) were fire-and-forget; shutdown only awaited the HTTP server. A `sync.WaitGroup`
+   now drains them (10s-bounded) after ctx cancel, so none is left mid-write.
+6. **Unique-slug 409 + FK existence oracle** — duplicate org/project slug now maps 23505 →
+   `store.ErrConflict` → 409 (was a raw 500); `monitorInOrg` returns an identical "monitor
+   not found" for a wrong-org id as for a nonexistent one, closing a cross-tenant
+   enumeration oracle. (The add-member-by-email helpful message is left as an accepted UX
+   affordance for semi-trusted org admins.)

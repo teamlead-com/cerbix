@@ -222,6 +222,8 @@ func (h *Handler) createComponent(w http.ResponseWriter, r *http.Request) {
 // monitorInOrg verifies a monitor exists and belongs to the given organization.
 // Writes 400 and returns false otherwise.
 func (h *Handler) monitorInOrg(w http.ResponseWriter, r *http.Request, monitorID, orgID string) bool {
+	// "not found" and "exists but in another org" return the SAME response so a caller
+	// can't use the difference to enumerate monitor ids across tenant boundaries.
 	mon, err := h.store.GetMonitor(r.Context(), monitorID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "monitor not found")
@@ -237,7 +239,7 @@ func (h *Handler) monitorInOrg(w http.ResponseWriter, r *http.Request, monitorID
 		return false
 	}
 	if proj.OrgID != orgID {
-		writeError(w, http.StatusBadRequest, "monitor is not in this organization")
+		writeError(w, http.StatusBadRequest, "monitor not found") // uniform: no cross-tenant existence oracle
 		return false
 	}
 	return true

@@ -1,7 +1,10 @@
 package prober
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"net"
 	"os"
 	"time"
@@ -37,10 +40,19 @@ func (p icmpProber) Probe(ctx context.Context, m domain.Monitor) Result {
 		_ = conn.SetDeadline(start.Add(5 * time.Second))
 	}
 
+	// A unique per-probe id/seq/payload so a concurrent ping or a stray reply on the
+	// shared raw socket can't be mistaken for THIS probe's reply (a false "up").
 	id := os.Getpid() & 0xffff
+	var seqBuf [2]byte
+	_, _ = rand.Read(seqBuf[:])
+	seq := int(binary.BigEndian.Uint16(seqBuf[:]))
+	token := make([]byte, 16)
+	_, _ = rand.Read(token)
+	payload := append([]byte("cerbix-"), token...)
+
 	msg := icmp.Message{
 		Type: ipv4.ICMPTypeEcho, Code: 0,
-		Body: &icmp.Echo{ID: id, Seq: 1, Data: []byte("cerbix-ping")},
+		Body: &icmp.Echo{ID: id, Seq: seq, Data: payload},
 	}
 	wb, err := msg.Marshal(nil)
 	if err != nil {
@@ -64,11 +76,34 @@ func (p icmpProber) Probe(ctx context.Context, m domain.Monitor) Result {
 		if err != nil {
 			continue
 		}
-		if rm.Type == ipv4.ICMPTypeEchoReply {
+		// Match seq + payload always; match ID only on the raw socket — the
+		// unprivileged datagram socket lets the kernel own/rewrite the ID.
+		if echoReplyMatches(rm, seq, payload, id, !useUDP) {
 			return Result{Connected: true, LatencyMS: elapsedMS(start)}
 		}
-		// Not our reply (e.g. an echo we sent looped back on a raw socket); keep reading.
+		// Not our reply (another ping's, or our own echo looped back) — keep reading.
 	}
+}
+
+// echoReplyMatches reports whether rm is an ICMP echo reply for THIS probe: an
+// EchoReply body whose Seq and payload match what we sent (and, on a raw socket
+// where we own the id, the ID too). This rejects a concurrent monitor's or a stray
+// reply on a shared raw socket being counted as our success.
+func echoReplyMatches(rm *icmp.Message, seq int, payload []byte, id int, matchID bool) bool {
+	if rm.Type != ipv4.ICMPTypeEchoReply {
+		return false
+	}
+	echo, ok := rm.Body.(*icmp.Echo)
+	if !ok {
+		return false
+	}
+	if echo.Seq != seq || !bytes.Equal(echo.Data, payload) {
+		return false
+	}
+	if matchID && echo.ID != id {
+		return false
+	}
+	return true
 }
 
 // listenICMP opens an ICMP socket, preferring the unprivileged datagram flavor.

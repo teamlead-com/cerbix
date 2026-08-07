@@ -27,6 +27,10 @@ import (
 const (
 	authFlowTTL   = 10 * time.Minute
 	tokenNumBytes = 32
+	// oidcHTTPTimeout bounds every OIDC network call (discovery, JWKS fetch, token
+	// exchange). Without it a hung IdP TCP connection blocks on http.DefaultClient's
+	// zero timeout — indefinitely, and on the boot path that once froze startup.
+	oidcHTTPTimeout = 15 * time.Second
 	// oidcRetryEvery is how often the background reloader retries building the OIDC
 	// provider while it is intended-enabled but not yet active (e.g. the IdP was
 	// unreachable at boot).
@@ -41,6 +45,7 @@ type oidcRuntime struct {
 	verifier       *oidc.IDTokenVerifier
 	ccVerifier     *oidc.IDTokenVerifier // client-credentials bearer (audience-relaxed)
 	oauth          oauth2.Config
+	httpClient     *http.Client // bounded client for the token exchange
 	postLogoutURL  string
 	buttonLabel    string
 	bootstrapAdmin map[string]bool
@@ -172,6 +177,11 @@ func (a *Authenticator) buildRuntime(ctx context.Context, e EffectiveOIDC) (*oid
 	if !e.Enabled {
 		return nil, nil
 	}
+	// Bound every OIDC HTTP call. oidc.ClientContext makes discovery AND the
+	// verifier's JWKS fetch use this client; the token exchange uses it via the
+	// runtime's httpClient in the callback handler.
+	httpClient := &http.Client{Timeout: oidcHTTPTimeout}
+	ctx = oidc.ClientContext(ctx, httpClient)
 	provider, err := oidc.NewProvider(ctx, e.Issuer)
 	if err != nil {
 		return nil, err
@@ -198,6 +208,7 @@ func (a *Authenticator) buildRuntime(ctx context.Context, e EffectiveOIDC) (*oid
 			Endpoint:     provider.Endpoint(),
 			Scopes:       scopes,
 		},
+		httpClient:     httpClient,
 		postLogoutURL:  e.PostLogoutURL,
 		buttonLabel:    e.ButtonLabel,
 		bootstrapAdmin: admins,
@@ -232,8 +243,11 @@ func (a *Authenticator) SyncOIDC(ctx context.Context) error {
 // retries while OIDC is intended-enabled but not yet active (e.g. the IdP was
 // unreachable at boot). It never blocks startup and never crashes the process.
 func (a *Authenticator) StartOIDC(ctx context.Context) {
-	_ = a.SyncOIDC(ctx)
 	go func() {
+		// The first sync runs here, NOT inline, so a slow/hung IdP (even with the
+		// bounded client) can never delay process startup. OIDC becomes active once
+		// this returns; until then the login page offers local auth / retries.
+		_ = a.SyncOIDC(ctx)
 		ticker := time.NewTicker(oidcRetryEvery)
 		defer ticker.Stop()
 		for {

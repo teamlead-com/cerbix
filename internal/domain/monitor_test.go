@@ -105,6 +105,13 @@ func TestMonitorMethodAndGrace(t *testing.T) {
 	if tcp.Method != "" || tcp.GraceSeconds != 0 {
 		t.Fatalf("non-http normalize = %+v, want cleared", tcp)
 	}
+	// A push monitor's failure_threshold is pinned to 1: a dead-man timeout is a
+	// single definitive signal, not confirmation-gated over N missed intervals.
+	pushT := Monitor{Name: "x", ProjectID: "p", Type: MonitorPush, IntervalSeconds: 60, FailureThreshold: 5}
+	pushT.Normalize()
+	if pushT.FailureThreshold != 1 {
+		t.Fatalf("push failure_threshold = %d, want pinned to 1", pushT.FailureThreshold)
+	}
 	// Negative grace is rejected.
 	push := Monitor{Name: "x", ProjectID: "p", Type: MonitorPush, IntervalSeconds: 60, GraceSeconds: -1}
 	if err := push.Validate(); err == nil {

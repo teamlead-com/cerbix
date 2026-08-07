@@ -310,6 +310,12 @@ func (m *Monitor) Normalize() {
 	if m.FailureThreshold < 1 {
 		m.FailureThreshold = 1 // at least one failed check declares down
 	}
+	if m.Type == MonitorPush {
+		// A push (dead-man's-switch) timeout is a single definitive signal — the
+		// target simply stopped reporting. It must not be confirmation-gated, or a
+		// threshold of N would delay "down" by N missed intervals.
+		m.FailureThreshold = 1
+	}
 	// Confirm interval: 0 = off; otherwise clamp to [5s, interval] so the
 	// confirmation phase can neither hammer the target nor outlast the main rhythm.
 	switch {

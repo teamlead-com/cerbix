@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -361,6 +362,15 @@ func runServe(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// bg tracks the long-lived background goroutines (outbox, ingest, scheduler,
+	// worker, LISTEN notifiers) so shutdown DRAINS them — waits for each Run(ctx) to
+	// return after ctx is cancelled — instead of exiting while one is mid-write.
+	var bg sync.WaitGroup
+	spawn := func(f func()) {
+		bg.Add(1)
+		go func() { defer bg.Done(); f() }()
+	}
+
 	// The HTTP-pull agent is DB-less and broker-less: it only needs the prober and
 	// outbound HTTPS to the central API. Handle it before any DB/auth/dispatcher setup.
 	if *role == "agent" {
@@ -434,10 +444,10 @@ func runServe(args []string) int {
 
 		subs := subscribe.New(st, mail)
 		deliverer := incidentFanout{hooks: webhook.New(st, nil), subs: subs, logger: logger}
-		go outbox.New(st, deliverer, notify.New(st, nil), registry, logger).
+		ob := outbox.New(st, deliverer, notify.New(st, nil), registry, logger).
 			WithMailer(mail).
-			WithSilence(func() bool { return settingsSvc.Alerting().Silenced(time.Now()) }).
-			Run(ctx)
+			WithSilence(func() bool { return settingsSvc.Alerting().Silenced(time.Now()) })
+		spawn(func() { ob.Run(ctx) })
 	}
 
 	// RabbitMQ management lookup (which worker pools have a live consumer): used by the
@@ -573,25 +583,27 @@ func runServe(args []string) int {
 		}
 		startIngest := func() {
 			ing := ingest.New(st, disp, registry, logger).WithEvents(broker)
-			go ing.Run(ctx)
+			spawn(func() { ing.Run(ctx) })
 		}
 		// Confirm-phase wake signals for the scheduler leader (LISTEN monitor_confirm):
 		// a counted failure reschedules the next probe at the confirm interval
 		// immediately, instead of waiting for the snapshot refresh.
 		confirmSignals := func() <-chan string {
 			cn := st.NewConfirmNotifier(logger)
-			go cn.Run(ctx)
+			spawn(func() { cn.Run(ctx) })
 			ch, _ := cn.Subscribe() // scheduler lives for the whole process — no unsubscribe
 			return ch
 		}
 		switch *role {
 		case "all":
-			go scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithPullRegions(cfg.Pull.Regions). // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
 				WithPullMetrics(registry).         // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).         // cerbix_scheduler_leader gauge
-				WithConfirmSignals(confirmSignals()).Run(ctx)
-			go worker.New(disp, runner, workerPoolSize, logger).Run(ctx)
+				WithConfirmSignals(confirmSignals())
+			spawn(func() { sch.Run(ctx) })
+			wk := worker.New(disp, runner, workerPoolSize, logger)
+			spawn(func() { wk.Run(ctx) })
 			startIngest()
 		case "scheduler":
 			if st == nil {
@@ -606,13 +618,14 @@ func runServe(args []string) int {
 			// Alert when a region with enabled monitors loses its worker/agent. Liveness
 			// unions RabbitMQ consumers with recent pull-agent heartbeats.
 			sch.WithLiveRegions(newLiveRegions(mgmt, st))
-			go sch.Run(ctx)
+			spawn(func() { sch.Run(ctx) })
 		case "worker":
 			// Answer region-scoped "Test connection" RPCs for this worker's region.
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
 				amqpd.ServeTests(runner.Run)
 			}
-			go worker.New(disp, runner, workerPoolSize, logger).Run(ctx)
+			wk := worker.New(disp, runner, workerPoolSize, logger)
+			spawn(func() { wk.Run(ctx) })
 		case "api":
 			if st == nil {
 				logging.Critical(logger, "api_requires_database", "hint", "set database.dsn")
@@ -646,8 +659,22 @@ func runServe(args []string) int {
 	registry.SetReady(false, "shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful_shutdown_failed", "error", err.Error())
+	httpErr := srv.Shutdown(shutdownCtx)
+	if httpErr != nil {
+		logger.Error("graceful_shutdown_failed", "error", httpErr.Error())
+	}
+	// Drain background goroutines so none is left mid-write. ctx is cancelled by the
+	// signal (NotifyContext); stop() also covers the errCh exit path. Bounded so a
+	// wedged goroutine can't hang the process forever.
+	stop()
+	drained := make(chan struct{})
+	go func() { bg.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		logger.Warn("background_drain_timeout")
+	}
+	if httpErr != nil {
 		return 1
 	}
 	logger.Info("stopped")

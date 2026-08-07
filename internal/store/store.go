@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teamlead-com/cerbix/internal/secret"
@@ -23,6 +24,16 @@ var ErrNotFound = errors.New("store: not found")
 // auto-incident (the incidents_one_open_auto partial unique index fired). The
 // caller treats it as a benign no-op — the concurrent create won the race.
 var ErrAlreadyOpen = errors.New("store: auto-incident already open")
+
+// ErrConflict is returned when a create violates a unique constraint (e.g. a
+// duplicate slug), so the API can answer 409 instead of a raw 500.
+var ErrConflict = errors.New("store: conflict")
+
+// isUniqueViolation reports whether err is a Postgres unique-constraint (23505) error.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 // Pool sizing. Several long-lived connections are checked out for the whole
 // process lifetime — the scheduler's leadership advisory lock plus the LISTEN

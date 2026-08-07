@@ -75,6 +75,10 @@ func (h *Handler) createOrganization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	org, err := h.store.CreateOrganization(r.Context(), body.Slug, body.Name)
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "an organization with that slug already exists")
+		return
+	}
 	if err != nil {
 		h.serverError(w, "create_organization", err)
 		return
@@ -145,6 +149,10 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proj, err := h.store.CreateProject(r.Context(), orgID, body.Slug, body.Name)
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "a project with that slug already exists")
+		return
+	}
 	if err != nil {
 		h.serverError(w, "create_project", err)
 		return

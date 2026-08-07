@@ -24,6 +24,9 @@ func (s *Store) CreateProject(ctx context.Context, orgID, slug, name string) (do
 		orgID, slug, name)
 	p, err := scanProject(row)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return domain.Project{}, ErrConflict
+		}
 		return domain.Project{}, fmt.Errorf("store: create project: %w", err)
 	}
 	return p, nil

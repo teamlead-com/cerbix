@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -113,6 +114,11 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Exchange over the bounded OIDC client so a hung token endpoint fails fast
+	// instead of blocking on http.DefaultClient's zero timeout.
+	if rt.httpClient != nil {
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, rt.httpClient)
+	}
 	oauthToken, err := rt.oauth.Exchange(ctx, code, oauth2.VerifierOption(flow.PKCEVerifier))
 	if err != nil {
 		a.logger.Error("token_exchange_failed", "error", err.Error())

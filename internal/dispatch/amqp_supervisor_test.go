@@ -149,3 +149,37 @@ func TestAMQPConsumerSurvivesChannelDeath(t *testing.T) {
 		t.Fatalf("channel death must not report broker_lost:\n%s", logBuf.String())
 	}
 }
+
+// TestAMQPPublisherReopensChannel proves the publisher self-heals from a
+// channel-level death while the connection stays up (the supervisor only watches
+// the connection). Opt-in via CERBIX_TEST_RABBITMQ_URL.
+func TestAMQPPublisherReopensChannel(t *testing.T) {
+	url := os.Getenv("CERBIX_TEST_RABBITMQ_URL")
+	if url == "" {
+		t.Skip("set CERBIX_TEST_RABBITMQ_URL to run the publisher channel-reopen test")
+	}
+	var logBuf syncBuffer
+	d, err := NewAMQP(url, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer d.Close()
+
+	if err := d.PublishResult(context.Background(), domain.Heartbeat{MonitorID: "m1", Up: true}); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	// Kill the publish channel out from under the publisher (connection stays up, so
+	// the connection supervisor never fires).
+	d.pubMu.Lock()
+	ch := d.pubCh
+	d.pubMu.Unlock()
+	_ = ch.Close()
+
+	// The next publish must transparently reopen the channel and succeed.
+	if err := d.PublishResult(context.Background(), domain.Heartbeat{MonitorID: "m2", Up: true}); err != nil {
+		t.Fatalf("publish after channel death should self-heal, got: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "publish_channel_reopened") {
+		t.Fatalf("expected publish_channel_reopened log, got: %s", logBuf.String())
+	}
+}

@@ -286,14 +286,41 @@ func (d *AMQP) declareJobQueue(queue string) error {
 	if d.declared[queue] {
 		return nil
 	}
-	d.pubMu.Lock()
-	_, err := d.pubCh.QueueDeclare(queue, true, false, false, false, nil)
-	d.pubMu.Unlock()
-	if err != nil {
+	if err := d.onPubChannel(func(ch *amqp.Channel) error {
+		_, e := ch.QueueDeclare(queue, true, false, false, false, nil)
+		return e
+	}); err != nil {
 		return err
 	}
 	d.declared[queue] = true
 	return nil
+}
+
+// onPubChannel runs fn against the publish channel under pubMu (amqp channels are
+// not safe for concurrent use). If fn fails, it reopens the channel on the CURRENT
+// connection and retries once — a channel-level exception (basic.return, a 4xx, an
+// ack error) closes pubCh while the TCP connection stays up, which the connection
+// supervisor never sees, so without this a single bad publish would wedge the
+// publisher forever behind a healthy broker_up=1. Durable queues survive the reopen
+// (they're connection-independent), so the declare cache stays valid.
+func (d *AMQP) onPubChannel(fn func(*amqp.Channel) error) error {
+	d.pubMu.Lock()
+	defer d.pubMu.Unlock()
+	err := fn(d.pubCh)
+	if err == nil {
+		return nil
+	}
+	conn, _ := d.current()
+	nch, rerr := conn.Channel()
+	if rerr != nil {
+		return err // connection is likely gone too; the supervisor will redial
+	}
+	if d.pubCh != nil {
+		_ = d.pubCh.Close()
+	}
+	d.pubCh = nch
+	d.logger.Warn("publish_channel_reopened", "error", err.Error())
+	return fn(d.pubCh)
 }
 
 func (d *AMQP) publish(queue string, v any) error { return d.publishTo(queue, v, "") }
@@ -305,13 +332,13 @@ func (d *AMQP) publishTo(queue string, v any, expiration string) error {
 	if err != nil {
 		return fmt.Errorf("dispatch: marshal: %w", err)
 	}
-	d.pubMu.Lock()
-	defer d.pubMu.Unlock()
-	return d.pubCh.PublishWithContext(d.ctx, "", queue, false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		DeliveryMode: amqp.Persistent,
-		Expiration:   expiration,
-		Body:         body,
+	return d.onPubChannel(func(ch *amqp.Channel) error {
+		return ch.PublishWithContext(d.ctx, "", queue, false, false, amqp.Publishing{
+			ContentType:  "application/json",
+			DeliveryMode: amqp.Persistent,
+			Expiration:   expiration,
+			Body:         body,
+		})
 	})
 }
 

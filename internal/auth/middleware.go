@@ -121,7 +121,7 @@ func (a *Authenticator) principalFromJWT(ctx context.Context, raw string) (authz
 	if email == "" {
 		email = idt.Subject + "@clients" // service accounts often carry no email
 	}
-	user, err := a.store.UpsertUserByOIDCSub(ctx, idt.Subject, email, display)
+	user, err := a.store.UpsertUserByOIDCIdentity(ctx, idt.Issuer, idt.Subject, email, display)
 	if err != nil {
 		return authz.Principal{}, false, err
 	}

@@ -15,8 +15,8 @@ func TestListAllUsers(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
 	admin, _ := st.CreateLocalUser(ctx, "root@x.com", "Root", "hash", true)
-	ada, _ := st.UpsertUserByOIDCSub(ctx, "sub-ada", "ada@x.com", "Ada")
-	orphan, _ := st.UpsertUserByOIDCSub(ctx, "sub-orphan", "lone@x.com", "Lone Wolf")
+	ada, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sub-ada", "ada@x.com", "Ada")
+	orphan, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sub-orphan", "lone@x.com", "Lone Wolf")
 
 	if _, err := st.CreateMembership(ctx, domain.Membership{UserID: admin.ID, OrgID: org.ID, Role: domain.RoleOrgAdmin}); err != nil {
 		t.Fatalf("org membership: %v", err)

@@ -168,7 +168,7 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	user, err := a.store.UpsertUserByOIDCSub(ctx, idToken.Subject, claims.Email, displayName)
+	user, err := a.store.UpsertUserByOIDCIdentity(ctx, idToken.Issuer, idToken.Subject, claims.Email, displayName)
 	if err != nil {
 		a.logger.Error("user_provision_failed", "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)

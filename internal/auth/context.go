@@ -12,7 +12,7 @@ import (
 // Store is the persistence surface the auth layer needs. *store.Store satisfies
 // it; tests can supply a fake.
 type Store interface {
-	UpsertUserByOIDCSub(ctx context.Context, sub, email, displayName string) (domain.User, error)
+	UpsertUserByOIDCIdentity(ctx context.Context, issuer, sub, email, displayName string) (domain.User, error)
 	SetGlobalAdmin(ctx context.Context, id string, admin bool) error
 	GetUser(ctx context.Context, id string) (domain.User, error)
 	ListMembershipsForUser(ctx context.Context, userID string) ([]domain.Membership, error)

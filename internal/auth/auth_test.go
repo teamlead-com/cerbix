@@ -231,7 +231,7 @@ func TestRequireAuthMiddleware(t *testing.T) {
 	}
 
 	// Valid session → handler runs with principal.
-	u, _ := fs.UpsertUserByOIDCSub(context.Background(), "kc-9", "u@x", "U")
+	u, _ := fs.UpsertUserByOIDCIdentity(context.Background(), "https://idp.test", "kc-9", "u@x", "U")
 	_, _ = fs.CreateSession(context.Background(), u.ID, "tok-9", time.Now().Add(time.Hour))
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
@@ -245,7 +245,7 @@ func TestRequireAuthMiddleware(t *testing.T) {
 func TestLogoutClearsSession(t *testing.T) {
 	fs := newFakeStore()
 	a := testAuthenticator(t, fs, newMockOIDC(t, "cerbix"))
-	u, _ := fs.UpsertUserByOIDCSub(context.Background(), "kc-10", "u@x", "U")
+	u, _ := fs.UpsertUserByOIDCIdentity(context.Background(), "https://idp.test", "kc-10", "u@x", "U")
 	_, _ = fs.CreateSession(context.Background(), u.ID, "tok-10", time.Now().Add(time.Hour))
 
 	rec := httptest.NewRecorder()

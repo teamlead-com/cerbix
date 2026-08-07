@@ -38,7 +38,10 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func (f *fakeStore) UpsertUserByOIDCSub(_ context.Context, sub, email, displayName string) (domain.User, error) {
+// UpsertUserByOIDCIdentity keys by subject alone in the fake — the (issuer, sub)
+// uniqueness is a DB-constraint concern exercised in store integration tests; the
+// hermetic auth tests only need the JIT-provisioning shape.
+func (f *fakeStore) UpsertUserByOIDCIdentity(_ context.Context, _, sub, email, displayName string) (domain.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	u, ok := f.usersBySub[sub]

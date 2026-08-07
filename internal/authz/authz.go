@@ -125,3 +125,25 @@ func (p Principal) VisibleOrg(orgID string) bool {
 func (p Principal) VisibleProject(orgID, projectID string) bool {
 	return p.Can(ActionProjectRead, orgID, projectID)
 }
+
+// VisibleScope returns the set of orgs/projects on which the principal holds
+// action, for pushing tenant scoping DOWN into a query (WHERE org_id = ANY(orgIDs)
+// OR project_id = ANY(projectIDs)) instead of filtering rows after a global LIMIT.
+// allOrgs=true means no restriction (global admin). orgIDs are org-level grants (all
+// projects in them); projectIDs are project-scoped grants. It mirrors Can exactly.
+func (p Principal) VisibleScope(action Action) (allOrgs bool, orgIDs, projectIDs []string) {
+	if p.IsGlobalAdmin {
+		return true, nil, nil
+	}
+	for _, m := range p.Memberships {
+		if !roleGrants[m.Role][action] {
+			continue
+		}
+		if m.ProjectID == "" {
+			orgIDs = append(orgIDs, m.OrgID)
+		} else {
+			projectIDs = append(projectIDs, m.ProjectID)
+		}
+	}
+	return false, orgIDs, projectIDs
+}

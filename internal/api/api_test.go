@@ -993,8 +993,25 @@ func (f *fakeStore) ReplayAllDeadOutbox(_ context.Context) (int, error) {
 	return n, nil
 }
 
-func (f *fakeStore) Search(_ context.Context, _ string, _ int) ([]domain.SearchHit, error) {
-	return f.searchHits, nil
+func (f *fakeStore) Search(_ context.Context, _ string, _ int, scope store.SearchScope) ([]domain.SearchHit, error) {
+	if scope.AllOrgs {
+		return f.searchHits, nil
+	}
+	orgs := map[string]bool{}
+	for _, o := range scope.OrgIDs {
+		orgs[o] = true
+	}
+	projs := map[string]bool{}
+	for _, p := range scope.ProjectIDs {
+		projs[p] = true
+	}
+	var out []domain.SearchHit
+	for _, h := range f.searchHits {
+		if orgs[h.OrgID] || projs[h.ProjectID] {
+			out = append(out, h)
+		}
+	}
+	return out, nil
 }
 
 func newHandler(fs *fakeStore) http.Handler {

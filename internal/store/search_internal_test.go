@@ -28,7 +28,7 @@ func TestSearch(t *testing.T) {
 	}
 
 	// "gate" matches the monitor name and the incident title.
-	hits, err := st.Search(ctx, "gate", 8)
+	hits, err := st.Search(ctx, "gate", 8, SearchScope{AllOrgs: true})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -41,14 +41,14 @@ func TestSearch(t *testing.T) {
 	}
 
 	// "api" matches the project (name/slug); a project hit's ProjectID is its own id.
-	hits, _ = st.Search(ctx, "api", 8)
+	hits, _ = st.Search(ctx, "api", 8, SearchScope{AllOrgs: true})
 	m = byType(hits)
 	if m["project"].ID != proj.ID || m["project"].ProjectID != proj.ID {
 		t.Fatalf("project hit = %+v", m["project"])
 	}
 
 	// A LIKE wildcard is matched literally, not as "everything".
-	if hits, _ := st.Search(ctx, "%", 8); len(hits) != 0 {
+	if hits, _ := st.Search(ctx, "%", 8, SearchScope{AllOrgs: true}); len(hits) != 0 {
 		t.Fatalf("'%%' matched %d rows, want 0 (wildcard must be escaped)", len(hits))
 	}
 }

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1456,5 +1457,59 @@ func TestRenotifyReminders(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 	if n, _ := st.EnqueueRenotifyReminders(ctx); n != 0 {
 		t.Fatalf("recovered monitor must not renotify, got %d", n)
+	}
+}
+
+// TestSearchScopeBeforeLimit proves tenant scoping is applied in SQL BEFORE the
+// per-type LIMIT: an allowed monitor that sorts AFTER a full page of another
+// tenant's matches must still be returned. With the old post-LIMIT filtering it
+// would be crowded out (the global top-8 were all the other tenant's, then removed).
+func TestSearchScopeBeforeLimit(t *testing.T) {
+	st, ctx := testStore(t)
+	orgA, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	orgB, _ := st.CreateOrganization(ctx, "globex", "Globex")
+	pA, _ := st.CreateProject(ctx, orgA.ID, "a", "A")
+	pB, _ := st.CreateProject(ctx, orgB.ID, "b", "B")
+
+	mk := func(projectID, name string) {
+		if _, err := st.CreateMonitor(ctx, domain.Monitor{
+			ProjectID: projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
+			IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+		}); err != nil {
+			t.Fatalf("create monitor %s: %v", name, err)
+		}
+	}
+	// 9 matches in org B that sort BEFORE the single org-A match (limit is 8).
+	for i := 0; i < 9; i++ {
+		mk(pB.ID, fmt.Sprintf("widget-b-%02d", i))
+	}
+	mk(pA.ID, "widget-z-target") // sorts last by name
+
+	// Caller sees only org A.
+	scope := store.SearchScope{OrgIDs: []string{orgA.ID}}
+	hits, err := st.Search(ctx, "widget", 8, scope)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	var gotTarget bool
+	for _, h := range hits {
+		if h.OrgID != orgA.ID {
+			t.Fatalf("search leaked a non-visible org's hit: %+v", h)
+		}
+		if h.Type == "monitor" && h.Label == "widget-z-target" {
+			gotTarget = true
+		}
+	}
+	if !gotTarget {
+		t.Fatalf("the allowed monitor was crowded out by another tenant (scope applied after LIMIT?); hits=%+v", hits)
+	}
+
+	// A global admin (AllOrgs) sees both tenants' matches.
+	admin, err := st.Search(ctx, "widget", 8, store.SearchScope{AllOrgs: true})
+	if err != nil {
+		t.Fatalf("admin search: %v", err)
+	}
+	if len(admin) == 0 {
+		t.Fatal("admin search returned nothing")
 	}
 }

@@ -136,7 +136,7 @@ type Store interface {
 	ListDeadOutbox(ctx context.Context, limit int) ([]domain.OutboxEventView, error)
 	ReplayDeadOutbox(ctx context.Context, id string) error
 	ReplayAllDeadOutbox(ctx context.Context) (int, error)
-	Search(ctx context.Context, q string, limit int) ([]domain.SearchHit, error)
+	Search(ctx context.Context, q string, limit int, scope store.SearchScope) ([]domain.SearchHit, error)
 	CreateSubscriber(ctx context.Context, sub domain.Subscriber) (domain.Subscriber, error)
 	ListSubscribersByPage(ctx context.Context, pageID string) ([]domain.Subscriber, error)
 	DeleteSubscriber(ctx context.Context, pageID, id string) error

@@ -198,7 +198,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 }
 
 func (a *Agent) poll(ctx context.Context) {
-	jobs, err := a.claim(ctx)
+	jobs, tokens, err := a.claim(ctx)
 	if err != nil {
 		a.logger.Warn("agent_claim_failed", "error", err.Error())
 		return
@@ -215,9 +215,11 @@ func (a *Agent) poll(ctx context.Context) {
 		}
 		results = append(results, a.runner.Run(ctx, job.Monitor))
 	}
-	if err := a.postResults(ctx, results); err != nil {
-		// API unreachable: keep this cycle's results as historical (buffered). Live
-		// status will be driven by fresh probes once connectivity returns.
+	// The tokens ack the claimed jobs: they ride along with the results POST so the
+	// server deletes those leased jobs only once the results are accepted. If the POST
+	// fails we buffer and do NOT ack — the leases lapse server-side and the jobs are
+	// re-delivered rather than lost.
+	if err := a.postResults(ctx, results, tokens); err != nil {
 		a.bufferResults(results)
 		a.logger.Warn("agent_results_buffered", "error", err.Error(), "buffered", len(a.buf))
 		return
@@ -249,42 +251,50 @@ func (a *Agent) flushBuffer(ctx context.Context) {
 	a.buf = nil
 }
 
-func (a *Agent) claim(ctx context.Context) ([]json.RawMessage, error) {
+func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []string, err error) {
 	url := fmt.Sprintf("%s/api/v1/agent/jobs?region=%s&max=%d", a.serverURL, a.region, claimBatch)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	a.auth(req)
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
 	}
 	var out struct {
-		Jobs []json.RawMessage `json:"jobs"`
+		Jobs   []json.RawMessage `json:"jobs"`
+		Tokens []string          `json:"tokens"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return out.Jobs, nil
+	return out.Jobs, out.Tokens, nil
 }
 
-func (a *Agent) postResults(ctx context.Context, results []domain.Heartbeat) error {
-	return a.postHeartbeats(ctx, "/api/v1/agent/results?region="+a.region, results)
+// postResults reports live results and acks (via ack tokens) the claimed jobs they
+// complete, in one request.
+func (a *Agent) postResults(ctx context.Context, results []domain.Heartbeat, ack []string) error {
+	return a.postHeartbeats(ctx, "/api/v1/agent/results?region="+a.region, results, ack)
 }
 
-// postBackfill sends buffered results to the historical (SLA-only) endpoint.
+// postBackfill sends buffered results to the historical (SLA-only) endpoint. Buffered
+// results were never acked, so their jobs already re-leased/expired — no ack here.
 func (a *Agent) postBackfill(ctx context.Context, results []domain.Heartbeat) error {
-	return a.postHeartbeats(ctx, "/api/v1/agent/backfill?region="+a.region, results)
+	return a.postHeartbeats(ctx, "/api/v1/agent/backfill?region="+a.region, results, nil)
 }
 
-func (a *Agent) postHeartbeats(ctx context.Context, path string, results []domain.Heartbeat) error {
-	body, err := json.Marshal(map[string]any{"results": results})
+func (a *Agent) postHeartbeats(ctx context.Context, path string, results []domain.Heartbeat, ack []string) error {
+	payload := map[string]any{"results": results}
+	if len(ack) > 0 {
+		payload["ack"] = ack
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}

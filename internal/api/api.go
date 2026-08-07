@@ -80,7 +80,8 @@ type Store interface {
 	ListEscalationPolicies(ctx context.Context, projectID string) ([]domain.EscalationPolicy, error)
 	UpdateEscalationPolicy(ctx context.Context, p domain.EscalationPolicy) (domain.EscalationPolicy, error)
 	DeleteEscalationPolicy(ctx context.Context, id string) error
-	ClaimPullJobs(ctx context.Context, region string, max int) ([][]byte, error)
+	ClaimPullJobs(ctx context.Context, region string, max, leaseSeconds int) ([]store.PullJob, error)
+	AckPullJobs(ctx context.Context, tokens []string) error
 	ClaimPullTest(ctx context.Context, region string) (id string, payload []byte, ok bool, err error)
 	SavePullTestResult(ctx context.Context, id, region string, result []byte) error
 	RecordAgentHeartbeat(ctx context.Context, region, agentID string) error

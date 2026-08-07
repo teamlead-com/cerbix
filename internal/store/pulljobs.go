@@ -31,38 +31,68 @@ func (s *Store) EnqueuePullJob(ctx context.Context, region string, payload []byt
 // a pull job is enqueued for it.
 const PullChannel = "pull_jobs"
 
-// ClaimPullJobs atomically claims up to max unexpired jobs for a region and returns
-// their payloads, removing them so each job is delivered to exactly one agent
-// (FOR UPDATE SKIP LOCKED makes concurrent agents safe). Expired jobs are left for the
-// purge; they are simply not returned.
-func (s *Store) ClaimPullJobs(ctx context.Context, region string, max int) ([][]byte, error) {
+// PullJob is a leased check job: an opaque payload (a dispatch.CheckJob snapshot)
+// plus the claim Token the agent echoes back to ack (delete) it once reported.
+type PullJob struct {
+	Token   string
+	Payload []byte
+}
+
+// ClaimPullJobs atomically LEASES up to max claimable jobs for a region: it stamps
+// each with a fresh claim_token and a lease_expires_at (now + leaseSeconds) and
+// returns them. A job is claimable when it is unexpired (expires_at > now) AND
+// currently unleased or its lease has lapsed (lease_expires_at IS NULL OR <= now) —
+// so a crashed agent's jobs become claimable again after the lease, rather than being
+// lost as they were under the old DELETE-on-claim. FOR UPDATE SKIP LOCKED keeps
+// concurrent agents safe. Jobs are removed only by AckPullJobs (on report) or the TTL
+// purge. A non-positive leaseSeconds falls back to 30s.
+func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
 	if max <= 0 {
 		max = 16
 	}
+	if leaseSeconds <= 0 {
+		leaseSeconds = 30
+	}
 	rows, err := s.pool.Query(ctx,
-		`DELETE FROM pull_jobs
+		`UPDATE pull_jobs SET claim_token = gen_random_uuid(),
+		        lease_expires_at = now() + make_interval(secs => $3)
 		  WHERE id IN (
 		     SELECT id FROM pull_jobs
 		      WHERE region = $1 AND expires_at > now()
+		        AND (lease_expires_at IS NULL OR lease_expires_at <= now())
 		      ORDER BY created_at
 		      LIMIT $2
 		      FOR UPDATE SKIP LOCKED
 		  )
-		  RETURNING payload`,
-		region, max)
+		  RETURNING claim_token::text, payload`,
+		region, max, leaseSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("store: claim pull jobs: %w", err)
 	}
 	defer rows.Close()
-	var out [][]byte
+	var out []PullJob
 	for rows.Next() {
-		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
+		var job PullJob
+		if err := rows.Scan(&job.Token, &job.Payload); err != nil {
 			return nil, fmt.Errorf("store: scan pull job: %w", err)
 		}
-		out = append(out, payload)
+		out = append(out, job)
 	}
 	return out, rows.Err()
+}
+
+// AckPullJobs removes leased jobs by their claim tokens — the agent's confirmation
+// that it has recorded the results. Acking by token (not id) is safe against a slow
+// agent whose lease already lapsed and was re-claimed by another: the stale token no
+// longer matches, so the late ack is a harmless no-op and the re-lease is preserved.
+func (s *Store) AckPullJobs(ctx context.Context, tokens []string) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM pull_jobs WHERE claim_token = ANY($1)`, tokens); err != nil {
+		return fmt.Errorf("store: ack pull jobs: %w", err)
+	}
+	return nil
 }
 
 // PurgeExpiredPullJobs deletes jobs past their TTL (housekeeping); returns the count.

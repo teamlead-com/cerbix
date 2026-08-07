@@ -18,6 +18,12 @@ import (
 // job (a max-hold fallback in case a NOTIFY is missed on a listener reconnect).
 const agentLongPollHold = 20 * time.Second
 
+// pullJobLeaseSeconds is how long a claimed pull job stays leased before it becomes
+// re-claimable (a crashed agent's jobs are re-delivered rather than lost). It covers a
+// normal probe+report round for a batch and is well under a job's TTL (~interval), so a
+// job re-leases at most a few times before its TTL purges it.
+const pullJobLeaseSeconds = 30
+
 // AgentRouter registers the HTTP-pull agent endpoints, gated by a shared bearer token
 // (WithAgentToken). It is mounted outside the session-auth middleware because agents
 // are not users. Without a token configured, the endpoints are disabled (404).
@@ -100,7 +106,7 @@ func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
 			max = n
 		}
 	}
-	payloads, err := h.store.ClaimPullJobs(r.Context(), region, max)
+	claimed, err := h.store.ClaimPullJobs(r.Context(), region, max, pullJobLeaseSeconds)
 	if err != nil {
 		h.serverError(w, "agent_claim_jobs", err)
 		return
@@ -108,18 +114,22 @@ func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
 	// Long-poll: if nothing is due, hold the request until a job is enqueued for this
 	// region (LISTEN/NOTIFY) or the max hold elapses, then claim once more. This cuts
 	// the query rate to near-zero while keeping dispatch near-instant, over plain HTTP.
-	if len(payloads) == 0 && h.pullWaiter != nil {
+	if len(claimed) == 0 && h.pullWaiter != nil {
 		h.pullWaiter.Wait(r.Context(), region, agentLongPollHold)
-		if payloads, err = h.store.ClaimPullJobs(r.Context(), region, max); err != nil {
+		if claimed, err = h.store.ClaimPullJobs(r.Context(), region, max, pullJobLeaseSeconds); err != nil {
 			h.serverError(w, "agent_claim_jobs", err)
 			return
 		}
 	}
-	jobs := make([]json.RawMessage, 0, len(payloads))
-	for _, p := range payloads {
-		jobs = append(jobs, json.RawMessage(p))
+	// jobs[i] and tokens[i] are parallel: the agent echoes the tokens it finished on its
+	// results POST to ack (delete) those jobs; anything left un-acked re-leases.
+	jobs := make([]json.RawMessage, 0, len(claimed))
+	tokens := make([]string, 0, len(claimed))
+	for _, c := range claimed {
+		jobs = append(jobs, json.RawMessage(c.Payload))
+		tokens = append(tokens, c.Token)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "tokens": tokens})
 }
 
 // enforceRegionScope rejects (403) a result batch that contains a heartbeat for a
@@ -169,6 +179,7 @@ func (h *Handler) agentResults(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Results []domain.Heartbeat `json:"results"`
+		Ack     []string           `json:"ack"` // claim tokens of the jobs these results complete
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -181,6 +192,13 @@ func (h *Handler) agentResults(w http.ResponseWriter, r *http.Request) {
 			h.serverError(w, "agent_publish_result", err)
 			return
 		}
+	}
+	// Ack only after the results are accepted into the pipeline: acking deletes the
+	// leased jobs, so a failure above leaves them to re-lease and be retried. A stale
+	// token (its lease already lapsed and was re-claimed) simply matches nothing.
+	if err := h.store.AckPullJobs(r.Context(), body.Ack); err != nil {
+		h.serverError(w, "agent_ack_jobs", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": len(body.Results)})
 }

@@ -47,21 +47,25 @@ func TestAgentEndpoints(t *testing.T) {
 		t.Fatalf("claim = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
 	var claimed struct {
-		Jobs []json.RawMessage `json:"jobs"`
+		Jobs   []json.RawMessage `json:"jobs"`
+		Tokens []string          `json:"tokens"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &claimed)
-	if len(claimed.Jobs) != 1 {
-		t.Fatalf("claimed %d jobs, want 1", len(claimed.Jobs))
+	if len(claimed.Jobs) != 1 || len(claimed.Tokens) != 1 || claimed.Tokens[0] == "" {
+		t.Fatalf("claimed %d jobs / %d tokens, want 1 job with a lease token", len(claimed.Jobs), len(claimed.Tokens))
 	}
 	if again := agentReq(h, http.MethodGet, "/api/v1/agent/jobs?region=geo3", "s3cr3t", ""); strings.Contains(again.Body.String(), "Monitor") {
 		t.Fatalf("re-claim returned a job, want none: %s", again.Body.String())
 	}
 
-	// Post a result → it reaches the sink. m1 lives in core, so the agent scopes the
-	// post to region=core.
-	body := `{"results":[{"monitor_id":"m1","up":true,"latency_ms":12,"code":200}]}`
+	// Post a result with the lease token as ack → it reaches the sink AND the job is
+	// acked (deleted). m1 lives in core, so the agent scopes the post to region=core.
+	body := `{"results":[{"monitor_id":"m1","up":true,"latency_ms":12,"code":200}],"ack":["` + claimed.Tokens[0] + `"]}`
 	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results?region=core", "s3cr3t", body); rec.Code != http.StatusOK {
 		t.Fatalf("results = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(fs.acked) != 1 || fs.acked[0] != claimed.Tokens[0] {
+		t.Fatalf("results handler acked %v, want [%s]", fs.acked, claimed.Tokens[0])
 	}
 	// A region-less result post is rejected — every agent ingest is region-scoped.
 	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results", "s3cr3t", body); rec.Code != http.StatusBadRequest {

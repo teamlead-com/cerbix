@@ -23,18 +23,26 @@ func TestEdgeBufferFlush(t *testing.T) {
 	var mu sync.Mutex
 	resultsFail := true
 	var backfilled, liveResults int
+	var acked []string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/agent/jobs":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"jobs": []json.RawMessage{json.RawMessage(`{"Monitor":{"id":"m1","type":"http","region":"pull1"}}`)},
+				"jobs":   []json.RawMessage{json.RawMessage(`{"Monitor":{"id":"m1","type":"http","region":"pull1"}}`)},
+				"tokens": []string{"lease-m1"},
 			})
 		case "/api/v1/agent/results":
+			var body struct {
+				Results []domain.Heartbeat `json:"results"`
+				Ack     []string           `json:"ack"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			mu.Lock()
 			fail := resultsFail
 			if !fail {
 				liveResults++
+				acked = append(acked, body.Ack...)
 			}
 			mu.Unlock()
 			if fail {
@@ -60,13 +68,17 @@ func TestEdgeBufferFlush(t *testing.T) {
 	a := New(srv.URL, "tok", "pull1", fixedRunner{hb: domain.Heartbeat{MonitorID: "m1", Up: true}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
-	// Cycle 1: /results fails → the result is buffered, nothing backfilled yet.
+	// Cycle 1: /results fails → the result is buffered, nothing backfilled yet, and
+	// crucially the job is NOT acked (its lease must lapse so it re-delivers).
 	a.poll(ctx)
 	if len(a.buf) != 1 {
 		t.Fatalf("after failed post, buffer = %d, want 1", len(a.buf))
 	}
 	if backfilled != 0 {
 		t.Fatalf("no backfill expected yet, got %d", backfilled)
+	}
+	if len(acked) != 0 {
+		t.Fatalf("a failed results post must not ack, got %v", acked)
 	}
 
 	// Cycle 2: connectivity restored → live post succeeds AND the buffer is flushed as backfill.
@@ -82,6 +94,13 @@ func TestEdgeBufferFlush(t *testing.T) {
 	}
 	if liveResults != 1 {
 		t.Fatalf("liveResults = %d, want 1 (cycle 2 live post)", liveResults)
+	}
+	// The successful live post carried the lease token as an ack.
+	mu.Lock()
+	gotAck := append([]string(nil), acked...)
+	mu.Unlock()
+	if len(gotAck) != 1 || gotAck[0] != "lease-m1" {
+		t.Fatalf("ack on success = %v, want [lease-m1]", gotAck)
 	}
 }
 

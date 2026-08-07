@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -47,6 +48,8 @@ type fakeStore struct {
 	oncall             map[string]domain.OnCallSchedule
 	overrides          map[string]domain.OnCallOverride
 	pullJobs           map[string][][]byte
+	pullSeq            int
+	acked              []string
 	pullTests          map[string]fakePullTest
 	agentHeartbeats    map[string]string
 	agentTokens        map[string]domain.AgentToken
@@ -520,13 +523,23 @@ func (f *fakeStore) AcknowledgeIncident(_ context.Context, id, by string) (domai
 	return inc, nil
 }
 
-func (f *fakeStore) ClaimPullJobs(_ context.Context, region string, _ int) ([][]byte, error) {
+func (f *fakeStore) ClaimPullJobs(_ context.Context, region string, _, _ int) ([]store.PullJob, error) {
 	if f.pullJobs == nil {
 		return nil, nil
 	}
-	out := f.pullJobs[region]
+	payloads := f.pullJobs[region]
 	f.pullJobs[region] = nil
+	out := make([]store.PullJob, 0, len(payloads))
+	for _, p := range payloads {
+		f.pullSeq++
+		out = append(out, store.PullJob{Token: fmt.Sprintf("tok-%s-%d", region, f.pullSeq), Payload: p})
+	}
 	return out, nil
+}
+
+func (f *fakeStore) AckPullJobs(_ context.Context, tokens []string) error {
+	f.acked = append(f.acked, tokens...)
+	return nil
 }
 func (f *fakeStore) ClaimPullTest(_ context.Context, region string) (string, []byte, bool, error) {
 	if f.pullTests == nil {

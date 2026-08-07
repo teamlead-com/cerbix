@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestPullJobsClaimOnceAndTTL(t *testing.T) {
+func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 
 	// Enqueue three jobs for geo3 and one for core.
@@ -18,31 +18,63 @@ func TestPullJobsClaimOnceAndTTL(t *testing.T) {
 		t.Fatalf("enqueue core: %v", err)
 	}
 
-	// Claim only geo3 jobs; core's is untouched.
-	got, err := st.ClaimPullJobs(ctx, "geo3", 10)
+	// Claim only geo3 jobs (leases them); core's is untouched.
+	got, err := st.ClaimPullJobs(ctx, "geo3", 10, 30)
 	if err != nil || len(got) != 3 {
 		t.Fatalf("claim geo3 = %d jobs err=%v (want 3)", len(got), err)
 	}
-	// A second claim returns nothing (delivered exactly once).
-	if again, _ := st.ClaimPullJobs(ctx, "geo3", 10); len(again) != 0 {
-		t.Fatalf("re-claim returned %d, want 0 (delivered once)", len(again))
+	for _, j := range got {
+		if j.Token == "" {
+			t.Fatal("claimed job has no lease token")
+		}
 	}
-	if core, _ := st.ClaimPullJobs(ctx, "core", 10); len(core) != 1 {
+	// A second claim returns nothing while the lease is live (not re-delivered).
+	if again, _ := st.ClaimPullJobs(ctx, "geo3", 10, 30); len(again) != 0 {
+		t.Fatalf("re-claim under live lease returned %d, want 0", len(again))
+	}
+	if core, _ := st.ClaimPullJobs(ctx, "core", 10, 30); len(core) != 1 {
 		t.Fatalf("core claim = %d, want 1 (region isolation)", len(core))
 	}
 
-	// An expired job is never claimed.
+	// Ack two of the three: those are deleted, the third remains leased.
+	if err := st.AckPullJobs(ctx, []string{got[0].Token, got[1].Token}); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	var remaining int
+	_ = st.pool.QueryRow(ctx, `SELECT count(*) FROM pull_jobs WHERE region='geo3'`).Scan(&remaining)
+	if remaining != 1 {
+		t.Fatalf("after acking 2 of 3, %d geo3 jobs remain, want 1", remaining)
+	}
+	// A stale token (the acked one) is a harmless no-op.
+	if err := st.AckPullJobs(ctx, []string{got[0].Token}); err != nil {
+		t.Fatalf("stale ack should be a no-op: %v", err)
+	}
+
+	// The un-acked job's lease lapses → it becomes claimable again (crash recovery),
+	// with a fresh token distinct from the original lease.
+	if _, err := st.pool.Exec(ctx, `UPDATE pull_jobs SET lease_expires_at = now() - interval '1 second' WHERE region='geo3'`); err != nil {
+		t.Fatalf("lapse lease: %v", err)
+	}
+	reclaimed, err := st.ClaimPullJobs(ctx, "geo3", 10, 30)
+	if err != nil || len(reclaimed) != 1 {
+		t.Fatalf("reclaim after lease lapse = %d err=%v (want 1)", len(reclaimed), err)
+	}
+	if reclaimed[0].Token == got[2].Token {
+		t.Fatal("reclaim must mint a fresh token so the old lease's late ack cannot delete it")
+	}
+
+	// An expired (TTL) job is never claimed, and is purged.
 	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{"old":1}`), 60); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if _, err := st.pool.Exec(ctx, `UPDATE pull_jobs SET expires_at = now() - interval '1 minute' WHERE region='geo3'`); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
-	if exp, _ := st.ClaimPullJobs(ctx, "geo3", 10); len(exp) != 0 {
+	if exp, _ := st.ClaimPullJobs(ctx, "geo3", 10, 30); len(exp) != 0 {
 		t.Fatalf("expired job claimed = %d, want 0", len(exp))
 	}
-	if n, err := st.PurgeExpiredPullJobs(ctx); err != nil || n != 1 {
-		t.Fatalf("purge expired = %d err=%v (want 1)", n, err)
+	if n, err := st.PurgeExpiredPullJobs(ctx); err != nil || n != 2 {
+		t.Fatalf("purge expired = %d err=%v (want 2)", n, err)
 	}
 }
 

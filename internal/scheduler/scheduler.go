@@ -447,13 +447,20 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 					// Pull-served region: enqueue for HTTP claim with a TTL (~interval) so
 					// a job for a region with no live agent expires rather than piling up.
 					// Confirm-phase jobs carry the short TTL so stale fast probes don't stack.
-					if payload, err := json.Marshal(dispatch.CheckJob{Monitor: m}); err != nil {
+					payload, err := json.Marshal(dispatch.CheckJob{Monitor: m})
+					if err != nil {
 						s.logger.Error("marshal_pull_job_failed", "monitor_id", m.ID, "error", err.Error())
-					} else if err := s.store.EnqueuePullJob(ctx, m.Region, payload, int(iv/time.Second)); err != nil {
+						continue // never enqueued → don't advance the cadence
+					}
+					if err := s.store.EnqueuePullJob(ctx, m.Region, payload, int(iv/time.Second)); err != nil {
 						if ctx.Err() != nil {
 							return false
 						}
+						// Leave nextRun unchanged so the next tick retries this monitor
+						// promptly rather than skipping a whole interval after a transient
+						// enqueue failure.
 						s.logger.Error("enqueue_pull_job_failed", "monitor_id", m.ID, "error", err.Error())
+						continue
 					}
 					nextRun[m.ID] = now.Add(iv)
 					continue

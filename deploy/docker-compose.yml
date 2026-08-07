@@ -149,15 +149,19 @@ services:
   worker:
     <<: [*cerbixBuild, *netCaps, *logging]
     profiles: ["distributed"]
+    # The CORE worker needs the DB to evaluate composite monitors (child statuses);
+    # config.worker-core.yaml carries it. Remote geo workers stay DB-less.
     command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "core"]
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     networks:
       default:
         ipv4_address: 10.5.0.22
     volumes:
-      - ./config.worker.yaml:/etc/cerbix/worker.yaml:ro
+      - ./config.worker-core.yaml:/etc/cerbix/worker.yaml:ro
 
   # ---- profile: mail (optional Mailpit for mail-flow E2E/dev) ---------------
   mailpit:

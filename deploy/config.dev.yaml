@@ -26,10 +26,10 @@ local:
   enabled: true
   min_password_length: 8
 
-# HTTP-pull transport (demo). NOTE: single-process --role=all does NOT route pull
-# regions (its in-process worker probes them); this block just enables the agent
-# endpoints so an agent container can be tested against the dev stack. Real pull
-# routing (jobs → pull_jobs) requires the distributed --role scheduler.
+# HTTP-pull transport (demo). --role=all routes these regions the same as the
+# distributed scheduler: their jobs and test-connections go to pull_jobs/pull_tests
+# for an agent to claim (strict region affinity), NOT the in-process worker. Run a
+# --role agent container for each region, or monitors there read stale (no fallback).
 pull:
   regions: ["pull1", "geo2"]
   token: "devpulltoken"

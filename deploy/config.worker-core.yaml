@@ -1,0 +1,21 @@
+# cerbix CORE worker — like config.worker.yaml but WITH a database connection.
+#
+# The core worker probes composite monitors, whose status is DERIVED from their
+# child monitors' current statuses read from the database (no network probe). A
+# DB-less worker cannot evaluate them — the composite prober returns "composite
+# evaluation unavailable" and the monitor flaps down. Composites are a core-region
+# concern, so only the core worker needs the DB; remote geo workers stay DB-less
+# (config.worker.yaml). Service-name DNS (postgres/rabbitmq) resolves on the
+# central network in both the distributed and geo composes.
+server:
+  listen: ":8080"        # ops endpoints only (/healthz /readyz /metrics)
+log:
+  level: "info"
+  format: "json"
+database:
+  dsn: "postgres://cerbix:cerbix@postgres:5432/cerbix?sslmode=disable"
+rabbitmq:
+  url: "amqp://golang:golang@rabbitmq:5672/"   # central broker
+prober:
+  allow_private_ips: true                       # internal targets
+  allow_metadata_ips: false

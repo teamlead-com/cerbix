@@ -547,23 +547,28 @@ func runServe(args []string) int {
 			runner.WithChildStatus(st.MonitorStatuses) // composite monitors read child statuses
 		}
 		if apiHandler != nil {
-			// "Test connection" runs in the target region. AMQP regions dispatch the probe
-			// to a worker via a RabbitMQ RPC; pull regions dispatch it to their agent over
-			// HTTP (pull_tests); inproc (--role=all) runs it locally (region is cosmetic).
+			// "Test connection" runs in the target region. Pull regions dispatch the probe
+			// to their agent over HTTP (pull_tests); AMQP regions dispatch it to a worker
+			// via a RabbitMQ RPC; inproc (--role=all) runs non-pull regions locally. The
+			// pull routing wraps EITHER base so pull-region tests reach the agent even in
+			// --role=all (matching how pull jobs are routed) — strict region affinity, no
+			// silent fallback to the local prober.
+			var base api.RegionTester
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
-				pullSet := make(map[string]bool, len(cfg.Pull.Regions))
-				for _, r := range cfg.Pull.Regions {
-					if r != "" {
-						pullSet[r] = true
-					}
-				}
-				if len(pullSet) > 0 && st != nil {
-					apiHandler.WithTester(regionRoutedTester{pullRegions: pullSet, pull: pullTester{store: st}, fallback: amqpd})
-				} else {
-					apiHandler.WithTester(amqpd)
-				}
+				base = amqpd
 			} else {
-				apiHandler.WithTester(localTester{run: runner.Run})
+				base = localTester{run: runner.Run}
+			}
+			pullSet := make(map[string]bool, len(cfg.Pull.Regions))
+			for _, r := range cfg.Pull.Regions {
+				if r != "" {
+					pullSet[r] = true
+				}
+			}
+			if len(pullSet) > 0 && st != nil {
+				apiHandler.WithTester(regionRoutedTester{pullRegions: pullSet, pull: pullTester{store: st}, fallback: base})
+			} else {
+				apiHandler.WithTester(base)
 			}
 		}
 		startIngest := func() {
@@ -582,7 +587,9 @@ func runServe(args []string) int {
 		switch *role {
 		case "all":
 			go scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
-				WithLeaderState(registry). // cerbix_scheduler_leader gauge
+				WithPullRegions(cfg.Pull.Regions). // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
+				WithPullMetrics(registry).         // per-region pull-queue depth/lag gauges
+				WithLeaderState(registry).         // cerbix_scheduler_leader gauge
 				WithConfirmSignals(confirmSignals()).Run(ctx)
 			go worker.New(disp, runner, workerPoolSize, logger).Run(ctx)
 			startIngest()

@@ -118,15 +118,20 @@ services:
 
   worker-core:
     <<: *cerbix
+    # The CORE worker needs the DB to evaluate composite monitors (child statuses).
+    # It sits on the central network, so it reaches postgres; remote geo workers
+    # below are DB-less by design (composites are a core-region concern).
     command: ["serve", "--config", "/etc/cerbix/worker.yaml", "--role", "worker", "--region", "core"]
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     networks:
       central:
         ipv4_address: 10.6.0.22
     volumes:
-      - ./config.worker.yaml:/etc/cerbix/worker.yaml:ro
+      - ./config.worker-core.yaml:/etc/cerbix/worker.yaml:ro
 
   # ---- remote geo-1: AMQP worker, broker-only, DB-less ----
   worker-geo1:

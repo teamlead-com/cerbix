@@ -2300,3 +2300,19 @@ scheduler — exactly one `1` across the fleet is the invariant to alert on) and
 `cerbix_broker_up` (AMQP reachability, wired off the connection supervisor's
 loss/reconnect transitions, only emitted when the AMQP transport is in use). Both are the
 paging signals for the silent-failure classes the hardening package targets.
+
+## D-0136 — Region affinity holds in the shipped topologies (iter-0078)
+Two wiring gaps let region affinity — "strict by design" — break in the topologies we
+actually ship. (1) `--role all` (the prod and single-geo topology) never called
+`WithPullRegions`, so a monitor in a pull region had its jobs published to the in-process
+worker and probed from core instead of routed to `pull_jobs` for the region's agent — a
+private target was unreachable and a public one gave a core-vantage result, silently. The
+`all` scheduler now wires `WithPullRegions`/`WithPullMetrics`, and the test-connection
+router was refactored so pull-region tests reach the agent (`pull_tests`) under `all` too,
+not just the AMQP roles. (2) The distributed and geo composes ran the CORE worker DB-less,
+but composite monitors derive their status from child statuses read from the DB — a
+DB-less worker returns "composite evaluation unavailable" and the composite flaps down.
+Composites are a core-region concern, so the core worker now uses `config.worker-core.yaml`
+(worker config + a database connection) and depends on Postgres; remote geo workers stay
+DB-less by design. Verified live: an `all`-mode pull-region monitor routes to `pull_jobs`
+with zero local heartbeats, and a distributed core worker evaluates a composite correctly.

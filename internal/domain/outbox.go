@@ -46,6 +46,10 @@ type OutboxEvent struct {
 	Topic    string
 	Payload  []byte
 	Attempts int
+	// ClaimToken identifies this delivery claim; the worker passes it back on
+	// mark-delivered/fail so a stale claim (lease expired, row re-claimed) can't
+	// overwrite the current owner's terminal state.
+	ClaimToken string
 }
 
 // OutboxEventView is an outbox row exposed to operators (the dead-letter admin

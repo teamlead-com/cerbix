@@ -47,6 +47,7 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		       next_attempt_at = now() + least(
 		           interval '1 hour',
 		           interval '10 seconds' * power(2, least(attempts, 12))),
+		       claim_token = gen_random_uuid(),
 		       updated_at = now()
 		 WHERE id IN (
 		     SELECT id FROM outbox_events
@@ -54,7 +55,7 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		      ORDER BY next_attempt_at
 		      FOR UPDATE SKIP LOCKED
 		      LIMIT $1)
-		 RETURNING id, topic, payload, attempts`, limit)
+		 RETURNING id, topic, payload, attempts, claim_token`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: claim outbox: %w", err)
 	}
@@ -62,7 +63,7 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 	var out []domain.OutboxEvent
 	for rows.Next() {
 		var e domain.OutboxEvent
-		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.Attempts); err != nil {
+		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.Attempts, &e.ClaimToken); err != nil {
 			return nil, fmt.Errorf("store: scan outbox: %w", err)
 		}
 		out = append(out, e)
@@ -73,11 +74,15 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 	return out, nil
 }
 
-// MarkOutboxDelivered marks an event delivered (terminal success).
-func (s *Store) MarkOutboxDelivered(ctx context.Context, id string) error {
+// MarkOutboxDelivered marks an event delivered (terminal success). The claimToken
+// CAS ensures only the CURRENT claim owner can set the state: a stale worker whose
+// lease expired (the row was re-claimed with a new token) updates zero rows and is
+// silently ignored, so it can't overwrite the owner's result.
+func (s *Store) MarkOutboxDelivered(ctx context.Context, id, claimToken string) error {
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE outbox_events SET status = 'delivered', last_error = '', updated_at = now() WHERE id = $1`,
-		id); err != nil {
+		`UPDATE outbox_events SET status = 'delivered', last_error = '', updated_at = now()
+		  WHERE id = $1 AND claim_token = $2`,
+		id, claimToken); err != nil {
 		return fmt.Errorf("store: mark outbox delivered: %w", err)
 	}
 	return nil
@@ -146,14 +151,16 @@ func (s *Store) ReplayAllDeadOutbox(ctx context.Context) (int, error) {
 // due again at its leased next_attempt_at) until attempts reaches maxAttempts, at
 // which point it is parked as dead for operator inspection. attempts was already
 // incremented by ClaimDueOutbox.
-func (s *Store) FailOutbox(ctx context.Context, id, lastErr string, maxAttempts int) error {
+func (s *Store) FailOutbox(ctx context.Context, id, claimToken, lastErr string, maxAttempts int) error {
+	// Same claimToken CAS as MarkOutboxDelivered: a stale worker's failure must not
+	// regress a row another worker already delivered (or re-claimed).
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE outbox_events
-		    SET status = CASE WHEN attempts >= $3 THEN 'dead' ELSE 'pending' END,
-		        last_error = $2,
+		    SET status = CASE WHEN attempts >= $4 THEN 'dead' ELSE 'pending' END,
+		        last_error = $3,
 		        updated_at = now()
-		  WHERE id = $1`,
-		id, lastErr, maxAttempts); err != nil {
+		  WHERE id = $1 AND claim_token = $2`,
+		id, claimToken, lastErr, maxAttempts); err != nil {
 		return fmt.Errorf("store: fail outbox: %w", err)
 	}
 	return nil

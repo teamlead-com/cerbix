@@ -127,10 +127,10 @@ func TestClaimBackoffDeliverDead(t *testing.T) {
 	}
 
 	// One delivered (terminal), one failed at max (dead).
-	if err := st.MarkOutboxDelivered(ctx, claimed[0].ID); err != nil {
+	if err := st.MarkOutboxDelivered(ctx, claimed[0].ID, claimed[0].ClaimToken); err != nil {
 		t.Fatalf("mark delivered: %v", err)
 	}
-	if err := st.FailOutbox(ctx, claimed[1].ID, "boom", 1); err != nil { // attempts(1) >= max(1) → dead
+	if err := st.FailOutbox(ctx, claimed[1].ID, claimed[1].ClaimToken, "boom", 1); err != nil { // attempts(1) >= max(1) → dead
 		t.Fatalf("fail: %v", err)
 	}
 	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "delivered"); got != 1 {
@@ -138,5 +138,14 @@ func TestClaimBackoffDeliverDead(t *testing.T) {
 	}
 	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "dead"); got != 1 {
 		t.Fatalf("dead rows = %d, want 1", got)
+	}
+
+	// Claim-token CAS: a STALE worker (wrong/old token) must NOT be able to
+	// regress or overwrite a row the current owner already finished.
+	if err := st.FailOutbox(ctx, claimed[0].ID, "00000000-0000-0000-0000-000000000000", "late failure", 1); err != nil {
+		t.Fatalf("stale fail: %v", err)
+	}
+	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "delivered"); got != 1 {
+		t.Fatalf("stale FailOutbox regressed a delivered row: delivered=%d, want 1", got)
 	}
 }

@@ -126,12 +126,12 @@ func TestClaimBackoffDeliverDead(t *testing.T) {
 		t.Fatalf("re-claim returned %d, want 0 (leased)", len(again))
 	}
 
-	// One delivered (terminal), one failed at max (dead).
-	if err := st.MarkOutboxDelivered(ctx, claimed[0].ID, claimed[0].ClaimToken); err != nil {
-		t.Fatalf("mark delivered: %v", err)
+	// One delivered (terminal), one failed at max (dead). Each owns its claim token → applied.
+	if applied, err := st.MarkOutboxDelivered(ctx, claimed[0].ID, claimed[0].ClaimToken); err != nil || !applied {
+		t.Fatalf("mark delivered: applied=%v err=%v, want true", applied, err)
 	}
-	if err := st.FailOutbox(ctx, claimed[1].ID, claimed[1].ClaimToken, "boom", 1); err != nil { // attempts(1) >= max(1) → dead
-		t.Fatalf("fail: %v", err)
+	if applied, err := st.FailOutbox(ctx, claimed[1].ID, claimed[1].ClaimToken, "boom", 1); err != nil || !applied { // attempts(1) >= max(1) → dead
+		t.Fatalf("fail: applied=%v err=%v, want true", applied, err)
 	}
 	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "delivered"); got != 1 {
 		t.Fatalf("delivered rows = %d, want 1", got)
@@ -140,12 +140,40 @@ func TestClaimBackoffDeliverDead(t *testing.T) {
 		t.Fatalf("dead rows = %d, want 1", got)
 	}
 
-	// Claim-token CAS: a STALE worker (wrong/old token) must NOT be able to
-	// regress or overwrite a row the current owner already finished.
-	if err := st.FailOutbox(ctx, claimed[0].ID, "00000000-0000-0000-0000-000000000000", "late failure", 1); err != nil {
-		t.Fatalf("stale fail: %v", err)
+	// Claim-token CAS: a STALE worker (wrong/old token) must NOT regress the row AND must
+	// report applied=false so the worker doesn't count a phantom delivery/dead-letter.
+	if applied, err := st.FailOutbox(ctx, claimed[0].ID, "00000000-0000-0000-0000-000000000000", "late failure", 1); err != nil || applied {
+		t.Fatalf("stale fail: applied=%v err=%v, want applied=false", applied, err)
 	}
 	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "delivered"); got != 1 {
 		t.Fatalf("stale FailOutbox regressed a delivered row: delivered=%d, want 1", got)
+	}
+}
+
+// TestPurgeDeliveredOutbox proves only OLD DELIVERED rows are reclaimed — recent delivered
+// and dead-lettered rows survive.
+func TestPurgeDeliveredOutbox(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	seed := func(status string, updatedAgo time.Duration) {
+		t.Helper()
+		if _, err := st.pool.Exec(ctx,
+			`INSERT INTO outbox_events (topic, status, payload, next_attempt_at, updated_at)
+			 VALUES ('monitor_transition', $1, '{}'::jsonb, now(), now() - make_interval(secs => $2))`,
+			status, int(updatedAgo.Seconds())); err != nil {
+			t.Fatalf("seed outbox: %v", err)
+		}
+	}
+	seed("delivered", 30*24*time.Hour) // old delivered → purged
+	seed("delivered", time.Hour)       // recent delivered → kept
+	seed("dead", 30*24*time.Hour)      // old dead → kept (never auto-purged)
+
+	n, err := st.PurgeDeliveredOutbox(ctx, 7*24*time.Hour)
+	if err != nil || n != 1 {
+		t.Fatalf("purge = %d err=%v, want 1", n, err)
+	}
+	var remaining int
+	_ = st.pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events`).Scan(&remaining)
+	if remaining != 2 {
+		t.Fatalf("remaining = %d, want 2 (recent delivered + dead)", remaining)
 	}
 }

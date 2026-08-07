@@ -30,6 +30,16 @@ func (s *Store) ReplaceMonitorDependencies(ctx context.Context, monitorID, proje
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
+	// Serialize dependency mutations within a project with a transaction advisory lock.
+	// Without it, concurrent edits (A→B and B→A) each run their cycle check against a
+	// snapshot lacking the other's uncommitted edge, both pass, and both commit → a cycle.
+	// The lock (released on commit/rollback) forces the second edit's cycle check to see the
+	// first's committed edges. Namespaced so it can't collide with other advisory keys.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('monitor_dependencies'), hashtext($1))`, projectID); err != nil {
+		return fmt.Errorf("store: lock dependency graph: %w", err)
+	}
+
 	if len(parents) > 0 {
 		// Same-project membership (and implicitly: existence).
 		var n int

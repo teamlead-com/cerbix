@@ -37,6 +37,7 @@ type Store interface {
 	PurgeExpiredPullJobs(ctx context.Context) (int, error)
 	PurgeExpiredPullTests(ctx context.Context) (int, error)
 	PurgeStaleAgentHeartbeats(ctx context.Context, olderThan time.Duration) (int, error)
+	PurgeDeliveredOutbox(ctx context.Context, olderThan time.Duration) (int, error)
 	DeleteExpiredSessions(ctx context.Context) (int64, error)
 	DeleteExpiredAuthFlows(ctx context.Context) (int64, error)
 	PullQueueStats(ctx context.Context) ([]metrics.PullStat, error)
@@ -120,6 +121,9 @@ const (
 	// staleAgentHeartbeatAge is how old an agent heartbeat row must be before the leader
 	// prunes it (far beyond the liveness window; only long-dead agent_ids are removed).
 	staleAgentHeartbeatAge = time.Hour
+	// deliveredOutboxRetention is how long a delivered outbox row is kept for audit before
+	// the leader purges it (dead-lettered rows are never auto-purged).
+	deliveredOutboxRetention = 7 * 24 * time.Hour
 	// confirmCapPerRegion bounds how many monitors may probe at their accelerated
 	// confirm interval simultaneously per region: during a mass outage the herd
 	// falls back to the normal rhythm instead of multiplying load (anti
@@ -590,6 +594,13 @@ func (s *Scheduler) maintainPartitions(ctx context.Context, now time.Time) {
 	}
 	if _, err := s.store.PurgeExpiredPullTests(ctx); err != nil {
 		s.logger.Warn("purge_pull_tests_failed", "error", err.Error())
+	}
+	// Delivered outbox rows accumulate forever otherwise; reclaim old ones (dead-lettered
+	// rows are kept for operator inspection/replay).
+	if purged, err := s.store.PurgeDeliveredOutbox(ctx, deliveredOutboxRetention); err != nil {
+		s.logger.Warn("purge_delivered_outbox_failed", "error", err.Error())
+	} else if purged > 0 {
+		s.logger.Info("delivered_outbox_purged", "count", purged)
 	}
 	// Drop heartbeat rows from long-dead agents (each restart leaves one under a new
 	// agent_id); far beyond the liveness window, so live agents are untouched.

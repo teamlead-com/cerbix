@@ -83,7 +83,10 @@ func (f *fakeStore) EvaluateRegionWorkerAlerts(context.Context, map[string]bool,
 func (f *fakeStore) AdvanceEscalations(context.Context) (int, error)           { return 0, nil }
 func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error { return nil }
 func (f *fakeStore) PurgeExpiredPullJobs(context.Context) (int, error)         { return 0, nil }
-func (f *fakeStore) PurgeExpiredPullTests(context.Context) (int, error)        { return 0, nil }
+func (f *fakeStore) PurgeDeliveredOutbox(context.Context, time.Duration) (int, error) {
+	return 0, nil
+}
+func (f *fakeStore) PurgeExpiredPullTests(context.Context) (int, error) { return 0, nil }
 func (f *fakeStore) PurgeStaleAgentHeartbeats(context.Context, time.Duration) (int, error) {
 	return 0, nil
 }

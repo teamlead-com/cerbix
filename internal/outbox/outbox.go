@@ -27,8 +27,8 @@ const (
 // Store is the persistence surface the worker needs.
 type Store interface {
 	ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error)
-	MarkOutboxDelivered(ctx context.Context, id, claimToken string) error
-	FailOutbox(ctx context.Context, id, claimToken, lastErr string, maxAttempts int) error
+	MarkOutboxDelivered(ctx context.Context, id, claimToken string) (applied bool, err error)
+	FailOutbox(ctx context.Context, id, claimToken, lastErr string, maxAttempts int) (applied bool, err error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	// Incident-context heuristics (attached to opened auto-incidents).
 	IncidentContext(ctx context.Context, inc domain.Incident) (domain.IncidentContext, error)
@@ -137,8 +137,15 @@ func (w *Worker) drain(ctx context.Context) {
 func (w *Worker) process(ctx context.Context, e domain.OutboxEvent) {
 	err := w.deliver(ctx, e)
 	if err == nil {
-		if merr := w.store.MarkOutboxDelivered(ctx, e.ID, e.ClaimToken); merr != nil {
+		applied, merr := w.store.MarkOutboxDelivered(ctx, e.ID, e.ClaimToken)
+		if merr != nil {
 			w.logger.Error("outbox_mark_delivered_failed", "id", e.ID, "error", merr.Error())
+			return
+		}
+		if !applied {
+			// Lost the claim_token CAS: another worker re-claimed this row (it will deliver
+			// it). We already sent — a duplicate delivery, but not OUR counted delivery.
+			w.logger.Warn("outbox_cas_lost", "id", e.ID, "phase", "delivered")
 			return
 		}
 		if w.metrics != nil {
@@ -147,8 +154,13 @@ func (w *Worker) process(ctx context.Context, e domain.OutboxEvent) {
 		w.logger.Info("outbox_delivered", "id", e.ID, "topic", e.Topic, "attempt", e.Attempts+1)
 		return
 	}
-	if ferr := w.store.FailOutbox(ctx, e.ID, e.ClaimToken, err.Error(), maxAttempts); ferr != nil {
+	applied, ferr := w.store.FailOutbox(ctx, e.ID, e.ClaimToken, err.Error(), maxAttempts)
+	if ferr != nil {
 		w.logger.Error("outbox_fail_failed", "id", e.ID, "error", ferr.Error())
+		return
+	}
+	if !applied {
+		w.logger.Warn("outbox_cas_lost", "id", e.ID, "phase", "failed")
 		return
 	}
 	if e.Attempts >= maxAttempts {

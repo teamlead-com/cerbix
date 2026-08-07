@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -78,14 +79,35 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 // CAS ensures only the CURRENT claim owner can set the state: a stale worker whose
 // lease expired (the row was re-claimed with a new token) updates zero rows and is
 // silently ignored, so it can't overwrite the owner's result.
-func (s *Store) MarkOutboxDelivered(ctx context.Context, id, claimToken string) error {
-	if _, err := s.pool.Exec(ctx,
+func (s *Store) MarkOutboxDelivered(ctx context.Context, id, claimToken string) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE outbox_events SET status = 'delivered', last_error = '', updated_at = now()
 		  WHERE id = $1 AND claim_token = $2`,
-		id, claimToken); err != nil {
-		return fmt.Errorf("store: mark outbox delivered: %w", err)
+		id, claimToken)
+	if err != nil {
+		return false, fmt.Errorf("store: mark outbox delivered: %w", err)
 	}
-	return nil
+	// applied=false means the claim_token CAS matched nothing: another worker re-claimed
+	// and owns this row now. The caller must not count it as this worker's delivery.
+	return tag.RowsAffected() > 0, nil
+}
+
+// PurgeDeliveredOutbox deletes delivered outbox rows older than olderThan — housekeeping
+// so the table doesn't grow without bound (delivered events are kept briefly for audit,
+// then reclaimed). Dead-lettered rows are NEVER purged here (operators inspect/replay
+// them). A non-positive olderThan falls back to 7 days. Returns rows deleted. Leader tick.
+func (s *Store) PurgeDeliveredOutbox(ctx context.Context, olderThan time.Duration) (int, error) {
+	secs := int(olderThan.Seconds())
+	if secs <= 0 {
+		secs = 7 * 24 * 3600
+	}
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM outbox_events WHERE status = 'delivered' AND updated_at < now() - make_interval(secs => $1)`,
+		secs)
+	if err != nil {
+		return 0, fmt.Errorf("store: purge delivered outbox: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // ListDeadOutbox returns dead-lettered events (delivery gave up after max
@@ -151,17 +173,19 @@ func (s *Store) ReplayAllDeadOutbox(ctx context.Context) (int, error) {
 // due again at its leased next_attempt_at) until attempts reaches maxAttempts, at
 // which point it is parked as dead for operator inspection. attempts was already
 // incremented by ClaimDueOutbox.
-func (s *Store) FailOutbox(ctx context.Context, id, claimToken, lastErr string, maxAttempts int) error {
+func (s *Store) FailOutbox(ctx context.Context, id, claimToken, lastErr string, maxAttempts int) (bool, error) {
 	// Same claimToken CAS as MarkOutboxDelivered: a stale worker's failure must not
 	// regress a row another worker already delivered (or re-claimed).
-	if _, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE outbox_events
 		    SET status = CASE WHEN attempts >= $4 THEN 'dead' ELSE 'pending' END,
 		        last_error = $3,
 		        updated_at = now()
 		  WHERE id = $1 AND claim_token = $2`,
-		id, claimToken, lastErr, maxAttempts); err != nil {
-		return fmt.Errorf("store: fail outbox: %w", err)
+		id, claimToken, lastErr, maxAttempts)
+	if err != nil {
+		return false, fmt.Errorf("store: fail outbox: %w", err)
 	}
-	return nil
+	// applied=false → the CAS lost (row re-claimed elsewhere); don't count a dead-letter.
+	return tag.RowsAffected() > 0, nil
 }

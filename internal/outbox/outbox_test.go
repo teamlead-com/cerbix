@@ -95,13 +95,13 @@ func (f *fakeStore) ClaimDueOutbox(_ context.Context, limit int) ([]domain.Outbo
 	f.pending = f.pending[n:]
 	return batch, nil
 }
-func (f *fakeStore) MarkOutboxDelivered(_ context.Context, id, _ string) error {
+func (f *fakeStore) MarkOutboxDelivered(_ context.Context, id, _ string) (bool, error) {
 	f.delivered = append(f.delivered, id)
-	return nil
+	return true, nil
 }
-func (f *fakeStore) FailOutbox(_ context.Context, id, _, _ string, _ int) error {
+func (f *fakeStore) FailOutbox(_ context.Context, id, _, _ string, _ int) (bool, error) {
 	f.failed = append(f.failed, id)
-	return nil
+	return true, nil
 }
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {
 	m, ok := f.monitors[id]

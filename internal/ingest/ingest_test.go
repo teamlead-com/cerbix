@@ -21,8 +21,10 @@ type fakeStore struct {
 	monitors    map[string]domain.Monitor
 	incidents   map[string]domain.Incident
 	updates     map[string][]domain.IncidentUpdate
-	consecutive map[string]int  // live failure counter (confirmations)
-	maint       map[string]bool // monitor id → currently in a maintenance window
+	consecutive map[string]int       // live failure counter (confirmations)
+	maint       map[string]bool      // monitor id → currently in a maintenance window
+	lastTs      map[string]time.Time // freshness watermark (last applied result ts)
+	seq         int64                // monotonic synthetic clock for zero-Ts heartbeats
 	nextInc     int
 	// createErrs is a queue of errors CreateIncident returns on successive calls
 	// (nil = success); createCalls counts how many times it was invoked.
@@ -38,44 +40,60 @@ func newFakeStore() *fakeStore {
 		updates:     map[string][]domain.IncidentUpdate{},
 		consecutive: map[string]int{},
 		maint:       map[string]bool{},
+		lastTs:      map[string]time.Time{},
 	}
 }
 
-func (f *fakeStore) InsertHeartbeat(_ context.Context, hb domain.Heartbeat) error {
+// RecordResult mirrors store.RecordResult: insert the heartbeat, then dedup +
+// freshness-gate before applying the status change. Zero-Ts heartbeats (the common
+// test shape) get a monotonic synthetic timestamp, exactly as production's hbTime
+// falls back to now() — so distinct probes stay distinct and forward-moving.
+func (f *fakeStore) RecordResult(_ context.Context, hb domain.Heartbeat) (prev, cur domain.MonitorStatus, suppressed, applied bool, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.hbs = append(f.hbs, hb)
-	return nil
-}
+	ts := hb.Ts
+	if ts.IsZero() {
+		f.seq++
+		ts = time.Unix(0, f.seq)
+	}
+	for _, e := range f.hbs {
+		if e.MonitorID == hb.MonitorID && e.Ts.Equal(ts) {
+			return "", "", false, false, nil // duplicate — already recorded
+		}
+	}
+	stored := hb
+	stored.Ts = ts
+	f.hbs = append(f.hbs, stored)
+	if last, ok := f.lastTs[hb.MonitorID]; ok && !ts.After(last) {
+		return "", "", false, false, nil // stale — kept for SLA, not applied
+	}
 
-func (f *fakeStore) RecordCheckStatus(_ context.Context, id string, up bool) (prev, cur domain.MonitorStatus, suppressed bool, err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	prev, ok := f.statuses[id]
+	prev, ok := f.statuses[hb.MonitorID]
 	if !ok {
 		prev = domain.StatusPending
 	}
-	threshold := f.monitors[id].FailureThreshold
+	threshold := f.monitors[hb.MonitorID].FailureThreshold
 	if threshold < 1 {
 		threshold = 1
 	}
-	if up {
-		f.consecutive[id] = 0
+	if hb.Up {
+		f.consecutive[hb.MonitorID] = 0
 		cur = domain.StatusUp
 	} else {
-		f.consecutive[id]++
-		if f.consecutive[id] >= threshold {
+		f.consecutive[hb.MonitorID]++
+		if f.consecutive[hb.MonitorID] >= threshold {
 			cur = domain.StatusDown
 		} else {
 			cur = prev // not yet confirmed — hold the current status
 		}
 	}
-	f.statuses[id] = cur
-	suppressed = f.maint[id]
+	f.statuses[hb.MonitorID] = cur
+	f.lastTs[hb.MonitorID] = ts
+	suppressed = f.maint[hb.MonitorID]
 	if prev == cur {
 		suppressed = false // no transition
 	}
-	return prev, cur, suppressed, nil
+	return prev, cur, suppressed, true, nil
 }
 
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {

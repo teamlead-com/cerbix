@@ -17,11 +17,12 @@ import (
 
 // Store is the persistence surface the ingester needs.
 type Store interface {
-	InsertHeartbeat(ctx context.Context, hb domain.Heartbeat) error
-	// RecordCheckStatus applies a check result with alert confirmations and
-	// maintenance suppression, returning the previous and new status and whether
-	// the change was suppressed (in maintenance → don't open an incident).
-	RecordCheckStatus(ctx context.Context, monitorID string, up bool) (prev, cur domain.MonitorStatus, suppressed bool, err error)
+	// RecordResult records a probe result atomically: heartbeat insert + live-status
+	// change + transition-outbox event in one transaction, with dedup and freshness
+	// gating. It returns the previous and new status, whether the change was
+	// suppressed (in maintenance → don't open an incident), and whether the result
+	// was actually applied to live status (false for a duplicate or stale result).
+	RecordResult(ctx context.Context, hb domain.Heartbeat) (prev, cur domain.MonitorStatus, suppressed, applied bool, err error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	FindOpenAutoIncidentByMonitor(ctx context.Context, monitorID string) (domain.Incident, error)
 	CreateIncident(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
@@ -103,24 +104,23 @@ func (c *Consumer) Run(ctx context.Context) {
 }
 
 func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
-	if err := c.store.InsertHeartbeat(ctx, hb); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			// The monitor was deleted while the probe was in flight; the
-			// scheduler drops it on its next snapshot refresh.
-			c.logger.Info("heartbeat_for_deleted_monitor", "monitor_id", hb.MonitorID)
-			return
-		}
-		c.logger.Error("insert_heartbeat_failed", "monitor_id", hb.MonitorID, "error", err.Error())
+	// One transaction records the heartbeat, applies the status change and enqueues
+	// any transition event: a duplicate re-delivery (applied=false) is deduped and
+	// never re-bumps the failure counter, a stale/out-of-order probe is kept for SLA
+	// but doesn't override newer live state, and a crash can't leave a status change
+	// without its heartbeat.
+	prev, cur, suppressed, applied, err := c.store.RecordResult(ctx, hb)
+	if errors.Is(err, store.ErrNotFound) {
+		// The monitor was deleted while the probe was in flight; the scheduler drops
+		// it on its next snapshot refresh.
+		c.logger.Info("result_for_deleted_monitor", "monitor_id", hb.MonitorID)
 		return
 	}
-	prev, cur, suppressed, err := c.store.RecordCheckStatus(ctx, hb.MonitorID, hb.Up)
-	if errors.Is(err, store.ErrNotFound) {
-		// Monitor deleted between the heartbeat insert and the status flip —
-		// same benign race as the insert path, not a failure.
-		c.logger.Info("status_for_deleted_monitor", "monitor_id", hb.MonitorID)
-	} else if err != nil {
-		c.logger.Error("record_check_status_failed", "monitor_id", hb.MonitorID, "error", err.Error())
-	} else if prev != cur {
+	if err != nil {
+		c.logger.Error("record_result_failed", "monitor_id", hb.MonitorID, "error", err.Error())
+		return
+	}
+	if applied && prev != cur {
 		c.logger.Info("monitor_status_changed", "monitor_id", hb.MonitorID, "prev", string(prev), "cur", string(cur), "suppressed", suppressed)
 		c.reconcileTransition(ctx, hb, prev, cur, suppressed)
 	}

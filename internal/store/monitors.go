@@ -3,9 +3,13 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -329,6 +333,22 @@ func (s *Store) RecordCheckStatus(ctx context.Context, monitorID string, up bool
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
+	prev, cur, suppressed, err = recordCheckStatusTx(ctx, tx, monitorID, up)
+	if err != nil {
+		return "", "", false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", false, fmt.Errorf("store: commit record status: %w", err)
+	}
+	return prev, cur, suppressed, nil
+}
+
+// recordCheckStatusTx applies one check result to a monitor's live status inside an
+// existing transaction (see RecordCheckStatus for the confirmation/suppression
+// semantics). It does NOT commit — the caller owns the transaction, which lets the
+// heartbeat insert, the status flip and the transition-outbox event all land in one
+// atomic unit (RecordResult).
+func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bool) (prev, cur domain.MonitorStatus, suppressed bool, err error) {
 	var prevS, curS string
 	var inMaint bool
 	var fails, threshold, confirmSec int
@@ -397,10 +417,85 @@ func (s *Store) RecordCheckStatus(ctx context.Context, monitorID string, up bool
 			return "", "", false, err
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", "", false, fmt.Errorf("store: commit record status: %w", err)
-	}
 	return prev, cur, inMaint, nil
+}
+
+// RecordResult records one probe result end-to-end in a SINGLE transaction: it
+// inserts the heartbeat, then — only if that heartbeat is both new and fresh —
+// applies the live-status change and enqueues any transition-outbox event. This is
+// the correctness spine for ingest: previously the insert and the status flip were
+// two independent transactions, so a duplicate re-delivery re-bumped the failure
+// counter and a crash between them could apply a status change with no heartbeat
+// behind it.
+//
+// Freshness/dedup, driven by the probe timestamp (hbTime) against monitors.last_result_ts:
+//   - duplicate (ON CONFLICT DO NOTHING inserts 0 rows): heartbeat already recorded,
+//     status is NOT touched — applied=false;
+//   - stale (ts not strictly newer than last_result_ts): the heartbeat is kept for
+//     SLA accuracy but a late/slow probe must not override newer live state —
+//     applied=false;
+//   - otherwise the status flip runs and last_result_ts advances to this ts —
+//     applied=true, and prev/cur/suppressed carry the transition for the caller.
+//
+// A result for an already-deleted monitor returns ErrNotFound (the caller drops it).
+func (s *Store) RecordResult(ctx context.Context, hb domain.Heartbeat) (prev, cur domain.MonitorStatus, suppressed, applied bool, err error) {
+	ts := hbTime(hb)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", "", false, false, fmt.Errorf("store: begin record result: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	ct, err := tx.Exec(ctx,
+		`INSERT INTO heartbeats (monitor_id, ts, up, latency_ms, code, msg) VALUES ($1,$2,$3,$4,$5,$6)
+		 ON CONFLICT (monitor_id, ts) DO NOTHING`,
+		hb.MonitorID, ts, hb.Up, hb.LatencyMS, hb.Code, hb.Msg)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" && strings.Contains(pgErr.ConstraintName, "monitor_id_fkey") {
+			return "", "", false, false, ErrNotFound
+		}
+		return "", "", false, false, fmt.Errorf("store: record result insert: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		// Duplicate re-delivery: the fact is already on record; do not re-apply it to
+		// live status (which would double-count the failure). Commit the (no-op) tx.
+		if err := tx.Commit(ctx); err != nil {
+			return "", "", false, false, fmt.Errorf("store: commit dup result: %w", err)
+		}
+		return "", "", false, false, nil
+	}
+
+	// Lock the monitor row and read the freshness watermark. FOR UPDATE also serialises
+	// concurrent results for the same monitor so last_result_ts can't race.
+	var lastTs *time.Time
+	err = tx.QueryRow(ctx, `SELECT last_result_ts FROM monitors WHERE id = $1 FOR UPDATE`, hb.MonitorID).Scan(&lastTs)
+	if noRows(err) {
+		return "", "", false, false, ErrNotFound
+	}
+	if err != nil {
+		return "", "", false, false, fmt.Errorf("store: record result lock: %w", err)
+	}
+	if lastTs != nil && !ts.After(*lastTs) {
+		// Stale/out-of-order: heartbeat is kept (already inserted) but must not move
+		// live state past a newer result. Commit the insert, report not-applied.
+		if err := tx.Commit(ctx); err != nil {
+			return "", "", false, false, fmt.Errorf("store: commit stale result: %w", err)
+		}
+		return "", "", false, false, nil
+	}
+
+	prev, cur, suppressed, err = recordCheckStatusTx(ctx, tx, hb.MonitorID, hb.Up)
+	if err != nil {
+		return "", "", false, false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE monitors SET last_result_ts = $2 WHERE id = $1`, hb.MonitorID, ts); err != nil {
+		return "", "", false, false, fmt.Errorf("store: advance last_result_ts: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", false, false, fmt.Errorf("store: commit record result: %w", err)
+	}
+	return prev, cur, suppressed, true, nil
 }
 
 // EnqueueRenotifyReminders re-sends the down alert for monitors that have stayed

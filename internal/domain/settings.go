@@ -103,6 +103,12 @@ func (p *AuthPolicy) Normalize() {
 	}
 }
 
+// EmailAllowlistEnforced reports whether a domain allowlist is configured (so a
+// login must present a permitted email; callers treat this as fail-closed).
+func (p AuthPolicy) EmailAllowlistEnforced() bool {
+	return len(p.AllowedEmailDomains) > 0
+}
+
 // EmailAllowed reports whether an email may sign in under this policy (empty allow
 // list = any domain).
 func (p AuthPolicy) EmailAllowed(email string) bool {

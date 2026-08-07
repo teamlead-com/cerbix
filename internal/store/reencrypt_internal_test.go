@@ -34,6 +34,21 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 		ProjectID: proj.ID, Type: domain.ChannelTelegram, Name: "tg", Enabled: true,
 		Config: map[string]string{"bot_token": "TOKEN", "chat_id": "1"},
 	})
+	// A monitor with an encrypted config secret (password) and a user TOTP secret —
+	// both were previously MISSED by reencrypt and would break on old-key removal.
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "db", Type: domain.MonitorTCP, Target: "db:5432",
+		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+		Config: map[string]string{"password": "dbpass"},
+	})
+	if err != nil {
+		t.Fatalf("create monitor: %v", err)
+	}
+	usr, _ := st.CreateLocalUser(ctx, "u@x", "U", "pwhash", false)
+	encTOTP, _ := cA.Encrypt("totpsecret")
+	if _, err := st.pool.Exec(ctx, `UPDATE users SET totp_secret = $2 WHERE id = $1`, usr.ID, encTOTP); err != nil {
+		t.Fatalf("seed totp: %v", err)
+	}
 
 	// Rotate: new primary B, old A kept for reading, then reencrypt.
 	rotated, _ := secret.New(keyB, keyA)
@@ -60,5 +75,22 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 	}
 	if _, err := cA.Decrypt(rawSecret); err == nil {
 		t.Fatal("after reencrypt, old key A must no longer read the webhook secret")
+	}
+
+	// Monitor config secret and TOTP secret must also have rotated to B.
+	var rawMonPw, rawTOTP string
+	_ = st.pool.QueryRow(ctx, `SELECT config->>'password' FROM monitors WHERE id = $1`, mon.ID).Scan(&rawMonPw)
+	_ = st.pool.QueryRow(ctx, `SELECT totp_secret FROM users WHERE id = $1`, usr.ID).Scan(&rawTOTP)
+	if got, err := cB.Decrypt(rawMonPw); err != nil || got != "dbpass" {
+		t.Fatalf("after reencrypt, B should read monitor password: got %q err=%v", got, err)
+	}
+	if got, err := cB.Decrypt(rawTOTP); err != nil || got != "totpsecret" {
+		t.Fatalf("after reencrypt, B should read TOTP secret: got %q err=%v", got, err)
+	}
+	if _, err := cA.Decrypt(rawMonPw); err == nil {
+		t.Fatal("after reencrypt, old key A must no longer read the monitor password")
+	}
+	if _, err := cA.Decrypt(rawTOTP); err == nil {
+		t.Fatal("after reencrypt, old key A must no longer read the TOTP secret")
 	}
 }

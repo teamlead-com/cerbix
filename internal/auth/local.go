@@ -91,9 +91,17 @@ func (a *Authenticator) LocalLoginHandler(w http.ResponseWriter, r *http.Request
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "two-factor code required", "totp_required": true})
 		return
 	}
-	// Instance policy: TOTP may be mandatory even when not yet enrolled.
+	// Instance policy: TOTP may be mandatory even when not yet enrolled. FAIL-CLOSED:
+	// if we can't load the user to evaluate the policy, refuse the login rather than
+	// issue an MFA-less session on a transient store error.
 	if !cred.TOTPEnabled && pol.RequireTOTP != domain.TOTPNone {
-		if u, uerr := a.store.GetUser(r.Context(), cred.UserID); uerr == nil && pol.TOTPRequiredFor(u.IsGlobalAdmin) {
+		u, uerr := a.store.GetUser(r.Context(), cred.UserID)
+		if uerr != nil {
+			a.logger.Error("totp_policy_user_lookup_failed", "user_id", cred.UserID, "error", uerr.Error())
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		if pol.TOTPRequiredFor(u.IsGlobalAdmin) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": "two-factor is required for your account — set it up to sign in", "totp_setup_required": true})

@@ -133,11 +133,9 @@ func TestResetConfirm(t *testing.T) {
 }
 
 // fakePolicy is a PolicySource returning a fixed live policy.
-type fakePolicy struct{ min int }
+type fakePolicy struct{ p domain.AuthPolicy }
 
-func (p fakePolicy) AuthPolicy() domain.AuthPolicy {
-	return domain.AuthPolicy{MinPasswordLen: p.min, RequireTOTP: domain.TOTPNone}
-}
+func (f fakePolicy) AuthPolicy() domain.AuthPolicy { return f.p }
 
 func TestResetConfirmUsesLivePolicyMinLength(t *testing.T) {
 	fs := newFakeStore()
@@ -145,7 +143,7 @@ func TestResetConfirmUsesLivePolicyMinLength(t *testing.T) {
 	u, _ := fs.CreateLocalUser(context.Background(), "user@x", "User", hash, false)
 	a := resetAuthenticator(t, fs, true)
 	// The instance policy raises the minimum beyond the config default (8).
-	a.WithSettings(fakePolicy{min: 12})
+	a.WithSettings(fakePolicy{p: domain.AuthPolicy{MinPasswordLen: 12, RequireTOTP: domain.TOTPNone}})
 
 	tok := "tok-live-policy"
 	_ = fs.CreatePasswordResetToken(context.Background(), u.ID, store.HashToken(tok), time.Now().Add(time.Hour))

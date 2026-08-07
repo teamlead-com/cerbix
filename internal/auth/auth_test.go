@@ -26,6 +26,7 @@ type mockOIDC struct {
 	key                  *rsa.PrivateKey
 	clientID             string
 	sub, email, name, nn string // claims for the next minted id_token
+	emailVerified        bool   // email_verified claim (default true = conformant IdP)
 }
 
 func newMockOIDC(t *testing.T, clientID string) *mockOIDC {
@@ -34,7 +35,7 @@ func newMockOIDC(t *testing.T, clientID string) *mockOIDC {
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	m := &mockOIDC{key: key, clientID: clientID}
+	m := &mockOIDC{key: key, clientID: clientID, emailVerified: true}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		iss := m.server.URL
@@ -80,7 +81,7 @@ func (m *mockOIDC) mintIDToken(t *testing.T) string {
 		Expiry:   jwt.NewNumericDate(now.Add(time.Hour)),
 		IssuedAt: jwt.NewNumericDate(now),
 	}
-	custom := map[string]any{"nonce": m.nn, "email": m.email, "name": m.name}
+	custom := map[string]any{"nonce": m.nn, "email": m.email, "name": m.name, "email_verified": m.emailVerified}
 	raw, err := jwt.Signed(sig).Claims(claims).Claims(custom).Serialize()
 	if err != nil {
 		t.Fatalf("sign id_token: %v", err)

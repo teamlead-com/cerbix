@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
-// ReencryptSecrets rewrites every stored secret under the current primary key:
-// each webhook signing secret and notification-channel config value is read
-// (decrypted with the keyring, which includes previous keys) and written back
-// (encrypted with the primary). Run it after adding a new primary key and moving
-// the old one to previous_keys; afterwards the old key can be dropped. It is a
-// no-op when encryption is disabled. Returns the number of webhooks and channels
-// rewritten.
+// ReencryptSecrets rewrites EVERY stored secret under the current primary key:
+// webhook signing secrets, notification-channel config, the OIDC client secret,
+// the instance SMTP password, monitor config secrets, and user TOTP secrets are
+// each read (decrypted with the keyring, which includes previous keys) and written
+// back (encrypted with the primary). Run it after adding a new primary key and
+// moving the old one to previous_keys; afterwards the old key can be dropped. It is
+// a no-op when encryption is disabled. Returns the number of webhooks and channels
+// rewritten (the other secret-bearing columns are covered but not separately counted).
 func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, err error) {
 	if s.cipher == nil {
 		return 0, 0, nil
@@ -150,6 +153,99 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		}
 	} else if merr != nil && !noRows(merr) {
 		return webhooks, channels, fmt.Errorf("store: scan mail settings for reencrypt: %w", merr)
+	}
+
+	// Monitors: only the SecretMonitorConfigKeys values in config are encrypted
+	// (non-secret keys are plaintext), so re-encrypt ONLY those. Skipping this left
+	// monitor credentials unreadable once the old key was dropped.
+	monRows, err := s.pool.Query(ctx, `SELECT id, config FROM monitors`)
+	if err != nil {
+		return webhooks, channels, fmt.Errorf("store: scan monitors for reencrypt: %w", err)
+	}
+	type monrow struct {
+		id  string
+		cfg []byte
+	}
+	var mons []monrow
+	for monRows.Next() {
+		var r monrow
+		if err := monRows.Scan(&r.id, &r.cfg); err != nil {
+			monRows.Close()
+			return webhooks, channels, fmt.Errorf("store: scan monitor: %w", err)
+		}
+		mons = append(mons, r)
+	}
+	monRows.Close()
+	if err := monRows.Err(); err != nil {
+		return webhooks, channels, fmt.Errorf("store: iterate monitors: %w", err)
+	}
+	for _, r := range mons {
+		if len(r.cfg) == 0 {
+			continue
+		}
+		cfg := map[string]string{}
+		if uerr := json.Unmarshal(r.cfg, &cfg); uerr != nil {
+			return webhooks, channels, fmt.Errorf("store: decode monitor %s config: %w", r.id, uerr)
+		}
+		changed := false
+		for k, v := range cfg {
+			if !domain.SecretMonitorConfigKeys[k] || v == "" {
+				continue
+			}
+			plain, derr := s.cipher.Decrypt(v)
+			if derr != nil {
+				return webhooks, channels, fmt.Errorf("store: decrypt monitor %s %q: %w", r.id, k, derr)
+			}
+			ev, eerr := s.cipher.Encrypt(plain)
+			if eerr != nil {
+				return webhooks, channels, fmt.Errorf("store: encrypt monitor %s %q: %w", r.id, k, eerr)
+			}
+			cfg[k] = ev
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		out, merr := json.Marshal(cfg)
+		if merr != nil {
+			return webhooks, channels, fmt.Errorf("store: encode monitor %s config: %w", r.id, merr)
+		}
+		if _, uerr := s.pool.Exec(ctx, `UPDATE monitors SET config = $2 WHERE id = $1`, r.id, string(out)); uerr != nil {
+			return webhooks, channels, fmt.Errorf("store: rewrite monitor %s: %w", r.id, uerr)
+		}
+	}
+
+	// TOTP secrets (users.totp_secret, encrypted at rest). Without this, rotating the
+	// key would lock out every 2FA user once the old key is dropped.
+	totpRows, err := s.pool.Query(ctx, `SELECT id, totp_secret FROM users WHERE totp_secret <> ''`)
+	if err != nil {
+		return webhooks, channels, fmt.Errorf("store: scan totp secrets for reencrypt: %w", err)
+	}
+	var totps []kv // reuses the {id,val} type declared for webhooks above
+	for totpRows.Next() {
+		var r kv
+		if err := totpRows.Scan(&r.id, &r.val); err != nil {
+			totpRows.Close()
+			return webhooks, channels, fmt.Errorf("store: scan totp secret: %w", err)
+		}
+		totps = append(totps, r)
+	}
+	totpRows.Close()
+	if err := totpRows.Err(); err != nil {
+		return webhooks, channels, fmt.Errorf("store: iterate totp secrets: %w", err)
+	}
+	for _, r := range totps {
+		plain, derr := s.cipher.Decrypt(r.val)
+		if derr != nil {
+			return webhooks, channels, fmt.Errorf("store: decrypt totp secret %s: %w", r.id, derr)
+		}
+		enc, eerr := s.cipher.Encrypt(plain)
+		if eerr != nil {
+			return webhooks, channels, fmt.Errorf("store: encrypt totp secret %s: %w", r.id, eerr)
+		}
+		if _, uerr := s.pool.Exec(ctx, `UPDATE users SET totp_secret = $2 WHERE id = $1`, r.id, enc); uerr != nil {
+			return webhooks, channels, fmt.Errorf("store: rewrite totp secret %s: %w", r.id, uerr)
+		}
 	}
 	return webhooks, channels, nil
 }

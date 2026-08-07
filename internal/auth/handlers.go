@@ -143,6 +143,7 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 
 	var claims struct {
 		Email             string `json:"email"`
+		EmailVerified     bool   `json:"email_verified"`
 		Name              string `json:"name"`
 		PreferredUsername string `json:"preferred_username"`
 	}
@@ -154,10 +155,17 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	if displayName == "" {
 		displayName = claims.PreferredUsername
 	}
-	// Instance policy: restrict which email domains may sign in via SSO.
-	if claims.Email != "" && !a.authPolicy().EmailAllowed(claims.Email) {
-		http.Error(w, "your email domain is not permitted to sign in", http.StatusForbidden)
-		return
+	pol := a.authPolicy()
+	// Instance policy: restrict which email domains may sign in via SSO. When an
+	// allowlist is configured it is FAIL-CLOSED — a token with no email, an
+	// unverified email, or a non-matching domain is rejected. (Without this, a token
+	// that simply omits the email claim would slip past the allowlist and JIT-create
+	// an empty-email user.)
+	if pol.EmailAllowlistEnforced() {
+		if claims.Email == "" || !claims.EmailVerified || !pol.EmailAllowed(claims.Email) {
+			http.Error(w, "a verified, permitted email is required to sign in", http.StatusForbidden)
+			return
+		}
 	}
 
 	user, err := a.store.UpsertUserByOIDCSub(ctx, idToken.Subject, claims.Email, displayName)
@@ -166,7 +174,9 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if claims.Email != "" && rt.bootstrapAdmin[claims.Email] && !user.IsGlobalAdmin {
+	// Bootstrap-admin grant requires a VERIFIED email so an unverified email claim
+	// matching a bootstrap address can't self-escalate to global admin.
+	if claims.Email != "" && claims.EmailVerified && rt.bootstrapAdmin[claims.Email] && !user.IsGlobalAdmin {
 		if err := a.store.SetGlobalAdmin(ctx, user.ID, true); err != nil {
 			a.logger.Error("bootstrap_admin_failed", "user_id", user.ID, "error", err.Error())
 		} else {

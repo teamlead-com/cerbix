@@ -2429,10 +2429,16 @@ the user row can't be read, and the OIDC client is 15s-bounded. (4) `ReencryptSe
 covers the columns it had missed — monitor config secrets, `users.totp_secret`, and (block 4)
 `push_token_enc` — so key rotation orphans nothing.
 
-**SSRF egress & tenant scope.** (5) Webhook/notify/OIDC/SMTP delivery routes through
+**SSRF egress & tenant scope.** (5) Webhook/notify/SMTP delivery routes through
 `prober.Guard` (IP-pinning dialer, `Proxy=nil`, redirect cap; SMTP keeps its TLS ServerName;
 CGNAT `100.64/10` blocked) — a user-controlled destination host can no longer reach internal
-addresses. (6) Global search scopes to the caller's visible orgs/projects *in SQL* (`= ANY`)
+addresses. **Correction (P0.2):** this delivery guard uses a SEPARATE `notification_egress`
+policy defaulting to **deny-private**, not the prober policy (which allows private for
+operator-chosen probe targets) — the original wiring reused `prober.AllowPrivateIPs=true`, so
+the guard was effectively open for editor-controlled destinations. OIDC discovery/JWKS/token
+is a distinct **operator-trusted** path on a 15s-bounded client and is **NOT** routed through
+`prober.Guard` (the earlier claim here was wrong); an internal Keycloak is a supported
+deployment, so identity egress is trusted configuration, not user input. (6) Global search scopes to the caller's visible orgs/projects *in SQL* (`= ANY`)
 before ranking/LIMIT, via `authz.VisibleScope` + `store.SearchScope`, closing a cross-tenant
 result-crowding leak.
 

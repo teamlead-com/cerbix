@@ -442,12 +442,15 @@ func runServe(args []string) int {
 			}
 		})
 
-		// Harden outbound alert delivery against SSRF: webhook/Slack/notify HTTP and
-		// SMTP all dial through the same egress guard as probes (resolve → policy check
-		// → pinned IP; metadata blocked by default, private gated by the same
-		// allow_private_ips), so a malicious webhook/channel/smtp_host can't reach
-		// loopback/link-local/metadata/internal services (redirect + DNS-rebind included).
-		egress := prober.NewGuard(cfg.Prober.AllowPrivateIPs, cfg.Prober.AllowMetadataIPs)
+		// Harden outbound alert delivery against SSRF: webhook/Slack/notify HTTP and SMTP
+		// dial through an egress guard (resolve → policy check → pinned IP; redirect +
+		// DNS-rebind included). This uses the SEPARATE notification_egress policy, which
+		// defaults to deny-private — NOT the prober policy (which allows private, since a
+		// probe target is operator-chosen). A notification destination can be set by a
+		// project editor, so it must not reach loopback/RFC1918/ULA/CGNAT/metadata unless
+		// the deployment explicitly opts in. (OIDC is a distinct operator-trusted path and
+		// is not routed through this guard — see D-0141.)
+		egress := prober.NewGuard(cfg.NotificationEgress.AllowPrivateIPs, cfg.NotificationEgress.AllowMetadataIPs)
 		mailer.SetEgressDial(egress.EgressDialContext())
 		subs := subscribe.New(st, mail)
 		deliverer := incidentFanout{hooks: webhook.New(st, egress.HTTPClient(10*time.Second)), subs: subs, logger: logger}

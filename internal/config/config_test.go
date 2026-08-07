@@ -41,6 +41,31 @@ func TestParseMinimalAppliesDefaults(t *testing.T) {
 	}
 }
 
+// TestEgressPolicyDefaults locks the SSRF policy split: probe egress allows private
+// (operator-chosen targets), notification egress denies private by default
+// (editor-chosen destinations), and both block metadata. A regression here silently
+// reopens SSRF on the alert-delivery path.
+func TestEgressPolicyDefaults(t *testing.T) {
+	cfg, err := Parse([]byte("log:\n  level: info\n"))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !cfg.Prober.AllowPrivateIPs {
+		t.Fatal("prober egress must allow private by default (monitors internal apps)")
+	}
+	if cfg.NotificationEgress.AllowPrivateIPs {
+		t.Fatal("notification egress must DENY private by default (editor-controlled destinations)")
+	}
+	if cfg.Prober.AllowMetadataIPs || cfg.NotificationEgress.AllowMetadataIPs {
+		t.Fatal("metadata IPs must be blocked by default on both policies")
+	}
+	// Explicit opt-in is honored (a deployment with genuine internal delivery endpoints).
+	cfg, err = Parse([]byte("notification_egress:\n  allow_private_ips: true\n"))
+	if err != nil || !cfg.NotificationEgress.AllowPrivateIPs {
+		t.Fatalf("notification_egress override = %v err=%v", cfg.NotificationEgress.AllowPrivateIPs, err)
+	}
+}
+
 func TestHeartbeatsRetentionDefaultAndValidation(t *testing.T) {
 	cfg, err := Parse([]byte("log:\n  level: info\n"))
 	if err != nil {

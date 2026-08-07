@@ -18,18 +18,19 @@ import (
 
 // Config is the validated configuration snapshot used by the runtime.
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	Log        LogConfig        `yaml:"log"`
-	Database   DatabaseConfig   `yaml:"database"`
-	RabbitMQ   RabbitMQConfig   `yaml:"rabbitmq"`
-	OIDC       OIDCConfig       `yaml:"oidc"`
-	Local      LocalAuthConfig  `yaml:"local"`
-	Session    SessionConfig    `yaml:"session"`
-	Prober     ProberConfig     `yaml:"prober"`
-	Heartbeats HeartbeatsConfig `yaml:"heartbeats"`
-	Security   SecurityConfig   `yaml:"security"`
-	Mail       MailConfig       `yaml:"mail"`
-	Pull       PullConfig       `yaml:"pull"`
+	Server             ServerConfig             `yaml:"server"`
+	Log                LogConfig                `yaml:"log"`
+	Database           DatabaseConfig           `yaml:"database"`
+	RabbitMQ           RabbitMQConfig           `yaml:"rabbitmq"`
+	OIDC               OIDCConfig               `yaml:"oidc"`
+	Local              LocalAuthConfig          `yaml:"local"`
+	Session            SessionConfig            `yaml:"session"`
+	Prober             ProberConfig             `yaml:"prober"`
+	NotificationEgress NotificationEgressConfig `yaml:"notification_egress"`
+	Heartbeats         HeartbeatsConfig         `yaml:"heartbeats"`
+	Security           SecurityConfig           `yaml:"security"`
+	Mail               MailConfig               `yaml:"mail"`
+	Pull               PullConfig               `yaml:"pull"`
 }
 
 // PullConfig configures the HTTP-pull transport (an alternative to RabbitMQ for a geo
@@ -133,6 +134,18 @@ type SessionConfig struct {
 // services, so allow_private_ips defaults on; allow_metadata_ips defaults off to
 // block link-local / cloud instance metadata (169.254.169.254).
 type ProberConfig struct {
+	AllowPrivateIPs  bool `yaml:"allow_private_ips"`
+	AllowMetadataIPs bool `yaml:"allow_metadata_ips"`
+}
+
+// NotificationEgressConfig is a SEPARATE SSRF policy for OUTBOUND alert delivery
+// (webhooks, Slack/notify HTTP, SMTP). Unlike probe egress it defaults to deny-private:
+// a probe target is chosen by an operator monitoring internal services, but a
+// notification destination can be set by a project editor, so it must not be able to
+// reach loopback/RFC1918/ULA/CGNAT/metadata by default. Opt back in per deployment only
+// when internal delivery endpoints are genuinely required. (OIDC discovery/JWKS/token is
+// a distinct, operator-trusted path and is NOT governed by this policy — see D-0141.)
+type NotificationEgressConfig struct {
 	AllowPrivateIPs  bool `yaml:"allow_private_ips"`
 	AllowMetadataIPs bool `yaml:"allow_metadata_ips"`
 }
@@ -306,6 +319,10 @@ func defaults() *Config {
 		Prober: ProberConfig{
 			AllowPrivateIPs:  true,  // this tool monitors internal apps
 			AllowMetadataIPs: false, // block cloud-metadata / link-local
+		},
+		NotificationEgress: NotificationEgressConfig{
+			AllowPrivateIPs:  false, // editor-controlled destinations: deny internal by default
+			AllowMetadataIPs: false,
 		},
 		Heartbeats: HeartbeatsConfig{
 			RetentionDays: 30,

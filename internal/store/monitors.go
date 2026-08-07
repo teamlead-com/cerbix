@@ -578,8 +578,8 @@ func (o ResultOutcome) withMissing(b bool) ResultOutcome { o.MissingRevisionObse
 // RecordScheduledResult records a worker/agent (scheduled) probe result following the
 // ordered pipeline in spec func-result-protocol §4, in ONE transaction:
 //
-//	missing ts → SELECT … FOR UPDATE (lock + DB clock + watermark) → [revision gate: INERT
-//	in P0a, activates in P0b] → timestamp bounds (BEFORE insert) → INSERT ON CONFLICT →
+//	missing ts → SELECT … FOR UPDATE (lock + DB clock + watermark) → revision gate
+//	(enforce|observe) → timestamp bounds (BEFORE insert) → INSERT ON CONFLICT →
 //	0 rows = duplicate → watermark compare (out-of-order = SLA-only | fresh = apply).
 //
 // This ordering is what simultaneously gives gate-before-insert, redelivery idempotency,

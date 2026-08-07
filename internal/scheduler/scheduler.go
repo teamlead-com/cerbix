@@ -11,7 +11,9 @@ import (
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/ingest"
 	"github.com/teamlead-com/cerbix/internal/metrics"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // advisoryLockKey is the well-known key for scheduler leadership.
@@ -21,6 +23,7 @@ const advisoryLockKey int64 = 0x6365726269780001 // "cerbix" + slot 1
 type Store interface {
 	ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, error)
 	StalePushMonitors(ctx context.Context) ([]domain.Monitor, error)
+	RecordDeadmanResult(ctx context.Context, monitorID string, revision int64, cutoff time.Time) (store.ResultOutcome, error)
 	TryBecomeLeader(ctx context.Context, key int64) (release func(), check func(context.Context) (bool, error), ok bool, err error)
 	RollupDailyAvailability(ctx context.Context, from, to time.Time) error
 	EnsureHeartbeatPartitions(ctx context.Context, ahead int) error
@@ -138,7 +141,8 @@ type Scheduler struct {
 	pullRegions   map[string]bool // regions served over HTTP-pull (jobs go to pull_jobs, not AMQP)
 	pullMetrics   PullStatsSink
 	leaderState   LeaderStateSink
-	confirmCh     <-chan string // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
+	confirmCh     <-chan string      // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
+	reconciler    *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
 }
 
 // WithConfirmSignals wires the stream of monitor ids that just entered their
@@ -162,6 +166,14 @@ func New(store Store, dispatcher dispatch.Dispatcher, logger *slog.Logger) *Sche
 		leaderKey:     advisoryLockKey,
 		retentionDays: defaultRetentionDays,
 	}
+}
+
+// WithReconciler wires the shared post-commit flow (SSE event + auto-incident) run after a
+// dead-man DOWN is applied. Optional and nil-safe: without it the status/outbox still land
+// (via RecordDeadmanResult), only the live SSE event + incident reconciliation are skipped.
+func (s *Scheduler) WithReconciler(rc *ingest.Reconciler) *Scheduler {
+	s.reconciler = rc
+	return s
 }
 
 // WithRetentionDays sets the raw-heartbeat retention window (in days), which also
@@ -522,10 +534,12 @@ func pruneNextRun(nextRun map[string]time.Time, monitors []domain.Monitor) {
 	}
 }
 
-// checkStalePush marks tripped push (dead-man's-switch) monitors down. A single
-// batched query returns the stale monitors (replacing a per-monitor lookup); a
-// down result is published for each, throttled by nextRun so the async status
-// update lag doesn't cause a re-publish every cycle.
+// checkStalePush marks tripped push (dead-man's-switch) monitors down. A batched query
+// returns the stale monitors; the leader applies each DOWN directly via RecordDeadmanResult
+// (atomic staleness re-check — no synthetic heartbeat through the dispatcher, closing the
+// race where a real ping lands after the staleness snapshot), throttled by nextRun so the
+// dead-man re-samples at roughly one interval while the outage persists. The transition, if
+// any, runs the shared post-commit reconciler.
 func (s *Scheduler) checkStalePush(ctx context.Context, now time.Time, nextRun map[string]time.Time) {
 	stale, err := s.store.StalePushMonitors(ctx)
 	if err != nil {
@@ -536,17 +550,20 @@ func (s *Scheduler) checkStalePush(ctx context.Context, now time.Time, nextRun m
 		if due, ok := nextRun[m.ID]; ok && now.Before(due) {
 			continue
 		}
-		// Transitional bridge: stamp a timestamp AND the monitor's current execution_revision
-		// so the synthetic DOWN passes RecordScheduledResult's missing-timestamp + revision
-		// gates. Replaced by RecordDeadmanResult (atomic staleness re-check, no dispatcher) in
-		// the dead-man step of P0b.
-		hb := domain.Heartbeat{MonitorID: m.ID, Up: false, Msg: "push timeout: no heartbeat within interval", Ts: now, ExecutionRevision: m.ExecutionRevision}
-		if err := s.dispatcher.PublishResult(ctx, hb); err != nil {
+		// cutoff mirrors the StalePushMonitors selection: stale iff the last real result is
+		// older than one interval+grace. Re-checked atomically inside RecordDeadmanResult.
+		cutoff := now.Add(-(m.Interval() + time.Duration(m.GraceSeconds)*time.Second))
+		o, err := s.store.RecordDeadmanResult(ctx, m.ID, m.ExecutionRevision, cutoff)
+		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			s.logger.Error("push_timeout_publish_failed", "monitor_id", m.ID, "error", err.Error())
+			s.logger.Error("deadman_result_failed", "monitor_id", m.ID, "error", err.Error())
 			continue
+		}
+		if o.Applied && o.Prev != o.Cur && s.reconciler != nil {
+			hb := domain.Heartbeat{MonitorID: m.ID, Up: false, Ts: now, Msg: "push timeout: no heartbeat within interval"}
+			s.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed)
 		}
 		nextRun[m.ID] = now.Add(m.Interval())
 	}

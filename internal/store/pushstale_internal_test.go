@@ -32,10 +32,12 @@ func TestStalePushMonitors(t *testing.T) {
 			t.Fatalf("update monitor: %v", err)
 		}
 	}
-	beat := func(id string, ago time.Duration) {
+	// Staleness is keyed on last_result_ts (a REAL observation), not raw heartbeats — a
+	// dead-man DOWN sample must not make a monitor look fresh (see StalePushMonitors).
+	reported := func(id string, ago time.Duration) {
 		if _, err := st.pool.Exec(ctx,
-			`INSERT INTO heartbeats (monitor_id, ts, up) VALUES ($1, $2, true)`, id, time.Now().Add(-ago)); err != nil {
-			t.Fatalf("seed heartbeat: %v", err)
+			`UPDATE monitors SET last_result_ts = $2 WHERE id = $1`, id, time.Now().Add(-ago)); err != nil {
+			t.Fatalf("set last_result_ts: %v", err)
 		}
 	}
 
@@ -44,14 +46,14 @@ func TestStalePushMonitors(t *testing.T) {
 
 	fresh := mk("fresh") // reported just now → not stale
 	set(fresh.ID, time.Hour, domain.StatusUp)
-	beat(fresh.ID, 0)
+	reported(fresh.ID, 0)
 
-	down := mk("down") // already down → excluded
+	down := mk("down") // already down but still silent → INCLUDED (periodic dead-man sampling)
 	set(down.ID, time.Hour, domain.StatusDown)
 
-	staleOldReport := mk("stale-oldreport") // last beat 90s ago, interval 60s → stale
+	staleOldReport := mk("stale-oldreport") // last report 90s ago, interval 60s → stale
 	set(staleOldReport.ID, time.Hour, domain.StatusUp)
-	beat(staleOldReport.ID, 90*time.Second)
+	reported(staleOldReport.ID, 90*time.Second)
 
 	// A non-push monitor must never appear.
 	if _, err := st.CreateMonitor(ctx, domain.Monitor{
@@ -69,14 +71,16 @@ func TestStalePushMonitors(t *testing.T) {
 	for _, m := range got {
 		gotIDs[m.ID] = true
 	}
-	if !gotIDs[staleNoReport.ID] || !gotIDs[staleOldReport.ID] {
-		t.Fatalf("stale monitors missing: got %v", gotIDs)
+	// A down-but-silent monitor stays in the set now (periodic dead-man DOWN sampling for
+	// sample-based SLA); only a freshly-reported one is excluded.
+	if !gotIDs[staleNoReport.ID] || !gotIDs[staleOldReport.ID] || !gotIDs[down.ID] {
+		t.Fatalf("stale monitors missing (incl. silent-down): got %v", gotIDs)
 	}
-	if gotIDs[fresh.ID] || gotIDs[down.ID] {
-		t.Fatalf("fresh/down monitor wrongly reported stale: got %v", gotIDs)
+	if gotIDs[fresh.ID] {
+		t.Fatalf("freshly-reported monitor wrongly reported stale: got %v", gotIDs)
 	}
-	if len(got) != 2 {
-		t.Fatalf("stale count = %d, want 2", len(got))
+	if len(got) != 3 {
+		t.Fatalf("stale count = %d, want 3", len(got))
 	}
 }
 

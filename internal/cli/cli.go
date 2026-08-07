@@ -626,9 +626,10 @@ func runServe(args []string) int {
 		switch *role {
 		case "all":
 			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
-				WithPullRegions(cfg.Pull.Regions). // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
-				WithPullMetrics(registry).         // per-region pull-queue depth/lag gauges
-				WithLeaderState(registry).         // cerbix_scheduler_leader gauge
+				WithPullRegions(cfg.Pull.Regions).                                  // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
+				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
+				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
+				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → SSE + incident
 				WithConfirmSignals(confirmSignals())
 			spawn(func() { sch.Run(ctx) })
 			wk := worker.New(disp, runner, workerPoolSize, logger)
@@ -640,10 +641,11 @@ func runServe(args []string) int {
 				return 1
 			}
 			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
-				WithPullRegions(cfg.Pull.Regions).   // pull-served regions get jobs via pull_jobs, not AMQP
-				WithPullMetrics(registry).           // per-region pull-queue depth/lag gauges
-				WithLeaderState(registry).           // cerbix_scheduler_leader gauge
-				WithConfirmSignals(confirmSignals()) // accelerated failure-confirmation probes
+				WithPullRegions(cfg.Pull.Regions).                                  // pull-served regions get jobs via pull_jobs, not AMQP
+				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
+				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
+				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → incident/outbox (SSE only if this process serves it)
+				WithConfirmSignals(confirmSignals())                                // accelerated failure-confirmation probes
 			// Alert when a region with enabled monitors loses its worker/agent. Liveness
 			// unions RabbitMQ consumers with recent pull-agent heartbeats.
 			sch.WithLiveRegions(newLiveRegions(mgmt, st))

@@ -226,3 +226,70 @@ func TestRevisionGate(t *testing.T) {
 		t.Fatalf("new-gen result after bump: %+v, want applied", o)
 	}
 }
+
+// TestRecordDeadmanResult proves the dead-man entrypoint's atomic staleness re-check:
+// it applies a DOWN (inserting an SLA sample, NOT advancing last_result_ts) only when the
+// monitor is still a stale, enabled push of the same generation; a fresh ping, wrong
+// revision, or disable since the cutoff drops it.
+func TestRecordDeadmanResult(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		IntervalSeconds: 60, FailureThreshold: 1, Enabled: true, PushToken: "cbxp_dm",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	now := time.Now().UTC()
+	cutoff := now.Add(-90 * time.Second) // now - (interval 60 + grace 30-ish)
+	rev := mon.ExecutionRevision
+
+	setLast := func(ts time.Time) {
+		if _, err := st.pool.Exec(ctx, `UPDATE monitors SET last_result_ts = $2 WHERE id = $1`, mon.ID, ts); err != nil {
+			t.Fatalf("set last: %v", err)
+		}
+	}
+	hbCount := func() int {
+		var n int
+		_ = st.pool.QueryRow(ctx, `SELECT count(*) FROM heartbeats WHERE monitor_id=$1`, mon.ID).Scan(&n)
+		return n
+	}
+
+	// Stale (last ping 1h ago, older than cutoff) → applies DOWN, inserts a sample.
+	setLast(now.Add(-time.Hour))
+	if o, err := st.RecordDeadmanResult(ctx, mon.ID, rev, cutoff); err != nil || !o.Applied || o.Cur != domain.StatusDown || !o.Inserted {
+		t.Fatalf("stale deadman: %+v err=%v, want applied down", o, err)
+	}
+	if hbCount() != 1 {
+		t.Fatalf("deadman must insert a DOWN sample: hb=%d", hbCount())
+	}
+	// last_result_ts must NOT be advanced by the dead-man (still ~1h ago).
+	var last *time.Time
+	_ = st.pool.QueryRow(ctx, `SELECT last_result_ts FROM monitors WHERE id=$1`, mon.ID).Scan(&last)
+	if last == nil || last.After(now.Add(-30*time.Minute)) {
+		t.Fatalf("dead-man must not advance last_result_ts: got %v", last)
+	}
+
+	// Fresh ping since cutoff → dropped (no new sample).
+	setLast(now)
+	if o, err := st.RecordDeadmanResult(ctx, mon.ID, rev, cutoff); err != nil || o.Applied || o.Inserted {
+		t.Fatalf("fresh-ping deadman must drop: %+v err=%v", o, err)
+	}
+	// Wrong revision → dropped.
+	setLast(now.Add(-time.Hour))
+	if o, _ := st.RecordDeadmanResult(ctx, mon.ID, rev+1, cutoff); o.Applied || o.Inserted {
+		t.Fatalf("stale-revision deadman must drop: %+v", o)
+	}
+	// Disabled → dropped.
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET enabled=false WHERE id=$1`, mon.ID); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if o, _ := st.RecordDeadmanResult(ctx, mon.ID, rev, cutoff); o.Applied || o.Inserted {
+		t.Fatalf("disabled deadman must drop: %+v", o)
+	}
+	if hbCount() != 1 {
+		t.Fatalf("only the first (stale) deadman should have inserted: hb=%d, want 1", hbCount())
+	}
+}

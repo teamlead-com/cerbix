@@ -13,11 +13,13 @@ import (
 	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/metrics"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 type fakeStore struct {
 	monitors      []domain.Monitor
 	stalePush     []domain.Monitor
+	deadmanCh     chan string // receives monitorID on each RecordDeadmanResult call
 	leader        bool
 	elections     int32
 	ensured       int32
@@ -35,6 +37,15 @@ func (f *fakeStore) ListEnabledMonitors(context.Context) ([]domain.Monitor, erro
 
 func (f *fakeStore) StalePushMonitors(context.Context) ([]domain.Monitor, error) {
 	return f.stalePush, nil
+}
+func (f *fakeStore) RecordDeadmanResult(_ context.Context, monitorID string, _ int64, _ time.Time) (store.ResultOutcome, error) {
+	if f.deadmanCh != nil {
+		select {
+		case f.deadmanCh <- monitorID:
+		default:
+		}
+	}
+	return store.ResultOutcome{Applied: true, Prev: domain.StatusUp, Cur: domain.StatusDown}, nil
 }
 
 func (f *fakeStore) TryBecomeLeader(_ context.Context, _ int64) (func(), func(context.Context) (bool, error), bool, error) {
@@ -149,11 +160,13 @@ func TestWithRetentionDaysClampsLow(t *testing.T) {
 }
 
 func TestSchedulerPushLiveness(t *testing.T) {
-	// The batched staleness query returns a tripped push monitor; the leader
-	// publishes a down result for it (which selection is stale is the store's job,
-	// covered by the DB-gated StalePushMonitors test).
+	// The batched staleness query returns a tripped push monitor; the leader applies a DOWN
+	// directly via RecordDeadmanResult (the atomic staleness re-check + which selection is
+	// stale are the store's job, covered by the DB-gated tests) rather than publishing a
+	// synthetic result through the dispatcher.
 	fs := &fakeStore{
-		leader: true,
+		leader:    true,
+		deadmanCh: make(chan string, 1),
 		stalePush: []domain.Monitor{
 			{ID: "stale", Type: domain.MonitorPush, IntervalSeconds: 1, Enabled: true, Status: domain.StatusUp, CreatedAt: time.Now().Add(-time.Hour)},
 		},
@@ -165,12 +178,12 @@ func TestSchedulerPushLiveness(t *testing.T) {
 	go s.Run(ctx)
 
 	select {
-	case hb := <-disp.Results():
-		if hb.MonitorID != "stale" || hb.Up {
-			t.Fatalf("expected a down result for the stale monitor, got %+v", hb)
+	case id := <-fs.deadmanCh:
+		if id != "stale" {
+			t.Fatalf("expected dead-man DOWN for the stale monitor, got %q", id)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("scheduler did not mark the stale push monitor down")
+		t.Fatal("scheduler did not apply the dead-man DOWN for the stale push monitor")
 	}
 }
 

@@ -344,10 +344,17 @@ func (s *Store) ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, erro
 // back to created_at when they have never reported). One query with an
 // index-backed correlated max(ts) replaces a per-monitor latest-heartbeat lookup.
 func (s *Store) StalePushMonitors(ctx context.Context) ([]domain.Monitor, error) {
+	// No `status <> 'down'` filter: a down push monitor STAYS in the stale set so the
+	// dead-man re-samples DOWN each idle tick (sample-based SLA reflects a sustained
+	// outage). The scheduler throttles re-fires via nextRun; RecordDeadmanResult only
+	// transitions on the first (its recordCheckStatusTx prev!=cur guard). Keyed on
+	// last_result_ts — REAL observations only (a dead-man DOWN heartbeat does not advance
+	// it) — identical to the dead-man CAS cutoff, so the monitor's own synthetic samples
+	// don't make it look fresh, and a real ping (advancing last_result_ts) removes it.
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+monitorColumns+` FROM monitors m
-		 WHERE m.type = 'push' AND m.enabled AND m.status <> 'down'
-		   AND COALESCE((SELECT max(h.ts) FROM heartbeats h WHERE h.monitor_id = m.id), m.created_at)
+		 WHERE m.type = 'push' AND m.enabled
+		   AND COALESCE(m.last_result_ts, m.created_at)
 		       < now() - make_interval(secs => m.interval_seconds + m.grace_seconds)`)
 	if err != nil {
 		return nil, fmt.Errorf("store: stale push monitors: %w", err)
@@ -622,6 +629,61 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	return s.commitOutcome(ctx, tx, ResultOutcome{
 		Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed,
 	}.withMissing(missingObserved))
+}
+
+// RecordDeadmanResult applies a push-timeout DOWN from the scheduler leader directly (no
+// synthetic heartbeat through the dispatcher — origin stays a trusted server-side call).
+// In ONE transaction it re-checks staleness ATOMICALLY under the monitor's lock — still an
+// enabled push monitor, same config generation, and no result since the scheduler's
+// evaluation cutoff — so a real ping (or a config change / disable) that landed since the
+// staleness snapshot causes the synthetic DOWN to be dropped, closing the dead-man race.
+// On pass it inserts a DOWN heartbeat (SLA sample; sample-based SLA would otherwise stay
+// 100% on stale UP samples) and applies the status transition through the SAME
+// recordCheckStatusTx as a real result (confirmation/maintenance/transition-outbox
+// preserved). It does NOT advance last_result_ts — only a real observation does — so the
+// scheduler re-samples DOWN each idle tick (throttled by nextRun) until a real ping
+// advances the watermark. cutoff is now - (interval + grace), computed by the scheduler.
+func (s *Store) RecordDeadmanResult(ctx context.Context, monitorID string, revision int64, cutoff time.Time) (ResultOutcome, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ResultOutcome{}, fmt.Errorf("store: begin deadman: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	var typ, status string
+	var enabled bool
+	var curRev int64
+	var lastOrCreated time.Time
+	err = tx.QueryRow(ctx,
+		`SELECT type, enabled, status, execution_revision, COALESCE(last_result_ts, created_at)
+		   FROM monitors WHERE id = $1 FOR UPDATE`,
+		monitorID).Scan(&typ, &enabled, &status, &curRev, &lastOrCreated)
+	if noRows(err) {
+		return ResultOutcome{}, ErrNotFound
+	}
+	if err != nil {
+		return ResultOutcome{}, fmt.Errorf("store: deadman lock: %w", err)
+	}
+	// Atomic staleness re-check. Any failure drops the synthetic DOWN.
+	if domain.MonitorType(typ) != domain.MonitorPush || !enabled || curRev != revision || !lastOrCreated.Before(cutoff) {
+		return s.commitOutcome(ctx, tx, ResultOutcome{})
+	}
+
+	// DOWN heartbeat for SLA continuity (statement_timestamp() → distinct ts per tick). Does
+	// NOT touch last_result_ts (that watermark tracks real observations, driving this CAS).
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO heartbeats (monitor_id, ts, up, msg, observed_at)
+		 VALUES ($1, statement_timestamp(), false, $2, NULL) ON CONFLICT (monitor_id, ts) DO NOTHING`,
+		monitorID, "push timeout: no heartbeat within interval"); err != nil {
+		return ResultOutcome{}, fmt.Errorf("store: deadman insert: %w", err)
+	}
+	prev, cur, suppressed, err := recordCheckStatusTx(ctx, tx, monitorID, false)
+	if err != nil {
+		return ResultOutcome{}, err
+	}
+	return s.commitOutcome(ctx, tx, ResultOutcome{
+		Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed,
+	})
 }
 
 // commitOutcome commits tx and returns the outcome (or a wrapped commit error).

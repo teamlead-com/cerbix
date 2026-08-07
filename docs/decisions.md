@@ -2316,3 +2316,19 @@ Composites are a core-region concern, so the core worker now uses `config.worker
 (worker config + a database connection) and depends on Postgres; remote geo workers stay
 DB-less by design. Verified live: an `all`-mode pull-region monitor routes to `pull_jobs`
 with zero local heartbeats, and a distributed core worker evaluates a composite correctly.
+
+## D-0137 — Pool sizing, SLA-report deadlock, per-cadence timeouts (iter-0079)
+Three leader-loop robustness gaps. (1) `pgxpool.New` used the default MaxConns
+(max(4, numCPU)) while several connections are pinned for the process lifetime — the
+leadership advisory lock plus the confirm/pull LISTEN notifiers — so on a small host
+(2 CPUs → 4 conns, 3 pinned) query traffic could starve. `Open` now parses the DSN and
+enforces a floor (MaxConns ≥ 12, MinConns ≥ 2) plus connection lifetime/idle/health-check,
+honoring a larger operator-set `pool_max_conns`. (2) `EnqueueDueSLAReports` held a
+transaction and then computed each project's SLIs via `s.pool` — a SECOND acquire while
+holding one; under pool saturation the nested acquire blocks forever (self-deadlock). SLIs
+now run on the transaction (`projectSLI` on a `sliQuerier` satisfied by both pool and tx).
+(3) Every periodic leader task ran on the process-lifetime context, so one hung query (a
+lock wait, a slow aggregate) stalled the whole tick and froze dispatch. Each sub-cadence
+now runs under a bounded child context (`subCadenceTimeout` 30s; `maintainTimeout` 2m for
+the drop_chunks/purge sweep). Verified by a 1-connection regression test that deadlocks on
+the old SLA path and passes on the fix.

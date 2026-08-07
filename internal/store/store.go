@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,6 +18,19 @@ import (
 
 // ErrNotFound is returned when a lookup matches no row.
 var ErrNotFound = errors.New("store: not found")
+
+// Pool sizing. Several long-lived connections are checked out for the whole
+// process lifetime — the scheduler's leadership advisory lock plus the LISTEN
+// notifiers (confirm-phase, pull) — so pgx's default MaxConns of max(4, numCPU)
+// can starve query traffic on a small host (2 CPUs → 4 conns, 3 pinned, 1 left).
+// Enforce a floor and set lifetimes/health-check so dead connections are pruned.
+const (
+	poolMinConns          = 2
+	poolMaxConnsFloor     = 12
+	poolMaxConnLifetime   = time.Hour
+	poolMaxConnIdleTime   = 30 * time.Minute
+	poolHealthCheckPeriod = time.Minute
+)
 
 // Store wraps a pgx connection pool.
 type Store struct {
@@ -39,7 +53,23 @@ func (s *Store) WithCipher(c *secret.Cipher) *Store {
 
 // Open creates a Store from a Postgres DSN and verifies connectivity.
 func Open(ctx context.Context, dsn string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse dsn: %w", err)
+	}
+	// Honor an operator-set pool_max_conns in the DSN, but never drop below the
+	// floor — we pin several connections for the process lifetime (leader lock +
+	// notifiers) and must keep headroom for actual queries.
+	if cfg.MaxConns < poolMaxConnsFloor {
+		cfg.MaxConns = poolMaxConnsFloor
+	}
+	if cfg.MinConns < poolMinConns {
+		cfg.MinConns = poolMinConns
+	}
+	cfg.MaxConnLifetime = poolMaxConnLifetime
+	cfg.MaxConnIdleTime = poolMaxConnIdleTime
+	cfg.HealthCheckPeriod = poolHealthCheckPeriod
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("store: connect: %w", err)
 	}

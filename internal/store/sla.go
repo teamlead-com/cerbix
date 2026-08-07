@@ -50,8 +50,21 @@ func (s *Store) MonitorSLI(ctx context.Context, monitorID string, since time.Tim
 // ProjectSLI aggregates all heartbeats of a project's monitors since `since`,
 // excluding maintenance windows (monitor- or project-scoped).
 func (s *Store) ProjectSLI(ctx context.Context, projectID string, since time.Time) (SLICounts, error) {
+	return projectSLI(ctx, s.pool, projectID, since)
+}
+
+// sliQuerier is satisfied by both *pgxpool.Pool and pgx.Tx, so projectSLI can run
+// on the pool OR inside a caller's transaction. Running it on the tx is what lets
+// EnqueueDueSLAReports compute SLIs WITHOUT acquiring a second pooled connection
+// while already holding one — the nested acquire could self-deadlock once the pool
+// is saturated (leader lock + notifiers + concurrent requests).
+type sliQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func projectSLI(ctx context.Context, q sliQuerier, projectID string, since time.Time) (SLICounts, error) {
 	var c SLICounts
-	err := s.pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT count(*)::bigint,
 		        count(*) FILTER (WHERE h.up)::bigint,
 		        COALESCE(avg(h.latency_ms) FILTER (WHERE h.up), 0)::float8,
@@ -387,7 +400,9 @@ func (s *Store) EnqueueDueSLAReports(ctx context.Context) (int, error) {
 	for _, p := range projects {
 		report := domain.SLAReport{ProjectID: p.id, ProjectName: p.name, GeneratedAt: now}
 		for _, w := range slaReportWindows {
-			c, err := s.ProjectSLI(ctx, p.id, now.Add(-w.duration))
+			// Run on tx, NOT s.pool: acquiring a second connection while holding
+			// this tx's connection can self-deadlock under pool saturation.
+			c, err := projectSLI(ctx, tx, p.id, now.Add(-w.duration))
 			if err != nil {
 				return 0, err
 			}

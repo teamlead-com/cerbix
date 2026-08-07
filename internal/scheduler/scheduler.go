@@ -103,6 +103,13 @@ const (
 	// leader steps down immediately rather than keep dispatching against a lock another
 	// node may now hold — the anti-split-brain watchdog.
 	leaderCheckEvery = 5 * time.Second
+	// subCadenceTimeout bounds a single periodic leader task (rollup, renotify, burn,
+	// SLA reports, region/escalation, stale-push) so one hung query — a lock wait, a slow
+	// aggregate — can't stall the whole leader tick and freeze dispatch. maintainTimeout
+	// is the larger budget for the hourly partition/purge sweep (drop_chunks + several
+	// purges).
+	subCadenceTimeout = 30 * time.Second
+	maintainTimeout   = 2 * time.Minute
 	// pullLagWarnSeconds logs a warning when a region's oldest unclaimed pull job is
 	// older than this — a live agent that stopped draining (paging is a Prometheus rule
 	// on cerbix_pull_agent_lag_seconds; this is the in-app operational breadcrumb).
@@ -305,19 +312,24 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 				// Recompute only the retained range: raw older than retention is
 				// dropped, so recomputing it would wipe the frozen rollup rows that
 				// carry long-range availability.
-				if err := s.store.RollupDailyAvailability(ctx, today.AddDate(0, 0, -s.retentionDays), today); err != nil {
-					s.logger.Error("rollup_daily_failed", "error", err.Error())
-				}
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					if err := s.store.RollupDailyAvailability(c, today.AddDate(0, 0, -s.retentionDays), today); err != nil {
+						s.logger.Error("rollup_daily_failed", "error", err.Error())
+					}
+				})
 			}
 			if lastMaintain.IsZero() || now.Sub(lastMaintain) >= maintainEvery {
 				lastMaintain = now
-				s.maintainPartitions(ctx, now)
+				withTimeout(ctx, maintainTimeout, func(c context.Context) { s.maintainPartitions(c, now) })
 			}
 			if lastRefresh.IsZero() || now.Sub(lastRefresh) >= refreshEvery {
 				lastRefresh = now
-				if ms, err := s.store.ListEnabledMonitors(ctx); err != nil {
-					s.logger.Error("list_enabled_monitors_failed", "error", err.Error())
-				} else {
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					ms, err := s.store.ListEnabledMonitors(c)
+					if err != nil {
+						s.logger.Error("list_enabled_monitors_failed", "error", err.Error())
+						return
+					}
 					monitors = ms
 					pruneNextRun(nextRun, monitors)
 					byID = make(map[string]domain.Monitor, len(monitors))
@@ -337,68 +349,80 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 							s.enterConfirm(confirmFast, byID, m, now, nextRun)
 						}
 					}
-				}
+				})
 			}
 			if lastPushCheck.IsZero() || now.Sub(lastPushCheck) >= pushCheckEvery {
 				lastPushCheck = now
-				s.checkStalePush(ctx, now, nextRun)
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) { s.checkStalePush(c, now, nextRun) })
 			}
 			if lastRenotify.IsZero() || now.Sub(lastRenotify) >= renotifyEvery {
 				lastRenotify = now
-				if n, err := s.store.EnqueueRenotifyReminders(ctx); err != nil {
-					s.logger.Error("renotify_failed", "error", err.Error())
-				} else if n > 0 {
-					s.logger.Info("renotify_reminders_enqueued", "count", n)
-				}
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					if n, err := s.store.EnqueueRenotifyReminders(c); err != nil {
+						s.logger.Error("renotify_failed", "error", err.Error())
+					} else if n > 0 {
+						s.logger.Info("renotify_reminders_enqueued", "count", n)
+					}
+				})
 			}
 			if lastBurn.IsZero() || now.Sub(lastBurn) >= burnEvery {
 				lastBurn = now
-				if fired, resolved, err := s.store.EvaluateBurnAlerts(ctx); err != nil {
-					s.logger.Error("burn_eval_failed", "error", err.Error())
-				} else if fired > 0 || resolved > 0 {
-					s.logger.Info("burn_alerts_evaluated", "fired", fired, "resolved", resolved)
-				}
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					if fired, resolved, err := s.store.EvaluateBurnAlerts(c); err != nil {
+						s.logger.Error("burn_eval_failed", "error", err.Error())
+					} else if fired > 0 || resolved > 0 {
+						s.logger.Info("burn_alerts_evaluated", "fired", fired, "resolved", resolved)
+					}
+				})
 			}
 			if lastReport.IsZero() || now.Sub(lastReport) >= reportEvery {
 				lastReport = now
-				if n, err := s.store.EnqueueDueSLAReports(ctx); err != nil {
-					s.logger.Error("sla_report_enqueue_failed", "error", err.Error())
-				} else if n > 0 {
-					s.logger.Info("sla_reports_enqueued", "count", n)
-				}
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					if n, err := s.store.EnqueueDueSLAReports(c); err != nil {
+						s.logger.Error("sla_report_enqueue_failed", "error", err.Error())
+					} else if n > 0 {
+						s.logger.Info("sla_reports_enqueued", "count", n)
+					}
+				})
 			}
 			if s.liveRegions != nil && (lastRegionChk.IsZero() || now.Sub(lastRegionChk) >= regionWorkerEvery) {
 				lastRegionChk = now
-				// A lookup failure must NOT be treated as "no workers" (that would alert
-				// every region), so evaluate only on a successful management response.
-				if liveSet, err := s.liveRegions.LiveJobRegions(ctx); err != nil {
-					s.logger.Warn("region_worker_live_lookup_failed", "error", err.Error())
-				} else if fired, resolved, err := s.store.EvaluateRegionWorkerAlerts(ctx, liveSet, regionWorkerGraceSeconds); err != nil {
-					s.logger.Error("region_worker_eval_failed", "error", err.Error())
-				} else if fired > 0 || resolved > 0 {
-					s.logger.Info("region_worker_alerts_evaluated", "fired", fired, "resolved", resolved)
-				}
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					// A lookup failure must NOT be treated as "no workers" (that would alert
+					// every region), so evaluate only on a successful management response.
+					if liveSet, err := s.liveRegions.LiveJobRegions(c); err != nil {
+						s.logger.Warn("region_worker_live_lookup_failed", "error", err.Error())
+					} else if fired, resolved, err := s.store.EvaluateRegionWorkerAlerts(c, liveSet, regionWorkerGraceSeconds); err != nil {
+						s.logger.Error("region_worker_eval_failed", "error", err.Error())
+					} else if fired > 0 || resolved > 0 {
+						s.logger.Info("region_worker_alerts_evaluated", "fired", fired, "resolved", resolved)
+					}
+				})
 			}
 			if s.pullMetrics != nil && (lastPullStats.IsZero() || now.Sub(lastPullStats) >= pullStatsEvery) {
 				lastPullStats = now
-				if stats, err := s.store.PullQueueStats(ctx); err != nil {
-					s.logger.Warn("pull_queue_stats_failed", "error", err.Error())
-				} else {
-					s.pullMetrics.SetPullStats(stats)
-					for _, st := range stats {
-						if st.LagSeconds >= pullLagWarnSeconds {
-							s.logger.Warn("pull_region_lagging", "region", st.Region, "pending", st.Pending, "lag_seconds", int(st.LagSeconds))
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					if stats, err := s.store.PullQueueStats(c); err != nil {
+						s.logger.Warn("pull_queue_stats_failed", "error", err.Error())
+					} else {
+						s.pullMetrics.SetPullStats(stats)
+						for _, st := range stats {
+							if st.LagSeconds >= pullLagWarnSeconds {
+								s.logger.Warn("pull_region_lagging", "region", st.Region, "pending", st.Pending, "lag_seconds", int(st.LagSeconds))
+							}
 						}
 					}
-				}
+				})
 			}
 			if lastEscalation.IsZero() || now.Sub(lastEscalation) >= escalationEvery {
 				lastEscalation = now
-				if n, err := s.store.AdvanceEscalations(ctx); err != nil {
-					s.logger.Error("advance_escalations_failed", "error", err.Error())
-				} else if n > 0 {
-					s.logger.Info("escalations_advanced", "fired", n)
-				}
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					if n, err := s.store.AdvanceEscalations(c); err != nil {
+						s.logger.Error("advance_escalations_failed", "error", err.Error())
+					} else if n > 0 {
+						s.logger.Info("escalations_advanced", "fired", n)
+					}
+				})
 			}
 			// Publish due active checks from the in-memory snapshot (no DB scan).
 			publishFailed, publishErr := 0, ""
@@ -558,6 +582,15 @@ func (s *Scheduler) maintainPartitions(ctx context.Context, now time.Time) {
 	} else if purged > 0 {
 		s.logger.Info("expired_auth_flows_purged", "count", purged)
 	}
+}
+
+// withTimeout runs a periodic leader task under a bounded child context so one
+// slow/hung store call can't stall the whole leader tick. The child is always
+// cancelled when fn returns.
+func withTimeout(parent context.Context, d time.Duration, fn func(context.Context)) {
+	ctx, cancel := context.WithTimeout(parent, d)
+	defer cancel()
+	fn(ctx)
 }
 
 // sleep waits for d or ctx cancellation; returns false if ctx was cancelled.

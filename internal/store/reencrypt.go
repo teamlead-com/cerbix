@@ -247,5 +247,40 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 			return webhooks, channels, fmt.Errorf("store: rewrite totp secret %s: %w", r.id, uerr)
 		}
 	}
+
+	// Push tokens (monitors.push_token_enc). Also upgrades the plaintext values the
+	// 00053 migration seeds (unprefixed → Decrypt passes them through, Encrypt writes
+	// ciphertext) so nothing stays plaintext once a key is configured, and covers key
+	// rotation for push endpoints.
+	ptRows, err := s.pool.Query(ctx, `SELECT id, push_token_enc FROM monitors WHERE push_token_enc IS NOT NULL`)
+	if err != nil {
+		return webhooks, channels, fmt.Errorf("store: scan push tokens for reencrypt: %w", err)
+	}
+	var pts []kv // reuses the {id,val} type declared for webhooks above
+	for ptRows.Next() {
+		var r kv
+		if err := ptRows.Scan(&r.id, &r.val); err != nil {
+			ptRows.Close()
+			return webhooks, channels, fmt.Errorf("store: scan push token: %w", err)
+		}
+		pts = append(pts, r)
+	}
+	ptRows.Close()
+	if err := ptRows.Err(); err != nil {
+		return webhooks, channels, fmt.Errorf("store: iterate push tokens: %w", err)
+	}
+	for _, r := range pts {
+		plain, derr := s.cipher.Decrypt(r.val)
+		if derr != nil {
+			return webhooks, channels, fmt.Errorf("store: decrypt push token %s: %w", r.id, derr)
+		}
+		enc, eerr := s.cipher.Encrypt(plain)
+		if eerr != nil {
+			return webhooks, channels, fmt.Errorf("store: encrypt push token %s: %w", r.id, eerr)
+		}
+		if _, uerr := s.pool.Exec(ctx, `UPDATE monitors SET push_token_enc = $2 WHERE id = $1`, r.id, enc); uerr != nil {
+			return webhooks, channels, fmt.Errorf("store: rewrite push token %s: %w", r.id, uerr)
+		}
+	}
 	return webhooks, channels, nil
 }

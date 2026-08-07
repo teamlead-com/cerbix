@@ -44,6 +44,14 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create monitor: %v", err)
 	}
+	// A push monitor whose token is encrypted at rest + blind-indexed for lookup.
+	push, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		IntervalSeconds: 3600, Enabled: true, PushToken: "cbxp_rotate_me",
+	})
+	if err != nil {
+		t.Fatalf("create push monitor: %v", err)
+	}
 	usr, _ := st.CreateLocalUser(ctx, "u@x", "U", "pwhash", false)
 	encTOTP, _ := cA.Encrypt("totpsecret")
 	if _, err := st.pool.Exec(ctx, `UPDATE users SET totp_secret = $2 WHERE id = $1`, usr.ID, encTOTP); err != nil {
@@ -92,5 +100,25 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 	}
 	if _, err := cA.Decrypt(rawTOTP); err == nil {
 		t.Fatal("after reencrypt, old key A must no longer read the TOTP secret")
+	}
+
+	// The push token must also have rotated to B, stay looked-up-able by its blind
+	// index, and never appear in plaintext at rest.
+	var rawPushEnc, rawPushHash string
+	_ = st.pool.QueryRow(ctx, `SELECT push_token_enc, push_token_hash FROM monitors WHERE id = $1`, push.ID).Scan(&rawPushEnc, &rawPushHash)
+	if got, err := cB.Decrypt(rawPushEnc); err != nil || got != "cbxp_rotate_me" {
+		t.Fatalf("after reencrypt, B should read push token: got %q err=%v", got, err)
+	}
+	if _, err := cA.Decrypt(rawPushEnc); err == nil {
+		t.Fatal("after reencrypt, old key A must no longer read the push token")
+	}
+	if rawPushEnc == "cbxp_rotate_me" {
+		t.Fatal("push token stored in plaintext at rest")
+	}
+	if rawPushHash != HashToken("cbxp_rotate_me") {
+		t.Fatalf("push token blind index = %q, want HashToken(token)", rawPushHash)
+	}
+	if got, err := st.GetMonitorByPushToken(ctx, "cbxp_rotate_me"); err != nil || got.ID != push.ID {
+		t.Fatalf("lookup by push token after rotation: %+v err=%v", got, err)
 	}
 }

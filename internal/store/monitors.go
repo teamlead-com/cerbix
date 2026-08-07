@@ -16,7 +16,7 @@ import (
 
 // monitorColumns includes a correlated aggregate for depends_on; the bare `id`
 // inside it resolves to the outer monitors row under any table alias.
-const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, " +
+const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, " +
 	"(SELECT COALESCE(array_agg(d.depends_on_id::text ORDER BY d.created_at), '{}') FROM monitor_dependencies d WHERE d.monitor_id = id) AS depends_on"
 
 // methodOrGet keeps the NOT NULL method column concrete; the prober ignores it
@@ -55,7 +55,13 @@ func (s *Store) scanMonitor(row pgx.Row) (domain.Monitor, error) {
 	m.Type = domain.MonitorType(typ)
 	m.Status = domain.MonitorStatus(stat)
 	if pushToken != nil {
-		m.PushToken = *pushToken
+		// push_token_enc holds the secret at rest (cipher-prefixed ciphertext when a key
+		// is configured, otherwise plaintext). Decrypt is nil- and plaintext-tolerant.
+		plain, derr := s.cipher.Decrypt(*pushToken)
+		if derr != nil {
+			return domain.Monitor{}, fmt.Errorf("store: decrypt push token: %w", derr)
+		}
+		m.PushToken = plain
 	}
 	if escPolicy != nil {
 		m.EscalationPolicyID = *escPolicy
@@ -138,18 +144,26 @@ func (s *Store) CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 	if region == "" {
 		region = domain.DefaultRegion
 	}
-	var pushToken *string
+	// Push token is stored as a blind index (SHA-256, for lookup) plus an encrypted
+	// value (for display); the plaintext is never persisted. Encrypt is nil- and
+	// empty-tolerant, so a non-push monitor stores NULLs.
+	var pushHash, pushEnc *string
 	if m.PushToken != "" {
-		pushToken = &m.PushToken
+		h := HashToken(m.PushToken)
+		enc, eerr := s.cipher.Encrypt(m.PushToken)
+		if eerr != nil {
+			return domain.Monitor{}, fmt.Errorf("store: encrypt push token: %w", eerr)
+		}
+		pushHash, pushEnc = &h, &enc
 	}
 	config, err := s.marshalConfig(m)
 	if err != nil {
 		return domain.Monitor{}, err
 	}
 	row := s.pool.QueryRow(ctx,
-		`INSERT INTO monitors (project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, push_token, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING `+monitorColumns,
-		m.ProjectID, m.Name, string(m.Type), m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, pushToken, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds)
+		`INSERT INTO monitors (project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, push_token_hash, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING `+monitorColumns,
+		m.ProjectID, m.Name, string(m.Type), m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, pushHash, pushEnc, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds)
 	created, err := s.scanMonitor(row)
 	if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: create monitor: %w", err)
@@ -158,8 +172,10 @@ func (s *Store) CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 }
 
 // GetMonitorByPushToken returns the push monitor with the given token, or ErrNotFound.
+// Lookup is by the blind index (hash of the presented token), so the plaintext never
+// needs to be stored or compared.
 func (s *Store) GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+monitorColumns+` FROM monitors WHERE push_token = $1`, token)
+	row := s.pool.QueryRow(ctx, `SELECT `+monitorColumns+` FROM monitors WHERE push_token_hash = $1`, HashToken(token))
 	m, err := s.scanMonitor(row)
 	if noRows(err) {
 		return domain.Monitor{}, ErrNotFound

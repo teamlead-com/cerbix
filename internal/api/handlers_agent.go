@@ -37,11 +37,13 @@ func (h *Handler) agentEnabled() bool {
 	return h.agentToken != "" || len(h.agentRegionTokens) > 0 || h.agentDBTokens
 }
 
-// agentDBAuthorized checks a bearer against database-managed agent tokens (a token
-// authorizes exactly its region; an empty request region — results/backfill without one
-// — accepts any live token).
+// agentDBAuthorized checks a bearer against database-managed agent tokens. A database
+// token authorizes exactly its region: the request MUST carry that region. (Every agent
+// endpoint requires a region — see agentAuth — so a token can only ever act on the region
+// it was minted for; there is no region-less path that would let one region's token forge
+// another's results.)
 func (h *Handler) agentDBAuthorized(ctx context.Context, bearer, region string) bool {
-	if !h.agentDBTokens || bearer == "" {
+	if !h.agentDBTokens || bearer == "" || region == "" {
 		return false
 	}
 	tokenRegion, ok, err := h.store.ResolveAgentTokenRegion(ctx, store.HashToken(bearer))
@@ -49,27 +51,22 @@ func (h *Handler) agentDBAuthorized(ctx context.Context, bearer, region string) 
 		h.logger.Warn("agent_token_resolve_failed", "error", err.Error())
 		return false
 	}
-	return ok && (region == "" || tokenRegion == region)
+	return ok && tokenRegion == region
 }
 
-// agentAuthorized checks a bearer token against the agent auth policy. A request with a
-// region (jobs/heartbeat) is authorized by the catch-all token or that region's token;
-// a request without a region (results) is authorized by the catch-all or any configured
-// per-region token (it is a valid agent, and results are routed by monitor id anyway).
+// agentAuthorized checks a bearer token against the agent auth policy. Every agent request
+// carries a region; it is authorized by the instance-wide catch-all token or by exactly
+// that region's configured token. A per-region token is scoped to its own region — it
+// cannot authorize a request for any other region (nor a region-less one).
 func (h *Handler) agentAuthorized(bearer, region string) bool {
 	eq := func(a, b string) bool { return b != "" && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
 	if eq(bearer, h.agentToken) {
 		return true
 	}
-	if region != "" {
-		return eq(bearer, h.agentRegionTokens[region])
+	if region == "" {
+		return false
 	}
-	for _, t := range h.agentRegionTokens {
-		if eq(bearer, t) {
-			return true
-		}
-	}
-	return false
+	return eq(bearer, h.agentRegionTokens[region])
 }
 
 // agentAuth wraps a handler with the agent-token check (constant-time, region-scoped).
@@ -131,7 +128,14 @@ func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
 // or an agent that does not send its region). Heartbeats for deleted monitors are
 // tolerated (they fall out at insert). Returns false and writes the error on rejection.
 func (h *Handler) enforceRegionScope(w http.ResponseWriter, r *http.Request, region string, hbs []domain.Heartbeat) bool {
-	if region == "" || len(hbs) == 0 {
+	if region == "" {
+		// A scoped ingest without a region cannot be verified — reject rather than
+		// wave it through. (The catch-all token can reach here region-less; a
+		// per-region/DB token is already rejected at agentAuth.)
+		writeError(w, http.StatusBadRequest, "region is required")
+		return false
+	}
+	if len(hbs) == 0 {
 		return true
 	}
 	ids := make([]string, 0, len(hbs))
@@ -228,6 +232,11 @@ func (h *Handler) agentTests(w http.ResponseWriter, r *http.Request) {
 // agentTestResult stores the heartbeat an agent produced for a test, which the waiting
 // /monitors/test request then returns to the operator.
 func (h *Handler) agentTestResult(w http.ResponseWriter, r *http.Request) {
+	region := r.URL.Query().Get("region")
+	if region == "" {
+		writeError(w, http.StatusBadRequest, "region is required")
+		return
+	}
 	var body struct {
 		ID     string          `json:"id"`
 		Result json.RawMessage `json:"result"`
@@ -239,7 +248,11 @@ func (h *Handler) agentTestResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	if err := h.store.SavePullTestResult(r.Context(), body.ID, body.Result); err != nil {
+	// Scope the write to the agent's own region: agentAuth has already proven the
+	// bearer owns `region`, and the store only updates a pending test that belongs to
+	// it, so a region's token cannot poison another region's test result by guessing
+	// its id.
+	if err := h.store.SavePullTestResult(r.Context(), body.ID, region, body.Result); err != nil {
 		h.serverError(w, "agent_test_result", err)
 		return
 	}

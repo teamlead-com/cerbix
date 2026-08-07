@@ -81,7 +81,7 @@ type Store interface {
 	DeleteEscalationPolicy(ctx context.Context, id string) error
 	ClaimPullJobs(ctx context.Context, region string, max int) ([][]byte, error)
 	ClaimPullTest(ctx context.Context, region string) (id string, payload []byte, ok bool, err error)
-	SavePullTestResult(ctx context.Context, id string, result []byte) error
+	SavePullTestResult(ctx context.Context, id, region string, result []byte) error
 	RecordAgentHeartbeat(ctx context.Context, region, agentID string) error
 	InsertHeartbeatsBulk(ctx context.Context, hbs []domain.Heartbeat) (int, error)
 	MonitorRegions(ctx context.Context, ids []string) (map[string]string, error)

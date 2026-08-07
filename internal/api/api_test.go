@@ -526,8 +526,8 @@ func (f *fakeStore) ClaimPullTest(_ context.Context, region string) (string, []b
 	}
 	return "", nil, false, nil
 }
-func (f *fakeStore) SavePullTestResult(_ context.Context, id string, result []byte) error {
-	if pt, ok := f.pullTests[id]; ok {
+func (f *fakeStore) SavePullTestResult(_ context.Context, id, region string, result []byte) error {
+	if pt, ok := f.pullTests[id]; ok && pt.region == region {
 		pt.result = result
 		f.pullTests[id] = pt
 	}

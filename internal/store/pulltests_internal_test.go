@@ -24,8 +24,15 @@ func TestPullTestLifecycle(t *testing.T) {
 	if _, _, ok, _ := st.ClaimPullTest(ctx, "geo2"); ok {
 		t.Fatal("a claimed test must not be claimed again")
 	}
-	// Agent posts the result; the API fetches it once (atomically removing it).
-	if err := st.SavePullTestResult(ctx, id, []byte(`{"up":true,"code":200}`)); err != nil {
+	// A result posted for the wrong region is ignored (scoped write).
+	if err := st.SavePullTestResult(ctx, id, "other", []byte(`{"up":true}`)); err != nil {
+		t.Fatalf("save result wrong region: %v", err)
+	}
+	if _, ok, _ := st.GetPullTestResult(ctx, id); ok {
+		t.Fatal("a cross-region result post must not populate the test")
+	}
+	// Agent posts the result for its own region; the API fetches it once (atomically removing it).
+	if err := st.SavePullTestResult(ctx, id, "geo2", []byte(`{"up":true,"code":200}`)); err != nil {
 		t.Fatalf("save result: %v", err)
 	}
 	raw, ok, err := st.GetPullTestResult(ctx, id)

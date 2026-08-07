@@ -20,7 +20,7 @@ func (h *Handler) listChannels(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "list_channels", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, channels)
+	writeJSON(w, http.StatusOK, redactChannels(channels))
 }
 
 // createChannel creates a notification channel (editor+).
@@ -58,7 +58,7 @@ func (h *Handler) createChannel(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "create_channel", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	writeJSON(w, http.StatusCreated, created.Redacted())
 }
 
 // deleteChannel removes a notification channel (editor+ on its project).
@@ -126,7 +126,19 @@ func (h *Handler) listMonitorChannels(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "list_monitor_channels", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, channels)
+	writeJSON(w, http.StatusOK, redactChannels(channels))
+}
+
+// redactChannels blanks secret config values in a channel slice before it is
+// returned to a client. List responses are visible to viewers, so decrypted
+// credentials (bot tokens, SMTP passwords, secret-bearing webhook URLs) must
+// never leave the server in them.
+func redactChannels(chs []domain.NotificationChannel) []domain.NotificationChannel {
+	out := make([]domain.NotificationChannel, len(chs))
+	for i, ch := range chs {
+		out[i] = ch.Redacted()
+	}
+	return out
 }
 
 // linkMonitorChannel links a channel to a monitor (editor+). The channel must be

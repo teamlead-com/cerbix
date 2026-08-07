@@ -43,6 +43,37 @@ type NotificationChannel struct {
 	CreatedAt time.Time         `json:"created_at"`
 }
 
+// SecretChannelConfigKeys are the channel config values that carry a credential
+// (or a URL that embeds one, like a Slack/webhook token). They are blanked by
+// Redacted() before a channel is returned to a client — list responses are
+// visible to viewers, who must not read another team's bot token or SMTP password.
+var SecretChannelConfigKeys = map[string]bool{
+	"url":           true, // Slack/webhook URLs embed the auth token in the path
+	"bot_token":     true, // Telegram
+	"smtp_password": true, // email
+}
+
+// Redacted returns a copy of the channel with secret config values blanked, safe
+// to serialize into an API response. The original is not mutated. A key that was
+// set is replaced with the empty string (its presence is still observable via the
+// key, but the value is gone); the corresponding create/edit UI re-collects the
+// secret rather than round-tripping it.
+func (c NotificationChannel) Redacted() NotificationChannel {
+	if c.Config == nil {
+		return c
+	}
+	cfg := make(map[string]string, len(c.Config))
+	for k, v := range c.Config {
+		if SecretChannelConfigKeys[k] {
+			cfg[k] = ""
+			continue
+		}
+		cfg[k] = v
+	}
+	c.Config = cfg
+	return c
+}
+
 // Validate enforces channel invariants, including type-specific required config.
 func (c NotificationChannel) Validate() error {
 	if c.ProjectID == "" {

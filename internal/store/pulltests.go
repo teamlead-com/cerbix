@@ -48,8 +48,12 @@ func (s *Store) ClaimPullTest(ctx context.Context, region string) (id string, pa
 }
 
 // SavePullTestResult records the heartbeat an agent produced for a test.
-func (s *Store) SavePullTestResult(ctx context.Context, id string, result []byte) error {
-	_, err := s.pool.Exec(ctx, `UPDATE pull_tests SET result = $2 WHERE id = $1`, id, result)
+func (s *Store) SavePullTestResult(ctx context.Context, id, region string, result []byte) error {
+	// The region predicate scopes the write to the agent's own region: an agent
+	// authenticated for region A cannot overwrite a test enqueued for region B even
+	// if it learns B's test id. A mismatch updates zero rows (silently ignored — the
+	// waiting /monitors/test poll simply times out, as it would for an unknown id).
+	_, err := s.pool.Exec(ctx, `UPDATE pull_tests SET result = $3 WHERE id = $1 AND region = $2`, id, region, result)
 	if err != nil {
 		return fmt.Errorf("store: save pull test result: %w", err)
 	}

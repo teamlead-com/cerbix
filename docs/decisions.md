@@ -2253,3 +2253,19 @@ The InsertHeartbeat 23503→ErrNotFound fix (D-0126) missed the bulk backfill pa
 wholesale on one FK violation → permanent backfill wedge and SLA loss) and the status-flip path
 (logged ERROR). Bulk now pre-filters by the live monitor set (self-heals on retry); ingest logs
 the status race as INFO. Same benign race, same quiet handling everywhere now.
+
+## D-0133 — Every agent ingest is region-scoped; channel secrets are redacted (iter-0075)
+Two boundary leaks from the deep audit. (1) The agent transport accepted region-less
+`/results` and `/backfill` posts, authorized them with ANY configured per-region (or DB)
+token, and skipped `enforceRegionScope` when the region was empty — so a token minted for
+one region could forge heartbeats for any monitor in any other region; `/test-results` had
+no region check at all, letting a valid agent poison another region's test result by
+guessing its id. Every agent endpoint now requires a region: `agentAuthorized`/
+`agentDBAuthorized` no longer honor the region-less path (only the instance-wide catch-all
+token can even reach a handler region-less, and the handler still rejects it), and
+`SavePullTestResult` scopes its UPDATE to the token's region. The real agent already sends
+`?region=` on results/backfill; test-results now sends it too. (2) Notification-channel
+`config` (decrypted bot tokens, SMTP passwords, secret-bearing Slack/webhook URLs) was
+returned verbatim by the viewer-readable list endpoints. `NotificationChannel.Redacted()`
+blanks `SecretChannelConfigKeys` and is applied to list and create responses; there is no
+config-edit flow, so nothing round-trips the blanked values.

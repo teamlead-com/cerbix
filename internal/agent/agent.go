@@ -151,7 +151,7 @@ func (a *Agent) postTestResult(ctx context.Context, id string, hb domain.Heartbe
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.serverURL+"/api/v1/agent/test-results", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.serverURL+"/api/v1/agent/test-results?region="+a.region, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

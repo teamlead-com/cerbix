@@ -57,10 +57,15 @@ func TestAgentEndpoints(t *testing.T) {
 		t.Fatalf("re-claim returned a job, want none: %s", again.Body.String())
 	}
 
-	// Post a result → it reaches the sink.
+	// Post a result → it reaches the sink. m1 lives in core, so the agent scopes the
+	// post to region=core.
 	body := `{"results":[{"monitor_id":"m1","up":true,"latency_ms":12,"code":200}]}`
-	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results", "s3cr3t", body); rec.Code != http.StatusOK {
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results?region=core", "s3cr3t", body); rec.Code != http.StatusOK {
 		t.Fatalf("results = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	// A region-less result post is rejected — every agent ingest is region-scoped.
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results", "s3cr3t", body); rec.Code != http.StatusBadRequest {
+		t.Fatalf("region-less results = %d, want 400", rec.Code)
 	}
 	if hb, ok := sink.last(); !ok || hb.MonitorID != "m1" || !hb.Up {
 		t.Fatalf("sink did not receive the heartbeat: %+v ok=%v", hb, ok)
@@ -133,8 +138,20 @@ func TestAgentTestEndpoints(t *testing.T) {
 	if rec := agentReq(h, http.MethodGet, "/api/v1/agent/tests?region=nope", "s3cr3t", ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"test":null`) {
 		t.Fatalf("empty test claim = %d %s", rec.Code, rec.Body.String())
 	}
-	// Post the result.
-	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/test-results", "s3cr3t", `{"id":"t1","result":{"up":true,"code":200}}`); rec.Code != http.StatusNoContent {
+	// A cross-region test-result post (right id, wrong region) does not populate the
+	// test — the store scopes the write to the agent's own region.
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/test-results?region=nope", "s3cr3t", `{"id":"t1","result":{"up":true}}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("cross-region test result = %d, want 204", rec.Code)
+	}
+	if string(fs.pullTests["t1"].result) != "" {
+		t.Fatalf("cross-region result must not be stored: %+v", fs.pullTests["t1"])
+	}
+	// A region-less test-result post is rejected.
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/test-results", "s3cr3t", `{"id":"t1","result":{"up":true}}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("region-less test result = %d, want 400", rec.Code)
+	}
+	// Post the result for the test's own region.
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/test-results?region=geo2", "s3cr3t", `{"id":"t1","result":{"up":true,"code":200}}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("post test result = %d, want 204 (%s)", rec.Code, rec.Body.String())
 	}
 	if string(fs.pullTests["t1"].result) == "" {
@@ -146,15 +163,19 @@ func TestAgentBackfill(t *testing.T) {
 	fs := seededStore()
 	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentToken("s3cr3t").AgentRouter()
 	body := `{"results":[{"monitor_id":"m1","ts":"2026-02-01T00:00:00Z","up":false,"msg":"down"},{"monitor_id":"m1","ts":"2026-02-01T00:01:00Z","up":true}]}`
-	rec := agentReq(h, http.MethodPost, "/api/v1/agent/backfill", "s3cr3t", body)
+	rec := agentReq(h, http.MethodPost, "/api/v1/agent/backfill?region=core", "s3cr3t", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("backfill = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
 	if len(fs.backfilled) != 2 {
 		t.Fatalf("backfilled = %d, want 2 (historical bulk, bypassing pipeline)", len(fs.backfilled))
 	}
+	// A region-less backfill is rejected — historical ingest is region-scoped too.
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/backfill", "s3cr3t", body); rec.Code != http.StatusBadRequest {
+		t.Fatalf("region-less backfill = %d, want 400", rec.Code)
+	}
 	// Unauthed is rejected.
-	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/backfill", "", body); rec.Code != http.StatusUnauthorized {
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/backfill?region=core", "", body); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthed backfill = %d, want 401", rec.Code)
 	}
 }
@@ -226,12 +247,22 @@ func TestAgentPerRegionTokenScope(t *testing.T) {
 	if rec := agentReq(h, http.MethodGet, "/api/v1/agent/jobs?region=geo5", "tok3", ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("geo3 token on geo5 = %d, want 401", rec.Code)
 	}
-	// A valid agent token may post results (no region on that endpoint) → 200.
-	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results", "tok5", `{"results":[]}`); rec.Code != http.StatusOK {
-		t.Fatalf("valid token results = %d, want 200", rec.Code)
+	// A per-region token posts results for its OWN region → 200.
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results?region=geo5", "tok5", `{"results":[]}`); rec.Code != http.StatusOK {
+		t.Fatalf("geo5 token results on geo5 = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	// A per-region token may NOT post results for another region → 401 (the old
+	// region-less bypass, where any per-region token authorized any results, is closed).
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results?region=geo3", "tok5", `{"results":[]}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("geo5 token results on geo3 = %d, want 401", rec.Code)
+	}
+	// A region-less results post is rejected outright (only the catch-all token even
+	// reaches the handler, and the handler requires a region).
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results", "tok5", `{"results":[]}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("region-less per-region token results = %d, want 401", rec.Code)
 	}
 	// An unknown token is rejected on results too.
-	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results", "nope", `{"results":[]}`); rec.Code != http.StatusUnauthorized {
+	if rec := agentReq(h, http.MethodPost, "/api/v1/agent/results?region=geo5", "nope", `{"results":[]}`); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown token results = %d, want 401", rec.Code)
 	}
 }

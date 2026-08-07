@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -90,6 +92,12 @@ func (s *Store) CreateIncident(ctx context.Context, inc domain.Incident, opening
 		inc.ProjectID, monitorID, inc.Title, inc.Status, inc.Impact, inc.Source, externalKey)
 	created, err := scanIncident(row)
 	if err != nil {
+		// The partial unique index rejects a second open auto-incident for the same
+		// monitor — a concurrent down transition raced us. Benign: one is open.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "incidents_one_open_auto" {
+			return domain.Incident{}, ErrAlreadyOpen
+		}
 		return domain.Incident{}, fmt.Errorf("store: create incident: %w", err)
 	}
 	if _, err := tx.Exec(ctx,

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -35,6 +36,26 @@ type Recorder interface {
 
 // autoIncidentAuthor labels timeline entries the pipeline writes.
 const autoIncidentAuthor = "auto"
+
+// autoIncidentOpen{Attempts,Backoff} bound the retry of a failed auto-incident open
+// for a monitor whose alerting depends on it (escalation ladder pages over it). Small
+// and off the hot heartbeat path — only reached on a transition, and only loops on error.
+const (
+	autoIncidentOpenAttempts = 3
+	autoIncidentOpenBackoff  = 250 * time.Millisecond
+)
+
+// sleepCtx waits for d or ctx cancellation; returns false if ctx was cancelled.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
 
 // Consumer reads results and writes them through the store. Outbound delivery
 // (webhooks, notifications) is not done here: the store enqueues those events in
@@ -157,9 +178,30 @@ func (c *Consumer) openAutoIncident(ctx context.Context, mon domain.Monitor, hb 
 		Impact:    domain.ImpactMajor,
 		Source:    domain.SourceAuto,
 	}
-	created, err := c.store.CreateIncident(ctx, inc, body, autoIncidentAuthor)
+	// Retry a transient failure: for an escalation-policy monitor the on-call ladder
+	// pages OVER this incident and the flat down-notify is suppressed, so a lost
+	// incident-create means the outage goes entirely unalerted. A bounded retry rides
+	// out a brief DB blip. (A concurrent create → ErrAlreadyOpen is success, not retried.)
+	var created domain.Incident
+	var err error
+	for attempt := 1; ; attempt++ {
+		created, err = c.store.CreateIncident(ctx, inc, body, autoIncidentAuthor)
+		if errors.Is(err, store.ErrAlreadyOpen) {
+			return // a concurrent down transition opened it first (unique index) — benign
+		}
+		if err == nil || attempt >= autoIncidentOpenAttempts {
+			break
+		}
+		c.logger.Warn("auto_incident_open_retry", "monitor_id", hb.MonitorID, "attempt", attempt, "error", err.Error())
+		if !sleepCtx(ctx, autoIncidentOpenBackoff) {
+			return // shutting down
+		}
+	}
 	if err != nil {
-		c.logger.Error("auto_incident_open_failed", "monitor_id", hb.MonitorID, "error", err.Error())
+		// Persistent failure: an escalation monitor's outage may go unpaged. Logged at
+		// ERROR so log-based alerting catches it (a full delivery guarantee would need
+		// the incident committed in the status-transition transaction — see D-0138).
+		c.logger.Error("auto_incident_open_failed", "monitor_id", hb.MonitorID, "escalation", mon.EscalationPolicyID != "", "error", err.Error())
 		return
 	}
 	if c.recorder != nil {

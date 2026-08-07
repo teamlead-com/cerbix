@@ -336,6 +336,10 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (fired int, err error) {
 		   JOIN monitors m ON m.id = i.monitor_id
 		  WHERE i.source = 'auto' AND i.status <> 'resolved' AND i.acknowledged_at IS NULL
 		    AND m.escalation_policy_id IS NOT NULL
+		    -- A disabled monitor is no longer probed, so it can never auto-recover to
+		    -- resolve the incident; without this it would page the on-call ladder
+		    -- forever. (Deletion is already handled: the JOIN drops the row.)
+		    AND m.enabled
 		    -- Dependency suppression (D-0100): the ladder pauses while a
 		    -- (transitive) parent is down — the parent's own alerting owns the
 		    -- page. It resumes on the next tick after the parent recovers if this

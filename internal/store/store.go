@@ -19,6 +19,11 @@ import (
 // ErrNotFound is returned when a lookup matches no row.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrAlreadyOpen is returned by CreateIncident when a monitor already has an open
+// auto-incident (the incidents_one_open_auto partial unique index fired). The
+// caller treats it as a benign no-op — the concurrent create won the race.
+var ErrAlreadyOpen = errors.New("store: auto-incident already open")
+
 // Pool sizing. Several long-lived connections are checked out for the whole
 // process lifetime — the scheduler's leadership advisory lock plus the LISTEN
 // notifiers (confirm-phase, pull) — so pgx's default MaxConns of max(4, numCPU)

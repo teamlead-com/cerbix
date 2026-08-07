@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -23,6 +24,10 @@ type fakeStore struct {
 	consecutive map[string]int  // live failure counter (confirmations)
 	maint       map[string]bool // monitor id → currently in a maintenance window
 	nextInc     int
+	// createErrs is a queue of errors CreateIncident returns on successive calls
+	// (nil = success); createCalls counts how many times it was invoked.
+	createErrs  []error
+	createCalls int
 }
 
 func newFakeStore() *fakeStore {
@@ -97,6 +102,14 @@ func (f *fakeStore) FindOpenAutoIncidentByMonitor(_ context.Context, monitorID s
 func (f *fakeStore) CreateIncident(_ context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.createCalls++
+	if len(f.createErrs) > 0 {
+		err := f.createErrs[0]
+		f.createErrs = f.createErrs[1:]
+		if err != nil {
+			return domain.Incident{}, err
+		}
+	}
 	f.nextInc++
 	inc.ID = "inc-" + string(rune('0'+f.nextInc))
 	f.incidents[inc.ID] = inc
@@ -238,6 +251,61 @@ func TestAutoIncidentOpenAndResolve(t *testing.T) {
 	if !waitFor(func() bool { o, r := fs.openAutoIncidentCount("m1"); return o == 0 && r == 1 }) {
 		o, r := fs.openAutoIncidentCount("m1")
 		t.Fatalf("after recovery: open=%d resolved=%d, want 0/1", o, r)
+	}
+}
+
+// TestAutoIncidentOpenRetries proves a transient CreateIncident failure is retried
+// rather than losing the incident — critical for escalation-policy monitors, whose
+// only alert is the ladder paging over that incident.
+func TestAutoIncidentOpenRetries(t *testing.T) {
+	fs := newFakeStore()
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ProjectID: "p1", Name: "api", AutoIncident: true, EscalationPolicyID: "ep1"}
+	fs.createErrs = []error{errors.New("db blip"), errors.New("db blip")} // fail twice, then succeed
+	disp := dispatch.NewInProc(8)
+	c := New(fs, disp, &fakeRecorder{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	_ = disp.PublishResult(ctx, domain.Heartbeat{MonitorID: "m1", Up: false, Code: 500, Msg: "500"})
+	if !waitFor(func() bool { o, _ := fs.openAutoIncidentCount("m1"); return o == 1 }) {
+		o, _ := fs.openAutoIncidentCount("m1")
+		t.Fatalf("expected the incident to open after retries, got %d open", o)
+	}
+	fs.mu.Lock()
+	calls := fs.createCalls
+	fs.mu.Unlock()
+	if calls != 3 {
+		t.Fatalf("CreateIncident called %d times, want 3 (2 failures + success)", calls)
+	}
+}
+
+// TestAutoIncidentAlreadyOpenIsBenign proves ErrAlreadyOpen (the unique-index race)
+// is treated as success: no retry, no error, no second incident.
+func TestAutoIncidentAlreadyOpenIsBenign(t *testing.T) {
+	fs := newFakeStore()
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ProjectID: "p1", Name: "api", AutoIncident: true}
+	fs.createErrs = []error{store.ErrAlreadyOpen}
+	disp := dispatch.NewInProc(8)
+	c := New(fs, disp, &fakeRecorder{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	_ = disp.PublishResult(ctx, domain.Heartbeat{MonitorID: "m1", Up: false, Code: 500, Msg: "500"})
+	// Give the pipeline time to process; ErrAlreadyOpen must NOT retry.
+	if !waitFor(func() bool { fs.mu.Lock(); n := fs.createCalls; fs.mu.Unlock(); return n >= 1 }) {
+		t.Fatal("CreateIncident was never called")
+	}
+	time.Sleep(300 * time.Millisecond) // longer than one backoff — a retry would show here
+	fs.mu.Lock()
+	calls := fs.createCalls
+	fs.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("CreateIncident called %d times, want 1 (ErrAlreadyOpen must not retry)", calls)
+	}
+	if o, _ := fs.openAutoIncidentCount("m1"); o != 0 {
+		t.Fatalf("no incident should be recorded on ErrAlreadyOpen, got %d open", o)
 	}
 }
 

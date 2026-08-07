@@ -2332,3 +2332,21 @@ lock wait, a slow aggregate) stalled the whole tick and froze dispatch. Each sub
 now runs under a bounded child context (`subCadenceTimeout` 30s; `maintainTimeout` 2m for
 the drop_chunks/purge sweep). Verified by a 1-connection regression test that deadlocks on
 the old SLA path and passes on the fix.
+
+## D-0138 — Escalation/incident lifecycle hardening (iter-0080)
+Three lifecycle gaps around auto-incidents and the on-call ladder. (1) A disabled monitor
+with an open auto-incident escalated forever — it is no longer probed, so it can never
+auto-recover to resolve the incident. `AdvanceEscalations` now requires `m.enabled`
+(deletion was already handled — the JOIN drops the row); the ladder resumes if the monitor
+is re-enabled and still down. (2) `ingest.openAutoIncident` had a check-then-create TOCTOU:
+two concurrent down transitions could both open an auto-incident. Migration 00049 adds a
+partial unique index (one non-resolved auto-incident per monitor, after resolving any
+pre-existing duplicates); `CreateIncident` maps the 23505 to `ErrAlreadyOpen` and ingest
+treats it as a benign race win. (3) An escalation-policy monitor whose incident-create
+failed paged no one: the ladder pages OVER the incident and the flat down-notify is
+suppressed, so a lost create meant total silence. Rather than a periodic reopener (which
+would wrongly re-page manually-resolved incidents) or a delivery-time check (racy against
+the ~ms incident-creation lag), `openAutoIncident` now retries a transient failure (3×,
+250ms) and logs a persistent failure at ERROR with an `escalation` flag for log-based
+alerting. A full delivery guarantee (incident committed in the status-transition
+transaction) is a larger refactor left as a follow-up.

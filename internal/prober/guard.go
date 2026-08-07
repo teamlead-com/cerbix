@@ -2,8 +2,11 @@ package prober
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"time"
 )
 
 // Guard is an SSRF policy for probe targets. cerbix exists to monitor internal
@@ -149,6 +152,36 @@ func (g Guard) dialContext(base *net.Dialer) func(context.Context, string, strin
 		}
 		return nil, lastErr
 	}
+}
+
+// HTTPClient returns an http.Client that applies this guard's egress policy to
+// OUTBOUND delivery (webhook/Slack notifications): every connection — including
+// redirect targets, since each hop re-dials through the same guarded dialer — is
+// resolved, policy-checked, and pinned to the checked IP, so redirect-to-internal
+// and DNS-rebinding can't reach loopback/link-local/metadata/(disallowed) private
+// hosts. Proxy is disabled (a proxy would bypass the IP guard). Redirect chains are
+// capped. Reuses the same guard used for probe targets, so egress honors the same
+// allow_private_ips / allow_metadata_ips policy.
+func (g Guard) HTTPClient(timeout time.Duration) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = g.dialContext(&net.Dialer{})
+	tr.Proxy = nil
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: tr,
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		},
+	}
+}
+
+// EgressDialContext exposes the guarded dialer (resolve → policy check → pinned
+// dial) for non-HTTP egress such as SMTP, which has no redirect/Transport hook.
+func (g Guard) EgressDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return g.dialContext(&net.Dialer{})
 }
 
 // resolveChecked resolves an ICMP target host to a single allowed IPv4 address,

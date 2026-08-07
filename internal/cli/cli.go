@@ -442,9 +442,16 @@ func runServe(args []string) int {
 			}
 		})
 
+		// Harden outbound alert delivery against SSRF: webhook/Slack/notify HTTP and
+		// SMTP all dial through the same egress guard as probes (resolve → policy check
+		// → pinned IP; metadata blocked by default, private gated by the same
+		// allow_private_ips), so a malicious webhook/channel/smtp_host can't reach
+		// loopback/link-local/metadata/internal services (redirect + DNS-rebind included).
+		egress := prober.NewGuard(cfg.Prober.AllowPrivateIPs, cfg.Prober.AllowMetadataIPs)
+		mailer.SetEgressDial(egress.EgressDialContext())
 		subs := subscribe.New(st, mail)
-		deliverer := incidentFanout{hooks: webhook.New(st, nil), subs: subs, logger: logger}
-		ob := outbox.New(st, deliverer, notify.New(st, nil), registry, logger).
+		deliverer := incidentFanout{hooks: webhook.New(st, egress.HTTPClient(10*time.Second)), subs: subs, logger: logger}
+		ob := outbox.New(st, deliverer, notify.New(st, egress.HTTPClient(10*time.Second)), registry, logger).
 			WithMailer(mail).
 			WithSilence(func() bool { return settingsSvc.Alerting().Silenced(time.Now()) })
 		spawn(func() { ob.Run(ctx) })

@@ -3,6 +3,7 @@
 package mailer
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -26,6 +27,17 @@ const (
 // smtp.SendMail (which itself has no dial timeout).
 var sendMailFunc = sendMailTimeout
 
+// egressDial, when installed by the composition root at startup, replaces the raw
+// net.DialTimeout for SMTP so connections go through the SSRF egress guard. nil
+// (default) keeps the plain dialer.
+var egressDial func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// SetEgressDial installs the guarded dialer used for all SMTP connections. Call
+// once at boot before any mail is sent.
+func SetEgressDial(d func(ctx context.Context, network, addr string) (net.Conn, error)) {
+	egressDial = d
+}
+
 // SendMailTimeout is the exported form of the timeout-bounded SMTP send, reused
 // by internal/notify so email notification channels get the same dial/session
 // deadlines instead of stdlib smtp.SendMail's unbounded blocking (which would
@@ -45,7 +57,18 @@ func sendMailTimeout(addr string, auth smtp.Auth, from string, to []string, msg 
 	if err != nil {
 		return err
 	}
-	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
+	// Route the TCP connect through the SSRF egress guard when installed (resolve →
+	// policy check → pinned IP), so a malicious smtp_host can't reach loopback/
+	// link-local/metadata/(disallowed) private addresses. TLS ServerName below stays
+	// the configured host, so cert validation is unaffected by the pinned dial.
+	var conn net.Conn
+	if egressDial != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+		defer cancel()
+		conn, err = egressDial(ctx, "tcp", addr)
+	} else {
+		conn, err = net.DialTimeout("tcp", addr, dialTimeout)
+	}
 	if err != nil {
 		return err
 	}

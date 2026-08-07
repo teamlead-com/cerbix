@@ -4,11 +4,42 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
+
+// TestHTTPClientEgressGuard proves the egress HTTPClient (used for webhook/Slack/
+// notify delivery) routes through the SSRF guard: a loopback destination is blocked
+// when private egress is disallowed, and reachable only when it is allowed. The SMTP
+// path (EgressDialContext) reuses this same dialer, covered by TestGuardedDial*.
+func TestHTTPClientEgressGuard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close() // srv listens on 127.0.0.1 (loopback)
+
+	// allow_private_ips=false → loopback delivery target is blocked (SSRF guard).
+	blocked := NewGuard(false, false).HTTPClient(5 * time.Second)
+	if _, err := blocked.Get(srv.URL); err == nil {
+		t.Fatal("egress to loopback must be blocked when private is disallowed")
+	}
+
+	// allow_private_ips=true → the same target is reachable (legit internal webhook).
+	allowed := NewGuard(true, false).HTTPClient(5 * time.Second)
+	resp, err := allowed.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("egress to loopback should succeed when private is allowed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+}
 
 func TestCheckIP(t *testing.T) {
 	cases := []struct {

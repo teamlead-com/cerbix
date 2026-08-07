@@ -18,8 +18,8 @@ func TestPublicRenderEnriched(t *testing.T) {
 	// in the component's project (p1).
 	fs.incidents["incR"] = domain.Incident{ID: "incR", ProjectID: "p1", Title: "past blip", Status: domain.IncidentResolved, Impact: domain.ImpactMinor, Source: domain.SourceManual, ResolvedAt: &resolved}
 	fs.incUpdates["incR"] = []domain.IncidentUpdate{
-		{ID: "iuR1", IncidentID: "incR", Status: domain.IncidentInvestigating, Body: "looking into it"},
-		{ID: "iuR2", IncidentID: "incR", Status: domain.IncidentResolved, Body: "fixed"},
+		{ID: "iuR1", IncidentID: "incR", Status: domain.IncidentInvestigating, Body: "looking into it", Author: "op-uuid"},
+		{ID: "iuR2", IncidentID: "incR", Status: domain.IncidentResolved, Body: "fixed", Author: "op-uuid"},
 	}
 	fs.postmortems["incR"] = domain.Postmortem{ID: "pmR", IncidentID: "incR", Body: "## Summary\nroot cause was X", Author: "op"}
 	fs.maintenance["mw1"] = domain.MaintenanceWindow{ID: "mw1", ProjectID: "p1", Reason: "db upgrade", StartsAt: now.Add(time.Hour), EndsAt: now.Add(2 * time.Hour)}
@@ -44,10 +44,15 @@ func TestPublicRenderEnriched(t *testing.T) {
 		RecentIncidents []struct {
 			ID      string `json:"id"`
 			Updates []struct {
-				ID string `json:"id"`
+				ID         string `json:"id"`
+				IncidentID string `json:"incident_id"`
+				Author     string `json:"author"`
 			} `json:"updates"`
 			Postmortem *struct {
-				Body string `json:"body"`
+				ID         string `json:"id"`
+				IncidentID string `json:"incident_id"`
+				Body       string `json:"body"`
+				Author     string `json:"author"`
 			} `json:"postmortem"`
 		} `json:"recent_incidents"`
 		Maintenance []struct {
@@ -78,6 +83,16 @@ func TestPublicRenderEnriched(t *testing.T) {
 	}
 	if pm := render.RecentIncidents[0].Postmortem; pm == nil || pm.Body == "" {
 		t.Fatalf("recent incident should carry its postmortem, got %+v", pm)
+	}
+	// Public redaction: timeline updates + postmortem must NOT leak internal ids or the
+	// author (a user UUID) — only body/status/timestamps are public.
+	for _, u := range render.RecentIncidents[0].Updates {
+		if u.ID != "" || u.IncidentID != "" || u.Author != "" {
+			t.Fatalf("public update leaked internal fields: %+v", u)
+		}
+	}
+	if pm := render.RecentIncidents[0].Postmortem; pm.ID != "" || pm.IncidentID != "" || pm.Author != "" {
+		t.Fatalf("public postmortem leaked internal fields: %+v", pm)
 	}
 	if len(render.Maintenance) != 1 || render.Maintenance[0].ID != "mw1" {
 		t.Fatalf("maintenance = %+v, want [mw1]", render.Maintenance)

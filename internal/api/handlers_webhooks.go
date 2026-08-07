@@ -172,6 +172,8 @@ func (h *Handler) deleteWebhook(w http.ResponseWriter, r *http.Request) {
 // generateWebhookSecret returns a new signing secret.
 func generateWebhookSecret() string {
 	b := make([]byte, 24)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error()) // fail closed — never issue a predictable secret
+	}
 	return "whsec_" + hex.EncodeToString(b)
 }

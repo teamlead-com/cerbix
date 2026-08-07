@@ -152,6 +152,8 @@ func (h *Handler) deleteApiToken(w http.ResponseWriter, r *http.Request) {
 // generateTokenSecret returns a new bearer secret with a recognizable prefix.
 func generateTokenSecret() string {
 	b := make([]byte, 24)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error()) // fail closed — never issue a predictable secret
+	}
 	return "cbx_" + hex.EncodeToString(b)
 }

@@ -374,10 +374,18 @@ func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs [
 				return nil, false
 			}
 		}
-		// On the public endpoint, strip internal ids / the ack actor from each
-		// incident before it leaves the server to an unauthenticated viewer.
+		// On the public endpoint, strip internal ids / actors from the incident AND its
+		// timeline updates + postmortem before they leave the server to an unauthenticated
+		// viewer (each carried its own id, incident id, and author UUID).
 		if public {
 			in = in.PublicRedacted()
+			for i := range updates {
+				updates[i] = updates[i].PublicRedacted()
+			}
+			if pm != nil {
+				red := pm.PublicRedacted()
+				pm = &red
+			}
 		}
 		out = append(out, incidentDetailView{Incident: in, Updates: updates, Postmortem: pm})
 	}
@@ -508,7 +516,9 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 // randomToken returns a 128-bit hex token for unlisted status pages.
 func randomToken() string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error()) // fail closed — never issue a predictable token
+	}
 	return hex.EncodeToString(b)
 }
 

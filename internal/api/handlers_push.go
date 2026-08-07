@@ -47,6 +47,8 @@ func (h *Handler) pushHeartbeat(w http.ResponseWriter, r *http.Request) {
 // generatePushToken returns a new push-endpoint secret.
 func generatePushToken() string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error()) // fail closed — never issue a predictable secret
+	}
 	return "cbxp_" + hex.EncodeToString(b)
 }

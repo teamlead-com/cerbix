@@ -146,6 +146,17 @@ type IncidentUpdate struct {
 	CreatedAt  time.Time      `json:"created_at"`
 }
 
+// PublicRedacted returns a copy safe for an unauthenticated status page: it strips the
+// internal identifiers (its own id, the incident id) and the author (a user id/name that
+// an outside viewer must not see). Body, status, and timestamp — what a timeline shows —
+// are kept.
+func (u IncidentUpdate) PublicRedacted() IncidentUpdate {
+	u.ID = ""
+	u.IncidentID = ""
+	u.Author = ""
+	return u
+}
+
 // Validate enforces incident-update invariants.
 func (u IncidentUpdate) Validate() error {
 	if u.IncidentID == "" {
@@ -166,4 +177,13 @@ type Postmortem struct {
 	PublishedAt time.Time `json:"published_at"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// PublicRedacted returns a copy safe for an unauthenticated status page: internal ids and
+// the author are stripped; the published body + timestamp are kept.
+func (p Postmortem) PublicRedacted() Postmortem {
+	p.ID = ""
+	p.IncidentID = ""
+	p.Author = ""
+	return p
 }

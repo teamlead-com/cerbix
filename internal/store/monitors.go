@@ -3,13 +3,10 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -454,64 +451,114 @@ func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bo
 //     applied=true, and prev/cur/suppressed carry the transition for the caller.
 //
 // A result for an already-deleted monitor returns ErrNotFound (the caller drops it).
-func (s *Store) RecordResult(ctx context.Context, hb domain.Heartbeat) (prev, cur domain.MonitorStatus, suppressed, applied bool, err error) {
-	ts := hbTime(hb)
+// Result-ingest outcome reasons (spec func-result-protocol §4/§5). Low-cardinality; the
+// caller maps them to the result_* metric families.
+const (
+	ReasonMissingTimestamp = "missing_timestamp"
+	ReasonFutureTimestamp  = "future_timestamp"
+	ReasonOutsideRetention = "outside_retention"
+	ReasonOutOfOrder       = "out_of_order"
+	ReasonDuplicate        = "duplicate"
+)
+
+// ResultOutcome is what a scheduled/push result did. Applied = live status/counters/outbox
+// ran (a fresh result); Inserted = a heartbeat row was written (SLA). Reason is "" when
+// Applied, else the outcome the caller reports as a metric.
+type ResultOutcome struct {
+	Applied    bool
+	Inserted   bool
+	Prev, Cur  domain.MonitorStatus
+	Suppressed bool
+	Reason     string
+}
+
+// RecordScheduledResult records a worker/agent (scheduled) probe result following the
+// ordered pipeline in spec func-result-protocol §4, in ONE transaction:
+//
+//	missing ts → SELECT … FOR UPDATE (lock + DB clock + watermark) → [revision gate: INERT
+//	in P0a, activates in P0b] → timestamp bounds (BEFORE insert) → INSERT ON CONFLICT →
+//	0 rows = duplicate → watermark compare (out-of-order = SLA-only | fresh = apply).
+//
+// This ordering is what simultaneously gives gate-before-insert, redelivery idempotency,
+// and the guarantee that a future- or out-of-window row is never persisted. now is the DB
+// statement_timestamp() (statement-scope, current even after the FOR UPDATE wait).
+func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) (ResultOutcome, error) {
+	// Step 1 — a scheduled result MUST carry a timestamp; a zero wire ts is fail-closed.
+	if hb.Ts.IsZero() {
+		return ResultOutcome{Reason: ReasonMissingTimestamp}, nil
+	}
+	ts := hb.Ts
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", "", false, false, fmt.Errorf("store: begin record result: %w", err)
+		return ResultOutcome{}, fmt.Errorf("store: begin record result: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
+	// Step 2 — lock the monitor (existence + serialise vs config writes), read the DB clock
+	// and the freshness watermark in one statement.
+	var lastTs *time.Time
+	var dbNow time.Time
+	err = tx.QueryRow(ctx,
+		`SELECT last_result_ts, statement_timestamp() FROM monitors WHERE id = $1 FOR UPDATE`,
+		hb.MonitorID).Scan(&lastTs, &dbNow)
+	if noRows(err) {
+		return ResultOutcome{}, ErrNotFound
+	}
+	if err != nil {
+		return ResultOutcome{}, fmt.Errorf("store: record result lock: %w", err)
+	}
+
+	// Step 3 — revision gate: INERT in P0a (activates in P0b).
+
+	// Step 4 — timestamp bounds, BEFORE the insert so a bad row never lands.
+	skew := s.resultSkew
+	if skew <= 0 {
+		skew = 5 * time.Minute
+	}
+	if ts.After(dbNow.Add(skew)) {
+		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonFutureTimestamp})
+	}
+	if s.resultRetention > 0 && ts.Before(dbNow.Add(-s.resultRetention)) {
+		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonOutsideRetention})
+	}
+
+	// Step 5 — insert; observed_at == ts for a scheduled result.
 	ct, err := tx.Exec(ctx,
-		`INSERT INTO heartbeats (monitor_id, ts, up, latency_ms, code, msg) VALUES ($1,$2,$3,$4,$5,$6)
-		 ON CONFLICT (monitor_id, ts) DO NOTHING`,
+		`INSERT INTO heartbeats (monitor_id, ts, up, latency_ms, code, msg, observed_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$2) ON CONFLICT (monitor_id, ts) DO NOTHING`,
 		hb.MonitorID, ts, hb.Up, hb.LatencyMS, hb.Code, hb.Msg)
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23503" && strings.Contains(pgErr.ConstraintName, "monitor_id_fkey") {
-			return "", "", false, false, ErrNotFound
-		}
-		return "", "", false, false, fmt.Errorf("store: record result insert: %w", err)
+		return ResultOutcome{}, fmt.Errorf("store: record result insert: %w", err)
 	}
+	// Step 6 — duplicate re-delivery: the fact is already recorded, apply nothing.
 	if ct.RowsAffected() == 0 {
-		// Duplicate re-delivery: the fact is already on record; do not re-apply it to
-		// live status (which would double-count the failure). Commit the (no-op) tx.
-		if err := tx.Commit(ctx); err != nil {
-			return "", "", false, false, fmt.Errorf("store: commit dup result: %w", err)
-		}
-		return "", "", false, false, nil
+		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonDuplicate})
 	}
 
-	// Lock the monitor row and read the freshness watermark. FOR UPDATE also serialises
-	// concurrent results for the same monitor so last_result_ts can't race.
-	var lastTs *time.Time
-	err = tx.QueryRow(ctx, `SELECT last_result_ts FROM monitors WHERE id = $1 FOR UPDATE`, hb.MonitorID).Scan(&lastTs)
-	if noRows(err) {
-		return "", "", false, false, ErrNotFound
-	}
-	if err != nil {
-		return "", "", false, false, fmt.Errorf("store: record result lock: %w", err)
-	}
+	// Step 7 — watermark compare.
 	if lastTs != nil && !ts.After(*lastTs) {
-		// Stale/out-of-order: heartbeat is kept (already inserted) but must not move
-		// live state past a newer result. Commit the insert, report not-applied.
-		if err := tx.Commit(ctx); err != nil {
-			return "", "", false, false, fmt.Errorf("store: commit stale result: %w", err)
-		}
-		return "", "", false, false, nil
+		// Out-of-order: heartbeat kept for SLA, live state untouched.
+		return s.commitOutcome(ctx, tx, ResultOutcome{Inserted: true, Reason: ReasonOutOfOrder})
 	}
-
-	prev, cur, suppressed, err = recordCheckStatusTx(ctx, tx, hb.MonitorID, hb.Up)
+	prev, cur, suppressed, err := recordCheckStatusTx(ctx, tx, hb.MonitorID, hb.Up)
 	if err != nil {
-		return "", "", false, false, err
+		return ResultOutcome{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE monitors SET last_result_ts = $2 WHERE id = $1`, hb.MonitorID, ts); err != nil {
-		return "", "", false, false, fmt.Errorf("store: advance last_result_ts: %w", err)
+		return ResultOutcome{}, fmt.Errorf("store: advance last_result_ts: %w", err)
 	}
+	return s.commitOutcome(ctx, tx, ResultOutcome{
+		Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed,
+	})
+}
+
+// commitOutcome commits tx and returns the outcome (or a wrapped commit error).
+func (s *Store) commitOutcome(ctx context.Context, tx pgx.Tx, o ResultOutcome) (ResultOutcome, error) {
 	if err := tx.Commit(ctx); err != nil {
-		return "", "", false, false, fmt.Errorf("store: commit record result: %w", err)
+		return ResultOutcome{}, fmt.Errorf("store: commit result: %w", err)
 	}
-	return prev, cur, suppressed, true, nil
+	return o, nil
 }
 
 // EnqueueRenotifyReminders re-sends the down alert for monitors that have stayed

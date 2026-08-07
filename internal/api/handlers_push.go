@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
@@ -33,7 +34,11 @@ func (h *Handler) pushHeartbeat(w http.ResponseWriter, r *http.Request) {
 			msg = "push reported down"
 		}
 	}
-	hb := domain.Heartbeat{MonitorID: mon.ID, Up: up, Msg: msg}
+	// Transitional bridge (P0a): stamp a server timestamp so the push ping is a valid
+	// scheduled result under RecordScheduledResult's missing-timestamp gate. Step 3
+	// replaces this with a dedicated PushResultRecorder that captures received_at at
+	// ingress and calls RecordPushResult directly (off the shared ResultSink).
+	hb := domain.Heartbeat{MonitorID: mon.ID, Up: up, Msg: msg, Ts: time.Now().UTC()}
 	if h.results != nil {
 		if err := h.results.PublishResult(r.Context(), hb); err != nil {
 			h.serverError(w, "publish_push_result", err)

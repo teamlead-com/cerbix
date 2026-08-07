@@ -144,6 +144,20 @@ func (r *Registry) RecordResultMissingRevision() {
 	r.resultMissingRev++
 }
 
+// RecordResultOutcome routes a store result-outcome reason to its metric family (the
+// single entry point callers use, so the reason→family mapping lives in one place). An
+// empty reason (applied) or an unmapped one (e.g. "duplicate") is a no-op.
+func (r *Registry) RecordResultOutcome(reason string) {
+	switch reason {
+	case "future_timestamp":
+		r.RecordResultQuarantined(reason)
+	case "out_of_order", "outside_retention":
+		r.RecordResultIgnored(reason)
+	case "missing_timestamp", "stale_revision", "missing_revision":
+		r.RecordResultRejected(reason)
+	}
+}
+
 // RecordIncidentOpened counts an incident opened through the API.
 func (r *Registry) RecordIncidentOpened() {
 	r.mu.Lock()

@@ -7,15 +7,14 @@ import (
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
-// TestRecordResultDedupAndFreshness proves the single-transaction result path:
-//   - a fresh result inserts a heartbeat and applies the status change;
-//   - a duplicate (same monitor+ts) is a no-op for both the heartbeat table and
-//     live status (it must not re-bump the failure counter);
-//   - a stale/out-of-order result is still recorded as a heartbeat (SLA is never
-//     lost) but must not override newer live state;
-//   - a strictly newer result applies again.
-func TestRecordResultDedupAndFreshness(t *testing.T) {
+// TestRecordScheduledResultPipeline exercises the ordered ingest pipeline
+// (spec func-result-protocol §4) end-to-end over the real DB: missing timestamp,
+// fresh apply, duplicate dedup, future-beyond-skew quarantine, outside-retention ignore,
+// out-of-order SLA-only, and a strictly-newer fresh recovery — asserting both the
+// ResultOutcome and the persisted heartbeat rows.
+func TestRecordScheduledResultPipeline(t *testing.T) {
 	st, ctx := outboxTestStore(t)
+	st.WithResultPolicy(5*time.Minute, 30*time.Minute)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
@@ -34,50 +33,72 @@ func TestRecordResultDedupAndFreshness(t *testing.T) {
 		}
 		return n
 	}
-
-	t2 := time.Now().UTC().Truncate(time.Millisecond)
-	t1 := t2.Add(-time.Minute) // strictly older
-	t3 := t2.Add(time.Minute)  // strictly newer
-
-	// 1) Fresh DOWN at t2 → applied, flips down (threshold 1).
-	prev, cur, _, applied, err := st.RecordResult(ctx, domain.Heartbeat{MonitorID: mon.ID, Ts: t2, Up: false, Code: 500})
-	if err != nil || !applied || cur != domain.StatusDown {
-		t.Fatalf("fresh down: prev=%v cur=%v applied=%v err=%v", prev, cur, applied, err)
-	}
-	if hbCount() != 1 {
-		t.Fatalf("after fresh down, heartbeats = %d, want 1", hbCount())
+	rec := func(hb domain.Heartbeat) ResultOutcome {
+		t.Helper()
+		o, err := st.RecordScheduledResult(ctx, hb)
+		if err != nil {
+			t.Fatalf("record: %v", err)
+		}
+		return o
 	}
 
-	// 2) Duplicate of t2 → no heartbeat, not applied, counter untouched.
-	_, _, _, applied, err = st.RecordResult(ctx, domain.Heartbeat{MonitorID: mon.ID, Ts: t2, Up: false, Code: 500})
-	if err != nil || applied {
-		t.Fatalf("duplicate: applied=%v err=%v, want applied=false", applied, err)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// 0) Missing timestamp → fail-closed reject, no insert.
+	if o := rec(domain.Heartbeat{MonitorID: mon.ID, Up: true}); o.Reason != ReasonMissingTimestamp || o.Inserted || o.Applied {
+		t.Fatalf("missing ts: %+v, want reject/no-insert", o)
 	}
-	if hbCount() != 1 {
-		t.Fatalf("after duplicate, heartbeats = %d, want 1 (no re-insert)", hbCount())
+	if hbCount() != 0 {
+		t.Fatalf("missing ts must not insert: hb=%d", hbCount())
+	}
+
+	// 1) Fresh DOWN at now → applied, flips down (threshold 1); observed_at == ts.
+	if o := rec(domain.Heartbeat{MonitorID: mon.ID, Ts: now, Up: false, Code: 500}); !o.Applied || o.Cur != domain.StatusDown || !o.Inserted {
+		t.Fatalf("fresh down: %+v", o)
+	}
+	var obs *time.Time
+	_ = st.pool.QueryRow(ctx, `SELECT observed_at FROM heartbeats WHERE monitor_id=$1 AND ts=$2`, mon.ID, now).Scan(&obs)
+	if obs == nil || !obs.Equal(now) {
+		t.Fatalf("observed_at should equal ts for scheduled: got %v", obs)
+	}
+
+	// 2) Duplicate of now → no heartbeat, not applied, counter untouched.
+	if o := rec(domain.Heartbeat{MonitorID: mon.ID, Ts: now, Up: false, Code: 500}); o.Reason != ReasonDuplicate || o.Applied || o.Inserted {
+		t.Fatalf("duplicate: %+v", o)
 	}
 	if got, _ := st.GetMonitor(ctx, mon.ID); got.ConsecutiveFailures != 1 {
-		t.Fatalf("duplicate must not re-bump failures: got %d, want 1", got.ConsecutiveFailures)
+		t.Fatalf("duplicate must not re-bump failures: %d", got.ConsecutiveFailures)
 	}
 
-	// 3) Stale UP at t1 (older than t2) → heartbeat kept, but status stays DOWN.
-	_, _, _, applied, err = st.RecordResult(ctx, domain.Heartbeat{MonitorID: mon.ID, Ts: t1, Up: true, Code: 200})
-	if err != nil || applied {
-		t.Fatalf("stale up: applied=%v err=%v, want applied=false", applied, err)
+	// 3) Future beyond skew (now+10m, skew 5m) → quarantine, no insert.
+	if o := rec(domain.Heartbeat{MonitorID: mon.ID, Ts: now.Add(10 * time.Minute), Up: true}); o.Reason != ReasonFutureTimestamp || o.Inserted {
+		t.Fatalf("future: %+v, want quarantine/no-insert", o)
+	}
+
+	// 4) Outside retention (now-1h, retention 30m) → ignore, no insert.
+	if o := rec(domain.Heartbeat{MonitorID: mon.ID, Ts: now.Add(-time.Hour), Up: true}); o.Reason != ReasonOutsideRetention || o.Inserted {
+		t.Fatalf("outside retention: %+v, want ignore/no-insert", o)
+	}
+	if hbCount() != 1 {
+		t.Fatalf("dup/future/outside must not insert: hb=%d, want 1", hbCount())
+	}
+
+	// 5) Out-of-order within retention (now-1m, older than watermark) → SLA-only.
+	if o := rec(domain.Heartbeat{MonitorID: mon.ID, Ts: now.Add(-time.Minute), Up: true, Code: 200}); o.Reason != ReasonOutOfOrder || o.Applied || !o.Inserted {
+		t.Fatalf("out-of-order: %+v, want SLA-only insert", o)
 	}
 	if hbCount() != 2 {
-		t.Fatalf("stale result must still be recorded: heartbeats = %d, want 2", hbCount())
+		t.Fatalf("out-of-order must insert for SLA: hb=%d, want 2", hbCount())
 	}
 	if got, _ := st.GetMonitor(ctx, mon.ID); got.Status != domain.StatusDown {
-		t.Fatalf("stale up must not override live state: status = %v, want down", got.Status)
+		t.Fatalf("out-of-order up must not override live state: %v", got.Status)
 	}
 
-	// 4) Fresh UP at t3 (newer than t2) → applied, recovers.
-	prev, cur, _, applied, err = st.RecordResult(ctx, domain.Heartbeat{MonitorID: mon.ID, Ts: t3, Up: true, Code: 200})
-	if err != nil || !applied || prev != domain.StatusDown || cur != domain.StatusUp {
-		t.Fatalf("fresh up: prev=%v cur=%v applied=%v err=%v", prev, cur, applied, err)
+	// 6) Fresh UP at now+1m (within skew, newer than watermark) → recovers.
+	if o := rec(domain.Heartbeat{MonitorID: mon.ID, Ts: now.Add(time.Minute), Up: true, Code: 200}); !o.Applied || o.Prev != domain.StatusDown || o.Cur != domain.StatusUp {
+		t.Fatalf("fresh up: %+v", o)
 	}
 	if hbCount() != 3 {
-		t.Fatalf("after fresh up, heartbeats = %d, want 3", hbCount())
+		t.Fatalf("after fresh up: hb=%d, want 3", hbCount())
 	}
 }

@@ -402,6 +402,9 @@ func runServe(args []string) int {
 		}
 		st = opened
 		defer st.Close()
+		// Result-ingest timestamp policy (spec func-result-protocol): skew bound + the
+		// retention floor below which a result is ignored (= the raw heartbeat window).
+		st.WithResultPolicy(cfg.Result.AllowedSkew.Std(), time.Duration(cfg.Heartbeats.RetentionDays)*24*time.Hour)
 		// Secret-at-rest encryption (validated in config; empty key = disabled).
 		if keys, err := cfg.Security.Keys(); err != nil {
 			logging.Critical(logger, "encryption_key_invalid", "error", err.Error())

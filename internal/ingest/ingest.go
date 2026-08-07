@@ -17,12 +17,12 @@ import (
 
 // Store is the persistence surface the ingester needs.
 type Store interface {
-	// RecordResult records a probe result atomically: heartbeat insert + live-status
-	// change + transition-outbox event in one transaction, with dedup and freshness
-	// gating. It returns the previous and new status, whether the change was
-	// suppressed (in maintenance → don't open an incident), and whether the result
-	// was actually applied to live status (false for a duplicate or stale result).
-	RecordResult(ctx context.Context, hb domain.Heartbeat) (prev, cur domain.MonitorStatus, suppressed, applied bool, err error)
+	// RecordScheduledResult records a scheduled (worker/agent) probe result in one
+	// transaction following the ordered ingest pipeline (missing → lock → revision gate →
+	// timestamp bounds → insert/dedup → watermark). The returned ResultOutcome says whether
+	// live state was applied, whether a heartbeat was inserted (SLA), the prev/new status,
+	// maintenance suppression, and — when not applied — the outcome reason for metrics.
+	RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) (store.ResultOutcome, error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	FindOpenAutoIncidentByMonitor(ctx context.Context, monitorID string) (domain.Incident, error)
 	CreateIncident(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
@@ -33,6 +33,9 @@ type Store interface {
 type Recorder interface {
 	RecordCheck(up bool)
 	RecordIncidentOpened()
+	// RecordResultOutcome reports a non-applied result outcome (quarantined/ignored/
+	// rejected) by its reason; an applied or benign-duplicate outcome is a no-op.
+	RecordResultOutcome(reason string)
 }
 
 // autoIncidentAuthor labels timeline entries the pipeline writes.
@@ -104,12 +107,11 @@ func (c *Consumer) Run(ctx context.Context) {
 }
 
 func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
-	// One transaction records the heartbeat, applies the status change and enqueues
-	// any transition event: a duplicate re-delivery (applied=false) is deduped and
-	// never re-bumps the failure counter, a stale/out-of-order probe is kept for SLA
-	// but doesn't override newer live state, and a crash can't leave a status change
-	// without its heartbeat.
-	prev, cur, suppressed, applied, err := c.store.RecordResult(ctx, hb)
+	// One transaction runs the ordered pipeline (missing → lock → revision gate → bounds →
+	// insert/dedup → watermark): a duplicate re-delivery is deduped, a stale/out-of-order
+	// probe is kept for SLA only, a future/out-of-window one is quarantined without an
+	// insert, and a crash can't leave a status change without its heartbeat.
+	o, err := c.store.RecordScheduledResult(ctx, hb)
 	if errors.Is(err, store.ErrNotFound) {
 		// The monitor was deleted while the probe was in flight; the scheduler drops
 		// it on its next snapshot refresh.
@@ -120,14 +122,27 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 		c.logger.Error("record_result_failed", "monitor_id", hb.MonitorID, "error", err.Error())
 		return
 	}
-	if applied && prev != cur {
-		c.logger.Info("monitor_status_changed", "monitor_id", hb.MonitorID, "prev", string(prev), "cur", string(cur), "suppressed", suppressed)
-		c.reconcileTransition(ctx, hb, prev, cur, suppressed)
-	}
 	if c.recorder != nil {
-		c.recorder.RecordCheck(hb.Up)
+		if o.Reason != "" {
+			c.recorder.RecordResultOutcome(o.Reason)
+		}
+		if o.Inserted {
+			c.recorder.RecordCheck(hb.Up) // count a real check only when a heartbeat was recorded
+		}
+	}
+	if o.Reason == ReasonFutureTimestamp {
+		// A future-beyond-skew scheduled result signals a broken worker clock; the
+		// aggregate metric can't identify it, so log (rate-limiting is a P2 refinement).
+		c.logger.Warn("result_quarantined", "monitor_id", hb.MonitorID, "reason", o.Reason, "ts", hb.Ts)
+	}
+	if o.Applied && o.Prev != o.Cur {
+		c.logger.Info("monitor_status_changed", "monitor_id", hb.MonitorID, "prev", string(o.Prev), "cur", string(o.Cur), "suppressed", o.Suppressed)
+		c.reconcileTransition(ctx, hb, o.Prev, o.Cur, o.Suppressed)
 	}
 }
+
+// ReasonFutureTimestamp mirrors store.ReasonFutureTimestamp for the quarantine log branch.
+const ReasonFutureTimestamp = store.ReasonFutureTimestamp
 
 // reconcileTransition handles any monitor status change: it publishes a live
 // event for SSE subscribers, and on going down opens an auto-incident / on

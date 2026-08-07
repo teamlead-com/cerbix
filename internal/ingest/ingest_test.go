@@ -25,6 +25,7 @@ type fakeStore struct {
 	maint       map[string]bool      // monitor id → currently in a maintenance window
 	lastTs      map[string]time.Time // freshness watermark (last applied result ts)
 	seq         int64                // monotonic synthetic clock for zero-Ts heartbeats
+	forceReason string               // if set, RecordScheduledResult returns this non-applied outcome
 	nextInc     int
 	// createErrs is a queue of errors CreateIncident returns on successive calls
 	// (nil = success); createCalls counts how many times it was invoked.
@@ -44,13 +45,19 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-// RecordResult mirrors store.RecordResult: insert the heartbeat, then dedup +
-// freshness-gate before applying the status change. Zero-Ts heartbeats (the common
-// test shape) get a monotonic synthetic timestamp, exactly as production's hbTime
-// falls back to now() — so distinct probes stay distinct and forward-moving.
-func (f *fakeStore) RecordResult(_ context.Context, hb domain.Heartbeat) (prev, cur domain.MonitorStatus, suppressed, applied bool, err error) {
+// RecordScheduledResult mirrors store.RecordScheduledResult enough for the handle-level
+// orchestration tests: dedup + freshness before applying the status change. Zero-Ts
+// heartbeats (the common test shape) get a monotonic synthetic timestamp so distinct
+// probes stay distinct and forward-moving — these tests simulate valid scheduled results.
+// forceReason lets a test drive a non-applied outcome (quarantine/reject/…) to verify the
+// handle() metric mapping. The full timestamp/missing/bounds pipeline is contract-tested
+// against the real DB in store.TestRecordScheduledResultPipeline.
+func (f *fakeStore) RecordScheduledResult(_ context.Context, hb domain.Heartbeat) (store.ResultOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.forceReason != "" {
+		return store.ResultOutcome{Reason: f.forceReason}, nil // not applied, not inserted
+	}
 	ts := hb.Ts
 	if ts.IsZero() {
 		f.seq++
@@ -58,14 +65,14 @@ func (f *fakeStore) RecordResult(_ context.Context, hb domain.Heartbeat) (prev, 
 	}
 	for _, e := range f.hbs {
 		if e.MonitorID == hb.MonitorID && e.Ts.Equal(ts) {
-			return "", "", false, false, nil // duplicate — already recorded
+			return store.ResultOutcome{Reason: store.ReasonDuplicate}, nil // already recorded
 		}
 	}
 	stored := hb
 	stored.Ts = ts
 	f.hbs = append(f.hbs, stored)
 	if last, ok := f.lastTs[hb.MonitorID]; ok && !ts.After(last) {
-		return "", "", false, false, nil // stale — kept for SLA, not applied
+		return store.ResultOutcome{Inserted: true, Reason: store.ReasonOutOfOrder}, nil // SLA-only
 	}
 
 	prev, ok := f.statuses[hb.MonitorID]
@@ -76,6 +83,7 @@ func (f *fakeStore) RecordResult(_ context.Context, hb domain.Heartbeat) (prev, 
 	if threshold < 1 {
 		threshold = 1
 	}
+	var cur domain.MonitorStatus
 	if hb.Up {
 		f.consecutive[hb.MonitorID] = 0
 		cur = domain.StatusUp
@@ -89,11 +97,11 @@ func (f *fakeStore) RecordResult(_ context.Context, hb domain.Heartbeat) (prev, 
 	}
 	f.statuses[hb.MonitorID] = cur
 	f.lastTs[hb.MonitorID] = ts
-	suppressed = f.maint[hb.MonitorID]
+	suppressed := f.maint[hb.MonitorID]
 	if prev == cur {
 		suppressed = false // no transition
 	}
-	return prev, cur, suppressed, true, nil
+	return store.ResultOutcome{Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed}, nil
 }
 
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {
@@ -178,6 +186,7 @@ type fakeRecorder struct {
 	mu            sync.Mutex
 	up, down      int
 	incidentsOpen int
+	outcomes      map[string]int // reason → count
 }
 
 func (r *fakeRecorder) RecordCheck(up bool) {
@@ -190,10 +199,65 @@ func (r *fakeRecorder) RecordCheck(up bool) {
 	}
 }
 
+func (r *fakeRecorder) RecordResultOutcome(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.outcomes == nil {
+		r.outcomes = map[string]int{}
+	}
+	r.outcomes[reason]++
+}
+
+func (r *fakeRecorder) outcomeCount(reason string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.outcomes[reason]
+}
+
 func (r *fakeRecorder) RecordIncidentOpened() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.incidentsOpen++
+}
+
+// TestHandleMapsNonAppliedOutcome proves handle() routes a non-applied store outcome to
+// the outcome metric and does NOT count it as a check (RecordCheck only on an inserted
+// heartbeat) or drive a transition.
+func TestHandleMapsNonAppliedOutcome(t *testing.T) {
+	fs := newFakeStore()
+	fs.forceReason = store.ReasonFutureTimestamp
+	fs.monitors["m1"] = domain.Monitor{ID: "m1"}
+	rec := &fakeRecorder{}
+	disp := dispatch.NewInProc(8)
+	c := New(fs, disp, rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	_ = disp.PublishResult(ctx, domain.Heartbeat{MonitorID: "m1", Up: true, Ts: time.Now()})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if rec.outcomeCount(store.ReasonFutureTimestamp) == 1 {
+			rec.mu.Lock()
+			up, down := rec.up, rec.down
+			rec.mu.Unlock()
+			if up != 0 || down != 0 {
+				t.Fatalf("non-applied outcome must not count a check: up=%d down=%d", up, down)
+			}
+			fs.mu.Lock()
+			n := len(fs.hbs)
+			fs.mu.Unlock()
+			if n != 0 {
+				t.Fatalf("quarantined result must not insert: hbs=%d", n)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("handle did not record the outcome metric")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func TestConsumerPersistsResults(t *testing.T) {

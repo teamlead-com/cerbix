@@ -58,6 +58,21 @@ type Store struct {
 	// drop_chunks; without the extension the declarative daily partitions are
 	// managed by hand. Detected once at Open.
 	timescale bool
+	// Result-ingest policy (spec func-result-protocol). resultSkew bounds how far ahead of
+	// the DB clock a scheduled result's timestamp may be before it is quarantined;
+	// resultRetention is the lower bound below which a result is ignored (outside the raw
+	// window). Zero → sane fallbacks (skew 5m; retention floor disabled). Set via
+	// WithResultPolicy at wiring.
+	resultSkew      time.Duration
+	resultRetention time.Duration
+}
+
+// WithResultPolicy sets the timestamp bounds used by RecordScheduledResult. Returns the
+// store for chaining, mirroring WithCipher.
+func (s *Store) WithResultPolicy(skew, retention time.Duration) *Store {
+	s.resultSkew = skew
+	s.resultRetention = retention
+	return s
 }
 
 // WithCipher enables at-rest encryption of secret columns (webhook secrets,

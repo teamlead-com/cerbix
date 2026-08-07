@@ -536,7 +536,10 @@ func (s *Scheduler) checkStalePush(ctx context.Context, now time.Time, nextRun m
 		if due, ok := nextRun[m.ID]; ok && now.Before(due) {
 			continue
 		}
-		hb := domain.Heartbeat{MonitorID: m.ID, Up: false, Msg: "push timeout: no heartbeat within interval"}
+		// Transitional bridge (P0a): stamp a timestamp so the synthetic DOWN is a valid
+		// scheduled result under RecordScheduledResult's missing-timestamp gate. P0b
+		// replaces this with RecordDeadmanResult (atomic staleness re-check, no dispatcher).
+		hb := domain.Heartbeat{MonitorID: m.ID, Up: false, Msg: "push timeout: no heartbeat within interval", Ts: now}
 		if err := s.dispatcher.PublishResult(ctx, hb); err != nil {
 			if ctx.Err() != nil {
 				return

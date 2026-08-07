@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/secret"
 )
 
 // ReencryptSecrets rewrites EVERY stored secret under the current primary key:
@@ -16,6 +17,57 @@ import (
 // moving the old one to previous_keys; afterwards the old key can be dropped. It is
 // a no-op when encryption is disabled. Returns the number of webhooks and channels
 // rewritten (the other secret-bearing columns are covered but not separately counted).
+// BackfillPushTokenEnc encrypts any push_token_enc still stored as plaintext (seeded by
+// migration 00053 from the old plaintext column). Unlike ReencryptSecrets — which only runs
+// via the `cerbix reencrypt` command — this runs at startup (readiness-gated) so a normal
+// migrate+serve never leaves a push bearer token in plaintext once a key is configured. A
+// no-op without a cipher (plaintext is then the chosen posture). Idempotent (already-
+// encrypted rows are skipped by the prefix check) and concurrency-safe (the UPDATE CAS on
+// the old value means only one replica converts each row). Returns rows converted.
+func (s *Store) BackfillPushTokenEnc(ctx context.Context) (int, error) {
+	if s.cipher == nil {
+		return 0, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, push_token_enc FROM monitors WHERE push_token_enc IS NOT NULL`)
+	if err != nil {
+		return 0, fmt.Errorf("store: scan push tokens for backfill: %w", err)
+	}
+	type kv struct{ id, val string }
+	var pts []kv
+	for rows.Next() {
+		var r kv
+		if err := rows.Scan(&r.id, &r.val); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("store: scan push token: %w", err)
+		}
+		pts = append(pts, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: iterate push tokens: %w", err)
+	}
+	converted := 0
+	for _, r := range pts {
+		if secret.IsEncrypted(r.val) {
+			continue // already ciphertext
+		}
+		enc, err := s.cipher.Encrypt(r.val)
+		if err != nil {
+			return converted, fmt.Errorf("store: encrypt push token %s: %w", r.id, err)
+		}
+		tag, err := s.pool.Exec(ctx,
+			`UPDATE monitors SET push_token_enc = $2 WHERE id = $1 AND push_token_enc = $3`,
+			r.id, enc, r.val)
+		if err != nil {
+			return converted, fmt.Errorf("store: backfill push token %s: %w", r.id, err)
+		}
+		if tag.RowsAffected() > 0 {
+			converted++
+		}
+	}
+	return converted, nil
+}
+
 func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, err error) {
 	if s.cipher == nil {
 		return 0, 0, nil

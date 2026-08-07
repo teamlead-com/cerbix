@@ -66,6 +66,11 @@ func (c *Cipher) Encrypt(s string) (string, error) {
 	return prefix + base64.RawStdEncoding.EncodeToString(ct), nil
 }
 
+// IsEncrypted reports whether s carries the at-rest ciphertext prefix (i.e. it is an
+// Encrypt output, not legacy/seeded plaintext). Used by one-time backfills to skip values
+// that are already encrypted.
+func IsEncrypted(s string) bool { return strings.HasPrefix(s, prefix) }
+
 // Decrypt reverses Encrypt, trying each key in turn (GCM's authentication tag
 // tells a wrong key from the right one). A value without the "enc:v1:" prefix is
 // returned as-is (legacy plaintext). An encrypted value presented to a nil Cipher,

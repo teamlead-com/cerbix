@@ -418,6 +418,15 @@ func runServe(args []string) int {
 			}
 			st.WithCipher(cipher)
 			logger.Info("secret_encryption_enabled", "keys", len(keys))
+			// Readiness-gated one-time backfill: encrypt any push token still stored as
+			// plaintext (migration 00053 seed). Fail-fast — never serve with a plaintext
+			// bearer token when a key is configured. Idempotent + concurrency-safe.
+			if n, err := st.BackfillPushTokenEnc(ctx); err != nil {
+				logging.Critical(logger, "push_token_backfill_failed", "error", err.Error())
+				return 1
+			} else if n > 0 {
+				logger.Info("push_token_backfill_complete", "converted", n)
+			}
 		}
 		registry.SetDatabaseUp(true)
 		logger.Info("database_connected")

@@ -122,3 +122,47 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 		t.Fatalf("lookup by push token after rotation: %+v err=%v", got, err)
 	}
 }
+
+// TestBackfillPushTokenEnc proves the readiness-gated backfill encrypts a plaintext
+// (migration-seeded) push token, is idempotent (already-encrypted rows untouched), and
+// leaves lookup working — no plaintext bearer token survives once a key is configured.
+func TestBackfillPushTokenEnc(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	key := randKey(t)
+	c, _ := secret.New(key)
+	st.WithCipher(c)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		IntervalSeconds: 3600, Enabled: true, PushToken: "cbxp_seed",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Simulate the 00053 seed: force push_token_enc back to plaintext.
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET push_token_enc = 'cbxp_seed' WHERE id=$1`, mon.ID); err != nil {
+		t.Fatalf("seed plaintext: %v", err)
+	}
+
+	n, err := st.BackfillPushTokenEnc(ctx)
+	if err != nil || n != 1 {
+		t.Fatalf("backfill = %d err=%v, want 1", n, err)
+	}
+	var raw string
+	_ = st.pool.QueryRow(ctx, `SELECT push_token_enc FROM monitors WHERE id=$1`, mon.ID).Scan(&raw)
+	if !secret.IsEncrypted(raw) {
+		t.Fatalf("push token still plaintext after backfill: %q", raw)
+	}
+	if got, _ := c.Decrypt(raw); got != "cbxp_seed" {
+		t.Fatalf("encrypted token decrypts to %q, want cbxp_seed", got)
+	}
+	// Idempotent: a second run converts nothing.
+	if n2, _ := st.BackfillPushTokenEnc(ctx); n2 != 0 {
+		t.Fatalf("second backfill = %d, want 0 (idempotent)", n2)
+	}
+	// Lookup still works (blind index unaffected).
+	if got, _, err := st.GetMonitorByPushToken(ctx, "cbxp_seed"); err != nil || got.ID != mon.ID {
+		t.Fatalf("lookup after backfill: %+v err=%v", got, err)
+	}
+}

@@ -52,6 +52,7 @@ type Store interface {
 	ListRecentHeartbeats(ctx context.Context, monitorID string, limit int) ([]domain.Heartbeat, error)
 	PasswordHashByID(ctx context.Context, id string) (string, error)
 	SetPassword(ctx context.Context, id, passwordHash string) error
+	DeleteSessionsByUser(ctx context.Context, userID, exceptToken string) (int64, error)
 	SetTOTPSecret(ctx context.Context, userID, secret string) error
 	GetTOTP(ctx context.Context, userID string) (secret string, enabled bool, err error)
 	EnableTOTP(ctx context.Context, userID string) error

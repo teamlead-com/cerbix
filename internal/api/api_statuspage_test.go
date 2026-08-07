@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +81,60 @@ func TestPublicRenderEnriched(t *testing.T) {
 	}
 	if len(render.Maintenance) != 1 || render.Maintenance[0].ID != "mw1" {
 		t.Fatalf("maintenance = %+v, want [mw1]", render.Maintenance)
+	}
+}
+
+// TestPublicRenderRedactsInternalIDs proves the public (unauthenticated) status-page
+// render strips internal identifiers and the ack actor from incidents/maintenance,
+// while the authenticated preview keeps them.
+func TestPublicRenderRedactsInternalIDs(t *testing.T) {
+	fs := seededStore()
+	// Give the seeded active incident (inc1, p1) sensitive internal fields.
+	inc := fs.incidents["inc1"]
+	inc.MonitorID = "mon1"
+	inc.ExternalKey = "am-fp-SENTINEL"
+	inc.AcknowledgedBy = "u1"
+	inc.Source = domain.SourceAuto
+	fs.incidents["inc1"] = inc
+
+	// Public render: the external key must not appear anywhere, and the incident's
+	// internal ids / ack actor must be blanked.
+	pub := newPublicHandler(fs)
+	rec := do(pub, outsider, http.MethodGet, "/api/v1/public/status-pages/acme-status", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("public render = %d, want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "am-fp-SENTINEL") {
+		t.Fatalf("public render leaked external_key: %s", rec.Body.String())
+	}
+	var pubRender struct {
+		ActiveIncidents []struct {
+			ID             string `json:"id"`
+			ProjectID      string `json:"project_id"`
+			MonitorID      string `json:"monitor_id"`
+			ExternalKey    string `json:"external_key"`
+			AcknowledgedBy string `json:"acknowledged_by"`
+		} `json:"active_incidents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pubRender); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(pubRender.ActiveIncidents) != 1 {
+		t.Fatalf("active incidents = %d, want 1", len(pubRender.ActiveIncidents))
+	}
+	got := pubRender.ActiveIncidents[0]
+	if got.ProjectID != "" || got.MonitorID != "" || got.ExternalKey != "" || got.AcknowledgedBy != "" {
+		t.Fatalf("public incident leaked internal fields: %+v", got)
+	}
+
+	// Authenticated preview keeps the detail (operators may need it).
+	authed := newHandler(fs)
+	arec := do(authed, o1Admin, http.MethodGet, "/api/v1/status-pages/sp1/render", "")
+	if arec.Code != http.StatusOK {
+		t.Fatalf("authed render = %d, want 200 (%s)", arec.Code, arec.Body.String())
+	}
+	if !strings.Contains(arec.Body.String(), "am-fp-SENTINEL") {
+		t.Fatalf("authed render should retain external_key, got %s", arec.Body.String())
 	}
 }
 

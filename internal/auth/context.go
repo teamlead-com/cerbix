@@ -35,7 +35,10 @@ type Store interface {
 
 type ctxKey int
 
-const principalKey ctxKey = iota
+const (
+	principalKey ctxKey = iota
+	sessionTokenKey
+)
 
 // WithPrincipal returns a context carrying the principal.
 func WithPrincipal(ctx context.Context, p authz.Principal) context.Context {
@@ -46,4 +49,18 @@ func WithPrincipal(ctx context.Context, p authz.Principal) context.Context {
 func PrincipalFrom(ctx context.Context) (authz.Principal, bool) {
 	p, ok := ctx.Value(principalKey).(authz.Principal)
 	return p, ok
+}
+
+// WithSessionToken carries the raw session-cookie token so a handler can identify
+// (and preserve) the caller's own session — e.g. a password change invalidates every
+// OTHER session but this one. Empty for bearer/JWT callers (no interactive session).
+func WithSessionToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, sessionTokenKey, token)
+}
+
+// SessionTokenFrom returns the raw session token for the request, or "" if the caller
+// did not authenticate with a session cookie.
+func SessionTokenFrom(ctx context.Context) string {
+	t, _ := ctx.Value(sessionTokenKey).(string)
+	return t
 }

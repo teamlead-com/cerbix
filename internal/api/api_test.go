@@ -28,40 +28,41 @@ type fakePullTest struct {
 }
 
 type fakeStore struct {
-	orgs             map[string]domain.Organization
-	projects         map[string]domain.Project
-	users            map[string]domain.User
-	byOrg            map[string][]domain.Project
-	userOrgs         map[string][]domain.Organization
-	members          map[string][]domain.Membership
-	monitors         map[string]domain.Monitor
-	passwords        map[string]string
-	slaTargets       map[string]domain.SLATarget
-	slaReports       map[string]bool // project id -> weekly report enabled
-	oidcSettings     *domain.OIDCSettings
-	instanceSettings domain.InstanceSettings
-	maintenance      map[string]domain.MaintenanceWindow
-	incidents        map[string]domain.Incident
-	escPolicies      map[string]domain.EscalationPolicy
-	oncall           map[string]domain.OnCallSchedule
-	overrides        map[string]domain.OnCallOverride
-	pullJobs         map[string][][]byte
-	pullTests        map[string]fakePullTest
-	agentHeartbeats  map[string]string
-	agentTokens      map[string]domain.AgentToken
-	backfilled       []domain.Heartbeat
-	incUpdates       map[string][]domain.IncidentUpdate
-	postmortems      map[string]domain.Postmortem
-	pages            map[string]domain.StatusPage
-	components       map[string]domain.Component
-	apiTokens        map[string]domain.ApiToken
-	webhooks         map[string]domain.Webhook
-	channels         map[string]domain.NotificationChannel
-	monLinks         map[string][]string // monitor id -> channel ids
-	deadOutbox       map[string]domain.OutboxEventView
-	searchHits       []domain.SearchHit
-	subscribers      map[string]domain.Subscriber // keyed by confirm token
-	outboxEvents     []struct {
+	orgs               map[string]domain.Organization
+	projects           map[string]domain.Project
+	users              map[string]domain.User
+	byOrg              map[string][]domain.Project
+	userOrgs           map[string][]domain.Organization
+	members            map[string][]domain.Membership
+	monitors           map[string]domain.Monitor
+	passwords          map[string]string
+	sessionsDeletedFor []string
+	slaTargets         map[string]domain.SLATarget
+	slaReports         map[string]bool // project id -> weekly report enabled
+	oidcSettings       *domain.OIDCSettings
+	instanceSettings   domain.InstanceSettings
+	maintenance        map[string]domain.MaintenanceWindow
+	incidents          map[string]domain.Incident
+	escPolicies        map[string]domain.EscalationPolicy
+	oncall             map[string]domain.OnCallSchedule
+	overrides          map[string]domain.OnCallOverride
+	pullJobs           map[string][][]byte
+	pullTests          map[string]fakePullTest
+	agentHeartbeats    map[string]string
+	agentTokens        map[string]domain.AgentToken
+	backfilled         []domain.Heartbeat
+	incUpdates         map[string][]domain.IncidentUpdate
+	postmortems        map[string]domain.Postmortem
+	pages              map[string]domain.StatusPage
+	components         map[string]domain.Component
+	apiTokens          map[string]domain.ApiToken
+	webhooks           map[string]domain.Webhook
+	channels           map[string]domain.NotificationChannel
+	monLinks           map[string][]string // monitor id -> channel ids
+	deadOutbox         map[string]domain.OutboxEventView
+	searchHits         []domain.SearchHit
+	subscribers        map[string]domain.Subscriber // keyed by confirm token
+	outboxEvents       []struct {
 		Topic   string
 		Payload []byte
 	}
@@ -373,6 +374,10 @@ func (f *fakeStore) SetPassword(_ context.Context, id, passwordHash string) erro
 	}
 	f.passwords[id] = passwordHash
 	return nil
+}
+func (f *fakeStore) DeleteSessionsByUser(_ context.Context, userID, _ string) (int64, error) {
+	f.sessionsDeletedFor = append(f.sessionsDeletedFor, userID)
+	return 0, nil
 }
 func (f *fakeStore) MonitorSLI(_ context.Context, _ string, _ time.Time) (store.SLICounts, error) {
 	return store.SLICounts{Total: 100, Up: 99, AvgLatencyMS: 12}, nil

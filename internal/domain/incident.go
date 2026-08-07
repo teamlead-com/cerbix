@@ -101,6 +101,20 @@ type Incident struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
+// PublicRedacted returns a copy safe to serialize on a public (unauthenticated)
+// status page: it strips internal identifiers and the acknowledging actor that an
+// outside viewer must not see — the project/monitor UUIDs, the external correlation
+// key (e.g. an Alertmanager fingerprint), and who acknowledged it. Title, status,
+// impact, and timing (what a status page actually shows) are kept.
+func (i Incident) PublicRedacted() Incident {
+	i.ProjectID = ""
+	i.MonitorID = ""
+	i.ExternalKey = ""
+	i.AcknowledgedBy = ""
+	i.AcknowledgedByName = ""
+	return i
+}
+
 // Validate enforces incident invariants (domain-owned).
 func (i Incident) Validate() error {
 	if strings.TrimSpace(i.Title) == "" {

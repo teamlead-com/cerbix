@@ -282,7 +282,7 @@ func (h *Handler) renderStatusPageAuthed(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	h.writeStatusPageRender(w, r, sp)
+	h.writeStatusPageRender(w, r, sp, false) // authed preview: full detail
 }
 
 // renderStatusPagePublic renders a page without a session, enforcing visibility:
@@ -310,7 +310,7 @@ func (h *Handler) renderStatusPagePublic(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	h.writeStatusPageRender(w, r, sp)
+	h.writeStatusPageRender(w, r, sp, true) // public: strip internal ids
 }
 
 // dayPoint is one day of a component's 90-day availability strip.
@@ -354,7 +354,7 @@ type incidentDetailView struct {
 // enrichIncidents attaches each incident's update timeline, and (when
 // withPostmortem) its published postmortem. N+1 is fine: the status page shows
 // few incidents (active now, resolved over 90 days).
-func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs []domain.Incident, withPostmortem bool) ([]incidentDetailView, bool) {
+func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs []domain.Incident, withPostmortem, public bool) ([]incidentDetailView, bool) {
 	ctx := r.Context()
 	out := make([]incidentDetailView, 0, len(incs))
 	for _, in := range incs {
@@ -372,6 +372,11 @@ func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs [
 				return nil, false
 			}
 		}
+		// On the public endpoint, strip internal ids / the ack actor from each
+		// incident before it leaves the server to an unauthenticated viewer.
+		if public {
+			in = in.PublicRedacted()
+		}
 		out = append(out, incidentDetailView{Incident: in, Updates: updates, Postmortem: pm})
 	}
 	return out, true
@@ -380,7 +385,7 @@ func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs [
 // writeStatusPageRender assembles and writes a page's public view: each
 // component's derived status and 90-day uptime, the worst-of summary, and the
 // unresolved incidents across the projects the components draw from.
-func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, sp domain.StatusPage) {
+func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, sp domain.StatusPage, public bool) {
 	ctx := r.Context()
 	comps, err := h.store.ListComponentsByPage(ctx, sp.ID)
 	if err != nil {
@@ -470,13 +475,19 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 
 	// Enrich incidents so each can expand: active ones show their timeline
 	// (latest update inline), past ones their timeline + postmortem.
-	activeViews, ok := h.enrichIncidents(w, r, active, false)
+	activeViews, ok := h.enrichIncidents(w, r, active, false, public)
 	if !ok {
 		return
 	}
-	recentViews, ok := h.enrichIncidents(w, r, recent, true)
+	recentViews, ok := h.enrichIncidents(w, r, recent, true, public)
 	if !ok {
 		return
+	}
+	// Strip internal project/monitor ids from maintenance windows on the public endpoint.
+	if public {
+		for i := range maints {
+			maints[i] = maints[i].PublicRedacted()
+		}
 	}
 
 	writeJSON(w, http.StatusOK, statusPageRender{

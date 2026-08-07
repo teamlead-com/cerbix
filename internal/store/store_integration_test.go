@@ -250,6 +250,46 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionsByUser(t *testing.T) {
+	st, ctx := testStore(t)
+	u, _ := st.UpsertUserByOIDCSub(ctx, "multi-sess", "m@x", "M")
+	other, _ := st.UpsertUserByOIDCSub(ctx, "other-user", "o@x", "O")
+	mk := func(uid, tok string) {
+		if _, err := st.CreateSession(ctx, uid, tok, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("create session %s: %v", tok, err)
+		}
+	}
+	mk(u.ID, "cur")   // the caller's current session
+	mk(u.ID, "phone") // another device
+	mk(u.ID, "old")   // a stale/stolen session
+	mk(other.ID, "someone-else")
+
+	// Password change: keep the current session, drop the user's others.
+	n, err := st.DeleteSessionsByUser(ctx, u.ID, "cur")
+	if err != nil || n != 2 {
+		t.Fatalf("delete-except-current = %d (err %v), want 2", n, err)
+	}
+	if _, err := st.SessionByToken(ctx, "cur"); err != nil {
+		t.Fatalf("current session must survive: %v", err)
+	}
+	for _, tok := range []string{"phone", "old"} {
+		if _, err := st.SessionByToken(ctx, tok); err != store.ErrNotFound {
+			t.Fatalf("session %q should be gone, got %v", tok, err)
+		}
+	}
+	// Another user's session is untouched.
+	if _, err := st.SessionByToken(ctx, "someone-else"); err != nil {
+		t.Fatalf("other user's session must be untouched: %v", err)
+	}
+	// Blank exception drops all remaining sessions for the user.
+	if n, err := st.DeleteSessionsByUser(ctx, u.ID, ""); err != nil || n != 1 {
+		t.Fatalf("delete-all = %d (err %v), want 1 (the current one)", n, err)
+	}
+	if _, err := st.SessionByToken(ctx, "cur"); err != store.ErrNotFound {
+		t.Fatal("delete-all should have removed the current session too")
+	}
+}
+
 func TestAuthFlowConsumedOnce(t *testing.T) {
 	st, ctx := testStore(t)
 	flow := store.AuthFlow{State: "st-1", Nonce: "n", PKCEVerifier: "v", RedirectTo: "/x", ExpiresAt: time.Now().Add(time.Minute)}

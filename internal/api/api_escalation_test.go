@@ -49,6 +49,45 @@ func TestEscalationPolicyAPI(t *testing.T) {
 	}
 }
 
+// TestCrossTenantEscalationRefsRejected proves same-project ownership is enforced on
+// escalation-related references: an escalation policy step target, an on-call schedule
+// participant, an override channel, and a monitor's escalation_policy_id must all
+// belong to the project they are attached to. nc3 lives in p3 (a different org's
+// project); referencing it from p1 must be rejected.
+func TestCrossTenantEscalationRefsRejected(t *testing.T) {
+	h := newHandler(seededStore())
+
+	// Escalation policy step target pointing at another project's channel (nc3) → 400.
+	crossPolicy := `{"name":"x","steps":[{"after_seconds":0,"targets":[{"type":"channel","id":"nc3"}]}]}`
+	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/escalation-policies", crossPolicy); rec.Code != http.StatusBadRequest {
+		t.Fatalf("policy with foreign channel = %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+	// On-call schedule participant from another project → 400.
+	crossSched := `{"name":"x","shift_seconds":604800,"anchor_at":"2026-01-05T00:00:00Z","participants":["nc3"]}`
+	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/oncall-schedules", crossSched); rec.Code != http.StatusBadRequest {
+		t.Fatalf("schedule with foreign participant = %d, want 400", rec.Code)
+	}
+
+	// Monitor escalation_policy_id must be in the monitor's project. Create a policy in
+	// p1, then reference it from a monitor in p2 (same org, different project) → 400.
+	rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/escalation-policies",
+		`{"name":"p1pol","steps":[{"after_seconds":0,"targets":[{"type":"channel","id":"nc1"}]}]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("seed p1 policy = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var pol domain.EscalationPolicy
+	_ = json.Unmarshal(rec.Body.Bytes(), &pol)
+	crossMon := `{"name":"m","type":"http","target":"https://x","interval_seconds":60,"timeout_seconds":5,"escalation_policy_id":"` + pol.ID + `"}`
+	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p2/monitors", crossMon); rec.Code != http.StatusBadRequest {
+		t.Fatalf("monitor in p2 with p1 policy = %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+	// Same policy, monitor in its OWN project (p1) → allowed.
+	sameMon := `{"name":"m","type":"http","target":"https://x","interval_seconds":60,"timeout_seconds":5,"escalation_policy_id":"` + pol.ID + `"}`
+	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors", sameMon); rec.Code != http.StatusCreated {
+		t.Fatalf("monitor in p1 with p1 policy = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestOnCallScheduleAPI(t *testing.T) {
 	h := newHandler(seededStore())
 	body := `{"name":"primary","shift_seconds":604800,"anchor_at":"2026-01-05T00:00:00Z","participants":["nc1"]}`

@@ -74,6 +74,7 @@ type Authenticator struct {
 	localBootPassword string
 	minPasswordLen    int
 	loginLimiter      *loginLimiter
+	trustedProxies    int            // reverse-proxy hops in front (rate-limit client IP)
 	mailer            *mailer.Mailer // optional; enables self-service password reset
 	policy            PolicySource   // optional; instance-wide auth policy
 }
@@ -131,6 +132,7 @@ func New(_ context.Context, cfg *config.Config, st Store, logger *slog.Logger) (
 		localBootPassword: cfg.Security.AdminPassword,
 		minPasswordLen:    cfg.Local.MinPasswordLength,
 		loginLimiter:      newLoginLimiter(cfg.Local.LoginRateLimitPerMinute),
+		trustedProxies:    cfg.Server.TrustedProxyCount,
 	}
 	return a, nil
 }

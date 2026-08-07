@@ -45,6 +45,9 @@ func (h *Handler) createEscalationPolicy(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !h.escalationStepsInProject(w, r, p.Steps, proj.ID) {
+		return
+	}
 	created, err := h.store.CreateEscalationPolicy(r.Context(), p)
 	if err != nil {
 		h.serverError(w, "create_escalation_policy", err)
@@ -65,6 +68,9 @@ func (h *Handler) updateEscalationPolicy(w http.ResponseWriter, r *http.Request)
 	p.Name, p.RepeatLast, p.Steps = body.Name, body.RepeatLast, body.Steps
 	if err := p.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !h.escalationStepsInProject(w, r, p.Steps, p.ProjectID) {
 		return
 	}
 	updated, err := h.store.UpdateEscalationPolicy(r.Context(), p)
@@ -143,6 +149,9 @@ func (h *Handler) createOnCallSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !h.channelsInProject(w, r, sc.Participants, proj.ID) {
+		return
+	}
 	created, err := h.store.CreateOnCallSchedule(r.Context(), sc)
 	if err != nil {
 		h.serverError(w, "create_oncall_schedule", err)
@@ -163,6 +172,9 @@ func (h *Handler) updateOnCallSchedule(w http.ResponseWriter, r *http.Request) {
 	sc.Name, sc.ShiftSeconds, sc.AnchorAt, sc.Participants = body.Name, body.ShiftSeconds, body.AnchorAt, body.Participants
 	if err := sc.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !h.channelsInProject(w, r, sc.Participants, sc.ProjectID) {
 		return
 	}
 	updated, err := h.store.UpdateOnCallSchedule(r.Context(), sc)
@@ -229,6 +241,9 @@ func (h *Handler) addOverride(w http.ResponseWriter, r *http.Request) {
 	o := domain.OnCallOverride{ScheduleID: sc.ID, ChannelID: body.ChannelID, StartsAt: body.StartsAt, EndsAt: body.EndsAt}
 	if err := o.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !h.channelInProject(w, r, o.ChannelID, sc.ProjectID) {
 		return
 	}
 	created, err := h.store.AddOnCallOverride(r.Context(), o)

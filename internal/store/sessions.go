@@ -62,6 +62,21 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	return nil
 }
 
+// DeleteSessionsByUser removes every session for a user EXCEPT the one whose raw
+// token is exceptToken (pass "" to drop all). Called on a password change/reset so a
+// stolen or stale session can't outlive the credential rotation, while the actor's
+// current session stays valid. Returns the number of sessions removed.
+func (s *Store) DeleteSessionsByUser(ctx context.Context, userID, exceptToken string) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		// A blank exceptToken hashes to a value no real token matches, so the
+		// `<>` predicate keeps nothing — i.e. all of the user's sessions are dropped.
+		`DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2`, userID, HashToken(exceptToken))
+	if err != nil {
+		return 0, fmt.Errorf("store: delete sessions by user: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // DeleteExpiredSessions removes sessions past their expiry and returns the count.
 func (s *Store) DeleteExpiredSessions(ctx context.Context) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE expires_at <= now()`)

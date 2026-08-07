@@ -35,7 +35,8 @@ func (a *Authenticator) RequireAuth(next http.Handler) http.Handler {
 					http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 					return
 				}
-				next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), principal)))
+				ctx := WithSessionToken(WithPrincipal(r.Context(), principal), c.Value)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 		}

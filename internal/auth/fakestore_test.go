@@ -107,6 +107,23 @@ func (f *fakeStore) DeleteSession(_ context.Context, token string) error {
 	return nil
 }
 
+func (f *fakeStore) DeleteSessionsByUser(_ context.Context, userID, exceptToken string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	keep := ""
+	if exceptToken != "" {
+		keep = store.HashToken(exceptToken)
+	}
+	var n int64
+	for h, s := range f.sessions {
+		if s.UserID == userID && h != keep {
+			delete(f.sessions, h)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (f *fakeStore) CreateAuthFlow(_ context.Context, fl store.AuthFlow) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

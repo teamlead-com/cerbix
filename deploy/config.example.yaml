@@ -8,6 +8,11 @@ server:
   healthz_path: "/healthz"
   readyz_path: "/readyz"
   metrics_path: "/metrics"
+  # Reverse-proxy hops in front of cerbix (0 = none). The login rate limiter takes
+  # the client IP this many entries from the right of X-Forwarded-For, so a client
+  # can't spoof XFF into a fresh bucket. Set to your real hop count in production
+  # (1 behind a lone Traefik, 2 behind Cloudflare→Traefik); leave 0 for direct exposure.
+  trusted_proxy_count: 0
 
 log:
   level: "info"      # debug|info|error|critical

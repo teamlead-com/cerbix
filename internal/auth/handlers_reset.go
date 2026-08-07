@@ -17,7 +17,7 @@ const resetTokenTTL = time.Hour
 // reset link to the address if it belongs to a local account. The response is
 // always 200 with a generic message so it can't be used to enumerate accounts.
 func (a *Authenticator) ResetRequestHandler(w http.ResponseWriter, r *http.Request) {
-	if !a.loginLimiter.allow(clientIP(r), time.Now()) {
+	if !a.loginLimiter.allow(clientIP(r, a.trustedProxies), time.Now()) {
 		writeJSONError(w, http.StatusTooManyRequests, "too many requests, try again later")
 		return
 	}

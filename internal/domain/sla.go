@@ -103,6 +103,14 @@ type MaintenanceWindow struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// PublicRedacted returns a copy safe for a public status page: internal
+// project/monitor identifiers stripped, the window timing and reason kept.
+func (m MaintenanceWindow) PublicRedacted() MaintenanceWindow {
+	m.ProjectID = ""
+	m.MonitorID = ""
+	return m
+}
+
 // Validate enforces maintenance-window invariants.
 func (m MaintenanceWindow) Validate() error {
 	if m.ProjectID == "" {

@@ -401,6 +401,15 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "set_password", err)
 		return
 	}
+	// Invalidate every OTHER session for this user so a stolen/stale session elsewhere
+	// can't survive the credential change; the caller's own session is preserved (it
+	// just proved the current password). A bearer/JWT caller has no session token, so
+	// all interactive sessions are dropped.
+	if n, err := h.store.DeleteSessionsByUser(r.Context(), p.UserID, auth.SessionTokenFrom(r.Context())); err != nil {
+		h.logEvent(r, "password_change_session_invalidate_failed", "error", err.Error())
+	} else {
+		h.logEvent(r, "password_changed", "sessions_invalidated", n)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -35,7 +35,7 @@ func (a *Authenticator) secondFactorOK(ctx context.Context, cred store.LocalCred
 // success, issues a session cookie. Failures return a uniform 401 to avoid user
 // enumeration; excessive attempts from one IP get 429.
 func (a *Authenticator) LocalLoginHandler(w http.ResponseWriter, r *http.Request) {
-	if !a.loginLimiter.allow(clientIP(r), time.Now()) {
+	if !a.loginLimiter.allow(clientIP(r, a.trustedProxies), time.Now()) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "too many login attempts, try again later"})

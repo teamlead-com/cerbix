@@ -58,6 +58,14 @@ type ServerConfig struct {
 	HealthzPath string `yaml:"healthz_path"`
 	ReadyzPath  string `yaml:"readyz_path"`
 	MetricsPath string `yaml:"metrics_path"`
+	// TrustedProxyCount is how many reverse-proxy hops sit in front of cerbix
+	// (e.g. 1 for a lone Traefik, 2 behind Cloudflare→Traefik). The rate-limiter's
+	// client IP is taken that many entries from the right of the
+	// X-Forwarded-For + peer chain, so a client can't spoof its way into a fresh
+	// bucket. 0 (default) trusts NO XFF and keys on the direct peer — safe against
+	// spoofing, but keys every request behind a proxy to the proxy's IP, so set
+	// this to your real hop count in production.
+	TrustedProxyCount int `yaml:"trusted_proxy_count"`
 }
 
 // LogConfig controls structured logging.

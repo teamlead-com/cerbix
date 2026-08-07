@@ -2350,3 +2350,36 @@ the ~ms incident-creation lag), `openAutoIncident` now retries a transient failu
 250ms) and logs a persistent failure at ERROR with an `escalation` flag for log-based
 alerting. A full delivery guarantee (incident committed in the status-transition
 transaction) is a larger refactor left as a follow-up.
+
+## D-0139 — Auth-surface hardening (iter-0081)
+A focused security audit of six auth concerns; two needed no change (OIDC already
+verifies audience/issuer/expiry/nonce/state via go-oidc; status-page cross-project
+linking stays org-scoped — the org is the tenant boundary and cross-org is already
+blocked, so intra-org cross-project is same-tenant by design). Four were real and fixed:
+
+1. **Rate-limiter XFF spoofing + unbounded map.** The login limiter keyed on a blindly
+   trusted `X-Forwarded-For` first hop, so an attacker set a unique XFF per request and
+   never tripped the limit; the key map was also never evicted (memory DoS). `clientIP`
+   now takes a `server.trusted_proxy_count` (default 0 = ignore XFF, key on the direct
+   peer) and reads the client that many hops from the right of the XFF+peer chain — a
+   spoofed leading XFF can't win a fresh bucket. `allow` opportunistically sweeps idle
+   keys (bounded to the last window).
+2. **Cross-tenant escalation references.** A monitor's `escalation_policy_id`, an
+   escalation policy's step targets (channel/schedule ids), on-call schedule participants,
+   and an override's channel id were all persisted without a same-project check (FKs
+   enforce existence only; step targets are FK-less JSONB) — so a user could page another
+   tenant's channel/schedule/policy. New `internal/api/tenant_scope.go` helpers assert
+   same-project ownership in every create/update handler (mirrors `compositeChildrenOK`).
+3. **Password change didn't invalidate other sessions.** `changePassword` now deletes the
+   user's OTHER sessions (new `store.DeleteSessionsByUser`) while KEEPING the caller's
+   current one (the raw session token is threaded through the request context). Standard
+   behavior, and it preserves the shared-session model the E2E suite relies on. The
+   password RESET path is deliberately left non-invalidating: the product/E2E contract
+   treats a self-service reset from a logged-in browser as keeping that session, and the
+   reset flow has no current-session token to preserve selectively — reset-time global
+   invalidation is a separate product/UX decision.
+4. **Public status-page id leakage.** The unauthenticated render embedded the full
+   `domain.Incident`/`MaintenanceWindow`, leaking `project_id`/`monitor_id`, the
+   `external_key` (e.g. an Alertmanager fingerprint) and `acknowledged_by` (a user id) to
+   anyone. The public path now applies `PublicRedacted()` to incidents and maintenance
+   windows; the authenticated preview keeps full detail.

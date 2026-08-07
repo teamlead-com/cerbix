@@ -276,6 +276,9 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 	if !h.compositeChildrenOK(w, r, m, proj.ID) {
 		return
 	}
+	if !h.escalationPolicyInProject(w, r, m.EscalationPolicyID, proj.ID) {
+		return
+	}
 	created, err := h.store.CreateMonitor(r.Context(), m)
 	if err != nil {
 		h.serverError(w, "create_monitor", err)
@@ -449,6 +452,9 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.compositeChildrenOK(w, r, mon, mon.ProjectID) {
+		return
+	}
+	if !h.escalationPolicyInProject(w, r, mon.EscalationPolicyID, mon.ProjectID) {
 		return
 	}
 	// Validate + replace the dependency edges before touching the row, so a

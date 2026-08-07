@@ -75,28 +75,31 @@ func (l *loginLimiter) sweep(now time.Time) {
 }
 
 // clientIP extracts the caller's IP for rate-limiting, resistant to spoofing.
-// trustedProxies is how many reverse-proxy hops sit in front of cerbix; the client
-// is that many entries from the right of the (X-Forwarded-For ++ peer) chain. With
-// 0 trusted hops, X-Forwarded-For is ignored entirely (it is client-controlled) and
-// the direct peer address is used, so a client cannot forge a fresh limiter bucket.
-func clientIP(r *http.Request, trustedProxies int) string {
+//
+// When trustedNets is non-empty (server.trusted_proxy_cidrs is set) the CIDR-trust
+// model is used and it SUPERSEDES trustedProxies: X-Forwarded-For is honored only
+// when the direct peer is inside a trusted network, then the (XFF ++ peer) chain is
+// walked right-to-left skipping addresses that are themselves trusted proxies — the
+// first untrusted address is the client. A request whose direct peer is not trusted
+// (e.g. one reaching the origin directly, bypassing the proxy) has its XFF ignored
+// entirely, so it can't forge a fresh limiter bucket.
+//
+// When trustedNets is empty the legacy hop-count model applies: trustedProxies is how
+// many reverse-proxy hops sit in front of cerbix; the client is that many entries from
+// the right of the chain. With 0 trusted hops, X-Forwarded-For is ignored entirely.
+func clientIP(r *http.Request, trustedProxies int, trustedNets []*net.IPNet) string {
 	peer := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(peer); err == nil {
 		peer = host
+	}
+	if len(trustedNets) > 0 {
+		return clientIPByCIDR(r, peer, trustedNets)
 	}
 	if trustedProxies <= 0 {
 		return peer
 	}
 	// Full left-to-right chain: XFF entries (each appended by a hop) then the peer.
-	chain := []string{}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		for _, part := range strings.Split(xff, ",") {
-			if p := strings.TrimSpace(part); p != "" {
-				chain = append(chain, p)
-			}
-		}
-	}
-	chain = append(chain, peer)
+	chain := forwardChain(r, peer)
 	// The rightmost trustedProxies entries are our own proxies; the one just before
 	// them is the real client. Clamp to the leftmost entry if the chain is short
 	// (fewer hops present than configured — never index past the client).
@@ -105,4 +108,52 @@ func clientIP(r *http.Request, trustedProxies int) string {
 		idx = 0
 	}
 	return chain[idx]
+}
+
+// clientIPByCIDR resolves the client under the CIDR-trust model (see clientIP).
+func clientIPByCIDR(r *http.Request, peer string, trustedNets []*net.IPNet) string {
+	if !ipInAny(peer, trustedNets) {
+		// Direct peer is not one of our proxies — do not trust any XFF it carries.
+		return peer
+	}
+	chain := forwardChain(r, peer)
+	// Walk right-to-left: skip our own proxies, stop at the first untrusted address.
+	for i := len(chain) - 1; i >= 0; i-- {
+		if !ipInAny(chain[i], trustedNets) {
+			return chain[i]
+		}
+	}
+	// Whole chain is trusted infrastructure — the leftmost entry is the closest to
+	// the (unknown) real client we have.
+	return chain[0]
+}
+
+// forwardChain builds the left-to-right address chain: X-Forwarded-For entries
+// (each appended by a hop, client-first) followed by the direct peer.
+func forwardChain(r *http.Request, peer string) []string {
+	chain := []string{}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		for _, part := range strings.Split(xff, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				chain = append(chain, p)
+			}
+		}
+	}
+	return append(chain, peer)
+}
+
+// ipInAny reports whether ip (a bare host string) parses and falls inside any of
+// the given networks. A malformed address is never "in" a trusted network, so it
+// is treated as an untrusted client — the safe default.
+func ipInAny(ip string, nets []*net.IPNet) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, n := range nets {
+		if n.Contains(parsed) {
+			return true
+		}
+	}
+	return false
 }

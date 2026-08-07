@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -80,6 +81,7 @@ type Authenticator struct {
 	minPasswordLen    int
 	loginLimiter      *loginLimiter
 	trustedProxies    int            // reverse-proxy hops in front (rate-limit client IP)
+	trustedProxyNets  []*net.IPNet   // trusted proxy networks; supersedes trustedProxies when set
 	decoyHash         string         // argon2id hash verified for unknown users (anti-enumeration timing)
 	mailer            *mailer.Mailer // optional; enables self-service password reset
 	policy            PolicySource   // optional; instance-wide auth policy
@@ -140,6 +142,9 @@ func New(_ context.Context, cfg *config.Config, st Store, logger *slog.Logger) (
 		loginLimiter:      newLoginLimiter(cfg.Local.LoginRateLimitPerMinute),
 		trustedProxies:    cfg.Server.TrustedProxyCount,
 	}
+	// Config.Validate (run at Load) already rejected malformed CIDRs, so this parse
+	// can't fail here; ignore the error defensively rather than plumb it up.
+	a.trustedProxyNets, _ = cfg.Server.TrustedProxyNets()
 	// Decoy hash for the anti-enumeration timing fix: a login for an unknown user
 	// verifies the submitted password against THIS hash so it spends the same
 	// Argon2id time as a wrong-password attempt on a real account. Generated at

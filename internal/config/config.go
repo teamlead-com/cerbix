@@ -9,6 +9,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -68,6 +69,15 @@ type ServerConfig struct {
 	// spoofing, but keys every request behind a proxy to the proxy's IP, so set
 	// this to your real hop count in production.
 	TrustedProxyCount int `yaml:"trusted_proxy_count"`
+	// TrustedProxyCIDRs lists the networks (CIDR notation) that our own reverse
+	// proxies live in. When non-empty this SUPERSEDES TrustedProxyCount: the
+	// rate-limiter honors X-Forwarded-For only when the direct peer is inside one
+	// of these networks, then walks the chain right-to-left skipping addresses
+	// that are themselves trusted proxies — the first untrusted address is the
+	// client. A request reaching cerbix directly (peer not in any trusted CIDR)
+	// has its XFF ignored entirely, so it can't forge a limiter bucket even in a
+	// dual-path deployment where both the proxy and the origin are reachable.
+	TrustedProxyCIDRs []string `yaml:"trusted_proxy_cidrs"`
 }
 
 // LogConfig controls structured logging.
@@ -460,6 +470,9 @@ func (c *Config) Validate() error {
 	if c.Result.RevisionMode != "enforce" && c.Result.RevisionMode != "observe" {
 		return fmt.Errorf("result.revision_mode must be enforce|observe: %q", c.Result.RevisionMode)
 	}
+	if _, err := c.Server.TrustedProxyNets(); err != nil {
+		return err
+	}
 	if _, err := c.Security.Keys(); err != nil {
 		return err
 	}
@@ -472,6 +485,28 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// TrustedProxyNets parses TrustedProxyCIDRs into networks, returning an error on
+// any malformed entry (called from Validate so a bad CIDR fails Load). An empty
+// list yields a nil slice, which selects the hop-count model in the rate-limiter.
+func (s ServerConfig) TrustedProxyNets() ([]*net.IPNet, error) {
+	if len(s.TrustedProxyCIDRs) == 0 {
+		return nil, nil
+	}
+	nets := make([]*net.IPNet, 0, len(s.TrustedProxyCIDRs))
+	for _, c := range s.TrustedProxyCIDRs {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, fmt.Errorf("server.trusted_proxy_cidrs: invalid CIDR %q: %w", c, err)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
 }
 
 // HTTPReadTimeout is a conservative default used by the HTTP server.

@@ -204,6 +204,27 @@ func TestValidateRejectsEmptyListen(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsBadTrustedProxyCIDR(t *testing.T) {
+	_, err := Parse([]byte("server:\n  trusted_proxy_cidrs:\n    - 10.0.0.0/8\n    - not-a-cidr\n"))
+	if err == nil || !strings.Contains(err.Error(), "server.trusted_proxy_cidrs") {
+		t.Fatalf("expected trusted_proxy_cidrs error, got %v", err)
+	}
+}
+
+func TestTrustedProxyNetsParses(t *testing.T) {
+	cfg, err := Parse([]byte("server:\n  trusted_proxy_cidrs:\n    - 10.0.0.0/8\n    - 172.16.0.0/12\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	nets, err := cfg.Server.TrustedProxyNets()
+	if err != nil {
+		t.Fatalf("TrustedProxyNets: %v", err)
+	}
+	if len(nets) != 2 {
+		t.Fatalf("want 2 nets, got %d", len(nets))
+	}
+}
+
 func TestValidateOIDCPartial(t *testing.T) {
 	_, err := Parse([]byte("oidc:\n  issuer: https://keycloak.example/realms/x\n"))
 	if err == nil || !strings.Contains(err.Error(), "oidc.client_id") {

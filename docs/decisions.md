@@ -2514,3 +2514,30 @@ Sampling stops the moment a real ping advances the watermark.
 Deferred (separate axes, not this decision): `job_id` correlation + strict
 `observed_at >= job_issued_at` (with P0b/job correlation); `state_sequence` for outbox
 delivery ordering (#4, P2) — orthogonal to `execution_revision`.
+
+## D-0143 — Monitoring as Code is a tenant-scoped file reconciler in the API control plane (spec, iter-0085)
+
+Cerbix will expose Monitoring as Code through named static file providers whose directory
+contents are hot-reconciled without process restart/reload. This is not an in-memory config
+swap: PostgreSQL remains the runtime/history source of truth, while files are desired state
+only for resources owned by their provider. The native syntax is a versioned
+`ProjectBundle` (`format: 1` once per file, resource maps keyed by stable source UID), not a
+Kubernetes `apiVersion`/`kind` envelope and not a Go/DB serialization.
+
+Organizations/projects must already exist; static provider scope is explicitly
+`instance|organization|project`, and bundle resolution/reference checks cannot escape it.
+Ownership is per monitor, so UI/API monitors coexist and are never diffed as provider
+orphans. Normal CRUD is rejected for file-managed declarative fields; there is no automatic
+adoption by name. A project bundle is the atomic/fault-isolation unit. Invalid input keeps
+its last-known-good state; ambiguous invalid scans suspend orphaning. Valid disappearance
+marks orphan and disables after grace, but never hard-deletes heartbeat/SLA/incident/audit
+history; restoration reuses DB identity and push token.
+
+The reconciler is an internal `api`/`all` component, with one PostgreSQL advisory-lock
+leader per provider and no `controller` role/service. Scheduler propagation is via an
+in-transaction notification plus its normal DB refresh fallback. Semantic no-ops never
+write/bump revision; real config changes use the D-0142 `UpdateMonitor`/
+`execution_revision` contract, so production enablement depends on P0b. Dynamic files are
+strict and bounded, allow no environment expansion/inline secrets, and expose explicit
+degraded/LKG observability rather than applying partial invalid state. Full contract,
+failure matrix, rollout, and acceptance tests: `docs/specs/func-monitoring-as-code.md`.

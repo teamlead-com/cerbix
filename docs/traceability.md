@@ -7,6 +7,8 @@ Mapping from requirements to code, tests, and metrics. Updated every iteration.
 | FR-001 (CLI roles/version) | `backend/internal/cli/cli.go`, `backend/cmd/cerbix/main.go` | `backend/internal/cli/cli_test.go` | — | transport |
 | FR-002 (health/ready/metrics) | `backend/internal/httpsrv/server.go` | `backend/internal/httpsrv/server_test.go` | `/healthz` `/readyz` `/metrics` | transport |
 | FR-003 (strict config) | `backend/internal/config/config.go` | `backend/internal/config/config_test.go` | — | infra |
+| FR-017 (Monitoring as Code file provider; planned) | —; contract: `docs/specs/func-monitoring-as-code.md` | Planned parser/reconcile/store/watcher/HA/API/UI/E2E matrix in spec §18 | Planned `cerbix_file_provider_*`; provider diagnostics API | application (reconcile/ownership) / domain (monitor invariants) / infra (watch+persistence+leadership) / transport (strict YAML+API provenance) |
+| NFR-014 (safe declarative reconciliation; planned) | —; contract: `docs/specs/func-monitoring-as-code.md` | Planned negative tenant/ownership/LKG/no-op/resource-bound/race tests in spec §18 | Planned degraded/LKG status + alerts | cross-layer; tenant isolation remains domain-owned |
 | NFR-001 (fail-fast config) | `backend/internal/config/config.go` (`Validate`, `KnownFields`) | `backend/internal/config/config_test.go` | — | infra |
 | NFR-002 (no self-healing) | `backend/internal/cli/cli.go` (`runServe` aborts on load error) | `backend/internal/cli/cli_test.go` (`TestServeFailsOnMissingConfigFile`) | — | infra |
 | NFR-003 (logging, no secrets) | `backend/internal/logging/logger.go` | `backend/internal/logging/logger_test.go` | — | infra |

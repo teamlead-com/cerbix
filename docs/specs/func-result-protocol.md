@@ -25,14 +25,15 @@ retry bypassed dedup), and a 1970 timestamp polluted the raw time series.
 ## 2. Trusted origins (server-side, never inferred from payload)
 
 Origin is established by which **typed store entrypoint** is called, not by any field in
-the result body (an external client must not be able to claim an origin). Three:
+the result body (an external client must not be able to claim an origin). Three live-state
+origins plus one SLA-only historical path:
 
 | Entrypoint | Caller | Ordering clock | Revision gate |
 | --- | --- | --- | --- |
 | `RecordScheduledResult` | worker/agent results (AMQP + pull) | result `observed_at` (worker clock, bounded) | required, CAS |
 | `RecordPushResult` | the push HTTP handler ONLY, via a dedicated `PushResultRecorder` (never the shared `ResultSink`) | server `received_at` (ingress) | exempt (applied to current config) |
 | `RecordDeadmanResult` | the scheduler leader, directly (no dispatcher) | server `statement_timestamp()` | CAS incl. atomic staleness re-check |
-| `RecordHistoricalResults` | agent backfill replay | per-row `observed_at` | n/a — SLA-only, never live state (§4) |
+| `RecordHistoricalResults` | agent backfill replay | per-row `observed_at` (wire `ts` → DB `observed_at`) | n/a — SLA-only, never live state (§4) |
 
 `statement_timestamp()` (the start of the current SQL statement) is the single
 authoritative clock for the skew bound and `received_at`. It is preferred over
@@ -108,28 +109,34 @@ For scheduled results the wire `ts` (the worker/agent probe clock) maps to DB
 its `ts` populates `observed_at` — it is NOT seen as `missing_timestamp`. `missing_timestamp`
 means the wire `ts` is genuinely zero (a malformed/broken producer), not "old binary".
 
-### Scheduled — outcomes
+### Scheduled — ordered pipeline
 A scheduled result MUST carry a timestamp (the prober always sets `ts`; `observed_at`
-nullable exists only for push/legacy). Precedence: **duplicate → missing → revision (§3)
-→ timestamp**.
+nullable exists only for push/legacy). The ingest transaction runs strictly in THIS order,
+which is what simultaneously preserves gate-before-insert, redelivery idempotency, and the
+ban on ever persisting a future- or stale-revision row. `ts` (the effective/ordering
+column) = `observed_at` for scheduled.
 
-- **duplicate** (heartbeat `(monitor_id, ts)` already present — an AMQP/pull redelivery):
-  `INSERT ... ON CONFLICT DO NOTHING` affects 0 rows → `applied=false`, no state/counter
-  mutation (the fact is already recorded). This is the redelivery-safety case.
-- **missing timestamp** (`ts` zero → `observed_at` would be NULL): **reject**, no insert.
-  `result_rejected_total{reason="missing_timestamp"}`. Never silently treated as "now".
+1. **Missing timestamp** — wire `ts` zero → **reject**, no insert.
+   `result_rejected_total{reason="missing_timestamp"}`. Never silently treated as "now".
+2. **`SELECT … FOR UPDATE`** the monitor row (locks it for the whole tx).
+3. **Revision gate (§3)** — present-mismatch, or missing in `enforce` → reject, no insert.
+4. **Timestamp bounds — evaluated BEFORE the insert** so a bad row never lands:
+   - `observed_at > now + skew` → **quarantine**: no insert, no state,
+     `result_quarantined_total{reason="future_timestamp"}` + a rate-limited structured log
+     (monitor_id / region / job_id);
+   - `observed_at < now − retention` → **ignore**: no insert,
+     `result_ignored_total{reason="outside_retention"}`.
+5. **`INSERT … ON CONFLICT (monitor_id, ts) DO NOTHING`**.
+6. **0 rows → duplicate** (AMQP/pull redelivery): `applied=false`, no state/counter/watermark
+   mutation — the fact is already recorded. (Redelivery safety.)
+7. **Watermark compare** (row was inserted):
+   - `observed_at <= last_result_ts` → **out-of-order**: heartbeat stays SLA-only,
+     `applied=false`, `result_ignored_total{reason="out_of_order"}`;
+   - else **fresh**: status/counters + transition-outbox, advance `last_result_ts`,
+     `applied=true`.
 
-Then, on a fresh non-duplicate result that passed the revision gate, by `observed_at`:
-1. **fresh** (`observed_at` within `[now-retention, now+skew]`, newer than watermark):
-   apply to state + SLA; `ts = observed_at`; watermark advances.
-2. **out-of-order within retention** (older than watermark, but `>= now - retention`):
-   SLA-only, not applied to live state. `result_ignored_total{reason="out_of_order"}`.
-3. **future beyond skew** (`observed_at > now + skew`): **quarantine** — no state, no
-   counters, no incident, no outbox, AND no heartbeat insert (a future-dated row would
-   pollute the rollup/partition). `result_quarantined_total{reason="future_timestamp"}` +
-   a rate-limited structured log with monitor_id / region / job_id.
-4. **outside retention** (`observed_at < now - retention`): ignore, no insert (already
-   outside the raw-retention/recompute window). `result_ignored_total{reason="outside_retention"}`.
+(now = `statement_timestamp()`; steps 4 and 7 are the "four timestamp outcomes":
+future-quarantine, outside-retention, out-of-order, fresh.)
 
 ### Push — never quarantined on client clock
 The heartbeat is the liveness signal; rejecting it on a bad client clock would trip a
@@ -152,7 +159,8 @@ reason="future|past"}` is emitted ONLY when a client timestamp is actually provi
 sits outside `received_at ± skew` (adoption telemetry for a future optional field); it is
 never a reject.
 
-**Post-commit flow (shared, all origins).** Applying push must run the SAME post-commit
+**Post-commit flow (shared, all LIVE-STATE origins).** Historical backfill does NOT
+reconcile (it never changes live state). Applying push must run the SAME post-commit
 reconciliation as scheduled ingest and dead-man — SSE status event, auto-incident
 open/resolve, operational check metric (the logic currently inline in `ingest.handle`).
 The direct `PushResultRecorder` must invoke that shared helper after commit; otherwise
@@ -212,9 +220,11 @@ immediately. Backfill gets its own contract, `RecordHistoricalResults`:
 
 - **Never touches live state** (no status/counter/incident/outbox/`last_result_ts`) — it is
   SLA/audit-only by definition (replaying old down→up must not re-alert).
-- **Per-row timestamp validation, identical bounds to scheduled:** `missing` → skip;
-  `future beyond skew` → skip; `outside retention` → skip; a valid historical row → insert
-  SLA-only. Each row of the batch is evaluated independently.
+- **Per-row timestamp validation, identical bounds to scheduled:** `missing` →
+  `result_rejected_total{reason="missing_timestamp"}`; `future beyond skew` →
+  `result_quarantined_total{reason="future_timestamp"}`; `outside retention` →
+  `result_ignored_total{reason="outside_retention"}`; each of those skips the insert. A
+  valid historical row → insert SLA-only. Each row of the batch is evaluated independently.
 - **Idempotent:** `ON CONFLICT (monitor_id, ts) DO NOTHING`.
 - **Revision:** not applicable — the gate exists to protect live state, which backfill never
   mutates; consistency with D-0142 is "backfill never applies to live state, regardless of
@@ -284,9 +294,10 @@ result:
   outage yields multiple DOWN samples but **exactly one** transition/outbox/incident;
   repeated DOWN does NOT advance `last_result_ts`; a real push halts sampling until the next
   `interval + grace` lapses; not applied across a revision bump / after disable.
-- Backfill: mixed valid/invalid batch — future/1970/missing rows skipped, valid rows
-  inserted SLA-only, live state untouched; idempotent replay (ON CONFLICT); a future row
-  never reaches an SLA `ts >= since` query.
+- Backfill: mixed valid/invalid batch — future-beyond-skew / 1970 / missing rows skipped,
+  valid rows inserted SLA-only, live state untouched; idempotent replay (ON CONFLICT); a
+  future-beyond-skew row never reaches an SLA `ts >= since` query (a future row WITHIN skew
+  is allowed).
 - received_at captured at ingress (not processed_at) — handler-level test.
 
 ## 9. Non-goals / deferred

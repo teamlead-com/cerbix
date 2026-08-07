@@ -32,6 +32,7 @@ the result body (an external client must not be able to claim an origin). Three:
 | `RecordScheduledResult` | worker/agent results (AMQP + pull) | result `observed_at` (worker clock, bounded) | required, CAS |
 | `RecordPushResult` | the push HTTP handler ONLY, via a dedicated `PushResultRecorder` (never the shared `ResultSink`) | server `received_at` (ingress) | exempt (applied to current config) |
 | `RecordDeadmanResult` | the scheduler leader, directly (no dispatcher) | server `statement_timestamp()` | CAS incl. atomic staleness re-check |
+| `RecordHistoricalResults` | agent backfill replay | per-row `observed_at` | n/a — SLA-only, never live state (§4) |
 
 `statement_timestamp()` (the start of the current SQL statement) is the single
 authoritative clock for the skew bound and `received_at`. It is preferred over
@@ -98,15 +99,27 @@ observation — legacy rows, push without a timestamp). Never write a synthetic 
 Skew bound: `allowed_skew` (config, default 5m), evaluated in SQL against
 `statement_timestamp()`.
 
+### Wire compatibility (do NOT rename the field)
+
+The result wire format keeps its existing `ts` JSON field; `observed_at` is a DB concept.
+For scheduled results the wire `ts` (the worker/agent probe clock) maps to DB
+`observed_at`. There is NO new `observed_at` wire field, so an old worker (which sends
+`ts` but no revision) stays compatible: `observe` mode tolerates its missing revision, and
+its `ts` populates `observed_at` — it is NOT seen as `missing_timestamp`. `missing_timestamp`
+means the wire `ts` is genuinely zero (a malformed/broken producer), not "old binary".
+
 ### Scheduled — outcomes
-A scheduled result MUST carry a timestamp (the prober always sets one; `observed_at`
-nullable exists only for push/legacy). So first, fail-closed:
+A scheduled result MUST carry a timestamp (the prober always sets `ts`; `observed_at`
+nullable exists only for push/legacy). Precedence: **duplicate → missing → revision (§3)
+→ timestamp**.
 
-0. **missing timestamp** (`observed_at IS NULL`): **reject**, no heartbeat insert.
-   `result_rejected_total{reason="missing_timestamp"}`. (A malformed/old-binary result;
-   never silently treated as "now".)
+- **duplicate** (heartbeat `(monitor_id, ts)` already present — an AMQP/pull redelivery):
+  `INSERT ... ON CONFLICT DO NOTHING` affects 0 rows → `applied=false`, no state/counter
+  mutation (the fact is already recorded). This is the redelivery-safety case.
+- **missing timestamp** (`ts` zero → `observed_at` would be NULL): **reject**, no insert.
+  `result_rejected_total{reason="missing_timestamp"}`. Never silently treated as "now".
 
-Then, by `observed_at`:
+Then, on a fresh non-duplicate result that passed the revision gate, by `observed_at`:
 1. **fresh** (`observed_at` within `[now-retention, now+skew]`, newer than watermark):
    apply to state + SLA; `ts = observed_at`; watermark advances.
 2. **out-of-order within retention** (older than watermark, but `>= now - retention`):
@@ -124,11 +137,26 @@ false dead-man DOWN. Ordering uses server `received_at`, captured at **ingress**
 `GetMonitorByPushToken` returns `(monitor, statement_timestamp())` from the same query;
 the handler carries that trusted `received_at` in a server-side envelope to
 `RecordPushResult` (external JSON cannot set it — avoids `received_at` degrading into
-`processed_at` under queue delay). The result is applied to the current config;
-`ts = received_at`, `observed_at = client Ts` (diagnostic). Client-clock anomaly →
-`result_clock_skew_total{origin="push", reason="future|past|missing"}` (comparing raw
-`observed_at` to `received_at ± skew`), never a reject. Push advances
-`last_result_ts = received_at` so the dead-man CAS can see fresh pings.
+`processed_at` under queue delay). `ts = received_at`, `observed_at = client Ts` (or NULL).
+Push advances `last_result_ts = received_at` so the dead-man CAS sees fresh pings.
+
+**Current-state re-check under the row lock.** The monitor can be disabled (or retyped)
+between the token lookup and the apply. `RecordPushResult` re-reads `type='push' AND enabled`
+under `FOR UPDATE` and drops the result if it no longer holds — a ping accepted just before
+a disable must not mutate a now-disabled monitor.
+
+**Client timestamp is optional and, today, absent.** The push endpoint does not currently
+accept a client timestamp, so `observed_at` is normally NULL — this is the expected case,
+NOT an error: no `missing` metric, no log. `result_clock_skew_total{origin="push",
+reason="future|past"}` is emitted ONLY when a client timestamp is actually provided and
+sits outside `received_at ± skew` (adoption telemetry for a future optional field); it is
+never a reject.
+
+**Post-commit flow (shared, all origins).** Applying push must run the SAME post-commit
+reconciliation as scheduled ingest and dead-man — SSE status event, auto-incident
+open/resolve, operational check metric (the logic currently inline in `ingest.handle`).
+The direct `PushResultRecorder` must invoke that shared helper after commit; otherwise
+direct push would silently stop opening/resolving incidents.
 
 ### Dead-man — atomic staleness re-check, through the outbox
 The scheduler applies it directly via `RecordDeadmanResult(monitorID, revision, cutoff)`
@@ -138,16 +166,53 @@ The scheduler applies it directly via `RecordDeadmanResult(monitorID, revision, 
     AND COALESCE(last_result_ts, created_at) < $evaluated_cutoff`. If it fails (a fresh
    ping, config change, or disable landed since the staleness snapshot) → drop the
    synthetic DOWN, `applied=false`, commit nothing.
-2. If it passes, apply the DOWN through the SAME `recordCheckStatusTx` path a real result
-   uses — it must NOT bypass confirmation/maintenance handling or the transition-outbox
-   enqueue. The staleness predicate + the status transition + the outbox event are one
-   transaction.
-3. Incident/event reconciliation runs AFTER commit, via a shared helper (the logic
-   currently inline in `ingest.handle`, extracted so ingest and the dead-man path reuse
-   it — the dead-man path bypasses `ingest.handle` itself).
+2. If it passes, in the SAME transaction:
+   a. **Insert a DOWN heartbeat** (`up=false, ts=statement_timestamp(), observed_at=NULL,
+      msg="push timeout…"`). This is required: SLA is sample-based (`count(up)/count(*)`),
+      so a status flip WITHOUT a heartbeat would leave the monitor DOWN but SLA at 100% on
+      stale UP samples. The insert provides the down sample.
+   b. Apply the DOWN through the SAME `recordCheckStatusTx` a real result uses — it must NOT
+      bypass confirmation/maintenance handling or the transition-outbox enqueue.
+   Staleness predicate + heartbeat insert + status transition + outbox event = one tx.
+3. Incident/event reconciliation runs AFTER commit, via the shared post-commit helper.
 
 `created_at` in the predicate is the monitor's, not the result's; `evaluated_cutoff` is
 the staleness threshold the scheduler used (`now - interval - grace`), passed in.
+
+**Dead-man does NOT advance `last_result_ts`** (only a real observation from the monitored
+service does). That is deliberate: while an outage persists, each scheduler tick (throttled
+by `nextRun ≈ interval`) re-fires the dead-man — its CAS still passes (`last_result_ts`
+unchanged, still `< cutoff`) — inserting a periodic DOWN sample so SLA reflects the ongoing
+outage; `recordCheckStatusTx` transitions only on the first (its own `prev != cur` guard),
+so no incident churn. The instant a real ping returns, `last_result_ts` advances and the
+CAS stops firing.
+
+> **Open point — `status <> 'down'` in the predicate (I diverge).** The review suggested
+> adding it to stop a concurrent explicit push-DOWN from being re-counted. I'd NOT add it:
+> an explicit push-DOWN goes through `RecordPushResult`, which advances
+> `last_result_ts=received_at`, so the dead-man CAS (`last_result_ts < cutoff`) already
+> fails — the double-count is prevented, and both paths serialise on the same `FOR UPDATE`
+> lock. Adding `status <> 'down'` would instead convert dead-man from periodic
+> down-sampling to edge-only, REGRESSING SLA continuity during a sustained push outage
+> (the current behavior samples each tick). Flagging for your call before I lock it.
+
+### Historical backfill — a fourth, SLA-only path
+An agent buffers results during a central outage and replays them as historical backfill;
+today `agentBackfill` calls `InsertHeartbeatsBulk` directly, bypassing every gate — so it
+can insert a `2099` row, and SLA (`WHERE h.ts >= since`, lower-bound only) counts it
+immediately. Backfill gets its own contract, `RecordHistoricalResults`:
+
+- **Never touches live state** (no status/counter/incident/outbox/`last_result_ts`) — it is
+  SLA/audit-only by definition (replaying old down→up must not re-alert).
+- **Per-row timestamp validation, identical bounds to scheduled:** `missing` → skip;
+  `future beyond skew` → skip; `outside retention` → skip; a valid historical row → insert
+  SLA-only. Each row of the batch is evaluated independently.
+- **Idempotent:** `ON CONFLICT (monitor_id, ts) DO NOTHING`.
+- **Revision:** not applicable — the gate exists to protect live state, which backfill never
+  mutates; consistency with D-0142 is "backfill never applies to live state, regardless of
+  revision", not a CAS.
+- Skipped rows increment the same `result_quarantined_total` / `result_ignored_total`
+  reasons; the handler returns inserted/received/skipped counts.
 
 ## 5. Metrics & logs
 
@@ -174,7 +239,7 @@ result:
   window defeats the future-clock guard; reject at load).
 - `result.revision_mode` (enum): default `enforce`; only `enforce` | `observe` accepted
   (anything else → fail-fast, no silent downgrade). `observe` is the rolling-upgrade escape
-  hatch; its removal is fixed in the decision record (§9).
+  hatch; its removal is fixed in the decision record (§10 / D-0142).
 
 ## 7. Schema summary
 
@@ -188,15 +253,24 @@ result:
 - Revision: bump on `UpdateMonitor`; NO bump on `SetMonitorStatus`/`ReencryptSecrets`;
   CAS rejects a mismatched-revision result (state untouched); `last_result_ts` reset on
   bump; observe vs enforce for missing revision; present-mismatch rejected in both modes.
-- Timestamps: the four scheduled outcomes; future→quarantine (no heartbeat row);
+- Scheduled: duplicate (redelivery)→applied=false no mutation; missing `ts`→reject no
+  insert; then the four timestamp outcomes; future→quarantine (no heartbeat row);
   1970→outside-retention (no row); out-of-order→SLA-only.
 - Push: bad-clock ping applied (not rejected), `ts=received_at`, `observed_at=client`,
   skew metric bumped. Idempotency precision — a client-level HTTP **retry** gets a fresh
   `received_at` and IS a new heartbeat (no dedup, by design; the test must NOT assert
   dedup). With the direct `PushResultRecorder` there is no transport envelope and thus no
   redelivery to dedup in the first place.
+- Push: current-state gate — a ping accepted just before a disable does NOT mutate the
+  now-disabled monitor (re-check under the row lock); direct-recorder path still opens/
+  resolves an auto-incident (post-commit helper runs).
 - Dead-man: synthetic DOWN dropped when a fresh ping raced in (CAS zero-rows); applied
-  when genuinely stale; not applied across a revision bump / after disable.
+  when genuinely stale; INSERTS a down heartbeat so SLA drops (not just status); periodic
+  re-fire during a sustained outage samples SLA; not applied across a revision bump / after
+  disable.
+- Backfill: mixed valid/invalid batch — future/1970/missing rows skipped, valid rows
+  inserted SLA-only, live state untouched; idempotent replay (ON CONFLICT); a future row
+  never reaches an SLA `ts >= since` query.
 - received_at captured at ingress (not processed_at) — handler-level test.
 
 ## 9. Non-goals / deferred
@@ -209,8 +283,24 @@ result:
 
 ## 10. Rollout
 
+Two independent constraints:
+
+**Config vs strict YAML.** The loader rejects unknown keys, so a `result:` block cannot be
+pushed to an old binary that predates it — the old process would fail to start. Therefore
+the `result:` block must be **optional with safe defaults**, and binaries are upgraded
+before the block is added to their configs. To make an in-place upgrade safe without a
+config edit, **when the `result:` block is ABSENT the binary defaults `revision_mode` to
+`observe`** (an upgrade of an existing install is the likely context); a fresh install
+gets `enforce` via the shipped `config.example.yaml` template (which includes the block).
+`allowed_skew` defaults to 5m in both cases. (This is the one behavioral default I want
+confirmed — see the reply.)
+
+**Producer-before-consumer.** Revision only appears once producers (worker/scheduler/agent)
+emit it. Roll producers to the new binary first, then the API/ingest consumer; `observe`
+covers imperfect ordering during the window.
+
 `observe` mode is the rolling-upgrade escape hatch (separate role processes may run mixed
-versions mid-rollout). New installs default to `enforce`. **Decision D-0142** fixes the
-`observe`-removal window: observe ships with P0b; it is removed **no later than iter-0089**
-(≈ three iterations after it lands), or one release after a confirmed prod `enforce`
-cutover, whichever comes first — so it can never silently become a permanent bypass.
+versions mid-rollout). **Decision D-0142** fixes the `observe`-removal window: observe ships
+with P0b; it is removed **no later than iter-0089** (≈ three iterations after it lands), or
+one release after a confirmed prod `enforce` cutover, whichever comes first — so it can
+never silently become a permanent bypass.

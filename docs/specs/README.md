@@ -37,6 +37,7 @@ part of the system. Unlike `docs/checks/` (immutable snapshots) and `docs/iterat
 | `func-confirm-phase.md` | Confirm phase: accelerated down confirmation (iter-0039) | implemented |
 | `func-monitor-dependencies.md` | Dependency graph + cascading alert suppression (iter-0040) | implemented |
 | `func-multi-region-quorum.md` | Multi-region quorum via composite, variant B (iter-0041) | implemented |
+| `func-result-protocol.md` | Result ingest: typed origins, timestamp hygiene, `execution_revision` (P0a/P0b, D-0142) | spec |
 | `sec-authn-authz.md` | OIDC (any issuer), local login, sessions, API tokens, client-credentials | implemented |
 | `ops-cicd.md` | GitLab CI (backend/frontend), build, coverage gate | skeleton |
 | `ops-keycloak-oidc.md` | Setup and integration guide for Keycloak and any OIDC providers | implemented |

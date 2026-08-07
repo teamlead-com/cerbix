@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -159,6 +160,16 @@ func (s *Store) Close() {
 // TruncateAll clears all domain tables. Intended for tests and local dev only;
 // it cascades and resets the tenant data set.
 func (s *Store) TruncateAll(ctx context.Context) error {
+	// Safety gate: this is destructive and test/dev-only. Refuse unless the connected
+	// database's name marks it as a test database, so a mis-set CERBIX_TEST_DATABASE_DSN
+	// (or a stray call) can never wipe a real dev/prod database.
+	var dbName string
+	if err := s.pool.QueryRow(ctx, `SELECT current_database()`).Scan(&dbName); err != nil {
+		return fmt.Errorf("store: truncate all (db check): %w", err)
+	}
+	if !strings.Contains(strings.ToLower(dbName), "test") {
+		return fmt.Errorf("store: refusing TruncateAll on non-test database %q (name must contain \"test\")", dbName)
+	}
 	_, err := s.pool.Exec(ctx,
 		`TRUNCATE instance_settings, oidc_settings, region_worker_alerts, escalation_policies, oncall_schedules, oncall_overrides, pull_jobs, pull_tests, agent_heartbeats, agent_tokens, outbox_events, heartbeats_daily, monitor_notifications, notification_channels, webhooks, api_tokens, components, status_pages, postmortems, incident_updates, incidents, sla_targets, maintenance_windows, heartbeats, monitors, sessions, auth_flows, memberships, projects, users, organizations RESTART IDENTITY CASCADE`)
 	if err != nil {

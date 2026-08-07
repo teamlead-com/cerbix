@@ -309,3 +309,25 @@ func TestDefaultSessionSecure(t *testing.T) {
 		t.Fatal("session.secure should default to true")
 	}
 }
+
+// TestExpandEnvStrict proves undefined vars fail loudly (no silent security downgrade),
+// defined/defined-empty expand, and $$ stays a literal $.
+func TestExpandEnvStrict(t *testing.T) {
+	t.Setenv("CBX_DEFINED", "val")
+	t.Setenv("CBX_EMPTY", "")
+	path := filepath.Join(t.TempDir(), "cfg.yaml")
+	if err := os.WriteFile(path, []byte("log:\n  level: ${CBX_UNDEFINED_XYZ}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("undefined env var must fail Load, not silently blank")
+	}
+	// Defined + defined-empty expand; $$ stays a literal $.
+	got, err := expandEnvStrict("a=${CBX_DEFINED} b=${CBX_EMPTY} c=$$literal")
+	if err != nil {
+		t.Fatalf("strict expand: %v", err)
+	}
+	if got != "a=val b= c=$literal" {
+		t.Fatalf("expand = %q, want %q", got, "a=val b= c=$literal")
+	}
+}

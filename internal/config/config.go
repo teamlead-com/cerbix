@@ -286,7 +286,57 @@ func Load(path string) (*Config, error) {
 	// .env in production — instead of being committed to the config file. A literal
 	// '$' in a value must be escaped as '$$'. Expansion is a single pass, so injected
 	// values are never re-expanded.
-	return Parse([]byte(os.ExpandEnv(string(data))))
+	expanded, err := expandEnvStrict(string(data))
+	if err != nil {
+		return nil, err
+	}
+	return Parse([]byte(expanded))
+}
+
+// expandEnvStrict expands ${VAR}/$VAR from the environment but, unlike os.ExpandEnv, FAILS
+// on an UNDEFINED variable instead of silently substituting "" — a silent blank could
+// disable a security-critical setting (encryption key, tokens, bootstrap admin) without
+// notice. A defined-but-empty variable is allowed (that is an explicit choice). The '$$'
+// escape and a bare trailing '$' are preserved as a literal '$'.
+func expandEnvStrict(s string) (string, error) {
+	var missing []string
+	out := os.Expand(s, func(key string) string {
+		// os.Expand passes "$" for the '$$' escape (a shell special var); yield a literal $.
+		// Any other non-env-name token (e.g. $@) is left as-is rather than treated as a var.
+		if key == "$" {
+			return "$"
+		}
+		if !isEnvName(key) {
+			return "$" + key
+		}
+		if v, ok := os.LookupEnv(key); ok {
+			return v
+		}
+		missing = append(missing, key)
+		return ""
+	})
+	if len(missing) > 0 {
+		return "", fmt.Errorf("config: undefined environment variable(s): %s", strings.Join(missing, ", "))
+	}
+	return out, nil
+}
+
+// isEnvName reports whether key is a POSIX-style environment variable name
+// ([A-Za-z_][A-Za-z0-9_]*), i.e. a real variable reference rather than a shell special.
+func isEnvName(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
+		case c >= '0' && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Parse validates raw YAML bytes into a Config. Unknown keys are rejected.

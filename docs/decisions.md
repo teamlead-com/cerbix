@@ -2463,3 +2463,38 @@ so a broker-native DLX with mutated queue args was deliberately NOT used); `Dock
 after the module moved to root). (13) Push tokens encrypt-at-rest (migration 00053):
 `push_token` plaintext → `push_token_hash` (SHA-256 blind index, UNIQUE, for lookup) +
 `push_token_enc` (keyring-encrypted); reveal UX preserved, so no rotate/revoke UI was needed.
+
+## D-0142 — Result ingest protocol: origin/timestamp/revision (spec func-result-protocol, P0a/P0b)
+Supersedes the ad-hoc iter-0083 freshness gate (worker-clock `hb.Ts` vs `last_result_ts`),
+which a review showed could be corrupted three independent ways (future clock freezing live
+state; a result of an OLD config winning by a newer timestamp; a dead-man DOWN racing a real
+ping). Full contract in `docs/specs/func-result-protocol.md`. Key rulings:
+
+- **Three trusted server-side origins**, established by which typed store entrypoint is
+  called — never inferred from the result body: `RecordScheduledResult` (revision-gated),
+  `RecordPushResult` (push HTTP handler only, via a dedicated `PushResultRecorder`, NOT the
+  shared `ResultSink`), `RecordDeadmanResult` (scheduler leader, direct — no synthetic
+  heartbeat through the dispatcher).
+- **`execution_revision`** (`BIGINT NOT NULL DEFAULT 1`) is a config generation, bumped ONLY
+  by `UpdateMonitor` (bind to the method, not the `config` column — `ReencryptSecrets`
+  rewrites `config` but must not bump). Gate evaluated under the monitor's `FOR UPDATE` lock
+  BEFORE the heartbeat insert: a revision failure inserts no heartbeat (a result of another
+  config is invalid for SLA too). `last_result_ts` resets to NULL on bump.
+- **Timestamps:** `observed_at` (raw, nullable) vs `ts` (effective/ordering). Authoritative
+  clock is `statement_timestamp()` (statement-scope, unlike transaction-scope `now()`).
+  Scheduled outcomes: missing→reject, fresh→apply, out-of-order-within-retention→SLA-only,
+  future-beyond-skew→quarantine (no insert), outside-retention→ignore (no insert). Push is
+  never rejected on client clock; ordering is server `received_at` captured at ingress.
+- **Dead-man** re-checks staleness atomically and applies DOWN through the SAME
+  `recordCheckStatusTx` (confirmation/maintenance/transition-outbox preserved), not a raw
+  UPDATE.
+- **`result.revision_mode: observe|enforce`** (default `enforce`; `observe` tolerates only a
+  MISSING revision on scheduled results — a present-mismatch is always rejected).
+  **`observe` is a temporary migration mode: removed no later than iter-0089** (≈ three
+  iterations after it ships in P0b), or one release after a confirmed prod `enforce` cutover,
+  whichever is sooner — it must never become a permanent compatibility bypass.
+- `result.allowed_skew` (default 5m, validated `>0` and `<=1h`).
+
+Deferred (separate axes, not this decision): `job_id` correlation + strict
+`observed_at >= job_issued_at` (with P0b/job correlation); `state_sequence` for outbox
+delivery ordering (#4, P2) — orthogonal to `execution_revision`.

@@ -160,8 +160,10 @@ func (g Guard) dialContext(base *net.Dialer) func(context.Context, string, strin
 // resolved, policy-checked, and pinned to the checked IP, so redirect-to-internal
 // and DNS-rebinding can't reach loopback/link-local/metadata/(disallowed) private
 // hosts. Proxy is disabled (a proxy would bypass the IP guard). Redirect chains are
-// capped. Reuses the same guard used for probe targets, so egress honors the same
-// allow_private_ips / allow_metadata_ips policy.
+// capped. The DIALER mechanism is shared with probe targets, but the POLICY is the
+// caller's: alert delivery constructs this from the deny-private notification_egress
+// policy, while probes use the allow-private prober policy — the two must not be
+// conflated (see cli.notificationEgressGuard and D-0141).
 func (g Guard) HTTPClient(timeout time.Duration) *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DialContext = g.dialContext(&net.Dialer{})

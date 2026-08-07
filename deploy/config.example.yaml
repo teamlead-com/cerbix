@@ -66,6 +66,16 @@ prober:
   allow_private_ips: true    # 10/8, 172.16/12, 192.168/16, loopback, ULA — the product's job
   allow_metadata_ips: false  # 169.254.0.0/16, fe80::/10 — keep off unless you truly need it
 
+# SSRF policy for OUTBOUND alert delivery (webhooks, Slack/notify HTTP, SMTP). SEPARATE
+# from `prober`: a probe target is operator-chosen, but a notification destination can be
+# set by a project editor, so private ranges are DENIED by default here.
+#   ⚠ BREAKING (upgrade): if your existing webhooks or SMTP host point at an INTERNAL
+#   address (e.g. mail.internal, a 10.x/192.168.x Slack proxy, a private Alertmanager),
+#   delivery will start failing after upgrade until you opt back in below.
+notification_egress:
+  allow_private_ips: false   # set true ONLY if you deliver alerts to internal endpoints
+  allow_metadata_ips: false  # keep off
+
 # Raw heartbeat retention. Heartbeats are stored in daily range partitions; the
 # scheduler leader pre-creates upcoming partitions and drops those older than the
 # window (a cheap DROP, not a big DELETE). retention_days also bounds the
@@ -92,7 +102,8 @@ security:
 # public_base_url + /reset). Optional: leave smtp_host/from empty to disable both.
 # When enabled, public_base_url is required (it builds confirm/unsubscribe/reset links).
 mail:
-  smtp_host: ""           # e.g. mail.internal
+  smtp_host: ""           # e.g. smtp.example.com — an INTERNAL host (mail.internal, 10.x)
+                          # needs notification_egress.allow_private_ips: true (see above)
   smtp_port: 587
   smtp_username: ""
   smtp_password: ""

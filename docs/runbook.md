@@ -38,6 +38,19 @@ Strict YAML (`deploy/config.example.yaml`). Unknown keys or invalid values cause
 fail-fast startup error logged at `CRITICAL` — the process exits non-zero. There is no
 self-healing; fix the config and restart.
 
+> **⚠ Breaking upgrade — notification egress (D-0141).** Outbound alert delivery
+> (webhooks, Slack/notify HTTP, SMTP) is now governed by a separate `notification_egress`
+> policy that **denies private IPs by default** (previously it inherited the allow-private
+> prober policy). If any webhook or `mail.smtp_host` points at an INTERNAL address
+> (`mail.internal`, a `10.x`/`192.168.x` proxy, a private Alertmanager), delivery will
+> start failing after upgrade. Opt back in explicitly:
+> ```yaml
+> notification_egress:
+>   allow_private_ips: true
+> ```
+> OIDC (`oidc.issuer`) is unaffected — an internal Keycloak stays supported; identity
+> egress is operator-trusted and not routed through this guard.
+
 ## Roles
 
 - `all` — every role in one process (dev).

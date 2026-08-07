@@ -324,6 +324,15 @@ func runReencrypt(args []string) int {
 	return 0
 }
 
+// notificationEgressGuard builds the SSRF guard for OUTBOUND alert delivery
+// (webhook/Slack/notify HTTP + SMTP) from the notification_egress policy — which
+// defaults to deny-private — NOT the prober policy (which allows private for
+// operator-chosen probe targets). Isolated so a regression that rewired delivery back
+// to cfg.Prober is caught by a test rather than reopening SSRF silently.
+func notificationEgressGuard(cfg *config.Config) prober.Guard {
+	return prober.NewGuard(cfg.NotificationEgress.AllowPrivateIPs, cfg.NotificationEgress.AllowMetadataIPs)
+}
+
 func runServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config YAML (required)")
@@ -450,7 +459,7 @@ func runServe(args []string) int {
 		// project editor, so it must not reach loopback/RFC1918/ULA/CGNAT/metadata unless
 		// the deployment explicitly opts in. (OIDC is a distinct operator-trusted path and
 		// is not routed through this guard — see D-0141.)
-		egress := prober.NewGuard(cfg.NotificationEgress.AllowPrivateIPs, cfg.NotificationEgress.AllowMetadataIPs)
+		egress := notificationEgressGuard(cfg)
 		mailer.SetEgressDial(egress.EgressDialContext())
 		subs := subscribe.New(st, mail)
 		deliverer := incidentFanout{hooks: webhook.New(st, egress.HTTPClient(10*time.Second)), subs: subs, logger: logger}

@@ -269,11 +269,25 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 		    SET name = $2, target = $3, interval_seconds = $4, timeout_seconds = $5,
 		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = $11, auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, updated_at = now(),
 		        -- Config generation: bump on ANY UpdateMonitor (fail-safe — a missed bump would
-		        -- reopen the stale-config vulnerability; an extra bump costs one re-probe), and
-		        -- reset the freshness watermark so the first result of the new generation is not
-		        -- rejected against the old one (spec §3). Status/counter/reencrypt writes do NOT
-		        -- touch this — they use different statements.
-		        execution_revision = execution_revision + 1, last_result_ts = NULL
+		        -- reopen the stale-config vulnerability; an extra bump costs one re-probe).
+		        -- Status/counter/reencrypt writes do NOT touch this — different statements.
+		        execution_revision = execution_revision + 1,
+		        -- Freshness watermark. SCHEDULED monitors reset it to NULL so the first result of
+		        -- the new generation is not rejected against the old one (spec §3). PUSH monitors
+		        -- PRESERVE it — it is the real-ping liveness watermark and push has no scheduled
+		        -- out-of-order compare, so nulling it would fall back to created_at and fire a
+		        -- FALSE dead-man DOWN on any edit of a live push monitor.
+		        last_result_ts = CASE WHEN type = 'push' THEN last_result_ts ELSE NULL END,
+		        -- Re-arm: a disabled→enabled transition (RHS sees the pre-update row) starts a new
+		        -- liveness epoch. For push the dead-man window restarts from the enable moment via
+		        -- push_armed_at; the pre-disable ping is not proof of liveness after re-enable, and
+		        -- we never fabricate a last_result_ts. All types reset live state to pending + clear
+		        -- the confirmation counter and bump state_sequence WITHOUT enqueuing an outbox event,
+		        -- so an undelivered pre-disable DOWN is dropped as superseded at delivery (#2).
+		        push_armed_at = CASE WHEN type = 'push' AND NOT enabled AND $8 THEN statement_timestamp() ELSE push_armed_at END,
+		        status = CASE WHEN NOT enabled AND $8 THEN 'pending' ELSE status END,
+		        consecutive_failures = CASE WHEN NOT enabled AND $8 THEN 0 ELSE consecutive_failures END,
+		        state_sequence = CASE WHEN NOT enabled AND $8 THEN state_sequence + 1 ELSE state_sequence END
 		  WHERE id = $1 RETURNING `+monitorColumns,
 		m.ID, m.Name, m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds)
 	updated, err := s.scanMonitor(row)
@@ -340,21 +354,22 @@ func (s *Store) ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, erro
 }
 
 // StalePushMonitors returns enabled push monitors whose dead-man's switch has
-// tripped: not already down, and with no heartbeat within their interval (falling
-// back to created_at when they have never reported). One query with an
-// index-backed correlated max(ts) replaces a per-monitor latest-heartbeat lookup.
+// tripped: no liveness within their interval+grace. One query with an
+// index-backed watermark replaces a per-monitor latest-heartbeat lookup.
 func (s *Store) StalePushMonitors(ctx context.Context) ([]domain.Monitor, error) {
 	// No `status <> 'down'` filter: a down push monitor STAYS in the stale set so the
 	// dead-man re-samples DOWN each idle tick (sample-based SLA reflects a sustained
 	// outage). The scheduler throttles re-fires via nextRun; RecordDeadmanResult only
-	// transitions on the first (its recordCheckStatusTx prev!=cur guard). Keyed on
-	// last_result_ts — REAL observations only (a dead-man DOWN heartbeat does not advance
-	// it) — identical to the dead-man CAS cutoff, so the monitor's own synthetic samples
-	// don't make it look fresh, and a real ping (advancing last_result_ts) removes it.
+	// transitions on the first (its recordCheckStatusTx prev!=cur guard). Freshness is
+	// max(push_armed_at, last_result_ts) — REAL observations plus the re-arm epoch (a
+	// dead-man DOWN heartbeat advances neither) — with created_at as the floor for a
+	// never-armed, never-reported monitor. Identical to the dead-man CAS cutoff, so the
+	// monitor's own synthetic samples don't make it look fresh, and a real ping (or a
+	// re-enable stamping push_armed_at) removes it.
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+monitorColumns+` FROM monitors m
 		 WHERE m.type = 'push' AND m.enabled
-		   AND COALESCE(m.last_result_ts, m.created_at)
+		   AND COALESCE(GREATEST(m.push_armed_at, m.last_result_ts), m.created_at)
 		       < now() - make_interval(secs => m.interval_seconds + m.grace_seconds)`)
 	if err != nil {
 		return nil, fmt.Errorf("store: stale push monitors: %w", err)
@@ -678,7 +693,7 @@ func (s *Store) RecordDeadmanResult(ctx context.Context, monitorID string, revis
 	var curRev int64
 	var lastOrCreated time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT type, enabled, status, execution_revision, COALESCE(last_result_ts, created_at)
+		`SELECT type, enabled, status, execution_revision, COALESCE(GREATEST(push_armed_at, last_result_ts), created_at)
 		   FROM monitors WHERE id = $1 FOR UPDATE`,
 		monitorID).Scan(&typ, &enabled, &status, &curRev, &lastOrCreated)
 	if noRows(err) {

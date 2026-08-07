@@ -143,3 +143,36 @@ func TestInsertHeartbeatForDeletedMonitor(t *testing.T) {
 		t.Fatalf("insert after delete = %v, want ErrNotFound", err)
 	}
 }
+
+func TestInsertHeartbeatsBulkSkipsDeletedMonitor(t *testing.T) {
+	st, ctx := testStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	live, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "live", Type: domain.MonitorTCP, Target: "localhost:1",
+		IntervalSeconds: 30, TimeoutSeconds: 5, Region: domain.DefaultRegion,
+	})
+	if err != nil {
+		t.Fatalf("create live: %v", err)
+	}
+	gone, _ := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "gone", Type: domain.MonitorTCP, Target: "localhost:2",
+		IntervalSeconds: 30, TimeoutSeconds: 5, Region: domain.DefaultRegion,
+	})
+	if err := st.DeleteMonitor(ctx, gone.ID); err != nil {
+		t.Fatalf("delete gone: %v", err)
+	}
+	// A batch mixing a live and a deleted monitor must not abort — the live
+	// heartbeats land, the deleted one is skipped.
+	n, err := st.InsertHeartbeatsBulk(ctx, []domain.Heartbeat{
+		{MonitorID: live.ID, Up: true},
+		{MonitorID: gone.ID, Up: false},
+		{MonitorID: live.ID, Up: true}, // dup ts within the call → one lands
+	})
+	if err != nil {
+		t.Fatalf("bulk insert: %v", err)
+	}
+	if n < 1 {
+		t.Fatalf("expected at least the live heartbeat inserted, got %d", n)
+	}
+}

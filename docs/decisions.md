@@ -2247,3 +2247,9 @@ basic.cancel, 4xx, ack error) still parked consumers forever behind a live conne
 silent-death symptom. The consume/serve-tests loops now also retry on a short backoff independent
 of the reconnect signal, and consumeOnce re-declares its queue every session so a deleted queue is
 recreated. Also fixed the Close()/redial data race and a nil-logger panic path.
+
+## D-0132 — Backfill tolerates deleted monitors; status race is quiet (iter-0074)
+The InsertHeartbeat 23503→ErrNotFound fix (D-0126) missed the bulk backfill path (a batch aborts
+wholesale on one FK violation → permanent backfill wedge and SLA loss) and the status-flip path
+(logged ERROR). Bulk now pre-filters by the live monitor set (self-heals on retry); ingest logs
+the status race as INFO. Same benign race, same quiet handling everywhere now.

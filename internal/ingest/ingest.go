@@ -93,7 +93,11 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 		return
 	}
 	prev, cur, suppressed, err := c.store.RecordCheckStatus(ctx, hb.MonitorID, hb.Up)
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
+		// Monitor deleted between the heartbeat insert and the status flip —
+		// same benign race as the insert path, not a failure.
+		c.logger.Info("status_for_deleted_monitor", "monitor_id", hb.MonitorID)
+	} else if err != nil {
 		c.logger.Error("record_check_status_failed", "monitor_id", hb.MonitorID, "error", err.Error())
 	} else if prev != cur {
 		c.logger.Info("monitor_status_changed", "monitor_id", hb.MonitorID, "prev", string(prev), "cur", string(cur), "suppressed", suppressed)

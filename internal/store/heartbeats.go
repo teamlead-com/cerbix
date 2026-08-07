@@ -51,17 +51,56 @@ func (s *Store) InsertHeartbeatsBulk(ctx context.Context, hbs []domain.Heartbeat
 	if len(hbs) == 0 {
 		return 0, nil
 	}
-	batch := &pgx.Batch{}
+	// Drop heartbeats for monitors deleted since the agent buffered them: a
+	// pgx batch is one implicit transaction, so a single FK violation (23503)
+	// aborts every insert and wedges the whole backfill on retry. Filtering by
+	// the live monitor set self-heals — the next retry excludes the confirmed
+	// deletion. (Mirrors the InsertHeartbeat 23503→ErrNotFound handling.)
+	ids := make([]string, 0, len(hbs))
+	seen := map[string]bool{}
 	for _, hb := range hbs {
+		if !seen[hb.MonitorID] {
+			seen[hb.MonitorID] = true
+			ids = append(ids, hb.MonitorID)
+		}
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id FROM monitors WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return 0, fmt.Errorf("store: bulk insert filter: %w", err)
+	}
+	live := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("store: bulk insert filter scan: %w", err)
+		}
+		live[id] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: bulk insert filter iterate: %w", err)
+	}
+
+	batch := &pgx.Batch{}
+	queued := 0
+	for _, hb := range hbs {
+		if !live[hb.MonitorID] {
+			continue // monitor gone — skip rather than abort the batch
+		}
+		queued++
 		batch.Queue(
 			`INSERT INTO heartbeats (monitor_id, ts, up, latency_ms, code, msg) VALUES ($1,$2,$3,$4,$5,$6)
 			 ON CONFLICT (monitor_id, ts) DO NOTHING`,
 			hb.MonitorID, hbTime(hb), hb.Up, hb.LatencyMS, hb.Code, hb.Msg)
 	}
+	if queued == 0 {
+		return 0, nil
+	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer br.Close()
 	inserted := 0
-	for range hbs {
+	for i := 0; i < queued; i++ {
 		ct, err := br.Exec()
 		if err != nil {
 			return inserted, fmt.Errorf("store: bulk insert heartbeat: %w", err)

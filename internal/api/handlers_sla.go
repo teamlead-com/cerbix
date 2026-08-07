@@ -28,7 +28,7 @@ type windowSLA struct {
 // monitorSLA reports SLI per standard window, with the SLO error budget where a
 // target is set.
 func (h *Handler) monitorSLA(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
+	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
 	if !ok {
 		return
 	}
@@ -67,7 +67,7 @@ func (h *Handler) monitorSLA(w http.ResponseWriter, r *http.Request) {
 
 // setMonitorSLATarget sets a monitor's SLO objective for a window.
 func (h *Handler) setMonitorSLATarget(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
+	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
 	if !ok {
 		return
 	}

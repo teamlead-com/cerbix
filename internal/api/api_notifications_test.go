@@ -74,6 +74,16 @@ func TestNotificationChannelSecretsRedacted(t *testing.T) {
 	if sl.Config["url"] != "" {
 		t.Fatalf("slack url not redacted: %q", sl.Config["url"])
 	}
+
+	// PATCH (toggle) response must ALSO be redacted — the fix for the iter-0075 gap
+	// where updateChannel returned the decrypted channel.
+	patch := do(h, o1Admin, http.MethodPatch, "/api/v1/notification-channels/nc-new", `{"enabled":false}`)
+	if patch.Code != http.StatusOK {
+		t.Fatalf("patch channel = %d (%s)", patch.Code, patch.Body.String())
+	}
+	if strings.Contains(patch.Body.String(), "SECRET") {
+		t.Fatalf("PATCH response leaked the secret url: %s", patch.Body.String())
+	}
 }
 
 // viewerChannel lists p1's channels as a viewer and returns the first of the given

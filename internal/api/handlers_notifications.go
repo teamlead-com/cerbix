@@ -92,7 +92,7 @@ func (h *Handler) updateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ch.Enabled = *body.Enabled
-	writeJSON(w, http.StatusOK, ch)
+	writeJSON(w, http.StatusOK, ch.Redacted())
 }
 
 func (h *Handler) deleteChannel(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +117,7 @@ func (h *Handler) deleteChannel(w http.ResponseWriter, r *http.Request) {
 
 // listMonitorChannels lists the channels linked to a monitor (viewer+).
 func (h *Handler) listMonitorChannels(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
+	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
 	if !ok {
 		return
 	}
@@ -144,7 +144,7 @@ func redactChannels(chs []domain.NotificationChannel) []domain.NotificationChann
 // linkMonitorChannel links a channel to a monitor (editor+). The channel must be
 // in the monitor's project.
 func (h *Handler) linkMonitorChannel(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
+	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
 	if !ok {
 		return
 	}
@@ -172,7 +172,7 @@ func (h *Handler) linkMonitorChannel(w http.ResponseWriter, r *http.Request) {
 
 // unlinkMonitorChannel removes a monitor↔channel link (editor+).
 func (h *Handler) unlinkMonitorChannel(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
+	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
 	if !ok {
 		return
 	}

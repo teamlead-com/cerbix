@@ -31,7 +31,7 @@ func availabilitySince(r *http.Request) time.Time {
 
 // monitorAvailability returns a monitor's per-day availability for the window.
 func (h *Handler) monitorAvailability(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
+	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
 	if !ok {
 		return
 	}

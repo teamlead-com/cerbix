@@ -292,6 +292,15 @@ func (m Monitor) Redacted() Monitor {
 	return m
 }
 
+// WithoutPushToken blanks the push heartbeat token. The token is a bearer
+// capability for the public push endpoint (anyone holding it can post UP/DOWN),
+// so it must not be returned to a read-only viewer — only to a caller who can
+// already write the monitor. Applied on top of Redacted() in the read handlers.
+func (m Monitor) WithoutPushToken() Monitor {
+	m.PushToken = ""
+	return m
+}
+
 // Normalize applies defaults and clears fields irrelevant to the monitor type:
 // an HTTP monitor defaults to (and upper-cases) GET; non-HTTP monitors carry no
 // method; grace applies only to push monitors.

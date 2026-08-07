@@ -35,21 +35,32 @@ func (h *Handler) projectAccess(w http.ResponseWriter, r *http.Request, projectI
 	return proj, true
 }
 
-// monitorAccess loads a monitor and its project, then checks access.
-func (h *Handler) monitorAccess(w http.ResponseWriter, r *http.Request, action authz.Action) (domain.Monitor, bool) {
+// monitorAccess loads a monitor and its project, then checks access. It returns
+// the project too so callers can make role-aware decisions (e.g. whether to reveal
+// the push token) without re-fetching it.
+func (h *Handler) monitorAccess(w http.ResponseWriter, r *http.Request, action authz.Action) (domain.Monitor, domain.Project, bool) {
 	mon, err := h.store.GetMonitor(r.Context(), r.PathValue("monitorID"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not found")
-		return domain.Monitor{}, false
+		return domain.Monitor{}, domain.Project{}, false
 	}
 	if err != nil {
 		h.serverError(w, "get_monitor", err)
-		return domain.Monitor{}, false
+		return domain.Monitor{}, domain.Project{}, false
 	}
-	if _, ok := h.projectAccess(w, r, mon.ProjectID, action); !ok {
-		return domain.Monitor{}, false
+	proj, ok := h.projectAccess(w, r, mon.ProjectID, action)
+	if !ok {
+		return domain.Monitor{}, domain.Project{}, false
 	}
-	return mon, true
+	return mon, proj, true
+}
+
+// principalCan reports whether the request's principal may perform action on the
+// given org/project — a non-erroring predicate (unlike projectAccess, which writes
+// a 403). Used for role-aware response shaping.
+func (h *Handler) principalCan(r *http.Request, action authz.Action, orgID, projectID string) bool {
+	p, ok := h.principal(r)
+	return ok && p.Can(action, orgID, projectID)
 }
 
 func (h *Handler) listMonitors(w http.ResponseWriter, r *http.Request) {
@@ -62,8 +73,12 @@ func (h *Handler) listMonitors(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "list_monitors", err)
 		return
 	}
+	canWrite := h.principalCan(r, authz.ActionProjectWrite, proj.OrgID, proj.ID)
 	for i := range monitors {
 		monitors[i] = monitors[i].Redacted() // never return secret config to the client
+		if !canWrite {
+			monitors[i] = monitors[i].WithoutPushToken() // viewers must not get the push bearer token
+		}
 	}
 	writeJSON(w, http.StatusOK, monitors)
 }
@@ -349,17 +364,23 @@ func (h *Handler) compositeChildrenOK(w http.ResponseWriter, r *http.Request, m 
 }
 
 func (h *Handler) getMonitor(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
+	mon, proj, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, mon.Redacted())
+	out := mon.Redacted()
+	// The push token is a bearer capability — reveal it only to a caller who can
+	// write the monitor; a read-only viewer must not be able to forge heartbeats.
+	if !h.principalCan(r, authz.ActionProjectWrite, proj.OrgID, proj.ID) {
+		out = out.WithoutPushToken()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // updateMonitor applies a partial update to a monitor (editor+). Type and
 // push_token are immutable; only the provided fields change.
 func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
+	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
 	if !ok {
 		return
 	}
@@ -474,7 +495,7 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
+	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectWrite)
 	if !ok {
 		return
 	}
@@ -487,7 +508,7 @@ func (h *Handler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listHeartbeats(w http.ResponseWriter, r *http.Request) {
-	mon, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
+	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
 	if !ok {
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,9 @@ type fakeStore struct {
 	purged        int32
 	sessionPurges int32
 	flowPurges    int32
+	// checkHeld, when set, is what the leadership watchdog check() returns; nil
+	// means "still leader" (true, nil).
+	checkHeld func() (bool, error)
 }
 
 func (f *fakeStore) ListEnabledMonitors(context.Context) ([]domain.Monitor, error) {
@@ -33,12 +37,18 @@ func (f *fakeStore) StalePushMonitors(context.Context) ([]domain.Monitor, error)
 	return f.stalePush, nil
 }
 
-func (f *fakeStore) TryBecomeLeader(_ context.Context, _ int64) (func(), bool, error) {
+func (f *fakeStore) TryBecomeLeader(_ context.Context, _ int64) (func(), func(context.Context) (bool, error), bool, error) {
 	atomic.AddInt32(&f.elections, 1)
 	if !f.leader {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
-	return func() {}, true, nil
+	check := func(context.Context) (bool, error) {
+		if f.checkHeld != nil {
+			return f.checkHeld()
+		}
+		return true, nil
+	}
+	return func() {}, check, true, nil
 }
 
 func (f *fakeStore) RollupDailyAvailability(_ context.Context, _, _ time.Time) error { return nil }
@@ -236,6 +246,67 @@ func TestEnterConfirmCap(t *testing.T) {
 	s.enterConfirm(confirmFast, byID, other, now, nextRun)
 	if _, ok := confirmFast["geo"]; !ok {
 		t.Fatal("another region must not be capped by core")
+	}
+}
+
+type leaderStateSpy struct {
+	mu     sync.Mutex
+	states []bool
+}
+
+func (s *leaderStateSpy) SetSchedulerLeader(leader bool) {
+	s.mu.Lock()
+	s.states = append(s.states, leader)
+	s.mu.Unlock()
+}
+
+func (s *leaderStateSpy) snapshot() []bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]bool(nil), s.states...)
+}
+
+// TestLeadershipWatchdogStepsDown proves the anti-split-brain watchdog: when the
+// liveness check reports the advisory lock is no longer held, the leader steps down
+// (gauge → false) and re-contends instead of continuing to dispatch.
+func TestLeadershipWatchdogStepsDown(t *testing.T) {
+	fs := &fakeStore{leader: true, checkHeld: func() (bool, error) { return false, nil }}
+	disp := dispatch.NewInProc(1)
+	spy := &leaderStateSpy{}
+	s := New(fs, disp, testLogger()).WithLeaderState(spy)
+	s.tick = 15 * time.Millisecond
+	s.retry = 15 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	// The lost lock makes it flap: acquire → first tick detects loss → step down →
+	// re-contend. Expect several elections and a leader-gauge that went true then false.
+	deadline := time.After(2 * time.Second)
+	for {
+		if atomic.LoadInt32(&fs.elections) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("watchdog did not re-contend after losing the lock (elections=%d)", atomic.LoadInt32(&fs.elections))
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+	cancel()
+
+	states := spy.snapshot()
+	var sawTrue, sawFalseAfterTrue bool
+	for _, v := range states {
+		if v {
+			sawTrue = true
+		} else if sawTrue {
+			sawFalseAfterTrue = true
+		}
+	}
+	if !sawTrue || !sawFalseAfterTrue {
+		t.Fatalf("leader gauge must go true then false on step-down, got %v", states)
 	}
 }
 

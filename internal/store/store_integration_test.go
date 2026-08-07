@@ -379,12 +379,16 @@ func TestLeadershipMutualExclusion(t *testing.T) {
 	st, ctx := testStore(t)
 	const key int64 = 0x123456
 
-	release1, ok1, err := st.TryBecomeLeader(ctx, key)
+	release1, check1, ok1, err := st.TryBecomeLeader(ctx, key)
 	if err != nil || !ok1 {
 		t.Fatalf("first acquire: ok=%v err=%v", ok1, err)
 	}
+	// The leader's liveness check reports the lock is still held.
+	if held, err := check1(ctx); err != nil || !held {
+		t.Fatalf("check while held: held=%v err=%v, want true", held, err)
+	}
 	// A second attempt on the same key must fail while held.
-	release2, ok2, err := st.TryBecomeLeader(ctx, key)
+	release2, _, ok2, err := st.TryBecomeLeader(ctx, key)
 	if err != nil {
 		t.Fatalf("second acquire err: %v", err)
 	}
@@ -394,7 +398,7 @@ func TestLeadershipMutualExclusion(t *testing.T) {
 	}
 	release1()
 	// After release, it can be acquired again.
-	release3, ok3, err := st.TryBecomeLeader(ctx, key)
+	release3, _, ok3, err := st.TryBecomeLeader(ctx, key)
 	if err != nil || !ok3 {
 		t.Fatalf("re-acquire after release: ok=%v err=%v", ok3, err)
 	}

@@ -21,7 +21,7 @@ const advisoryLockKey int64 = 0x6365726269780001 // "cerbix" + slot 1
 type Store interface {
 	ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, error)
 	StalePushMonitors(ctx context.Context) ([]domain.Monitor, error)
-	TryBecomeLeader(ctx context.Context, key int64) (release func(), ok bool, err error)
+	TryBecomeLeader(ctx context.Context, key int64) (release func(), check func(context.Context) (bool, error), ok bool, err error)
 	RollupDailyAvailability(ctx context.Context, from, to time.Time) error
 	EnsureHeartbeatPartitions(ctx context.Context, ahead int) error
 	PurgeOldHeartbeats(ctx context.Context, cutoff time.Time) (int, error)
@@ -43,6 +43,13 @@ type Store interface {
 // Implemented by *metrics.Registry.
 type PullStatsSink interface {
 	SetPullStats(stats []metrics.PullStat)
+}
+
+// LeaderStateSink records whether this process currently holds scheduler
+// leadership, for the cerbix_scheduler_leader gauge. Implemented by
+// *metrics.Registry. Optional.
+type LeaderStateSink interface {
+	SetSchedulerLeader(leader bool)
 }
 
 // LiveRegionSource reports which worker-pool regions currently have a live worker
@@ -91,6 +98,11 @@ const (
 	escalationEvery = 15 * time.Second
 	// pullStatsEvery is how often the leader samples per-region pull-queue depth/lag.
 	pullStatsEvery = 15 * time.Second
+	// leaderCheckEvery is how often the leader re-verifies it still holds the advisory
+	// lock on its held connection. If the connection (and the session lock) was lost the
+	// leader steps down immediately rather than keep dispatching against a lock another
+	// node may now hold — the anti-split-brain watchdog.
+	leaderCheckEvery = 5 * time.Second
 	// pullLagWarnSeconds logs a warning when a region's oldest unclaimed pull job is
 	// older than this — a live agent that stopped draining (paging is a Prometheus rule
 	// on cerbix_pull_agent_lag_seconds; this is the in-app operational breadcrumb).
@@ -118,6 +130,7 @@ type Scheduler struct {
 	liveRegions   LiveRegionSource
 	pullRegions   map[string]bool // regions served over HTTP-pull (jobs go to pull_jobs, not AMQP)
 	pullMetrics   PullStatsSink
+	leaderState   LeaderStateSink
 	confirmCh     <-chan string // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
 }
 
@@ -184,14 +197,29 @@ func (s *Scheduler) WithPullMetrics(sink PullStatsSink) *Scheduler {
 	return s
 }
 
+// WithLeaderState wires the sink for the cerbix_scheduler_leader gauge, set to 1
+// while this process is the leader and 0 on standby / after stepping down. Optional.
+func (s *Scheduler) WithLeaderState(sink LeaderStateSink) *Scheduler {
+	s.leaderState = sink
+	return s
+}
+
+// setLeaderState is a nil-safe gauge update.
+func (s *Scheduler) setLeaderState(leader bool) {
+	if s.leaderState != nil {
+		s.leaderState.SetSchedulerLeader(leader)
+	}
+}
+
 // Run blocks until ctx is cancelled, contending for leadership and scheduling
 // checks while leader.
 func (s *Scheduler) Run(ctx context.Context) {
+	s.setLeaderState(false) // standby until we win the lock
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		release, ok, err := s.store.TryBecomeLeader(ctx, s.leaderKey)
+		release, check, ok, err := s.store.TryBecomeLeader(ctx, s.leaderKey)
 		if err != nil {
 			s.logger.Error("leader_election_failed", "error", err.Error())
 			if !sleep(ctx, s.retry) {
@@ -207,19 +235,32 @@ func (s *Scheduler) Run(ctx context.Context) {
 			continue
 		}
 		s.logger.Info("scheduler_leader_acquired")
-		s.lead(ctx)
+		s.setLeaderState(true)
+		lost := s.lead(ctx, check)
 		release()
+		s.setLeaderState(false)
+		// A clean context cancellation is shutdown → stop. A lost lock (watchdog
+		// stepped us down) means we must re-contend, not exit: another node may have
+		// taken over, or the lock is free again after a Postgres blip.
+		if lost && ctx.Err() == nil {
+			s.logger.Warn("scheduler_leader_lost_recontending")
+			if !sleep(ctx, s.retry) {
+				return
+			}
+			continue
+		}
 		s.logger.Info("scheduler_leader_released")
 		return
 	}
 }
 
-// lead runs the scheduling loop until ctx is cancelled. It reloads the enabled
-// monitors on a slow cadence into an in-memory snapshot and, on each fast tick,
-// publishes due active checks from that snapshot — so the hot path no longer
-// scans the monitors table every second. Push-liveness runs as a single batched
-// query on its own cadence.
-func (s *Scheduler) lead(ctx context.Context) {
+// lead runs the scheduling loop until ctx is cancelled or leadership is lost. It
+// reloads the enabled monitors on a slow cadence into an in-memory snapshot and, on
+// each fast tick, publishes due active checks from that snapshot — so the hot path no
+// longer scans the monitors table every second. Push-liveness runs as a single batched
+// query on its own cadence. Returns true if it stepped down because the advisory lock
+// was lost (the caller re-contends), false on a clean context cancellation.
+func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool, error)) bool {
 	nextRun := map[string]time.Time{}
 	var monitors []domain.Monitor
 	byID := map[string]domain.Monitor{}
@@ -228,13 +269,13 @@ func (s *Scheduler) lead(ctx context.Context) {
 	// signal — a recovery stops the signals, so acceleration decays on its own;
 	// the snapshot refresh prunes it authoritatively).
 	confirmFast := map[string]time.Time{}
-	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn time.Time
+	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk time.Time
 	ticker := time.NewTicker(s.tick)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case id := <-s.confirmCh:
 			// A failure was just counted (no verdict yet): probe again at the
 			// confirm interval, respecting the per-region cap.
@@ -242,6 +283,22 @@ func (s *Scheduler) lead(ctx context.Context) {
 				s.enterConfirm(confirmFast, byID, m, time.Now(), nextRun)
 			}
 		case now := <-ticker.C:
+			// Anti-split-brain watchdog: verify we still hold the lock before doing
+			// any leader work this tick. On loss (connection died, Postgres blip)
+			// step down immediately so we stop dispatching against a lock we no
+			// longer own; the caller re-contends.
+			if check != nil && (lastLeaderChk.IsZero() || now.Sub(lastLeaderChk) >= leaderCheckEvery) {
+				lastLeaderChk = now
+				held, err := check(ctx)
+				if err != nil {
+					s.logger.Error("scheduler_leadership_check_failed", "error", err.Error())
+					return true
+				}
+				if !held {
+					s.logger.Warn("scheduler_leadership_lost")
+					return true
+				}
+			}
 			if now.Sub(lastRollup) >= rollupEvery {
 				lastRollup = now
 				today := now.UTC().Truncate(24 * time.Hour)
@@ -370,7 +427,7 @@ func (s *Scheduler) lead(ctx context.Context) {
 						s.logger.Error("marshal_pull_job_failed", "monitor_id", m.ID, "error", err.Error())
 					} else if err := s.store.EnqueuePullJob(ctx, m.Region, payload, int(iv/time.Second)); err != nil {
 						if ctx.Err() != nil {
-							return
+							return false
 						}
 						s.logger.Error("enqueue_pull_job_failed", "monitor_id", m.ID, "error", err.Error())
 					}
@@ -379,7 +436,7 @@ func (s *Scheduler) lead(ctx context.Context) {
 				}
 				if err := s.dispatcher.PublishJob(ctx, dispatch.CheckJob{Monitor: m}); err != nil {
 					if ctx.Err() != nil {
-						return
+						return false
 					}
 					// During a broker outage every due monitor fails — aggregate
 					// into one line per tick instead of a line per monitor.

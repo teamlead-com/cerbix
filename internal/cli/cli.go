@@ -533,6 +533,7 @@ func runServe(args []string) int {
 		// A worker consumes only its region's jobs queue (checks.jobs.<region>);
 		// harmless no-op for scheduler/api (they don't consume jobs).
 		amqpd.WithJobRegion(*region)
+		amqpd.WithBrokerState(registry.SetBrokerUp) // cerbix_broker_up gauge
 		disp = amqpd
 	}
 	if disp != nil {
@@ -581,6 +582,7 @@ func runServe(args []string) int {
 		switch *role {
 		case "all":
 			go scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+				WithLeaderState(registry). // cerbix_scheduler_leader gauge
 				WithConfirmSignals(confirmSignals()).Run(ctx)
 			go worker.New(disp, runner, workerPoolSize, logger).Run(ctx)
 			startIngest()
@@ -592,6 +594,7 @@ func runServe(args []string) int {
 			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithPullRegions(cfg.Pull.Regions).   // pull-served regions get jobs via pull_jobs, not AMQP
 				WithPullMetrics(registry).           // per-region pull-queue depth/lag gauges
+				WithLeaderState(registry).           // cerbix_scheduler_leader gauge
 				WithConfirmSignals(confirmSignals()) // accelerated failure-confirmation probes
 			// Alert when a region with enabled monitors loses its worker/agent. Liveness
 			// unions RabbitMQ consumers with recent pull-agent heartbeats.

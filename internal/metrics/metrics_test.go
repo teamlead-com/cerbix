@@ -47,6 +47,48 @@ func TestPullStatsGauges(t *testing.T) {
 	}
 }
 
+func TestSchedulerLeaderGauge(t *testing.T) {
+	reg := New(buildinfo.Info{}, "scheduler")
+	var before bytes.Buffer
+	reg.WritePrometheus(&before)
+	if strings.Contains(before.String(), "cerbix_scheduler_leader") {
+		t.Fatal("leader gauge should be absent until a scheduler tracks it")
+	}
+	reg.SetSchedulerLeader(false)
+	var standby bytes.Buffer
+	reg.WritePrometheus(&standby)
+	if !strings.Contains(standby.String(), "cerbix_scheduler_leader 0") {
+		t.Fatalf("expected scheduler_leader 0, got:\n%s", standby.String())
+	}
+	reg.SetSchedulerLeader(true)
+	var lead bytes.Buffer
+	reg.WritePrometheus(&lead)
+	if !strings.Contains(lead.String(), "cerbix_scheduler_leader 1") {
+		t.Fatalf("expected scheduler_leader 1, got:\n%s", lead.String())
+	}
+}
+
+func TestBrokerUpGauge(t *testing.T) {
+	reg := New(buildinfo.Info{}, "worker")
+	var before bytes.Buffer
+	reg.WritePrometheus(&before)
+	if strings.Contains(before.String(), "cerbix_broker_up") {
+		t.Fatal("broker gauge should be absent until the AMQP transport tracks it")
+	}
+	reg.SetBrokerUp(true)
+	var up bytes.Buffer
+	reg.WritePrometheus(&up)
+	if !strings.Contains(up.String(), "cerbix_broker_up 1") {
+		t.Fatalf("expected broker_up 1, got:\n%s", up.String())
+	}
+	reg.SetBrokerUp(false)
+	var down bytes.Buffer
+	reg.WritePrometheus(&down)
+	if !strings.Contains(down.String(), "cerbix_broker_up 0") {
+		t.Fatalf("expected broker_up 0, got:\n%s", down.String())
+	}
+}
+
 func TestDatabaseUpOnlyExportedWhenEnabled(t *testing.T) {
 	reg := New(buildinfo.Info{}, "api")
 

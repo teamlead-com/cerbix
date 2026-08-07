@@ -86,6 +86,9 @@ type AMQP struct {
 	pubMu  sync.Mutex
 	logger *slog.Logger
 
+	stateMu       sync.Mutex    // guards onBrokerState
+	onBrokerState func(up bool) // optional broker-reachability gauge hook
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -165,6 +168,27 @@ func NewAMQP(url string, logger *slog.Logger) (*AMQP, error) {
 	return d, nil
 }
 
+// WithBrokerState wires a callback for the cerbix_broker_up gauge, invoked with
+// false on broker loss and true on (re)connect. The dispatcher only exists after a
+// successful dial, so wiring the sink immediately reports up. Optional; nil-safe.
+func (d *AMQP) WithBrokerState(f func(up bool)) *AMQP {
+	d.stateMu.Lock()
+	d.onBrokerState = f
+	d.stateMu.Unlock()
+	d.setBrokerState(true)
+	return d
+}
+
+// setBrokerState is a nil-safe, race-free gauge update.
+func (d *AMQP) setBrokerState(up bool) {
+	d.stateMu.Lock()
+	f := d.onBrokerState
+	d.stateMu.Unlock()
+	if f != nil {
+		f(up)
+	}
+}
+
 // current returns the live connection and the signal channel that closes when
 // the NEXT successful reconnect completes.
 func (d *AMQP) current() (*amqp.Connection, <-chan struct{}) {
@@ -194,6 +218,7 @@ func (d *AMQP) supervise() {
 				reason = amqpErr.Error()
 			}
 			d.logger.Warn("broker_lost", "error", reason)
+			d.setBrokerState(false)
 			if !d.redial() {
 				return // shutdown while reconnecting
 			}
@@ -238,6 +263,7 @@ func (d *AMQP) redial() bool {
 		d.declaredMu.Unlock()
 		close(wake)
 		d.logger.Info("broker_reconnected", "attempts", attempt)
+		d.setBrokerState(true)
 		return true
 	}
 }

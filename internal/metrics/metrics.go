@@ -29,6 +29,10 @@ type Registry struct {
 	outboxDelivered uint64
 	outboxDead      uint64
 	pullStats       []PullStat
+	leaderTracked   bool
+	leader          bool
+	brokerTracked   bool
+	brokerUp        bool
 	now             func() time.Time
 }
 
@@ -105,6 +109,27 @@ func (r *Registry) SetPullStats(stats []PullStat) {
 	r.pullStats = stats
 }
 
+// SetSchedulerLeader records whether this process currently holds scheduler
+// leadership. Calling it marks leadership as tracked, so cerbix_scheduler_leader
+// is only exported by a process that runs a scheduler (exactly one should read 1
+// across the fleet — a persistent 0-everywhere or 2×1 is an alertable anomaly).
+func (r *Registry) SetSchedulerLeader(leader bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.leaderTracked = true
+	r.leader = leader
+}
+
+// SetBrokerUp records AMQP broker reachability. Calling it marks the broker as
+// tracked, so cerbix_broker_up is only exported when the AMQP transport is in use
+// (the inproc dev transport never calls it).
+func (r *Registry) SetBrokerUp(up bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.brokerTracked = true
+	r.brokerUp = up
+}
+
 // Ready reports whether the service is ready to serve.
 func (r *Registry) Ready() bool {
 	r.mu.RLock()
@@ -131,6 +156,10 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	outboxDelivered := r.outboxDelivered
 	outboxDead := r.outboxDead
 	pullStats := r.pullStats
+	leaderTracked := r.leaderTracked
+	leader := r.leader
+	brokerTracked := r.brokerTracked
+	brokerUp := r.brokerUp
 	uptime := r.now().Sub(r.startTime).Seconds()
 	r.mu.RUnlock()
 
@@ -173,6 +202,18 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	fmt.Fprintln(w, "# HELP cerbix_outbox_dead_total Total outbox events parked as dead after exhausting retries.")
 	fmt.Fprintln(w, "# TYPE cerbix_outbox_dead_total counter")
 	fmt.Fprintf(w, "cerbix_outbox_dead_total %d\n", outboxDead)
+
+	if leaderTracked {
+		fmt.Fprintln(w, "# HELP cerbix_scheduler_leader Whether this process currently holds scheduler leadership (1) or is on standby (0).")
+		fmt.Fprintln(w, "# TYPE cerbix_scheduler_leader gauge")
+		fmt.Fprintf(w, "cerbix_scheduler_leader %d\n", b2i(leader))
+	}
+
+	if brokerTracked {
+		fmt.Fprintln(w, "# HELP cerbix_broker_up Whether the AMQP broker is currently reachable (1) or not (0).")
+		fmt.Fprintln(w, "# TYPE cerbix_broker_up gauge")
+		fmt.Fprintf(w, "cerbix_broker_up %d\n", b2i(brokerUp))
+	}
 
 	if pullStats != nil {
 		fmt.Fprintln(w, "# HELP cerbix_pull_jobs_pending Unclaimed pull jobs per region (HTTP-pull transport).")

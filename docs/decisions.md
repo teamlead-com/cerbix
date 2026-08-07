@@ -2285,3 +2285,18 @@ opening stays gated on the returned suppressed flag (maintenance shouldn't spawn
 Caveat: a monitor with `renotify_seconds = 0` that goes down mid-window and stays down is
 not re-alerted after the window — reminders are the carry-out mechanism, and that monitor
 opted out of them.
+
+## D-0135 — Scheduler leadership watchdog + leader/broker health gauges (iter-0077)
+The scheduler held its leadership advisory lock on a pooled connection but `lead()` never
+re-verified it. If that connection died (network blip, Postgres restart, pooler eviction)
+the server released the session lock while the old leader kept dispatching jobs, running
+renotify, and advancing escalations — another node could then win the lock, giving two
+active leaders (double dispatch/renotify/escalation). `TryBecomeLeader` now also returns a
+`check()` that probes the held connection (`pg_locks` for our own backend + reconstructed
+key); the leader runs it every 5s and steps down + re-contends the moment the lock is not
+confirmed held (fail-safe: any check error is treated as loss). Added two health gauges:
+`cerbix_scheduler_leader` (1 leader / 0 standby, only emitted by a process running a
+scheduler — exactly one `1` across the fleet is the invariant to alert on) and
+`cerbix_broker_up` (AMQP reachability, wired off the connection supervisor's
+loss/reconnect transitions, only emitted when the AMQP transport is in use). Both are the
+paging signals for the silent-failure classes the hardening package targets.

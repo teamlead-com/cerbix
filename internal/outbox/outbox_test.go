@@ -42,6 +42,10 @@ type fakeStore struct {
 	downAncestors    []store.DownAncestor
 	downAncErr       error
 	suppressionNotes []string
+
+	// maintenance-suppression fakes
+	inMaintenance    map[string]bool
+	inMaintenanceErr error
 }
 
 func (f *fakeStore) IncidentContext(_ context.Context, _ domain.Incident) (domain.IncidentContext, error) {
@@ -55,6 +59,13 @@ func (f *fakeStore) DownAncestors(_ context.Context, _ string) ([]store.DownAnce
 func (f *fakeStore) AppendSuppressionNote(_ context.Context, monitorID, root string) (bool, error) {
 	f.suppressionNotes = append(f.suppressionNotes, monitorID+"←"+root)
 	return true, nil
+}
+
+func (f *fakeStore) MonitorInMaintenance(_ context.Context, monitorID string) (bool, error) {
+	if f.inMaintenanceErr != nil {
+		return false, f.inMaintenanceErr
+	}
+	return f.inMaintenance[monitorID], nil
 }
 
 func (f *fakeStore) AppendIncidentContext(_ context.Context, incidentID, body string) (bool, error) {
@@ -332,6 +343,57 @@ func TestDependencySuppression(t *testing.T) {
 	newWorker(fs4, &fakeWebhook{}, nf4, &fakeMetrics{}).drain(context.Background())
 	if nf4.called != 1 {
 		t.Fatalf("lookup error must fail open: called=%d", nf4.called)
+	}
+}
+
+func TestMaintenanceSuppression(t *testing.T) {
+	mon := domain.Monitor{ID: "m1", Name: "api"}
+	downMT, _ := json.Marshal(domain.MonitorTransition{MonitorID: "m1", Prev: domain.StatusUp, Cur: domain.StatusDown})
+	reminderMT, _ := json.Marshal(domain.MonitorTransition{MonitorID: "m1", Prev: domain.StatusDown, Cur: domain.StatusDown, Reminder: true})
+	upMT, _ := json.Marshal(domain.MonitorTransition{MonitorID: "m1", Prev: domain.StatusDown, Cur: domain.StatusUp})
+
+	// In maintenance: the initial down AND the renotify reminder are muted (delivered
+	// as no-ops), but recovery still goes out — this is exactly how a still-down
+	// monitor gets alerted once the window closes (the next reminder is no longer muted).
+	fs := &fakeStore{
+		monitors: map[string]domain.Monitor{"m1": mon},
+		pending: []domain.OutboxEvent{
+			{ID: "e1", Topic: domain.TopicMonitorTransition, Payload: downMT, Attempts: 1},
+			{ID: "e2", Topic: domain.TopicMonitorTransition, Payload: reminderMT, Attempts: 1},
+			{ID: "e3", Topic: domain.TopicMonitorTransition, Payload: upMT, Attempts: 1},
+		},
+		inMaintenance: map[string]bool{"m1": true},
+	}
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 || !nf.up {
+		t.Fatalf("during maintenance only recovery must deliver: called=%d up=%v", nf.called, nf.up)
+	}
+	if len(fs.delivered) != 3 {
+		t.Fatalf("all events must be marked delivered (down/reminder as no-ops): %v", fs.delivered)
+	}
+
+	// Window closed (not in maintenance) → the down alert delivers normally.
+	fs2 := &fakeStore{
+		monitors: map[string]domain.Monitor{"m1": mon},
+		pending:  []domain.OutboxEvent{{ID: "e4", Topic: domain.TopicMonitorTransition, Payload: reminderMT, Attempts: 1}},
+	}
+	nf2 := &fakeNotify{}
+	newWorker(fs2, &fakeWebhook{}, nf2, &fakeMetrics{}).drain(context.Background())
+	if nf2.called != 1 || nf2.up {
+		t.Fatalf("after the window the reminder must deliver: called=%d up=%v", nf2.called, nf2.up)
+	}
+
+	// Lookup error → fail open (a down alert is never silently muted by a DB hiccup).
+	fs3 := &fakeStore{
+		monitors:         map[string]domain.Monitor{"m1": mon},
+		pending:          []domain.OutboxEvent{{ID: "e5", Topic: domain.TopicMonitorTransition, Payload: downMT, Attempts: 1}},
+		inMaintenanceErr: errors.New("db hiccup"),
+	}
+	nf3 := &fakeNotify{}
+	newWorker(fs3, &fakeWebhook{}, nf3, &fakeMetrics{}).drain(context.Background())
+	if nf3.called != 1 {
+		t.Fatalf("maintenance lookup error must fail open: called=%d", nf3.called)
 	}
 }
 

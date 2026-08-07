@@ -36,6 +36,8 @@ type Store interface {
 	// Dependency-graph suppression: (transitive) parents currently down.
 	DownAncestors(ctx context.Context, monitorID string) ([]store.DownAncestor, error)
 	AppendSuppressionNote(ctx context.Context, monitorID, rootName string) (bool, error)
+	// Maintenance suppression: is the monitor inside an active window right now.
+	MonitorInMaintenance(ctx context.Context, monitorID string) (bool, error)
 }
 
 // WebhookDeliverer delivers an incident event to a project's webhooks.
@@ -263,6 +265,19 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		// delivery is muted, plus a one-time timeline note on the child's incident.
 		if mt.Cur == domain.StatusDown && w.dependencySuppressed(ctx, monitor) {
 			return nil
+		}
+		// Maintenance suppression: mute a DOWN notify while the monitor is inside an
+		// active window. The transition is still recorded and re-enqueued by the
+		// renotify job, so if the monitor is still down when the window closes the
+		// next reminder delivers — the fix for "down during maintenance is never
+		// alerted, even after the window ends". Recovery is never suppressed.
+		if mt.Cur == domain.StatusDown {
+			if inMaint, err := w.store.MonitorInMaintenance(ctx, monitor.ID); err != nil {
+				w.logger.Warn("maintenance_check_failed", "monitor_id", monitor.ID, "error", err.Error())
+			} else if inMaint {
+				w.logger.Info("alert_suppressed_by_maintenance", "monitor_id", monitor.ID, "reminder", mt.Reminder)
+				return nil
+			}
 		}
 		return w.notifs.Deliver(ctx, monitor, mt.Cur == domain.StatusUp)
 

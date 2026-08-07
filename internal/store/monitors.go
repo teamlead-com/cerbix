@@ -351,11 +351,14 @@ func (s *Store) RecordCheckStatus(ctx context.Context, monitorID string, up bool
 		     WHEN cur.consecutive_failures + 1 >= cur.failure_threshold THEN 'down'
 		     ELSE m.status
 		   END,
-		   -- last_notified_at drives re-notify: stamped on a fresh (non-suppressed)
-		   -- down, cleared on recovery, otherwise left for the reminder job to bump.
+		   -- last_notified_at drives re-notify: stamped on a fresh down (including a
+		   -- down that starts during maintenance, so the renotify job re-enqueues it
+		   -- and it delivers once the window ends — the initial notify is muted at
+		   -- DELIVERY, not dropped here), cleared on recovery, else left for the
+		   -- reminder job to bump.
 		   last_notified_at = CASE
 		     WHEN $2 THEN NULL
-		     WHEN cur.consecutive_failures + 1 >= cur.failure_threshold AND cur.old_status <> 'down' AND NOT maint.in_maint THEN now()
+		     WHEN cur.consecutive_failures + 1 >= cur.failure_threshold AND cur.old_status <> 'down' THEN now()
 		     ELSE m.last_notified_at
 		   END,
 		   updated_at = now()
@@ -379,8 +382,13 @@ func (s *Store) RecordCheckStatus(ctx context.Context, monitorID string, up bool
 			return "", "", false, fmt.Errorf("store: notify confirm phase: %w", err)
 		}
 	}
-	// Notify only on a real flip that isn't muted by an active maintenance window.
-	if prev != cur && !inMaint {
+	// Enqueue the transition on every real flip, INCLUDING one during maintenance:
+	// the fact and its event are always recorded, and the outbox worker mutes the
+	// down-notify DELIVERY while the window is active. Suppressing here (as before)
+	// meant a monitor that went down mid-window and stayed down was never alerted
+	// even after the window closed. (Incident opening is still gated on !inMaint in
+	// ingest via the returned suppressed flag — maintenance shouldn't spawn incidents.)
+	if prev != cur {
 		payload, err := json.Marshal(domain.MonitorTransition{MonitorID: monitorID, Prev: prev, Cur: cur})
 		if err != nil {
 			return "", "", false, fmt.Errorf("store: marshal transition: %w", err)

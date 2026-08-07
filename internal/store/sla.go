@@ -428,6 +428,27 @@ func scanMaintenance(row pgx.Row) (domain.MaintenanceWindow, error) {
 	return mw, nil
 }
 
+// MonitorInMaintenance reports whether a monitor is inside an active maintenance
+// window right now — a monitor-specific window or a project-wide one. Used by the
+// outbox worker to suppress down-alert DELIVERY during maintenance (the transition is
+// still recorded and enqueued; only its notification is muted), mirroring the maint
+// gate in RecordCheckStatus. A missing monitor reports false (its transition is dropped
+// upstream anyway). Fail-closed to false so an error never silently mutes a real alert.
+func (s *Store) MonitorInMaintenance(ctx context.Context, monitorID string) (bool, error) {
+	var inMaint bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(
+		   SELECT 1 FROM maintenance_windows mw
+		   JOIN monitors m ON m.id = $1
+		   WHERE mw.starts_at <= now() AND mw.ends_at >= now()
+		     AND (mw.monitor_id = m.id OR (mw.monitor_id IS NULL AND mw.project_id = m.project_id))
+		 )`, monitorID).Scan(&inMaint)
+	if err != nil {
+		return false, fmt.Errorf("store: monitor in maintenance: %w", err)
+	}
+	return inMaint, nil
+}
+
 // CreateMaintenanceWindow inserts a maintenance window (validated in domain).
 func (s *Store) CreateMaintenanceWindow(ctx context.Context, mw domain.MaintenanceWindow) (domain.MaintenanceWindow, error) {
 	if err := mw.Validate(); err != nil {

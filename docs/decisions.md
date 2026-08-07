@@ -2269,3 +2269,19 @@ token can even reach a handler region-less, and the handler still rejects it), a
 returned verbatim by the viewer-readable list endpoints. `NotificationChannel.Redacted()`
 blanks `SecretChannelConfigKeys` and is applied to list and create responses; there is no
 config-edit flow, so nothing round-trips the blanked values.
+
+## D-0134 — Maintenance mutes alert delivery, not the transition record (iter-0076)
+Maintenance suppression lived at enqueue: a monitor that went DOWN during a window had
+its transition event dropped and its `last_notified_at` left NULL, so `EnqueueRenotifyReminders`
+(which requires `last_notified_at IS NOT NULL`) never picked it up — the monitor stayed
+silently down forever, even after the window closed. This contradicted the spine principle
+that facts/events always record and only DELIVERY is muted (the escalation, dependency, and
+instance-silence suppressions all already work that way). `RecordCheckStatus` now enqueues
+the transition on every flip and stamps `last_notified_at` on a fresh down regardless of
+maintenance; the outbox worker mutes the DOWN notify at delivery via
+`MonitorInMaintenance` (fail-open on error, recovery never muted). A still-down monitor is
+then re-alerted by the first renotify reminder that fires after the window. Incident
+opening stays gated on the returned suppressed flag (maintenance shouldn't spawn incidents).
+Caveat: a monitor with `renotify_seconds = 0` that goes down mid-window and stays down is
+not re-alerted after the window — reminders are the carry-out mechanism, and that monitor
+opted out of them.

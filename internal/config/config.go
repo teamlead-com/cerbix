@@ -27,6 +27,7 @@ type Config struct {
 	Session            SessionConfig            `yaml:"session"`
 	Prober             ProberConfig             `yaml:"prober"`
 	NotificationEgress NotificationEgressConfig `yaml:"notification_egress"`
+	Result             ResultConfig             `yaml:"result"`
 	Heartbeats         HeartbeatsConfig         `yaml:"heartbeats"`
 	Security           SecurityConfig           `yaml:"security"`
 	Mail               MailConfig               `yaml:"mail"`
@@ -148,6 +149,17 @@ type ProberConfig struct {
 type NotificationEgressConfig struct {
 	AllowPrivateIPs  bool `yaml:"allow_private_ips"`
 	AllowMetadataIPs bool `yaml:"allow_metadata_ips"`
+}
+
+// ResultConfig governs result ingest (spec func-result-protocol). AllowedSkew bounds how
+// far ahead of statement_timestamp() a scheduled result's observed_at may be before it is
+// quarantined. RevisionMode is parsed and validated here but INERT in P0a — the
+// execution_revision gate activates in P0b; the default is the secure `enforce`, including
+// when the whole `result:` block is absent (the default must not depend on which example
+// file was copied — see D-0142 / spec §10).
+type ResultConfig struct {
+	AllowedSkew  Duration `yaml:"allowed_skew"`
+	RevisionMode string   `yaml:"revision_mode"` // enforce | observe
 }
 
 // HeartbeatsConfig controls raw heartbeat retention. RetentionDays bounds how many
@@ -324,6 +336,10 @@ func defaults() *Config {
 			AllowPrivateIPs:  false, // editor-controlled destinations: deny internal by default
 			AllowMetadataIPs: false,
 		},
+		Result: ResultConfig{
+			AllowedSkew:  Duration(5 * time.Minute),
+			RevisionMode: "enforce", // secure default even when the result: block is absent
+		},
 		Heartbeats: HeartbeatsConfig{
 			RetentionDays: 30,
 		},
@@ -385,6 +401,14 @@ func (c *Config) Validate() error {
 	// practical minimum.
 	if c.Heartbeats.RetentionDays < 2 {
 		return fmt.Errorf("heartbeats.retention_days must be at least 2")
+	}
+	// Result ingest (spec func-result-protocol). A skew larger than an hour would defeat the
+	// future-clock guard; a non-positive one is meaningless. RevisionMode is strict-enum.
+	if s := c.Result.AllowedSkew.Std(); s <= 0 || s > time.Hour {
+		return fmt.Errorf("result.allowed_skew must be > 0 and <= 1h: %s", s)
+	}
+	if c.Result.RevisionMode != "enforce" && c.Result.RevisionMode != "observe" {
+		return fmt.Errorf("result.revision_mode must be enforce|observe: %q", c.Result.RevisionMode)
 	}
 	if _, err := c.Security.Keys(); err != nil {
 		return err

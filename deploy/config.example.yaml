@@ -76,6 +76,14 @@ notification_egress:
   allow_private_ips: false   # set true ONLY if you deliver alerts to internal endpoints
   allow_metadata_ips: false  # keep off
 
+# Result ingest (spec func-result-protocol). allowed_skew bounds how far ahead of the DB
+# clock a scheduled result's timestamp may be before it is quarantined. revision_mode gates
+# stale-config results: enforce (secure default) | observe (temporary migration mode during
+# a rolling upgrade — see the runbook / D-0142). The block is optional; absent → enforce.
+result:
+  allowed_skew: 5m          # > 0 and <= 1h
+  revision_mode: enforce    # enforce | observe
+
 # Raw heartbeat retention. Heartbeats are stored in daily range partitions; the
 # scheduler leader pre-creates upcoming partitions and drops those older than the
 # window (a cheap DROP, not a big DELETE). retention_days also bounds the

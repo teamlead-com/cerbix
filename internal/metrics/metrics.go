@@ -7,6 +7,7 @@ package metrics
 import (
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 
@@ -33,7 +34,14 @@ type Registry struct {
 	leader          bool
 	brokerTracked   bool
 	brokerUp        bool
-	now             func() time.Time
+	// Result-ingest outcome counters (spec func-result-protocol). Low-cardinality: keyed by
+	// a fixed reason/origin set, never by monitor_id/job_id (those go to logs).
+	resultQuarantined map[string]uint64            // reason → count (future_timestamp)
+	resultIgnored     map[string]uint64            // reason → count (out_of_order, outside_retention)
+	resultRejected    map[string]uint64            // reason → count (missing_timestamp, stale_revision, missing_revision)
+	resultClockSkew   map[string]map[string]uint64 // origin → reason → count (push future|past)
+	resultMissingRev  uint64                       // observe-mode: scheduled result with no revision
+	now               func() time.Time
 }
 
 // PullStat is one region's pull-queue depth and lag, exported as gauges.
@@ -79,6 +87,61 @@ func (r *Registry) RecordCheck(up bool) {
 	} else {
 		r.checksDown++
 	}
+}
+
+// RecordResultQuarantined counts a result set aside without touching state (e.g. a
+// future-timestamp beyond skew). reason is a fixed low-cardinality label.
+func (r *Registry) RecordResultQuarantined(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.resultQuarantined == nil {
+		r.resultQuarantined = map[string]uint64{}
+	}
+	r.resultQuarantined[reason]++
+}
+
+// RecordResultIgnored counts a result not applied to live state (out_of_order kept for
+// SLA, or outside_retention dropped).
+func (r *Registry) RecordResultIgnored(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.resultIgnored == nil {
+		r.resultIgnored = map[string]uint64{}
+	}
+	r.resultIgnored[reason]++
+}
+
+// RecordResultRejected counts a fail-closed reject (missing_timestamp, stale_revision,
+// missing_revision) — no heartbeat inserted, no state change.
+func (r *Registry) RecordResultRejected(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.resultRejected == nil {
+		r.resultRejected = map[string]uint64{}
+	}
+	r.resultRejected[reason]++
+}
+
+// RecordResultClockSkew counts an accepted-but-anomalous client clock (push only today):
+// the result is still applied, this is adoption/diagnostic telemetry. reason is future|past.
+func (r *Registry) RecordResultClockSkew(origin, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.resultClockSkew == nil {
+		r.resultClockSkew = map[string]map[string]uint64{}
+	}
+	if r.resultClockSkew[origin] == nil {
+		r.resultClockSkew[origin] = map[string]uint64{}
+	}
+	r.resultClockSkew[origin][reason]++
+}
+
+// RecordResultMissingRevision counts a scheduled result with no revision that was applied
+// under observe mode (the migration counter watched before switching to enforce).
+func (r *Registry) RecordResultMissingRevision() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resultMissingRev++
 }
 
 // RecordIncidentOpened counts an incident opened through the API.
@@ -160,6 +223,14 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	leader := r.leader
 	brokerTracked := r.brokerTracked
 	brokerUp := r.brokerUp
+	quarantined := copyCounts(r.resultQuarantined)
+	ignored := copyCounts(r.resultIgnored)
+	rejected := copyCounts(r.resultRejected)
+	clockSkew := map[string]map[string]uint64{}
+	for origin, byReason := range r.resultClockSkew {
+		clockSkew[origin] = copyCounts(byReason)
+	}
+	missingRev := r.resultMissingRev
 	uptime := r.now().Sub(r.startTime).Seconds()
 	r.mu.RUnlock()
 
@@ -190,6 +261,28 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	fmt.Fprintln(w, "# TYPE cerbix_checks_total counter")
 	fmt.Fprintf(w, "cerbix_checks_total{result=\"up\"} %d\n", checksUp)
 	fmt.Fprintf(w, "cerbix_checks_total{result=\"down\"} %d\n", checksDown)
+
+	// Result-ingest outcomes (spec func-result-protocol). Only non-empty series are emitted.
+	writeReasonCounter(w, "cerbix_result_quarantined_total",
+		"Results set aside without touching state (by reason).", quarantined)
+	writeReasonCounter(w, "cerbix_result_ignored_total",
+		"Results not applied to live state (by reason).", ignored)
+	writeReasonCounter(w, "cerbix_result_rejected_total",
+		"Results fail-closed rejected with no insert (by reason).", rejected)
+	if len(clockSkew) > 0 {
+		fmt.Fprintln(w, "# HELP cerbix_result_clock_skew_total Accepted results with an anomalous client clock (by origin, reason).")
+		fmt.Fprintln(w, "# TYPE cerbix_result_clock_skew_total counter")
+		for _, origin := range sortedKeys(clockSkew) {
+			for _, reason := range sortedKeys(clockSkew[origin]) {
+				fmt.Fprintf(w, "cerbix_result_clock_skew_total{origin=%q,reason=%q} %d\n", origin, reason, clockSkew[origin][reason])
+			}
+		}
+	}
+	if missingRev > 0 {
+		fmt.Fprintln(w, "# HELP cerbix_result_missing_revision_total Scheduled results with no revision applied under observe mode.")
+		fmt.Fprintln(w, "# TYPE cerbix_result_missing_revision_total counter")
+		fmt.Fprintf(w, "cerbix_result_missing_revision_total %d\n", missingRev)
+	}
 
 	fmt.Fprintln(w, "# HELP cerbix_incidents_opened_total Total incidents opened through the API.")
 	fmt.Fprintln(w, "# TYPE cerbix_incidents_opened_total counter")
@@ -232,4 +325,38 @@ func b2i(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// copyCounts snapshots a reason→count map under the caller's lock.
+func copyCounts(m map[string]uint64) map[string]uint64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// sortedKeys returns a map's keys in a stable order (deterministic /metrics output).
+func sortedKeys[V any](m map[string]V) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
+// writeReasonCounter emits a {reason="…"} counter family, skipping it entirely when empty.
+func writeReasonCounter(w io.Writer, name, help string, counts map[string]uint64) {
+	if len(counts) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(w, "# TYPE %s counter\n", name)
+	for _, reason := range sortedKeys(counts) {
+		fmt.Fprintf(w, "%s{reason=%q} %d\n", name, reason, counts[reason])
+	}
 }

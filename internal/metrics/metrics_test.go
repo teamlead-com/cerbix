@@ -127,3 +127,35 @@ func TestReadinessTransitions(t *testing.T) {
 		t.Fatal("registry should be ready")
 	}
 }
+
+// TestResultOutcomeMetrics proves the result-ingest outcome counters render with their
+// low-cardinality labels and that empty families are omitted.
+func TestResultOutcomeMetrics(t *testing.T) {
+	reg := New(buildinfo.Info{}, "all")
+	reg.RecordResultQuarantined("future_timestamp")
+	reg.RecordResultIgnored("out_of_order")
+	reg.RecordResultRejected("missing_timestamp")
+	reg.RecordResultClockSkew("push", "future")
+	reg.RecordResultMissingRevision()
+
+	var b bytes.Buffer
+	reg.WritePrometheus(&b)
+	out := b.String()
+	for _, want := range []string{
+		`cerbix_result_quarantined_total{reason="future_timestamp"} 1`,
+		`cerbix_result_ignored_total{reason="out_of_order"} 1`,
+		`cerbix_result_rejected_total{reason="missing_timestamp"} 1`,
+		`cerbix_result_clock_skew_total{origin="push",reason="future"} 1`,
+		`cerbix_result_missing_revision_total 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("metrics output missing %q\n%s", want, out)
+		}
+	}
+	// A fresh registry emits none of the result families (empty → omitted).
+	var empty bytes.Buffer
+	New(buildinfo.Info{}, "all").WritePrometheus(&empty)
+	if strings.Contains(empty.String(), "cerbix_result_") {
+		t.Fatalf("empty registry should not emit result_* series:\n%s", empty.String())
+	}
+}

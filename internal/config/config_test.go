@@ -66,6 +66,39 @@ func TestEgressPolicyDefaults(t *testing.T) {
 	}
 }
 
+// TestResultConfigDefaultsAndValidation locks the result-ingest config contract: absent
+// block → secure enforce + 5m skew (default must not depend on the example file); partial
+// block keeps the revision_mode default; strict enum + skew bounds.
+func TestResultConfigDefaultsAndValidation(t *testing.T) {
+	cfg, err := Parse([]byte("log:\n  level: info\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Result.RevisionMode != "enforce" {
+		t.Fatalf("absent block: revision_mode = %q, want enforce", cfg.Result.RevisionMode)
+	}
+	if cfg.Result.AllowedSkew.Std() != 5*time.Minute {
+		t.Fatalf("absent block: allowed_skew = %s, want 5m", cfg.Result.AllowedSkew.Std())
+	}
+	// Partial block: overriding skew must NOT reset revision_mode to empty.
+	cfg, err = Parse([]byte("result:\n  allowed_skew: 1m\n"))
+	if err != nil || cfg.Result.RevisionMode != "enforce" || cfg.Result.AllowedSkew.Std() != time.Minute {
+		t.Fatalf("partial block: mode=%q skew=%s err=%v", cfg.Result.RevisionMode, cfg.Result.AllowedSkew.Std(), err)
+	}
+	if _, err := Parse([]byte("result:\n  revision_mode: observe\n")); err != nil {
+		t.Fatalf("observe must be accepted: %v", err)
+	}
+	if _, err := Parse([]byte("result:\n  revision_mode: lax\n")); err == nil {
+		t.Fatal("invalid revision_mode must be rejected")
+	}
+	if _, err := Parse([]byte("result:\n  allowed_skew: 2h\n")); err == nil {
+		t.Fatal("allowed_skew > 1h must be rejected")
+	}
+	if _, err := Parse([]byte("result:\n  allowed_skew: 0s\n")); err == nil {
+		t.Fatal("allowed_skew <= 0 must be rejected")
+	}
+}
+
 func TestHeartbeatsRetentionDefaultAndValidation(t *testing.T) {
 	cfg, err := Parse([]byte("log:\n  level: info\n"))
 	if err != nil {

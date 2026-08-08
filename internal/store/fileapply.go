@@ -39,16 +39,52 @@ type ApplyResult struct {
 // fileprovider, then apply create/update/dependency_update/noop/orphan/restore with the
 // D-0142 config-write contract, dependency edges, provenance, monotonic generation, and the
 // scheduler NOTIFY — all atomic, deterministic-ordered, and per-project fault-isolated.
+// ApplyFileManagedBundle runs the reconcile on a POOL connection (used by tests and any
+// non-leader caller). The leadership-fenced path is LeaderSession.ApplyFileManagedBundle.
 func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (ApplyResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("store: begin apply bundle: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	res, err := s.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ApplyResult{}, fmt.Errorf("store: commit apply bundle: %w", err)
+	}
+	return res, nil
+}
 
+// ApplyFileManagedBundle runs the reconcile on the LEADER's pinned connection, so a lost
+// advisory lock (connection death) also aborts this transaction — a former leader can never
+// commit after losing leadership (fencing, spec §17).
+func (ls *LeaderSession) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (ApplyResult, error) {
+	tx, err := ls.conn.Begin(ctx)
+	if err != nil {
+		return ApplyResult{}, fmt.Errorf("store: begin apply bundle (leader): %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	res, err := ls.store.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ApplyResult{}, fmt.Errorf("store: commit apply bundle (leader fencing): %w", err)
+	}
+	return res, nil
+}
+
+// applyBundleTx is the whole reconcile body on a caller-owned transaction (no begin/commit).
+// Both the pool and leader-fenced wrappers call it (spec §9): resolve tenant, read the
+// provider-owned current set, plan, apply create/update/dependency_update/noop/orphan/restore
+// with the D-0142 config-write contract, dependency edges, provenance, monotonic generation,
+// and the scheduler NOTIFY — atomic, deterministic-ordered, per-project fault-isolated.
+func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (ApplyResult, error) {
 	// Resolve tenant in ONE query, constraining the project by its organization (spec §5).
 	var orgID, projID string
-	err = tx.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT o.id, p.id FROM projects p JOIN organizations o ON o.id = p.org_id
 		  WHERE o.slug = $1 AND p.slug = $2`, desired.Organization, desired.Project).Scan(&orgID, &projID)
 	if noRows(err) {
@@ -234,9 +270,6 @@ func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, d
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return ApplyResult{}, fmt.Errorf("store: commit apply bundle: %w", err)
-	}
 	return ApplyResult{Organization: desired.Organization, Project: desired.Project, Generation: newGen, Counts: plan.Counts(), Changed: changed}, nil
 }
 

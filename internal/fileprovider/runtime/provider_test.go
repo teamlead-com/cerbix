@@ -21,13 +21,18 @@ type applyCall struct {
 }
 
 type fakeApplier struct {
-	owned []store.TenantRef
-	calls []applyCall
+	owned   []store.TenantRef
+	session *fakeSession
 }
 
-func (f *fakeApplier) ApplyFileManagedBundle(_ context.Context, _ string, dp *fileprovider.DesiredProject, path string, _ time.Duration) (store.ApplyResult, error) {
-	f.calls = append(f.calls, applyCall{dp.Organization, dp.Project, len(dp.Monitors), path})
-	return store.ApplyResult{Organization: dp.Organization, Project: dp.Project}, nil
+func (f *fakeApplier) sess() *fakeSession {
+	if f.session == nil {
+		f.session = &fakeSession{}
+	}
+	return f.session
+}
+func (f *fakeApplier) TryBecomeLeaderSession(context.Context, int64) (LeaderSession, bool, error) {
+	return f.sess(), true, nil
 }
 func (f *fakeApplier) FileProviderProjects(_ context.Context, _ string) ([]store.TenantRef, error) {
 	return f.owned, nil
@@ -35,8 +40,15 @@ func (f *fakeApplier) FileProviderProjects(_ context.Context, _ string) ([]store
 func (f *fakeApplier) FileProviderCounts(_ context.Context, _ string) (int, int, error) {
 	return 0, 0, nil
 }
-func (f *fakeApplier) TryBecomeLeader(context.Context, int64) (func(), func(context.Context) (bool, error), bool, error) {
-	return func() {}, func(context.Context) (bool, error) { return true, nil }, true, nil
+
+// fakeSession is a fenced-apply stand-in that records the mutating calls.
+type fakeSession struct{ calls []applyCall }
+
+func (s *fakeSession) Check(context.Context) (bool, error) { return true, nil }
+func (s *fakeSession) Release()                            {}
+func (s *fakeSession) ApplyFileManagedBundle(_ context.Context, _ string, dp *fileprovider.DesiredProject, path string, _ time.Duration) (store.ApplyResult, error) {
+	s.calls = append(s.calls, applyCall{dp.Organization, dp.Project, len(dp.Monitors), path})
+	return store.ApplyResult{Organization: dp.Organization, Project: dp.Project}, nil
 }
 
 func testProvider(dir string, applier Applier) *Provider {
@@ -70,11 +82,11 @@ func TestReconcileAppliesValidBundles(t *testing.T) {
 	write(t, dir, "a.yaml", bundle("acme", "payments"))
 	write(t, dir, "b.yaml", bundle("acme", "billing"))
 	fa := &fakeApplier{}
-	rep := testProvider(dir, fa).reconcile(context.Background())
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
 	if rep.Applied != 2 || rep.Rejected != 0 || rep.Orphaned != 0 {
 		t.Fatalf("report = %+v, want 2 applied", rep)
 	}
-	for _, c := range fa.calls {
+	for _, c := range fa.sess().calls {
 		if c.monitors == 0 {
 			t.Fatalf("valid apply must carry monitors: %+v", c)
 		}
@@ -86,18 +98,18 @@ func TestReconcileOrphansDisappearedProject(t *testing.T) {
 	write(t, dir, "a.yaml", bundle("acme", "payments"))
 	// The provider owns payments (present) and billing (file gone) → billing is orphaned.
 	fa := &fakeApplier{owned: []store.TenantRef{{Organization: "acme", Project: "payments"}, {Organization: "acme", Project: "billing"}}}
-	rep := testProvider(dir, fa).reconcile(context.Background())
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
 	if rep.Orphaned != 1 {
 		t.Fatalf("report = %+v, want 1 orphaned", rep)
 	}
 	var orphanEmpty bool
-	for _, c := range fa.calls {
+	for _, c := range fa.sess().calls {
 		if c.project == "billing" && c.monitors == 0 {
 			orphanEmpty = true
 		}
 	}
 	if !orphanEmpty {
-		t.Fatalf("disappeared project must be orphaned with an empty desired: %+v", fa.calls)
+		t.Fatalf("disappeared project must be orphaned with an empty desired: %+v", fa.sess().calls)
 	}
 }
 
@@ -106,14 +118,14 @@ func TestReconcileSuspendsOrphanOnUnbound(t *testing.T) {
 	write(t, dir, "a.yaml", bundle("acme", "payments"))
 	write(t, dir, "broken.yaml", "format: 1\n  bad: [unclosed\n") // unbound → suspend
 	fa := &fakeApplier{owned: []store.TenantRef{{Organization: "acme", Project: "payments"}, {Organization: "acme", Project: "billing"}}}
-	rep := testProvider(dir, fa).reconcile(context.Background())
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
 	if rep.Rejected == 0 {
 		t.Fatal("broken file must be rejected")
 	}
 	if rep.Orphaned != 0 {
 		t.Fatalf("unbound file must suspend orphaning, got %d orphaned", rep.Orphaned)
 	}
-	for _, c := range fa.calls {
+	for _, c := range fa.sess().calls {
 		if c.monitors == 0 {
 			t.Fatalf("no empty-orphan apply must happen while suspended: %+v", c)
 		}
@@ -122,9 +134,9 @@ func TestReconcileSuspendsOrphanOnUnbound(t *testing.T) {
 
 func TestReconcileDegradedOnUnreadableDir(t *testing.T) {
 	fa := &fakeApplier{}
-	rep := testProvider(filepath.Join(t.TempDir(), "does-not-exist"), fa).reconcile(context.Background())
-	if !rep.Degraded || len(fa.calls) != 0 {
-		t.Fatalf("unreadable dir must degrade with no apply: %+v calls=%d", rep, len(fa.calls))
+	rep := testProvider(filepath.Join(t.TempDir(), "does-not-exist"), fa).reconcile(context.Background(), fa.sess())
+	if !rep.Degraded || len(fa.sess().calls) != 0 {
+		t.Fatalf("unreadable dir must degrade with no apply: %+v calls=%d", rep, len(fa.sess().calls))
 	}
 }
 
@@ -194,11 +206,11 @@ func TestReconcileDuplicateDoesNotOrphan(t *testing.T) {
 	write(t, dir, "one.yaml", bundle("acme", "payments")) // both target acme/payments → duplicate
 	write(t, dir, "two.yaml", bundle("acme", "payments"))
 	fa := &fakeApplier{owned: []store.TenantRef{{Organization: "acme", Project: "payments"}}}
-	rep := testProvider(dir, fa).reconcile(context.Background())
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
 	if rep.Orphaned != 0 {
 		t.Fatalf("a frozen duplicate project must NOT be orphaned, got %d", rep.Orphaned)
 	}
-	for _, c := range fa.calls {
+	for _, c := range fa.sess().calls {
 		if c.monitors == 0 {
 			t.Fatalf("no empty-orphan apply must touch a frozen project: %+v", c)
 		}
@@ -217,7 +229,7 @@ func TestReconcileScanErrorSuspendsOrphan(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	fa := &fakeApplier{owned: []store.TenantRef{{Organization: "acme", Project: "billing"}}}
-	rep := testProvider(dir, fa).reconcile(context.Background())
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
 	if rep.Rejected == 0 {
 		t.Fatal("scan-level rejection expected")
 	}
@@ -236,14 +248,14 @@ func TestReconcileRejectsOversizedBundle(t *testing.T) {
 	fa := &fakeApplier{owned: []store.TenantRef{{Organization: "acme", Project: "payments"}}}
 	p := testProvider(dir, fa)
 	p.limits.MaxMonitorsPerBundle = 1
-	rep := p.reconcile(context.Background())
+	rep := p.reconcile(context.Background(), fa.sess())
 	if rep.Applied != 0 {
 		t.Fatalf("oversized bundle must not apply, got Applied=%d", rep.Applied)
 	}
 	if rep.Rejected == 0 {
 		t.Fatal("oversized bundle must be rejected")
 	}
-	if rep.Orphaned != 0 || len(fa.calls) != 0 {
-		t.Fatalf("a rejected (frozen) bundle must NOT be applied or orphaned: orphaned=%d calls=%d", rep.Orphaned, len(fa.calls))
+	if rep.Orphaned != 0 || len(fa.sess().calls) != 0 {
+		t.Fatalf("a rejected (frozen) bundle must NOT be applied or orphaned: orphaned=%d calls=%d", rep.Orphaned, len(fa.sess().calls))
 	}
 }

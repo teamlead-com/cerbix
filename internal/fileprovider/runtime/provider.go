@@ -20,12 +20,23 @@ import (
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
-// Applier is the store surface the reconcile loop needs (implemented by *store.Store).
+// Applier is the store surface the reconcile loop needs (implemented by *store.Store). The
+// mutating apply is NOT here — it lives on LeaderSession so it can be fenced by the leader's
+// connection (spec §17). The read-only lookups may use the pool: a stale read only feeds a
+// destructive decision whose apply is itself fenced.
 type Applier interface {
-	ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (store.ApplyResult, error)
+	TryBecomeLeaderSession(ctx context.Context, key int64) (LeaderSession, bool, error)
 	FileProviderProjects(ctx context.Context, providerID string) ([]store.TenantRef, error)
 	FileProviderCounts(ctx context.Context, providerID string) (managed, orphaned int, err error)
-	TryBecomeLeader(ctx context.Context, key int64) (release func(), check func(context.Context) (bool, error), ok bool, err error)
+}
+
+// LeaderSession is a held leadership whose apply transaction runs on the lock-owning
+// connection, so a lost lock aborts the in-flight apply (fencing). Implemented by
+// *store.LeaderSession.
+type LeaderSession interface {
+	Check(ctx context.Context) (bool, error)
+	Release()
+	ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (store.ApplyResult, error)
 }
 
 // MetricsSink receives the provider's bounded observability signals (spec §16). Nil-safe:
@@ -104,7 +115,7 @@ type ReconcileReport struct {
 func (p *Provider) Run(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		release, check, ok, err := p.applier.TryBecomeLeader(ctx, p.leaderKey)
+		session, ok, err := p.applier.TryBecomeLeaderSession(ctx, p.leaderKey)
 		if err != nil {
 			p.logger.Error("file_provider_leader_error", "error", err.Error())
 			if !sleepCtx(ctx, backoff) {
@@ -121,11 +132,9 @@ func (p *Provider) Run(ctx context.Context) {
 		}
 		p.logger.Info("file_provider_leader_acquired")
 		p.setLeader(true)
-		p.leaderLoop(ctx, check)
+		p.leaderLoop(ctx, session)
 		p.setLeader(false)
-		if release != nil {
-			release()
-		}
+		session.Release()
 		p.logger.Info("file_provider_leader_released")
 	}
 }
@@ -133,8 +142,8 @@ func (p *Provider) Run(ctx context.Context) {
 // leaderLoop runs while this process holds leadership: an initial reconcile, then reconciles
 // on a debounced directory change, on the mandatory periodic resync (a lost/coalesced event
 // must not stall progress), and steps down if the advisory lock is lost.
-func (p *Provider) leaderLoop(ctx context.Context, check func(context.Context) (bool, error)) {
-	p.reconcile(ctx)
+func (p *Provider) leaderLoop(ctx context.Context, session LeaderSession) {
+	p.reconcile(ctx, session)
 	lastFP := p.fingerprint()
 
 	resyncT := time.NewTicker(p.resync)
@@ -153,12 +162,12 @@ func (p *Provider) leaderLoop(ctx context.Context, check func(context.Context) (
 		case <-ctx.Done():
 			return
 		case <-checkT.C:
-			if held, err := check(ctx); err != nil || !held {
+			if held, err := session.Check(ctx); err != nil || !held {
 				p.logger.Warn("file_provider_leadership_lost")
 				return
 			}
 		case <-resyncT.C:
-			p.reconcile(ctx) // mandatory resync (§11): the lost-notification recovery path
+			p.reconcile(ctx, session) // mandatory resync (§11): the lost-notification recovery path
 			lastFP = p.fingerprint()
 			dirty = false
 		case <-pollT.C:
@@ -172,7 +181,7 @@ func (p *Provider) leaderLoop(ctx context.Context, check func(context.Context) (
 			}
 			if dirty && !time.Now().Before(debounceUntil) {
 				dirty = false
-				p.reconcile(ctx)
+				p.reconcile(ctx, session)
 				lastFP = p.fingerprint()
 			}
 		}
@@ -182,14 +191,14 @@ func (p *Provider) leaderLoop(ctx context.Context, check func(context.Context) (
 // reconcile performs one full bounded scan → group → apply, honoring last-known-good and the
 // unbound orphan-suspension rule. Best-effort: per-project failures are logged and isolated;
 // a directory read error degrades without touching the committed runtime.
-func (p *Provider) reconcile(ctx context.Context) ReconcileReport {
+func (p *Provider) reconcile(ctx context.Context, session LeaderSession) ReconcileReport {
 	start := time.Now()
-	rep := p.reconcileInner(ctx)
+	rep := p.reconcileInner(ctx, session)
 	p.publishMetrics(ctx, rep, time.Since(start).Seconds())
 	return rep
 }
 
-func (p *Provider) reconcileInner(ctx context.Context) ReconcileReport {
+func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) ReconcileReport {
 	var rep ReconcileReport
 	cands, scanErrs, err := fileprovider.ScanDirectory(p.dir, p.limits)
 	if err != nil {
@@ -222,7 +231,7 @@ func (p *Provider) reconcileInner(ctx context.Context) ReconcileReport {
 			continue
 		}
 		presentKeys[key] = true
-		if _, aerr := p.applier.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace); aerr != nil {
+		if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace); aerr != nil {
 			rep.Rejected++
 			p.logger.Warn("file_provider_apply_failed", "org", dp.Organization, "project", dp.Project, "reason", classify(aerr))
 			continue
@@ -250,7 +259,7 @@ func (p *Provider) reconcileInner(ctx context.Context) ReconcileReport {
 				continue
 			}
 			empty := &fileprovider.DesiredProject{Organization: t.Organization, Project: t.Project, Monitors: map[string]fileprovider.DesiredMonitor{}}
-			if _, aerr := p.applier.ApplyFileManagedBundle(ctx, p.name, empty, "", p.orphanGrace); aerr != nil {
+			if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, empty, "", p.orphanGrace); aerr != nil {
 				p.logger.Warn("file_provider_orphan_failed", "org", t.Organization, "project", t.Project, "reason", classify(aerr))
 				continue
 			}
@@ -370,4 +379,27 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// storeApplier adapts *store.Store to the Applier interface. It is needed because
+// *store.Store.TryBecomeLeaderSession returns the concrete *store.LeaderSession, which Go
+// will not treat as satisfying an interface method that returns the LeaderSession interface
+// (no return-type covariance); the adapter performs the widening.
+type storeApplier struct{ st *store.Store }
+
+// NewStoreApplier wraps a *store.Store as the reconcile-loop Applier.
+func NewStoreApplier(st *store.Store) Applier { return storeApplier{st: st} }
+
+func (a storeApplier) TryBecomeLeaderSession(ctx context.Context, key int64) (LeaderSession, bool, error) {
+	ls, ok, err := a.st.TryBecomeLeaderSession(ctx, key)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return ls, true, nil
+}
+func (a storeApplier) FileProviderProjects(ctx context.Context, providerID string) ([]store.TenantRef, error) {
+	return a.st.FileProviderProjects(ctx, providerID)
+}
+func (a storeApplier) FileProviderCounts(ctx context.Context, providerID string) (int, int, error) {
+	return a.st.FileProviderCounts(ctx, providerID)
 }

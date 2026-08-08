@@ -31,29 +31,29 @@ func TestProviderLeadershipFailover(t *testing.T) {
 	key := leaderKeyFor("failover-probe")
 
 	// Candidate A wins.
-	relA, _, okA, err := st.TryBecomeLeader(ctx, key)
+	sA, okA, err := st.TryBecomeLeaderSession(ctx, key)
 	if err != nil || !okA {
 		t.Fatalf("candidate A must acquire: ok=%v err=%v", okA, err)
 	}
 	// Candidate B is excluded while A holds.
-	relB, _, okB, err := st.TryBecomeLeader(ctx, key)
+	sB, okB, err := st.TryBecomeLeaderSession(ctx, key)
 	if err != nil {
 		t.Fatalf("candidate B error: %v", err)
 	}
 	if okB {
-		if relB != nil {
-			relB()
+		if sB != nil {
+			sB.Release()
 		}
 		t.Fatal("two providers held leadership simultaneously (split brain)")
 	}
 	// A releases → a candidate can fail over and acquire.
-	relA()
+	sA.Release()
 	acquired := false
 	for i := 0; i < 50; i++ {
-		rel, _, ok, _ := st.TryBecomeLeader(ctx, key)
+		s2, ok, _ := st.TryBecomeLeaderSession(ctx, key)
 		if ok {
 			acquired = true
-			rel()
+			s2.Release()
 			break
 		}
 		time.Sleep(20 * time.Millisecond)

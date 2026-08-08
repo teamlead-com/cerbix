@@ -842,7 +842,7 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		if !info.IsDir() {
 			return fmt.Errorf("file provider %q: %q is not a directory", name, pc.Directory)
 		}
-		p := fpruntime.New(name, pc, st, logger).WithMetrics(registry)
+		p := fpruntime.New(name, pc, fpruntime.NewStoreApplier(st), logger).WithMetrics(registry)
 		spawn(func() { p.Run(ctx) })
 		logger.Info("file_provider_started", "provider", name, "directory", pc.Directory)
 	}

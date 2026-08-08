@@ -4454,7 +4454,10 @@ export interface paths {
          */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description Optional: restrict both bundles and runtime status to one named provider (§15). */
+                    provider?: string;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;

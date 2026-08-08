@@ -76,12 +76,33 @@ function toggleTag(t: string) {
   else s.add(t);
   activeTags.value = s;
 }
-// Source filter (FR-017): All / UI-managed / file-managed.
-const sourceFilter = ref<"all" | "ui" | "file">("all");
-const hasFileManaged = computed(() => monitors.value.some((m) => m.management?.source === "file"));
+// Source filter (FR-017 §15): All / UI-managed / one entry per NAMED file provider.
+// Value is "all" | "ui" | "file:<provider>" so multiple providers are individually selectable.
+const sourceFilter = ref<string>("all");
+const fileProviders = computed(() =>
+  Array.from(
+    new Set(
+      monitors.value
+        .filter((m) => m.management?.source === "file" && m.management?.provider)
+        .map((m) => m.management!.provider as string),
+    ),
+  ).sort(),
+);
+const hasFileManaged = computed(() => fileProviders.value.length > 0);
+const sourceOptions = computed<{ value: string; label: string }[]>(() => [
+  { value: "all", label: "All" },
+  { value: "ui", label: "UI" },
+  ...fileProviders.value.map((p) => ({ value: "file:" + p, label: p })),
+]);
 const shown = computed(() => {
   return monitors.value.filter((m) => {
-    if (sourceFilter.value !== "all" && (m.management?.source ?? "ui") !== sourceFilter.value) return false;
+    const src = sourceFilter.value;
+    if (src === "ui") {
+      if ((m.management?.source ?? "ui") !== "ui") return false;
+    } else if (src.startsWith("file:")) {
+      const prov = src.slice(5);
+      if (m.management?.source !== "file" || m.management?.provider !== prov) return false;
+    }
     if (activeTags.value.size) {
       const tags = m.tags ?? [];
       for (const t of activeTags.value) if (!tags.includes(t)) return false;
@@ -122,13 +143,13 @@ watch(() => ws.projectId, load);
       <div v-if="!error && hasFileManaged" class="mb-3 flex items-center gap-[6px]">
         <span class="mr-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">Source</span>
         <button
-          v-for="opt in (['all', 'ui', 'file'] as const)"
-          :key="opt"
+          v-for="opt in sourceOptions"
+          :key="opt.value"
           type="button"
-          class="rounded-full border px-[10px] py-[3px] text-[11.5px] capitalize transition-colors"
-          :class="sourceFilter === opt ? 'border-accent bg-accent-weak text-accent' : 'border-border text-ink-2 hover:border-border-strong hover:text-ink'"
-          @click="sourceFilter = opt"
-        >{{ opt === "ui" ? "UI" : opt }}</button>
+          class="rounded-full border px-[10px] py-[3px] text-[11.5px] transition-colors"
+          :class="sourceFilter === opt.value ? 'border-accent bg-accent-weak text-accent' : 'border-border text-ink-2 hover:border-border-strong hover:text-ink'"
+          @click="sourceFilter = opt.value"
+        >{{ opt.label }}</button>
       </div>
 
       <!-- tag filter -->

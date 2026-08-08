@@ -39,9 +39,29 @@ func (h *Handler) listFileProvidersAdmin(w http.ResponseWriter, r *http.Request)
 		h.serverError(w, "file_provider_diagnostics", err)
 		return
 	}
+	// Optional ?provider= filter (§15 named-provider selection on the operator side).
+	if name := r.URL.Query().Get("provider"); name != "" {
+		filtered := diags[:0:0]
+		for _, d := range diags {
+			if d.Provider == name {
+				filtered = append(filtered, d)
+			}
+		}
+		diags = filtered
+	}
 	body := map[string]any{"bundles": diags}
 	if h.fpStatus != nil {
-		body["providers"] = h.fpStatus.FileProviderRuntimeStatuses()
+		runtime := h.fpStatus.FileProviderRuntimeStatuses()
+		if name := r.URL.Query().Get("provider"); name != "" {
+			out := runtime[:0:0]
+			for _, s := range runtime {
+				if s.Provider == name {
+					out = append(out, s)
+				}
+			}
+			runtime = out
+		}
+		body["providers"] = runtime
 	}
 	writeJSON(w, http.StatusOK, body)
 }

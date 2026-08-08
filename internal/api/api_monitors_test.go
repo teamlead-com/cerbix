@@ -143,6 +143,25 @@ func TestFileProviderDiagnostics(t *testing.T) {
 	if all.Providers == nil {
 		t.Fatal("global admin diagnostics must include the runtime providers list")
 	}
+	// Named-provider filter (§15): ?provider= narrows bundles AND runtime status.
+	recF := do(h, globalAdmin, http.MethodGet, "/api/v1/admin/file-providers?provider=platform", "")
+	var filtered struct {
+		Bundles   []store.FileProviderDiagnostic  `json:"bundles"`
+		Providers []api.FileProviderRuntimeStatus `json:"providers"`
+	}
+	_ = json.Unmarshal(recF.Body.Bytes(), &filtered)
+	if len(filtered.Bundles) != 2 || len(filtered.Providers) != 1 {
+		t.Fatalf("provider=platform should keep all platform rows, got %d bundles / %d providers", len(filtered.Bundles), len(filtered.Providers))
+	}
+	recNone := do(h, globalAdmin, http.MethodGet, "/api/v1/admin/file-providers?provider=nope", "")
+	var none struct {
+		Bundles   []store.FileProviderDiagnostic  `json:"bundles"`
+		Providers []api.FileProviderRuntimeStatus `json:"providers"`
+	}
+	_ = json.Unmarshal(recNone.Body.Bytes(), &none)
+	if len(none.Bundles) != 0 || len(none.Providers) != 0 {
+		t.Fatalf("provider=nope should match nothing, got %d bundles / %d providers", len(none.Bundles), len(none.Providers))
+	}
 	// Non-admin: 403.
 	if rec := do(h, o1Viewer, http.MethodGet, "/api/v1/admin/file-providers", ""); rec.Code == http.StatusOK {
 		t.Fatalf("non-admin got %d, want non-200", rec.Code)

@@ -1803,6 +1803,12 @@ paths:
         process's live runtime view of every configured provider (`providers`): leadership,
         last scan/success, and counts — including configured-but-idle providers. Requires a
         global admin.
+      parameters:
+        - in: query
+          name: provider
+          required: false
+          schema: { type: string }
+          description: 'Optional: restrict both bundles and runtime status to one named provider (§15).'
       responses:
         '200':
           description: OK

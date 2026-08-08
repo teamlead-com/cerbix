@@ -194,10 +194,10 @@ type Handler struct {
 	settings          *settings.Service
 	liveRegions       LiveRegionSource
 	tester            RegionTester
-	agentToken        string            // optional catch-all agent token (authorizes any region)
-	agentRegionTokens map[string]string // per-region agent tokens (region → token)
-	agentDBTokens     bool              // also resolve agent tokens from the database
-	pullWaiter        PullWaiter        // long-poll wake source (LISTEN/NOTIFY); nil = no long-poll
+	agentToken        string                   // optional catch-all agent token (authorizes any region)
+	agentRegionTokens map[string]string        // per-region agent tokens (region → token)
+	agentDBTokens     bool                     // also resolve agent tokens from the database
+	pullWaiter        PullWaiter               // long-poll wake source (LISTEN/NOTIFY); nil = no long-poll
 	fpStatus          FileProviderStatusSource // process-local file-provider runtime status; nil = none
 }
 

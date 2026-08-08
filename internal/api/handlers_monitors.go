@@ -487,11 +487,32 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := h.store.UpdateMonitor(r.Context(), mon)
 	if err != nil {
+		if h.rejectIfManaged(w, r, mon.ID, err) {
+			return
+		}
 		h.serverError(w, "update_monitor", err)
 		return
 	}
 	h.logEvent(r, "monitor_updated", "monitor_id", updated.ID, "name", updated.Name, "enabled", updated.Enabled, "project_id", updated.ProjectID)
 	writeJSON(w, http.StatusOK, updated.Redacted())
+}
+
+// rejectIfManaged maps store.ErrManagedByFile to 409 with tenant-safe provenance (spec §8):
+// a file-managed monitor's declarative fields are read-only through normal CRUD. Returns
+// true when it handled the error.
+func (h *Handler) rejectIfManaged(w http.ResponseWriter, r *http.Request, monitorID string, err error) bool {
+	if !errors.Is(err, store.ErrManagedByFile) {
+		return false
+	}
+	body := map[string]any{"error": "managed_by_file"}
+	if fm, ok, perr := h.store.MonitorProvenance(r.Context(), monitorID); perr == nil && ok {
+		body["management"] = map[string]any{
+			"source": "file", "provider": fm.Provider, "uid": fm.UID,
+			"path": fm.SourcePath, "read_only": true,
+		}
+	}
+	writeJSON(w, http.StatusConflict, body)
+	return true
 }
 
 func (h *Handler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
@@ -500,6 +521,9 @@ func (h *Handler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.DeleteMonitor(r.Context(), mon.ID); err != nil {
+		if h.rejectIfManaged(w, r, mon.ID, err) {
+			return
+		}
 		h.serverError(w, "delete_monitor", err)
 		return
 	}

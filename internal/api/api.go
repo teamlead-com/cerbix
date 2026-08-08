@@ -48,6 +48,7 @@ type Store interface {
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, time.Time, error)
 	DeleteMonitor(ctx context.Context, id string) error
+	MonitorProvenance(ctx context.Context, monitorID string) (store.FileManagement, bool, error)
 	ReplaceMonitorDependencies(ctx context.Context, monitorID, projectID string, parents []string) error
 	ListRecentHeartbeats(ctx context.Context, monitorID string, limit int) ([]domain.Heartbeat, error)
 	PasswordHashByID(ctx context.Context, id string) (string, error)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 func TestUpdateMonitorAuthzAndPartial(t *testing.T) {
@@ -38,5 +39,40 @@ func TestUpdateMonitorAuthzAndPartial(t *testing.T) {
 	// Unknown monitor → 404.
 	if rec := do(h, o1Admin, http.MethodPatch, "/api/v1/monitors/nope", `{"name":"x"}`); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown monitor = %d, want 404", rec.Code)
+	}
+}
+
+// TestFileManagedMonitorReadOnly proves the ownership contract at the transport boundary
+// (spec §8): a file-managed monitor rejects declarative CRUD with 409 + tenant-safe
+// provenance, while unmanaged monitors stay editable.
+func TestFileManagedMonitorReadOnly(t *testing.T) {
+	fs := seededStore()
+	fs.managed = map[string]store.FileManagement{
+		"mon1": {Provider: "platform", UID: "api", SourcePath: "acme-payments.yaml"},
+	}
+	h := newHandler(fs)
+
+	rec := do(h, o1Admin, http.MethodPatch, "/api/v1/monitors/mon1", `{"name":"x"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("patch file-managed = %d, want 409", rec.Code)
+	}
+	var body struct {
+		Error      string `json:"error"`
+		Management struct {
+			Source, Provider, UID, Path string
+			ReadOnly                    bool `json:"read_only"`
+		} `json:"management"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.Error != "managed_by_file" || body.Management.Provider != "platform" || body.Management.UID != "api" || !body.Management.ReadOnly {
+		t.Fatalf("409 body = %s", rec.Body.String())
+	}
+	if rec := do(h, o1Admin, http.MethodDelete, "/api/v1/monitors/mon1", ""); rec.Code != http.StatusConflict {
+		t.Fatalf("delete file-managed = %d, want 409", rec.Code)
+	}
+	// The SAME monitor, when NOT file-managed, stays editable (coexistence, not a global lock).
+	unmanaged := newHandler(seededStore())
+	if rec := do(unmanaged, o1Admin, http.MethodPatch, "/api/v1/monitors/mon1", `{"name":"y"}`); rec.Code != http.StatusOK {
+		t.Fatalf("patch unmanaged = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
 }

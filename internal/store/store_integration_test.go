@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1639,5 +1640,57 @@ func TestSearchScopeBeforeLimit(t *testing.T) {
 	}
 	if len(admin) == 0 {
 		t.Fatal("admin search returned nothing")
+	}
+}
+
+func TestFileManagedOwnershipGuard(t *testing.T) {
+	st, ctx := testStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "payments", "Payments")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
+		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true, Region: "core",
+	})
+	if err != nil {
+		t.Fatalf("create monitor: %v", err)
+	}
+
+	// Unmanaged: normal CRUD works, provenance absent.
+	if _, ok, _ := st.MonitorProvenance(ctx, mon.ID); ok {
+		t.Fatal("fresh monitor must have no provenance")
+	}
+	mon.Name = "api-renamed"
+	if _, err := st.UpdateMonitor(ctx, mon); err != nil {
+		t.Fatalf("update unmanaged: %v", err)
+	}
+
+	// Claim ownership via a managed_monitors row (the apply path, iter-0089, will write this).
+	conn, err := pgx.Connect(ctx, os.Getenv("CERBIX_TEST_DATABASE_DSN"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx,
+		`INSERT INTO managed_monitors (monitor_id, provider_id, org_id, project_id, source_uid, source_path)
+		 VALUES ($1, 'platform', $2, $3, 'api', 'acme-payments.yaml')`,
+		mon.ID, org.ID, proj.ID); err != nil {
+		t.Fatalf("seed ownership: %v", err)
+	}
+
+	// Now user-managed writes are rejected atomically.
+	if _, err := st.UpdateMonitor(ctx, mon); !errors.Is(err, store.ErrManagedByFile) {
+		t.Fatalf("update file-managed = %v, want ErrManagedByFile", err)
+	}
+	if err := st.DeleteMonitor(ctx, mon.ID); !errors.Is(err, store.ErrManagedByFile) {
+		t.Fatalf("delete file-managed = %v, want ErrManagedByFile", err)
+	}
+	fm, ok, err := st.MonitorProvenance(ctx, mon.ID)
+	if err != nil || !ok || fm.Provider != "platform" || fm.UID != "api" || fm.SourcePath != "acme-payments.yaml" {
+		t.Fatalf("provenance = %+v ok=%v err=%v", fm, ok, err)
+	}
+
+	// The composite FK proves tenant integrity: the monitor still lives in its project.
+	if got, _ := st.GetMonitor(ctx, mon.ID); got.ProjectID != proj.ID {
+		t.Fatalf("monitor project drift: %s", got.ProjectID)
 	}
 }

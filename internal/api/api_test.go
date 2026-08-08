@@ -36,6 +36,7 @@ type fakeStore struct {
 	userOrgs           map[string][]domain.Organization
 	members            map[string][]domain.Membership
 	monitors           map[string]domain.Monitor
+	managed            map[string]store.FileManagement // monitor id → file provenance (ownership)
 	passwords          map[string]string
 	sessionsDeletedFor []string
 	slaTargets         map[string]domain.SLATarget
@@ -343,6 +344,9 @@ func (f *fakeStore) UpdateMonitor(_ context.Context, m domain.Monitor) (domain.M
 	if _, ok := f.monitors[m.ID]; !ok {
 		return domain.Monitor{}, store.ErrNotFound
 	}
+	if _, managed := f.managed[m.ID]; managed {
+		return domain.Monitor{}, store.ErrManagedByFile
+	}
 	f.monitors[m.ID] = m
 	return m, nil
 }
@@ -350,8 +354,15 @@ func (f *fakeStore) DeleteMonitor(_ context.Context, id string) error {
 	if _, ok := f.monitors[id]; !ok {
 		return store.ErrNotFound
 	}
+	if _, managed := f.managed[id]; managed {
+		return store.ErrManagedByFile
+	}
 	delete(f.monitors, id)
 	return nil
+}
+func (f *fakeStore) MonitorProvenance(_ context.Context, id string) (store.FileManagement, bool, error) {
+	fm, ok := f.managed[id]
+	return fm, ok, nil
 }
 func (f *fakeStore) ReplaceMonitorDependencies(_ context.Context, monitorID, projectID string, parents []string) error {
 	for _, p := range parents {

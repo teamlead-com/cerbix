@@ -564,7 +564,7 @@ func runServe(args []string) int {
 
 	// Monitoring as Code file providers (FR-017): owned only by api/all (spec §12). Startup
 	// is fail-fast — a configured provider needs a DB and a readable directory here.
-	if err := startFileProviders(ctx, cfg, *role, st, logger, spawn); err != nil {
+	if err := startFileProviders(ctx, cfg, *role, st, registry, logger, spawn); err != nil {
 		logging.Critical(logger, "file_provider_startup_failed", "error", err.Error())
 		return 1
 	}
@@ -818,7 +818,7 @@ func (f incidentFanout) Deliver(ctx context.Context, ev domain.IncidentEvent) er
 // config but never watch the directory). Fail-fast per §4.1: a configured provider requires
 // a database, and its directory must exist and be readable at startup. Each provider runs
 // its own leader-elected reconcile loop under the shutdown WaitGroup via spawn.
-func startFileProviders(ctx context.Context, cfg *config.Config, role string, st *store.Store, logger *slog.Logger, spawn func(func())) error {
+func startFileProviders(ctx context.Context, cfg *config.Config, role string, st *store.Store, registry *metrics.Registry, logger *slog.Logger, spawn func(func())) error {
 	if len(cfg.Providers.File) == 0 {
 		return nil
 	}
@@ -842,7 +842,7 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		if !info.IsDir() {
 			return fmt.Errorf("file provider %q: %q is not a directory", name, pc.Directory)
 		}
-		p := fpruntime.New(name, pc, st, logger)
+		p := fpruntime.New(name, pc, st, logger).WithMetrics(registry)
 		spawn(func() { p.Run(ctx) })
 		logger.Info("file_provider_started", "provider", name, "directory", pc.Directory)
 	}

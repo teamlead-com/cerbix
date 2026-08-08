@@ -396,3 +396,19 @@ func TestProvidersFileRejections(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderOrphanGraceZeroIsImmediate(t *testing.T) {
+	// Explicit 0 means immediate disable (spec §4.1), NOT the 30s default.
+	cfg, err := Parse([]byte("providers:\n  file:\n    p:\n      directory: /x\n      orphan_grace_period: 0s\n      scope: {type: instance}\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if g := cfg.Providers.File["p"].OrphanGraceOrDefault(); g != 0 {
+		t.Fatalf("explicit 0 orphan_grace = %s, want 0 (immediate)", g)
+	}
+	// Absent → contract default 30s.
+	cfg, _ = Parse([]byte("providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: instance}\n"))
+	if g := cfg.Providers.File["p"].OrphanGraceOrDefault(); g != 30*time.Second {
+		t.Fatalf("absent orphan_grace = %s, want 30s default", g)
+	}
+}

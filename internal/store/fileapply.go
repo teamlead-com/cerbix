@@ -273,6 +273,18 @@ func (s *Store) FileProviderProjects(ctx context.Context, providerID string) ([]
 	return out, rows.Err()
 }
 
+// FileProviderCounts returns a provider's managed and orphaned monitor counts across all its
+// tenants — the `managed_monitors`/`orphaned_monitors` gauges (spec §16).
+func (s *Store) FileProviderCounts(ctx context.Context, providerID string) (managed, orphaned int, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT count(*), count(*) FILTER (WHERE orphaned_at IS NOT NULL)
+		   FROM managed_monitors WHERE provider_id = $1`, providerID).Scan(&managed, &orphaned)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: file provider counts: %w", err)
+	}
+	return managed, orphaned, nil
+}
+
 // readManagedSet reads the provider's owned monitors for one tenant into fileprovider
 // current-state values (plus id/orphan/enabled lookups the apply needs), inside the tx.
 func (s *Store) readManagedSet(ctx context.Context, tx pgx.Tx, providerID, orgID, projID string) (

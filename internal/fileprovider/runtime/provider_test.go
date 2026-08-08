@@ -32,16 +32,21 @@ func (f *fakeApplier) ApplyFileManagedBundle(_ context.Context, _ string, dp *fi
 func (f *fakeApplier) FileProviderProjects(_ context.Context, _ string) ([]store.TenantRef, error) {
 	return f.owned, nil
 }
+func (f *fakeApplier) FileProviderCounts(_ context.Context, _ string) (int, int, error) {
+	return 0, 0, nil
+}
 func (f *fakeApplier) TryBecomeLeader(context.Context, int64) (func(), func(context.Context) (bool, error), bool, error) {
 	return func() {}, func(context.Context) (bool, error) { return true, nil }, true, nil
 }
 
 func testProvider(dir string, applier Applier) *Provider {
+	resync := config.Duration(30 * time.Second)
+	grace := config.Duration(0)
 	cfg := config.FileProviderConfig{
 		Directory:         dir,
 		Debounce:          config.Duration(100 * time.Millisecond),
-		ResyncInterval:    config.Duration(30 * time.Second),
-		OrphanGracePeriod: config.Duration(0),
+		ResyncInterval:    &resync,
+		OrphanGracePeriod: &grace,
 		Scope:             config.ProviderScopeConfig{Type: config.ProviderScopeInstance},
 		Limits:            config.ProviderLimits{MaxFiles: 1000, MaxFileBytes: 1 << 20, MaxTotalBytes: 16 << 20, MaxMonitorsPerBundle: 1000, MaxManagedMonitors: 5000},
 	}

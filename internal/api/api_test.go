@@ -364,6 +364,15 @@ func (f *fakeStore) MonitorProvenance(_ context.Context, id string) (store.FileM
 	fm, ok := f.managed[id]
 	return fm, ok, nil
 }
+func (f *fakeStore) MonitorProvenanceBatch(_ context.Context, ids []string) (map[string]store.FileManagement, error) {
+	out := map[string]store.FileManagement{}
+	for _, id := range ids {
+		if fm, ok := f.managed[id]; ok {
+			out[id] = fm
+		}
+	}
+	return out, nil
+}
 func (f *fakeStore) ReplaceMonitorDependencies(_ context.Context, monitorID, projectID string, parents []string) error {
 	for _, p := range parents {
 		parent, ok := f.monitors[p]

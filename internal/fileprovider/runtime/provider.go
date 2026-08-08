@@ -24,7 +24,16 @@ import (
 type Applier interface {
 	ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (store.ApplyResult, error)
 	FileProviderProjects(ctx context.Context, providerID string) ([]store.TenantRef, error)
+	FileProviderCounts(ctx context.Context, providerID string) (managed, orphaned int, err error)
 	TryBecomeLeader(ctx context.Context, key int64) (release func(), check func(context.Context) (bool, error), ok bool, err error)
+}
+
+// MetricsSink receives the provider's bounded observability signals (spec §16). Nil-safe:
+// a Provider without a sink simply emits none. Implemented by *metrics.Registry.
+type MetricsSink interface {
+	SetFileProviderLeader(name string, leader bool)
+	RecordFileProviderReconcile(name, outcome string)
+	SetFileProviderStatus(name string, durationSeconds float64, lastSuccessUnix int64, managed, orphaned, bundleErrors int)
 }
 
 // fileProviderLeaderBaseKey namespaces per-provider advisory locks away from the scheduler
@@ -51,9 +60,16 @@ type Provider struct {
 	leaderKey   int64
 	applier     Applier
 	logger      *slog.Logger
+	metrics     MetricsSink
 
 	leaderCheckEvery time.Duration
 	pollEvery        time.Duration
+}
+
+// WithMetrics attaches an observability sink (nil-safe).
+func (p *Provider) WithMetrics(m MetricsSink) *Provider {
+	p.metrics = m
+	return p
 }
 
 // New builds a Provider from its static config (already validated/defaulted by config.Load).
@@ -64,8 +80,8 @@ func New(name string, cfg config.FileProviderConfig, applier Applier, logger *sl
 		scope:            cfg.Scope,
 		limits:           cfg.Limits,
 		debounce:         cfg.Debounce.Std(),
-		resync:           cfg.ResyncInterval.Std(),
-		orphanGrace:      cfg.OrphanGracePeriod.Std(),
+		resync:           cfg.ResyncOrDefault(),
+		orphanGrace:      cfg.OrphanGraceOrDefault(),
 		leaderKey:        leaderKeyFor(name),
 		applier:          applier,
 		logger:           logger.With("provider", name),
@@ -104,7 +120,9 @@ func (p *Provider) Run(ctx context.Context) {
 			continue
 		}
 		p.logger.Info("file_provider_leader_acquired")
+		p.setLeader(true)
 		p.leaderLoop(ctx, check)
+		p.setLeader(false)
 		if release != nil {
 			release()
 		}
@@ -165,6 +183,13 @@ func (p *Provider) leaderLoop(ctx context.Context, check func(context.Context) (
 // unbound orphan-suspension rule. Best-effort: per-project failures are logged and isolated;
 // a directory read error degrades without touching the committed runtime.
 func (p *Provider) reconcile(ctx context.Context) ReconcileReport {
+	start := time.Now()
+	rep := p.reconcileInner(ctx)
+	p.publishMetrics(ctx, rep, time.Since(start).Seconds())
+	return rep
+}
+
+func (p *Provider) reconcileInner(ctx context.Context) ReconcileReport {
 	var rep ReconcileReport
 	cands, scanErrs, err := fileprovider.ScanDirectory(p.dir, p.limits)
 	if err != nil {
@@ -220,6 +245,40 @@ func (p *Provider) reconcile(ctx context.Context) ReconcileReport {
 		}
 	}
 	return rep
+}
+
+func (p *Provider) setLeader(leader bool) {
+	if p.metrics != nil {
+		p.metrics.SetFileProviderLeader(p.name, leader)
+	}
+}
+
+// publishMetrics records the bounded reconcile outcome, duration, and status gauges.
+func (p *Provider) publishMetrics(ctx context.Context, rep ReconcileReport, dur float64) {
+	if p.metrics == nil {
+		return
+	}
+	outcome := "noop"
+	switch {
+	case rep.Degraded:
+		outcome = "error"
+	case rep.Applied > 0 || rep.Orphaned > 0:
+		outcome = "applied"
+	case rep.Rejected > 0:
+		outcome = "rejected"
+	}
+	p.metrics.RecordFileProviderReconcile(p.name, outcome)
+	var success int64
+	if !rep.Degraded {
+		success = time.Now().Unix()
+	}
+	managed, orphaned := 0, 0
+	if !rep.Degraded {
+		if m, o, err := p.applier.FileProviderCounts(ctx, p.name); err == nil {
+			managed, orphaned = m, o
+		}
+	}
+	p.metrics.SetFileProviderStatus(p.name, dur, success, managed, orphaned, rep.Rejected)
 }
 
 // fingerprint is a cheap directory signature (eligible file names + sizes + mtimes) used to

@@ -159,3 +159,36 @@ func TestResultOutcomeMetrics(t *testing.T) {
 		t.Fatalf("empty registry should not emit result_* series:\n%s", empty.String())
 	}
 }
+
+func TestFileProviderMetrics(t *testing.T) {
+	r := New(buildinfo.Info{Version: "test"}, "all")
+	r.SetFileProviderLeader("platform", true)
+	r.RecordFileProviderReconcile("platform", "applied")
+	r.RecordFileProviderReconcile("platform", "applied")
+	r.RecordFileProviderReconcile("platform", "noop")
+	r.SetFileProviderStatus("platform", 0.125, 1700000000, 7, 2, 1)
+
+	var b strings.Builder
+	r.WritePrometheus(&b)
+	out := b.String()
+	for _, want := range []string{
+		`cerbix_file_provider_leader{provider="platform"} 1`,
+		`cerbix_file_provider_reconcile_total{provider="platform",outcome="applied"} 2`,
+		`cerbix_file_provider_reconcile_total{provider="platform",outcome="noop"} 1`,
+		`cerbix_file_provider_reconcile_duration_seconds{provider="platform"} 0.125`,
+		`cerbix_file_provider_last_success_timestamp_seconds{provider="platform"} 1700000000`,
+		`cerbix_file_provider_managed_monitors{provider="platform"} 7`,
+		`cerbix_file_provider_orphaned_monitors{provider="platform"} 2`,
+		`cerbix_file_provider_bundle_errors{provider="platform"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("metrics missing %q\n%s", want, out)
+		}
+	}
+	// No provider configured → no file-provider series at all.
+	var empty strings.Builder
+	New(buildinfo.Info{}, "all").WritePrometheus(&empty)
+	if strings.Contains(empty.String(), "cerbix_file_provider_") {
+		t.Fatal("file-provider metrics must be absent when no provider is configured")
+	}
+}

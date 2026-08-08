@@ -74,13 +74,51 @@ func (h *Handler) listMonitors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	canWrite := h.principalCan(r, authz.ActionProjectWrite, proj.OrgID, proj.ID)
+	ids := make([]string, len(monitors))
 	for i := range monitors {
-		monitors[i] = monitors[i].Redacted() // never return secret config to the client
-		if !canWrite {
-			monitors[i] = monitors[i].WithoutPushToken() // viewers must not get the push bearer token
-		}
+		ids[i] = monitors[i].ID
 	}
-	writeJSON(w, http.StatusOK, monitors)
+	prov, perr := h.store.MonitorProvenanceBatch(r.Context(), ids)
+	if perr != nil {
+		h.serverError(w, "list_monitors_provenance", perr)
+		return
+	}
+	out := make([]monitorWithMgmt, len(monitors))
+	for i := range monitors {
+		m := monitors[i].Redacted() // never return secret config to the client
+		if !canWrite {
+			m = m.WithoutPushToken() // viewers must not get the push bearer token
+		}
+		fm, ok := prov[monitors[i].ID]
+		out[i] = monitorWithMgmt{Monitor: m, Management: mgmtFor(fm, ok)}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// managementDTO is the read-only source-provenance block on monitor responses (spec §15).
+// Tenant-safe: the path is relative, never an absolute filesystem path.
+type managementDTO struct {
+	Source   string `json:"source"` // "file" | "ui"
+	Provider string `json:"provider,omitempty"`
+	UID      string `json:"uid,omitempty"`
+	Path     string `json:"path,omitempty"`
+	ReadOnly bool   `json:"read_only"`
+}
+
+// monitorWithMgmt is a monitor response carrying its management provenance. domain.Monitor's
+// JSON fields promote to the top level; `management` is added alongside.
+type monitorWithMgmt struct {
+	domain.Monitor
+	Management managementDTO `json:"management"`
+}
+
+// mgmtFor builds the provenance block: a provider row means file-managed/read-only; its
+// absence means an ordinary UI/API monitor.
+func mgmtFor(fm store.FileManagement, ok bool) managementDTO {
+	if !ok {
+		return managementDTO{Source: "ui"}
+	}
+	return managementDTO{Source: "file", Provider: fm.Provider, UID: fm.UID, Path: fm.SourcePath, ReadOnly: true}
 }
 
 type regionView struct {
@@ -374,7 +412,12 @@ func (h *Handler) getMonitor(w http.ResponseWriter, r *http.Request) {
 	if !h.principalCan(r, authz.ActionProjectWrite, proj.OrgID, proj.ID) {
 		out = out.WithoutPushToken()
 	}
-	writeJSON(w, http.StatusOK, out)
+	fm, ok, perr := h.store.MonitorProvenance(r.Context(), mon.ID)
+	if perr != nil {
+		h.serverError(w, "get_monitor_provenance", perr)
+		return
+	}
+	writeJSON(w, http.StatusOK, monitorWithMgmt{Monitor: out, Management: mgmtFor(fm, ok)})
 }
 
 // updateMonitor applies a partial update to a monitor (editor+). Type and

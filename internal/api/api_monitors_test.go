@@ -76,3 +76,41 @@ func TestFileManagedMonitorReadOnly(t *testing.T) {
 		t.Fatalf("patch unmanaged = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
 }
+
+// TestMonitorManagementProvenance covers spec §15: monitor responses carry a tenant-safe
+// `management` block — file-managed monitors report source=file + provider/uid/path +
+// read_only; ordinary monitors report source=ui.
+func TestMonitorManagementProvenance(t *testing.T) {
+	fs := seededStore()
+	fs.managed = map[string]store.FileManagement{
+		"mon1": {Provider: "platform", UID: "api", SourcePath: "acme-payments.yaml"},
+	}
+	h := newHandler(fs)
+
+	rec := do(h, o1Admin, http.MethodGet, "/api/v1/monitors/mon1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get mon1 = %d", rec.Code)
+	}
+	var got struct {
+		ID         string `json:"id"`
+		Management struct {
+			Source, Provider, UID, Path string
+			ReadOnly                    bool `json:"read_only"`
+		} `json:"management"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.ID != "mon1" {
+		t.Fatalf("monitor fields must still promote to top level: %s", rec.Body.String())
+	}
+	if got.Management.Source != "file" || got.Management.Provider != "platform" || got.Management.UID != "api" || got.Management.Path != "acme-payments.yaml" || !got.Management.ReadOnly {
+		t.Fatalf("file provenance block = %+v", got.Management)
+	}
+
+	// An ordinary (unmanaged) monitor reports source=ui.
+	plain := newHandler(seededStore())
+	rec = do(plain, o1Admin, http.MethodGet, "/api/v1/monitors/mon1", "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Management.Source != "ui" || got.Management.ReadOnly {
+		t.Fatalf("unmanaged monitor management = %+v, want source=ui read_only=false", got.Management)
+	}
+}

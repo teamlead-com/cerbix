@@ -21,10 +21,14 @@ type ProvidersConfig struct {
 
 // FileProviderConfig is one named file provider under `providers.file.<name>`.
 type FileProviderConfig struct {
-	Directory         string              `yaml:"directory"`
-	Debounce          Duration            `yaml:"debounce"`
-	ResyncInterval    Duration            `yaml:"resync_interval"`
-	OrphanGracePeriod Duration            `yaml:"orphan_grace_period"`
+	Directory string   `yaml:"directory"`
+	Debounce  Duration `yaml:"debounce"`
+	// ResyncInterval and OrphanGracePeriod are pointers so an ABSENT key (nil → contract
+	// default) is distinguishable from an EXPLICIT zero. Per spec §4.1 an explicit
+	// orphan_grace_period of 0 means "immediate disable after a valid absence" — NOT the
+	// 30s default.
+	ResyncInterval    *Duration           `yaml:"resync_interval"`
+	OrphanGracePeriod *Duration           `yaml:"orphan_grace_period"`
 	Scope             ProviderScopeConfig `yaml:"scope"`
 	Limits            ProviderLimits      `yaml:"limits"`
 }
@@ -79,6 +83,22 @@ const (
 
 var providerNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
 
+// ResyncOrDefault returns the effective resync interval (nil → contract default).
+func (p FileProviderConfig) ResyncOrDefault() time.Duration {
+	if p.ResyncInterval != nil {
+		return p.ResyncInterval.Std()
+	}
+	return defaultProviderResync
+}
+
+// OrphanGraceOrDefault returns the effective orphan grace (nil → default; explicit 0 kept).
+func (p FileProviderConfig) OrphanGraceOrDefault() time.Duration {
+	if p.OrphanGracePeriod != nil {
+		return p.OrphanGracePeriod.Std()
+	}
+	return defaultProviderOrphanGrace
+}
+
 // normalizeProviders fills zero-valued per-provider fields with the contract defaults. Map
 // entries cannot be pre-populated by defaults() (their keys are unknown before decode), so
 // this runs after decode and before Validate.
@@ -87,15 +107,15 @@ func (c *Config) normalizeProviders() {
 		if p.Debounce == 0 {
 			p.Debounce = Duration(defaultProviderDebounce)
 		}
-		if p.ResyncInterval == 0 {
-			p.ResyncInterval = Duration(defaultProviderResync)
+		// Pointer fields: allocate the contract default ONLY when the key was absent (nil). An
+		// explicit value — including 0 for OrphanGracePeriod (immediate disable, §4.1) — is kept.
+		if p.ResyncInterval == nil {
+			d := Duration(defaultProviderResync)
+			p.ResyncInterval = &d
 		}
-		// OrphanGracePeriod default only when the key is absent; 0 is a valid explicit value
-		// (immediate disable after a valid absence). We cannot distinguish absent from 0 on a
-		// scalar, so 0 keeps the default; an operator wanting true-zero sets it explicitly to a
-		// sub-second value is NOT supported — 0 means default, documented in the example.
-		if p.OrphanGracePeriod == 0 {
-			p.OrphanGracePeriod = Duration(defaultProviderOrphanGrace)
+		if p.OrphanGracePeriod == nil {
+			d := Duration(defaultProviderOrphanGrace)
+			p.OrphanGracePeriod = &d
 		}
 		if p.Limits.MaxFiles == 0 {
 			p.Limits.MaxFiles = defaultMaxFiles
@@ -178,10 +198,10 @@ func (p FileProviderConfig) validate(name string) error {
 	if d := p.Debounce.Std(); d < minProviderDebounce || d > maxProviderDebounce {
 		return fmt.Errorf("providers.file.%s: debounce must be in [100ms, 30s], got %s", name, d)
 	}
-	if d := p.ResyncInterval.Std(); d < minProviderResync || d > maxProviderResync {
+	if d := p.ResyncOrDefault(); d < minProviderResync || d > maxProviderResync {
 		return fmt.Errorf("providers.file.%s: resync_interval must be in [5s, 1h], got %s", name, d)
 	}
-	if d := p.OrphanGracePeriod.Std(); d < 0 || d > maxProviderOrphanGrace {
+	if d := p.OrphanGraceOrDefault(); d < 0 || d > maxProviderOrphanGrace {
 		return fmt.Errorf("providers.file.%s: orphan_grace_period must be in [0, 24h], got %s", name, d)
 	}
 	return p.Limits.validate(name)

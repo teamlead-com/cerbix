@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -320,4 +323,71 @@ func TestLastSuccessOnlyOnCleanScan(t *testing.T) {
 	if fm.lastSuccess != 0 {
 		t.Fatalf("a scan with rejections must NOT advance last_success, got %d", fm.lastSuccess)
 	}
+}
+
+// TestLeaderLoopEventStormBounded proves the §17 backpressure invariant: the watch is a SINGLE
+// dirty bit + debounce, not an unbounded event queue. Under a sustained storm of directory
+// changes (hundreds of rewrites, each changing the file's size so every poll observes a change),
+// the number of reconciles stays tiny — bounded by debounce settling, NOT proportional to the
+// number of changes. A naive per-event queue would apply once per change.
+func TestLeaderLoopEventStormBounded(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.yaml", bundle("acme", "payments"))
+	fa := &fakeApplier{}
+	p := testProvider(dir, fa)
+	// Tight watch cadence; resync/leader-check far out so only the poll+debounce path is exercised.
+	p.debounce = 40 * time.Millisecond
+	p.pollEvery = 3 * time.Millisecond
+	p.resync = 30 * time.Second
+	p.leaderCheckEvery = 30 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var done sync.WaitGroup
+	done.Add(1)
+	go func() { defer done.Done(); p.leaderLoop(ctx, fa.sess()) }()
+
+	// Storm: rewrite the same file ~continuously for 300ms, each write a different size so the
+	// fingerprint changes on every poll and the debounce keeps re-arming (never settles).
+	var writes atomic.Int64
+	stormEnd := make(chan struct{})
+	var storm sync.WaitGroup
+	storm.Add(1)
+	go func() {
+		defer storm.Done()
+		i := 0
+		for {
+			select {
+			case <-stormEnd:
+				return
+			default:
+			}
+			i++
+			body := bundle("acme", "payments") + "\n# " + strings.Repeat("x", i%400+1)
+			if err := os.WriteFile(filepath.Join(dir, "a.yaml"), []byte(body), 0o600); err == nil {
+				writes.Add(1)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	close(stormEnd)
+	storm.Wait()
+	// Let the debounce settle and fire at most one coalesced reconcile.
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	done.Wait()
+
+	n := int64(writes.Load())
+	if n < 100 {
+		t.Fatalf("storm too weak to be meaningful: only %d writes", n)
+	}
+	applies := int64(len(fa.sess().calls))
+	// 1 initial reconcile + ~1 post-settle. Anything near the write count means unbounded queuing.
+	if applies > 10 {
+		t.Fatalf("event storm was not coalesced: %d applies for %d writes (want a small constant)", applies, n)
+	}
+	if applies < 1 {
+		t.Fatalf("expected at least the initial reconcile, got %d", applies)
+	}
+	t.Logf("coalesced %d directory changes into %d reconciles", n, applies)
 }

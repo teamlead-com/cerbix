@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/events"
+	fpruntime "github.com/teamlead-com/cerbix/internal/fileprovider/runtime"
 	"github.com/teamlead-com/cerbix/internal/httpsrv"
 	"github.com/teamlead-com/cerbix/internal/ingest"
 	"github.com/teamlead-com/cerbix/internal/logging"
@@ -560,6 +562,13 @@ func runServe(args []string) int {
 		logger.Info("auth_enabled", "oidc_active", authn.OIDCActive(), "local", cfg.Local.Enabled)
 	}
 
+	// Monitoring as Code file providers (FR-017): owned only by api/all (spec §12). Startup
+	// is fail-fast — a configured provider needs a DB and a readable directory here.
+	if err := startFileProviders(ctx, cfg, *role, st, logger, spawn); err != nil {
+		logging.Critical(logger, "file_provider_startup_failed", "error", err.Error())
+		return 1
+	}
+
 	// Checking pipeline. --role=all runs every role in one process over the
 	// in-process dispatcher; distributed roles (api|scheduler|worker) use the
 	// RabbitMQ dispatcher and each run only their part.
@@ -802,4 +811,40 @@ func (f incidentFanout) Deliver(ctx context.Context, ev domain.IncidentEvent) er
 		}
 	}
 	return err
+}
+
+// startFileProviders launches the Monitoring-as-Code file providers for an api/all process
+// (spec §12: only these roles own the component; scheduler/worker/agent parse the same
+// config but never watch the directory). Fail-fast per §4.1: a configured provider requires
+// a database, and its directory must exist and be readable at startup. Each provider runs
+// its own leader-elected reconcile loop under the shutdown WaitGroup via spawn.
+func startFileProviders(ctx context.Context, cfg *config.Config, role string, st *store.Store, logger *slog.Logger, spawn func(func())) error {
+	if len(cfg.Providers.File) == 0 {
+		return nil
+	}
+	if role != "all" && role != "api" {
+		return nil // owned only by api/all; other roles neither watch nor require the directory
+	}
+	if st == nil {
+		return fmt.Errorf("file providers require a database (role %s)", role)
+	}
+	names := make([]string, 0, len(cfg.Providers.File))
+	for name := range cfg.Providers.File {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pc := cfg.Providers.File[name]
+		info, err := os.Stat(pc.Directory)
+		if err != nil {
+			return fmt.Errorf("file provider %q: directory %q not readable at startup: %w", name, pc.Directory, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("file provider %q: %q is not a directory", name, pc.Directory)
+		}
+		p := fpruntime.New(name, pc, st, logger)
+		spawn(func() { p.Run(ctx) })
+		logger.Info("file_provider_started", "provider", name, "directory", pc.Directory)
+	}
+	return nil
 }

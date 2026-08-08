@@ -240,6 +240,39 @@ func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, d
 	return ApplyResult{Organization: desired.Organization, Project: desired.Project, Generation: newGen, Counts: plan.Counts(), Changed: changed}, nil
 }
 
+// TenantRef is an (organization, project) slug pair a provider owns bundles for.
+type TenantRef struct {
+	Organization string
+	Project      string
+}
+
+// FileProviderProjects lists the distinct tenants a provider currently owns a bundle for
+// (by slug). The reconcile loop uses it to detect a whole-project disappearance: an owned
+// project absent from the current valid snapshot is a candidate for orphaning (unless the
+// scan suspended orphaning). Ordered for deterministic processing.
+func (s *Store) FileProviderProjects(ctx context.Context, providerID string) ([]TenantRef, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT o.slug, p.slug
+		   FROM file_provider_bundles b
+		   JOIN organizations o ON o.id = b.org_id
+		   JOIN projects p ON p.id = b.project_id
+		  WHERE b.provider_id = $1
+		  ORDER BY o.slug, p.slug`, providerID)
+	if err != nil {
+		return nil, fmt.Errorf("store: file provider projects: %w", err)
+	}
+	defer rows.Close()
+	var out []TenantRef
+	for rows.Next() {
+		var t TenantRef
+		if err := rows.Scan(&t.Organization, &t.Project); err != nil {
+			return nil, fmt.Errorf("store: scan provider project: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // readManagedSet reads the provider's owned monitors for one tenant into fileprovider
 // current-state values (plus id/orphan/enabled lookups the apply needs), inside the tx.
 func (s *Store) readManagedSet(ctx context.Context, tx pgx.Tx, providerID, orgID, projID string) (

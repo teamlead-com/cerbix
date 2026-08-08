@@ -2661,3 +2661,16 @@ config-hash changed; `dependency_update` (NO revision bump) iff only the depende
 changed. This preserves §7's intent (order/comment-insensitive no-op detection, including
 dependency order) and honors §9.2/D-0142 exactly. `execution_revision` is bumped only by a
 real monitor-config change, never by a dependency-graph edit.
+
+## D-0147 — File-provider watcher is poll-based, not event-driven (iter-0095)
+The Monitoring-as-Code watcher (spec §11) is implemented as a bounded directory POLL
+(a name+size+mtime fingerprint sampled every ~1s) plus debounce and the spec-mandated
+periodic full resync — NOT an inotify/fsnotify event stream. Rationale: the spec already
+requires the periodic resync and states correctness "cannot depend solely on" filesystem
+events (they may be coalesced or lost, and ConfigMap/git-sync replace the directory inode);
+a poll + resync meets the observable contract without adding an fsnotify dependency or its
+platform edge cases. Recorded consequences: a change is detected within one poll interval +
+debounce rather than instantly, and a pure `chmod` (no size/mtime change) is not observed
+until the next resync. If sub-second latency is later required, an fsnotify hint layer can be
+added in front of the same reconcile path without changing the model. This is a deliberate
+architecture decision, not an omission.

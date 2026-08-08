@@ -91,6 +91,16 @@ func ScanDirectory(dir string, limits config.ProviderLimits) ([]Candidate, []Sca
 			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "unreadable file"}})
 			continue
 		}
+		// Re-check against the ACTUAL bytes read: the file can grow between stat and read, so
+		// the pre-read stat size is not authoritative for the byte limits (TOCTOU).
+		if int64(len(data)) > limits.MaxFileBytes {
+			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "file exceeds max_file_bytes"}})
+			continue
+		}
+		if total+int64(len(data)) > limits.MaxTotalBytes {
+			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "provider total bytes exceeds max_total_bytes"}})
+			continue
+		}
 		total += int64(len(data))
 		cands = append(cands, Candidate{Path: full, RelPath: name, Data: data})
 	}
@@ -103,6 +113,11 @@ type GroupResult struct {
 	Valid map[string]*DesiredProject
 	// Paths maps "org/project" → the tenant-safe relative source path (for provenance).
 	Paths map[string]string
+	// Frozen holds tenant keys that resolved to a tenant but were REJECTED (a duplicate-target
+	// project). Such a project keeps its last-known-good and must NOT be orphaned this scan —
+	// it is neither applied (out of Valid) nor treated as absent (spec §6/§9.1). Distinct from
+	// SuspendOrphan, which is provider-wide.
+	Frozen map[string]bool
 	// Errors are bounded per-file rejections (decode/scope/duplicate).
 	Errors []ScanError
 	// SuspendOrphan is set when a file could not be bound to a tenant (unbound_error): a
@@ -118,7 +133,7 @@ type GroupResult struct {
 // (decode/scope failure) is an unbound_error that suspends orphaning provider-wide (§9.1);
 // independently valid bundles still group for a non-destructive apply.
 func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResult {
-	res := GroupResult{Valid: map[string]*DesiredProject{}, Paths: map[string]string{}}
+	res := GroupResult{Valid: map[string]*DesiredProject{}, Paths: map[string]string{}, Frozen: map[string]bool{}}
 	seen := map[string]int{}                // tenant key → candidate count
 	firstPath := map[string]string{}        // tenant key → first path (for dup diagnostics)
 	decoded := map[string]*DesiredProject{} // tenant key → decoded bundle
@@ -149,9 +164,12 @@ func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResu
 		if n == 1 {
 			res.Valid[key] = decoded[key]
 		} else {
-			// Duplicate target: reject BOTH competitors and freeze this project (drop from
-			// Valid, keep it out of orphan processing implicitly — it is never applied).
+			// Duplicate target: reject BOTH competitors and FREEZE this project — drop it from
+			// Valid AND mark it Frozen so the reconcile loop keeps its last-known-good instead
+			// of reading it as absent and orphaning it (spec §6/§9.1). This is a per-project
+			// freeze, not a provider-wide orphan suspension.
 			delete(res.Valid, key)
+			res.Frozen[key] = true
 			res.Errors = append(res.Errors, ScanError{RelPath: firstPath[key], Err: &BundleError{Reason: ReasonDuplicateProject, Msg: "project " + key + " is declared by more than one file"}})
 		}
 	}

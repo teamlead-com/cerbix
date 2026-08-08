@@ -213,6 +213,14 @@ func (p *Provider) reconcileInner(ctx context.Context) ReconcileReport {
 	presentKeys := make(map[string]bool, len(grp.Valid))
 	for _, key := range sortedKeys(grp.Valid) {
 		dp := grp.Valid[key]
+		// Bounded: a bundle over max_monitors_per_bundle is rejected whole (never partially
+		// applied) and FROZEN (present for orphan purposes → keeps its last-known-good).
+		if len(dp.Monitors) > p.limits.MaxMonitorsPerBundle {
+			presentKeys[key] = true
+			rep.Rejected++
+			p.logger.Warn("file_provider_bundle_rejected", "org", dp.Organization, "project", dp.Project, "reason", "max_monitors_per_bundle")
+			continue
+		}
 		presentKeys[key] = true
 		if _, aerr := p.applier.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace); aerr != nil {
 			rep.Rejected++
@@ -223,9 +231,14 @@ func (p *Provider) reconcileInner(ctx context.Context) ReconcileReport {
 	}
 
 	// Whole-project disappearance: an owned project absent from the valid snapshot is orphaned
-	// by applying an empty desired — UNLESS an unbound file suspended orphaning this scan
-	// (a broken/half-written replacement must not read as intentional deletion, §9.1/§10).
-	if !grp.SuspendOrphan {
+	// by applying an empty desired — but ONLY when this scan can be trusted to represent
+	// desired absence. Orphaning is suspended PROVIDER-WIDE when any file could not be bound to
+	// a tenant: a decode/scope failure (grp.SuspendOrphan) OR a scan-level rejection
+	// (over-size, symlink escape, unreadable) — an unbindable rejection must never read as
+	// deletion (§9.1). A duplicate-target project (grp.Frozen) is bindable but rejected, so it
+	// is frozen PER-PROJECT (kept out of orphaning) without suspending the whole provider.
+	suspendOrphan := grp.SuspendOrphan || len(scanErrs) > 0
+	if !suspendOrphan {
 		owned, oerr := p.applier.FileProviderProjects(ctx, p.name)
 		if oerr != nil {
 			p.logger.Warn("file_provider_owned_lookup_failed", "error", oerr.Error())
@@ -233,7 +246,7 @@ func (p *Provider) reconcileInner(ctx context.Context) ReconcileReport {
 		}
 		for _, t := range owned {
 			key := t.Organization + "/" + t.Project
-			if presentKeys[key] {
+			if presentKeys[key] || grp.Frozen[key] {
 				continue
 			}
 			empty := &fileprovider.DesiredProject{Organization: t.Organization, Project: t.Project, Monitors: map[string]fileprovider.DesiredMonitor{}}

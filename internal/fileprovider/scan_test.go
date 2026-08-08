@@ -144,3 +144,27 @@ func keysOf(m map[string]*DesiredProject) []string {
 	}
 	return out
 }
+
+// TestGroupBundlesDuplicateFreezesNotSuspend covers the §9.1 fix: a duplicate-target project
+// is FROZEN (per-project, kept out of orphaning) and does NOT set the provider-wide
+// SuspendOrphan — while an independently valid project still applies.
+func TestGroupBundlesDuplicateFreezesNotSuspend(t *testing.T) {
+	scope := config.ProviderScopeConfig{Type: config.ProviderScopeInstance}
+	res := GroupBundles([]Candidate{
+		{RelPath: "one.yaml", Data: []byte(bundleYAML("acme", "payments", "api"))},
+		{RelPath: "two.yaml", Data: []byte(bundleYAML("acme", "payments", "web"))}, // dup target
+		{RelPath: "ok.yaml", Data: []byte(bundleYAML("acme", "billing", "api"))},
+	}, scope)
+	if _, ok := res.Valid["acme/payments"]; ok {
+		t.Fatal("duplicate project must be out of Valid")
+	}
+	if !res.Frozen["acme/payments"] {
+		t.Fatal("duplicate project must be marked Frozen (kept out of orphaning)")
+	}
+	if res.SuspendOrphan {
+		t.Fatal("a bindable duplicate must NOT suspend orphaning provider-wide")
+	}
+	if _, ok := res.Valid["acme/billing"]; !ok {
+		t.Fatal("the independently valid project must still apply")
+	}
+}

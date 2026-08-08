@@ -186,3 +186,42 @@ func TestFingerprintDetectsChanges(t *testing.T) {
 		t.Fatalf("missing dir fingerprint = %q, want sentinel", fp)
 	}
 }
+
+// TestReconcileDuplicateDoesNotOrphan is the §9.1 regression: a duplicate-target project the
+// provider already owns must be FROZEN (kept alive), never orphaned by the disappearance path.
+func TestReconcileDuplicateDoesNotOrphan(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "one.yaml", bundle("acme", "payments")) // both target acme/payments → duplicate
+	write(t, dir, "two.yaml", bundle("acme", "payments"))
+	fa := &fakeApplier{owned: []store.TenantRef{{Organization: "acme", Project: "payments"}}}
+	rep := testProvider(dir, fa).reconcile(context.Background())
+	if rep.Orphaned != 0 {
+		t.Fatalf("a frozen duplicate project must NOT be orphaned, got %d", rep.Orphaned)
+	}
+	for _, c := range fa.calls {
+		if c.monitors == 0 {
+			t.Fatalf("no empty-orphan apply must touch a frozen project: %+v", c)
+		}
+	}
+}
+
+// TestReconcileScanErrorSuspendsOrphan is the §9.1 regression: a scan-level rejected file
+// (unbindable to a tenant) suspends orphaning provider-wide, so an owned project whose file is
+// (temporarily) absent is NOT orphaned this scan.
+func TestReconcileScanErrorSuspendsOrphan(t *testing.T) {
+	dir := t.TempDir()
+	// A symlink escaping the root is a scan-level rejection (unbindable).
+	outside := t.TempDir()
+	write(t, outside, "x.yaml", bundle("acme", "payments"))
+	if err := os.Symlink(filepath.Join(outside, "x.yaml"), filepath.Join(dir, "link.yaml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	fa := &fakeApplier{owned: []store.TenantRef{{Organization: "acme", Project: "billing"}}}
+	rep := testProvider(dir, fa).reconcile(context.Background())
+	if rep.Rejected == 0 {
+		t.Fatal("scan-level rejection expected")
+	}
+	if rep.Orphaned != 0 {
+		t.Fatalf("a scan-level (unbindable) rejection must suspend orphaning, got %d orphaned", rep.Orphaned)
+	}
+}

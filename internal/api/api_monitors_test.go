@@ -114,3 +114,47 @@ func TestMonitorManagementProvenance(t *testing.T) {
 		t.Fatalf("unmanaged monitor management = %+v, want source=ui read_only=false", got.Management)
 	}
 }
+
+// TestFileProviderDiagnostics covers spec §15: global-admin sees every provider bundle;
+// an org-admin sees only its organization's bundles; a non-admin is refused.
+func TestFileProviderDiagnostics(t *testing.T) {
+	fs := seededStore()
+	fs.diagnostics = []fakeDiag{
+		{orgID: "o1", diag: store.FileProviderDiagnostic{Provider: "platform", Organization: "acme", Project: "payments", SourcePath: "a.yaml", Generation: 3, Status: "applied"}},
+		{orgID: "o2", diag: store.FileProviderDiagnostic{Provider: "platform", Organization: "beta", Project: "web", SourcePath: "b.yaml", Generation: 1, Status: "degraded"}},
+	}
+	h := newHandler(fs)
+
+	// Global admin: all bundles.
+	rec := do(h, globalAdmin, http.MethodGet, "/api/v1/admin/file-providers", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin diagnostics = %d", rec.Code)
+	}
+	var all struct {
+		Providers []store.FileProviderDiagnostic `json:"providers"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &all)
+	if len(all.Providers) != 2 {
+		t.Fatalf("global admin should see all bundles, got %d", len(all.Providers))
+	}
+	// Non-admin: 403.
+	if rec := do(h, o1Viewer, http.MethodGet, "/api/v1/admin/file-providers", ""); rec.Code == http.StatusOK {
+		t.Fatalf("non-admin got %d, want non-200", rec.Code)
+	}
+	// Org admin: only own org (o1).
+	rec = do(h, o1Admin, http.MethodGet, "/api/v1/organizations/o1/file-providers", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("org admin diagnostics = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var org struct {
+		Providers []store.FileProviderDiagnostic `json:"providers"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &org)
+	if len(org.Providers) != 1 || org.Providers[0].Organization != "acme" {
+		t.Fatalf("org admin should see only own-org bundles, got %+v", org.Providers)
+	}
+	// Foreign org → not found / forbidden (never another tenant's data).
+	if rec := do(h, o1Admin, http.MethodGet, "/api/v1/organizations/o2/file-providers", ""); rec.Code == http.StatusOK {
+		t.Fatalf("org admin must not read another org's diagnostics, got %d", rec.Code)
+	}
+}

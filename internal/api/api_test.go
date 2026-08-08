@@ -37,6 +37,7 @@ type fakeStore struct {
 	members            map[string][]domain.Membership
 	monitors           map[string]domain.Monitor
 	managed            map[string]store.FileManagement // monitor id → file provenance (ownership)
+	diagnostics        []fakeDiag                      // file-provider bundle diagnostics
 	passwords          map[string]string
 	sessionsDeletedFor []string
 	slaTargets         map[string]domain.SLATarget
@@ -363,6 +364,22 @@ func (f *fakeStore) DeleteMonitor(_ context.Context, id string) error {
 func (f *fakeStore) MonitorProvenance(_ context.Context, id string) (store.FileManagement, bool, error) {
 	fm, ok := f.managed[id]
 	return fm, ok, nil
+}
+
+// fakeDiag pairs a diagnostic with its org id for the org-scoped filter.
+type fakeDiag struct {
+	orgID string
+	diag  store.FileProviderDiagnostic
+}
+
+func (f *fakeStore) FileProviderDiagnostics(_ context.Context, orgID string) ([]store.FileProviderDiagnostic, error) {
+	var out []store.FileProviderDiagnostic
+	for _, d := range f.diagnostics {
+		if orgID == "" || d.orgID == orgID {
+			out = append(out, d.diag)
+		}
+	}
+	return out, nil
 }
 func (f *fakeStore) MonitorProvenanceBatch(_ context.Context, ids []string) (map[string]store.FileManagement, error) {
 	out := map[string]store.FileManagement{}

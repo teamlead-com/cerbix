@@ -273,6 +273,45 @@ func (s *Store) FileProviderProjects(ctx context.Context, providerID string) ([]
 	return out, rows.Err()
 }
 
+// FileProviderDiagnostic is one bundle's tenant-safe status for the diagnostics API
+// (spec §15). Path is the RELATIVE source path; no absolute filesystem path is exposed.
+type FileProviderDiagnostic struct {
+	Provider     string     `json:"provider"`
+	Organization string     `json:"organization"`
+	Project      string     `json:"project"`
+	SourcePath   string     `json:"path"`
+	Generation   int64      `json:"generation"`
+	Status       string     `json:"status"`
+	LastError    string     `json:"last_error,omitempty"`
+	AppliedAt    *time.Time `json:"applied_at,omitempty"`
+}
+
+// FileProviderDiagnostics returns file-provider bundle status. An empty orgID returns every
+// bundle (global-admin); a non-empty orgID restricts to that organization (org-admin) — the
+// filter is applied in SQL so a caller can never see another tenant's bundle/error/path.
+func (s *Store) FileProviderDiagnostics(ctx context.Context, orgID string) ([]FileProviderDiagnostic, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT b.provider_id, o.slug, p.slug, b.source_path, b.generation, b.status, b.last_error, b.applied_at
+		   FROM file_provider_bundles b
+		   JOIN organizations o ON o.id = b.org_id
+		   JOIN projects p ON p.id = b.project_id
+		  WHERE ($1 = '' OR b.org_id = $1::uuid)
+		  ORDER BY b.provider_id, o.slug, p.slug`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("store: file provider diagnostics: %w", err)
+	}
+	defer rows.Close()
+	var out []FileProviderDiagnostic
+	for rows.Next() {
+		var d FileProviderDiagnostic
+		if err := rows.Scan(&d.Provider, &d.Organization, &d.Project, &d.SourcePath, &d.Generation, &d.Status, &d.LastError, &d.AppliedAt); err != nil {
+			return nil, fmt.Errorf("store: scan diagnostic: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 // FileProviderCounts returns a provider's managed and orphaned monitor counts across all its
 // tenants — the `managed_monitors`/`orphaned_monitors` gauges (spec §16).
 func (s *Store) FileProviderCounts(ctx context.Context, providerID string) (managed, orphaned int, err error) {

@@ -50,6 +50,7 @@ type Store interface {
 	DeleteMonitor(ctx context.Context, id string) error
 	MonitorProvenance(ctx context.Context, monitorID string) (store.FileManagement, bool, error)
 	MonitorProvenanceBatch(ctx context.Context, monitorIDs []string) (map[string]store.FileManagement, error)
+	FileProviderDiagnostics(ctx context.Context, orgID string) ([]store.FileProviderDiagnostic, error)
 	ReplaceMonitorDependencies(ctx context.Context, monitorID, projectID string, parents []string) error
 	ListRecentHeartbeats(ctx context.Context, monitorID string, limit int) ([]domain.Heartbeat, error)
 	PasswordHashByID(ctx context.Context, id string) (string, error)
@@ -449,6 +450,8 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/admin/users", h.listAllUsers)
 	mux.HandleFunc("PATCH /api/v1/admin/users/{userID}", h.updateAdminUser)
 	mux.HandleFunc("DELETE /api/v1/admin/users/{userID}", h.deleteAdminUser)
+	mux.HandleFunc("GET /api/v1/admin/file-providers", h.listFileProvidersAdmin)
+	mux.HandleFunc("GET /api/v1/organizations/{orgID}/file-providers", h.listOrgFileProviders)
 	mux.HandleFunc("GET /api/v1/admin/outbox/dead", h.listDeadOutbox)
 	mux.HandleFunc("POST /api/v1/admin/outbox/dead/replay-all", h.replayAllDeadOutbox)
 	mux.HandleFunc("POST /api/v1/admin/outbox/dead/{eventID}/replay", h.replayDeadOutbox)

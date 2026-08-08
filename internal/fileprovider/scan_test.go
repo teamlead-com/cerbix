@@ -168,3 +168,46 @@ func TestGroupBundlesDuplicateFreezesNotSuspend(t *testing.T) {
 		t.Fatal("the independently valid project must still apply")
 	}
 }
+
+// TestScanTotalBytesBound covers the cumulative byte limit and the bounded reader: a second
+// file that pushes total past max_total_bytes is rejected (never fully loaded).
+func TestScanTotalBytesBound(t *testing.T) {
+	dir := t.TempDir()
+	body := bundleYAML("acme", "payments", "api")
+	writeFile(t, dir, "a.yaml", body)
+	writeFile(t, dir, "b.yaml", bundleYAML("acme", "billing", "api"))
+	lim := defaultLimits()
+	lim.MaxTotalBytes = int64(len(body)) + 5 // only the first file fits
+	cands, errs, err := ScanDirectory(dir, lim)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("only the first file should fit the total budget, got %d", len(cands))
+	}
+	var totalErr bool
+	for _, e := range errs {
+		if e.Err.Msg == "provider total bytes exceeds max_total_bytes" {
+			totalErr = true
+		}
+	}
+	if !totalErr {
+		t.Fatalf("expected a total-bytes rejection, got %+v", errs)
+	}
+}
+
+// TestScanBoundedReadRejectsOversize covers the TOCTOU-safe path: a file larger than
+// max_file_bytes is rejected via the bounded reader (cap+1), not loaded whole.
+func TestScanBoundedReadRejectsOversize(t *testing.T) {
+	dir := t.TempDir()
+	lim := defaultLimits()
+	lim.MaxFileBytes = 64
+	writeFile(t, dir, "big.yaml", string(make([]byte, 4096))) // 4 KiB >> 64 B cap
+	cands, errs, err := ScanDirectory(dir, lim)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(cands) != 0 || len(errs) != 1 || errs[0].Err.Msg != "file exceeds max_file_bytes" {
+		t.Fatalf("oversized file must be rejected via the bounded reader: cands=%d errs=%+v", len(cands), errs)
+	}
+}

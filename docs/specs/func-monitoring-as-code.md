@@ -437,10 +437,17 @@ decommission/release requires an explicit future operation.
 - Eligible files are regular immediate children ending in `.yaml` or `.yml`; dotfiles,
   editor temporaries, sockets, devices, FIFOs, and subdirectories are ignored/rejected as
   defined by strict tests. Version 1 is non-recursive.
-- Create, write, remove, rename, chmod/replacement, and watcher-error signals trigger a
-  debounced full rescan.
-- A periodic full resync is mandatory because filesystem notifications may be coalesced or
-  lost and directory inodes may be replaced by ConfigMap/git-sync style updates.
+- **Change detection is poll-based (normative; D-0147).** The provider samples a bounded
+  directory signature (eligible file names + sizes + mtimes, no content read) on a short
+  interval and triggers a debounced full rescan when it changes. A create, write, remove,
+  rename, or replacement therefore triggers a debounced rescan within one poll interval; an
+  event-driven (inotify/fsnotify) hint layer MAY be added in front of the same rescan path
+  but is not required. Because the signature is name+size+mtime, a change that alters none of
+  those — notably a pure `chmod` — is guaranteed to be observed no later than the next
+  periodic resync (below), not necessarily on the next poll.
+- A periodic full resync is mandatory (it is the primary correctness path, not a fallback):
+  poll signals may miss a same-size+mtime change, and directory inodes may be replaced
+  wholesale by ConfigMap/git-sync style updates.
 - The provider re-establishes its watch after a directory replacement. While unavailable,
   last-known-good remains active and no orphaning occurs.
 - Internal symlinks may be followed only when their canonical regular-file target remains

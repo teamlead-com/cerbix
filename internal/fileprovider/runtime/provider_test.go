@@ -225,3 +225,25 @@ func TestReconcileScanErrorSuspendsOrphan(t *testing.T) {
 		t.Fatalf("a scan-level (unbindable) rejection must suspend orphaning, got %d orphaned", rep.Orphaned)
 	}
 }
+
+// TestReconcileRejectsOversizedBundle covers max_monitors_per_bundle enforcement: a bundle
+// over the limit is rejected whole (no apply) and frozen (not orphaned).
+func TestReconcileRejectsOversizedBundle(t *testing.T) {
+	dir := t.TempDir()
+	// Two monitors in one bundle; limit set to 1.
+	write(t, dir, "p.yaml", "format: 1\norganization: acme\nproject: payments\nmonitors:\n"+
+		"  a: {name: A, type: http, target: https://a}\n  b: {name: B, type: http, target: https://b}\n")
+	fa := &fakeApplier{owned: []store.TenantRef{{Organization: "acme", Project: "payments"}}}
+	p := testProvider(dir, fa)
+	p.limits.MaxMonitorsPerBundle = 1
+	rep := p.reconcile(context.Background())
+	if rep.Applied != 0 {
+		t.Fatalf("oversized bundle must not apply, got Applied=%d", rep.Applied)
+	}
+	if rep.Rejected == 0 {
+		t.Fatal("oversized bundle must be rejected")
+	}
+	if rep.Orphaned != 0 || len(fa.calls) != 0 {
+		t.Fatalf("a rejected (frozen) bundle must NOT be applied or orphaned: orphaned=%d calls=%d", rep.Orphaned, len(fa.calls))
+	}
+}

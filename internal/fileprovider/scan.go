@@ -1,6 +1,7 @@
 package fileprovider
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -79,26 +80,38 @@ func ScanDirectory(dir string, limits config.ProviderLimits) ([]Candidate, []Sca
 			continue
 		}
 		if info.Size() > limits.MaxFileBytes {
+			// Cheap early reject on the stat size; the bounded read below is authoritative.
 			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "file exceeds max_file_bytes"}})
 			continue
 		}
-		if total+info.Size() > limits.MaxTotalBytes {
-			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "provider total bytes exceeds max_total_bytes"}})
-			continue
+		// Read through a bounded reader so an oversized file (grown between stat and read, TOCTOU)
+		// is NEVER fully loaded into memory: cap = min(max_file_bytes, remaining total budget),
+		// read one extra byte to detect overflow.
+		capBytes := limits.MaxFileBytes
+		if rem := limits.MaxTotalBytes - total; rem < capBytes {
+			capBytes = rem
 		}
-		data, derr := os.ReadFile(realPath)
-		if derr != nil {
+		if capBytes < 0 {
+			capBytes = 0
+		}
+		f, oerr := os.Open(realPath)
+		if oerr != nil {
 			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "unreadable file"}})
 			continue
 		}
-		// Re-check against the ACTUAL bytes read: the file can grow between stat and read, so
-		// the pre-read stat size is not authoritative for the byte limits (TOCTOU).
-		if int64(len(data)) > limits.MaxFileBytes {
-			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "file exceeds max_file_bytes"}})
+		data, rerr := io.ReadAll(io.LimitReader(f, capBytes+1))
+		_ = f.Close()
+		if rerr != nil {
+			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "unreadable file"}})
 			continue
 		}
-		if total+int64(len(data)) > limits.MaxTotalBytes {
-			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "provider total bytes exceeds max_total_bytes"}})
+		if int64(len(data)) > capBytes {
+			// Hit the cap+1 → the file exceeds its per-file limit or the remaining total budget.
+			msg := "file exceeds max_file_bytes"
+			if capBytes < limits.MaxFileBytes {
+				msg = "provider total bytes exceeds max_total_bytes"
+			}
+			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: msg}})
 			continue
 		}
 		total += int64(len(data))

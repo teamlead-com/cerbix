@@ -13,6 +13,13 @@ server:
   # can't spoof XFF into a fresh bucket. Set to your real hop count in production
   # (1 behind a lone Traefik, 2 behind Cloudflare→Traefik); leave 0 for direct exposure.
   trusted_proxy_count: 0
+  # Optional, stronger than the hop count: the networks your own proxies live in.
+  # When set this SUPERSEDES trusted_proxy_count — X-Forwarded-For is honored only when
+  # the direct peer is inside one of these CIDRs (a request hitting the origin directly
+  # has its XFF ignored, so it can't forge a rate-limit bucket in a dual-path deploy).
+  # trusted_proxy_cidrs:
+  #   - 10.0.0.0/8
+  #   - 172.16.0.0/12
 
 log:
   level: "info"      # debug|info|error|critical

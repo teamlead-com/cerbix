@@ -53,7 +53,7 @@ Top-level `Config` sections (`internal/config`):
 
 | Section | Keys (main) | Purpose |
 |---|---|---|
-| `server` | `listen`, `healthz_path`, `readyz_path`, `metrics_path` | Address and paths of the operational endpoints. |
+| `server` | `listen`, `healthz_path`, `readyz_path`, `metrics_path`, `trusted_proxy_count`, `trusted_proxy_cidrs` | Address/paths of the operational endpoints; reverse-proxy trust for the rate-limiter client IP (CIDRs supersede the hop count when set — D-0139/D-0143). |
 | `log` | `level`, `format` | `log/slog`, JSON. |
 | `database` | `dsn` | Postgres (pgx). Empty → scaffold mode without a DB. |
 | `rabbitmq` | `url`, `management_url` | AMQP for distributed roles (+ management API for worker-liveness alerts). |
@@ -61,6 +61,8 @@ Top-level `Config` sections (`internal/config`):
 | `local` | `enabled`, `min_password_length`, `login_rate_limit_per_minute` | Local login (password + TOTP), brute-force limit. |
 | `session` | `cookie_name`, `ttl`, `secure` | Server-side sessions (cookie). |
 | `prober` | `allow_private_ips`, `allow_metadata_ips` | SSRF guard: what workers are allowed to resolve. |
+| `notification_egress` | `allow_private_ips`, `allow_metadata_ips` | SSRF guard for **alert delivery** (webhook/notify/SMTP), independent of `prober`; defaults **deny-private** (D-0141/iter-0084). |
+| `result` | `allowed_skew`, `revision_mode` | Result-ingest contract: future-clock skew bound + `execution_revision` gate policy (`enforce`\|`observe`; default `enforce`) — D-0142 (`specs/func-result-protocol.md`). |
 | `heartbeats` | `retention_days` | Retention period for raw heartbeats (partitions are dropped by the leader). |
 | `security` | `encryption_key`, `previous_keys`, `admin_email`, `admin_password` | AES-256-GCM keyring for at-rest secrets + rotation; global-admin bootstrap on an empty system. |
 | `mail` | `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). |

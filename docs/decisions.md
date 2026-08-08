@@ -2514,3 +2514,83 @@ Sampling stops the moment a real ping advances the watermark.
 Deferred (separate axes, not this decision): `job_id` correlation + strict
 `observed_at >= job_issued_at` (with P0b/job correlation); `state_sequence` for outbox
 delivery ordering (#4, P2) — orthogonal to `execution_revision`.
+
+## D-0143 — Result-protocol implementation + hardening backlog delivered (iter-0085)
+Implements the D-0142 contract and the whole iter-0084 §5 deferred backlog. Each item is its
+own `-race`+E2E-verified commit; schema commits verified in both storage modes.
+
+**P0a — timestamp hygiene + typed origins.** `heartbeats.observed_at` (migration 00054), the
+strict `result:` config block, and `result_*` outcome metrics land inert first (expand
+phase). `RecordScheduledResult` runs the ordered pipeline (missing-ts reject → `FOR UPDATE` +
+`statement_timestamp()` → timestamp bounds before insert → INSERT ON CONFLICT → dedup →
+watermark: out-of-order = SLA-only | fresh = apply). Push gets a dedicated `RecordPushResult`
+(via `PushResultRecorder`, not the shared `ResultSink`), and every origin reuses one
+post-commit `ingest.Reconciler` (SSE + auto-incident). `RecordHistoricalResults` is the
+SLA-only, bounded, live-state-never-touched backfill path.
+
+**P0b — execution_revision gate.** `monitors.execution_revision` (migration 00055), bumped
+only by `UpdateMonitor`, evaluated under the row lock BEFORE the heartbeat insert; missing →
+reject in `enforce` / tolerated+counted in `observe`, present-mismatch → reject always.
+`RecordDeadmanResult` is the scheduler leader's typed entrypoint (atomic staleness re-check,
+DOWN through the same `recordCheckStatusTx`, periodic down-sampling).
+
+**P1 — reliability.** Readiness-gated push-token encrypt-at-rest backfill (no plaintext
+bearer served during the upgrade window); pull ACK/lease correctness (malformed jobs are not
+acked so they re-deliver; claim batch bounded).
+
+**P2 — hardening list (audit #1/#3/#4/#5/#7/#8/#9/#10/#11/#13).** Monitor resource caps in
+`Monitor.Validate` (#3); strict env-expand (undefined `${VAR}` fails Load — #11), `TruncateAll`
+refuses non-`test` DBs (#8), migrate advisory lock (#10); fail-closed crypto RNG (#13) +
+public-DTO redaction (`PublicRedacted()` — #9); atomic password reset (#7) + TOTP lockout
+fixes + subscriber unsubscribe link kept (#6); delivered-outbox purge (#4), outbox CAS
+`applied` signal (#1), dependency-graph advisory lock (#5).
+
+**Follow-on P2 (config/migration-bearing).**
+- **#14** — rate-limit `server.trusted_proxy_cidrs`: honors X-Forwarded-For only when the
+  direct peer is inside a trusted network, then walks the chain right-to-left skipping
+  trusted proxies (the first untrusted address is the client). SUPERSEDES the hop-count model
+  (`trusted_proxy_count`) when set; empty = legacy hop-count. Closes the dual-path spoof where
+  a request reaching the origin directly could forge XFF and mint a fresh limiter bucket.
+- **#12** — OIDC identity keyed by `(issuer, subject)`, not subject alone (migration 00056,
+  partial unique index on `(oidc_issuer, oidc_sub)`). `UpsertUserByOIDCSub` →
+  `UpsertUserByOIDCIdentity(issuer, sub, …)` threading the ID-token `iss`; a legacy NULL-issuer
+  row for the subject adopts the current issuer once, guarded so it can't steal a bound
+  identity. Two providers minting the same `sub` no longer collapse into one account
+  (identity-confusion / account-takeover).
+- **#2** — outbox `state_sequence` (migration 00057): a monotonic per-monitor counter bumped
+  in the same tx as each applied transition, carried in the `MonitorTransition` event, checked
+  at delivery — an event whose `Seq` is older than the monitor's current `state_sequence` is
+  dropped as superseded (a stale DOWN after a delivered recovery; a reminder for a
+  since-recovered monitor). `Seq==0` (legacy) is never stale. Realizes the item D-0142 §9
+  deferred; orthogonal to `execution_revision`.
+
+## D-0144 — Push liveness watermark & dead-man re-arm (iter-0085)
+Refines D-0142's blanket "`UpdateMonitor` resets `last_result_ts = NULL` on bump", which a
+post-P0b review showed is a **false-DOWN defect for push monitors**: `last_result_ts` was
+overloaded as both the scheduled out-of-order watermark and the push/dead-man liveness
+watermark. Nulling it on any edit of a long-created push monitor made
+`COALESCE(last_result_ts, created_at)` fall back to the stale `created_at`; the bumped
+revision then matched the dead-man CAS, so an ordinary edit (even a rename) — including one
+from the future file-provider — fired a false synthetic DOWN + incident.
+
+Shipped fix (migration 00058, `monitors.push_armed_at`):
+- **`last_result_ts` is the REAL-ping watermark only.** `UpdateMonitor` PRESERVES it for push
+  monitors (they have no scheduled ordering compare) and still resets it to NULL for scheduled
+  monitors (§3 rationale unchanged).
+- **`push_armed_at` is a server-owned re-arm epoch.** Dead-man freshness is
+  `COALESCE(GREATEST(push_armed_at, last_result_ts), created_at)`, used identically by
+  `StalePushMonitors` and the `RecordDeadmanResult` CAS; `created_at` is the floor only when
+  both are NULL.
+- **`disabled → enabled` starts a fresh liveness epoch** (re-arm from the enable moment):
+  `push_armed_at = statement_timestamp()` (a pre-disable ping is not proof of liveness; no
+  `last_result_ts` is fabricated), live state resets to `pending`, the confirmation counter
+  clears, and `state_sequence` bumps WITHOUT an outbox event, so an undelivered pre-disable
+  DOWN is dropped as superseded (D-0143 #2). First ping → `pending → up` (no recovery
+  notification); no ping past the window → `pending → down` with one alert.
+- **`disable`** just drops the monitor from dead-man evaluation (the `enabled` filter).
+  Shrinking `interval`/`grace` on an enabled monitor can turn it stale at once — that is the
+  new policy applying, not a reset.
+
+The pending/counter/`state_sequence` reset applies to all monitor types on re-enable;
+`push_armed_at` is push-only. Contract recorded in `func-result-protocol` §11; regression
+test `store.TestPushUpdatePreservesLiveness`.

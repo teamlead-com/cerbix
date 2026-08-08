@@ -32,6 +32,7 @@ const (
 	ReasonTypeChange        Reason = "type_change"
 	ReasonDuplicateProject  Reason = "duplicate_project"
 	ReasonEmptyBundle       Reason = "empty_bundle"
+	ReasonQuotaExceeded     Reason = "max_managed_monitors"
 )
 
 // BundleError is a reconcile-facing error carrying a bounded reason and a message that is

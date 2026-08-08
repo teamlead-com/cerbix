@@ -57,6 +57,8 @@ var validRoles = map[string]bool{
 const (
 	dbPingInterval = 10 * time.Second
 	workerPoolSize = 4
+	// maxConcurrentReconciles bounds file-provider reconciles running at once, process-wide.
+	maxConcurrentReconciles = 4
 )
 
 // Main runs the CLI and returns a process exit code.
@@ -833,6 +835,8 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// One semaphore shared by every provider bounds concurrent reconciles process-wide (§17).
+	reconcileSem := make(chan struct{}, maxConcurrentReconciles)
 	for _, name := range names {
 		pc := cfg.Providers.File[name]
 		info, err := os.Stat(pc.Directory)
@@ -842,7 +846,7 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		if !info.IsDir() {
 			return fmt.Errorf("file provider %q: %q is not a directory", name, pc.Directory)
 		}
-		p := fpruntime.New(name, pc, fpruntime.NewStoreApplier(st), logger).WithMetrics(registry)
+		p := fpruntime.New(name, pc, fpruntime.NewStoreApplier(st), logger).WithMetrics(registry).WithReconcileLimiter(reconcileSem)
 		spawn(func() { p.Run(ctx) })
 		logger.Info("file_provider_started", "provider", name, "directory", pc.Directory)
 	}

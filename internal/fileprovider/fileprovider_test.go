@@ -2,6 +2,7 @@ package fileprovider
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/config"
@@ -204,4 +205,16 @@ func TestDependencyDAG(t *testing.T) {
 	wantReason(t, "format: 1\norganization: acme\nproject: p\nmonitors:\n"+
 		"  a:\n    name: A\n    type: http\n    target: https://a\n    depends_on: [b]\n"+
 		"  b:\n    name: B\n    type: http\n    target: https://b\n    depends_on: [a]\n", instanceScope(), ReasonDependencyCycle)
+}
+
+func TestDecodeYAMLPolicy(t *testing.T) {
+	// Custom tag rejected.
+	wantReason(t, "format: 1\norganization: acme\nproject: p\nmonitors:\n  a:\n    name: !!binary aGk=\n    type: http\n    target: https://x\n", instanceScope(), ReasonInvalidFormat)
+	// A custom application tag rejected.
+	wantReason(t, "format: 1\norganization: acme\nproject: p\nmonitors:\n  a: !Custom\n    name: A\n    type: http\n    target: https://x\n", instanceScope(), ReasonInvalidFormat)
+	// Excessive nesting depth rejected (build a deeply nested seq under a field the decoder
+	// would otherwise reject — but the policy walk runs first, so depth wins).
+	deep := "format: 1\norganization: acme\nproject: p\nmonitors:\n  a:\n    name: A\n    type: http\n    target: "
+	deep += strings.Repeat("[", maxYAMLDepth+3)
+	wantReason(t, deep+"\n", instanceScope(), ReasonInvalidFormat)
 }

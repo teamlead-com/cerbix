@@ -61,6 +61,20 @@ type rawMonitor struct {
 // in-bundle dependency DAG check. It performs no I/O and touches no database. Any violation
 // returns a *BundleError with a bounded reason.
 func Decode(data []byte, scope config.ProviderScopeConfig) (*DesiredProject, error) {
+	// Structural policy first (spec §14): bound nesting depth + total node count and reject
+	// custom/non-core YAML tags, BEFORE binding to the typed struct. yaml.v3 already bounds
+	// alias expansion; this adds the explicit Cerbix bound + tag allowlist.
+	var doc yaml.Node
+	if err := yaml.NewDecoder(strings.NewReader(string(data))).Decode(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, rejectf(ReasonInvalidFormat, "", "empty bundle")
+		}
+		return nil, decodeError(err)
+	}
+	if be := checkYAMLPolicy(&doc, 0, new(int)); be != nil {
+		return nil, be
+	}
+
 	var raw rawBundle
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true) // unknown root/monitor fields (incl. server-owned) reject
@@ -99,6 +113,44 @@ func Decode(data []byte, scope config.ProviderScopeConfig) (*DesiredProject, err
 		return nil, err
 	}
 	return dp, nil
+}
+
+// YAML structural bounds (spec §14): defense against deeply-nested / oversized / custom-tagged
+// documents beyond yaml.v3's built-in alias-expansion protection.
+const (
+	maxYAMLDepth = 32
+	maxYAMLNodes = 10000
+)
+
+// allowedYAMLTags is the core-schema tag allowlist. Any other tag — a custom `!Foo`, or a
+// non-core `!!binary`/`!!python/...` — rejects the bundle (custom_tag, spec §14).
+var allowedYAMLTags = map[string]bool{
+	"": true, "!!str": true, "!!int": true, "!!float": true, "!!bool": true,
+	"!!null": true, "!!map": true, "!!seq": true, "!!merge": true, "!!timestamp": true,
+}
+
+// checkYAMLPolicy walks the parsed node tree enforcing max depth, max total node count, and
+// the tag allowlist. count is threaded by pointer so the whole document shares one budget.
+func checkYAMLPolicy(n *yaml.Node, depth int, count *int) *BundleError {
+	if n == nil {
+		return nil
+	}
+	if depth > maxYAMLDepth {
+		return rejectf(ReasonInvalidFormat, "", "bundle nesting exceeds the maximum depth %d", maxYAMLDepth)
+	}
+	*count++
+	if *count > maxYAMLNodes {
+		return rejectf(ReasonInvalidFormat, "", "bundle exceeds the maximum node count %d", maxYAMLNodes)
+	}
+	if !allowedYAMLTags[n.Tag] {
+		return rejectf(ReasonInvalidFormat, "", "unsupported or custom YAML tag %q", n.Tag)
+	}
+	for _, c := range n.Content {
+		if be := checkYAMLPolicy(c, depth+1, count); be != nil {
+			return be
+		}
+	}
+	return nil
 }
 
 // resolveTenant applies the scope→tenant-fields matrix (spec §5) and returns the resolved

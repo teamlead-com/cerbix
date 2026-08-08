@@ -36,7 +36,7 @@ type Applier interface {
 type LeaderSession interface {
 	Check(ctx context.Context) (bool, error)
 	Release()
-	ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (store.ApplyResult, error)
+	ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int) (store.ApplyResult, error)
 }
 
 // MetricsSink receives the provider's bounded observability signals (spec §16). Nil-safe:
@@ -72,6 +72,7 @@ type Provider struct {
 	applier     Applier
 	logger      *slog.Logger
 	metrics     MetricsSink
+	sem         chan struct{} // shared across providers: global reconcile-concurrency bound (§17)
 
 	leaderCheckEvery time.Duration
 	pollEvery        time.Duration
@@ -80,6 +81,13 @@ type Provider struct {
 // WithMetrics attaches an observability sink (nil-safe).
 func (p *Provider) WithMetrics(m MetricsSink) *Provider {
 	p.metrics = m
+	return p
+}
+
+// WithReconcileLimiter attaches a semaphore shared by ALL providers in the process, bounding
+// how many providers may reconcile at once (spec §17). Nil = unbounded.
+func (p *Provider) WithReconcileLimiter(sem chan struct{}) *Provider {
+	p.sem = sem
 	return p
 }
 
@@ -192,6 +200,15 @@ func (p *Provider) leaderLoop(ctx context.Context, session LeaderSession) {
 // unbound orphan-suspension rule. Best-effort: per-project failures are logged and isolated;
 // a directory read error degrades without touching the committed runtime.
 func (p *Provider) reconcile(ctx context.Context, session LeaderSession) ReconcileReport {
+	// Global concurrency gate (§17): block until a slot is free, but never past ctx.
+	if p.sem != nil {
+		select {
+		case p.sem <- struct{}{}:
+			defer func() { <-p.sem }()
+		case <-ctx.Done():
+			return ReconcileReport{}
+		}
+	}
 	start := time.Now()
 	rep := p.reconcileInner(ctx, session)
 	p.publishMetrics(ctx, rep, time.Since(start).Seconds())
@@ -231,7 +248,7 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 			continue
 		}
 		presentKeys[key] = true
-		if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace); aerr != nil {
+		if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace, p.limits.MaxManagedMonitors); aerr != nil {
 			rep.Rejected++
 			p.logger.Warn("file_provider_apply_failed", "org", dp.Organization, "project", dp.Project, "reason", classify(aerr))
 			continue
@@ -259,7 +276,7 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 				continue
 			}
 			empty := &fileprovider.DesiredProject{Organization: t.Organization, Project: t.Project, Monitors: map[string]fileprovider.DesiredMonitor{}}
-			if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, empty, "", p.orphanGrace); aerr != nil {
+			if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, empty, "", p.orphanGrace, p.limits.MaxManagedMonitors); aerr != nil {
 				p.logger.Warn("file_provider_orphan_failed", "org", t.Organization, "project", t.Project, "reason", classify(aerr))
 				continue
 			}

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ func applyBundle(t *testing.T, st *Store, ctx context.Context, y string, grace t
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	res, err := st.ApplyFileManagedBundle(ctx, "platform", dp, "acme-payments.yaml", grace)
+	res, err := st.ApplyFileManagedBundle(ctx, "platform", dp, "acme-payments.yaml", grace, 0)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -193,7 +194,7 @@ monitors:
 	}
 
 	// --- Tenant not found: no mutation, typed error ---
-	if _, terr := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, "format: 1\norganization: ghost\nproject: nope\nmonitors: {}\n"), "x.yaml", 0); terr == nil {
+	if _, terr := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, "format: 1\norganization: ghost\nproject: nope\nmonitors: {}\n"), "x.yaml", 0, 0); terr == nil {
 		t.Fatal("missing tenant must reject")
 	}
 }
@@ -205,4 +206,35 @@ func mustDecodeStore(t *testing.T, y string) *fileprovider.DesiredProject {
 		t.Fatalf("decode: %v", err)
 	}
 	return dp
+}
+
+// TestApplyBundleMaxManagedMonitors covers the max_managed_monitors quota (spec §4/§17): a
+// bundle whose creates would push the provider past its cap is rejected whole (LKG kept), and
+// the quota is counted under the provider-wide serialization lock.
+func TestApplyBundleMaxManagedMonitors(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	_, _ = st.CreateProject(ctx, org.ID, "payments", "Payments")
+	_, _ = st.CreateProject(ctx, org.ID, "billing", "Billing")
+
+	twoMon := func(project string) string {
+		return "format: 1\norganization: acme\nproject: " + project + "\nmonitors:\n" +
+			"  a: {name: A, type: http, target: https://a}\n  b: {name: B, type: http, target: https://b}\n"
+	}
+	// payments: 2 monitors, cap 2 → fits.
+	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, twoMon("payments")), "p.yaml", 0, 2); err != nil {
+		t.Fatalf("payments within quota should apply: %v", err)
+	}
+	// billing: 1 monitor would make 3 > cap 2 → rejected whole, LKG (no monitors created).
+	oneMon := "format: 1\norganization: acme\nproject: billing\nmonitors:\n  a: {name: A, type: http, target: https://a}\n"
+	_, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, oneMon), "b.yaml", 0, 2)
+	var be *fileprovider.BundleError
+	if err == nil || !errors.As(err, &be) || be.Reason != fileprovider.ReasonQuotaExceeded {
+		t.Fatalf("over-quota bundle must reject with max_managed_monitors, got %v", err)
+	}
+	var billing int
+	_ = st.pool.QueryRow(ctx, `SELECT count(*) FROM managed_monitors mm JOIN projects p ON p.id=mm.project_id WHERE p.slug='billing'`).Scan(&billing)
+	if billing != 0 {
+		t.Fatalf("rejected over-quota bundle must create nothing, got %d", billing)
+	}
 }

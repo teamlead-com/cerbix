@@ -46,7 +46,7 @@ type fakeSession struct{ calls []applyCall }
 
 func (s *fakeSession) Check(context.Context) (bool, error) { return true, nil }
 func (s *fakeSession) Release()                            {}
-func (s *fakeSession) ApplyFileManagedBundle(_ context.Context, _ string, dp *fileprovider.DesiredProject, path string, _ time.Duration) (store.ApplyResult, error) {
+func (s *fakeSession) ApplyFileManagedBundle(_ context.Context, _ string, dp *fileprovider.DesiredProject, path string, _ time.Duration, _ int) (store.ApplyResult, error) {
 	s.calls = append(s.calls, applyCall{dp.Organization, dp.Project, len(dp.Monitors), path})
 	return store.ApplyResult{Organization: dp.Organization, Project: dp.Project}, nil
 }
@@ -257,5 +257,28 @@ func TestReconcileRejectsOversizedBundle(t *testing.T) {
 	}
 	if rep.Orphaned != 0 || len(fa.sess().calls) != 0 {
 		t.Fatalf("a rejected (frozen) bundle must NOT be applied or orphaned: orphaned=%d calls=%d", rep.Orphaned, len(fa.sess().calls))
+	}
+}
+
+// TestReconcileConcurrencyGate covers the §17 process-wide bound: with a full semaphore,
+// reconcile blocks on the gate and honors ctx cancellation (no apply while it can't get a slot).
+func TestReconcileConcurrencyGate(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.yaml", bundle("acme", "payments"))
+	fa := &fakeApplier{}
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{} // occupy the only slot
+	p := testProvider(dir, fa).WithReconcileLimiter(sem)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	rep := p.reconcile(ctx, fa.sess())
+	if rep.Applied != 0 || len(fa.sess().calls) != 0 {
+		t.Fatalf("reconcile must not run while the concurrency gate is full: %+v calls=%d", rep, len(fa.sess().calls))
+	}
+	// Free the slot → reconcile proceeds.
+	<-sem
+	if rep := p.reconcile(context.Background(), fa.sess()); rep.Applied != 1 {
+		t.Fatalf("reconcile must run once a slot is free, got Applied=%d", rep.Applied)
 	}
 }

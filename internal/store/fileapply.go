@@ -41,13 +41,13 @@ type ApplyResult struct {
 // scheduler NOTIFY — all atomic, deterministic-ordered, and per-project fault-isolated.
 // ApplyFileManagedBundle runs the reconcile on a POOL connection (used by tests and any
 // non-leader caller). The leadership-fenced path is LeaderSession.ApplyFileManagedBundle.
-func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (ApplyResult, error) {
+func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int) (ApplyResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("store: begin apply bundle: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	res, err := s.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace)
+	res, err := s.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace, maxManaged)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -60,13 +60,13 @@ func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, d
 // ApplyFileManagedBundle runs the reconcile on the LEADER's pinned connection, so a lost
 // advisory lock (connection death) also aborts this transaction — a former leader can never
 // commit after losing leadership (fencing, spec §17).
-func (ls *LeaderSession) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (ApplyResult, error) {
+func (ls *LeaderSession) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int) (ApplyResult, error) {
 	tx, err := ls.conn.Begin(ctx)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("store: begin apply bundle (leader): %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	res, err := ls.store.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace)
+	res, err := ls.store.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace, maxManaged)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -81,7 +81,25 @@ func (ls *LeaderSession) ApplyFileManagedBundle(ctx context.Context, providerID 
 // provider-owned current set, plan, apply create/update/dependency_update/noop/orphan/restore
 // with the D-0142 config-write contract, dependency edges, provenance, monotonic generation,
 // and the scheduler NOTIFY — atomic, deterministic-ordered, per-project fault-isolated.
-func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration) (ApplyResult, error) {
+func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int) (ApplyResult, error) {
+	// Bound the whole transaction: a stuck statement or lock must not wedge the reconcile loop
+	// (spec §17). SET LOCAL is tx-scoped.
+	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '20s'`); err != nil {
+		return ApplyResult{}, fmt.Errorf("store: set statement_timeout: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '10s'`); err != nil {
+		return ApplyResult{}, fmt.Errorf("store: set lock_timeout: %w", err)
+	}
+
+	// Serialize ALL applies for this provider so the max_managed_monitors quota check below is
+	// authoritative — two concurrent applies (e.g. during a failover window) can't both read
+	// free quota (spec §17; iter-0096 §3). Provider-scoped advisory xact lock (released on
+	// commit/rollback), namespaced away from the dependency-graph lock.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('file_provider_quota'), hashtext($1))`, providerID); err != nil {
+		return ApplyResult{}, fmt.Errorf("store: lock provider quota: %w", err)
+	}
+
 	// Resolve tenant in ONE query, constraining the project by its organization (spec §5).
 	var orgID, projID string
 	err := tx.QueryRow(ctx,
@@ -113,6 +131,31 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 	plan, err := fileprovider.Plan(desired, current)
 	if err != nil {
 		return ApplyResult{}, err // typed *fileprovider.BundleError (e.g. type_change) — bundle rejected, LKG kept
+	}
+
+	// max_managed_monitors quota (spec §4/§17): only creates grow the provider's owned set.
+	// Under the provider quota lock this count is authoritative. Reject the WHOLE bundle if it
+	// would push the provider past its cap (LKG kept for this project). maxManaged<=0 = unbounded.
+	if maxManaged > 0 {
+		creates := 0
+		for _, e := range plan.Entries {
+			if e.Action == fileprovider.ActionCreate {
+				creates++
+			}
+		}
+		if creates > 0 {
+			var owned int
+			if err := tx.QueryRow(ctx,
+				`SELECT count(*) FROM managed_monitors WHERE provider_id = $1`, providerID).Scan(&owned); err != nil {
+				return ApplyResult{}, fmt.Errorf("store: count managed monitors: %w", err)
+			}
+			if owned+creates > maxManaged {
+				return ApplyResult{}, &fileprovider.BundleError{
+					Reason: fileprovider.ReasonQuotaExceeded,
+					Msg:    fmt.Sprintf("provider would own %d monitors, over max_managed_monitors=%d", owned+creates, maxManaged),
+				}
+			}
+		}
 	}
 
 	// Current bundle generation → next.

@@ -300,8 +300,19 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 		return ApplyResult{}, fmt.Errorf("store: upsert bundle: %w", err)
 	}
 
-	// Scheduler wake-up ONLY when execution config changed (spec §12). Bounded payload.
+	// Append a tenant audit record + wake the scheduler ONLY when execution config changed
+	// (spec §9 step 10 / §12) — both in THIS transaction, atomic with the monitor writes.
 	if changed {
+		c := plan.Counts()
+		target := fmt.Sprintf("provider=%s project=%s gen=%d create=%d update=%d dep=%d restore=%d orphan=%d",
+			providerID, desired.Project, newGen,
+			c[fileprovider.ActionCreate], c[fileprovider.ActionUpdate], c[fileprovider.ActionDependencyUpdate],
+			c[fileprovider.ActionRestore], c[fileprovider.ActionOrphan])
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
+			 VALUES ($1, NULL, false, 'file_provider.apply', $2)`, orgID, target); err != nil {
+			return ApplyResult{}, fmt.Errorf("store: audit file apply: %w", err)
+		}
 		payload, _ := json.Marshal(struct {
 			Provider   string `json:"provider"`
 			Org        string `json:"org"`
@@ -347,6 +358,37 @@ func (s *Store) FileProviderProjects(ctx context.Context, providerID string) ([]
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// RecordBundleAttempt persists a REJECTED/ERRORED apply attempt on the bundle's diagnostics
+// row (spec §15): status + a bounded last_error + attempted_at, WITHOUT advancing the applied
+// generation or last-known-good. Slugs are resolved tenant-safely; an unresolvable tenant is
+// a no-op (an unbound file cannot be pinned to a bundle row). lastErr is truncated and must
+// already be bounded/secret-free (a reason code, not raw YAML).
+func (s *Store) RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error {
+	var orgID, projID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT o.id, p.id FROM projects p JOIN organizations o ON o.id = p.org_id
+		  WHERE o.slug = $1 AND p.slug = $2`, orgSlug, projSlug).Scan(&orgID, &projID)
+	if noRows(err) {
+		return nil // unbound — nothing to pin
+	}
+	if err != nil {
+		return fmt.Errorf("store: resolve bundle tenant (attempt): %w", err)
+	}
+	if len(lastErr) > 500 {
+		lastErr = lastErr[:500]
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO file_provider_bundles (provider_id, org_id, project_id, source_path, status, last_error, attempted_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,now())
+		 ON CONFLICT (provider_id, org_id, project_id)
+		 DO UPDATE SET status = EXCLUDED.status, last_error = EXCLUDED.last_error,
+		               attempted_at = now(), source_path = EXCLUDED.source_path, updated_at = now()`,
+		providerID, orgID, projID, sourcePath, status, lastErr); err != nil {
+		return fmt.Errorf("store: record bundle attempt: %w", err)
+	}
+	return nil
 }
 
 // FileProviderDiagnostic is one bundle's tenant-safe status for the diagnostics API

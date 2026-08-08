@@ -28,6 +28,7 @@ type Applier interface {
 	TryBecomeLeaderSession(ctx context.Context, key int64) (LeaderSession, bool, error)
 	FileProviderProjects(ctx context.Context, providerID string) ([]store.TenantRef, error)
 	FileProviderCounts(ctx context.Context, providerID string) (managed, orphaned int, err error)
+	RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error
 }
 
 // LeaderSession is a held leadership whose apply transaction runs on the lock-owning
@@ -76,6 +77,32 @@ type Provider struct {
 
 	leaderCheckEvery time.Duration
 	pollEvery        time.Duration
+	lastLog          map[string]time.Time // per-reason log throttle (single reconcile goroutine)
+}
+
+// errorLogEvery rate-limits repeated parse/apply/watcher error logs (spec §16).
+const errorLogEvery = 30 * time.Second
+
+// warnThrottled logs a warning at most once per errorLogEvery per (msg,key) so a persistently
+// broken bundle doesn't flood the log. Runs on the single reconcile goroutine (no lock).
+func (p *Provider) warnThrottled(key, msg string, kv ...any) {
+	if p.lastLog == nil {
+		p.lastLog = map[string]time.Time{}
+	}
+	id := msg + "|" + key
+	now := time.Now()
+	if last, ok := p.lastLog[id]; ok && now.Sub(last) < errorLogEvery {
+		return
+	}
+	p.lastLog[id] = now
+	p.logger.Warn(msg, kv...)
+}
+
+// persistAttempt records a bindable rejection on the bundle's diagnostics row (best-effort).
+func (p *Provider) persistAttempt(ctx context.Context, org, proj, path, status, reason string) {
+	if err := p.applier.RecordBundleAttempt(ctx, p.name, org, proj, path, status, reason); err != nil {
+		p.warnThrottled(org+"/"+proj, "file_provider_attempt_persist_failed", "error", err.Error())
+	}
 }
 
 // WithMetrics attaches an observability sink (nil-safe).
@@ -244,13 +271,20 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		if len(dp.Monitors) > p.limits.MaxMonitorsPerBundle {
 			presentKeys[key] = true
 			rep.Rejected++
-			p.logger.Warn("file_provider_bundle_rejected", "org", dp.Organization, "project", dp.Project, "reason", "max_monitors_per_bundle")
+			p.warnThrottled(key, "file_provider_bundle_rejected", "org", dp.Organization, "project", dp.Project, "reason", "max_monitors_per_bundle")
+			p.persistAttempt(ctx, dp.Organization, dp.Project, grp.Paths[key], "rejected", "max_monitors_per_bundle")
 			continue
 		}
 		presentKeys[key] = true
 		if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace, p.limits.MaxManagedMonitors); aerr != nil {
 			rep.Rejected++
-			p.logger.Warn("file_provider_apply_failed", "org", dp.Organization, "project", dp.Project, "reason", classify(aerr))
+			reason, status := classify(aerr), "error"
+			var be *fileprovider.BundleError
+			if errorsAs(aerr, &be) {
+				status = "rejected"
+			}
+			p.warnThrottled(key, "file_provider_apply_failed", "org", dp.Organization, "project", dp.Project, "reason", reason)
+			p.persistAttempt(ctx, dp.Organization, dp.Project, grp.Paths[key], status, reason)
 			continue
 		}
 		rep.Applied++
@@ -307,8 +341,10 @@ func (p *Provider) publishMetrics(ctx context.Context, rep ReconcileReport, dur 
 		outcome = "rejected"
 	}
 	p.metrics.RecordFileProviderReconcile(p.name, outcome)
+	// last_success advances ONLY on a clean scan — a scan with any rejection (invalid/quota/
+	// duplicate) is NOT a success, so a stale-success alert still fires (spec §16).
 	var success int64
-	if !rep.Degraded {
+	if !rep.Degraded && rep.Rejected == 0 {
 		success = time.Now().Unix()
 	}
 	managed, orphaned := 0, 0
@@ -419,4 +455,7 @@ func (a storeApplier) FileProviderProjects(ctx context.Context, providerID strin
 }
 func (a storeApplier) FileProviderCounts(ctx context.Context, providerID string) (int, int, error) {
 	return a.st.FileProviderCounts(ctx, providerID)
+}
+func (a storeApplier) RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error {
+	return a.st.RecordBundleAttempt(ctx, providerID, orgSlug, projSlug, sourcePath, status, lastErr)
 }

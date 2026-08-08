@@ -21,8 +21,9 @@ type applyCall struct {
 }
 
 type fakeApplier struct {
-	owned   []store.TenantRef
-	session *fakeSession
+	owned    []store.TenantRef
+	session  *fakeSession
+	attempts int
 }
 
 func (f *fakeApplier) sess() *fakeSession {
@@ -39,6 +40,10 @@ func (f *fakeApplier) FileProviderProjects(_ context.Context, _ string) ([]store
 }
 func (f *fakeApplier) FileProviderCounts(_ context.Context, _ string) (int, int, error) {
 	return 0, 0, nil
+}
+func (f *fakeApplier) RecordBundleAttempt(_ context.Context, _, _, _, _, _, _ string) error {
+	f.attempts++
+	return nil
 }
 
 // fakeSession is a fenced-apply stand-in that records the mutating calls.
@@ -280,5 +285,39 @@ func TestReconcileConcurrencyGate(t *testing.T) {
 	<-sem
 	if rep := p.reconcile(context.Background(), fa.sess()); rep.Applied != 1 {
 		t.Fatalf("reconcile must run once a slot is free, got Applied=%d", rep.Applied)
+	}
+}
+
+// fakeMetrics captures the last status push for the last_success assertion.
+type fakeMetrics struct{ lastSuccess int64 }
+
+func (m *fakeMetrics) SetFileProviderLeader(string, bool)         {}
+func (m *fakeMetrics) RecordFileProviderReconcile(string, string) {}
+func (m *fakeMetrics) SetFileProviderStatus(_ string, _ float64, lastSuccessUnix int64, _, _, _ int) {
+	m.lastSuccess = lastSuccessUnix
+}
+
+// TestLastSuccessOnlyOnCleanScan covers §16: last_success advances on a clean scan but NOT on
+// a scan with any rejection (so a stale-success alert still fires while bundles are broken).
+func TestLastSuccessOnlyOnCleanScan(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.yaml", bundle("acme", "payments"))
+	fa := &fakeApplier{}
+	fm := &fakeMetrics{}
+	p := testProvider(dir, fa).WithMetrics(fm)
+	if rep := p.reconcile(context.Background(), fa.sess()); rep.Rejected != 0 {
+		t.Fatalf("clean scan unexpectedly rejected: %+v", rep)
+	}
+	if fm.lastSuccess == 0 {
+		t.Fatal("clean scan must advance last_success")
+	}
+	// Add a broken file → the scan now has a rejection → last_success must NOT advance.
+	fm.lastSuccess = 0
+	write(t, dir, "broken.yaml", "format: 1\n  bad: [unclosed\n")
+	if rep := p.reconcile(context.Background(), fa.sess()); rep.Rejected == 0 {
+		t.Fatalf("expected a rejection, got %+v", rep)
+	}
+	if fm.lastSuccess != 0 {
+		t.Fatalf("a scan with rejections must NOT advance last_success, got %d", fm.lastSuccess)
 	}
 }

@@ -238,3 +238,54 @@ func TestApplyBundleMaxManagedMonitors(t *testing.T) {
 		t.Fatalf("rejected over-quota bundle must create nothing, got %d", billing)
 	}
 }
+
+// TestApplyWritesAudit covers spec §9 step 10: a changed apply appends a tenant audit record
+// in the SAME transaction as the monitor writes.
+func TestApplyWritesAudit(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	_, _ = st.CreateProject(ctx, org.ID, "payments", "Payments")
+	b := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  a: {name: A, type: http, target: https://a}\n"
+	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, b), "p.yaml", 0, 0); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	var n int
+	_ = st.pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE org_id=$1 AND action='file_provider.apply'`, org.ID).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected 1 file_provider.apply audit row, got %d", n)
+	}
+	// A no-op re-apply writes NO new audit row (nothing changed).
+	_, _ = st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, b), "p.yaml", 0, 0)
+	_ = st.pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE org_id=$1 AND action='file_provider.apply'`, org.ID).Scan(&n)
+	if n != 1 {
+		t.Fatalf("no-op apply must not audit: got %d rows", n)
+	}
+}
+
+// TestRecordBundleAttempt covers spec §15: a rejected/errored attempt is persisted on the
+// bundle's diagnostics row (status/last_error/attempted_at) without advancing generation; an
+// unresolvable tenant is a no-op.
+func TestRecordBundleAttempt(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	_, _ = st.CreateProject(ctx, org.ID, "payments", "Payments")
+
+	if err := st.RecordBundleAttempt(ctx, "platform", "acme", "payments", "p.yaml", "rejected", "max_managed_monitors"); err != nil {
+		t.Fatalf("record attempt: %v", err)
+	}
+	diags, err := st.FileProviderDiagnostics(ctx, "")
+	if err != nil || len(diags) != 1 {
+		t.Fatalf("diagnostics = %d err=%v, want 1", len(diags), err)
+	}
+	d := diags[0]
+	if d.Status != "rejected" || d.LastError != "max_managed_monitors" || d.Generation != 0 {
+		t.Fatalf("persisted attempt = %+v", d)
+	}
+	// Unresolvable tenant → no-op, no error, no row.
+	if err := st.RecordBundleAttempt(ctx, "platform", "ghost", "nope", "x.yaml", "error", "boom"); err != nil {
+		t.Fatalf("unresolvable tenant must be a no-op: %v", err)
+	}
+	if diags, _ := st.FileProviderDiagnostics(ctx, ""); len(diags) != 1 {
+		t.Fatalf("unresolvable tenant must not create a row, got %d", len(diags))
+	}
+}

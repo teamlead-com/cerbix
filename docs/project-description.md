@@ -101,7 +101,7 @@ one project. Reconciliation is transactional per ProjectBundle, tenant-scoped,
 last-known-good preserving, no-op idempotent, HA-elected through PostgreSQL, and never
 hard-deletes history. The complete pre-implementation contract is
 [`docs/specs/func-monitoring-as-code.md`](specs/func-monitoring-as-code.md) (FR-017,
-NFR-014, D-0143).
+NFR-014, D-0145).
 
 ## Delivery Method
 

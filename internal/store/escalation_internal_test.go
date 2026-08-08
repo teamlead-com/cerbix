@@ -52,6 +52,10 @@ func TestAdvanceEscalations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create monitor: %v", err)
 	}
+	// A real open auto-incident always has the monitor DOWN — escalation is gated on it.
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET status = 'down' WHERE id = $1`, mon.ID); err != nil {
+		t.Fatalf("set down: %v", err)
+	}
 	inc, err := st.CreateIncident(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
@@ -137,6 +141,11 @@ func TestAdvanceEscalationsSkipsDisabledMonitor(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("monitor: %v", err)
+	}
+	// Open auto-incident ⇒ monitor is DOWN (escalation gate). Raw enable/disable below
+	// leaves status untouched, so the monitor stays down across the toggle.
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET status = 'down' WHERE id = $1`, mon.ID); err != nil {
+		t.Fatalf("set down: %v", err)
 	}
 	if _, err := st.CreateIncident(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "down",
@@ -289,6 +298,10 @@ func TestAdvanceEscalationsRepeatLast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("monitor: %v", err)
 	}
+	// Open auto-incident ⇒ monitor is DOWN (escalation gate, D-0144).
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET status = 'down' WHERE id = $1`, mon.ID); err != nil {
+		t.Fatalf("set down: %v", err)
+	}
 	inc, err := st.CreateIncident(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
@@ -313,5 +326,60 @@ func TestAdvanceEscalationsRepeatLast(t *testing.T) {
 	}
 	if count() != 2 {
 		t.Fatalf("outbox=%d, want 2", count())
+	}
+}
+
+// TestAdvanceEscalationsRequiresDownStatus proves the D-0144 lifecycle gate: an open,
+// unacknowledged auto-incident escalates only while the monitor is actually DOWN. A monitor
+// re-enabled into `pending` (re-arm window) with a lingering pre-disable incident must NOT
+// page the ladder until it is confirmed down again.
+func TestAdvanceEscalationsRequiresDownStatus(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	ch, err := st.CreateNotificationChannel(ctx, domain.NotificationChannel{
+		ProjectID: proj.ID, Type: domain.ChannelWebhook, Name: "primary",
+		Config: map[string]string{"url": "https://example.com/x"}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("channel: %v", err)
+	}
+	policy, err := st.CreateEscalationPolicy(ctx, domain.EscalationPolicy{
+		ProjectID: proj.ID, Name: "p", Steps: []domain.EscalationStep{
+			{AfterSeconds: 0, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: ch.ID}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "payments", Type: domain.MonitorHTTP, Target: "https://x",
+		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, AutoIncident: true, EscalationPolicyID: policy.ID,
+	})
+	if err != nil {
+		t.Fatalf("monitor: %v", err)
+	}
+	if _, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, MonitorID: mon.ID, Title: "down",
+		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+	}, "auto opened", "system"); err != nil {
+		t.Fatalf("incident: %v", err)
+	}
+
+	setStatus := func(s domain.MonitorStatus) {
+		if _, err := st.pool.Exec(ctx, `UPDATE monitors SET status = $2 WHERE id = $1`, mon.ID, string(s)); err != nil {
+			t.Fatalf("set status %s: %v", s, err)
+		}
+	}
+
+	// Re-arm window: monitor is `pending` with a lingering open incident → NO escalation.
+	setStatus(domain.StatusPending)
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 0 {
+		t.Fatalf("pending monitor escalated: fired=%d err=%v (want 0)", n, err)
+	}
+	// Confirmed down again (dead-man or a real failure) → the ladder resumes.
+	setStatus(domain.StatusDown)
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 1 {
+		t.Fatalf("down monitor should escalate: fired=%d err=%v (want 1)", n, err)
 	}
 }

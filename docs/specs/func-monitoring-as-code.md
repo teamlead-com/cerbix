@@ -1,6 +1,6 @@
 # Spec: Monitoring as Code file provider (func-monitoring-as-code)
 
-Status: SPEC (spec-before-code). Requirements: FR-017, NFR-014. Decision: D-0143.
+Status: SPEC (spec-before-code). Requirements: FR-017, NFR-014. Decision: D-0145.
 No part of this document is implemented merely by publishing the specification.
 
 ## 1. Purpose

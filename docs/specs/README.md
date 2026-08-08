@@ -38,7 +38,7 @@ part of the system. Unlike `docs/checks/` (immutable snapshots) and `docs/iterat
 | `func-monitor-dependencies.md` | Dependency graph + cascading alert suppression (iter-0040) | implemented |
 | `func-multi-region-quorum.md` | Multi-region quorum via composite, variant B (iter-0041) | implemented |
 | `func-result-protocol.md` | Result ingest: typed origins, timestamp hygiene, `execution_revision` (P0a/P0b, D-0142) | spec |
-| `func-monitoring-as-code.md` | Hot-reconciled, tenant-scoped Monitoring as Code file provider (FR-017, D-0143) | spec |
+| `func-monitoring-as-code.md` | Hot-reconciled, tenant-scoped Monitoring as Code file provider (FR-017, D-0145) | spec |
 | `sec-authn-authz.md` | OIDC (any issuer), local login, sessions, API tokens, client-credentials | implemented |
 | `ops-cicd.md` | GitLab CI (backend/frontend), build, coverage gate | skeleton |
 | `ops-keycloak-oidc.md` | Setup and integration guide for Keycloak and any OIDC providers | implemented |

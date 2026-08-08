@@ -79,8 +79,12 @@ request durable within the request and removes any transport redelivery.
      `applied=false` with **no heartbeat insert** and no state/counter/incident/watermark
      mutation.
   3. Only on revision pass does the timestamp outcome (§4) decide insert + apply.
-- **On `UpdateMonitor` bump, reset `last_result_ts = NULL`** in the same statement: a new
-  generation starts a fresh watermark (a new job cannot predate the new revision).
+- **On `UpdateMonitor` bump, reset `last_result_ts = NULL` for SCHEDULED monitors** in the
+  same statement: a new generation starts a fresh watermark (a new job cannot predate the
+  new revision). **PUSH monitors PRESERVE `last_result_ts`** — it is their real-ping liveness
+  watermark and push has no scheduled ordering compare, so nulling it would fall back to
+  `created_at` and fire a false dead-man DOWN on any edit of a live push monitor. Shipped
+  refinement in **§11 / D-0144**.
 - **Mode enum `result_revision_mode: observe | enforce`:**
   - `observe` (migration only): a *missing* revision on a scheduled result is applied +
     counted (`result_missing_revision_total`). A *present-but-mismatched* revision is
@@ -171,7 +175,9 @@ The scheduler applies it directly via `RecordDeadmanResult(monitorID, revision, 
 (no synthetic heartbeat through the dispatcher). In ONE transaction:
 1. `SELECT ... FROM monitors WHERE id=$1 FOR UPDATE` and evaluate the staleness predicate
    `type='push' AND enabled AND execution_revision=$revision
-    AND COALESCE(last_result_ts, created_at) < $evaluated_cutoff`. If it fails (a fresh
+    AND COALESCE(GREATEST(push_armed_at, last_result_ts), created_at) < $evaluated_cutoff`
+    (freshness = max of the real-ping watermark and the re-arm epoch; see §11 / D-0144). If
+    it fails (a fresh
    ping, config change, or disable landed since the staleness snapshot) → drop the
    synthetic DOWN, `applied=false`, commit nothing.
 2. If it passes, in the SAME transaction:
@@ -264,9 +270,12 @@ result:
 
 ## 7. Schema summary
 
-- `monitors.execution_revision BIGINT NOT NULL DEFAULT 1` (+ bump in `UpdateMonitor`, reset
-  `last_result_ts` on bump).
-- `heartbeats.observed_at timestamptz NULL`.
+- `monitors.execution_revision BIGINT NOT NULL DEFAULT 1` — migration **00055** (+ bump in
+  `UpdateMonitor`; `last_result_ts` reset to NULL on bump for **scheduled** monitors only,
+  preserved for push — §11 / D-0144).
+- `heartbeats.observed_at timestamptz NULL` — migration **00054**.
+- `monitors.push_armed_at timestamptz NULL` — migration **00058**; server-owned dead-man
+  re-arm epoch for push (§11 / D-0144).
 - (`monitors.last_result_ts` already exists, from migration 00051.)
 - **Behavior change (not schema):** drop `m.status <> 'down'` from `StalePushMonitors` so a
   down push monitor stays in the stale set for periodic dead-man down-sampling (edge-only →
@@ -306,7 +315,8 @@ result:
   P0b/job correlation, not here.
 - `state_sequence` (per-applied-transition monotonic) for outbox delivery ordering (#4) —
   a **separate** axis from `execution_revision`; introduced with the outbox-ordering work
-  (P2), not here.
+  (P2). **Shipped in iter-0085** (migration 00057; delivery-time staleness gate) — see
+  D-0143.
 
 ## 10. Rollout
 
@@ -339,3 +349,44 @@ with a startup WARNING, the missing-revision metric, and hard removal at iter-00
 **Decision D-0142** fixes the `observe`-removal window: it is removed **no later than
 iter-0089** (≈ three iterations after it lands in P0b), or one release after a confirmed
 prod `enforce` cutover, whichever comes first — never a permanent bypass.
+
+## 11. Amendment (iter-0085) — push liveness watermark & dead-man re-arm (D-0144)
+
+A post-P0b review found that the blanket "`UpdateMonitor` resets `last_result_ts = NULL` on
+revision bump" (§3) is a **correctness defect for push monitors**: `last_result_ts` was
+overloaded as both the scheduled out-of-order watermark AND the push/dead-man liveness
+watermark. Nulling it on any edit of a long-created push monitor made
+`COALESCE(last_result_ts, created_at)` fall back to the stale `created_at`; the bumped
+revision then matched the dead-man CAS, so an ordinary edit (even a rename) fired a false
+synthetic DOWN + incident. The shipped code splits the two concerns:
+
+- **`last_result_ts` is the REAL-ping watermark only.** `UpdateMonitor` PRESERVES it for
+  push monitors (they have no scheduled ordering compare) and still resets it to NULL for
+  scheduled monitors (§3 rationale unchanged).
+- **`push_armed_at` (migration 00058)** is a server-owned re-arm epoch. Dead-man freshness
+  is `COALESCE(GREATEST(push_armed_at, last_result_ts), created_at)`, used identically by
+  `StalePushMonitors` and the `RecordDeadmanResult` CAS. `created_at` is the floor only when
+  both are NULL (a never-armed, never-reported monitor gets its window from creation).
+- **`disabled → enabled` starts a fresh liveness epoch** (re-arm from the enable moment):
+  `push_armed_at = statement_timestamp()` (a pre-disable ping is not proof of liveness after
+  re-enable, and no `last_result_ts` is fabricated), live state resets to `pending`, the
+  confirmation counter clears, and `state_sequence` bumps **without** an outbox event so an
+  undelivered pre-disable DOWN is dropped as superseded at delivery (the #2 staleness gate).
+  First ping after re-enable → `pending → up` (no recovery notification); no ping past
+  `push_armed_at + interval + grace` → `pending → down` with exactly one alert.
+- **`disable`** simply drops the monitor from dead-man evaluation (the `enabled` filter).
+  Shrinking `interval`/`grace` on an *enabled* push monitor can turn it stale at once — that
+  is the new policy applying, not a reset.
+- **Incident/escalation lifecycle.** Because re-enable sets `pending`, escalation must not
+  page a lingering pre-disable auto-incident during the re-arm window: `AdvanceEscalations`
+  gates on `enabled AND status = 'down'`, and the reconciler resolves an open auto-incident
+  on **any** transition into up (`cur == up && prev != up`), so a `pending → up` recovery
+  closes the stale incident (no-op when nothing is open). No ping → dead-man `pending → down`
+  reuses the still-open incident and the ladder resumes.
+
+Applies to all monitor types for the pending/counter/`state_sequence` reset and the
+escalation/reconciler lifecycle; `push_armed_at` is push-only. Regression tests
+`store.TestPushUpdatePreservesLiveness`, `store.TestAdvanceEscalationsRequiresDownStatus`,
+`ingest.TestReconcilerClosesIncidentOnPendingToUp`, and
+`store.TestReEnableSupersedesQueuedDown` (re-enable bumps `state_sequence` past a still-queued
+pre-disable DOWN, silently — so the outbox gate drops it).

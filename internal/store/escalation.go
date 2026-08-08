@@ -340,6 +340,12 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (fired int, err error) {
 		    -- resolve the incident; without this it would page the on-call ladder
 		    -- forever. (Deletion is already handled: the JOIN drops the row.)
 		    AND m.enabled
+		    -- Only page while the monitor is actually DOWN. A re-enabled monitor sits in
+		    -- pending for a fresh interval+grace window (re-arm, D-0144); a lingering
+		    -- pre-disable auto-incident must NOT escalate during that window. The ladder
+		    -- resumes once the monitor is confirmed down again (dead-man or a real
+		    -- failure); a recovery (pending to up) resolves the stale incident instead.
+		    AND m.status = 'down'
 		    -- Dependency suppression (D-0100): the ladder pauses while a
 		    -- (transitive) parent is down — the parent's own alerting owns the
 		    -- page. It resumes on the next tick after the parent recovers if this

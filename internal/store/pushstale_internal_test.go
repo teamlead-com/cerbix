@@ -84,6 +84,132 @@ func TestStalePushMonitors(t *testing.T) {
 	}
 }
 
+// TestPushUpdatePreservesLiveness covers the push-watermark semantics: a plain edit
+// of a live push monitor must NOT wipe its real-ping liveness (the false-DOWN-after-
+// update blocker), and a disabled→enabled transition must re-arm the dead-man from the
+// enable moment (push_armed_at) without fabricating a last_result_ts.
+func TestPushUpdatePreservesLiveness(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+
+	inStale := func(id string) bool {
+		got, err := st.StalePushMonitors(ctx)
+		if err != nil {
+			t.Fatalf("stale push: %v", err)
+		}
+		for _, m := range got {
+			if m.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	readArmed := func(id string) *time.Time {
+		var at *time.Time
+		if err := st.pool.QueryRow(ctx, `SELECT push_armed_at FROM monitors WHERE id=$1`, id).Scan(&at); err != nil {
+			t.Fatalf("read push_armed_at: %v", err)
+		}
+		return at
+	}
+	readLast := func(id string) *time.Time {
+		var at *time.Time
+		if err := st.pool.QueryRow(ctx, `SELECT last_result_ts FROM monitors WHERE id=$1`, id).Scan(&at); err != nil {
+			t.Fatalf("read last_result_ts: %v", err)
+		}
+		return at
+	}
+
+	// --- Blocker: editing a LIVE push monitor must not turn it stale. ---
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 0, Enabled: true, PushToken: "cbxp_live",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Created long ago, but a real ping landed 10s ago → currently live.
+	realPing := time.Now().Add(-10 * time.Second)
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET created_at = $2, last_result_ts = $3 WHERE id = $1`,
+		mon.ID, time.Now().Add(-time.Hour), realPing); err != nil {
+		t.Fatalf("seed liveness: %v", err)
+	}
+	if inStale(mon.ID) {
+		t.Fatal("precondition: live push should not be stale before the edit")
+	}
+	mon.Name = "cron-renamed"
+	upd, err := st.UpdateMonitor(ctx, mon)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if upd.ExecutionRevision != mon.ExecutionRevision+1 {
+		t.Fatalf("revision not bumped: got %d", upd.ExecutionRevision)
+	}
+	if last := readLast(mon.ID); last == nil || last.Before(realPing.Add(-time.Second)) || last.After(realPing.Add(time.Second)) {
+		t.Fatalf("edit must PRESERVE the real-ping last_result_ts, got %v (want ~%v)", last, realPing)
+	}
+	if inStale(mon.ID) {
+		t.Fatal("BLOCKER: a plain edit of a live push monitor turned it stale (false DOWN)")
+	}
+
+	// --- Re-arm: disabled→enabled starts a fresh liveness window from the enable moment. ---
+	dorm, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "dormant", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 0, Enabled: true, PushToken: "cbxp_dorm",
+	})
+	if err != nil {
+		t.Fatalf("create dormant: %v", err)
+	}
+	oldPing := time.Now().Add(-time.Hour)
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET created_at = $2, last_result_ts = $3, status = 'up' WHERE id = $1`,
+		dorm.ID, time.Now().Add(-2*time.Hour), oldPing); err != nil {
+		t.Fatalf("seed dormant: %v", err)
+	}
+	// Disable (no re-arm; status/last preserved; excluded from dead-man while disabled).
+	dorm.Enabled = false
+	if _, err := st.UpdateMonitor(ctx, dorm); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if a := readArmed(dorm.ID); a != nil {
+		t.Fatalf("disable must not arm: push_armed_at=%v", a)
+	}
+	// Re-enable → re-arm.
+	dorm.Enabled = true
+	reUpd, err := st.UpdateMonitor(ctx, dorm)
+	if err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	if reUpd.Status != domain.StatusPending {
+		t.Fatalf("re-enable must reset live state to pending, got %q", reUpd.Status)
+	}
+	if reUpd.ConsecutiveFailures != 0 {
+		t.Fatalf("re-enable must clear confirmation counter, got %d", reUpd.ConsecutiveFailures)
+	}
+	if a := readArmed(dorm.ID); a == nil || time.Since(*a) > time.Minute {
+		t.Fatalf("re-enable must stamp push_armed_at ~now, got %v", a)
+	}
+	// last_result_ts is the REAL ping — never fabricated by re-arm.
+	if last := readLast(dorm.ID); last == nil || last.After(oldPing.Add(time.Second)) {
+		t.Fatalf("re-arm must NOT fabricate last_result_ts, got %v (want the old real ping ~%v)", last, oldPing)
+	}
+	// Freshly armed → not stale despite the hour-old ping.
+	if inStale(dorm.ID) {
+		t.Fatal("re-armed push must not be immediately stale (fresh window from enable)")
+	}
+	// Simulate the liveness window elapsing (armed 2min ago, interval 60s, grace 0) → stale.
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET push_armed_at = $2 WHERE id = $1`,
+		dorm.ID, time.Now().Add(-2*time.Minute)); err != nil {
+		t.Fatalf("age push_armed_at: %v", err)
+	}
+	if !inStale(dorm.ID) {
+		t.Fatal("re-armed push with no ping past the window must become stale")
+	}
+	// And the dead-man actually applies DOWN under the current (re-enable-bumped) revision:
+	// freshness (aged push_armed_at) is past the cutoff, so the CAS passes.
+	cutoff := time.Now().Add(-90 * time.Second)
+	if o, err := st.RecordDeadmanResult(ctx, dorm.ID, reUpd.ExecutionRevision, cutoff); err != nil || !o.Applied || o.Cur != domain.StatusDown {
+		t.Fatalf("dead-man after re-arm window: %+v err=%v, want applied down", o, err)
+	}
+}
+
 // TestStalePushGrace covers grace_seconds extending the liveness window.
 func TestStalePushGrace(t *testing.T) {
 	st, ctx := outboxTestStore(t)
@@ -111,5 +237,70 @@ func TestStalePushGrace(t *testing.T) {
 	}
 	if !got[strict.ID] {
 		t.Fatal("monitor past interval with no grace should be stale")
+	}
+}
+
+// TestReEnableSupersedesQueuedDown is the direct assertion that a disabled→enabled
+// transition bumps state_sequence past a still-queued pre-disable DOWN — so the outbox
+// worker drops that DOWN as superseded (the delivery-time gate is separately covered by
+// outbox.TestStaleTransitionSuppressed). The bump is silent (no new transition event).
+func TestReEnableSupersedesQueuedDown(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		IntervalSeconds: 60, FailureThreshold: 1, Enabled: true, PushToken: "cbxp_seq",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// A real DOWN push: pending→down enqueues a transition event and bumps state_sequence.
+	if o, err := st.RecordPushResult(ctx, mon.ID, false, "boom", time.Now(), time.Time{}); err != nil || o.Cur != domain.StatusDown {
+		t.Fatalf("push down: %+v err=%v, want down", o, err)
+	}
+
+	transitionCount := func() int {
+		var n int
+		if err := st.pool.QueryRow(ctx,
+			`SELECT count(*) FROM outbox_events WHERE topic = 'monitor_transition'`).Scan(&n); err != nil {
+			t.Fatalf("count transitions: %v", err)
+		}
+		return n
+	}
+	// The queued DOWN event's stamped Seq.
+	var eventSeq int64
+	if err := st.pool.QueryRow(ctx,
+		`SELECT (payload->>'seq')::bigint FROM outbox_events
+		  WHERE topic = 'monitor_transition' ORDER BY created_at DESC, id DESC LIMIT 1`).Scan(&eventSeq); err != nil {
+		t.Fatalf("read event seq: %v", err)
+	}
+	downMon, _ := st.GetMonitor(ctx, mon.ID)
+	if eventSeq != 1 || downMon.StateSequence != 1 {
+		t.Fatalf("after DOWN: event seq=%d, monitor state_sequence=%d, want 1/1", eventSeq, downMon.StateSequence)
+	}
+	beforeCount := transitionCount()
+
+	// Disable (no bump) then re-enable (silent bump).
+	m := downMon
+	m.Enabled = false
+	if _, err := st.UpdateMonitor(ctx, m); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	m.Enabled = true
+	reUpd, err := st.UpdateMonitor(ctx, m)
+	if err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+
+	// Re-enable bumped state_sequence beyond the queued DOWN's Seq → the outbox worker's
+	// gate (event.Seq > 0 && monitor.state_sequence > event.Seq) now drops it as superseded.
+	if !(eventSeq > 0 && reUpd.StateSequence > eventSeq) {
+		t.Fatalf("re-enable did not supersede queued DOWN: state_sequence=%d, event seq=%d", reUpd.StateSequence, eventSeq)
+	}
+	// The bump is silent: neither disable nor re-enable enqueued a new transition event.
+	if got := transitionCount(); got != beforeCount {
+		t.Fatalf("re-enable enqueued a transition event: count %d→%d (must be silent)", beforeCount, got)
 	}
 }

@@ -163,10 +163,10 @@ type NotificationEgressConfig struct {
 
 // ResultConfig governs result ingest (spec func-result-protocol). AllowedSkew bounds how
 // far ahead of statement_timestamp() a scheduled result's observed_at may be before it is
-// quarantined. RevisionMode is parsed and validated here but INERT in P0a — the
-// execution_revision gate activates in P0b; the default is the secure `enforce`, including
-// when the whole `result:` block is absent (the default must not depend on which example
-// file was copied — see D-0142 / spec §10).
+// quarantined. RevisionMode selects the active execution_revision gate policy (enforce |
+// observe); the default is the secure `enforce`, including when the whole `result:` block
+// is absent (the default must not depend on which example file was copied — see D-0142 /
+// spec §10).
 type ResultConfig struct {
 	AllowedSkew  Duration `yaml:"allowed_skew"`
 	RevisionMode string   `yaml:"revision_mode"` // enforce | observe

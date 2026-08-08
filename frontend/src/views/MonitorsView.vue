@@ -76,11 +76,16 @@ function toggleTag(t: string) {
   else s.add(t);
   activeTags.value = s;
 }
+// Source filter (FR-017): All / UI-managed / file-managed.
+const sourceFilter = ref<"all" | "ui" | "file">("all");
+const hasFileManaged = computed(() => monitors.value.some((m) => m.management?.source === "file"));
 const shown = computed(() => {
-  if (!activeTags.value.size) return monitors.value;
   return monitors.value.filter((m) => {
-    const tags = m.tags ?? [];
-    for (const t of activeTags.value) if (!tags.includes(t)) return false;
+    if (sourceFilter.value !== "all" && (m.management?.source ?? "ui") !== sourceFilter.value) return false;
+    if (activeTags.value.size) {
+      const tags = m.tags ?? [];
+      for (const t of activeTags.value) if (!tags.includes(t)) return false;
+    }
     return true;
   });
 });
@@ -112,6 +117,19 @@ watch(() => ws.projectId, load);
       </div>
 
       <div v-if="error" class="rounded border border-down/40 bg-down-weak p-4 text-[13px] text-down">{{ error }}</div>
+
+      <!-- source filter (FR-017): coexisting UI/file-managed monitors -->
+      <div v-if="!error && hasFileManaged" class="mb-3 flex items-center gap-[6px]">
+        <span class="mr-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">Source</span>
+        <button
+          v-for="opt in (['all', 'ui', 'file'] as const)"
+          :key="opt"
+          type="button"
+          class="rounded-full border px-[10px] py-[3px] text-[11.5px] capitalize transition-colors"
+          :class="sourceFilter === opt ? 'border-accent bg-accent-weak text-accent' : 'border-border text-ink-2 hover:border-border-strong hover:text-ink'"
+          @click="sourceFilter = opt"
+        >{{ opt === "ui" ? "UI" : opt }}</button>
+      </div>
 
       <!-- tag filter -->
       <div v-if="!error && allTags.length" class="mb-4 flex flex-wrap items-center gap-[6px]">
@@ -145,6 +163,10 @@ watch(() => ws.projectId, load);
                 <RouterLink :to="{ name: 'monitor', params: { id: m.id } }" class="font-medium text-ink hover:text-accent">
                   {{ m.name }}
                 </RouterLink>
+                <span v-if="m.management?.source === 'file'" class="ml-[6px] inline-flex items-center gap-[4px] rounded-full bg-inset px-[7px] py-px font-mono text-[10.5px] text-ink-2" :title="'Managed by file provider ' + m.management.provider + ' (' + m.management.path + ') — read-only'">
+                  <svg viewBox="0 0 24 24" class="h-[11px] w-[11px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+                  file
+                </span>
                 <span v-for="t in m.tags || []" :key="t" class="ml-[6px] rounded-full bg-inset px-[7px] py-px font-mono text-[10.5px] text-ink-3">{{ t }}</span>
               </td>
               <td class="border-b border-border px-4 py-[11px]">

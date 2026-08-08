@@ -151,3 +151,38 @@ func TestLeaderKeyDerivation(t *testing.T) {
 		t.Fatal("leader key must be stable for a given name")
 	}
 }
+
+// TestFingerprintDetectsChanges covers the watcher's change-detection (§11/§18.3): the
+// directory fingerprint changes on create, content write, and rename, and is stable when
+// nothing changed — so the poll loop coalesces to exactly the rescans it should.
+func TestFingerprintDetectsChanges(t *testing.T) {
+	dir := t.TempDir()
+	p := testProvider(dir, &fakeApplier{})
+
+	empty := p.fingerprint()
+	write(t, dir, "a.yaml", bundle("acme", "payments"))
+	created := p.fingerprint()
+	if created == empty {
+		t.Fatal("fingerprint must change when a file is created")
+	}
+	if p.fingerprint() != created {
+		t.Fatal("fingerprint must be stable when nothing changed")
+	}
+	// Content write (different bytes) changes it.
+	write(t, dir, "a.yaml", bundle("acme", "billing"))
+	written := p.fingerprint()
+	if written == created {
+		t.Fatal("fingerprint must change on a content write")
+	}
+	// Atomic-rename style replacement (new name) changes it.
+	if err := os.Rename(filepath.Join(dir, "a.yaml"), filepath.Join(dir, "b.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if p.fingerprint() == written {
+		t.Fatal("fingerprint must change on a rename")
+	}
+	// A vanished directory yields the sentinel (observed as a change → reconcile keeps LKG).
+	if fp := testProvider(filepath.Join(dir, "gone"), &fakeApplier{}).fingerprint(); fp != "unreadable" {
+		t.Fatalf("missing dir fingerprint = %q, want sentinel", fp)
+	}
+}

@@ -58,9 +58,10 @@ func (f *fakeApplier) FileProviderCounts(_ context.Context, _ string) (int, int,
 
 // fakeSession is a fenced-apply stand-in that records the mutating calls + attempts.
 type fakeSession struct {
-	calls    []applyCall
-	attempts int
-	noChange bool // when true, every apply reports NoChange (steady-state no-op)
+	calls          []applyCall
+	attempts       int
+	attemptsByPath int
+	noChange       bool // when true, every apply reports NoChange (steady-state no-op)
 }
 
 func (s *fakeSession) Check(context.Context) (bool, error) { return true, nil }
@@ -71,6 +72,10 @@ func (s *fakeSession) ApplyFileManagedBundle(_ context.Context, _ string, dp *fi
 }
 func (s *fakeSession) RecordBundleAttempt(_ context.Context, _, _, _, _, _, _ string) error {
 	s.attempts++
+	return nil
+}
+func (s *fakeSession) RecordBundleAttemptByPath(_ context.Context, _, _, _, _ string) error {
+	s.attemptsByPath++
 	return nil
 }
 
@@ -362,6 +367,13 @@ func TestReconcileCountsErrorNoFalseSuccess(t *testing.T) {
 	if fm.lastSuccess != 0 {
 		t.Fatalf("an unverifiable scan (counts lookup failed) must NOT advance last_success, got %d", fm.lastSuccess)
 	}
+	if fm.lastOutcome != "error" {
+		t.Fatalf("a counts-lookup failure must record outcome=error, got %q", fm.lastOutcome)
+	}
+	// The duration/error gauges are still updated (via the counts-preserving path), not skipped.
+	if fm.statsCalls != 1 || fm.statusCalls != 0 {
+		t.Fatalf("counts-unknown must update gauges via SetFileProviderReconcileStats, got status=%d stats=%d", fm.statusCalls, fm.statsCalls)
+	}
 }
 
 // TestReconcileNoopNotCountedApplied covers §16/§17: a bundle apply that reports NoChange must
@@ -396,6 +408,22 @@ func TestReconcilePersistsDuplicateRejection(t *testing.T) {
 	}
 }
 
+// TestReconcilePersistsInvalidByPath covers P1#5 (§9.1): a decode error is persisted to the
+// known bundle row through the fenced by-path path, not left only in the process log.
+func TestReconcilePersistsInvalidByPath(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.yaml", bundle("acme", "payments"))
+	write(t, dir, "broken.yaml", "format: 1\n  bad: [unclosed\n") // decode error → grp.Errors
+	fa := &fakeApplier{}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+	if rep.Rejected == 0 {
+		t.Fatalf("broken file must be rejected: %+v", rep)
+	}
+	if fa.sess().attemptsByPath == 0 {
+		t.Fatal("a decode error must be persisted via the fenced by-path attempt")
+	}
+}
+
 // TestReconcileConcurrencyGate covers the §17 process-wide bound: with a full semaphore,
 // reconcile blocks on the gate and honors ctx cancellation (no apply while it can't get a slot).
 func TestReconcileConcurrencyGate(t *testing.T) {
@@ -419,13 +447,25 @@ func TestReconcileConcurrencyGate(t *testing.T) {
 	}
 }
 
-// fakeMetrics captures the last status push for the last_success assertion.
-type fakeMetrics struct{ lastSuccess int64 }
+// fakeMetrics captures the last status push + outcome for assertions.
+type fakeMetrics struct {
+	lastSuccess int64
+	lastOutcome string
+	statusCalls int // full SetFileProviderStatus calls (counts known)
+	statsCalls  int // SetFileProviderReconcileStats calls (counts unknown)
+}
 
-func (m *fakeMetrics) SetFileProviderLeader(string, bool)         {}
-func (m *fakeMetrics) RecordFileProviderReconcile(string, string) {}
+func (m *fakeMetrics) SetFileProviderLeader(string, bool) {}
+func (m *fakeMetrics) RecordFileProviderReconcile(_ string, outcome string) {
+	m.lastOutcome = outcome
+}
 func (m *fakeMetrics) SetFileProviderStatus(_ string, _ float64, lastSuccessUnix int64, _, _, _ int) {
 	m.lastSuccess = lastSuccessUnix
+	m.statusCalls++
+}
+func (m *fakeMetrics) SetFileProviderReconcileStats(_ string, _ float64, lastSuccessUnix int64, _ int) {
+	m.lastSuccess = lastSuccessUnix
+	m.statsCalls++
 }
 
 // TestLastSuccessOnlyOnCleanScan covers §16: last_success advances on a clean scan but NOT on

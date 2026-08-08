@@ -39,6 +39,7 @@ type LeaderSession interface {
 	Release()
 	ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int, allowAbsence bool) (store.ApplyResult, error)
 	RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error
+	RecordBundleAttemptByPath(ctx context.Context, providerID, sourcePath, status, lastErr string) error
 }
 
 // MetricsSink receives the provider's bounded observability signals (spec §16). Nil-safe:
@@ -47,6 +48,7 @@ type MetricsSink interface {
 	SetFileProviderLeader(name string, leader bool)
 	RecordFileProviderReconcile(name, outcome string)
 	SetFileProviderStatus(name string, durationSeconds float64, lastSuccessUnix int64, managed, orphaned, bundleErrors int)
+	SetFileProviderReconcileStats(name string, durationSeconds float64, lastSuccessUnix int64, bundleErrors int)
 }
 
 // fileProviderLeaderBaseKey namespaces per-provider advisory locks away from the scheduler
@@ -106,6 +108,18 @@ func (p *Provider) warnThrottled(key, msg string, kv ...any) {
 func (p *Provider) persistAttempt(ctx context.Context, session LeaderSession, org, proj, path, status, reason string) {
 	if err := session.RecordBundleAttempt(ctx, p.name, org, proj, path, status, reason); err != nil {
 		p.warnThrottled(org+"/"+proj, "file_provider_attempt_persist_failed", "error", err.Error())
+	}
+}
+
+// persistAttemptByPath marks a KNOWN-path bundle rejected when its file can no longer be bound to
+// a tenant (a decode/scope/scan failure at a path a bundle was previously applied from). Best-
+// effort and fenced; a path with no existing bundle row is a no-op (stays process-local, §9.1).
+func (p *Provider) persistAttemptByPath(ctx context.Context, session LeaderSession, path, reason string) {
+	if path == "" {
+		return
+	}
+	if err := session.RecordBundleAttemptByPath(ctx, p.name, path, "rejected", reason); err != nil {
+		p.warnThrottled(path, "file_provider_attempt_persist_failed", "error", err.Error())
 	}
 }
 
@@ -271,12 +285,17 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		rep.Rejected++
 		rep.LastError = string(se.Err.Reason)
 		p.warnThrottled(se.RelPath, "file_provider_file_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
+		// A scan-level rejection at a previously-applied path marks that known bundle rejected.
+		p.persistAttemptByPath(ctx, session, se.RelPath, string(se.Err.Reason))
 	}
 	grp := fileprovider.GroupBundles(cands, p.scope)
 	for _, se := range grp.Errors {
 		rep.Rejected++
 		rep.LastError = string(se.Err.Reason)
 		p.warnThrottled(se.RelPath, "file_provider_bundle_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
+		// A decode/scope failure at a known path marks that known LKG bundle rejected (§9.1);
+		// a duplicate is also persisted per-tenant by the Frozen loop below.
+		p.persistAttemptByPath(ctx, session, se.RelPath, string(se.Err.Reason))
 	}
 	// Persist tenant-bound (duplicate) rejections to diagnostics so a frozen project SHOWS as
 	// rejected, not silently process-local (§15). Unbound decode/scope/scan rejections have no
@@ -381,41 +400,44 @@ func (p *Provider) publishMetrics(ctx context.Context, rep ReconcileReport, dur 
 	if p.metrics == nil && p.status == nil {
 		return
 	}
-	outcome := "noop"
-	switch {
-	case rep.Degraded:
-		outcome = "error"
-	case rep.Applied > 0 || rep.Orphaned > 0:
-		outcome = "applied"
-	case rep.Rejected > 0:
-		outcome = "rejected"
-	}
-	// last_success advances ONLY on a clean scan — a scan with any rejection (invalid/quota/
-	// duplicate) is NOT a success, so a stale-success alert still fires (spec §16).
-	var success int64
-	if !rep.Degraded && rep.Rejected == 0 {
-		success = time.Now().Unix()
-	}
-	// Read the post-apply owned counts. When they're unknown — a degraded scan, or a failed
-	// lookup — do NOT publish misleading zero gauges and do NOT advance last_success on an
-	// unverifiable scan (§16): leave the gauges at their last value (Prometheus keeps them) and
-	// preserve the diagnostics counts.
+	// Read the post-apply owned counts FIRST: a failed lookup means we cannot verify the scan's
+	// result, so it is an ERROR outcome (not a false applied/noop) and last_success must not
+	// advance — but the duration/error gauges still update, and the last-known managed/orphaned
+	// counts are preserved rather than clobbered to a misleading zero (§16).
 	managed, orphaned, countsOK := 0, 0, false
 	if !rep.Degraded {
 		if m, o, err := p.applier.FileProviderCounts(ctx, p.name); err == nil {
 			managed, orphaned, countsOK = m, o, true
 		} else {
-			success = 0
 			if rep.LastError == "" {
 				rep.LastError = "counts_unavailable"
 			}
 			p.warnThrottled("counts", "file_provider_counts_failed", "error", err.Error())
 		}
 	}
+	// Outcome reflects the WHOLE reconcile, counts lookup included.
+	outcome := "noop"
+	switch {
+	case rep.Degraded || !countsOK:
+		outcome = "error"
+	case rep.Applied > 0 || rep.Orphaned > 0:
+		outcome = "applied"
+	case rep.Rejected > 0:
+		outcome = "rejected"
+	}
+	// last_success advances ONLY on a clean, fully-verified scan — no rejection, not degraded,
+	// counts known (spec §16), so a stale-success alert still fires while anything is wrong.
+	var success int64
+	if !rep.Degraded && rep.Rejected == 0 && countsOK {
+		success = time.Now().Unix()
+	}
 	if p.metrics != nil {
 		p.metrics.RecordFileProviderReconcile(p.name, outcome)
 		if countsOK {
 			p.metrics.SetFileProviderStatus(p.name, dur, success, managed, orphaned, rep.Rejected)
+		} else {
+			// Update duration/error without clobbering the managed/orphaned gauges.
+			p.metrics.SetFileProviderReconcileStats(p.name, dur, success, rep.Rejected)
 		}
 	}
 	if p.status != nil {

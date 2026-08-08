@@ -117,6 +117,21 @@ func (r *Registry) SetFileProviderStatus(name string, durationSeconds float64, l
 	s.bundleErrors = bundleErrors
 }
 
+// SetFileProviderReconcileStats updates the duration / last-success / bundle-error gauges when
+// the owned COUNTS are unknown (a degraded scan or a failed counts lookup), WITHOUT clobbering
+// the last-known managed/orphaned gauges to a misleading zero (§16). lastSuccessUnix==0 leaves
+// the previous success untouched.
+func (r *Registry) SetFileProviderReconcileStats(name string, durationSeconds float64, lastSuccessUnix int64, bundleErrors int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.fileProvider(name)
+	s.lastDuration = durationSeconds
+	if lastSuccessUnix > 0 {
+		s.lastSuccessUnix = lastSuccessUnix
+	}
+	s.bundleErrors = bundleErrors
+}
+
 // SetReady marks the service ready or not-ready, recording an optional reason.
 func (r *Registry) SetReady(ready bool, reason string) {
 	r.mu.Lock()

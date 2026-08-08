@@ -176,26 +176,40 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 		}
 	}
 
-	// Current bundle generation → next.
-	var gen int64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(generation, 0) FROM file_provider_bundles
-		  WHERE provider_id = $1 AND org_id = $2 AND project_id = $3`, providerID, orgID, projID).Scan(&gen); err != nil && !noRows(err) {
-		return ApplyResult{}, fmt.Errorf("store: read bundle generation: %w", err)
+	// Current bundle row: existence + generation + persisted diagnostics. The bundle row is
+	// written on an axis INDEPENDENT of monitor state (§15): a stale rejected/error status is
+	// cleared on a now-clean scan, a rename is picked up even for an empty/all-orphaned bundle,
+	// and the first (even empty) bundle is recorded — all WITHOUT rewriting an unchanged row on
+	// every resync.
+	var (
+		gen           int64
+		curStatus     string
+		curLastErr    string
+		curBundlePath string
+		bundleExisted bool
+	)
+	switch rerr := tx.QueryRow(ctx,
+		`SELECT generation, status, last_error, source_path FROM file_provider_bundles
+		  WHERE provider_id = $1 AND org_id = $2 AND project_id = $3`, providerID, orgID, projID).
+		Scan(&gen, &curStatus, &curLastErr, &curBundlePath); {
+	case noRows(rerr):
+		bundleExisted = false
+	case rerr != nil:
+		return ApplyResult{}, fmt.Errorf("store: read bundle row: %w", rerr)
+	default:
+		bundleExisted = true
 	}
 	newGen := gen + 1
 
 	// Track what ACTUALLY changed so a no-op writes nothing and the generation only advances on
 	// a real state change (spec §7/§17):
-	//   execChanged  → execution config changed → scheduler NOTIFY + audit
-	//   depChanged   → declarative dependency graph changed → audit (no reschedule)
-	//   stateChanged → any managed_monitors/monitor/dep mutation → bump generation + upsert bundle
-	//   pathChanged  → only the provenance source_path drifted (a rename; no desired change)
+	//   execChanged  → execution config changed → scheduler NOTIFY (create/update/re-enable/disable)
+	//   stateChanged → any managed_monitors/monitor/dep mutation → bump generation + audit
 	curHash := make(map[string]string, len(current))
 	for _, c := range current {
 		curHash[c.UID] = c.Hash
 	}
-	var execChanged, depChanged, stateChanged, pathChanged bool
+	var execChanged, stateChanged bool
 
 	// Phase 1 — monitors + provenance.
 	for _, e := range plan.Entries {
@@ -240,12 +254,13 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 
 		case fileprovider.ActionRestore:
 			// Reintroducing a previously-orphaned UID (spec §10). Do a SEMANTIC write only when
-			// actually needed — the monitor was grace-disabled (must re-enable) or its config
-			// changed. A restore within grace with unchanged config only CLEARS the orphan mark;
-			// it must NOT bump execution_revision, reset the scheduler watermark, notify, or
-			// audit (§10: restore bumps revision only when required).
+			// actually needed — the monitor's ACTUAL enabled state differs from the DESIRED one
+			// (e.g. it was grace-disabled but the file wants it enabled), or its config changed. A
+			// restore whose desired state already matches (incl. a declarative `enabled: false`
+			// that is already disabled) only CLEARS the orphan mark; it must NOT bump
+			// execution_revision, reset the watermark, notify, or count as an execution change.
 			id := idByUID[e.UID]
-			if !enabledByUID[e.UID] || desired.Monitors[e.UID].Hash != curHash[e.UID] {
+			if enabledByUID[e.UID] != desired.Monitors[e.UID].Monitor.Enabled || desired.Monitors[e.UID].Hash != curHash[e.UID] {
 				m := desired.Monitors[e.UID].Monitor
 				m.ID, m.ProjectID = id, projID
 				if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
@@ -275,20 +290,16 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 				idByUID[e.UID], sourcePath, newGen); err != nil {
 				return ApplyResult{}, fmt.Errorf("store: dep provenance: %w", err)
 			}
-			depChanged, stateChanged = true, true
+			stateChanged = true
 
 		case fileprovider.ActionNoop:
-			// Nothing semantic changed. Refresh ONLY the provenance path if the file was renamed
-			// — never bump the generation or touch the monitor (spec §7). A steady state writes
-			// NOTHING, so periodic resync causes no write amplification (§17).
-			tag, err := tx.Exec(ctx,
+			// Nothing semantic changed. Refresh ONLY the per-monitor provenance path if the file
+			// was renamed — never bump the generation or touch the monitor (spec §7). The
+			// `IS DISTINCT FROM` guard means a steady state writes NOTHING (no amplification, §17).
+			if _, err := tx.Exec(ctx,
 				`UPDATE managed_monitors SET source_path=$2 WHERE monitor_id=$1 AND source_path IS DISTINCT FROM $2`,
-				idByUID[e.UID], sourcePath)
-			if err != nil {
+				idByUID[e.UID], sourcePath); err != nil {
 				return ApplyResult{}, fmt.Errorf("store: touch provenance path: %w", err)
-			}
-			if tag.RowsAffected() > 0 {
-				pathChanged = true
 			}
 
 		case fileprovider.ActionOrphan:
@@ -371,13 +382,19 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 		}
 	}
 
-	// Bundle row: advance generation + refresh content/status ONLY on a real state change; a
-	// pure rename refreshes just the source_path (no generation bump); a true no-op writes
-	// NOTHING — periodic resync of an unchanged bundle causes no write amplification (§7/§17).
+	// Bundle-row axis (independent of monitor state, §15): advance generation only on a real
+	// state change; otherwise write the row iff it is missing, its recorded path drifted, or a
+	// stale rejected/error status must be cleared after a now-clean scan. The first (even empty)
+	// bundle records generation 1. A steady-state clean no-op — row already 'applied', no error,
+	// path unchanged — writes NOTHING (no amplification, §7/§17).
 	effGen := gen
-	switch {
-	case stateChanged:
+	if stateChanged {
 		effGen = newGen
+	} else if !bundleExisted {
+		effGen = 1
+	}
+	staleDiag := curStatus != "applied" || curLastErr != ""
+	if stateChanged || !bundleExisted || curBundlePath != sourcePath || staleDiag {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO file_provider_bundles (provider_id, org_id, project_id, source_path, content_hash, generation, status, last_error, applied_at, attempted_at)
 			 VALUES ($1,$2,$3,$4,$5,$6,'applied','',$7,$7)
@@ -385,24 +402,17 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			 DO UPDATE SET source_path=EXCLUDED.source_path, content_hash=EXCLUDED.content_hash,
 			               generation=EXCLUDED.generation, status='applied', last_error='',
 			               applied_at=EXCLUDED.applied_at, attempted_at=EXCLUDED.attempted_at, updated_at=now()`,
-			providerID, orgID, projID, sourcePath, bundleContentHash(desired), newGen, dbNow); err != nil {
+			providerID, orgID, projID, sourcePath, bundleContentHash(desired), effGen, dbNow); err != nil {
 			return ApplyResult{}, fmt.Errorf("store: upsert bundle: %w", err)
-		}
-	case pathChanged:
-		// Rename only: keep the generation, refresh the recorded path + clear any stale error.
-		if _, err := tx.Exec(ctx,
-			`UPDATE file_provider_bundles SET source_path=$4, status='applied', last_error='', attempted_at=now(), updated_at=now()
-			  WHERE provider_id=$1 AND org_id=$2 AND project_id=$3`,
-			providerID, orgID, projID, sourcePath); err != nil {
-			return ApplyResult{}, fmt.Errorf("store: refresh bundle path: %w", err)
 		}
 	}
 
-	// Audit when execution config OR the declarative dependency graph changed (spec §9 step 10);
-	// wake the scheduler ONLY when execution config changed (§12) — a dependency-only change
-	// affects delivery-time suppression, not scheduling. Both in THIS transaction, atomic with
-	// the monitor writes.
-	if execChanged || depChanged {
+	// Audit on ANY persisted ownership/config state change (spec §9 step 10 / D-0148): create,
+	// update, dependency change, restore, orphan-mark, un-orphan, and grace-disable are all
+	// "changed applies". A pure no-op (nothing persisted) writes no audit. Wake the scheduler
+	// ONLY when execution config changed (§12) — a dependency/ownership-only change affects
+	// delivery-time suppression, not scheduling. All in THIS transaction.
+	if stateChanged {
 		c := plan.Counts()
 		target := fmt.Sprintf("provider=%s project=%s gen=%d create=%d update=%d dep=%d restore=%d orphan=%d",
 			providerID, desired.Project, effGen,
@@ -429,7 +439,7 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 	return ApplyResult{
 		Organization: desired.Organization, Project: desired.Project,
 		Generation: effGen, Counts: plan.Counts(),
-		Changed: execChanged, NoChange: !stateChanged && !pathChanged,
+		Changed: execChanged, NoChange: !stateChanged,
 	}, nil
 }
 
@@ -506,6 +516,30 @@ func recordBundleAttempt(ctx context.Context, q rowExecer, providerID, orgSlug, 
 // RecordBundleAttempt persists a rejection on a POOL connection (tests / non-leader callers).
 func (s *Store) RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error {
 	return recordBundleAttempt(ctx, s.pool, providerID, orgSlug, projSlug, sourcePath, status, lastErr)
+}
+
+// recordBundleAttemptByPath marks an EXISTING bundle row (matched by provider + relative source
+// path) rejected/errored, WITHOUT inserting. It exists for an invalid file at a PREVIOUSLY KNOWN
+// path — a known last-known-good bundle whose YAML we cannot decode, so we cannot re-derive its
+// tenant (spec §13/§9.1). A brand-new unknown invalid file matches no row and stays process-local.
+func recordBundleAttemptByPath(ctx context.Context, q rowExecer, providerID, sourcePath, status, lastErr string) error {
+	if sourcePath == "" {
+		return nil
+	}
+	if len(lastErr) > 500 {
+		lastErr = lastErr[:500]
+	}
+	if _, err := q.Exec(ctx,
+		`UPDATE file_provider_bundles SET status=$3, last_error=$4, attempted_at=now(), updated_at=now()
+		  WHERE provider_id=$1 AND source_path=$2`, providerID, sourcePath, status, lastErr); err != nil {
+		return fmt.Errorf("store: record bundle attempt by path: %w", err)
+	}
+	return nil
+}
+
+// RecordBundleAttemptByPath (leader-fenced) marks a known-path bundle rejected without insert.
+func (ls *LeaderSession) RecordBundleAttemptByPath(ctx context.Context, providerID, sourcePath, status, lastErr string) error {
+	return recordBundleAttemptByPath(ctx, ls.conn, providerID, sourcePath, status, lastErr)
 }
 
 // RecordBundleAttempt persists a rejection on the LEADER's fenced connection, so a former leader

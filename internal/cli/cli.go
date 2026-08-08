@@ -875,6 +875,13 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		} else {
 			_ = dh.Close()
 		}
+		// Register a zero leadership gauge BEFORE election so every configured provider always
+		// exports `cerbix_file_provider_leader{provider}` — otherwise, after the sole leader
+		// disappears, the remaining followers export no series and the NoLeader alert's
+		// `max by(provider)(…leader) == 0` matches an empty vector and never fires (§16).
+		if registry != nil {
+			registry.SetFileProviderLeader(name, false)
+		}
 		p := fpruntime.New(name, pc, fpruntime.NewStoreApplier(st), logger).
 			WithMetrics(registry).WithReconcileLimiter(reconcileSem).WithStatus(statusReg)
 		spawn(func() { p.Run(ctx) })

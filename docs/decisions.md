@@ -2674,3 +2674,20 @@ debounce rather than instantly, and a pure `chmod` (no size/mtime change) is not
 until the next resync. If sub-second latency is later required, an fsnotify hint layer can be
 added in front of the same reconcile path without changing the model. This is a deliberate
 architecture decision, not an omission.
+
+## D-0148 — File-provider audit fires on any persisted state change; scheduler NOTIFY only on execution change (iter-0109)
+Spec §9 step 10 requires an audit record on a "changed apply" but does not enumerate what
+counts as changed. This decision fixes the contract: the `file_provider.apply` audit row is
+written for ANY persisted ownership/config state change in the apply transaction — create,
+update, dependency change, restore, first orphan-mark, un-orphan, and grace-disable — i.e.
+whenever `stateChanged` is true. A pure no-op (nothing persisted) writes no audit. Separately,
+the scheduler wake (`pg_notify(monitor_config_changed)`) fires ONLY when EXECUTION config
+changed (`execChanged`: create/update/re-enable/disable) — a dependency-only or ownership-only
+change affects delivery-time suppression, not scheduling, so it must not force a reschedule.
+Rationale: an external review found the code audited only on exec/dep changes while §9 reads as
+"any changed apply", so first-orphan and un-orphan (which do mutate persisted generation/owner
+state) went unaudited — code and spec diverged. Auditing all ownership-state transitions is the
+literal reading of §9 and gives operators a complete lifecycle trail; the NOTIFY axis stays
+narrow so no-op-for-scheduling changes don't churn the leader. Consequence: an un-orphan with an
+unchanged config is audited (an ownership transition) but does NOT bump `execution_revision` or
+NOTIFY (D-0142 revision-safety preserved).

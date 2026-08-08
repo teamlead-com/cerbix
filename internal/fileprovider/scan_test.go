@@ -1,6 +1,7 @@
 package fileprovider
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -196,18 +197,42 @@ func TestScanTotalBytesBound(t *testing.T) {
 	}
 }
 
-// TestScanBoundedReadRejectsOversize covers the TOCTOU-safe path: a file larger than
-// max_file_bytes is rejected via the bounded reader (cap+1), not loaded whole.
-func TestScanBoundedReadRejectsOversize(t *testing.T) {
+// TestScanRejectsOversizeFileByStat covers the cheap early reject: a file whose STAT size
+// already exceeds max_file_bytes is rejected before any read. (This is the stat path, not the
+// bounded reader — the bounded reader itself is proven deterministically by TestReadBounded.)
+func TestScanRejectsOversizeFileByStat(t *testing.T) {
 	dir := t.TempDir()
 	lim := defaultLimits()
 	lim.MaxFileBytes = 64
-	writeFile(t, dir, "big.yaml", string(make([]byte, 4096))) // 4 KiB >> 64 B cap
+	writeFile(t, dir, "big.yaml", string(make([]byte, 4096))) // 4 KiB >> 64 B
 	cands, errs, err := ScanDirectory(dir, lim)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if len(cands) != 0 || len(errs) != 1 || errs[0].Err.Msg != "file exceeds max_file_bytes" {
-		t.Fatalf("oversized file must be rejected via the bounded reader: cands=%d errs=%+v", len(cands), errs)
+		t.Fatalf("oversized file must be rejected: cands=%d errs=%+v", len(cands), errs)
+	}
+}
+
+// TestReadBounded proves the memory-safe bound directly (the "stat allowed → source grew →
+// read stops at cap+1" case that the stat early-reject can never exercise): the reader never
+// yields more than cap+1 bytes and flags overflow, regardless of how large the source is.
+func TestReadBounded(t *testing.T) {
+	// Source far larger than the cap → overflow, and EXACTLY cap+1 bytes materialized (not 4096).
+	data, over, err := readBounded(bytes.NewReader(make([]byte, 4096)), 64)
+	if err != nil || !over {
+		t.Fatalf("oversized source must overflow: over=%v err=%v", over, err)
+	}
+	if int64(len(data)) != 65 {
+		t.Fatalf("bounded read materialized %d bytes, want cap+1=65 (never the full 4096)", len(data))
+	}
+	// Source within the cap → no overflow, exact length.
+	data, over, err = readBounded(bytes.NewReader(make([]byte, 32)), 64)
+	if err != nil || over || len(data) != 32 {
+		t.Fatalf("within-cap read: len=%d over=%v err=%v", len(data), over, err)
+	}
+	// cap 0 (no remaining total budget) → any non-empty source overflows.
+	if _, over, _ = readBounded(bytes.NewReader([]byte("x")), 0); !over {
+		t.Fatal("cap 0 must overflow on any byte")
 	}
 }

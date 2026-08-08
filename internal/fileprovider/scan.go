@@ -99,14 +99,14 @@ func ScanDirectory(dir string, limits config.ProviderLimits) ([]Candidate, []Sca
 			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "unreadable file"}})
 			continue
 		}
-		data, rerr := io.ReadAll(io.LimitReader(f, capBytes+1))
+		data, over, rerr := readBounded(f, capBytes)
 		_ = f.Close()
 		if rerr != nil {
 			errs = append(errs, ScanError{RelPath: name, Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "unreadable file"}})
 			continue
 		}
-		if int64(len(data)) > capBytes {
-			// Hit the cap+1 → the file exceeds its per-file limit or the remaining total budget.
+		if over {
+			// Exceeded the per-file limit or the remaining total budget (never fully loaded).
 			msg := "file exceeds max_file_bytes"
 			if capBytes < limits.MaxFileBytes {
 				msg = "provider total bytes exceeds max_total_bytes"
@@ -187,6 +187,20 @@ func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResu
 		}
 	}
 	return res
+}
+
+// readBounded reads at most capBytes+1 bytes from r and reports whether the source exceeded
+// capBytes. It never allocates more than capBytes+1, so an oversized input (e.g. a file that
+// grew between stat and read — TOCTOU) is never fully loaded: the memory-safe byte bound.
+func readBounded(r io.Reader, capBytes int64) (data []byte, overflow bool, err error) {
+	if capBytes < 0 {
+		capBytes = 0
+	}
+	data, err = io.ReadAll(io.LimitReader(r, capBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	return data, int64(len(data)) > capBytes, nil
 }
 
 // withinRoot reports whether target is root itself or a descendant of it (both canonical).

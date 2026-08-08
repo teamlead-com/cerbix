@@ -1,0 +1,17 @@
+# Example Monitoring-as-Code bundle (format 1). Copy to `example.yaml` and set organization/
+# project to slugs that exist in your database — the file provider never creates tenants.
+# Instance scope (per config.dev.yaml) requires both `organization` and `project` here.
+format: 1
+organization: acme
+project: payments
+monitors:
+  api:
+    name: Payments API
+    type: http
+    target: https://payments.internal/health
+    interval: 30s
+    timeout: 5s
+  heartbeat:
+    name: Nightly job heartbeat
+    type: push
+    interval: 3600s

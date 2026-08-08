@@ -1,0 +1,52 @@
+# Prometheus alerting rules for the Monitoring-as-Code file provider (FR-017, spec §16).
+# Scrape cerbix's /metrics (all metrics are low-cardinality; `provider` is bounded by the static
+# max_configured_file_providers). Load via Prometheus `rule_files:`. Thresholds reference the
+# default resync_interval (30s); retune the stale-success window to ~3× your configured value.
+#
+# Validate: promtool check rules deploy/alerts/monitoring-as-code.rules.yml
+groups:
+  - name: cerbix-monitoring-as-code
+    rules:
+      # A configured provider has not produced a CLEAN reconcile recently. last_success only
+      # advances on a scan with zero rejections, so this fires while a bundle stays broken even
+      # though the process is up (local follower readiness cannot prove an active leader, §16).
+      - alert: CerbixFileProviderStaleSuccess
+        expr: time() - max by (provider) (cerbix_file_provider_last_success_timestamp_seconds) > 90
+        for: 10m
+        labels:
+          severity: warning
+          component: monitoring-as-code
+        annotations:
+          summary: "cerbix file provider {{ $labels.provider }} has no recent clean reconcile"
+          description: >
+            No clean reconcile for provider {{ $labels.provider }} in over 3× the default
+            resync_interval. A persistently invalid/half-written bundle keeps last-known-good
+            running while the desired generation is rejected (degraded). Check
+            GET /api/v1/admin/file-providers.
+
+      # Bundles are being rejected. Degraded, not down: last-known-good stays live.
+      - alert: CerbixFileProviderBundleErrors
+        expr: max by (provider) (cerbix_file_provider_bundle_errors) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: monitoring-as-code
+        annotations:
+          summary: "cerbix file provider {{ $labels.provider }} is rejecting bundles"
+          description: >
+            Provider {{ $labels.provider }} reported bundle rejections on its last scan for 15m.
+            Inspect the tenant-safe last_error via the provider diagnostics API.
+
+      # No replica currently holds this provider's reconcile leadership (fleet-wide). One api/all
+      # replica should lead; zero means reconciliation is stalled across the fleet.
+      - alert: CerbixFileProviderNoLeader
+        expr: max by (provider) (cerbix_file_provider_leader) == 0
+        for: 10m
+        labels:
+          severity: critical
+          component: monitoring-as-code
+        annotations:
+          summary: "cerbix file provider {{ $labels.provider }} has no active leader"
+          description: >
+            No api/all replica holds the reconcile leadership for provider {{ $labels.provider }}.
+            Declarative changes will not be applied until a leader is elected.

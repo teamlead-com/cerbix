@@ -40,6 +40,17 @@ pull:
 notification_egress:
   allow_private_ips: true
 
+# Monitoring as Code (FR-017): a representative instance-scoped file provider watching the
+# mounted deploy/monitoring.d directory. Idle by default (the dir ships only a *.example, which
+# the scanner ignores — it reads .yaml/.yml only). Rename it to a real .yaml with your seeded
+# org/project to exercise the reconcile + the e2e/tests/file-providers.spec.ts UI surface.
+providers:
+  file:
+    platform:
+      directory: /etc/cerbix/monitoring.d
+      scope:
+        type: instance
+
 security:
   admin_email: "admin@cerbix.local"
   admin_password: "devpassword123"

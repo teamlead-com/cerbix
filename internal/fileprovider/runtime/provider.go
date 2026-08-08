@@ -432,7 +432,7 @@ func (p *Provider) publishMetrics(ctx context.Context, rep ReconcileReport, dur 
 // a sentinel so a vanished/replaced directory is observed as a change (then handled by
 // reconcile, which keeps LKG rather than orphaning).
 func (p *Provider) fingerprint() string {
-	entries, err := os.ReadDir(p.dir)
+	entries, truncated, err := fileprovider.ReadDirBounded(p.dir)
 	if err != nil {
 		return "unreadable"
 	}
@@ -453,7 +453,12 @@ func (p *Provider) fingerprint() string {
 		parts = append(parts, name+":"+strconv.FormatInt(info.Size(), 10)+":"+strconv.FormatInt(info.ModTime().UnixNano(), 10))
 	}
 	sort.Strings(parts)
-	return strings.Join(parts, "|")
+	sig := strings.Join(parts, "|")
+	if truncated {
+		// Fold the truncation state in so entering/leaving the bounded regime is seen as a change.
+		sig = "truncated|" + sig
+	}
+	return sig
 }
 
 func sortedKeys(m map[string]*fileprovider.DesiredProject) []string {

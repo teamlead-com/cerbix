@@ -217,4 +217,8 @@ func TestDecodeYAMLPolicy(t *testing.T) {
 	deep := "format: 1\norganization: acme\nproject: p\nmonitors:\n  a:\n    name: A\n    type: http\n    target: "
 	deep += strings.Repeat("[", maxYAMLDepth+3)
 	wantReason(t, deep+"\n", instanceScope(), ReasonInvalidFormat)
+	// Alias bomb: an anchored 10-item seq aliased ~1500× expands (via the alias-following walk)
+	// past maxYAMLNodes and is rejected — before any struct decode.
+	bomb := "format: 1\nx: &a [a,a,a,a,a,a,a,a,a,a]\ny: [" + strings.Repeat("*a,", 1500) + "*a]\n"
+	wantReason(t, bomb, instanceScope(), ReasonInvalidFormat)
 }

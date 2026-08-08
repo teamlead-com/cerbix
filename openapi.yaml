@@ -2214,6 +2214,8 @@ components:
       properties:
         provider: { type: string, description: 'Provider name from config.' }
         scope_type: { type: string, enum: [instance, organization, project] }
+        scope_org: { type: string, description: 'Organization slug for organization/project-scoped providers.' }
+        scope_project: { type: string, description: 'Project slug for project-scoped providers.' }
         leader: { type: boolean, description: 'Whether this process currently holds the provider leader lock.' }
         last_scan_unix: { type: integer, format: int64, description: 'Unix seconds of the last reconcile attempt (0 = never).' }
         last_success_unix: { type: integer, format: int64, description: 'Unix seconds of the last successful generation (sticky; 0 = never).' }

@@ -10,6 +10,42 @@ import (
 	"github.com/teamlead-com/cerbix/internal/config"
 )
 
+// maxDirEntries bounds how many directory entries one scan/fingerprint will read, so a
+// pathologically huge provider directory cannot exhaust memory/CPU before max_files is even
+// applied. The provider directory is operator-managed (a mount/ConfigMap/git-sync checkout), so
+// this is a robustness backstop, not a security boundary; hitting it is a misconfiguration and
+// makes the scan ambiguous (last-known-good is kept, nothing is orphaned).
+const maxDirEntries = 50000
+
+// ReadDirBounded reads up to maxDirEntries directory entries in batches (via os.File.ReadDir),
+// returning truncated=true if the directory has more — it stops reading rather than
+// materializing the entire listing. Entries are in directory order (callers sort as needed).
+func ReadDirBounded(dir string) (entries []os.DirEntry, truncated bool, err error) {
+	return readDirBoundedN(dir, maxDirEntries)
+}
+
+// readDirBoundedN is ReadDirBounded with an injectable cap (for tests).
+func readDirBoundedN(dir string, max int) (entries []os.DirEntry, truncated bool, err error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close() //nolint:errcheck // read-only handle
+	for {
+		batch, berr := f.ReadDir(512)
+		entries = append(entries, batch...)
+		if len(entries) > max {
+			return entries[:max], true, nil
+		}
+		if berr == io.EOF {
+			return entries, false, nil
+		}
+		if berr != nil {
+			return nil, false, berr
+		}
+	}
+}
+
 // Candidate is one eligible bundle file read from a provider directory.
 type Candidate struct {
 	Path    string // absolute
@@ -37,7 +73,7 @@ func ScanDirectory(dir string, limits config.ProviderLimits) ([]Candidate, []Sca
 	if err != nil {
 		return nil, nil, err
 	}
-	entries, err := os.ReadDir(dir)
+	entries, truncated, err := ReadDirBounded(dir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -50,6 +86,12 @@ func ScanDirectory(dir string, limits config.ProviderLimits) ([]Candidate, []Sca
 		total   int64
 		fileCnt int
 	)
+	if truncated {
+		// A pathologically huge directory: enumeration was bounded before max_files could even
+		// be applied. Treat it as an ambiguous scan (a scan-level rejection → SuspendOrphan) so
+		// nothing is orphaned on a listing we could not fully read (§9.1/§17).
+		errs = append(errs, ScanError{RelPath: "", Err: &BundleError{Reason: ReasonInvalidFormat, Msg: "provider directory entry count exceeds bound"}})
+	}
 	for _, e := range entries {
 		name := e.Name()
 		if strings.HasPrefix(name, ".") {

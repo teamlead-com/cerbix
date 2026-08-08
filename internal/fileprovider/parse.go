@@ -142,6 +142,16 @@ func checkYAMLPolicy(n *yaml.Node, depth int, count *int) *BundleError {
 	if *count > maxYAMLNodes {
 		return rejectf(ReasonInvalidFormat, "", "bundle exceeds the maximum node count %d", maxYAMLNodes)
 	}
+	// An alias references an anchored subtree. Follow it and count that subtree against the SAME
+	// budget on EVERY use, so a billion-laughs alias bomb (aliases of aliases) blows maxYAMLNodes
+	// / maxYAMLDepth and is rejected rather than expanding on decode (spec §14). Alias nodes
+	// carry no user tag, so they skip the tag allowlist.
+	if n.Kind == yaml.AliasNode {
+		if n.Alias != nil {
+			return checkYAMLPolicy(n.Alias, depth+1, count)
+		}
+		return nil
+	}
 	if !allowedYAMLTags[n.Tag] {
 		return rejectf(ReasonInvalidFormat, "", "unsupported or custom YAML tag %q", n.Tag)
 	}

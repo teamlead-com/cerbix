@@ -397,6 +397,27 @@ func TestProvidersFileRejections(t *testing.T) {
 	}
 }
 
+// TestProvidersFileSymlinkOverlapRejected covers the canonical-root overlap check: two
+// providers whose directories are lexically distinct but symlink to the SAME real path are
+// rejected as overlapping (EvalSymlinks, not just filepath.Clean).
+func TestProvidersFileSymlinkOverlapRejected(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	link := filepath.Join(base, "link")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	y := "providers:\n  file:\n    a:\n      directory: " + real +
+		"\n      scope: {type: instance}\n    b:\n      directory: " + link +
+		"\n      scope: {type: instance}\n"
+	if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("symlinked duplicate root must be rejected as overlap, got %v", err)
+	}
+}
+
 func TestProviderOrphanGraceZeroIsImmediate(t *testing.T) {
 	// Explicit 0 means immediate disable (spec §4.1), NOT the 30s default.
 	cfg, err := Parse([]byte("providers:\n  file:\n    p:\n      directory: /x\n      orphan_grace_period: 0s\n      scope: {type: instance}\n"))

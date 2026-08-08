@@ -12,6 +12,8 @@ import (
 type FileProviderRuntimeStatus struct {
 	Provider        string `json:"provider"`
 	ScopeType       string `json:"scope_type"`
+	ScopeOrg        string `json:"scope_org,omitempty"`
+	ScopeProject    string `json:"scope_project,omitempty"`
 	Leader          bool   `json:"leader"`
 	LastScanUnix    int64  `json:"last_scan_unix,omitempty"`
 	LastSuccessUnix int64  `json:"last_success_unix,omitempty"`

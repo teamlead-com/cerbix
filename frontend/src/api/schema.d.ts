@@ -4939,6 +4939,10 @@ export interface components {
             provider?: string;
             /** @enum {string} */
             scope_type?: "instance" | "organization" | "project";
+            /** @description Organization slug for organization/project-scoped providers. */
+            scope_org?: string;
+            /** @description Project slug for project-scoped providers. */
+            scope_project?: string;
             /** @description Whether this process currently holds the provider leader lock. */
             leader?: boolean;
             /**

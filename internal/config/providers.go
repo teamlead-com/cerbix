@@ -155,7 +155,13 @@ func (c *Config) validateProviders() error {
 		if err := p.validate(name); err != nil {
 			return err
 		}
+		// Compare on the CANONICAL path so two lexically-distinct directories that symlink to
+		// the same real root are still detected as overlapping. EvalSymlinks needs the path to
+		// exist; if it does not yet (created later), fall back to the lexical clean path.
 		clean := filepath.Clean(p.Directory)
+		if resolved, rerr := filepath.EvalSymlinks(p.Directory); rerr == nil {
+			clean = resolved
+		}
 		for existing, other := range roots {
 			if clean == existing || isSubpath(existing, clean) || isSubpath(clean, existing) {
 				return fmt.Errorf("providers.file.%s: directory %q overlaps provider %q root %q", name, p.Directory, other, existing)

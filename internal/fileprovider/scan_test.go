@@ -25,6 +25,28 @@ func defaultLimits() config.ProviderLimits {
 	return config.ProviderLimits{MaxFiles: 1000, MaxFileBytes: 1 << 20, MaxTotalBytes: 16 << 20, MaxMonitorsPerBundle: 1000, MaxManagedMonitors: 5000}
 }
 
+// TestReadDirBoundedTruncates covers the enumeration bound: reading stops after the cap and
+// reports truncated, so a pathologically large provider directory is never fully materialized.
+func TestReadDirBoundedTruncates(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 20; i++ {
+		writeFile(t, dir, "f"+string(rune('a'+i))+".yaml", "x")
+	}
+	// Cap below the entry count → truncated, and exactly cap entries returned.
+	entries, truncated, err := readDirBoundedN(dir, 5)
+	if err != nil {
+		t.Fatalf("readDirBoundedN: %v", err)
+	}
+	if !truncated || len(entries) != 5 {
+		t.Fatalf("want truncated with 5 entries, got truncated=%v len=%d", truncated, len(entries))
+	}
+	// Cap above the entry count → not truncated, all entries.
+	entries, truncated, err = readDirBoundedN(dir, 1000)
+	if err != nil || truncated || len(entries) != 20 {
+		t.Fatalf("want all 20 entries untruncated, got truncated=%v len=%d err=%v", truncated, len(entries), err)
+	}
+}
+
 func TestScanDirectoryEligibility(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "a.yaml", bundleYAML("acme", "payments", "api"))

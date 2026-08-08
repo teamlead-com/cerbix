@@ -17,6 +17,12 @@ import (
 	"github.com/teamlead-com/cerbix/internal/fileprovider"
 )
 
+// applyBundleTimeout bounds the WHOLE bundle apply (Begin → plan → writes → Commit), on top of
+// the per-statement statement_timeout/lock_timeout set inside the tx (spec §17): a bundle with
+// thousands of statements cannot wedge the reconcile loop even if each statement stays under its
+// own limit.
+const applyBundleTimeout = 60 * time.Second
+
 // ErrBundleTenantNotFound means the bundle's organization/project slug pair does not resolve
 // to an existing tenant. The file provider never creates tenants (spec §5); the caller keeps
 // last-known-good and records the rejection.
@@ -50,6 +56,8 @@ type ApplyResult struct {
 // restore only), keeping last-known-good for every absent UID (spec §9.1). The caller computes
 // it PROVIDER-WIDE before applying any bundle.
 func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int, allowAbsence bool) (ApplyResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, applyBundleTimeout)
+	defer cancel()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("store: begin apply bundle: %w", err)
@@ -69,6 +77,8 @@ func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, d
 // advisory lock (connection death) also aborts this transaction — a former leader can never
 // commit after losing leadership (fencing, spec §17).
 func (ls *LeaderSession) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int, allowAbsence bool) (ApplyResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, applyBundleTimeout)
+	defer cancel()
 	tx, err := ls.conn.Begin(ctx)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("store: begin apply bundle (leader): %w", err)

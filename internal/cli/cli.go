@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -864,6 +865,16 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		if !info.IsDir() {
 			return fmt.Errorf("file provider %q: %q is not a directory", name, pc.Directory)
 		}
+		// Stat proves existence but not that the directory can be ENUMERATED (a dir with no
+		// execute/read bit stats fine yet fails ReadDir). Fail fast on that too (§4.1).
+		if dh, derr := os.Open(pc.Directory); derr != nil {
+			return fmt.Errorf("file provider %q: directory %q not openable at startup: %w", name, pc.Directory, derr)
+		} else if _, derr := dh.ReadDir(1); derr != nil && derr != io.EOF {
+			_ = dh.Close()
+			return fmt.Errorf("file provider %q: directory %q not enumerable at startup: %w", name, pc.Directory, derr)
+		} else {
+			_ = dh.Close()
+		}
 		p := fpruntime.New(name, pc, fpruntime.NewStoreApplier(st), logger).
 			WithMetrics(registry).WithReconcileLimiter(reconcileSem).WithStatus(statusReg)
 		spawn(func() { p.Run(ctx) })
@@ -884,6 +895,8 @@ func (a fpStatusAdapter) FileProviderRuntimeStatuses() []api.FileProviderRuntime
 		out = append(out, api.FileProviderRuntimeStatus{
 			Provider:        s.Provider,
 			ScopeType:       s.ScopeType,
+			ScopeOrg:        s.ScopeOrg,
+			ScopeProject:    s.ScopeProject,
 			Leader:          s.Leader,
 			LastScanUnix:    s.LastScanUnix,
 			LastSuccessUnix: s.LastSuccessUnix,

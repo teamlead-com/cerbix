@@ -2644,3 +2644,20 @@ strict non-secret `settings` schema (composite/synthetic) or the `secret_ref` co
 (credentialed types) lands in a later iteration. This is the spec's own scope clause, not a
 simplification: there is no generic `config` escape hatch, and any secret-bearing key is
 rejected `inline_secret_forbidden` before type resolution.
+
+## D-0146 — File-provider canonical hash excludes dependency edges (iter-0089)
+Spec §7 lists "dependency UIDs" among the set-like values folded into the canonical semantic
+hash, while §9.2 / D-0142 require a dependency-only change to be a `dependency_update` that
+does NOT bump `execution_revision`. Folding dependencies into a single hash makes those two
+clauses contradict: any dependency edit would change the hash and be classified as a
+revision-bumping `update`.
+
+Resolution (reconciles both, no spec weakening): the canonical **monitor** hash covers only
+the monitor's own execution-affecting config (name, type, target, schedule, conditions,
+tags, region, enabled, auto-incident, settings) and EXCLUDES dependency UIDs. Dependencies
+are compared as a separate normalized (sorted+deduped) set. The planner then classifies:
+`noop` iff config-hash equal AND dependency-set equal; `update` (revision bump) iff the
+config-hash changed; `dependency_update` (NO revision bump) iff only the dependency-set
+changed. This preserves §7's intent (order/comment-insensitive no-op detection, including
+dependency order) and honors §9.2/D-0142 exactly. `execution_revision` is bumped only by a
+real monitor-config change, never by a dependency-graph edit.

@@ -32,8 +32,11 @@ type canonicalMonitor struct {
 	AutoIncident     bool              `json:"auto_incident"`
 	Conditions       []string          `json:"conditions"` // order-preserved
 	Tags             []string          `json:"tags"`       // sorted+deduped
-	DependsOn        []string          `json:"depends_on"` // sorted+deduped
 	Config           map[string]string `json:"config,omitempty"`
+	// NOTE: depends_on is deliberately EXCLUDED from the semantic hash. Dependency edges are
+	// a separate reconcile axis (dependency_update) that does NOT bump execution_revision
+	// (D-0142); the planner compares dependency sets on their own. Folding them into the hash
+	// would misclassify a dep-only change as a semantic update.
 }
 
 // canonicalHash computes the semantic hash of a normalized monitor. Because
@@ -58,7 +61,6 @@ func canonicalHash(uid string, m domain.Monitor) string {
 		AutoIncident:     m.AutoIncident,
 		Conditions:       append([]string(nil), m.Conditions...),
 		Tags:             normStringSet(m.Tags),
-		DependsOn:        normStringSet(m.DependsOn),
 		Config:           m.Config,
 	}
 	b, err := json.Marshal(cm)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/fileprovider"
@@ -32,6 +33,7 @@ type ApplyResult struct {
 	Generation   int64
 	Counts       map[fileprovider.Action]int
 	Changed      bool // execution config changed → scheduler NOTIFY emitted
+	NoChange     bool // nothing changed at all → NO DB write, generation NOT advanced (§7/§17)
 }
 
 // ApplyFileManagedBundle reconciles one desired project bundle into PostgreSQL in ONE
@@ -173,7 +175,18 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 	}
 	newGen := gen + 1
 
-	changed := false
+	// Track what ACTUALLY changed so a no-op writes nothing and the generation only advances on
+	// a real state change (spec §7/§17):
+	//   execChanged  → execution config changed → scheduler NOTIFY + audit
+	//   depChanged   → declarative dependency graph changed → audit (no reschedule)
+	//   stateChanged → any managed_monitors/monitor/dep mutation → bump generation + upsert bundle
+	//   pathChanged  → only the provenance source_path drifted (a rename; no desired change)
+	curHash := make(map[string]string, len(current))
+	for _, c := range current {
+		curHash[c.UID] = c.Hash
+	}
+	var execChanged, depChanged, stateChanged, pathChanged bool
+
 	// Phase 1 — monitors + provenance.
 	for _, e := range plan.Entries {
 		switch e.Action {
@@ -198,9 +211,9 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 				created.ID, providerID, orgID, projID, e.UID, desired.Monitors[e.UID].Hash, sourcePath, newGen, dbNow); err != nil {
 				return ApplyResult{}, fmt.Errorf("store: insert provenance: %w", err)
 			}
-			changed = true
+			execChanged, stateChanged = true, true
 
-		case fileprovider.ActionUpdate, fileprovider.ActionRestore:
+		case fileprovider.ActionUpdate:
 			id := idByUID[e.UID]
 			m := desired.Monitors[e.UID].Monitor
 			m.ID, m.ProjectID = id, projID
@@ -213,32 +226,77 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 				id, desired.Monitors[e.UID].Hash, sourcePath, newGen, dbNow); err != nil {
 				return ApplyResult{}, fmt.Errorf("store: update provenance: %w", err)
 			}
-			changed = true
+			execChanged, stateChanged = true, true
 
-		case fileprovider.ActionDependencyUpdate, fileprovider.ActionNoop:
-			// Provenance-only: a no-op (comment/rename) or a dependency-only change must NOT
-			// write the monitor row or bump execution_revision (spec §7). Advancing generation
-			// and refreshing the relative path is provenance, not a semantic write.
+		case fileprovider.ActionRestore:
+			// Reintroducing a previously-orphaned UID (spec §10). Do a SEMANTIC write only when
+			// actually needed — the monitor was grace-disabled (must re-enable) or its config
+			// changed. A restore within grace with unchanged config only CLEARS the orphan mark;
+			// it must NOT bump execution_revision, reset the scheduler watermark, notify, or
+			// audit (§10: restore bumps revision only when required).
+			id := idByUID[e.UID]
+			if !enabledByUID[e.UID] || desired.Monitors[e.UID].Hash != curHash[e.UID] {
+				m := desired.Monitors[e.UID].Monitor
+				m.ID, m.ProjectID = id, projID
+				if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
+					return ApplyResult{}, uerr
+				}
+				if _, err := tx.Exec(ctx,
+					`UPDATE managed_monitors SET spec_hash=$2, source_path=$3, generation=$4, orphaned_at=NULL, applied_at=$5 WHERE monitor_id=$1`,
+					id, desired.Monitors[e.UID].Hash, sourcePath, newGen, dbNow); err != nil {
+					return ApplyResult{}, fmt.Errorf("store: restore provenance: %w", err)
+				}
+				execChanged = true
+			} else {
+				// Pure un-orphan: clear the mark + refresh provenance, no monitor write.
+				if _, err := tx.Exec(ctx,
+					`UPDATE managed_monitors SET source_path=$2, generation=$3, orphaned_at=NULL, applied_at=$4 WHERE monitor_id=$1`,
+					id, sourcePath, newGen, dbNow); err != nil {
+					return ApplyResult{}, fmt.Errorf("store: restore un-orphan: %w", err)
+				}
+			}
+			stateChanged = true // clearing orphaned_at is a real state change
+
+		case fileprovider.ActionDependencyUpdate:
+			// The declarative dependency graph changed (affects delivery-time suppression, not
+			// scheduling): refresh provenance + audit, but NO execution_revision bump / NOTIFY.
 			if _, err := tx.Exec(ctx,
 				`UPDATE managed_monitors SET source_path=$2, generation=$3 WHERE monitor_id=$1`,
 				idByUID[e.UID], sourcePath, newGen); err != nil {
-				return ApplyResult{}, fmt.Errorf("store: touch provenance: %w", err)
+				return ApplyResult{}, fmt.Errorf("store: dep provenance: %w", err)
+			}
+			depChanged, stateChanged = true, true
+
+		case fileprovider.ActionNoop:
+			// Nothing semantic changed. Refresh ONLY the provenance path if the file was renamed
+			// — never bump the generation or touch the monitor (spec §7). A steady state writes
+			// NOTHING, so periodic resync causes no write amplification (§17).
+			tag, err := tx.Exec(ctx,
+				`UPDATE managed_monitors SET source_path=$2 WHERE monitor_id=$1 AND source_path IS DISTINCT FROM $2`,
+				idByUID[e.UID], sourcePath)
+			if err != nil {
+				return ApplyResult{}, fmt.Errorf("store: touch provenance path: %w", err)
+			}
+			if tag.RowsAffected() > 0 {
+				pathChanged = true
 			}
 
 		case fileprovider.ActionOrphan:
-			// A UID absent from the desired set. Act on absence ONLY when the scan is
-			// trusted (allowAbsence): an ambiguous scan (unbound decode/scope error or a
-			// scan-level rejection) must never read a present-project UID as deleted — keep
-			// its last-known-good untouched (spec §9.1). When trusted, record the first
-			// orphaned_at; the grace timer below governs the eventual disable, and history is
-			// never deleted (spec §10).
+			// A UID absent from the desired set. Act on absence ONLY when the scan is trusted
+			// (allowAbsence): an ambiguous scan must never read a present-project UID as deleted
+			// (spec §9.1). When trusted, record the FIRST orphaned_at; the grace timer below
+			// governs the eventual disable, and history is never deleted (§10).
 			if !allowAbsence {
 				continue
 			}
-			if _, err := tx.Exec(ctx,
+			tag, err := tx.Exec(ctx,
 				`UPDATE managed_monitors SET orphaned_at=$2 WHERE monitor_id=$1 AND orphaned_at IS NULL`,
-				idByUID[e.UID], dbNow); err != nil {
+				idByUID[e.UID], dbNow)
+			if err != nil {
 				return ApplyResult{}, fmt.Errorf("store: mark orphan: %w", err)
+			}
+			if tag.RowsAffected() > 0 {
+				stateChanged = true // only the first absence writes; a repeat is a no-op
 			}
 		}
 	}
@@ -273,7 +331,7 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
 				return ApplyResult{}, uerr
 			}
-			changed = true
+			execChanged, stateChanged = true, true
 		}
 	}
 
@@ -303,24 +361,41 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 		}
 	}
 
-	// Bundle generation/provenance + status, upserted in the same tx.
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO file_provider_bundles (provider_id, org_id, project_id, source_path, content_hash, generation, status, last_error, applied_at, attempted_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,'applied','',$7,$7)
-		 ON CONFLICT (provider_id, org_id, project_id)
-		 DO UPDATE SET source_path=EXCLUDED.source_path, content_hash=EXCLUDED.content_hash,
-		               generation=EXCLUDED.generation, status='applied', last_error='',
-		               applied_at=EXCLUDED.applied_at, attempted_at=EXCLUDED.attempted_at, updated_at=now()`,
-		providerID, orgID, projID, sourcePath, bundleContentHash(desired), newGen, dbNow); err != nil {
-		return ApplyResult{}, fmt.Errorf("store: upsert bundle: %w", err)
+	// Bundle row: advance generation + refresh content/status ONLY on a real state change; a
+	// pure rename refreshes just the source_path (no generation bump); a true no-op writes
+	// NOTHING — periodic resync of an unchanged bundle causes no write amplification (§7/§17).
+	effGen := gen
+	switch {
+	case stateChanged:
+		effGen = newGen
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO file_provider_bundles (provider_id, org_id, project_id, source_path, content_hash, generation, status, last_error, applied_at, attempted_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,'applied','',$7,$7)
+			 ON CONFLICT (provider_id, org_id, project_id)
+			 DO UPDATE SET source_path=EXCLUDED.source_path, content_hash=EXCLUDED.content_hash,
+			               generation=EXCLUDED.generation, status='applied', last_error='',
+			               applied_at=EXCLUDED.applied_at, attempted_at=EXCLUDED.attempted_at, updated_at=now()`,
+			providerID, orgID, projID, sourcePath, bundleContentHash(desired), newGen, dbNow); err != nil {
+			return ApplyResult{}, fmt.Errorf("store: upsert bundle: %w", err)
+		}
+	case pathChanged:
+		// Rename only: keep the generation, refresh the recorded path + clear any stale error.
+		if _, err := tx.Exec(ctx,
+			`UPDATE file_provider_bundles SET source_path=$4, status='applied', last_error='', attempted_at=now(), updated_at=now()
+			  WHERE provider_id=$1 AND org_id=$2 AND project_id=$3`,
+			providerID, orgID, projID, sourcePath); err != nil {
+			return ApplyResult{}, fmt.Errorf("store: refresh bundle path: %w", err)
+		}
 	}
 
-	// Append a tenant audit record + wake the scheduler ONLY when execution config changed
-	// (spec §9 step 10 / §12) — both in THIS transaction, atomic with the monitor writes.
-	if changed {
+	// Audit when execution config OR the declarative dependency graph changed (spec §9 step 10);
+	// wake the scheduler ONLY when execution config changed (§12) — a dependency-only change
+	// affects delivery-time suppression, not scheduling. Both in THIS transaction, atomic with
+	// the monitor writes.
+	if execChanged || depChanged {
 		c := plan.Counts()
 		target := fmt.Sprintf("provider=%s project=%s gen=%d create=%d update=%d dep=%d restore=%d orphan=%d",
-			providerID, desired.Project, newGen,
+			providerID, desired.Project, effGen,
 			c[fileprovider.ActionCreate], c[fileprovider.ActionUpdate], c[fileprovider.ActionDependencyUpdate],
 			c[fileprovider.ActionRestore], c[fileprovider.ActionOrphan])
 		if _, err := tx.Exec(ctx,
@@ -328,18 +403,24 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			 VALUES ($1, NULL, false, 'file_provider.apply', $2)`, orgID, target); err != nil {
 			return ApplyResult{}, fmt.Errorf("store: audit file apply: %w", err)
 		}
+	}
+	if execChanged {
 		payload, _ := json.Marshal(struct {
 			Provider   string `json:"provider"`
 			Org        string `json:"org"`
 			Project    string `json:"project"`
 			Generation int64  `json:"generation"`
-		}{providerID, orgID, projID, newGen})
+		}{providerID, orgID, projID, effGen})
 		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, FileConfigChannel, string(payload)); err != nil {
 			return ApplyResult{}, fmt.Errorf("store: notify config change: %w", err)
 		}
 	}
 
-	return ApplyResult{Organization: desired.Organization, Project: desired.Project, Generation: newGen, Counts: plan.Counts(), Changed: changed}, nil
+	return ApplyResult{
+		Organization: desired.Organization, Project: desired.Project,
+		Generation: effGen, Counts: plan.Counts(),
+		Changed: execChanged, NoChange: !stateChanged && !pathChanged,
+	}, nil
 }
 
 // TenantRef is an (organization, project) slug pair a provider owns bundles for.
@@ -375,14 +456,20 @@ func (s *Store) FileProviderProjects(ctx context.Context, providerID string) ([]
 	return out, rows.Err()
 }
 
-// RecordBundleAttempt persists a REJECTED/ERRORED apply attempt on the bundle's diagnostics
-// row (spec §15): status + a bounded last_error + attempted_at, WITHOUT advancing the applied
-// generation or last-known-good. Slugs are resolved tenant-safely; an unresolvable tenant is
-// a no-op (an unbound file cannot be pinned to a bundle row). lastErr is truncated and must
-// already be bounded/secret-free (a reason code, not raw YAML).
-func (s *Store) RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error {
+// rowExecer is the subset of pgxpool.Pool / *pgxpool.Conn used by recordBundleAttempt, so the
+// same body runs on the pool (non-leader/tests) or on the leader's fenced connection.
+type rowExecer interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// recordBundleAttempt persists a REJECTED/ERRORED apply attempt on the bundle's diagnostics row
+// (spec §15): status + a bounded last_error + attempted_at, WITHOUT advancing the applied
+// generation or last-known-good. Slugs are resolved tenant-safely; an unresolvable tenant is a
+// no-op. lastErr is truncated and must already be bounded/secret-free (a reason code).
+func recordBundleAttempt(ctx context.Context, q rowExecer, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error {
 	var orgID, projID string
-	err := s.pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT o.id, p.id FROM projects p JOIN organizations o ON o.id = p.org_id
 		  WHERE o.slug = $1 AND p.slug = $2`, orgSlug, projSlug).Scan(&orgID, &projID)
 	if noRows(err) {
@@ -394,7 +481,7 @@ func (s *Store) RecordBundleAttempt(ctx context.Context, providerID, orgSlug, pr
 	if len(lastErr) > 500 {
 		lastErr = lastErr[:500]
 	}
-	if _, err := s.pool.Exec(ctx,
+	if _, err := q.Exec(ctx,
 		`INSERT INTO file_provider_bundles (provider_id, org_id, project_id, source_path, status, last_error, attempted_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,now())
 		 ON CONFLICT (provider_id, org_id, project_id)
@@ -404,6 +491,18 @@ func (s *Store) RecordBundleAttempt(ctx context.Context, providerID, orgSlug, pr
 		return fmt.Errorf("store: record bundle attempt: %w", err)
 	}
 	return nil
+}
+
+// RecordBundleAttempt persists a rejection on a POOL connection (tests / non-leader callers).
+func (s *Store) RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error {
+	return recordBundleAttempt(ctx, s.pool, providerID, orgSlug, projSlug, sourcePath, status, lastErr)
+}
+
+// RecordBundleAttempt persists a rejection on the LEADER's fenced connection, so a former leader
+// that has lost the advisory lock (connection death) cannot overwrite a new leader's applied
+// diagnostics with a stale error (§17). Runs on the same pinned conn the apply tx used.
+func (ls *LeaderSession) RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error {
+	return recordBundleAttempt(ctx, ls.conn, providerID, orgSlug, projSlug, sourcePath, status, lastErr)
 }
 
 // FileProviderDiagnostic is one bundle's tenant-safe status for the diagnostics API

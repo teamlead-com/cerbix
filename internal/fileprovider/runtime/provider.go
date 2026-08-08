@@ -28,16 +28,17 @@ type Applier interface {
 	TryBecomeLeaderSession(ctx context.Context, key int64) (LeaderSession, bool, error)
 	FileProviderProjects(ctx context.Context, providerID string) ([]store.TenantRef, error)
 	FileProviderCounts(ctx context.Context, providerID string) (managed, orphaned int, err error)
-	RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error
 }
 
-// LeaderSession is a held leadership whose apply transaction runs on the lock-owning
-// connection, so a lost lock aborts the in-flight apply (fencing). Implemented by
-// *store.LeaderSession.
+// LeaderSession is a held leadership whose mutating operations run on the lock-owning
+// connection, so a lost lock aborts them (fencing). Implemented by *store.LeaderSession.
+// RecordBundleAttempt lives here (not on Applier) so a former leader cannot overwrite a new
+// leader's applied diagnostics with a stale rejection (spec §17).
 type LeaderSession interface {
 	Check(ctx context.Context) (bool, error)
 	Release()
 	ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int, allowAbsence bool) (store.ApplyResult, error)
+	RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error
 }
 
 // MetricsSink receives the provider's bounded observability signals (spec §16). Nil-safe:
@@ -99,9 +100,11 @@ func (p *Provider) warnThrottled(key, msg string, kv ...any) {
 	p.logger.Warn(msg, kv...)
 }
 
-// persistAttempt records a bindable rejection on the bundle's diagnostics row (best-effort).
-func (p *Provider) persistAttempt(ctx context.Context, org, proj, path, status, reason string) {
-	if err := p.applier.RecordBundleAttempt(ctx, p.name, org, proj, path, status, reason); err != nil {
+// persistAttempt records a bindable rejection on the bundle's diagnostics row (best-effort),
+// through the LEADER's fenced connection so a former leader cannot clobber a new leader's
+// applied state with a stale error (spec §17).
+func (p *Provider) persistAttempt(ctx context.Context, session LeaderSession, org, proj, path, status, reason string) {
+	if err := session.RecordBundleAttempt(ctx, p.name, org, proj, path, status, reason); err != nil {
 		p.warnThrottled(org+"/"+proj, "file_provider_attempt_persist_failed", "error", err.Error())
 	}
 }
@@ -275,6 +278,14 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		rep.LastError = string(se.Err.Reason)
 		p.warnThrottled(se.RelPath, "file_provider_bundle_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
 	}
+	// Persist tenant-bound (duplicate) rejections to diagnostics so a frozen project SHOWS as
+	// rejected, not silently process-local (§15). Unbound decode/scope/scan rejections have no
+	// tenant to pin, so they remain log-only (documented limitation).
+	for key := range grp.Frozen {
+		if org, proj, ok := splitTenantKey(key); ok {
+			p.persistAttempt(ctx, session, org, proj, grp.Paths[key], "rejected", string(fileprovider.ReasonDuplicateProject))
+		}
+	}
 
 	// Trust of absence is decided PROVIDER-WIDE, BEFORE any apply (§9.1). An unbindable file —
 	// a decode/scope failure (grp.SuspendOrphan) or a scan-level rejection (over-size, symlink
@@ -299,11 +310,12 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 			rep.Rejected++
 			rep.LastError = "max_monitors_per_bundle"
 			p.warnThrottled(key, "file_provider_bundle_rejected", "org", dp.Organization, "project", dp.Project, "reason", "max_monitors_per_bundle")
-			p.persistAttempt(ctx, dp.Organization, dp.Project, grp.Paths[key], "rejected", "max_monitors_per_bundle")
+			p.persistAttempt(ctx, session, dp.Organization, dp.Project, grp.Paths[key], "rejected", "max_monitors_per_bundle")
 			continue
 		}
 		presentKeys[key] = true
-		if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace, p.limits.MaxManagedMonitors, allowAbsence); aerr != nil {
+		res, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace, p.limits.MaxManagedMonitors, allowAbsence)
+		if aerr != nil {
 			rep.Rejected++
 			reason, status := classify(aerr), "error"
 			rep.LastError = reason
@@ -312,10 +324,14 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 				status = "rejected"
 			}
 			p.warnThrottled(key, "file_provider_apply_failed", "org", dp.Organization, "project", dp.Project, "reason", reason)
-			p.persistAttempt(ctx, dp.Organization, dp.Project, grp.Paths[key], status, reason)
+			p.persistAttempt(ctx, session, dp.Organization, dp.Project, grp.Paths[key], status, reason)
 			continue
 		}
-		rep.Applied++
+		// A pure no-op (unchanged bundle) is NOT an "applied" change — leaving rep.Applied at 0
+		// keeps reconcile_total{outcome="noop"} reachable in steady state (§16/§17).
+		if !res.NoChange {
+			rep.Applied++
+		}
 	}
 
 	// Whole-project disappearance: an owned project absent from the valid snapshot is orphaned
@@ -449,6 +465,15 @@ func sortedKeys(m map[string]*fileprovider.DesiredProject) []string {
 	return out
 }
 
+// splitTenantKey splits a grouping key "org/project" into its slugs. ok=false if malformed.
+func splitTenantKey(key string) (org, project string, ok bool) {
+	i := strings.IndexByte(key, '/')
+	if i <= 0 || i == len(key)-1 {
+		return "", "", false
+	}
+	return key[:i], key[i+1:], true
+}
+
 // classify maps an apply error to a bounded reason for logs (never raw YAML/secrets).
 func classify(err error) string {
 	var be *fileprovider.BundleError
@@ -510,7 +535,4 @@ func (a storeApplier) FileProviderProjects(ctx context.Context, providerID strin
 }
 func (a storeApplier) FileProviderCounts(ctx context.Context, providerID string) (int, int, error) {
 	return a.st.FileProviderCounts(ctx, providerID)
-}
-func (a storeApplier) RecordBundleAttempt(ctx context.Context, providerID, orgSlug, projSlug, sourcePath, status, lastErr string) error {
-	return a.st.RecordBundleAttempt(ctx, providerID, orgSlug, projSlug, sourcePath, status, lastErr)
 }

@@ -28,7 +28,6 @@ type applyCall struct {
 type fakeApplier struct {
 	owned      []store.TenantRef
 	session    *fakeSession
-	attempts   int
 	ownedErr   error // injected: FileProviderProjects failure
 	countsErr  error // injected: FileProviderCounts failure
 	countsMgd  int
@@ -56,19 +55,23 @@ func (f *fakeApplier) FileProviderCounts(_ context.Context, _ string) (int, int,
 	}
 	return f.countsMgd, f.countsOrph, nil
 }
-func (f *fakeApplier) RecordBundleAttempt(_ context.Context, _, _, _, _, _, _ string) error {
-	f.attempts++
-	return nil
-}
 
-// fakeSession is a fenced-apply stand-in that records the mutating calls.
-type fakeSession struct{ calls []applyCall }
+// fakeSession is a fenced-apply stand-in that records the mutating calls + attempts.
+type fakeSession struct {
+	calls    []applyCall
+	attempts int
+	noChange bool // when true, every apply reports NoChange (steady-state no-op)
+}
 
 func (s *fakeSession) Check(context.Context) (bool, error) { return true, nil }
 func (s *fakeSession) Release()                            {}
 func (s *fakeSession) ApplyFileManagedBundle(_ context.Context, _ string, dp *fileprovider.DesiredProject, path string, _ time.Duration, _ int, allowAbsence bool) (store.ApplyResult, error) {
 	s.calls = append(s.calls, applyCall{dp.Organization, dp.Project, len(dp.Monitors), path, allowAbsence})
-	return store.ApplyResult{Organization: dp.Organization, Project: dp.Project}, nil
+	return store.ApplyResult{Organization: dp.Organization, Project: dp.Project, NoChange: s.noChange}, nil
+}
+func (s *fakeSession) RecordBundleAttempt(_ context.Context, _, _, _, _, _, _ string) error {
+	s.attempts++
+	return nil
 }
 
 func testProvider(dir string, applier Applier) *Provider {
@@ -358,6 +361,38 @@ func TestReconcileCountsErrorNoFalseSuccess(t *testing.T) {
 	}
 	if fm.lastSuccess != 0 {
 		t.Fatalf("an unverifiable scan (counts lookup failed) must NOT advance last_success, got %d", fm.lastSuccess)
+	}
+}
+
+// TestReconcileNoopNotCountedApplied covers §16/§17: a bundle apply that reports NoChange must
+// not increment rep.Applied, so reconcile_total{outcome="noop"} is reachable in steady state.
+func TestReconcileNoopNotCountedApplied(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.yaml", bundle("acme", "payments"))
+	fa := &fakeApplier{session: &fakeSession{noChange: true}}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+	if rep.Applied != 0 || rep.Rejected != 0 {
+		t.Fatalf("a no-op apply must not count as applied/rejected: %+v", rep)
+	}
+	if len(fa.sess().calls) != 1 {
+		t.Fatalf("the bundle must still be applied (as a no-op), got %d calls", len(fa.sess().calls))
+	}
+}
+
+// TestReconcilePersistsDuplicateRejection covers §15/P1#7: a duplicate-target (frozen) project
+// is tenant-bound, so its rejection is persisted to diagnostics through the fenced session —
+// not left only in the process log.
+func TestReconcilePersistsDuplicateRejection(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.yaml", bundle("acme", "payments"))
+	write(t, dir, "b.yaml", bundle("acme", "payments")) // same tenant → duplicate → frozen
+	fa := &fakeApplier{}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+	if rep.Rejected == 0 {
+		t.Fatalf("duplicate project must be rejected: %+v", rep)
+	}
+	if fa.sess().attempts == 0 {
+		t.Fatal("a duplicate (tenant-bound) rejection must be persisted via the fenced session")
 	}
 }
 

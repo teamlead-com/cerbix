@@ -86,14 +86,21 @@ monitors:
 		t.Fatalf("dependency edge missing: %d", deps)
 	}
 
-	// --- No-op: same bundle → no revision bump, no updated_at change, generation advances ---
+	// --- No-op: same bundle, same path → NO DB write at all, generation does NOT advance
+	// (§7/§17: periodic resync of an unchanged bundle must not amplify writes). ---
 	res = applyBundle(t, st, ctx, bundle, 0)
-	if res.Changed || res.Generation != 2 || res.Counts[fileprovider.ActionNoop] != 2 {
-		t.Fatalf("noop result = %+v", res)
+	if res.Changed || !res.NoChange || res.Generation != 1 || res.Counts[fileprovider.ActionNoop] != 2 {
+		t.Fatalf("noop result = %+v (want NoChange, generation unchanged at 1)", res)
 	}
 	_, rev2, _, updated2, _ := monRow(t, st, ctx, "api")
 	if rev2 != apiRev || !updated2.Equal(apiUpdated) {
 		t.Fatalf("no-op must not touch the monitor: rev %d→%d updated %v→%v", apiRev, rev2, apiUpdated, updated2)
+	}
+	// The bundle row's generation must also be unchanged by the no-op.
+	var genAfterNoop int64
+	_ = st.pool.QueryRow(ctx, `SELECT generation FROM file_provider_bundles WHERE provider_id='platform'`).Scan(&genAfterNoop)
+	if genAfterNoop != 1 {
+		t.Fatalf("no-op must not advance the bundle generation, got %d", genAfterNoop)
 	}
 
 	// --- Semantic update: change interval → revision bump ---
@@ -288,6 +295,92 @@ func TestRecordBundleAttempt(t *testing.T) {
 	if diags, _ := st.FileProviderDiagnostics(ctx, ""); len(diags) != 1 {
 		t.Fatalf("unresolvable tenant must not create a row, got %d", len(diags))
 	}
+}
+
+// TestApplyRestoreNoConfigChangeNoRevisionBump covers §10 / P1#4: a UID that reappears WITHIN
+// grace while still enabled and with unchanged config must only clear the orphan mark — it must
+// NOT bump execution_revision, reset the scheduler watermark, notify, or audit.
+func TestApplyRestoreNoConfigChangeNoRevisionBump(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	_, _ = st.CreateProject(ctx, org.ID, "payments", "Payments")
+	one := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  a: {name: A, type: http, target: https://a, interval: 30s, timeout: 5s}\n"
+	empty := "format: 1\norganization: acme\nproject: payments\nmonitors: {}\n"
+
+	applyBundle(t, st, ctx, one, 0)
+	_, rev0, en0, _, _ := monRow(t, st, ctx, "a")
+	if !en0 {
+		t.Fatal("A must start enabled")
+	}
+	// Mark absence with a LARGE grace so A is orphaned but NOT disabled (still enabled).
+	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, empty), "p.yaml", time.Hour, 0, true); err != nil {
+		t.Fatalf("orphan-mark apply: %v", err)
+	}
+	if en, orph := uidState(t, st, ctx, "a"); !en || !orph {
+		t.Fatalf("A should be orphaned-but-enabled within grace (en=%v orph=%v)", en, orph)
+	}
+	auditBefore := auditCount(t, st, ctx)
+	// Restore with UNCHANGED config while still enabled → pure un-orphan.
+	res, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, one), "p.yaml", 0, 0, true)
+	if err != nil {
+		t.Fatalf("restore apply: %v", err)
+	}
+	if res.Changed {
+		t.Fatalf("un-orphan with no config change must NOT report an execution change: %+v", res)
+	}
+	_, rev1, en1, _, _ := monRow(t, st, ctx, "a")
+	if rev1 != rev0 {
+		t.Fatalf("un-orphan must NOT bump execution_revision: %d → %d", rev0, rev1)
+	}
+	if !en1 {
+		t.Fatal("A must stay enabled after un-orphan")
+	}
+	if _, orph := uidState(t, st, ctx, "a"); orph {
+		t.Fatal("un-orphan must clear orphaned_at")
+	}
+	if auditCount(t, st, ctx) != auditBefore {
+		t.Fatal("a config-unchanged un-orphan must NOT write an audit record")
+	}
+}
+
+// TestApplyDependencyChangeAudited covers §9 / P1#7: a dependency-only mutation changes the
+// declarative graph and MUST be audited (even though it does not bump execution_revision).
+func TestApplyDependencyChangeAudited(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	_, _ = st.CreateProject(ctx, org.ID, "payments", "Payments")
+	withDep := "format: 1\norganization: acme\nproject: payments\nmonitors:\n" +
+		"  a: {name: A, type: http, target: https://a, interval: 30s, timeout: 5s, depends_on: [b]}\n" +
+		"  b: {name: B, type: http, target: https://b, interval: 30s, timeout: 5s}\n"
+	noDep := "format: 1\norganization: acme\nproject: payments\nmonitors:\n" +
+		"  a: {name: A, type: http, target: https://a, interval: 30s, timeout: 5s}\n" +
+		"  b: {name: B, type: http, target: https://b, interval: 30s, timeout: 5s}\n"
+
+	applyBundle(t, st, ctx, withDep, 0)
+	_, revBefore, _, _, _ := monRow(t, st, ctx, "a")
+	auditBefore := auditCount(t, st, ctx)
+
+	res := applyBundle(t, st, ctx, noDep, 0)
+	if res.Counts[fileprovider.ActionDependencyUpdate] != 1 {
+		t.Fatalf("expected a dependency-only change, got %+v", res)
+	}
+	_, revAfter, _, _, _ := monRow(t, st, ctx, "a")
+	if revAfter != revBefore {
+		t.Fatalf("dependency-only change must NOT bump execution_revision: %d → %d", revBefore, revAfter)
+	}
+	if auditCount(t, st, ctx) != auditBefore+1 {
+		t.Fatal("a dependency-only change must be audited")
+	}
+}
+
+// auditCount returns the number of file_provider.apply audit rows.
+func auditCount(t *testing.T, st *Store, ctx context.Context) int {
+	t.Helper()
+	var n int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action='file_provider.apply'`).Scan(&n); err != nil {
+		t.Fatalf("audit count: %v", err)
+	}
+	return n
 }
 
 // uidState reads a managed monitor's enabled flag and whether it is orphaned (orphaned_at set).

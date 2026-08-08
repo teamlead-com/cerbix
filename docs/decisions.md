@@ -2633,3 +2633,14 @@ write/bump revision; real config changes use the D-0142 `UpdateMonitor`/
 strict and bounded, allow no environment expansion/inline secrets, and expose explicit
 degraded/LKG observability rather than applying partial invalid state. Full contract,
 failure matrix, rollout, and acceptance tests: `docs/specs/func-monitoring-as-code.md`.
+
+**Addendum (iter-0087, contract foundation).** Applying spec §3.1 ("a type is available only
+when every required type-specific field has a strict non-secret schema"), the v1 file
+provider's supported monitor types are the ones fully expressible by common fields —
+`http, tcp, icmp, dns, tls, grpc, websocket, ssh, push`. Types needing a typed `settings`
+object (`composite`, `synthetic`) or credentials (`postgres, mysql, redis, promql,
+rabbitmq`) are rejected by the parser with a bounded `unsupported_type` reason until their
+strict non-secret `settings` schema (composite/synthetic) or the `secret_ref` contract
+(credentialed types) lands in a later iteration. This is the spec's own scope clause, not a
+simplification: there is no generic `config` escape hatch, and any secret-bearing key is
+rejected `inline_secret_forbidden` before type resolution.

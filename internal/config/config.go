@@ -33,6 +33,7 @@ type Config struct {
 	Security           SecurityConfig           `yaml:"security"`
 	Mail               MailConfig               `yaml:"mail"`
 	Pull               PullConfig               `yaml:"pull"`
+	Providers          ProvidersConfig          `yaml:"providers"`
 }
 
 // PullConfig configures the HTTP-pull transport (an alternative to RabbitMQ for a geo
@@ -357,6 +358,9 @@ func Parse(data []byte) (*Config, error) {
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
+	// Per-entry provider defaults can only be applied after decode (map keys are unknown to
+	// defaults()); they run before Validate so the bounds check sees resolved values.
+	cfg.normalizeProviders()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -471,6 +475,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("result.revision_mode must be enforce|observe: %q", c.Result.RevisionMode)
 	}
 	if _, err := c.Server.TrustedProxyNets(); err != nil {
+		return err
+	}
+	if err := c.validateProviders(); err != nil {
 		return err
 	}
 	if _, err := c.Security.Keys(); err != nil {

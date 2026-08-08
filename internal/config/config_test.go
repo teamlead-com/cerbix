@@ -352,3 +352,47 @@ func TestExpandEnvStrict(t *testing.T) {
 		t.Fatalf("expand = %q, want %q", got, "a=val b= c=$literal")
 	}
 }
+
+func TestProvidersFileValid(t *testing.T) {
+	cfg, err := Parse([]byte("providers:\n  file:\n    platform:\n      directory: /etc/cerbix/monitoring.d\n      scope:\n        type: instance\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	p, ok := cfg.Providers.File["platform"]
+	if !ok {
+		t.Fatal("provider not parsed")
+	}
+	// Defaults applied by normalizeProviders.
+	if p.Debounce.Std().String() != "2s" || p.ResyncInterval.Std().String() != "30s" {
+		t.Fatalf("defaults not applied: %+v", p)
+	}
+	if p.Limits.MaxFiles != 1000 || p.Limits.MaxManagedMonitors != 5000 {
+		t.Fatalf("limit defaults not applied: %+v", p.Limits)
+	}
+}
+
+func TestProvidersFileRejections(t *testing.T) {
+	cases := []struct {
+		name, yaml, want string
+	}{
+		{"bad name", "providers:\n  file:\n    BadName:\n      directory: /x\n      scope: {type: instance}\n", "invalid provider name"},
+		{"relative dir", "providers:\n  file:\n    p:\n      directory: rel/dir\n      scope: {type: instance}\n", "absolute path"},
+		{"root dir", "providers:\n  file:\n    p:\n      directory: /\n      scope: {type: instance}\n", "filesystem root"},
+		{"missing scope", "providers:\n  file:\n    p:\n      directory: /x\n", "scope.type is required"},
+		{"bad scope", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: cluster}\n", "scope.type must be"},
+		{"instance with org", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: instance, organization: acme}\n", "must not set"},
+		{"org without org", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: organization}\n", "requires scope.organization"},
+		{"project without project", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: project, organization: acme}\n", "requires scope.organization and scope.project"},
+		{"bad debounce", "providers:\n  file:\n    p:\n      directory: /x\n      debounce: 5m\n      scope: {type: instance}\n", "debounce must be"},
+		{"overlap roots", "providers:\n  file:\n    a:\n      directory: /etc/cerbix/mon\n      scope: {type: instance}\n    b:\n      directory: /etc/cerbix/mon/sub\n      scope: {type: instance}\n", "overlaps"},
+		{"limit over max", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: instance}\n      limits: {max_files: 999999999}\n", "safety maximum"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Parse([]byte(c.yaml))
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want error containing %q, got %v", c.want, err)
+			}
+		})
+	}
+}

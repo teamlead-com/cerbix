@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -21,12 +22,17 @@ type applyCall struct {
 	org, project string
 	monitors     int
 	sourcePath   string
+	allowAbsence bool
 }
 
 type fakeApplier struct {
-	owned    []store.TenantRef
-	session  *fakeSession
-	attempts int
+	owned      []store.TenantRef
+	session    *fakeSession
+	attempts   int
+	ownedErr   error // injected: FileProviderProjects failure
+	countsErr  error // injected: FileProviderCounts failure
+	countsMgd  int
+	countsOrph int
 }
 
 func (f *fakeApplier) sess() *fakeSession {
@@ -39,10 +45,16 @@ func (f *fakeApplier) TryBecomeLeaderSession(context.Context, int64) (LeaderSess
 	return f.sess(), true, nil
 }
 func (f *fakeApplier) FileProviderProjects(_ context.Context, _ string) ([]store.TenantRef, error) {
+	if f.ownedErr != nil {
+		return nil, f.ownedErr
+	}
 	return f.owned, nil
 }
 func (f *fakeApplier) FileProviderCounts(_ context.Context, _ string) (int, int, error) {
-	return 0, 0, nil
+	if f.countsErr != nil {
+		return 0, 0, f.countsErr
+	}
+	return f.countsMgd, f.countsOrph, nil
 }
 func (f *fakeApplier) RecordBundleAttempt(_ context.Context, _, _, _, _, _, _ string) error {
 	f.attempts++
@@ -54,8 +66,8 @@ type fakeSession struct{ calls []applyCall }
 
 func (s *fakeSession) Check(context.Context) (bool, error) { return true, nil }
 func (s *fakeSession) Release()                            {}
-func (s *fakeSession) ApplyFileManagedBundle(_ context.Context, _ string, dp *fileprovider.DesiredProject, path string, _ time.Duration, _ int) (store.ApplyResult, error) {
-	s.calls = append(s.calls, applyCall{dp.Organization, dp.Project, len(dp.Monitors), path})
+func (s *fakeSession) ApplyFileManagedBundle(_ context.Context, _ string, dp *fileprovider.DesiredProject, path string, _ time.Duration, _ int, allowAbsence bool) (store.ApplyResult, error) {
+	s.calls = append(s.calls, applyCall{dp.Organization, dp.Project, len(dp.Monitors), path, allowAbsence})
 	return store.ApplyResult{Organization: dp.Organization, Project: dp.Project}, nil
 }
 
@@ -265,6 +277,87 @@ func TestReconcileRejectsOversizedBundle(t *testing.T) {
 	}
 	if rep.Orphaned != 0 || len(fa.sess().calls) != 0 {
 		t.Fatalf("a rejected (frozen) bundle must NOT be applied or orphaned: orphaned=%d calls=%d", rep.Orphaned, len(fa.sess().calls))
+	}
+}
+
+// TestReconcileAbsenceGuardThreadedToApply is the P0 ordering guard (spec §9.1): suspendOrphan
+// is computed BEFORE any apply, so when the scan is ambiguous the PER-BUNDLE apply of a present
+// project runs with allowAbsence=false — a UID dropped from that project keeps its LKG. Without
+// a scan error the same apply runs with allowAbsence=true.
+func TestReconcileAbsenceGuardThreadedToApply(t *testing.T) {
+	// Clean scan → allowAbsence=true on the present-project apply.
+	dirOK := t.TempDir()
+	write(t, dirOK, "a.yaml", bundle("acme", "payments"))
+	faOK := &fakeApplier{}
+	if rep := testProvider(dirOK, faOK).reconcile(context.Background(), faOK.sess()); rep.Rejected != 0 {
+		t.Fatalf("clean scan unexpectedly rejected: %+v", rep)
+	}
+	if len(faOK.sess().calls) != 1 || !faOK.sess().calls[0].allowAbsence {
+		t.Fatalf("clean scan must apply with allowAbsence=true, got %+v", faOK.sess().calls)
+	}
+
+	// Ambiguous scan (an unreadable/oversized sibling → scanErr) → allowAbsence=false, even
+	// though the payments project itself is present and valid.
+	dirBad := t.TempDir()
+	write(t, dirBad, "a.yaml", bundle("acme", "payments"))
+	// An oversized file trips a scan-level rejection (bounded reader), not a decode error.
+	big := make([]byte, 2<<20)
+	for i := range big {
+		big[i] = 'x'
+	}
+	if err := os.WriteFile(filepath.Join(dirBad, "big.yaml"), big, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	faBad := &fakeApplier{}
+	p := testProvider(dirBad, faBad)
+	p.limits.MaxFileBytes = 1 << 20 // 1 MiB → big.yaml is rejected at scan
+	rep := p.reconcile(context.Background(), faBad.sess())
+	if rep.Rejected == 0 {
+		t.Fatalf("oversized sibling must produce a scan rejection: %+v", rep)
+	}
+	var appliedPayments bool
+	for _, c := range faBad.sess().calls {
+		if c.project == "payments" {
+			appliedPayments = true
+			if c.allowAbsence {
+				t.Fatalf("ambiguous scan must apply the present project with allowAbsence=false, got %+v", c)
+			}
+		}
+	}
+	if !appliedPayments {
+		t.Fatalf("present valid project must still apply (non-destructively) under an ambiguous scan: %+v", faBad.sess().calls)
+	}
+}
+
+// TestReconcileOwnedLookupErrorDegrades covers §16: a failed owned-set lookup is NOT a clean
+// reconcile — it degrades so last_success does not advance (stale-success alert stays reliable).
+func TestReconcileOwnedLookupErrorDegrades(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.yaml", bundle("acme", "payments"))
+	fa := &fakeApplier{ownedErr: errors.New("db down")}
+	fm := &fakeMetrics{}
+	rep := testProvider(dir, fa).WithMetrics(fm).reconcile(context.Background(), fa.sess())
+	if !rep.Degraded || rep.LastError != "owned_lookup_failed" {
+		t.Fatalf("owned-lookup error must degrade with a reason, got %+v", rep)
+	}
+	if fm.lastSuccess != 0 {
+		t.Fatalf("a degraded reconcile must NOT advance last_success, got %d", fm.lastSuccess)
+	}
+}
+
+// TestReconcileCountsErrorNoFalseSuccess covers §16: if the post-apply owned-count lookup
+// fails, the reconcile must not publish a false success or misleading zero gauges.
+func TestReconcileCountsErrorNoFalseSuccess(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.yaml", bundle("acme", "payments"))
+	fa := &fakeApplier{countsErr: errors.New("count failed")}
+	fm := &fakeMetrics{}
+	rep := testProvider(dir, fa).WithMetrics(fm).reconcile(context.Background(), fa.sess())
+	if rep.Degraded {
+		t.Fatalf("a clean apply with only a counts-lookup failure should not be marked degraded: %+v", rep)
+	}
+	if fm.lastSuccess != 0 {
+		t.Fatalf("an unverifiable scan (counts lookup failed) must NOT advance last_success, got %d", fm.lastSuccess)
 	}
 }
 

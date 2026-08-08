@@ -41,13 +41,19 @@ type ApplyResult struct {
 // scheduler NOTIFY — all atomic, deterministic-ordered, and per-project fault-isolated.
 // ApplyFileManagedBundle runs the reconcile on a POOL connection (used by tests and any
 // non-leader caller). The leadership-fenced path is LeaderSession.ApplyFileManagedBundle.
-func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int) (ApplyResult, error) {
+// allowAbsence governs whether this apply may act on a UID's ABSENCE from the desired set
+// (orphan-mark + grace-disable). It MUST be false whenever the surrounding directory scan is
+// ambiguous — an unbound decode/scope error or a scan-level rejection — because absence then
+// cannot be trusted as intent; the apply stays non-destructive (create/update/dependency/noop/
+// restore only), keeping last-known-good for every absent UID (spec §9.1). The caller computes
+// it PROVIDER-WIDE before applying any bundle.
+func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int, allowAbsence bool) (ApplyResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("store: begin apply bundle: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	res, err := s.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace, maxManaged)
+	res, err := s.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace, maxManaged, allowAbsence)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -60,13 +66,13 @@ func (s *Store) ApplyFileManagedBundle(ctx context.Context, providerID string, d
 // ApplyFileManagedBundle runs the reconcile on the LEADER's pinned connection, so a lost
 // advisory lock (connection death) also aborts this transaction — a former leader can never
 // commit after losing leadership (fencing, spec §17).
-func (ls *LeaderSession) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int) (ApplyResult, error) {
+func (ls *LeaderSession) ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int, allowAbsence bool) (ApplyResult, error) {
 	tx, err := ls.conn.Begin(ctx)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("store: begin apply bundle (leader): %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	res, err := ls.store.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace, maxManaged)
+	res, err := ls.store.applyBundleTx(ctx, tx, providerID, desired, sourcePath, orphanGrace, maxManaged, allowAbsence)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -81,7 +87,7 @@ func (ls *LeaderSession) ApplyFileManagedBundle(ctx context.Context, providerID 
 // provider-owned current set, plan, apply create/update/dependency_update/noop/orphan/restore
 // with the D-0142 config-write contract, dependency edges, provenance, monotonic generation,
 // and the scheduler NOTIFY — atomic, deterministic-ordered, per-project fault-isolated.
-func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int) (ApplyResult, error) {
+func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int, allowAbsence bool) (ApplyResult, error) {
 	// Bound the whole transaction: a stuck statement or lock must not wedge the reconcile loop
 	// (spec §17). SET LOCAL is tx-scoped.
 	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '20s'`); err != nil {
@@ -220,8 +226,15 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			}
 
 		case fileprovider.ActionOrphan:
-			// First valid absence: record orphaned_at. Do NOT disable yet — the grace timer
-			// (handled below) governs the disable, and history is never deleted (spec §10).
+			// A UID absent from the desired set. Act on absence ONLY when the scan is
+			// trusted (allowAbsence): an ambiguous scan (unbound decode/scope error or a
+			// scan-level rejection) must never read a present-project UID as deleted — keep
+			// its last-known-good untouched (spec §9.1). When trusted, record the first
+			// orphaned_at; the grace timer below governs the eventual disable, and history is
+			// never deleted (spec §10).
+			if !allowAbsence {
+				continue
+			}
 			if _, err := tx.Exec(ctx,
 				`UPDATE managed_monitors SET orphaned_at=$2 WHERE monitor_id=$1 AND orphaned_at IS NULL`,
 				idByUID[e.UID], dbNow); err != nil {
@@ -232,7 +245,9 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 
 	// Grace-elapsed disable: an already-orphaned, still-enabled, still-absent UID past its
 	// grace window is disabled through the config-write path (§10). Deterministic UID order.
-	if orphanGrace >= 0 {
+	// Suppressed entirely when absence is untrusted this scan (§9.1) — a former orphan must
+	// not tick toward disable while the snapshot is ambiguous.
+	if allowAbsence && orphanGrace >= 0 {
 		var graced []string
 		for _, c := range current {
 			if !c.Orphaned {

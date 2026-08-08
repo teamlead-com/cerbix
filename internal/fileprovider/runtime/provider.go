@@ -37,7 +37,7 @@ type Applier interface {
 type LeaderSession interface {
 	Check(ctx context.Context) (bool, error)
 	Release()
-	ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int) (store.ApplyResult, error)
+	ApplyFileManagedBundle(ctx context.Context, providerID string, desired *fileprovider.DesiredProject, sourcePath string, orphanGrace time.Duration, maxManaged int, allowAbsence bool) (store.ApplyResult, error)
 }
 
 // MetricsSink receives the provider's bounded observability signals (spec §16). Nil-safe:
@@ -276,6 +276,17 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		p.warnThrottled(se.RelPath, "file_provider_bundle_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
 	}
 
+	// Trust of absence is decided PROVIDER-WIDE, BEFORE any apply (§9.1). An unbindable file —
+	// a decode/scope failure (grp.SuspendOrphan) or a scan-level rejection (over-size, symlink
+	// escape, unreadable) — means the snapshot cannot be read as declaring anything absent.
+	// While suspended, NO apply may orphan/disable a UID (not even one absent from a project
+	// that IS present in the snapshot): the per-bundle apply runs with allowAbsence=false, so a
+	// present-project bundle that dropped a UID keeps that UID's last-known-good. A duplicate
+	// (grp.Frozen) is bindable-but-rejected → frozen per-project (kept out of orphaning) without
+	// suspending the whole provider.
+	suspendOrphan := grp.SuspendOrphan || len(scanErrs) > 0
+	allowAbsence := !suspendOrphan
+
 	// Apply every valid bundle; per-project fault isolation (a rejection keeps that project's
 	// last-known-good, others still apply).
 	presentKeys := make(map[string]bool, len(grp.Valid))
@@ -292,7 +303,7 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 			continue
 		}
 		presentKeys[key] = true
-		if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace, p.limits.MaxManagedMonitors); aerr != nil {
+		if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace, p.limits.MaxManagedMonitors, allowAbsence); aerr != nil {
 			rep.Rejected++
 			reason, status := classify(aerr), "error"
 			rep.LastError = reason
@@ -308,17 +319,15 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 	}
 
 	// Whole-project disappearance: an owned project absent from the valid snapshot is orphaned
-	// by applying an empty desired — but ONLY when this scan can be trusted to represent
-	// desired absence. Orphaning is suspended PROVIDER-WIDE when any file could not be bound to
-	// a tenant: a decode/scope failure (grp.SuspendOrphan) OR a scan-level rejection
-	// (over-size, symlink escape, unreadable) — an unbindable rejection must never read as
-	// deletion (§9.1). A duplicate-target project (grp.Frozen) is bindable but rejected, so it
-	// is frozen PER-PROJECT (kept out of orphaning) without suspending the whole provider.
-	suspendOrphan := grp.SuspendOrphan || len(scanErrs) > 0
-	if !suspendOrphan {
+	// by applying an empty desired — but ONLY when absence is trusted this scan (computed above).
+	if allowAbsence {
 		owned, oerr := p.applier.FileProviderProjects(ctx, p.name)
 		if oerr != nil {
-			p.logger.Warn("file_provider_owned_lookup_failed", "error", oerr.Error())
+			// A failed owned-set lookup is NOT a clean reconcile: degrade so last_success does
+			// not advance (the stale-success alert must stay reliable, §16).
+			rep.Degraded = true
+			rep.LastError = "owned_lookup_failed"
+			p.warnThrottled("owned", "file_provider_owned_lookup_failed", "error", oerr.Error())
 			return rep
 		}
 		for _, t := range owned {
@@ -327,8 +336,12 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 				continue
 			}
 			empty := &fileprovider.DesiredProject{Organization: t.Organization, Project: t.Project, Monitors: map[string]fileprovider.DesiredMonitor{}}
-			if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, empty, "", p.orphanGrace, p.limits.MaxManagedMonitors); aerr != nil {
-				p.logger.Warn("file_provider_orphan_failed", "org", t.Organization, "project", t.Project, "reason", classify(aerr))
+			if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, empty, "", p.orphanGrace, p.limits.MaxManagedMonitors, true); aerr != nil {
+				// An orphan apply that failed is a real reconcile failure, not a clean scan.
+				rep.Rejected++
+				rep.Degraded = true
+				rep.LastError = classify(aerr)
+				p.warnThrottled(key, "file_provider_orphan_failed", "org", t.Organization, "project", t.Project, "reason", classify(aerr))
 				continue
 			}
 			rep.Orphaned++
@@ -367,18 +380,34 @@ func (p *Provider) publishMetrics(ctx context.Context, rep ReconcileReport, dur 
 	if !rep.Degraded && rep.Rejected == 0 {
 		success = time.Now().Unix()
 	}
-	managed, orphaned := 0, 0
+	// Read the post-apply owned counts. When they're unknown — a degraded scan, or a failed
+	// lookup — do NOT publish misleading zero gauges and do NOT advance last_success on an
+	// unverifiable scan (§16): leave the gauges at their last value (Prometheus keeps them) and
+	// preserve the diagnostics counts.
+	managed, orphaned, countsOK := 0, 0, false
 	if !rep.Degraded {
 		if m, o, err := p.applier.FileProviderCounts(ctx, p.name); err == nil {
-			managed, orphaned = m, o
+			managed, orphaned, countsOK = m, o, true
+		} else {
+			success = 0
+			if rep.LastError == "" {
+				rep.LastError = "counts_unavailable"
+			}
+			p.warnThrottled("counts", "file_provider_counts_failed", "error", err.Error())
 		}
 	}
 	if p.metrics != nil {
 		p.metrics.RecordFileProviderReconcile(p.name, outcome)
-		p.metrics.SetFileProviderStatus(p.name, dur, success, managed, orphaned, rep.Rejected)
+		if countsOK {
+			p.metrics.SetFileProviderStatus(p.name, dur, success, managed, orphaned, rep.Rejected)
+		}
 	}
 	if p.status != nil {
-		p.status.update(p.name, time.Now().Unix(), success, rep.LastError, managed, orphaned, rep.Rejected)
+		if countsOK {
+			p.status.update(p.name, time.Now().Unix(), success, rep.LastError, managed, orphaned, rep.Rejected)
+		} else {
+			p.status.updateNoCounts(p.name, time.Now().Unix(), success, rep.LastError, rep.Rejected)
+		}
 	}
 }
 

@@ -68,6 +68,24 @@ func (r *StatusRegistry) update(name string, lastScan, lastSuccess int64, lastEr
 	r.m[name] = s
 }
 
+// updateNoCounts records a post-reconcile status whose owned counts are UNKNOWN (a degraded
+// scan or a failed counts lookup) WITHOUT clobbering the last-known managed/orphaned figures to
+// zero — a silent zero would read as "no monitors" in diagnostics. Scan time, last error, and
+// rejected are updated; last success is only advanced when lastSuccess > 0 (kept sticky).
+func (r *StatusRegistry) updateNoCounts(name string, lastScan, lastSuccess int64, lastErr string, rejected int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.m[name]
+	s.Provider = name
+	s.LastScanUnix = lastScan
+	if lastSuccess > 0 {
+		s.LastSuccessUnix = lastSuccess
+	}
+	s.LastError = lastErr
+	s.Rejected = rejected
+	r.m[name] = s
+}
+
 // Snapshot returns all provider statuses, sorted by name (deterministic diagnostics).
 func (r *StatusRegistry) Snapshot() []ProviderStatus {
 	r.mu.RLock()

@@ -17,7 +17,7 @@ func applyBundle(t *testing.T, st *Store, ctx context.Context, y string, grace t
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	res, err := st.ApplyFileManagedBundle(ctx, "platform", dp, "acme-payments.yaml", grace, 0)
+	res, err := st.ApplyFileManagedBundle(ctx, "platform", dp, "acme-payments.yaml", grace, 0, true)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -194,7 +194,7 @@ monitors:
 	}
 
 	// --- Tenant not found: no mutation, typed error ---
-	if _, terr := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, "format: 1\norganization: ghost\nproject: nope\nmonitors: {}\n"), "x.yaml", 0, 0); terr == nil {
+	if _, terr := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, "format: 1\norganization: ghost\nproject: nope\nmonitors: {}\n"), "x.yaml", 0, 0, true); terr == nil {
 		t.Fatal("missing tenant must reject")
 	}
 }
@@ -222,12 +222,12 @@ func TestApplyBundleMaxManagedMonitors(t *testing.T) {
 			"  a: {name: A, type: http, target: https://a}\n  b: {name: B, type: http, target: https://b}\n"
 	}
 	// payments: 2 monitors, cap 2 → fits.
-	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, twoMon("payments")), "p.yaml", 0, 2); err != nil {
+	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, twoMon("payments")), "p.yaml", 0, 2, true); err != nil {
 		t.Fatalf("payments within quota should apply: %v", err)
 	}
 	// billing: 1 monitor would make 3 > cap 2 → rejected whole, LKG (no monitors created).
 	oneMon := "format: 1\norganization: acme\nproject: billing\nmonitors:\n  a: {name: A, type: http, target: https://a}\n"
-	_, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, oneMon), "b.yaml", 0, 2)
+	_, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, oneMon), "b.yaml", 0, 2, true)
 	var be *fileprovider.BundleError
 	if err == nil || !errors.As(err, &be) || be.Reason != fileprovider.ReasonQuotaExceeded {
 		t.Fatalf("over-quota bundle must reject with max_managed_monitors, got %v", err)
@@ -246,7 +246,7 @@ func TestApplyWritesAudit(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	_, _ = st.CreateProject(ctx, org.ID, "payments", "Payments")
 	b := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  a: {name: A, type: http, target: https://a}\n"
-	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, b), "p.yaml", 0, 0); err != nil {
+	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, b), "p.yaml", 0, 0, true); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	var n int
@@ -255,7 +255,7 @@ func TestApplyWritesAudit(t *testing.T) {
 		t.Fatalf("expected 1 file_provider.apply audit row, got %d", n)
 	}
 	// A no-op re-apply writes NO new audit row (nothing changed).
-	_, _ = st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, b), "p.yaml", 0, 0)
+	_, _ = st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, b), "p.yaml", 0, 0, true)
 	_ = st.pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE org_id=$1 AND action='file_provider.apply'`, org.ID).Scan(&n)
 	if n != 1 {
 		t.Fatalf("no-op apply must not audit: got %d rows", n)
@@ -287,5 +287,77 @@ func TestRecordBundleAttempt(t *testing.T) {
 	}
 	if diags, _ := st.FileProviderDiagnostics(ctx, ""); len(diags) != 1 {
 		t.Fatalf("unresolvable tenant must not create a row, got %d", len(diags))
+	}
+}
+
+// uidState reads a managed monitor's enabled flag and whether it is orphaned (orphaned_at set).
+func uidState(t *testing.T, st *Store, ctx context.Context, uid string) (enabled, orphaned bool) {
+	t.Helper()
+	var orphAt *time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT m.enabled, mm.orphaned_at FROM managed_monitors mm JOIN monitors m ON m.id=mm.monitor_id
+		  WHERE mm.source_uid=$1`, uid).Scan(&enabled, &orphAt); err != nil {
+		t.Fatalf("read uid %q state: %v", uid, err)
+	}
+	return enabled, orphAt != nil
+}
+
+// TestApplyBundleAbsenceGuard is the P0 orphan-safety regression (spec §9.1): when the scan is
+// ambiguous (allowAbsence=false), a UID that is absent from a bundle for a PRESENT project must
+// NOT be orphaned or grace-disabled — its last-known-good is kept. Only a trusted scan
+// (allowAbsence=true) may orphan it. This is the "UID inside a present project" case the review
+// flagged, distinct from a whole-project disappearance.
+func TestApplyBundleAbsenceGuard(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, err := st.CreateOrganization(ctx, "acme", "Acme")
+	if err != nil {
+		t.Fatalf("org: %v", err)
+	}
+	if _, err := st.CreateProject(ctx, org.ID, "payments", "Payments"); err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	both := "format: 1\norganization: acme\nproject: payments\nmonitors:\n" +
+		"  a: {name: A, type: http, target: https://a, interval: 30s, timeout: 5s}\n" +
+		"  b: {name: B, type: http, target: https://b, interval: 30s, timeout: 5s}\n"
+	onlyA := "format: 1\norganization: acme\nproject: payments\nmonitors:\n" +
+		"  a: {name: A, type: http, target: https://a, interval: 30s, timeout: 5s}\n"
+
+	// Seed A+B with a TRUSTED apply.
+	applyBundle(t, st, ctx, both, 0)
+	if en, orph := uidState(t, st, ctx, "b"); !en || orph {
+		t.Fatalf("post-seed B should be enabled and not orphaned (en=%v orph=%v)", en, orph)
+	}
+
+	// Ambiguous scan: apply {A} with allowAbsence=FALSE, grace=0. B is absent from a PRESENT
+	// project, but the guard must keep it enabled AND unmarked (no orphaned_at).
+	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, onlyA), "p.yaml", 0, 0, false); err != nil {
+		t.Fatalf("apply {A} allowAbsence=false: %v", err)
+	}
+	if en, orph := uidState(t, st, ctx, "b"); !en || orph {
+		t.Fatalf("allowAbsence=false must NOT orphan/disable a present-project UID (en=%v orph=%v)", en, orph)
+	}
+	// A second ambiguous scan must still not disable B (grace-disable also suppressed).
+	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, onlyA), "p.yaml", 0, 0, false); err != nil {
+		t.Fatalf("second apply {A} allowAbsence=false: %v", err)
+	}
+	if en, orph := uidState(t, st, ctx, "b"); !en || orph {
+		t.Fatalf("repeated allowAbsence=false must keep B live (en=%v orph=%v)", en, orph)
+	}
+
+	// A TRUSTED scan marks the first absence (orphaned_at set) but does NOT disable in the same
+	// pass — the mark and the grace-disable are separate reconciles by design (§10).
+	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, onlyA), "p.yaml", 0, 0, true); err != nil {
+		t.Fatalf("first trusted apply {A}: %v", err)
+	}
+	if en, orph := uidState(t, st, ctx, "b"); !en || !orph {
+		t.Fatalf("first trusted scan must orphan B but keep it enabled (en=%v orph=%v)", en, orph)
+	}
+	// The NEXT trusted scan (grace=0, B already orphaned at tx start) disables B — proving the
+	// guard, not a missing plan entry, was protecting it earlier.
+	if _, err := st.ApplyFileManagedBundle(ctx, "platform", mustDecodeStore(t, onlyA), "p.yaml", 0, 0, true); err != nil {
+		t.Fatalf("second trusted apply {A}: %v", err)
+	}
+	if en, orph := uidState(t, st, ctx, "b"); en || !orph {
+		t.Fatalf("second trusted scan (grace=0) must disable orphaned B (en=%v orph=%v)", en, orph)
 	}
 }

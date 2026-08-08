@@ -239,3 +239,68 @@ func TestStalePushGrace(t *testing.T) {
 		t.Fatal("monitor past interval with no grace should be stale")
 	}
 }
+
+// TestReEnableSupersedesQueuedDown is the direct assertion that a disabled→enabled
+// transition bumps state_sequence past a still-queued pre-disable DOWN — so the outbox
+// worker drops that DOWN as superseded (the delivery-time gate is separately covered by
+// outbox.TestStaleTransitionSuppressed). The bump is silent (no new transition event).
+func TestReEnableSupersedesQueuedDown(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		IntervalSeconds: 60, FailureThreshold: 1, Enabled: true, PushToken: "cbxp_seq",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// A real DOWN push: pending→down enqueues a transition event and bumps state_sequence.
+	if o, err := st.RecordPushResult(ctx, mon.ID, false, "boom", time.Now(), time.Time{}); err != nil || o.Cur != domain.StatusDown {
+		t.Fatalf("push down: %+v err=%v, want down", o, err)
+	}
+
+	transitionCount := func() int {
+		var n int
+		if err := st.pool.QueryRow(ctx,
+			`SELECT count(*) FROM outbox_events WHERE topic = 'monitor_transition'`).Scan(&n); err != nil {
+			t.Fatalf("count transitions: %v", err)
+		}
+		return n
+	}
+	// The queued DOWN event's stamped Seq.
+	var eventSeq int64
+	if err := st.pool.QueryRow(ctx,
+		`SELECT (payload->>'seq')::bigint FROM outbox_events
+		  WHERE topic = 'monitor_transition' ORDER BY created_at DESC, id DESC LIMIT 1`).Scan(&eventSeq); err != nil {
+		t.Fatalf("read event seq: %v", err)
+	}
+	downMon, _ := st.GetMonitor(ctx, mon.ID)
+	if eventSeq != 1 || downMon.StateSequence != 1 {
+		t.Fatalf("after DOWN: event seq=%d, monitor state_sequence=%d, want 1/1", eventSeq, downMon.StateSequence)
+	}
+	beforeCount := transitionCount()
+
+	// Disable (no bump) then re-enable (silent bump).
+	m := downMon
+	m.Enabled = false
+	if _, err := st.UpdateMonitor(ctx, m); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	m.Enabled = true
+	reUpd, err := st.UpdateMonitor(ctx, m)
+	if err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+
+	// Re-enable bumped state_sequence beyond the queued DOWN's Seq → the outbox worker's
+	// gate (event.Seq > 0 && monitor.state_sequence > event.Seq) now drops it as superseded.
+	if !(eventSeq > 0 && reUpd.StateSequence > eventSeq) {
+		t.Fatalf("re-enable did not supersede queued DOWN: state_sequence=%d, event seq=%d", reUpd.StateSequence, eventSeq)
+	}
+	// The bump is silent: neither disable nor re-enable enqueued a new transition event.
+	if got := transitionCount(); got != beforeCount {
+		t.Fatalf("re-enable enqueued a transition event: count %d→%d (must be silent)", beforeCount, got)
+	}
+}

@@ -387,4 +387,6 @@ synthetic DOWN + incident. The shipped code splits the two concerns:
 Applies to all monitor types for the pending/counter/`state_sequence` reset and the
 escalation/reconciler lifecycle; `push_armed_at` is push-only. Regression tests
 `store.TestPushUpdatePreservesLiveness`, `store.TestAdvanceEscalationsRequiresDownStatus`,
-`ingest.TestReconcilerClosesIncidentOnPendingToUp`.
+`ingest.TestReconcilerClosesIncidentOnPendingToUp`, and
+`store.TestReEnableSupersedesQueuedDown` (re-enable bumps `state_sequence` past a still-queued
+pre-disable DOWN, silently — so the outbox gate drops it).

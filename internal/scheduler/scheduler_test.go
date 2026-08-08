@@ -26,12 +26,14 @@ type fakeStore struct {
 	purged        int32
 	sessionPurges int32
 	flowPurges    int32
+	listCalls     int32 // ListEnabledMonitors invocations (snapshot reloads)
 	// checkHeld, when set, is what the leadership watchdog check() returns; nil
 	// means "still leader" (true, nil).
 	checkHeld func() (bool, error)
 }
 
 func (f *fakeStore) ListEnabledMonitors(context.Context) ([]domain.Monitor, error) {
+	atomic.AddInt32(&f.listCalls, 1)
 	return f.monitors, nil
 }
 
@@ -225,6 +227,44 @@ func TestConfirmSignalAcceleratesProbe(t *testing.T) {
 	case <-time.After(4 * time.Second):
 		t.Fatal("confirm signal did not accelerate the next probe")
 	}
+}
+
+// TestConfigSignalForcesSnapshotReload proves the §12 config-change wake path: a signal on the
+// config channel (store.ConfigNotifier, from a committed file-provider apply) forces the leader
+// to reload its snapshot on the next tick, well before the slow refreshEvery fallback.
+func TestConfigSignalForcesSnapshotReload(t *testing.T) {
+	fs := &fakeStore{leader: true} // no monitors → no dispatch, just count reloads
+	ch := make(chan struct{}, 1)
+	s := New(fs, dispatch.NewInProc(1), testLogger()).WithConfigSignals(ch)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	waitUntil(t, 3*time.Second, "initial snapshot load", func() bool {
+		return atomic.LoadInt32(&fs.listCalls) >= 1
+	})
+	n0 := atomic.LoadInt32(&fs.listCalls)
+
+	// A config signal must force another reload within a couple of ticks — far under the 15s
+	// refreshEvery fallback (which would otherwise be the only reload path).
+	ch <- struct{}{}
+	waitUntil(t, 4*time.Second, "config-signal-forced reload", func() bool {
+		return atomic.LoadInt32(&fs.listCalls) > n0
+	})
+}
+
+// waitUntil polls cond until true or the deadline elapses (then fails with msg).
+func waitUntil(t *testing.T, d time.Duration, msg string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", msg)
 }
 
 // TestEnterConfirmCap proves the per-region cap: past confirmCapPerRegion the

@@ -35,7 +35,8 @@ wait_for(){ local want="$1" sql="$2" label="$3" tries="${4:-40}"; for _ in $(seq
 
 # The good bundle: an http monitor (scheduler will probe it) + a push monitor (server-minted
 # token; used to prove token preservation across orphan→restore).
-write_good(){ local apiname="$1"; printf 'format: 1\norganization: acme\nproject: payments\nmonitors:\n  api: {name: %s, type: http, target: https://x, interval: 30s, timeout: 5s}\n  ping: {name: Ping, type: push, interval: 60s}\n' "$apiname" > "$D/mon.d/p.yaml"; }
+# args: <api-name> [target]. Short interval so scheduler-exec / config-propagation is observable.
+write_good(){ local apiname="$1"; local tgt="${2:-https://x}"; printf 'format: 1\norganization: acme\nproject: payments\nmonitors:\n  api: {name: %s, type: http, target: %s, interval: 10s, timeout: 5s}\n  ping: {name: Ping, type: push, interval: 60s}\n' "$apiname" "$tgt" > "$D/mon.d/p.yaml"; }
 
 "$D/cerbix" serve --config "$D/config.yaml" >"$D/serve.log" 2>&1 & PID=$!
 trap 'kill $PID 2>/dev/null || true' EXIT
@@ -62,15 +63,29 @@ wait_for API2 "SELECT name FROM monitors WHERE id='$MID_HTTP'" "update-name"
 GEN2="$(PSQL "SELECT generation FROM file_provider_bundles WHERE provider_id='platform'")"
 [ "$GEN2" -gt "$GEN1" ] || { echo "FAIL update: generation did not advance ($GEN1 -> $GEN2)"; exit 1; }
 
+# 3b) CONFIG/TARGET CHANGE PROPAGATES — a target change bumps execution_revision (config
+#     committed + monitor_config_changed NOTIFY) and the scheduler keeps executing the monitor
+#     with the new config (a fresh heartbeat lands after the change). This proves the NOTIFY has
+#     a listener (the ConfigNotifier→scheduler snapshot reload), not just the 15s fallback.
+REV1="$(PSQL "SELECT execution_revision FROM monitors WHERE id='$MID_HTTP'")"
+HB1="$(PSQL "SELECT count(*) FROM heartbeats WHERE monitor_id='$MID_HTTP'")"
+write_good API2 https://y
+for _ in $(seq 1 30); do [ "$(PSQL "SELECT execution_revision FROM monitors WHERE id='$MID_HTTP'")" -gt "$REV1" ] 2>/dev/null && break; sleep 0.5; done
+REV2="$(PSQL "SELECT execution_revision FROM monitors WHERE id='$MID_HTTP'")"
+[ "$REV2" -gt "$REV1" ] || { echo "FAIL config-change: target change did not bump execution_revision ($REV1 -> $REV2)"; exit 1; }
+for _ in $(seq 1 40); do [ "$(PSQL "SELECT count(*) FROM heartbeats WHERE monitor_id='$MID_HTTP'")" -gt "$HB1" ] 2>/dev/null && break; sleep 0.5; done
+[ "$(PSQL "SELECT count(*) FROM heartbeats WHERE monitor_id='$MID_HTTP'")" -gt "$HB1" ] || { echo "FAIL config-change: scheduler did not execute the monitor after the config change"; exit 1; }
+
 # 4) LAST-KNOWN-GOOD — invalid input must NOT orphan/disable/mutate the live monitors.
+GEN_PRE_LKG="$(PSQL "SELECT generation FROM file_provider_bundles WHERE provider_id='platform'")"
 printf 'format: 1\n  this: [is not: valid yaml\n' > "$D/mon.d/p.yaml"
 sleep 6   # > resync_interval + debounce: the bad bundle is scanned and rejected
 [ "$(PSQL "SELECT name FROM monitors WHERE id='$MID_HTTP'")" = "API2" ] || { echo "FAIL LKG: last-known-good name was lost on invalid input"; exit 1; }
 [ "$(PSQL "SELECT count(*) FROM monitors WHERE enabled")" = "2" ] || { echo "FAIL LKG: invalid input disabled live monitors"; exit 1; }
-[ "$(PSQL "SELECT generation FROM file_provider_bundles WHERE provider_id='platform'")" = "$GEN2" ] || { echo "FAIL LKG: rejected bundle advanced the generation"; exit 1; }
+[ "$(PSQL "SELECT generation FROM file_provider_bundles WHERE provider_id='platform'")" = "$GEN_PRE_LKG" ] || { echo "FAIL LKG: rejected bundle advanced the generation"; exit 1; }
 
-# restore a valid bundle (identical to last good) → clean no-op re-apply, monitors intact.
-write_good API2
+# restore a valid bundle (identical to last good, target https://y) → clean re-apply, intact.
+write_good API2 https://y
 wait_for applied "SELECT status FROM file_provider_bundles WHERE provider_id='platform'" "recover-applied"
 
 # 5) ORPHAN-DISABLE — removing the file disables (never hard-deletes) both owned monitors.
@@ -79,7 +94,7 @@ wait_for 0 "SELECT count(*) FROM monitors WHERE enabled" "orphan-disable"
 [ "$(PSQL "SELECT count(*) FROM monitors")" = "2" ] || { echo "FAIL orphan: monitors were hard-deleted"; exit 1; }
 
 # 6) RESTORE — re-adding the same source restores in place: SAME DB ids AND SAME push token.
-write_good API2
+write_good API2 https://y
 wait_for 2 "SELECT count(*) FROM monitors WHERE enabled" "restore-enable"
 [ "$(PSQL "SELECT id FROM monitors WHERE type='push'")" = "$MID_PUSH" ] || { echo "FAIL restore: push monitor got a new DB id"; exit 1; }
 [ "$(PSQL "SELECT id FROM monitors WHERE type='http'")" = "$MID_HTTP" ] || { echo "FAIL restore: http monitor got a new DB id"; exit 1; }
@@ -87,4 +102,4 @@ wait_for 2 "SELECT count(*) FROM monitors WHERE enabled" "restore-enable"
 
 # 7) NO RESTART — the whole lifecycle ran in one live process.
 kill -0 $PID || { echo "FAIL: process restarted during the lifecycle"; exit 1; }
-echo "PASS: create + scheduler-exec + in-place update (gen bump) + last-known-good + orphan-disable + restore (same id & push token), NO process restart"
+echo "PASS: create + scheduler-exec + in-place update (gen bump) + config-change propagation (revision bump + fresh heartbeat) + last-known-good + orphan-disable + restore (same id & push token), NO process restart"

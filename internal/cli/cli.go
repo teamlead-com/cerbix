@@ -643,6 +643,15 @@ func runServe(args []string) int {
 			ch, _ := cn.Subscribe() // scheduler lives for the whole process — no unsubscribe
 			return ch
 		}
+		// Config-change wake signals for the scheduler leader (LISTEN monitor_config_changed):
+		// a committed file-provider apply forces a snapshot reload on the next tick instead of
+		// waiting out refreshEvery (spec §12).
+		configSignals := func() <-chan struct{} {
+			cn := st.NewConfigNotifier(logger)
+			spawn(func() { cn.Run(ctx) })
+			ch, _ := cn.Subscribe()
+			return ch
+		}
 		switch *role {
 		case "all":
 			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
@@ -650,7 +659,8 @@ func runServe(args []string) int {
 				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → SSE + incident
-				WithConfirmSignals(confirmSignals())
+				WithConfirmSignals(confirmSignals()).
+				WithConfigSignals(configSignals()) // file-apply config changes wake the leader
 			spawn(func() { sch.Run(ctx) })
 			wk := worker.New(disp, runner, workerPoolSize, logger)
 			spawn(func() { wk.Run(ctx) })
@@ -665,7 +675,8 @@ func runServe(args []string) int {
 				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → incident/outbox (SSE only if this process serves it)
-				WithConfirmSignals(confirmSignals())                                // accelerated failure-confirmation probes
+				WithConfirmSignals(confirmSignals()).                               // accelerated failure-confirmation probes
+				WithConfigSignals(configSignals())                                  // file-apply config changes wake the leader
 			// Alert when a region with enabled monitors loses its worker/agent. Liveness
 			// unions RabbitMQ consumers with recent pull-agent heartbeats.
 			sch.WithLiveRegions(newLiveRegions(mgmt, st))

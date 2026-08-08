@@ -377,6 +377,14 @@ synthetic DOWN + incident. The shipped code splits the two concerns:
 - **`disable`** simply drops the monitor from dead-man evaluation (the `enabled` filter).
   Shrinking `interval`/`grace` on an *enabled* push monitor can turn it stale at once — that
   is the new policy applying, not a reset.
+- **Incident/escalation lifecycle.** Because re-enable sets `pending`, escalation must not
+  page a lingering pre-disable auto-incident during the re-arm window: `AdvanceEscalations`
+  gates on `enabled AND status = 'down'`, and the reconciler resolves an open auto-incident
+  on **any** transition into up (`cur == up && prev != up`), so a `pending → up` recovery
+  closes the stale incident (no-op when nothing is open). No ping → dead-man `pending → down`
+  reuses the still-open incident and the ladder resumes.
 
-Applies to all monitor types for the pending/counter/`state_sequence` reset; `push_armed_at`
-is push-only. Regression test `store.TestPushUpdatePreservesLiveness`.
+Applies to all monitor types for the pending/counter/`state_sequence` reset and the
+escalation/reconciler lifecycle; `push_armed_at` is push-only. Regression tests
+`store.TestPushUpdatePreservesLiveness`, `store.TestAdvanceEscalationsRequiresDownStatus`,
+`ingest.TestReconcilerClosesIncidentOnPendingToUp`.

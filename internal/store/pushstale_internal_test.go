@@ -202,6 +202,12 @@ func TestPushUpdatePreservesLiveness(t *testing.T) {
 	if !inStale(dorm.ID) {
 		t.Fatal("re-armed push with no ping past the window must become stale")
 	}
+	// And the dead-man actually applies DOWN under the current (re-enable-bumped) revision:
+	// freshness (aged push_armed_at) is past the cutoff, so the CAS passes.
+	cutoff := time.Now().Add(-90 * time.Second)
+	if o, err := st.RecordDeadmanResult(ctx, dorm.ID, reUpd.ExecutionRevision, cutoff); err != nil || !o.Applied || o.Cur != domain.StatusDown {
+		t.Fatalf("dead-man after re-arm window: %+v err=%v, want applied down", o, err)
+	}
 }
 
 // TestStalePushGrace covers grace_seconds extending the liveness window.

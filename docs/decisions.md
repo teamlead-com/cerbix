@@ -2591,6 +2591,18 @@ Shipped fix (migration 00058, `monitors.push_armed_at`):
   Shrinking `interval`/`grace` on an enabled monitor can turn it stale at once — that is the
   new policy applying, not a reset.
 
+**Lifecycle follow-up (incident/escalation).** Setting `pending` on re-enable exposed a
+lifecycle regression: a pre-disable auto-incident could keep paging. Two coupled fixes:
+- `AdvanceEscalations` now gates on `m.enabled AND m.status = 'down'` (was `enabled` only):
+  the on-call ladder never fires while the monitor is `pending` (the re-arm window); it
+  resumes only once the monitor is confirmed down again (dead-man or a real failure).
+- The reconciler resolves an open auto-incident on **any transition INTO up**
+  (`cur == up && prev != up`), not just `down → up`, so a re-enabled monitor recovering as
+  `pending → up` closes its stale incident. A normal first `pending → up` (nothing open) is
+  a safe no-op (one lookup). If instead no ping arrives, the dead-man fires `pending → down`,
+  reuses the still-open incident (no double-open), and the ladder resumes.
+
 The pending/counter/`state_sequence` reset applies to all monitor types on re-enable;
 `push_armed_at` is push-only. Contract recorded in `func-result-protocol` §11; regression
-test `store.TestPushUpdatePreservesLiveness`.
+tests `store.TestPushUpdatePreservesLiveness`, `store.TestAdvanceEscalationsRequiresDownStatus`,
+`ingest.TestReconcilerClosesIncidentOnPendingToUp`.

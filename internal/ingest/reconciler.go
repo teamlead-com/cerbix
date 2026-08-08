@@ -62,7 +62,12 @@ func (rc *Reconciler) Reconcile(ctx context.Context, hb domain.Heartbeat, prev, 
 		if mon.AutoIncident && !suppressed {
 			rc.openAutoIncident(ctx, mon, hb)
 		}
-	case cur == domain.StatusUp && prev == domain.StatusDown:
+	case cur == domain.StatusUp && prev != domain.StatusUp:
+		// Any transition INTO up resolves an open auto-incident — not just down→up.
+		// A monitor re-enabled while a pre-disable auto-incident is still open recovers
+		// as pending→up (re-arm sets pending, D-0144); that must close the stale incident
+		// too. resolveAutoIncident is a no-op when nothing is open, so a normal first
+		// pending→up (no incident) costs one lookup and does nothing.
 		rc.resolveAutoIncident(ctx, hb)
 	}
 }

@@ -506,3 +506,35 @@ func waitFor(cond func() bool) bool {
 	}
 	return false
 }
+
+// TestReconcilerClosesIncidentOnPendingToUp covers the D-0144 lifecycle fix: a transition
+// INTO up resolves an open auto-incident even when it comes from `pending` (a monitor
+// re-enabled while a pre-disable auto-incident is still open recovers as pending→up, not
+// down→up). A plain pending→up with nothing open is a safe no-op.
+func TestReconcilerClosesIncidentOnPendingToUp(t *testing.T) {
+	fs := newFakeStore()
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ProjectID: "p1", Name: "api", AutoIncident: true}
+	rc := NewReconciler(fs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+
+	// No open incident: pending→up must not create or resolve anything.
+	rc.Reconcile(ctx, domain.Heartbeat{MonitorID: "m1", Up: true}, domain.StatusPending, domain.StatusUp, false)
+	if o, r := fs.openAutoIncidentCount("m1"); o != 0 || r != 0 {
+		t.Fatalf("pending→up with nothing open: open=%d resolved=%d, want 0/0", o, r)
+	}
+
+	// Seed an open auto-incident (as if opened before a disable), then recover as pending→up.
+	if _, err := fs.CreateIncident(ctx, domain.Incident{
+		ProjectID: "p1", MonitorID: "m1", Title: "down", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+	}, "auto opened", "system"); err != nil {
+		t.Fatalf("seed incident: %v", err)
+	}
+	if o, _ := fs.openAutoIncidentCount("m1"); o != 1 {
+		t.Fatalf("precondition: want 1 open incident, got %d", o)
+	}
+	rc.Reconcile(ctx, domain.Heartbeat{MonitorID: "m1", Up: true}, domain.StatusPending, domain.StatusUp, false)
+	if o, r := fs.openAutoIncidentCount("m1"); o != 0 || r != 1 {
+		t.Fatalf("pending→up must resolve the stale incident: open=%d resolved=%d, want 0/1", o, r)
+	}
+}

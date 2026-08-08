@@ -1799,7 +1799,10 @@ paths:
       summary: List all file-provider bundle diagnostics (global admin only)
       description: >
         Monitoring-as-Code (FR-017) provider bundle status across all tenants: relative
-        source path, applied generation, status, and bounded errors. Requires a global admin.
+        source path, applied generation, status, and bounded errors (`bundles`), plus this
+        process's live runtime view of every configured provider (`providers`): leadership,
+        last scan/success, and counts — including configured-but-idle providers. Requires a
+        global admin.
       responses:
         '200':
           description: OK
@@ -1808,7 +1811,8 @@ paths:
               schema:
                 type: object
                 properties:
-                  providers: { type: array, items: { $ref: '#/components/schemas/FileProviderDiagnostic' } }
+                  bundles: { type: array, items: { $ref: '#/components/schemas/FileProviderDiagnostic' } }
+                  providers: { type: array, items: { $ref: '#/components/schemas/FileProviderRuntimeStatus' } }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/organizations/{orgID}/file-providers:
     get:
@@ -1830,7 +1834,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  providers: { type: array, items: { $ref: '#/components/schemas/FileProviderDiagnostic' } }
+                  bundles: { type: array, items: { $ref: '#/components/schemas/FileProviderDiagnostic' } }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
   /api/v1/admin/outbox/dead:
@@ -2195,6 +2199,22 @@ components:
         status: { type: string, enum: [pending, applied, rejected, error, degraded] }
         last_error: { type: string }
         applied_at: { type: string, format: date-time }
+    FileProviderRuntimeStatus:
+      type: object
+      description: >
+        One configured file provider as seen live by THIS api process (§15). Process-local:
+        leadership and scan times reflect this replica only (a follower reports leader=false).
+        Configured-but-idle providers appear too (registered before their first reconcile).
+      properties:
+        provider: { type: string, description: 'Provider name from config.' }
+        scope_type: { type: string, enum: [instance, organization, project] }
+        leader: { type: boolean, description: 'Whether this process currently holds the provider leader lock.' }
+        last_scan_unix: { type: integer, format: int64, description: 'Unix seconds of the last reconcile attempt (0 = never).' }
+        last_success_unix: { type: integer, format: int64, description: 'Unix seconds of the last successful generation (sticky; 0 = never).' }
+        last_error: { type: string, description: 'Bounded reason of the last rejection this scan.' }
+        managed_monitors: { type: integer, description: 'Monitors currently managed by this provider.' }
+        orphaned_monitors: { type: integer, description: 'Monitors orphaned (source removed, retained).' }
+        bundle_errors: { type: integer, description: 'Bundles rejected in the last scan.' }
     CreateMonitor:
       type: object
       required: [name, type]

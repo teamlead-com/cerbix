@@ -4450,7 +4450,7 @@ export interface paths {
         };
         /**
          * List all file-provider bundle diagnostics (global admin only)
-         * @description Monitoring-as-Code (FR-017) provider bundle status across all tenants: relative source path, applied generation, status, and bounded errors. Requires a global admin.
+         * @description Monitoring-as-Code (FR-017) provider bundle status across all tenants: relative source path, applied generation, status, and bounded errors (`bundles`), plus this process's live runtime view of every configured provider (`providers`): leadership, last scan/success, and counts — including configured-but-idle providers. Requires a global admin.
          */
         get: {
             parameters: {
@@ -4468,7 +4468,8 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            providers?: components["schemas"]["FileProviderDiagnostic"][];
+                            bundles?: components["schemas"]["FileProviderDiagnostic"][];
+                            providers?: components["schemas"]["FileProviderRuntimeStatus"][];
                         };
                     };
                 };
@@ -4512,7 +4513,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            providers?: components["schemas"]["FileProviderDiagnostic"][];
+                            bundles?: components["schemas"]["FileProviderDiagnostic"][];
                         };
                     };
                 };
@@ -4928,6 +4929,33 @@ export interface components {
             last_error?: string;
             /** Format: date-time */
             applied_at?: string;
+        };
+        /** @description One configured file provider as seen live by THIS api process (§15). Process-local: leadership and scan times reflect this replica only (a follower reports leader=false). Configured-but-idle providers appear too (registered before their first reconcile). */
+        FileProviderRuntimeStatus: {
+            /** @description Provider name from config. */
+            provider?: string;
+            /** @enum {string} */
+            scope_type?: "instance" | "organization" | "project";
+            /** @description Whether this process currently holds the provider leader lock. */
+            leader?: boolean;
+            /**
+             * Format: int64
+             * @description Unix seconds of the last reconcile attempt (0 = never).
+             */
+            last_scan_unix?: number;
+            /**
+             * Format: int64
+             * @description Unix seconds of the last successful generation (sticky; 0 = never).
+             */
+            last_success_unix?: number;
+            /** @description Bounded reason of the last rejection this scan. */
+            last_error?: string;
+            /** @description Monitors currently managed by this provider. */
+            managed_monitors?: number;
+            /** @description Monitors orphaned (source removed, retained). */
+            orphaned_monitors?: number;
+            /** @description Bundles rejected in the last scan. */
+            bundle_errors?: number;
         };
         CreateMonitor: {
             name: string;

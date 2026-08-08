@@ -1072,6 +1072,17 @@ func newPublicHandler(fs *fakeStore) http.Handler {
 	return api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).PublicRouter()
 }
 
+// newHandlerWithFPStatus builds a router with a file-provider runtime status source wired in,
+// so diagnostics tests can assert the "providers" section of the admin response.
+func newHandlerWithFPStatus(fs *fakeStore, src api.FileProviderStatusSource) http.Handler {
+	return api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithFileProviderStatus(src).Router()
+}
+
+// fakeFPStatus is a static FileProviderStatusSource for tests.
+type fakeFPStatus []api.FileProviderRuntimeStatus
+
+func (f fakeFPStatus) FileProviderRuntimeStatuses() []api.FileProviderRuntimeStatus { return f }
+
 func do(h http.Handler, p authz.Principal, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req = req.WithContext(auth.WithPrincipal(req.Context(), p))

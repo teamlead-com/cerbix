@@ -73,6 +73,7 @@ type Provider struct {
 	applier     Applier
 	logger      *slog.Logger
 	metrics     MetricsSink
+	status      *StatusRegistry
 	sem         chan struct{} // shared across providers: global reconcile-concurrency bound (§17)
 
 	leaderCheckEvery time.Duration
@@ -118,6 +119,16 @@ func (p *Provider) WithReconcileLimiter(sem chan struct{}) *Provider {
 	return p
 }
 
+// WithStatus attaches the process-local diagnostics registry and seeds this provider's entry
+// (so a configured-but-idle provider is already visible). Nil-safe.
+func (p *Provider) WithStatus(reg *StatusRegistry) *Provider {
+	p.status = reg
+	if reg != nil {
+		reg.register(p.name, p.scope.Type, p.scope.Organization, p.scope.Project)
+	}
+	return p
+}
+
 // New builds a Provider from its static config (already validated/defaulted by config.Load).
 func New(name string, cfg config.FileProviderConfig, applier Applier, logger *slog.Logger) *Provider {
 	return &Provider{
@@ -138,10 +149,11 @@ func New(name string, cfg config.FileProviderConfig, applier Applier, logger *sl
 
 // ReconcileReport is a bounded per-scan summary for logs/metrics (no per-file identifiers).
 type ReconcileReport struct {
-	Applied  int // valid bundles applied (any outcome incl. no-op)
-	Rejected int // per-file rejections (decode/scope/duplicate/size/apply)
-	Orphaned int // whole-project disappearances processed
-	Degraded bool
+	Applied   int // valid bundles applied (any outcome incl. no-op)
+	Rejected  int // per-file rejections (decode/scope/duplicate/size/apply)
+	Orphaned  int // whole-project disappearances processed
+	Degraded  bool
+	LastError string // bounded reason of the last rejection this scan (for diagnostics)
 }
 
 // Run elects leadership for this provider and, while leader, runs the watch/reconcile loop.
@@ -248,17 +260,20 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 	if err != nil {
 		// Directory unreadable/replaced: keep last-known-good, mark degraded, never orphan.
 		rep.Degraded = true
+		rep.LastError = "scan_failed"
 		p.logger.Warn("file_provider_scan_failed", "error", err.Error())
 		return rep
 	}
 	for _, se := range scanErrs {
 		rep.Rejected++
-		p.logger.Warn("file_provider_file_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
+		rep.LastError = string(se.Err.Reason)
+		p.warnThrottled(se.RelPath, "file_provider_file_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
 	}
 	grp := fileprovider.GroupBundles(cands, p.scope)
 	for _, se := range grp.Errors {
 		rep.Rejected++
-		p.logger.Warn("file_provider_bundle_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
+		rep.LastError = string(se.Err.Reason)
+		p.warnThrottled(se.RelPath, "file_provider_bundle_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
 	}
 
 	// Apply every valid bundle; per-project fault isolation (a rejection keeps that project's
@@ -271,6 +286,7 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		if len(dp.Monitors) > p.limits.MaxMonitorsPerBundle {
 			presentKeys[key] = true
 			rep.Rejected++
+			rep.LastError = "max_monitors_per_bundle"
 			p.warnThrottled(key, "file_provider_bundle_rejected", "org", dp.Organization, "project", dp.Project, "reason", "max_monitors_per_bundle")
 			p.persistAttempt(ctx, dp.Organization, dp.Project, grp.Paths[key], "rejected", "max_monitors_per_bundle")
 			continue
@@ -279,6 +295,7 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		if _, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace, p.limits.MaxManagedMonitors); aerr != nil {
 			rep.Rejected++
 			reason, status := classify(aerr), "error"
+			rep.LastError = reason
 			var be *fileprovider.BundleError
 			if errorsAs(aerr, &be) {
 				status = "rejected"
@@ -324,11 +341,15 @@ func (p *Provider) setLeader(leader bool) {
 	if p.metrics != nil {
 		p.metrics.SetFileProviderLeader(p.name, leader)
 	}
+	if p.status != nil {
+		p.status.setLeader(p.name, leader)
+	}
 }
 
-// publishMetrics records the bounded reconcile outcome, duration, and status gauges.
+// publishMetrics records the bounded reconcile outcome/duration/status to BOTH the metrics
+// sink and the diagnostics registry (either may be nil).
 func (p *Provider) publishMetrics(ctx context.Context, rep ReconcileReport, dur float64) {
-	if p.metrics == nil {
+	if p.metrics == nil && p.status == nil {
 		return
 	}
 	outcome := "noop"
@@ -340,7 +361,6 @@ func (p *Provider) publishMetrics(ctx context.Context, rep ReconcileReport, dur 
 	case rep.Rejected > 0:
 		outcome = "rejected"
 	}
-	p.metrics.RecordFileProviderReconcile(p.name, outcome)
 	// last_success advances ONLY on a clean scan — a scan with any rejection (invalid/quota/
 	// duplicate) is NOT a success, so a stale-success alert still fires (spec §16).
 	var success int64
@@ -353,7 +373,13 @@ func (p *Provider) publishMetrics(ctx context.Context, rep ReconcileReport, dur 
 			managed, orphaned = m, o
 		}
 	}
-	p.metrics.SetFileProviderStatus(p.name, dur, success, managed, orphaned, rep.Rejected)
+	if p.metrics != nil {
+		p.metrics.RecordFileProviderReconcile(p.name, outcome)
+		p.metrics.SetFileProviderStatus(p.name, dur, success, managed, orphaned, rep.Rejected)
+	}
+	if p.status != nil {
+		p.status.update(p.name, time.Now().Unix(), success, rep.LastError, managed, orphaned, rep.Rejected)
+	}
 }
 
 // fingerprint is a cheap directory signature (eligible file names + sizes + mtimes) used to

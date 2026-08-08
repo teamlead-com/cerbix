@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/teamlead-com/cerbix/internal/api"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
@@ -123,7 +124,8 @@ func TestFileProviderDiagnostics(t *testing.T) {
 		{orgID: "o1", diag: store.FileProviderDiagnostic{Provider: "platform", Organization: "acme", Project: "payments", SourcePath: "a.yaml", Generation: 3, Status: "applied"}},
 		{orgID: "o2", diag: store.FileProviderDiagnostic{Provider: "platform", Organization: "beta", Project: "web", SourcePath: "b.yaml", Generation: 1, Status: "degraded"}},
 	}
-	h := newHandler(fs)
+	// Wire a runtime status source so the global-admin body carries the "providers" list.
+	h := newHandlerWithFPStatus(fs, fakeFPStatus{{Provider: "platform", ScopeType: "instance", Leader: true}})
 
 	// Global admin: all bundles.
 	rec := do(h, globalAdmin, http.MethodGet, "/api/v1/admin/file-providers", "")
@@ -131,11 +133,15 @@ func TestFileProviderDiagnostics(t *testing.T) {
 		t.Fatalf("admin diagnostics = %d", rec.Code)
 	}
 	var all struct {
-		Providers []store.FileProviderDiagnostic `json:"providers"`
+		Bundles   []store.FileProviderDiagnostic  `json:"bundles"`
+		Providers []api.FileProviderRuntimeStatus `json:"providers"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &all)
-	if len(all.Providers) != 2 {
-		t.Fatalf("global admin should see all bundles, got %d", len(all.Providers))
+	if len(all.Bundles) != 2 {
+		t.Fatalf("global admin should see all bundles, got %d", len(all.Bundles))
+	}
+	if all.Providers == nil {
+		t.Fatal("global admin diagnostics must include the runtime providers list")
 	}
 	// Non-admin: 403.
 	if rec := do(h, o1Viewer, http.MethodGet, "/api/v1/admin/file-providers", ""); rec.Code == http.StatusOK {
@@ -147,11 +153,11 @@ func TestFileProviderDiagnostics(t *testing.T) {
 		t.Fatalf("org admin diagnostics = %d (%s)", rec.Code, rec.Body.String())
 	}
 	var org struct {
-		Providers []store.FileProviderDiagnostic `json:"providers"`
+		Bundles []store.FileProviderDiagnostic `json:"bundles"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &org)
-	if len(org.Providers) != 1 || org.Providers[0].Organization != "acme" {
-		t.Fatalf("org admin should see only own-org bundles, got %+v", org.Providers)
+	if len(org.Bundles) != 1 || org.Bundles[0].Organization != "acme" {
+		t.Fatalf("org admin should see only own-org bundles, got %+v", org.Bundles)
 	}
 	// Foreign org → not found / forbidden (never another tenant's data).
 	if rec := do(h, o1Admin, http.MethodGet, "/api/v1/organizations/o2/file-providers", ""); rec.Code == http.StatusOK {

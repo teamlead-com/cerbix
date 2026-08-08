@@ -566,7 +566,7 @@ func runServe(args []string) int {
 
 	// Monitoring as Code file providers (FR-017): owned only by api/all (spec §12). Startup
 	// is fail-fast — a configured provider needs a DB and a readable directory here.
-	if err := startFileProviders(ctx, cfg, *role, st, registry, logger, spawn); err != nil {
+	if err := startFileProviders(ctx, cfg, *role, st, registry, apiHandler, logger, spawn); err != nil {
 		logging.Critical(logger, "file_provider_startup_failed", "error", err.Error())
 		return 1
 	}
@@ -820,7 +820,7 @@ func (f incidentFanout) Deliver(ctx context.Context, ev domain.IncidentEvent) er
 // config but never watch the directory). Fail-fast per §4.1: a configured provider requires
 // a database, and its directory must exist and be readable at startup. Each provider runs
 // its own leader-elected reconcile loop under the shutdown WaitGroup via spawn.
-func startFileProviders(ctx context.Context, cfg *config.Config, role string, st *store.Store, registry *metrics.Registry, logger *slog.Logger, spawn func(func())) error {
+func startFileProviders(ctx context.Context, cfg *config.Config, role string, st *store.Store, registry *metrics.Registry, apiHandler *api.Handler, logger *slog.Logger, spawn func(func())) error {
 	if len(cfg.Providers.File) == 0 {
 		return nil
 	}
@@ -835,6 +835,13 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// One process-local status registry backs the diagnostics API (§15): every provider
+	// (writer) registers at New so configured-but-idle providers surface before their first
+	// reconcile; the api handler reads a snapshot on demand.
+	statusReg := fpruntime.NewStatusRegistry()
+	if apiHandler != nil {
+		apiHandler.WithFileProviderStatus(fpStatusAdapter{reg: statusReg})
+	}
 	// One semaphore shared by every provider bounds concurrent reconciles process-wide (§17).
 	reconcileSem := make(chan struct{}, maxConcurrentReconciles)
 	for _, name := range names {
@@ -846,9 +853,34 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		if !info.IsDir() {
 			return fmt.Errorf("file provider %q: %q is not a directory", name, pc.Directory)
 		}
-		p := fpruntime.New(name, pc, fpruntime.NewStoreApplier(st), logger).WithMetrics(registry).WithReconcileLimiter(reconcileSem)
+		p := fpruntime.New(name, pc, fpruntime.NewStoreApplier(st), logger).
+			WithMetrics(registry).WithReconcileLimiter(reconcileSem).WithStatus(statusReg)
 		spawn(func() { p.Run(ctx) })
 		logger.Info("file_provider_started", "provider", name, "directory", pc.Directory)
 	}
 	return nil
+}
+
+// fpStatusAdapter bridges the reconcile runtime's StatusRegistry to the api package's
+// FileProviderStatusSource, mapping each snapshot entry to the API DTO. Go has no structural
+// typing across packages, so this thin adapter avoids the api package importing runtime.
+type fpStatusAdapter struct{ reg *fpruntime.StatusRegistry }
+
+func (a fpStatusAdapter) FileProviderRuntimeStatuses() []api.FileProviderRuntimeStatus {
+	snap := a.reg.Snapshot()
+	out := make([]api.FileProviderRuntimeStatus, 0, len(snap))
+	for _, s := range snap {
+		out = append(out, api.FileProviderRuntimeStatus{
+			Provider:        s.Provider,
+			ScopeType:       s.ScopeType,
+			Leader:          s.Leader,
+			LastScanUnix:    s.LastScanUnix,
+			LastSuccessUnix: s.LastSuccessUnix,
+			LastError:       s.LastError,
+			Managed:         s.Managed,
+			Orphaned:        s.Orphaned,
+			BundleErrors:    s.Rejected,
+		})
+	}
+	return out
 }

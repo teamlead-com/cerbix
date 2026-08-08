@@ -198,6 +198,7 @@ type Handler struct {
 	agentRegionTokens map[string]string // per-region agent tokens (region → token)
 	agentDBTokens     bool              // also resolve agent tokens from the database
 	pullWaiter        PullWaiter        // long-poll wake source (LISTEN/NOTIFY); nil = no long-poll
+	fpStatus          FileProviderStatusSource // process-local file-provider runtime status; nil = none
 }
 
 // PullWaiter blocks until a pull job is enqueued for a region (or the max hold / request
@@ -309,6 +310,13 @@ func (h *Handler) WithLiveRegions(s LiveRegionSource) *Handler {
 // before saving, from the monitor's own region. Without it, test returns 501.
 func (h *Handler) WithTester(t RegionTester) *Handler {
 	h.tester = t
+	return h
+}
+
+// WithFileProviderStatus wires this process's file-provider runtime status source into the
+// global-admin diagnostics (leadership/last-scan/configured providers). Nil = none.
+func (h *Handler) WithFileProviderStatus(src FileProviderStatusSource) *Handler {
+	h.fpStatus = src
 	return h
 }
 

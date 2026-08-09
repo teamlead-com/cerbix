@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/teamlead-com/cerbix/internal/api"
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 func TestUpdateMonitorAuthzAndPartial(t *testing.T) {
@@ -38,5 +40,146 @@ func TestUpdateMonitorAuthzAndPartial(t *testing.T) {
 	// Unknown monitor → 404.
 	if rec := do(h, o1Admin, http.MethodPatch, "/api/v1/monitors/nope", `{"name":"x"}`); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown monitor = %d, want 404", rec.Code)
+	}
+}
+
+// TestFileManagedMonitorReadOnly proves the ownership contract at the transport boundary
+// (spec §8): a file-managed monitor rejects declarative CRUD with 409 + tenant-safe
+// provenance, while unmanaged monitors stay editable.
+func TestFileManagedMonitorReadOnly(t *testing.T) {
+	fs := seededStore()
+	fs.managed = map[string]store.FileManagement{
+		"mon1": {Provider: "platform", UID: "api", SourcePath: "acme-payments.yaml"},
+	}
+	h := newHandler(fs)
+
+	rec := do(h, o1Admin, http.MethodPatch, "/api/v1/monitors/mon1", `{"name":"x"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("patch file-managed = %d, want 409", rec.Code)
+	}
+	var body struct {
+		Error      string `json:"error"`
+		Management struct {
+			Source, Provider, UID, Path string
+			ReadOnly                    bool `json:"read_only"`
+		} `json:"management"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.Error != "managed_by_file" || body.Management.Provider != "platform" || body.Management.UID != "api" || !body.Management.ReadOnly {
+		t.Fatalf("409 body = %s", rec.Body.String())
+	}
+	if rec := do(h, o1Admin, http.MethodDelete, "/api/v1/monitors/mon1", ""); rec.Code != http.StatusConflict {
+		t.Fatalf("delete file-managed = %d, want 409", rec.Code)
+	}
+	// The SAME monitor, when NOT file-managed, stays editable (coexistence, not a global lock).
+	unmanaged := newHandler(seededStore())
+	if rec := do(unmanaged, o1Admin, http.MethodPatch, "/api/v1/monitors/mon1", `{"name":"y"}`); rec.Code != http.StatusOK {
+		t.Fatalf("patch unmanaged = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMonitorManagementProvenance covers spec §15: monitor responses carry a tenant-safe
+// `management` block — file-managed monitors report source=file + provider/uid/path +
+// read_only; ordinary monitors report source=ui.
+func TestMonitorManagementProvenance(t *testing.T) {
+	fs := seededStore()
+	fs.managed = map[string]store.FileManagement{
+		"mon1": {Provider: "platform", UID: "api", SourcePath: "acme-payments.yaml"},
+	}
+	h := newHandler(fs)
+
+	rec := do(h, o1Admin, http.MethodGet, "/api/v1/monitors/mon1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get mon1 = %d", rec.Code)
+	}
+	var got struct {
+		ID         string `json:"id"`
+		Management struct {
+			Source, Provider, UID, Path string
+			ReadOnly                    bool `json:"read_only"`
+		} `json:"management"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.ID != "mon1" {
+		t.Fatalf("monitor fields must still promote to top level: %s", rec.Body.String())
+	}
+	if got.Management.Source != "file" || got.Management.Provider != "platform" || got.Management.UID != "api" || got.Management.Path != "acme-payments.yaml" || !got.Management.ReadOnly {
+		t.Fatalf("file provenance block = %+v", got.Management)
+	}
+
+	// An ordinary (unmanaged) monitor reports source=ui.
+	plain := newHandler(seededStore())
+	rec = do(plain, o1Admin, http.MethodGet, "/api/v1/monitors/mon1", "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Management.Source != "ui" || got.Management.ReadOnly {
+		t.Fatalf("unmanaged monitor management = %+v, want source=ui read_only=false", got.Management)
+	}
+}
+
+// TestFileProviderDiagnostics covers spec §15: global-admin sees every provider bundle;
+// an org-admin sees only its organization's bundles; a non-admin is refused.
+func TestFileProviderDiagnostics(t *testing.T) {
+	fs := seededStore()
+	fs.diagnostics = []fakeDiag{
+		{orgID: "o1", diag: store.FileProviderDiagnostic{Provider: "platform", Organization: "acme", Project: "payments", SourcePath: "a.yaml", Generation: 3, Status: "applied"}},
+		{orgID: "o2", diag: store.FileProviderDiagnostic{Provider: "platform", Organization: "beta", Project: "web", SourcePath: "b.yaml", Generation: 1, Status: "degraded"}},
+	}
+	// Wire a runtime status source so the global-admin body carries the "providers" list.
+	h := newHandlerWithFPStatus(fs, fakeFPStatus{{Provider: "platform", ScopeType: "instance", Leader: true}})
+
+	// Global admin: all bundles.
+	rec := do(h, globalAdmin, http.MethodGet, "/api/v1/admin/file-providers", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin diagnostics = %d", rec.Code)
+	}
+	var all struct {
+		Bundles   []store.FileProviderDiagnostic  `json:"bundles"`
+		Providers []api.FileProviderRuntimeStatus `json:"providers"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &all)
+	if len(all.Bundles) != 2 {
+		t.Fatalf("global admin should see all bundles, got %d", len(all.Bundles))
+	}
+	if all.Providers == nil {
+		t.Fatal("global admin diagnostics must include the runtime providers list")
+	}
+	// Named-provider filter (§15): ?provider= narrows bundles AND runtime status.
+	recF := do(h, globalAdmin, http.MethodGet, "/api/v1/admin/file-providers?provider=platform", "")
+	var filtered struct {
+		Bundles   []store.FileProviderDiagnostic  `json:"bundles"`
+		Providers []api.FileProviderRuntimeStatus `json:"providers"`
+	}
+	_ = json.Unmarshal(recF.Body.Bytes(), &filtered)
+	if len(filtered.Bundles) != 2 || len(filtered.Providers) != 1 {
+		t.Fatalf("provider=platform should keep all platform rows, got %d bundles / %d providers", len(filtered.Bundles), len(filtered.Providers))
+	}
+	recNone := do(h, globalAdmin, http.MethodGet, "/api/v1/admin/file-providers?provider=nope", "")
+	var none struct {
+		Bundles   []store.FileProviderDiagnostic  `json:"bundles"`
+		Providers []api.FileProviderRuntimeStatus `json:"providers"`
+	}
+	_ = json.Unmarshal(recNone.Body.Bytes(), &none)
+	if len(none.Bundles) != 0 || len(none.Providers) != 0 {
+		t.Fatalf("provider=nope should match nothing, got %d bundles / %d providers", len(none.Bundles), len(none.Providers))
+	}
+	// Non-admin: 403.
+	if rec := do(h, o1Viewer, http.MethodGet, "/api/v1/admin/file-providers", ""); rec.Code == http.StatusOK {
+		t.Fatalf("non-admin got %d, want non-200", rec.Code)
+	}
+	// Org admin: only own org (o1).
+	rec = do(h, o1Admin, http.MethodGet, "/api/v1/organizations/o1/file-providers", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("org admin diagnostics = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var org struct {
+		Bundles []store.FileProviderDiagnostic `json:"bundles"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &org)
+	if len(org.Bundles) != 1 || org.Bundles[0].Organization != "acme" {
+		t.Fatalf("org admin should see only own-org bundles, got %+v", org.Bundles)
+	}
+	// Foreign org → not found / forbidden (never another tenant's data).
+	if rec := do(h, o1Admin, http.MethodGet, "/api/v1/organizations/o2/file-providers", ""); rec.Code == http.StatusOK {
+		t.Fatalf("org admin must not read another org's diagnostics, got %d", rec.Code)
 	}
 }

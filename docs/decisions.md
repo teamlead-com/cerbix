@@ -2606,3 +2606,88 @@ The pending/counter/`state_sequence` reset applies to all monitor types on re-en
 `push_armed_at` is push-only. Contract recorded in `func-result-protocol` §11; regression
 tests `store.TestPushUpdatePreservesLiveness`, `store.TestAdvanceEscalationsRequiresDownStatus`,
 `ingest.TestReconcilerClosesIncidentOnPendingToUp`.
+
+## D-0145 — Monitoring as Code is a tenant-scoped file reconciler in the API control plane (spec, iter-0086)
+
+Cerbix will expose Monitoring as Code through named static file providers whose directory
+contents are hot-reconciled without process restart/reload. This is not an in-memory config
+swap: PostgreSQL remains the runtime/history source of truth, while files are desired state
+only for resources owned by their provider. The native syntax is a versioned
+`ProjectBundle` (`format: 1` once per file, resource maps keyed by stable source UID), not a
+Kubernetes `apiVersion`/`kind` envelope and not a Go/DB serialization.
+
+Organizations/projects must already exist; static provider scope is explicitly
+`instance|organization|project`, and bundle resolution/reference checks cannot escape it.
+Ownership is per monitor, so UI/API monitors coexist and are never diffed as provider
+orphans. Normal CRUD is rejected for file-managed declarative fields; there is no automatic
+adoption by name. A project bundle is the atomic/fault-isolation unit. Invalid input keeps
+its last-known-good state; ambiguous invalid scans suspend orphaning. Valid disappearance
+marks orphan and disables after grace, but never hard-deletes heartbeat/SLA/incident/audit
+history; restoration reuses DB identity and push token.
+
+The reconciler is an internal `api`/`all` component, with one PostgreSQL advisory-lock
+leader per provider and no `controller` role/service. Scheduler propagation is via an
+in-transaction notification plus its normal DB refresh fallback. Semantic no-ops never
+write/bump revision; real config changes use the D-0142 `UpdateMonitor`/
+`execution_revision` contract, so production enablement depends on P0b. Dynamic files are
+strict and bounded, allow no environment expansion/inline secrets, and expose explicit
+degraded/LKG observability rather than applying partial invalid state. Full contract,
+failure matrix, rollout, and acceptance tests: `docs/specs/func-monitoring-as-code.md`.
+
+**Addendum (iter-0087, contract foundation).** Applying spec §3.1 ("a type is available only
+when every required type-specific field has a strict non-secret schema"), the v1 file
+provider's supported monitor types are the ones fully expressible by common fields —
+`http, tcp, icmp, dns, tls, grpc, websocket, ssh, push`. Types needing a typed `settings`
+object (`composite`, `synthetic`) or credentials (`postgres, mysql, redis, promql,
+rabbitmq`) are rejected by the parser with a bounded `unsupported_type` reason until their
+strict non-secret `settings` schema (composite/synthetic) or the `secret_ref` contract
+(credentialed types) lands in a later iteration. This is the spec's own scope clause, not a
+simplification: there is no generic `config` escape hatch, and any secret-bearing key is
+rejected `inline_secret_forbidden` before type resolution.
+
+## D-0146 — File-provider canonical hash excludes dependency edges (iter-0089)
+Spec §7 lists "dependency UIDs" among the set-like values folded into the canonical semantic
+hash, while §9.2 / D-0142 require a dependency-only change to be a `dependency_update` that
+does NOT bump `execution_revision`. Folding dependencies into a single hash makes those two
+clauses contradict: any dependency edit would change the hash and be classified as a
+revision-bumping `update`.
+
+Resolution (reconciles both, no spec weakening): the canonical **monitor** hash covers only
+the monitor's own execution-affecting config (name, type, target, schedule, conditions,
+tags, region, enabled, auto-incident, settings) and EXCLUDES dependency UIDs. Dependencies
+are compared as a separate normalized (sorted+deduped) set. The planner then classifies:
+`noop` iff config-hash equal AND dependency-set equal; `update` (revision bump) iff the
+config-hash changed; `dependency_update` (NO revision bump) iff only the dependency-set
+changed. This preserves §7's intent (order/comment-insensitive no-op detection, including
+dependency order) and honors §9.2/D-0142 exactly. `execution_revision` is bumped only by a
+real monitor-config change, never by a dependency-graph edit.
+
+## D-0147 — File-provider watcher is poll-based, not event-driven (iter-0095)
+The Monitoring-as-Code watcher (spec §11) is implemented as a bounded directory POLL
+(a name+size+mtime fingerprint sampled every ~1s) plus debounce and the spec-mandated
+periodic full resync — NOT an inotify/fsnotify event stream. Rationale: the spec already
+requires the periodic resync and states correctness "cannot depend solely on" filesystem
+events (they may be coalesced or lost, and ConfigMap/git-sync replace the directory inode);
+a poll + resync meets the observable contract without adding an fsnotify dependency or its
+platform edge cases. Recorded consequences: a change is detected within one poll interval +
+debounce rather than instantly, and a pure `chmod` (no size/mtime change) is not observed
+until the next resync. If sub-second latency is later required, an fsnotify hint layer can be
+added in front of the same reconcile path without changing the model. This is a deliberate
+architecture decision, not an omission.
+
+## D-0148 — File-provider audit fires on any persisted state change; scheduler NOTIFY only on execution change (iter-0109)
+Spec §9 step 10 requires an audit record on a "changed apply" but does not enumerate what
+counts as changed. This decision fixes the contract: the `file_provider.apply` audit row is
+written for ANY persisted ownership/config state change in the apply transaction — create,
+update, dependency change, restore, first orphan-mark, un-orphan, and grace-disable — i.e.
+whenever `stateChanged` is true. A pure no-op (nothing persisted) writes no audit. Separately,
+the scheduler wake (`pg_notify(monitor_config_changed)`) fires ONLY when EXECUTION config
+changed (`execChanged`: create/update/re-enable/disable) — a dependency-only or ownership-only
+change affects delivery-time suppression, not scheduling, so it must not force a reschedule.
+Rationale: an external review found the code audited only on exec/dep changes while §9 reads as
+"any changed apply", so first-orphan and un-orphan (which do mutate persisted generation/owner
+state) went unaudited — code and spec diverged. Auditing all ownership-state transitions is the
+literal reading of §9 and gives operators a complete lifecycle trail; the NOTIFY axis stays
+narrow so no-op-for-scheduling changes don't churn the leader. Consequence: an un-orphan with an
+unchanged config is audited (an ownership transition) but does NOT bump `execution_revision` or
+NOTIFY (D-0142 revision-safety preserved).

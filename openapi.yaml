@@ -1793,6 +1793,56 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/admin/file-providers:
+    get:
+      tags: [admin]
+      summary: List all file-provider bundle diagnostics (global admin only)
+      description: >
+        Monitoring-as-Code (FR-017) provider bundle status across all tenants: relative
+        source path, applied generation, status, and bounded errors (`bundles`), plus this
+        process's live runtime view of every configured provider (`providers`): leadership,
+        last scan/success, and counts — including configured-but-idle providers. Requires a
+        global admin.
+      parameters:
+        - in: query
+          name: provider
+          required: false
+          schema: { type: string }
+          description: 'Optional: restrict both bundles and runtime status to one named provider (§15).'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bundles: { type: array, items: { $ref: '#/components/schemas/FileProviderDiagnostic' } }
+                  providers: { type: array, items: { $ref: '#/components/schemas/FileProviderRuntimeStatus' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/organizations/{orgID}/file-providers:
+    get:
+      tags: [admin]
+      summary: List an organization's file-provider bundle diagnostics (org admin)
+      description: >
+        Provider bundle status scoped to one organization (org admin). Filtered in the store,
+        so no cross-tenant bundle/error/path is ever returned.
+      parameters:
+        - in: path
+          name: orgID
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bundles: { type: array, items: { $ref: '#/components/schemas/FileProviderDiagnostic' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/v1/admin/outbox/dead:
     get:
       tags: [admin]
@@ -2130,8 +2180,49 @@ components:
         escalation_policy_id: { type: string, description: 'On-call escalation policy for down alerts. Empty = flat notification to all linked channels.' }
         status: { type: string, enum: [pending, up, down] }
         push_token: { type: string, description: 'Set for push monitors; the secret in their heartbeat URL.' }
+        management:
+          $ref: '#/components/schemas/MonitorManagement'
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    MonitorManagement:
+      type: object
+      description: 'Read-only source provenance (FR-017). A file-managed monitor is read-only through normal CRUD (409 managed_by_file); an ordinary monitor reports source=ui.'
+      properties:
+        source: { type: string, enum: [ui, file] }
+        provider: { type: string, description: 'File provider name (source=file).' }
+        uid: { type: string, description: 'Source UID within the bundle (source=file).' }
+        path: { type: string, description: 'Tenant-safe RELATIVE bundle path (never an absolute filesystem path).' }
+        read_only: { type: boolean, description: 'True when declarative fields cannot be edited via CRUD.' }
+    FileProviderDiagnostic:
+      type: object
+      description: 'One file-provider bundle status (tenant-safe; relative path only).'
+      properties:
+        provider: { type: string }
+        organization: { type: string, description: 'Organization slug.' }
+        project: { type: string, description: 'Project slug.' }
+        path: { type: string, description: 'Relative source path.' }
+        generation: { type: integer, format: int64 }
+        status: { type: string, enum: [pending, applied, rejected, error, degraded] }
+        last_error: { type: string }
+        applied_at: { type: string, format: date-time }
+    FileProviderRuntimeStatus:
+      type: object
+      description: >
+        One configured file provider as seen live by THIS api process (§15). Process-local:
+        leadership and scan times reflect this replica only (a follower reports leader=false).
+        Configured-but-idle providers appear too (registered before their first reconcile).
+      properties:
+        provider: { type: string, description: 'Provider name from config.' }
+        scope_type: { type: string, enum: [instance, organization, project] }
+        scope_org: { type: string, description: 'Organization slug for organization/project-scoped providers.' }
+        scope_project: { type: string, description: 'Project slug for project-scoped providers.' }
+        leader: { type: boolean, description: 'Whether this process currently holds the provider leader lock.' }
+        last_scan_unix: { type: integer, format: int64, description: 'Unix seconds of the last reconcile attempt (0 = never).' }
+        last_success_unix: { type: integer, format: int64, description: 'Unix seconds of the last successful generation (sticky; 0 = never).' }
+        last_error: { type: string, description: 'Bounded reason of the last rejection this scan.' }
+        managed_monitors: { type: integer, description: 'Monitors currently managed by this provider.' }
+        orphaned_monitors: { type: integer, description: 'Monitors orphaned (source removed, retained).' }
+        bundle_errors: { type: integer, description: 'Bundles rejected in the last scan.' }
     CreateMonitor:
       type: object
       required: [name, type]

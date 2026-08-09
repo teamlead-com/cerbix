@@ -112,6 +112,10 @@ services:
       - "8080:8080"
     volumes:
       - ./config.dev.yaml:/etc/cerbix/config.yaml:ro
+      # Monitoring as Code (FR-017): mount a bundle directory to exercise the file provider (and
+      # the e2e/tests/file-providers.spec.ts UI surface). Enable the matching providers.file
+      # block in config.dev.yaml, then edit deploy/monitoring.d/*.yaml to your seeded org/project.
+      - ./monitoring.d:/etc/cerbix/monitoring.d:ro
 
   # ---- profile: distributed (roles as separate processes) ------------------
   scheduler:

@@ -91,6 +91,18 @@ client-credentials JWTs (any issuer, D-0043), both routed through `authz.Can`.
 - **Settings page** — one place to manage notification channels (per project) and API
   tokens + outbound webhooks (per org), mirroring the service-account/notification model.
 
+## Monitoring as Code (planned)
+
+An optional file provider in the `api`/`all` control plane will hot-reconcile strict,
+versioned, project-scoped YAML bundles into PostgreSQL without restarting Cerbix. Existing
+organizations/projects are referenced by immutable slugs; the provider never provisions
+tenants. Ownership is per monitor, so file-managed and UI/API-managed monitors coexist in
+one project. Reconciliation is transactional per ProjectBundle, tenant-scoped,
+last-known-good preserving, no-op idempotent, HA-elected through PostgreSQL, and never
+hard-deletes history. The complete pre-implementation contract is
+[`docs/specs/func-monitoring-as-code.md`](specs/func-monitoring-as-code.md) (FR-017,
+NFR-014, D-0145).
+
 ## Delivery Method
 
 Iteration-based per `AGENTS.md`. The full phased roadmap and rationale live in the

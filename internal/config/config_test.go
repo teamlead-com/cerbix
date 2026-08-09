@@ -352,3 +352,84 @@ func TestExpandEnvStrict(t *testing.T) {
 		t.Fatalf("expand = %q, want %q", got, "a=val b= c=$literal")
 	}
 }
+
+func TestProvidersFileValid(t *testing.T) {
+	cfg, err := Parse([]byte("providers:\n  file:\n    platform:\n      directory: /etc/cerbix/monitoring.d\n      scope:\n        type: instance\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	p, ok := cfg.Providers.File["platform"]
+	if !ok {
+		t.Fatal("provider not parsed")
+	}
+	// Defaults applied by normalizeProviders.
+	if p.Debounce.Std().String() != "2s" || p.ResyncInterval.Std().String() != "30s" {
+		t.Fatalf("defaults not applied: %+v", p)
+	}
+	if p.Limits.MaxFiles != 1000 || p.Limits.MaxManagedMonitors != 5000 {
+		t.Fatalf("limit defaults not applied: %+v", p.Limits)
+	}
+}
+
+func TestProvidersFileRejections(t *testing.T) {
+	cases := []struct {
+		name, yaml, want string
+	}{
+		{"bad name", "providers:\n  file:\n    BadName:\n      directory: /x\n      scope: {type: instance}\n", "invalid provider name"},
+		{"relative dir", "providers:\n  file:\n    p:\n      directory: rel/dir\n      scope: {type: instance}\n", "absolute path"},
+		{"root dir", "providers:\n  file:\n    p:\n      directory: /\n      scope: {type: instance}\n", "filesystem root"},
+		{"missing scope", "providers:\n  file:\n    p:\n      directory: /x\n", "scope.type is required"},
+		{"bad scope", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: cluster}\n", "scope.type must be"},
+		{"instance with org", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: instance, organization: acme}\n", "must not set"},
+		{"org without org", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: organization}\n", "requires scope.organization"},
+		{"project without project", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: project, organization: acme}\n", "requires scope.organization and scope.project"},
+		{"bad debounce", "providers:\n  file:\n    p:\n      directory: /x\n      debounce: 5m\n      scope: {type: instance}\n", "debounce must be"},
+		{"overlap roots", "providers:\n  file:\n    a:\n      directory: /etc/cerbix/mon\n      scope: {type: instance}\n    b:\n      directory: /etc/cerbix/mon/sub\n      scope: {type: instance}\n", "overlaps"},
+		{"limit over max", "providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: instance}\n      limits: {max_files: 999999999}\n", "safety maximum"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Parse([]byte(c.yaml))
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want error containing %q, got %v", c.want, err)
+			}
+		})
+	}
+}
+
+// TestProvidersFileSymlinkOverlapRejected covers the canonical-root overlap check: two
+// providers whose directories are lexically distinct but symlink to the SAME real path are
+// rejected as overlapping (EvalSymlinks, not just filepath.Clean).
+func TestProvidersFileSymlinkOverlapRejected(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	link := filepath.Join(base, "link")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	y := "providers:\n  file:\n    a:\n      directory: " + real +
+		"\n      scope: {type: instance}\n    b:\n      directory: " + link +
+		"\n      scope: {type: instance}\n"
+	if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("symlinked duplicate root must be rejected as overlap, got %v", err)
+	}
+}
+
+func TestProviderOrphanGraceZeroIsImmediate(t *testing.T) {
+	// Explicit 0 means immediate disable (spec §4.1), NOT the 30s default.
+	cfg, err := Parse([]byte("providers:\n  file:\n    p:\n      directory: /x\n      orphan_grace_period: 0s\n      scope: {type: instance}\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if g := cfg.Providers.File["p"].OrphanGraceOrDefault(); g != 0 {
+		t.Fatalf("explicit 0 orphan_grace = %s, want 0 (immediate)", g)
+	}
+	// Absent → contract default 30s.
+	cfg, _ = Parse([]byte("providers:\n  file:\n    p:\n      directory: /x\n      scope: {type: instance}\n"))
+	if g := cfg.Providers.File["p"].OrphanGraceOrDefault(); g != 30*time.Second {
+		t.Fatalf("absent orphan_grace = %s, want 30s default", g)
+	}
+}

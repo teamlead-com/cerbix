@@ -36,6 +36,8 @@ type fakeStore struct {
 	userOrgs           map[string][]domain.Organization
 	members            map[string][]domain.Membership
 	monitors           map[string]domain.Monitor
+	managed            map[string]store.FileManagement // monitor id → file provenance (ownership)
+	diagnostics        []fakeDiag                      // file-provider bundle diagnostics
 	passwords          map[string]string
 	sessionsDeletedFor []string
 	slaTargets         map[string]domain.SLATarget
@@ -343,6 +345,9 @@ func (f *fakeStore) UpdateMonitor(_ context.Context, m domain.Monitor) (domain.M
 	if _, ok := f.monitors[m.ID]; !ok {
 		return domain.Monitor{}, store.ErrNotFound
 	}
+	if _, managed := f.managed[m.ID]; managed {
+		return domain.Monitor{}, store.ErrManagedByFile
+	}
 	f.monitors[m.ID] = m
 	return m, nil
 }
@@ -350,8 +355,40 @@ func (f *fakeStore) DeleteMonitor(_ context.Context, id string) error {
 	if _, ok := f.monitors[id]; !ok {
 		return store.ErrNotFound
 	}
+	if _, managed := f.managed[id]; managed {
+		return store.ErrManagedByFile
+	}
 	delete(f.monitors, id)
 	return nil
+}
+func (f *fakeStore) MonitorProvenance(_ context.Context, id string) (store.FileManagement, bool, error) {
+	fm, ok := f.managed[id]
+	return fm, ok, nil
+}
+
+// fakeDiag pairs a diagnostic with its org id for the org-scoped filter.
+type fakeDiag struct {
+	orgID string
+	diag  store.FileProviderDiagnostic
+}
+
+func (f *fakeStore) FileProviderDiagnostics(_ context.Context, orgID string) ([]store.FileProviderDiagnostic, error) {
+	var out []store.FileProviderDiagnostic
+	for _, d := range f.diagnostics {
+		if orgID == "" || d.orgID == orgID {
+			out = append(out, d.diag)
+		}
+	}
+	return out, nil
+}
+func (f *fakeStore) MonitorProvenanceBatch(_ context.Context, ids []string) (map[string]store.FileManagement, error) {
+	out := map[string]store.FileManagement{}
+	for _, id := range ids {
+		if fm, ok := f.managed[id]; ok {
+			out[id] = fm
+		}
+	}
+	return out, nil
 }
 func (f *fakeStore) ReplaceMonitorDependencies(_ context.Context, monitorID, projectID string, parents []string) error {
 	for _, p := range parents {
@@ -1034,6 +1071,17 @@ func newHandler(fs *fakeStore) http.Handler {
 func newPublicHandler(fs *fakeStore) http.Handler {
 	return api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).PublicRouter()
 }
+
+// newHandlerWithFPStatus builds a router with a file-provider runtime status source wired in,
+// so diagnostics tests can assert the "providers" section of the admin response.
+func newHandlerWithFPStatus(fs *fakeStore, src api.FileProviderStatusSource) http.Handler {
+	return api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithFileProviderStatus(src).Router()
+}
+
+// fakeFPStatus is a static FileProviderStatusSource for tests.
+type fakeFPStatus []api.FileProviderRuntimeStatus
+
+func (f fakeFPStatus) FileProviderRuntimeStatuses() []api.FileProviderRuntimeStatus { return f }
 
 func do(h http.Handler, p authz.Principal, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))

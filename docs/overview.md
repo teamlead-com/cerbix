@@ -67,6 +67,7 @@ Top-level `Config` sections (`internal/config`):
 | `security` | `encryption_key`, `previous_keys`, `admin_email`, `admin_password` | AES-256-GCM keyring for at-rest secrets + rotation; global-admin bootstrap on an empty system. |
 | `mail` | `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). |
 | `pull` | `regions`, `token`, `agents`, `server_url` | HTTP-pull transport: broker-less regions (server side) and agent credentials (agent side). |
+| `providers` | `file.<name>.{directory, debounce, resync_interval, orphan_grace_period, scope, limits}` | Monitoring-as-Code file providers (FR-017, spec `func-monitoring-as-code`). Static definition; contents hot-reconciled by `api`/`all`. Scope `instance\|organization\|project` (no implicit scope). |
 
 Many settings (OIDC, branding, auth-policy, alerting, monitor-defaults, mail), once first
 saved in the UI, live in the DB (singleton `instance_settings` / `oidc_settings`) and **override**

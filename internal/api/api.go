@@ -48,6 +48,9 @@ type Store interface {
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, time.Time, error)
 	DeleteMonitor(ctx context.Context, id string) error
+	MonitorProvenance(ctx context.Context, monitorID string) (store.FileManagement, bool, error)
+	MonitorProvenanceBatch(ctx context.Context, monitorIDs []string) (map[string]store.FileManagement, error)
+	FileProviderDiagnostics(ctx context.Context, orgID string) ([]store.FileProviderDiagnostic, error)
 	ReplaceMonitorDependencies(ctx context.Context, monitorID, projectID string, parents []string) error
 	ListRecentHeartbeats(ctx context.Context, monitorID string, limit int) ([]domain.Heartbeat, error)
 	PasswordHashByID(ctx context.Context, id string) (string, error)
@@ -191,10 +194,11 @@ type Handler struct {
 	settings          *settings.Service
 	liveRegions       LiveRegionSource
 	tester            RegionTester
-	agentToken        string            // optional catch-all agent token (authorizes any region)
-	agentRegionTokens map[string]string // per-region agent tokens (region → token)
-	agentDBTokens     bool              // also resolve agent tokens from the database
-	pullWaiter        PullWaiter        // long-poll wake source (LISTEN/NOTIFY); nil = no long-poll
+	agentToken        string                   // optional catch-all agent token (authorizes any region)
+	agentRegionTokens map[string]string        // per-region agent tokens (region → token)
+	agentDBTokens     bool                     // also resolve agent tokens from the database
+	pullWaiter        PullWaiter               // long-poll wake source (LISTEN/NOTIFY); nil = no long-poll
+	fpStatus          FileProviderStatusSource // process-local file-provider runtime status; nil = none
 }
 
 // PullWaiter blocks until a pull job is enqueued for a region (or the max hold / request
@@ -306,6 +310,13 @@ func (h *Handler) WithLiveRegions(s LiveRegionSource) *Handler {
 // before saving, from the monitor's own region. Without it, test returns 501.
 func (h *Handler) WithTester(t RegionTester) *Handler {
 	h.tester = t
+	return h
+}
+
+// WithFileProviderStatus wires this process's file-provider runtime status source into the
+// global-admin diagnostics (leadership/last-scan/configured providers). Nil = none.
+func (h *Handler) WithFileProviderStatus(src FileProviderStatusSource) *Handler {
+	h.fpStatus = src
 	return h
 }
 
@@ -447,6 +458,8 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/admin/users", h.listAllUsers)
 	mux.HandleFunc("PATCH /api/v1/admin/users/{userID}", h.updateAdminUser)
 	mux.HandleFunc("DELETE /api/v1/admin/users/{userID}", h.deleteAdminUser)
+	mux.HandleFunc("GET /api/v1/admin/file-providers", h.listFileProvidersAdmin)
+	mux.HandleFunc("GET /api/v1/organizations/{orgID}/file-providers", h.listOrgFileProviders)
 	mux.HandleFunc("GET /api/v1/admin/outbox/dead", h.listDeadOutbox)
 	mux.HandleFunc("POST /api/v1/admin/outbox/dead/replay-all", h.replayAllDeadOutbox)
 	mux.HandleFunc("POST /api/v1/admin/outbox/dead/{eventID}/replay", h.replayDeadOutbox)

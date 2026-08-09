@@ -146,3 +146,27 @@ pull:
                           #     - region: "geo-1"
                           #       token: "geo1-secret"
   server_url: ""          # agent: e.g. https://cerbix.core
+
+# ---------------------------------------------------------------------------
+# Monitoring as Code — file providers (spec func-monitoring-as-code, FR-017).
+# OPTIONAL. Each named provider hot-reconciles ProjectBundle YAML files under its
+# directory WITHOUT a restart/reload. The provider DEFINITION (name/scope/directory/
+# limits) is static — only the file CONTENTS are dynamic. Owned by --role api/all;
+# scheduler/worker/agent parse this block but never watch the directory.
+# providers:
+#   file:
+#     platform:                          # provider name = ^[a-z][a-z0-9-]{0,39}$, metric label
+#       directory: /etc/cerbix/monitoring.d   # absolute, non-root; api/all require it to exist
+#       debounce: 2s                     # [100ms, 30s]
+#       resync_interval: 30s             # [5s, 1h] — mandatory periodic full rescan
+#       orphan_grace_period: 30s         # [0, 24h] — disable (never hard-delete) after valid absence
+#       scope:
+#         type: instance                 # instance | organization | project (NO implicit scope)
+#         # organization: acme           # required for organization/project scope
+#         # project: payments            # required for project scope
+#       limits:
+#         max_files: 1000
+#         max_file_bytes: 1048576
+#         max_total_bytes: 16777216
+#         max_monitors_per_bundle: 1000
+#         max_managed_monitors: 5000

@@ -244,10 +244,41 @@ func (s *Store) RecordPushResult(ctx context.Context, monitorID string, up bool,
 	})
 }
 
-// UpdateMonitor updates a monitor's mutable fields (name, target, schedule,
-// conditions, enabled) by id. Type and push_token are immutable. ErrNotFound if
-// the monitor is gone. The caller validates via domain first.
+// UpdateMonitor is the USER-managed (API/UI) config-write path. It rejects a monitor owned
+// by a file provider with ErrManagedByFile — the ownership check runs inside the same
+// transaction as the write (under the monitor's row lock), so a concurrent file apply that
+// claims ownership cannot slip past a stale handler-level check (spec §8/§9.2). Type and
+// push_token are immutable. ErrNotFound if the monitor is gone. Caller validates via domain.
 func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Monitor{}, fmt.Errorf("store: begin update monitor: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	var exists int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM monitors WHERE id = $1 FOR UPDATE`, m.ID).Scan(&exists); noRows(err) {
+		return domain.Monitor{}, ErrNotFound
+	} else if err != nil {
+		return domain.Monitor{}, fmt.Errorf("store: lock monitor: %w", err)
+	}
+	if err := assertNotFileManagedTx(ctx, tx, m.ID); err != nil {
+		return domain.Monitor{}, err
+	}
+	updated, err := updateMonitorTx(ctx, tx, s, m)
+	if err != nil {
+		return domain.Monitor{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Monitor{}, fmt.Errorf("store: commit update monitor: %w", err)
+	}
+	return updated, nil
+}
+
+// updateMonitorTx is the shared config-write contract (D-0142): it bumps execution_revision,
+// applies the freshness-watermark / push re-arm rules, and returns the updated row. Both the
+// user path (UpdateMonitor, after its ownership guard) and the file-apply path (which owns
+// the row and must NOT be blocked by the guard) call it inside their own transaction.
+func updateMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor) (domain.Monitor, error) {
 	conditions := m.Conditions
 	if conditions == nil {
 		conditions = []string{}
@@ -264,7 +295,7 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 	if err != nil {
 		return domain.Monitor{}, err
 	}
-	row := s.pool.QueryRow(ctx,
+	row := tx.QueryRow(ctx,
 		`UPDATE monitors
 		    SET name = $2, target = $3, interval_seconds = $4, timeout_seconds = $5,
 		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = $11, auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, updated_at = now(),
@@ -792,13 +823,29 @@ func (s *Store) EnqueueRenotifyReminders(ctx context.Context) (int, error) {
 }
 
 // DeleteMonitor removes a monitor (and its heartbeats via cascade).
+// DeleteMonitor is a USER-managed (API/UI) op: it rejects a file-owned monitor with
+// ErrManagedByFile (checked under the row lock, atomic against a concurrent file apply —
+// spec §8). The file provider never physically deletes; it orphans/disables instead (§10).
 func (s *Store) DeleteMonitor(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM monitors WHERE id = $1`, id)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("store: begin delete monitor: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	var exists int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM monitors WHERE id = $1 FOR UPDATE`, id).Scan(&exists); noRows(err) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("store: lock monitor: %w", err)
+	}
+	if err := assertNotFileManagedTx(ctx, tx, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM monitors WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("store: delete monitor: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit delete monitor: %w", err)
 	}
 	return nil
 }

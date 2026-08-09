@@ -146,6 +146,7 @@ type Scheduler struct {
 	pullMetrics   PullStatsSink
 	leaderState   LeaderStateSink
 	confirmCh     <-chan string      // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
+	configCh      <-chan struct{}    // execution-config changes (LISTEN monitor_config_changed) → force a snapshot reload
 	reconciler    *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
 }
 
@@ -156,6 +157,15 @@ type Scheduler struct {
 // accelerates within refreshEvery.
 func (s *Scheduler) WithConfirmSignals(ch <-chan string) *Scheduler {
 	s.confirmCh = ch
+	return s
+}
+
+// WithConfigSignals wires the execution-config change stream (store.ConfigNotifier on
+// monitor_config_changed), so a committed file-provider apply forces the leader to reload its
+// enabled-monitor snapshot on the next tick instead of waiting out refreshEvery (spec §12).
+// Optional: without it, the periodic snapshot refresh is the fallback (up to refreshEvery late).
+func (s *Scheduler) WithConfigSignals(ch <-chan struct{}) *Scheduler {
+	s.configCh = ch
 	return s
 }
 
@@ -305,6 +315,11 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 			if m, ok := byID[id]; ok && m.ConfirmConfigured() {
 				s.enterConfirm(confirmFast, byID, m, time.Now(), nextRun)
 			}
+		case <-s.configCh:
+			// A file-provider apply committed an execution-config change: force a snapshot
+			// reload on the next tick so it is scheduled promptly, not up to refreshEvery late
+			// (spec §12). A zero lastRefresh makes the tick's refresh guard fire immediately.
+			lastRefresh = time.Time{}
 		case now := <-ticker.C:
 			// Anti-split-brain watchdog: verify we still hold the lock before doing
 			// any leader work this tick. On loss (connection died, Postgres blip)

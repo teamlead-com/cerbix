@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/events"
+	fpruntime "github.com/teamlead-com/cerbix/internal/fileprovider/runtime"
 	"github.com/teamlead-com/cerbix/internal/httpsrv"
 	"github.com/teamlead-com/cerbix/internal/ingest"
 	"github.com/teamlead-com/cerbix/internal/logging"
@@ -55,6 +58,8 @@ var validRoles = map[string]bool{
 const (
 	dbPingInterval = 10 * time.Second
 	workerPoolSize = 4
+	// maxConcurrentReconciles bounds file-provider reconciles running at once, process-wide.
+	maxConcurrentReconciles = 4
 )
 
 // Main runs the CLI and returns a process exit code.
@@ -560,6 +565,13 @@ func runServe(args []string) int {
 		logger.Info("auth_enabled", "oidc_active", authn.OIDCActive(), "local", cfg.Local.Enabled)
 	}
 
+	// Monitoring as Code file providers (FR-017): owned only by api/all (spec §12). Startup
+	// is fail-fast — a configured provider needs a DB and a readable directory here.
+	if err := startFileProviders(ctx, cfg, *role, st, registry, apiHandler, logger, spawn); err != nil {
+		logging.Critical(logger, "file_provider_startup_failed", "error", err.Error())
+		return 1
+	}
+
 	// Checking pipeline. --role=all runs every role in one process over the
 	// in-process dispatcher; distributed roles (api|scheduler|worker) use the
 	// RabbitMQ dispatcher and each run only their part.
@@ -632,6 +644,15 @@ func runServe(args []string) int {
 			ch, _ := cn.Subscribe() // scheduler lives for the whole process — no unsubscribe
 			return ch
 		}
+		// Config-change wake signals for the scheduler leader (LISTEN monitor_config_changed):
+		// a committed file-provider apply forces a snapshot reload on the next tick instead of
+		// waiting out refreshEvery (spec §12).
+		configSignals := func() <-chan struct{} {
+			cn := st.NewConfigNotifier(logger)
+			spawn(func() { cn.Run(ctx) })
+			ch, _ := cn.Subscribe()
+			return ch
+		}
 		switch *role {
 		case "all":
 			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
@@ -639,7 +660,8 @@ func runServe(args []string) int {
 				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → SSE + incident
-				WithConfirmSignals(confirmSignals())
+				WithConfirmSignals(confirmSignals()).
+				WithConfigSignals(configSignals()) // file-apply config changes wake the leader
 			spawn(func() { sch.Run(ctx) })
 			wk := worker.New(disp, runner, workerPoolSize, logger)
 			spawn(func() { wk.Run(ctx) })
@@ -654,7 +676,8 @@ func runServe(args []string) int {
 				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → incident/outbox (SSE only if this process serves it)
-				WithConfirmSignals(confirmSignals())                                // accelerated failure-confirmation probes
+				WithConfirmSignals(confirmSignals()).                               // accelerated failure-confirmation probes
+				WithConfigSignals(configSignals())                                  // file-apply config changes wake the leader
 			// Alert when a region with enabled monitors loses its worker/agent. Liveness
 			// unions RabbitMQ consumers with recent pull-agent heartbeats.
 			sch.WithLiveRegions(newLiveRegions(mgmt, st))
@@ -802,4 +825,93 @@ func (f incidentFanout) Deliver(ctx context.Context, ev domain.IncidentEvent) er
 		}
 	}
 	return err
+}
+
+// startFileProviders launches the Monitoring-as-Code file providers for an api/all process
+// (spec §12: only these roles own the component; scheduler/worker/agent parse the same
+// config but never watch the directory). Fail-fast per §4.1: a configured provider requires
+// a database, and its directory must exist and be readable at startup. Each provider runs
+// its own leader-elected reconcile loop under the shutdown WaitGroup via spawn.
+func startFileProviders(ctx context.Context, cfg *config.Config, role string, st *store.Store, registry *metrics.Registry, apiHandler *api.Handler, logger *slog.Logger, spawn func(func())) error {
+	if len(cfg.Providers.File) == 0 {
+		return nil
+	}
+	if role != "all" && role != "api" {
+		return nil // owned only by api/all; other roles neither watch nor require the directory
+	}
+	if st == nil {
+		return fmt.Errorf("file providers require a database (role %s)", role)
+	}
+	names := make([]string, 0, len(cfg.Providers.File))
+	for name := range cfg.Providers.File {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// One process-local status registry backs the diagnostics API (§15): every provider
+	// (writer) registers at New so configured-but-idle providers surface before their first
+	// reconcile; the api handler reads a snapshot on demand.
+	statusReg := fpruntime.NewStatusRegistry()
+	if apiHandler != nil {
+		apiHandler.WithFileProviderStatus(fpStatusAdapter{reg: statusReg})
+	}
+	// One semaphore shared by every provider bounds concurrent reconciles process-wide (§17).
+	reconcileSem := make(chan struct{}, maxConcurrentReconciles)
+	for _, name := range names {
+		pc := cfg.Providers.File[name]
+		info, err := os.Stat(pc.Directory)
+		if err != nil {
+			return fmt.Errorf("file provider %q: directory %q not readable at startup: %w", name, pc.Directory, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("file provider %q: %q is not a directory", name, pc.Directory)
+		}
+		// Stat proves existence but not that the directory can be ENUMERATED (a dir with no
+		// execute/read bit stats fine yet fails ReadDir). Fail fast on that too (§4.1).
+		if dh, derr := os.Open(pc.Directory); derr != nil {
+			return fmt.Errorf("file provider %q: directory %q not openable at startup: %w", name, pc.Directory, derr)
+		} else if _, derr := dh.ReadDir(1); derr != nil && derr != io.EOF {
+			_ = dh.Close()
+			return fmt.Errorf("file provider %q: directory %q not enumerable at startup: %w", name, pc.Directory, derr)
+		} else {
+			_ = dh.Close()
+		}
+		// Register a zero leadership gauge BEFORE election so every configured provider always
+		// exports `cerbix_file_provider_leader{provider}` — otherwise, after the sole leader
+		// disappears, the remaining followers export no series and the NoLeader alert's
+		// `max by(provider)(…leader) == 0` matches an empty vector and never fires (§16).
+		if registry != nil {
+			registry.SetFileProviderLeader(name, false)
+		}
+		p := fpruntime.New(name, pc, fpruntime.NewStoreApplier(st), logger).
+			WithMetrics(registry).WithReconcileLimiter(reconcileSem).WithStatus(statusReg)
+		spawn(func() { p.Run(ctx) })
+		logger.Info("file_provider_started", "provider", name, "directory", pc.Directory)
+	}
+	return nil
+}
+
+// fpStatusAdapter bridges the reconcile runtime's StatusRegistry to the api package's
+// FileProviderStatusSource, mapping each snapshot entry to the API DTO. Go has no structural
+// typing across packages, so this thin adapter avoids the api package importing runtime.
+type fpStatusAdapter struct{ reg *fpruntime.StatusRegistry }
+
+func (a fpStatusAdapter) FileProviderRuntimeStatuses() []api.FileProviderRuntimeStatus {
+	snap := a.reg.Snapshot()
+	out := make([]api.FileProviderRuntimeStatus, 0, len(snap))
+	for _, s := range snap {
+		out = append(out, api.FileProviderRuntimeStatus{
+			Provider:        s.Provider,
+			ScopeType:       s.ScopeType,
+			ScopeOrg:        s.ScopeOrg,
+			ScopeProject:    s.ScopeProject,
+			Leader:          s.Leader,
+			LastScanUnix:    s.LastScanUnix,
+			LastSuccessUnix: s.LastSuccessUnix,
+			LastError:       s.LastError,
+			Managed:         s.Managed,
+			Orphaned:        s.Orphaned,
+			BundleErrors:    s.Rejected,
+		})
+	}
+	return out
 }

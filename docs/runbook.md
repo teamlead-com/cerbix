@@ -177,3 +177,40 @@ TimescaleDB hypertable + continuous aggregates is a future optimization for larg
 
 > Sections for broker outages, scheduler failover, and SLA backfill are added as those
 > subsystems land.
+
+## Monitoring as Code file providers (FR-017)
+
+Static `providers.file.<name>` blocks reconcile ProjectBundle YAML into provider-owned
+monitors without a restart/reload. Owned by `--role api`/`all` only (scheduler/worker/agent
+parse the config but never watch the directory).
+
+**Deployment invariant (HA):** every `api`/`all` replica MUST see identical provider-directory
+content (shared read-only volume, identical ConfigMap, or identical git-sync checkout). One
+replica per provider applies at a time (a PostgreSQL advisory lock, distinct per provider);
+the lock prevents concurrent apply but cannot tell a stale local directory from a fresh one,
+so divergent content across replicas is an operator error. Alert if replicas disagree.
+
+**Alerting (fleet-level):** local follower readiness cannot prove an active provider leader.
+Alert on `time() - cerbix_file_provider_last_success_timestamp_seconds{provider=...}` exceeding
+an operator window (e.g. 3× `resync_interval`), and on a rising
+`cerbix_file_provider_bundle_errors{provider=...}` — a persistently invalid or half-written
+bundle keeps last-known-good running while the desired generation is rejected (degraded).
+
+**Degraded vs down:** an invalid dynamic bundle, a duplicate-project file, or a temporarily
+unreadable directory rejects the desired generation and marks the provider degraded — it never
+restarts the process or mutates the committed runtime. A directory that disappears is NOT a
+desired deletion (last-known-good is kept, orphaning is suspended). A truly-absent valid bundle
+orphans then disables after `orphan_grace_period` (0 = immediate); history is never hard-deleted.
+
+**Diagnostics API:** `GET /api/v1/admin/file-providers` (global admin) returns
+`{bundles, providers}` — persisted per-bundle status/last-error/generation AND this process's
+live runtime view of every configured provider (leadership, last scan, last success, counts),
+including configured-but-idle providers. Leadership/scan times are process-local: query each
+`api`/`all` replica to see which one currently leads. `?provider=<name>` narrows to one provider.
+`GET /api/v1/organizations/{orgID}/file-providers` (org admin) returns `{bundles}` scoped to that
+organization only (no cross-tenant path/error).
+
+**Smoke:** `e2e/mac-smoke.sh` proves the full live lifecycle on a throwaway DB with the process
+never restarting: create → scheduler executes the file-managed monitor → in-place semantic
+update (generation bump, same DB id) → last-known-good on invalid input → orphan-disable (no
+hard delete) → restore (same DB id and push token).

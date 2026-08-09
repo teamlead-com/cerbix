@@ -4441,6 +4441,97 @@ export interface paths {
         };
         trace?: never;
     };
+    "/api/v1/admin/file-providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List all file-provider bundle diagnostics (global admin only)
+         * @description Monitoring-as-Code (FR-017) provider bundle status across all tenants: relative source path, applied generation, status, and bounded errors (`bundles`), plus this process's live runtime view of every configured provider (`providers`): leadership, last scan/success, and counts — including configured-but-idle providers. Requires a global admin.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional: restrict both bundles and runtime status to one named provider (§15). */
+                    provider?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            bundles?: components["schemas"]["FileProviderDiagnostic"][];
+                            providers?: components["schemas"]["FileProviderRuntimeStatus"][];
+                        };
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/organizations/{orgID}/file-providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List an organization's file-provider bundle diagnostics (org admin)
+         * @description Provider bundle status scoped to one organization (org admin). Filtered in the store, so no cross-tenant bundle/error/path is ever returned.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    orgID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            bundles?: components["schemas"]["FileProviderDiagnostic"][];
+                        };
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/outbox/dead": {
         parameters: {
             query?: never;
@@ -4806,10 +4897,72 @@ export interface components {
             status?: "pending" | "up" | "down";
             /** @description Set for push monitors; the secret in their heartbeat URL. */
             push_token?: string;
+            management?: components["schemas"]["MonitorManagement"];
             /** Format: date-time */
             created_at?: string;
             /** Format: date-time */
             updated_at?: string;
+        };
+        /** @description Read-only source provenance (FR-017). A file-managed monitor is read-only through normal CRUD (409 managed_by_file); an ordinary monitor reports source=ui. */
+        MonitorManagement: {
+            /** @enum {string} */
+            source?: "ui" | "file";
+            /** @description File provider name (source=file). */
+            provider?: string;
+            /** @description Source UID within the bundle (source=file). */
+            uid?: string;
+            /** @description Tenant-safe RELATIVE bundle path (never an absolute filesystem path). */
+            path?: string;
+            /** @description True when declarative fields cannot be edited via CRUD. */
+            read_only?: boolean;
+        };
+        /** @description One file-provider bundle status (tenant-safe; relative path only). */
+        FileProviderDiagnostic: {
+            provider?: string;
+            /** @description Organization slug. */
+            organization?: string;
+            /** @description Project slug. */
+            project?: string;
+            /** @description Relative source path. */
+            path?: string;
+            /** Format: int64 */
+            generation?: number;
+            /** @enum {string} */
+            status?: "pending" | "applied" | "rejected" | "error" | "degraded";
+            last_error?: string;
+            /** Format: date-time */
+            applied_at?: string;
+        };
+        /** @description One configured file provider as seen live by THIS api process (§15). Process-local: leadership and scan times reflect this replica only (a follower reports leader=false). Configured-but-idle providers appear too (registered before their first reconcile). */
+        FileProviderRuntimeStatus: {
+            /** @description Provider name from config. */
+            provider?: string;
+            /** @enum {string} */
+            scope_type?: "instance" | "organization" | "project";
+            /** @description Organization slug for organization/project-scoped providers. */
+            scope_org?: string;
+            /** @description Project slug for project-scoped providers. */
+            scope_project?: string;
+            /** @description Whether this process currently holds the provider leader lock. */
+            leader?: boolean;
+            /**
+             * Format: int64
+             * @description Unix seconds of the last reconcile attempt (0 = never).
+             */
+            last_scan_unix?: number;
+            /**
+             * Format: int64
+             * @description Unix seconds of the last successful generation (sticky; 0 = never).
+             */
+            last_success_unix?: number;
+            /** @description Bounded reason of the last rejection this scan. */
+            last_error?: string;
+            /** @description Monitors currently managed by this provider. */
+            managed_monitors?: number;
+            /** @description Monitors orphaned (source removed, retained). */
+            orphaned_monitors?: number;
+            /** @description Bundles rejected in the last scan. */
+            bundle_errors?: number;
         };
         CreateMonitor: {
             name: string;

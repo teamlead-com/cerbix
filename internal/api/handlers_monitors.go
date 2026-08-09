@@ -74,13 +74,51 @@ func (h *Handler) listMonitors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	canWrite := h.principalCan(r, authz.ActionProjectWrite, proj.OrgID, proj.ID)
+	ids := make([]string, len(monitors))
 	for i := range monitors {
-		monitors[i] = monitors[i].Redacted() // never return secret config to the client
-		if !canWrite {
-			monitors[i] = monitors[i].WithoutPushToken() // viewers must not get the push bearer token
-		}
+		ids[i] = monitors[i].ID
 	}
-	writeJSON(w, http.StatusOK, monitors)
+	prov, perr := h.store.MonitorProvenanceBatch(r.Context(), ids)
+	if perr != nil {
+		h.serverError(w, "list_monitors_provenance", perr)
+		return
+	}
+	out := make([]monitorWithMgmt, len(monitors))
+	for i := range monitors {
+		m := monitors[i].Redacted() // never return secret config to the client
+		if !canWrite {
+			m = m.WithoutPushToken() // viewers must not get the push bearer token
+		}
+		fm, ok := prov[monitors[i].ID]
+		out[i] = monitorWithMgmt{Monitor: m, Management: mgmtFor(fm, ok)}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// managementDTO is the read-only source-provenance block on monitor responses (spec §15).
+// Tenant-safe: the path is relative, never an absolute filesystem path.
+type managementDTO struct {
+	Source   string `json:"source"` // "file" | "ui"
+	Provider string `json:"provider,omitempty"`
+	UID      string `json:"uid,omitempty"`
+	Path     string `json:"path,omitempty"`
+	ReadOnly bool   `json:"read_only"`
+}
+
+// monitorWithMgmt is a monitor response carrying its management provenance. domain.Monitor's
+// JSON fields promote to the top level; `management` is added alongside.
+type monitorWithMgmt struct {
+	domain.Monitor
+	Management managementDTO `json:"management"`
+}
+
+// mgmtFor builds the provenance block: a provider row means file-managed/read-only; its
+// absence means an ordinary UI/API monitor.
+func mgmtFor(fm store.FileManagement, ok bool) managementDTO {
+	if !ok {
+		return managementDTO{Source: "ui"}
+	}
+	return managementDTO{Source: "file", Provider: fm.Provider, UID: fm.UID, Path: fm.SourcePath, ReadOnly: true}
 }
 
 type regionView struct {
@@ -374,7 +412,12 @@ func (h *Handler) getMonitor(w http.ResponseWriter, r *http.Request) {
 	if !h.principalCan(r, authz.ActionProjectWrite, proj.OrgID, proj.ID) {
 		out = out.WithoutPushToken()
 	}
-	writeJSON(w, http.StatusOK, out)
+	fm, ok, perr := h.store.MonitorProvenance(r.Context(), mon.ID)
+	if perr != nil {
+		h.serverError(w, "get_monitor_provenance", perr)
+		return
+	}
+	writeJSON(w, http.StatusOK, monitorWithMgmt{Monitor: out, Management: mgmtFor(fm, ok)})
 }
 
 // updateMonitor applies a partial update to a monitor (editor+). Type and
@@ -487,11 +530,32 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := h.store.UpdateMonitor(r.Context(), mon)
 	if err != nil {
+		if h.rejectIfManaged(w, r, mon.ID, err) {
+			return
+		}
 		h.serverError(w, "update_monitor", err)
 		return
 	}
 	h.logEvent(r, "monitor_updated", "monitor_id", updated.ID, "name", updated.Name, "enabled", updated.Enabled, "project_id", updated.ProjectID)
 	writeJSON(w, http.StatusOK, updated.Redacted())
+}
+
+// rejectIfManaged maps store.ErrManagedByFile to 409 with tenant-safe provenance (spec §8):
+// a file-managed monitor's declarative fields are read-only through normal CRUD. Returns
+// true when it handled the error.
+func (h *Handler) rejectIfManaged(w http.ResponseWriter, r *http.Request, monitorID string, err error) bool {
+	if !errors.Is(err, store.ErrManagedByFile) {
+		return false
+	}
+	body := map[string]any{"error": "managed_by_file"}
+	if fm, ok, perr := h.store.MonitorProvenance(r.Context(), monitorID); perr == nil && ok {
+		body["management"] = map[string]any{
+			"source": "file", "provider": fm.Provider, "uid": fm.UID,
+			"path": fm.SourcePath, "read_only": true,
+		}
+	}
+	writeJSON(w, http.StatusConflict, body)
+	return true
 }
 
 func (h *Handler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
@@ -500,6 +564,9 @@ func (h *Handler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.DeleteMonitor(r.Context(), mon.ID); err != nil {
+		if h.rejectIfManaged(w, r, mon.ID, err) {
+			return
+		}
 		h.serverError(w, "delete_monitor", err)
 		return
 	}

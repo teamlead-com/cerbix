@@ -41,7 +41,21 @@ type Registry struct {
 	resultRejected    map[string]uint64            // reason → count (missing_timestamp, stale_revision, missing_revision)
 	resultClockSkew   map[string]map[string]uint64 // origin → reason → count (push future|past)
 	resultMissingRev  uint64                       // observe-mode: scheduled result with no revision
-	now               func() time.Time
+	// File-provider metrics (spec func-monitoring-as-code §16). Keyed by the bounded provider
+	// name only — never by file/project/monitor id.
+	fileProviders map[string]*fileProviderStat
+	now           func() time.Time
+}
+
+// fileProviderStat holds one file provider's exported gauges/counters.
+type fileProviderStat struct {
+	leader          bool
+	reconciles      map[string]uint64 // outcome → count (applied|noop|rejected|error)
+	lastDuration    float64
+	lastSuccessUnix int64
+	managed         int
+	orphaned        int
+	bundleErrors    int
 }
 
 // PullStat is one region's pull-queue depth and lag, exported as gauges.
@@ -59,6 +73,63 @@ func New(info buildinfo.Info, role string) *Registry {
 		startTime: time.Now(),
 		now:       time.Now,
 	}
+}
+
+// fileProvider returns (creating) the stat block for a provider.
+func (r *Registry) fileProvider(name string) *fileProviderStat {
+	if r.fileProviders == nil {
+		r.fileProviders = map[string]*fileProviderStat{}
+	}
+	s := r.fileProviders[name]
+	if s == nil {
+		s = &fileProviderStat{reconciles: map[string]uint64{}}
+		r.fileProviders[name] = s
+	}
+	return s
+}
+
+// SetFileProviderLeader records whether this process holds a provider's reconcile leadership.
+func (r *Registry) SetFileProviderLeader(name string, leader bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fileProvider(name).leader = leader
+}
+
+// RecordFileProviderReconcile counts one reconcile by bounded outcome (applied|noop|rejected|error).
+func (r *Registry) RecordFileProviderReconcile(name, outcome string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fileProvider(name).reconciles[outcome]++
+}
+
+// SetFileProviderStatus records the post-reconcile gauges. lastSuccessUnix is advanced only on
+// a successful reconcile (0 leaves the previous value untouched).
+func (r *Registry) SetFileProviderStatus(name string, durationSeconds float64, lastSuccessUnix int64, managed, orphaned, bundleErrors int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.fileProvider(name)
+	s.lastDuration = durationSeconds
+	if lastSuccessUnix > 0 {
+		s.lastSuccessUnix = lastSuccessUnix
+	}
+	s.managed = managed
+	s.orphaned = orphaned
+	s.bundleErrors = bundleErrors
+}
+
+// SetFileProviderReconcileStats updates the duration / last-success / bundle-error gauges when
+// the owned COUNTS are unknown (a degraded scan or a failed counts lookup), WITHOUT clobbering
+// the last-known managed/orphaned gauges to a misleading zero (§16). lastSuccessUnix==0 leaves
+// the previous success untouched.
+func (r *Registry) SetFileProviderReconcileStats(name string, durationSeconds float64, lastSuccessUnix int64, bundleErrors int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.fileProvider(name)
+	s.lastDuration = durationSeconds
+	if lastSuccessUnix > 0 {
+		s.lastSuccessUnix = lastSuccessUnix
+	}
+	s.bundleErrors = bundleErrors
 }
 
 // SetReady marks the service ready or not-ready, recording an optional reason.
@@ -245,6 +316,11 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		clockSkew[origin] = copyCounts(byReason)
 	}
 	missingRev := r.resultMissingRev
+	fileProviders := map[string]fileProviderStat{}
+	for name, s := range r.fileProviders {
+		cp := fileProviderStat{leader: s.leader, reconciles: copyCounts(s.reconciles), lastDuration: s.lastDuration, lastSuccessUnix: s.lastSuccessUnix, managed: s.managed, orphaned: s.orphaned, bundleErrors: s.bundleErrors}
+		fileProviders[name] = cp
+	}
 	uptime := r.now().Sub(r.startTime).Seconds()
 	r.mu.RUnlock()
 
@@ -330,6 +406,35 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		for _, s := range pullStats {
 			fmt.Fprintf(w, "cerbix_pull_jobs_pending{region=%q} %d\n", s.Region, s.Pending)
 			fmt.Fprintf(w, "cerbix_pull_agent_lag_seconds{region=%q} %.3f\n", s.Region, s.LagSeconds)
+		}
+	}
+
+	if len(fileProviders) > 0 {
+		fmt.Fprintln(w, "# HELP cerbix_file_provider_leader Whether this process holds a file provider's reconcile leadership.")
+		fmt.Fprintln(w, "# TYPE cerbix_file_provider_leader gauge")
+		fmt.Fprintln(w, "# HELP cerbix_file_provider_reconcile_total File-provider reconciles by outcome.")
+		fmt.Fprintln(w, "# TYPE cerbix_file_provider_reconcile_total counter")
+		fmt.Fprintln(w, "# HELP cerbix_file_provider_reconcile_duration_seconds Duration of the last reconcile.")
+		fmt.Fprintln(w, "# TYPE cerbix_file_provider_reconcile_duration_seconds gauge")
+		fmt.Fprintln(w, "# HELP cerbix_file_provider_last_success_timestamp_seconds Unix time of the last successful reconcile.")
+		fmt.Fprintln(w, "# TYPE cerbix_file_provider_last_success_timestamp_seconds gauge")
+		fmt.Fprintln(w, "# HELP cerbix_file_provider_managed_monitors Monitors currently owned by the provider.")
+		fmt.Fprintln(w, "# TYPE cerbix_file_provider_managed_monitors gauge")
+		fmt.Fprintln(w, "# HELP cerbix_file_provider_orphaned_monitors Owned monitors currently orphaned.")
+		fmt.Fprintln(w, "# TYPE cerbix_file_provider_orphaned_monitors gauge")
+		fmt.Fprintln(w, "# HELP cerbix_file_provider_bundle_errors Bundles/files rejected in the last scan.")
+		fmt.Fprintln(w, "# TYPE cerbix_file_provider_bundle_errors gauge")
+		for _, name := range sortedKeys(fileProviders) {
+			s := fileProviders[name]
+			fmt.Fprintf(w, "cerbix_file_provider_leader{provider=%q} %d\n", name, b2i(s.leader))
+			for _, outcome := range sortedKeys(s.reconciles) {
+				fmt.Fprintf(w, "cerbix_file_provider_reconcile_total{provider=%q,outcome=%q} %d\n", name, outcome, s.reconciles[outcome])
+			}
+			fmt.Fprintf(w, "cerbix_file_provider_reconcile_duration_seconds{provider=%q} %.3f\n", name, s.lastDuration)
+			fmt.Fprintf(w, "cerbix_file_provider_last_success_timestamp_seconds{provider=%q} %d\n", name, s.lastSuccessUnix)
+			fmt.Fprintf(w, "cerbix_file_provider_managed_monitors{provider=%q} %d\n", name, s.managed)
+			fmt.Fprintf(w, "cerbix_file_provider_orphaned_monitors{provider=%q} %d\n", name, s.orphaned)
+			fmt.Fprintf(w, "cerbix_file_provider_bundle_errors{provider=%q} %d\n", name, s.bundleErrors)
 		}
 	}
 }

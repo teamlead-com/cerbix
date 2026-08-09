@@ -1,0 +1,97 @@
+// Package fileprovider implements the Monitoring-as-Code file provider (spec
+// func-monitoring-as-code, FR-017/NFR-014). This file holds the pure contract layer:
+// strict ProjectBundle decoding, canonicalization, validation, and deterministic planning.
+// It performs NO database or filesystem-watch work — those are later iterations. The
+// application/store apply path and the watcher build on these pure values.
+package fileprovider
+
+import (
+	"fmt"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
+)
+
+// Reason is a bounded, low-cardinality rejection code. It never contains raw YAML, secret
+// values, or unbounded text — safe for logs, status records, and metric outcome buckets.
+type Reason string
+
+const (
+	ReasonInvalidFormat     Reason = "invalid_format"
+	ReasonUnknownField      Reason = "unknown_field"
+	ReasonDuplicateKey      Reason = "duplicate_key"
+	ReasonScopeMismatch     Reason = "scope_mismatch"
+	ReasonInvalidUID        Reason = "invalid_uid"
+	ReasonInvalidDuration   Reason = "invalid_duration"
+	ReasonServerOwnedField  Reason = "server_owned_field"
+	ReasonInlineSecret      Reason = "inline_secret_forbidden"
+	ReasonUnsupportedType   Reason = "unsupported_type"
+	ReasonUnsupportedField  Reason = "unsupported_field"
+	ReasonDomainInvalid     Reason = "domain_invalid"
+	ReasonDependencyInvalid Reason = "dependency_invalid"
+	ReasonDependencyCycle   Reason = "dependency_cycle"
+	ReasonTypeChange        Reason = "type_change"
+	ReasonDuplicateProject  Reason = "duplicate_project"
+	ReasonEmptyBundle       Reason = "empty_bundle"
+	ReasonQuotaExceeded     Reason = "max_managed_monitors"
+)
+
+// BundleError is a reconcile-facing error carrying a bounded reason and a message that is
+// safe to log/surface (no secrets, no raw YAML). It anchors an optional monitor UID.
+type BundleError struct {
+	Reason Reason
+	UID    string // optional: the offending monitor UID
+	Msg    string
+}
+
+func (e *BundleError) Error() string {
+	if e.UID != "" {
+		return string(e.Reason) + " [" + e.UID + "]: " + e.Msg
+	}
+	return string(e.Reason) + ": " + e.Msg
+}
+
+func rejectf(r Reason, uid, format string, args ...any) *BundleError {
+	return &BundleError{Reason: r, UID: uid, Msg: fmt.Sprintf(format, args...)}
+}
+
+// DesiredMonitor is one normalized, validated monitor from a bundle (pre-apply). ProjectID
+// and server-owned fields are intentionally unset — they are resolved in the apply
+// transaction. DependsOn holds source UIDs (sorted+deduped), resolved to DB IDs at apply.
+type DesiredMonitor struct {
+	UID       string
+	Monitor   domain.Monitor
+	DependsOn []string
+	Hash      string // canonical semantic hash (§7)
+}
+
+// DesiredProject is a fully parsed, validated bundle for one resolved tenant.
+type DesiredProject struct {
+	Organization string
+	Project      string
+	Monitors     map[string]DesiredMonitor // by source UID
+}
+
+// fileSupportedTypes are the monitor types the v1 file provider can express with a strict
+// non-secret schema (common fields only). Types needing a typed `settings` object
+// (composite, synthetic) or credentials (postgres/mysql/redis/promql/rabbitmq) are rejected
+// until their strict schema / secret_ref contract lands (spec §3.1). This is an explicit
+// scope boundary, not a generic escape hatch.
+var fileSupportedTypes = map[domain.MonitorType]bool{
+	domain.MonitorHTTP:      true,
+	domain.MonitorTCP:       true,
+	domain.MonitorICMP:      true,
+	domain.MonitorDNS:       true,
+	domain.MonitorTLS:       true,
+	domain.MonitorGRPC:      true,
+	domain.MonitorWebSocket: true,
+	domain.MonitorSSH:       true,
+	domain.MonitorPush:      true,
+}
+
+// secretSettingKeys are field/settings keys that carry credentials. Their presence anywhere
+// in a bundle rejects it as inline_secret_forbidden — a bundle never carries a secret.
+var secretSettingKeys = map[string]bool{
+	"password": true, "passphrase": true, "token": true, "bot_token": true,
+	"secret": true, "client_secret": true, "smtp_password": true, "private_key": true,
+	"cookie": true, "credentials": true, "api_key": true, "apikey": true, "auth": true,
+}

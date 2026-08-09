@@ -21,6 +21,9 @@ const ws = useWorkspace();
 const live = useLive();
 const session = useSession();
 const canWrite = computed(() => !!monitor.value && session.canProjectWrite(ws.orgId, monitor.value.project_id ?? ""));
+// FR-017: a file-managed monitor's declarative fields are read-only through the UI/API; edit/
+// delete/pause are disabled with an explanation (the file provider owns the desired state).
+const fileManaged = computed(() => monitor.value?.management?.source === "file");
 const id = route.params.id as string;
 
 const loading = ref(true);
@@ -234,7 +237,14 @@ watch(
             <span>checked <span class="font-mono text-ink-2">{{ lastChecked }}</span></span>
           </div>
         </div>
-        <div v-if="canWrite" class="ml-auto flex flex-wrap gap-2">
+        <div v-if="fileManaged" class="ml-auto max-w-[340px] rounded-sm border border-border bg-inset px-[12px] py-[8px] text-[12px] text-ink-2">
+          <div class="flex items-center gap-[6px] font-medium text-ink">
+            <svg viewBox="0 0 24 24" class="h-[13px] w-[13px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+            Managed by file
+          </div>
+          <p class="mt-[3px] leading-snug">Provider <span class="font-mono">{{ monitor?.management?.provider }}</span> · <span class="font-mono">{{ monitor?.management?.path }}</span>. Declarative fields are read-only; edit the bundle file to change them.</p>
+        </div>
+        <div v-if="canWrite && !fileManaged" class="ml-auto flex flex-wrap gap-2">
           <template v-if="!confirmingDelete">
             <button type="button" class="inline-flex h-[34px] items-center gap-[7px] rounded-sm border border-border bg-surface px-[13px] text-[13px] text-ink hover:border-border-strong disabled:opacity-50" :disabled="pausing" @click="togglePause">
               <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2">

@@ -5,7 +5,7 @@
 Consolidate the information architecture of the SPA: the org-scoped Members screen moves
 from the sidebar ("Manage" section, where it is the only item) into Settings as a tab in
 the **Organization** group, and the global-admin-only tab group formerly labeled
-"Instance" is renamed **Administration** — it will also host the upcoming Users page
+"Instance" is renamed **Administration** — it also hosts the Users page
 (`func-admin-users`). Frontend-only; no API changes.
 
 ## Current state
@@ -26,7 +26,7 @@ Settings tab groups:
 |---|---|---|
 | Project | by project role | Notification channels, Incoming alerts |
 | Organization | org members (manage: org_admin) | **Members** (new tab, first), API tokens, Webhooks |
-| **Administration** (renamed from Instance) | global admin only | Authentication, Branding, Email, Alerting, Monitor defaults (+ Users later) |
+| **Administration** (renamed from Instance) | global admin only | Authentication, Branding, Email, Alerting, Monitor defaults, Users |
 | Account | everyone | Security |
 
 ## Requirements

@@ -17,5 +17,5 @@ Self-observability of cerbix: metrics, health/readiness, alerts.
 
 ## Requirements (draft)
 
-- NFR: `/readyz` reflects the readiness of dependencies (DB/broker) in future iterations.
+- NFR: `/readyz` is gated on live **DB connectivity** — a background ping (`pingDatabase`) flips readiness and `cerbix_database_up`; a DSN-less process stays ready in scaffold mode. (Broker reachability is not wired into readiness.)
 - NFR: key paths have metrics with the `cerbix_` prefix.

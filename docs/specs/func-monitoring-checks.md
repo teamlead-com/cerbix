@@ -47,9 +47,10 @@ engine, scheduling and execution (scheduler → Dispatcher → worker → ingest
 
 ## Requirements
 
-- FR-007 (monitors + HTTP/TCP prober + conditions) — DONE.
-- FR-008 (scheduler leader + dispatcher + worker + ingestion) — DONE (inproc; distributed
-  via RabbitMQ — later).
+- FR-007 (monitors + probers + conditions) — DONE (full prober set: http/tcp/icmp/dns/tls/grpc/
+  websocket/ssh/push + postgres/mysql/redis/promql/rabbitmq/composite/synthetic).
+- FR-008 (scheduler leader + dispatcher + worker + ingestion) — DONE (inproc dev; distributed
+  over AMQP with per-region queues + a broker-less HTTP-pull agent transport).
 - NFR: a single probe does not block the pool (context timeout); scheduler leadership is exclusive
   (advisory lock); jobs carry a snapshot of the monitor.
 

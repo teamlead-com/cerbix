@@ -91,17 +91,23 @@ client-credentials JWTs (any issuer, D-0043), both routed through `authz.Can`.
 - **Settings page** — one place to manage notification channels (per project) and API
   tokens + outbound webhooks (per org), mirroring the service-account/notification model.
 
-## Monitoring as Code (planned)
+## Monitoring as Code
 
-An optional file provider in the `api`/`all` control plane will hot-reconcile strict,
-versioned, project-scoped YAML bundles into PostgreSQL without restarting Cerbix. Existing
-organizations/projects are referenced by immutable slugs; the provider never provisions
-tenants. Ownership is per monitor, so file-managed and UI/API-managed monitors coexist in
-one project. Reconciliation is transactional per ProjectBundle, tenant-scoped,
-last-known-good preserving, no-op idempotent, HA-elected through PostgreSQL, and never
-hard-deletes history. The complete pre-implementation contract is
-[`docs/specs/func-monitoring-as-code.md`](specs/func-monitoring-as-code.md) (FR-017,
-NFR-014, D-0145).
+An optional file provider in the `api`/`all` control plane hot-reconciles strict, versioned,
+project-scoped YAML bundles into PostgreSQL without restarting Cerbix ([`internal/fileprovider`](../internal/fileprovider/)
++ [`internal/store/fileapply.go`](../internal/store/fileapply.go)). Existing organizations/projects
+are referenced by immutable slugs; the provider never provisions tenants. Ownership is per
+monitor, so file-managed and UI/API-managed monitors coexist in one project (file-managed ones
+are read-only in the UI/API — `409 managed_by_file`). Reconciliation is transactional per
+ProjectBundle, tenant-scoped, last-known-good preserving, no-op idempotent, HA-elected through a
+PostgreSQL advisory lock (leader-fenced apply), and never hard-deletes history — a removed file
+orphans then disables after a grace period, and re-adding it restores the same DB id + push
+token. A committed config change wakes the scheduler via `monitor_config_changed`. Operators get
+a tenant-safe diagnostics API (`GET /api/v1/admin/file-providers` → `{bundles, providers}`), a
+"Managed by file" badge + named-provider filter in the UI, and Prometheus alert rules
+([`docker/alerts/monitoring-as-code.rules.yml`](../docker/alerts/monitoring-as-code.rules.yml)).
+Full contract: [`docs/specs/func-monitoring-as-code.md`](specs/func-monitoring-as-code.md)
+(FR-017, NFR-014, D-0145/0146/0147/0148) — **DONE**.
 
 ## Delivery Method
 

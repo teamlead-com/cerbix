@@ -2,7 +2,7 @@ name: Image
 
 # Publishes the multi-arch container image to GHCR on version tags. This is
 # artifact publishing (same tier as the release binaries), not deployment —
-# deploys stay manual: pin the tag via CERBIX_IMAGE in deploy/.env.
+# deploys stay manual: pin the tag via CERBIX_IMAGE in docker/.env.
 
 on:
   push:
@@ -38,7 +38,7 @@ jobs:
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          file: Dockerfile
+          file: docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

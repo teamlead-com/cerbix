@@ -20,7 +20,7 @@ Describe the tests run to verify your changes:
 
 - [ ] **Backend Unit/Integration Tests**: `go test ./... -race` passed at the repo root.
 - [ ] **Frontend Typecheck & Build**: `npm run build` passed in `frontend/`.
-- [ ] **Manual / E2E Verification**: Verified locally using `docker compose -f deploy/docker-compose.yml up --build`.
+- [ ] **Manual / E2E Verification**: Verified locally using `docker compose -f docker/docker-compose.yml up --build`.
 
 ---
 

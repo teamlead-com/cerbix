@@ -6,7 +6,7 @@ Operational guide. Grows as capabilities land.
 
 ```bash
 make build
-./bin/cerbix serve --config deploy/config.example.yaml --role all
+./bin/cerbix serve --config docker/config.example.yaml --role all
 ```
 
 Probes:
@@ -20,7 +20,7 @@ curl -s localhost:8080/metrics   # cerbix_* series
 ## Run the dev stack
 
 ```bash
-docker compose -f deploy/docker-compose.yml up --build
+docker compose -f docker/docker-compose.yml up --build
 # Postgres :5432 · RabbitMQ :5672 (mgmt :15672) · Keycloak :8081 · cerbix :8080
 ```
 
@@ -34,7 +34,7 @@ docker compose -f deploy/docker-compose.yml up --build
 
 ## Config
 
-Strict YAML (`deploy/config.example.yaml`). Unknown keys or invalid values cause a
+Strict YAML (`docker/config.example.yaml`). Unknown keys or invalid values cause a
 fail-fast startup error logged at `CRITICAL` — the process exits non-zero. There is no
 self-healing; fix the config and restart.
 
@@ -68,7 +68,7 @@ readiness on live connectivity (a background ping every 10s updates `/readyz` an
 Apply migrations explicitly (e.g. before a deploy):
 
 ```bash
-./bin/cerbix migrate --config deploy/config.example.yaml   # requires database.dsn
+./bin/cerbix migrate --config docker/config.example.yaml   # requires database.dsn
 ```
 
 Migrations are embedded (`internal/store/migrations/*.sql`, goose format) — no external
@@ -169,7 +169,7 @@ TimescaleDB hypertable + continuous aggregates is a future optimization for larg
 
 | Symptom | Check |
 | --- | --- |
-| Exit code 1 on start, `config_load_failed` log | Config path/keys/values; see `deploy/config.example.yaml`. |
+| Exit code 1 on start, `config_load_failed` log | Config path/keys/values; see `docker/config.example.yaml`. |
 | Exit code 1, `db_migrate_failed` / `db_connect_failed` | DSN, DB reachability, credentials, migration SQL. |
 | Exit code 1, `oidc_init_failed` | Keycloak issuer URL reachable? discovery endpoint correct? |
 | `/api/*` returns 401 | Missing/expired session cookie; log in via `/auth/login`. |

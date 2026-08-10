@@ -19,10 +19,10 @@ then stores heartbeats as compressed hypertables automatically; plain PostgreSQL
 ```bash
 git clone https://github.com/teamlead-com/cerbix.git
 cd cerbix
-cp deploy/.env.prod.example deploy/.env
+cp docker/.env.prod.example docker/.env
 ```
 
-Edit `deploy/.env`:
+Edit `docker/.env`:
 
 ```bash
 POSTGRES_PASSWORD=<strong password>
@@ -38,11 +38,11 @@ CERBIX_ADMIN_PASSWORD=<strong password>
 ### 2. Start
 
 ```bash
-docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d
+docker compose --env-file docker/.env -f docker/docker-compose.prod.yml up -d
 ```
 
 This pulls `ghcr.io/teamlead-com/cerbix` (SPA + binary in one distroless image; pin a
-version via `CERBIX_IMAGE` in `deploy/.env`) and starts `postgres`, `rabbitmq`, and
+version via `CERBIX_IMAGE` in `docker/.env`) and starts `postgres`, `rabbitmq`, and
 `cerbix` (`--role all`). Migrations apply automatically; the admin account is created on
 the first start against an empty database.
 
@@ -54,7 +54,7 @@ Verify:
 
 ```bash
 curl -s http://127.0.0.1:8080/healthz     # {"status":"ok"}
-docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml logs -f cerbix
+docker compose --env-file docker/.env -f docker/docker-compose.prod.yml logs -f cerbix
 ```
 
 ### 3. Put TLS in front
@@ -72,9 +72,9 @@ these live in the database and override the config file from then on.
 ### Upgrading
 
 ```bash
-# bump CERBIX_IMAGE in deploy/.env to the new tag, then:
-docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml pull cerbix
-docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d
+# bump CERBIX_IMAGE in docker/.env to the new tag, then:
+docker compose --env-file docker/.env -f docker/docker-compose.prod.yml pull cerbix
+docker compose --env-file docker/.env -f docker/docker-compose.prod.yml up -d
 ```
 
 New migrations apply on startup. Data lives in the named volumes `pgdata` and
@@ -124,7 +124,7 @@ sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin cerbix
 sudo mkdir -p /etc/cerbix
 ```
 
-`/etc/cerbix/config.yaml` (full reference: [`deploy/config.example.yaml`](deploy/config.example.yaml)):
+`/etc/cerbix/config.yaml` (full reference: [`docker/config.example.yaml`](docker/config.example.yaml)):
 
 ```yaml
 server:
@@ -227,8 +227,8 @@ at `/metrics`.
 
 The same binary runs as separate `api` / `scheduler` / `worker` / `agent` processes over
 RabbitMQ (per-region worker pools, HTTP-pull agents for segments with no broker access).
-See the profiles in [`deploy/docker-compose.yml`](deploy/docker-compose.yml), the
-multi-geo stack in [`deploy/docker-compose.geo.yml`](deploy/docker-compose.geo.yml), and
+See the profiles in [`docker/docker-compose.yml`](docker/docker-compose.yml), the
+multi-geo stack in [`docker/docker-compose.geo.yml`](docker/docker-compose.geo.yml), and
 the deployment map in [`docs/overview.md`](docs/overview.md). One caveat when running
 multiple roles: apply migrations once (`cerbix migrate --config …`) before starting
 several roles on a schema that has new migrations.

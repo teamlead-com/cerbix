@@ -83,7 +83,7 @@ cerbix is structured as a Go + Vue 3 monorepo:
 ├── frontend/                 # Vue 3 + TypeScript + Vite SPA
 │   ├── src/                  # Components, views, Pinia stores, and OpenAPI client
 │   └── public/               # Static assets
-├── deploy/                   # Docker Compose local dev stack & environment files
+├── docker/                   # Docker Compose local dev stack & environment files
 ├── docs/                     # Documentation
 │   ├── architecture.md       # Detailed system topology and workflow diagrams
 │   ├── overview.md           # Architecture overview & competitor comparison
@@ -117,7 +117,7 @@ cerbix is structured as a Go + Vue 3 monorepo:
 
 2. **Start the local dev infrastructure**:
    ```bash
-   docker compose -f deploy/docker-compose.yml up --build
+   docker compose -f docker/docker-compose.yml up --build
    ```
    This spins up PostgreSQL, RabbitMQ, Keycloak, and the cerbix monolith (`--role all`) on `http://localhost:8080`.
 

@@ -30,7 +30,7 @@ updates:
 
   # Maintain Dockerfile base images
   - package-ecosystem: "docker"
-    directory: "/"
+    directory: "/docker"
     schedule:
       interval: "weekly"
     labels:

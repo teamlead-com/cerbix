@@ -2,13 +2,13 @@
 #
 # Infra (postgres, rabbitmq) always starts; pick HOW cerbix runs via profiles:
 #
-#   docker compose -f deploy/docker-compose.yml --profile single up -d --build
+#   docker compose -f docker/docker-compose.yml --profile single up -d --build
 #       one process, --role all, UI/API on :8080
 #
-#   docker compose -f deploy/docker-compose.yml --profile distributed up -d --build
+#   docker compose -f docker/docker-compose.yml --profile distributed up -d --build
 #       scheduler + api (:8082) + worker as separate processes over RabbitMQ;
 #       apply migrations ONCE first (roles racing a new migration fail):
-#       docker compose -f deploy/docker-compose.yml --profile distributed \
+#       docker compose -f docker/docker-compose.yml --profile distributed \
 #         run --rm api migrate --config /etc/cerbix/config.yaml
 #
 #   add --profile sso to either to also start Keycloak (:8081) + MariaDB;
@@ -47,7 +47,7 @@ x-cerbix-build: &cerbixBuild
   # binary, so one image serves API + auth + SPA (no separate nginx).
   build:
     context: ..
-    dockerfile: Dockerfile
+    dockerfile: docker/Dockerfile
   image: cerbix-cerbix
 
 name: cerbix
@@ -114,7 +114,7 @@ services:
       - ./config.dev.yaml:/etc/cerbix/config.yaml:ro
       # Monitoring as Code (FR-017): mount a bundle directory to exercise the file provider (and
       # the e2e/tests/file-providers.spec.ts UI surface). Enable the matching providers.file
-      # block in config.dev.yaml, then edit deploy/monitoring.d/*.yaml to your seeded org/project.
+      # block in config.dev.yaml, then edit docker/monitoring.d/*.yaml to your seeded org/project.
       - ./monitoring.d:/etc/cerbix/monitoring.d:ro
 
   # ---- profile: distributed (roles as separate processes) ------------------

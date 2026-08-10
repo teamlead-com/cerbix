@@ -36,9 +36,9 @@ cerbix is a monorepo: a Go backend and a Vue 3 frontend.
   `buildinfo`, `httpsrv`, `cli`, and later `auth`, `authz`, `store`, `domain`,
   `dispatch`, `scheduler`, `worker`, `prober`, `mq`, `sla`, `notify`, `statuspage`,
   `incidents`, `apitoken`, `api`). **No `pkg/`.**
-- `deploy/`: compose stacks, role configs, and `config.example.yaml`.
+- `docker/`: compose stacks, role configs, and `config.example.yaml`.
 - `frontend/`: Vue 3 + TS SPA (Vite), embedded into the binary via `embed.FS`.
-- `deploy/`: `docker-compose.yml` local dev stack.
+- `docker/`: `docker-compose.yml` local dev stack.
 - `docs/`: PRD, TZ, status, traceability, decisions, runbook, iteration reports.
 
 Keep transport (HTTP), domain, application, and infra concerns isolated. Interfaces
@@ -108,7 +108,7 @@ From the repo root:
 - `make test` / `go test ./...` — unit and fake-backed integration tests.
 - `make race` / `go test -race ./...` — concurrency checks (scheduler, worker, SSE).
 - `make build` — builds `bin/cerbix` with version/commit ldflags.
-- `./bin/cerbix serve --config deploy/config.example.yaml --role all` — run locally.
+- `./bin/cerbix serve --config docker/config.example.yaml --role all` — run locally.
 - `make lint` / `golangci-lint run ./...` — required when configured.
 - `gofmt -w <files>` — format changed Go files before review.
 

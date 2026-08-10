@@ -1,7 +1,7 @@
 # cerbix production stack — single-process (--role all) + Postgres + RabbitMQ.
 #
-#   cp deploy/.env.prod.example deploy/.env      # then fill in secrets
-#   docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d
+#   cp docker/.env.prod.example docker/.env      # then fill in secrets
+#   docker compose --env-file docker/.env -f docker/docker-compose.prod.yml up -d
 #
 # Hardened for prod: secrets come from .env (never committed), containers restart
 # unless-stopped, memory is capped, and only the API port is published — bound to

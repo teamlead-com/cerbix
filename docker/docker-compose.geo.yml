@@ -3,8 +3,8 @@
 # Central site (postgres, rabbitmq, scheduler, api, worker-core) always starts;
 # remote sites are opt-in via profiles:
 #
-#   docker compose -f deploy/docker-compose.geo.yml up -d --build                  # central only
-#   docker compose -f deploy/docker-compose.geo.yml --profile geo1 --profile geo2 up -d --build
+#   docker compose -f docker/docker-compose.geo.yml up -d --build                  # central only
+#   docker compose -f docker/docker-compose.geo.yml --profile geo1 --profile geo2 up -d --build
 #
 # Reproduces the production topology on one host using THREE isolated networks, so
 # remote roles reach only what they would across a real geo boundary:
@@ -23,7 +23,7 @@ x-cerbix: &cerbix
   image: cerbix:local
   build:
     context: ..
-    dockerfile: Dockerfile
+    dockerfile: docker/Dockerfile
   cap_drop: [ALL]
   logging:
     driver: json-file

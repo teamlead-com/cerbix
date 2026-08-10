@@ -11,4 +11,4 @@ frontend/dist
 **/*.log
 docs
 .ci
-deploy/.env
+docker/.env

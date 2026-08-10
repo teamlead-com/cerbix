@@ -2,7 +2,7 @@
 
 Internal uptime & SLA monitoring: monitors → heartbeats → SLA/incidents/status
 pages, with OpenID Connect (any issuer) + local login, org→project multi-tenancy and role-based access control (Global/Org/Project roles). Go backend,
-Postgres, RabbitMQ, Vue 3 SPA. Monorepo: the Go module at the root (`cmd/`, `internal/`), `frontend/`, `docs/`, `deploy/`.
+Postgres, RabbitMQ, Vue 3 SPA. Monorepo: the Go module at the root (`cmd/`, `internal/`), `frontend/`, `docs/`, `docker/`.
 
 ## 1. Read this first
 
@@ -19,11 +19,11 @@ Postgres, RabbitMQ, Vue 3 SPA. Monorepo: the Go module at the root (`cmd/`, `int
 
 ```bash
 # full dev stack (pg+timescale, rabbitmq, an OIDC IdP [Keycloak in dev], cerbix)
-docker compose -f deploy/docker-compose.yml up --build
+docker compose -f docker/docker-compose.yml up --build
 
 # or just the backend against your own Postgres:
-./bin/cerbix migrate --config deploy/config.example.yaml
-./bin/cerbix serve   --config deploy/config.example.yaml --role all
+./bin/cerbix migrate --config docker/config.example.yaml
+./bin/cerbix serve   --config docker/config.example.yaml --role all
 # :8080/healthz  /readyz  /metrics ; SPA at /
 ```
 

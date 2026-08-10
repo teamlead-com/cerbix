@@ -68,8 +68,8 @@ Full step-by-step production guides (Docker Compose and bare binary + systemd) l
 
 ```bash
 # From the repo root — builds the SPA + Go binary into one image and runs the dev stack.
-docker compose -f deploy/docker-compose.yml --profile single up -d --build
-# UI + API on http://localhost:8080 — log in with the bootstrap admin from deploy/config.dev.yaml.
+docker compose -f docker/docker-compose.yml --profile single up -d --build
+# UI + API on http://localhost:8080 — log in with the bootstrap admin from docker/config.dev.yaml.
 ```
 
 ### Just the binary + Postgres
@@ -94,7 +94,7 @@ cerbix serve --config config.yaml --role all
 # Ops endpoints: /healthz  /readyz  /metrics
 ```
 
-See [`deploy/config.example.yaml`](deploy/config.example.yaml) for
+See [`docker/config.example.yaml`](docker/config.example.yaml) for
 every option (RabbitMQ, OIDC, mail, secrets-at-rest, geo/pull transport), and
 [`docs/overview.md`](docs/overview.md) for architecture, the deployment map, and design
 notes. The API contract lives in [`openapi.yaml`](openapi.yaml).
@@ -108,7 +108,7 @@ rm -rf ../internal/web/dist && cp -r dist ../internal/web/dist
 cd .. && go build -o cerbix ./cmd/cerbix
 
 # Or build the image (multi-stage: SPA + binary → distroless):
-docker compose -f deploy/docker-compose.yml build
+docker compose -f docker/docker-compose.yml build
 ```
 
 CLI:

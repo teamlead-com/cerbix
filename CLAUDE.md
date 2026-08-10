@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-cerbix — self-hosted uptime & SLA monitoring. One static Go binary embeds the Vue 3 SPA, REST API, and goose migrations. Monorepo: the Go module at the repo root (`cmd/`, `internal/`, Go 1.25), `frontend/` (Vue 3 + Vite + TS), `docs/`, `deploy/`, `openapi.yaml` (source of truth for the API). Module path `github.com/teamlead-com/cerbix` matches the GitHub repo, so `go install .../cmd/cerbix@latest` works once the repo is public.
+cerbix — self-hosted uptime & SLA monitoring. One static Go binary embeds the Vue 3 SPA, REST API, and goose migrations. Monorepo: the Go module at the repo root (`cmd/`, `internal/`, Go 1.25), `frontend/` (Vue 3 + Vite + TS), `docs/`, `docker/`, `openapi.yaml` (source of truth for the API). Module path `github.com/teamlead-com/cerbix` matches the GitHub repo, so `go install .../cmd/cerbix@latest` works once the repo is public.
 
 ## Commands
 
@@ -49,14 +49,14 @@ Tests create `e2e-`prefixed entities and clean them up — dev stacks only.
 ### Image & stacks (from repo root)
 
 ```bash
-docker compose -f deploy/docker-compose.yml build            # multi-stage: node builds SPA → embedded → distroless
+docker compose -f docker/docker-compose.yml build            # multi-stage: node builds SPA → embedded → distroless
 # Single-geo file is profile-driven; `single` and `distributed` are mutually exclusive:
-docker compose -f deploy/docker-compose.yml --profile single up -d          # one process --role all, :8080 (static IPs 10.5.0.x)
-docker compose -f deploy/docker-compose.yml --profile distributed run --rm api migrate --config /etc/cerbix/config.yaml  # migrate ONCE first — roles racing a new migration fail with "relation already exists"
-docker compose -f deploy/docker-compose.yml --profile distributed up -d     # scheduler + api (:8082) + worker
+docker compose -f docker/docker-compose.yml --profile single up -d          # one process --role all, :8080 (static IPs 10.5.0.x)
+docker compose -f docker/docker-compose.yml --profile distributed run --rm api migrate --config /etc/cerbix/config.yaml  # migrate ONCE first — roles racing a new migration fail with "relation already exists"
+docker compose -f docker/docker-compose.yml --profile distributed up -d     # scheduler + api (:8082) + worker
 # add --profile sso to either for Keycloak (:8081) + MariaDB
-# deploy/docker-compose.geo.yml  — multi-geo: central always, remote sites via --profile geo1/geo2 (3 isolated subnets)
-# deploy/docker-compose.prod.yml — prod role=all, secrets from deploy/.env (see .env.prod.example)
+# docker/docker-compose.geo.yml  — multi-geo: central always, remote sites via --profile geo1/geo2 (3 isolated subnets)
+# docker/docker-compose.prod.yml — prod role=all, secrets from docker/.env (see .env.prod.example)
 ```
 
 Dev login: `admin@cerbix.local` / `devpassword123` (local auth; Keycloak on :8081 optional).

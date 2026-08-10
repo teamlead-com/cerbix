@@ -20,7 +20,7 @@ incident and postmortem communication.
   issuer works (Keycloak, Auth0, Okta, Google, Entra ID; Keycloak is just the dev-stack
   example, D-0043). Authorization (membership + roles) lives in the cerbix database
   User identity keys on the `oidc_sub` claim (D-0044).
-- **Deploy:** out of scope for now; only local dev via `deploy/docker-compose.yml`.
+- **Deploy:** out of scope for now; only local dev via `docker/docker-compose.yml`.
 
 ## Architecture (summary)
 

@@ -2,7 +2,7 @@
 # into the Go binary (internal/web/dist via go:embed), so this single image serves
 # the whole app — REST API, /auth, public status pages, and the SPA — with no nginx.
 #
-# Build context is the REPO ROOT (see deploy/docker-compose.yml: context ..),
+# Build context is the REPO ROOT (see docker/docker-compose.yml: context ..),
 # because this Dockerfile needs both frontend/ and the Go module at the root.
 
 # Stage 1 — build the SPA.

@@ -231,9 +231,9 @@ If `sub` and `email` are present in this JSON preview, Keycloak is 100% properly
 
 Instead of manual UI configuration, you can import this complete realm configuration into Keycloak:
 
-1. Save the JSON content below as `deploy/keycloak/cerbix-realm.json`.
+1. Save the JSON content below as `docker/keycloak/cerbix-realm.json`.
 2. In Keycloak Admin Console: **Realm Settings** → top right **Action** menu → **Partial Import** (or create realm from file).
-3. Select `deploy/keycloak/cerbix-realm.json`, check **Import users** and **Import clients**, and click **Import**.
+3. Select `docker/keycloak/cerbix-realm.json`, check **Import users** and **Import clients**, and click **Import**.
 
 ```json
 {
@@ -295,7 +295,7 @@ Instead of manual UI configuration, you can import this complete realm configura
 
 ## ⚙️ cerbix Side Configuration (`config.yaml`)
 
-Edit your cerbix configuration file (e.g. `deploy/config.example.yaml` or `config.yaml`):
+Edit your cerbix configuration file (e.g. `docker/config.example.yaml` or `config.yaml`):
 
 ### Docker Compose Static IP Map (`subnet: 10.5.0.0/16`)
 
@@ -324,11 +324,11 @@ auth:
 
 ## 🐳 Step 4: Quickstart with Docker Compose (Local Dev)
 
-The repository provides a pre-configured Keycloak container in `deploy/docker-compose.yml`:
+The repository provides a pre-configured Keycloak container in `docker/docker-compose.yml`:
 
 ```bash
 # Start the full dev stack (PostgreSQL, RabbitMQ, Keycloak, cerbix)
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml up -d
 ```
 
 ### Dev Environment Pre-sets:

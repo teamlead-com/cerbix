@@ -2,7 +2,7 @@
 # (docker compose .env): config.Load expands ${VAR} at startup, so nothing secret
 # is committed in this file. A literal '$' in a value must be escaped as '$$'.
 #
-# Safe to commit: only placeholders live here. Real values go in deploy/.env.
+# Safe to commit: only placeholders live here. Real values go in docker/.env.
 server:
   listen: ":8080"
 

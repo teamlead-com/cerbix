@@ -3,7 +3,7 @@
 # max_configured_file_providers). Load via Prometheus `rule_files:`. Thresholds reference the
 # default resync_interval (30s); retune the stale-success window to ~3× your configured value.
 #
-# Validate: promtool check rules deploy/alerts/monitoring-as-code.rules.yml
+# Validate: promtool check rules docker/alerts/monitoring-as-code.rules.yml
 groups:
   - name: cerbix-monitoring-as-code
     rules:

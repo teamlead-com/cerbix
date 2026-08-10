@@ -170,7 +170,7 @@ The reference point is company conventions (Go services `example-svc`), plus les
 
 # Part 2 — Map of the preferred deployment
 
-## 2.1 Local development (`deploy/docker-compose.yml`)
+## 2.1 Local development (`docker/docker-compose.yml`)
 
 One `--role=all` process + infrastructure:
 
@@ -182,8 +182,8 @@ One `--role=all` process + infrastructure:
 | `cerbix` | build `../backend` | 8080 | `serve --role all` (API + SPA embed) |
 
 The SPA is served by the binary itself from `embed.FS` on :8080 — no separate nginx layer is needed. **The image
-is self-contained:** `Dockerfile` is a root-context multi-stage build (node builds the SPA → the Go stage
-embeds `dist` into the binary → distroless), so `docker compose -f deploy/docker-compose.yml build
+is self-contained:** `docker/Dockerfile` is a root-context multi-stage build (node builds the SPA → the Go stage
+embeds `dist` into the binary → distroless), so `docker compose -f docker/docker-compose.yml build
 cerbix` builds both the frontend and the backend into one image. For local development with hot-reload —
 `make -C frontend dev` (Vite server on :5173).
 
@@ -353,7 +353,7 @@ uses **only outbound HTTPS** to the center to fetch jobs (`GET /agent/jobs`, ato
 LOCKED`), runs them through its prober, and posts heartbeats (`POST /agent/results`, the same ingest). Authentication — a bearer token:
 a shared `pull.token` (catch-all), a per-region token (`pull.agents: [{region, token}]`, an agent sees only its own
 region), **or** a DB token (issue/revoke without redeploy via `POST/DELETE /api/v1/agent-tokens`, global-admin). Liveness
-of a pull region (for the picker and the "region without a worker" alert) — via agent heartbeat. Example: `deploy/config.agent.yaml`.
+of a pull region (for the picker and the "region without a worker" alert) — via agent heartbeat. Example: `docker/config.agent.yaml`.
 
 **Production-grade properties of the pull transport:**
 - **Long-poll (LISTEN/NOTIFY):** `GET /agent/jobs` holds the request until a job appears (or 20s max-hold) instead of

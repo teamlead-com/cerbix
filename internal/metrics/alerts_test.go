@@ -9,12 +9,12 @@ import (
 )
 
 // TestMonitoringAsCodeAlertRules validates the shipped Prometheus alert rules
-// (deploy/alerts/monitoring-as-code.rules.yml): they are structurally well-formed and every
+// (docker/alerts/monitoring-as-code.rules.yml): they are structurally well-formed and every
 // expr references a real cerbix_file_provider_* metric this package emits — so the rules can't
 // silently drift from the metric names. (promtool check rules is run separately in CI/dev; this
 // is the runnable in-repo guard.)
 func TestMonitoringAsCodeAlertRules(t *testing.T) {
-	const path = "../../deploy/alerts/monitoring-as-code.rules.yml"
+	const path = "../../docker/alerts/monitoring-as-code.rules.yml"
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read alert rules: %v", err)

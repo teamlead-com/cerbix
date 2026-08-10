@@ -6,7 +6,7 @@ This document provides a comprehensive breakdown of the **cerbix** architecture,
 
 ## 📐 1. Single Binary Concept & Process Roles
 
-`cerbix` ships as a single compiled Go static binary with embedded database migrations and embedded Vue 3 SPA frontend assets ([`internal/web`](../backend/internal/web)).
+`cerbix` ships as a single compiled Go static binary with embedded database migrations and embedded Vue 3 SPA frontend assets ([`internal/web`](../internal/web)).
 
 Process behavior is determined by the `--role` flag:
 

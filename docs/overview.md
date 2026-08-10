@@ -182,7 +182,7 @@ One `--role=all` process + infrastructure:
 | `cerbix` | build `../backend` | 8080 | `serve --role all` (API + SPA embed) |
 
 The SPA is served by the binary itself from `embed.FS` on :8080 — no separate nginx layer is needed. **The image
-is self-contained:** `backend/Dockerfile` is a root-context multi-stage build (node builds the SPA → the Go stage
+is self-contained:** `Dockerfile` is a root-context multi-stage build (node builds the SPA → the Go stage
 embeds `dist` into the binary → distroless), so `docker compose -f deploy/docker-compose.yml build
 cerbix` builds both the frontend and the backend into one image. For local development with hot-reload —
 `make -C frontend dev` (Vite server on :5173).

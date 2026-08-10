@@ -117,7 +117,8 @@ Bootstrap the first admin without Keycloak: set `security.admin_email` and
 `security.admin_password`; on an empty system a global admin is created at startup
 (`bootstrap_admin_created`). The password is taken from config and **never generated or
 logged** — if it is unset, no admin is created (`bootstrap_admin_skipped`). Rotate it via
-`/api/v1/me/password` after first login. (Local-login rate limiting is not yet implemented.)
+`/api/v1/me/password` after first login. Local-login brute-force protection is a per-client-IP
+sliding-window limiter (`login_rate_limit_per_minute`, default 10; 0 disables) — D-0031.
 
 ### Keycloak bootstrap
 
@@ -143,9 +144,11 @@ Monitors are managed via the API (requires auth): `POST /api/v1/projects/{id}/mo
 syntax (declarative): `[STATUS] == 200`, `[RESPONSE_TIME] < 500`, `[BODY] contains "UP"`,
 `[CONNECTED] == 1`.
 
-Distributed roles (`--role=scheduler` / `--role=worker` in separate processes) require the
-RabbitMQ dispatcher, which is not yet wired; use `--role=all` for now. ICMP and push
-(dead-man's-switch) monitor types are also not yet implemented.
+Distributed roles run as separate processes over the RabbitMQ dispatcher (`--role=scheduler` /
+`--role=worker`, per-region `checks.jobs.<region>`); broker-less regions use the HTTP-pull
+`--role=agent` transport. `--role=all` remains the single-process dev mode. All MVP monitor
+types are implemented, including ICMP (`internal/prober/icmp.go`, D-0032; unprivileged-first
+socket) and push (dead-man's-switch, D-0028).
 
 ## SLA / SLI
 

@@ -18,7 +18,7 @@ Build, quality checks and tests in GitLab CI for the monorepo (backend + fronten
   `CERBIX_TEST_DATABASE_DSN`, so the opt-in store integration tests run in CI. Locally the
   same tests skip unless that env var is set (default `go test ./...` stays hermetic).
 - Frontend jobs are added in Phase 4 (by `frontend/**` paths): the Vue build (`frontend/dist`)
-  and copying the result into `backend/internal/web/dist/` before `go build`, so the SPA is embedded
+  and copying the result into `internal/web/dist/` before `go build`, so the SPA is embedded
   into the binary via `embed.FS`. A placeholder shell is committed in the repository, so the Go module
   builds without the frontend as well. The API contract is `openapi.yaml` (repo root), from which the
   TS client is generated.

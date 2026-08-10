@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
 
 /* Design tokens — see docs/design/notes.md. Theme flips via prefers-color-scheme
    and a [data-theme] attribute that wins in both directions. Tailwind semantic

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import BrandMark from "@/components/BrandMark.vue";
 import { useTheme } from "@/composables/useTheme";
 import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
@@ -116,12 +117,7 @@ function oidcLogin() {
 
       <div class="px-7 pb-6 pt-7">
         <div class="mb-6 flex items-center gap-[10px]">
-          <img v-if="branding.logoUrl" :src="branding.logoUrl" alt="" class="h-[30px] w-[30px] rounded-sm object-contain" />
-          <span v-else class="grid h-[30px] w-[30px] place-items-center rounded-sm bg-accent text-accent-ink">
-            <svg viewBox="0 0 24 24" class="h-[17px] w-[17px]" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" /><path d="M8.5 12l2 2 4.5-4.5" />
-            </svg>
-          </span>
+          <BrandMark :tile="30" :glyph="17" />
           <span class="font-mono text-[17px] font-semibold tracking-tight">{{ branding.productName }}</span>
         </div>
 

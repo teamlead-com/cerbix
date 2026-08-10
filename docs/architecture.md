@@ -11,7 +11,6 @@ This document provides a comprehensive breakdown of the **cerbix** architecture,
 Process behavior is determined by the `--role` flag:
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#1e293b', 'primaryTextColor': '#f8fafc', 'primaryBorderColor': '#3b82f6', 'lineColor': '#38bdf8', 'textColor': '#f8fafc' }}}%%
 flowchart TD
     CLI["cerbix serve --role <role>"]
     
@@ -29,7 +28,6 @@ flowchart TD
 In production, roles are deployed as independent, horizontally scalable containers.
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#1e293b', 'primaryTextColor': '#f8fafc', 'primaryBorderColor': '#3b82f6', 'lineColor': '#38bdf8', 'textColor': '#f8fafc' }}}%%
 flowchart TB
     subgraph Clients["Clients & External Systems"]
         User["Browser / User"]
@@ -68,15 +66,15 @@ flowchart TB
     LB -->|REST / SSE / SPA| API1
     LB -->|REST / SSE / SPA| API2
 
-    API1 & API2 <--> MQ
-    API1 & API2 <--> PG
+    API1 & API2 --- MQ
+    API1 & API2 --- PG
 
-    SCH1 <-->|Advisory Lock Leader Election| PG
-    SCH1 & SCH2 <--> MQ
+    SCH1 ---|Advisory Lock Leader Election| PG
+    SCH1 & SCH2 --- MQ
 
-    W1 & W2 <-->|AMQP checks.jobs / checks.results| MQ
+    W1 & W2 ---|AMQP checks.jobs / checks.results| MQ
 
-    AGT1 -->|Outbound HTTPS GET /agent/jobs (Long-Polling)| API1
+    AGT1 -->|"Outbound HTTPS GET /agent/jobs (Long-Polling)"| API1
     AGT1 -->|Outbound HTTPS POST /agent/results| API1
 ```
 
@@ -87,7 +85,6 @@ flowchart TB
 Below is the sequence diagram illustrating a regular check execution (from scheduling to alert delivery):
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'actorBkg': '#1e293b', 'actorTextColor': '#f8fafc', 'actorBorder': '#3b82f6', 'actorLineColor': '#64748b', 'lineColor': '#38bdf8', 'signalColor': '#38bdf8', 'signalTextColor': '#f8fafc', 'textColor': '#f8fafc', 'labelBoxBkgColor': '#1e293b', 'labelBoxBorderColor': '#3b82f6', 'labelTextColor': '#f8fafc', 'noteBkgColor': '#1e293b', 'noteTextColor': '#f8fafc', 'noteBorderColor': '#3b82f6', 'sequenceNumberColor': '#ffffff' }}}%%
 sequenceDiagram
     autonumber
     participant S as Scheduler (Leader)
@@ -133,7 +130,6 @@ sequenceDiagram
 ### 4.1 Mode A: AMQP Geo-Worker Pools (Direct AMQP Connection)
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'actorBkg': '#1e293b', 'actorTextColor': '#f8fafc', 'actorBorder': '#3b82f6', 'actorLineColor': '#64748b', 'lineColor': '#38bdf8', 'signalColor': '#38bdf8', 'signalTextColor': '#f8fafc', 'textColor': '#f8fafc', 'labelBoxBkgColor': '#1e293b', 'labelBoxBorderColor': '#3b82f6', 'labelTextColor': '#f8fafc', 'noteBkgColor': '#1e293b', 'noteTextColor': '#f8fafc', 'noteBorderColor': '#3b82f6', 'sequenceNumberColor': '#ffffff' }}}%%
 sequenceDiagram
     autonumber
     participant S as Central Scheduler
@@ -153,7 +149,6 @@ sequenceDiagram
 The diagram below details the exact queue topology and data flow across RabbitMQ in AMQP mode:
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#1e293b', 'primaryTextColor': '#f8fafc', 'primaryBorderColor': '#3b82f6', 'lineColor': '#38bdf8', 'textColor': '#f8fafc' }}}%%
 flowchart TD
     SCHED["Scheduler (Leader)"]
     
@@ -184,7 +179,6 @@ flowchart TD
 ### 4.3 Mode B: HTTP Pull-Agent (Outbound HTTPS Only)
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'actorBkg': '#1e293b', 'actorTextColor': '#f8fafc', 'actorBorder': '#3b82f6', 'actorLineColor': '#64748b', 'lineColor': '#38bdf8', 'signalColor': '#38bdf8', 'signalTextColor': '#f8fafc', 'textColor': '#f8fafc', 'labelBoxBkgColor': '#1e293b', 'labelBoxBorderColor': '#3b82f6', 'labelTextColor': '#f8fafc', 'noteBkgColor': '#1e293b', 'noteTextColor': '#f8fafc', 'noteBorderColor': '#3b82f6', 'sequenceNumberColor': '#ffffff' }}}%%
 sequenceDiagram
     autonumber
     participant S as Central Scheduler
@@ -223,7 +217,6 @@ sequenceDiagram
 ## 🔐 5. Authentication & Tenant Authorization (AuthN & AuthZ)
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'actorBkg': '#1e293b', 'actorTextColor': '#f8fafc', 'actorBorder': '#3b82f6', 'actorLineColor': '#64748b', 'lineColor': '#38bdf8', 'signalColor': '#38bdf8', 'signalTextColor': '#f8fafc', 'textColor': '#f8fafc', 'labelBoxBkgColor': '#1e293b', 'labelBoxBorderColor': '#3b82f6', 'labelTextColor': '#f8fafc', 'noteBkgColor': '#1e293b', 'noteTextColor': '#f8fafc', 'noteBorderColor': '#3b82f6', 'sequenceNumberColor': '#ffffff' }}}%%
 sequenceDiagram
     autonumber
     participant Client as SPA / Client
@@ -267,7 +260,6 @@ sequenceDiagram
 ## 🚨 6. Escalations, On-Call & Incident Handling
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'actorBkg': '#1e293b', 'actorTextColor': '#f8fafc', 'actorBorder': '#3b82f6', 'actorLineColor': '#64748b', 'lineColor': '#38bdf8', 'signalColor': '#38bdf8', 'signalTextColor': '#f8fafc', 'textColor': '#f8fafc', 'labelBoxBkgColor': '#1e293b', 'labelBoxBorderColor': '#3b82f6', 'labelTextColor': '#f8fafc', 'noteBkgColor': '#1e293b', 'noteTextColor': '#f8fafc', 'noteBorderColor': '#3b82f6', 'sequenceNumberColor': '#ffffff' }}}%%
 sequenceDiagram
     autonumber
     participant Ingest as Ingest Pipeline
@@ -303,8 +295,7 @@ sequenceDiagram
 * **Daily Rollup**: Aggregates in `heartbeats_daily` are calculated in the background by the scheduler leader to serve instantaneous 90+ day SLA/SLI reports.
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#1e293b', 'primaryTextColor': '#f8fafc', 'primaryBorderColor': '#3b82f6', 'lineColor': '#38bdf8', 'textColor': '#f8fafc' }}}%%
-erdiagram
+erDiagram
     organizations ||--o{ projects : contains
     projects ||--o{ monitors : contains
     projects ||--o{ incidents : registers

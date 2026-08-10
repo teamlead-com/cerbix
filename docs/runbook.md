@@ -53,10 +53,11 @@ self-healing; fix the config and restart.
 
 ## Roles
 
-- `all` — every role in one process (dev).
-- `api` — REST + SSE, serves the SPA, consumes results.
-- `scheduler` — leader-elected job scheduler.
-- `worker` — stateless probe pool.
+- `all` — every role in one process (dev; inproc transport, no broker needed).
+- `api` — REST + SSE, serves the SPA, consumes results, delivers the outbox.
+- `scheduler` — leader-elected job scheduler (Postgres advisory lock).
+- `worker` — stateless AMQP prober pool (DB-less; region-scoped via `--region`).
+- `agent` — DB-less **and** broker-less HTTP-pull prober for broker-less geos (outbound HTTPS only).
 
 ## Database & migrations
 
@@ -135,7 +136,8 @@ When a database is configured and `--role=all`, `serve` starts the checking pipe
 
 - **scheduler** — contends for leadership via a Postgres advisory lock; the leader scans
   enabled monitors every second and publishes a job when one is due (`scheduler_leader_acquired`).
-- **worker pool** — executes probes (HTTP/TCP) with per-check timeout + retries.
+- **worker pool** — executes the probe (http/tcp/icmp/dns/tls/grpc/websocket/ssh, plus the
+  DB/PromQL/RabbitMQ/composite/synthetic probers) with per-check timeout + retries.
 - **ingestion** — writes each result as a heartbeat, updates the monitor's `status`, and
   increments `cerbix_checks_total{result="up|down"}`.
 

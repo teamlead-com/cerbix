@@ -5,10 +5,13 @@
 useDefault = true
 
 [allowlist]
-description = "Documentation false positives"
+description = "Documentation false positives + fabricated test fixtures"
 regexes = [
   '''issuance/revocation''',
   '''RS256-signed''',
   '''parent/child''',
+  # Fabricated password literal in the password-reset test body (not a credential);
+  # generic-api-key flags it on entropy. internal/auth/handlers_reset_test.go.
+  '''pw1234567890''',
 ]
 paths = []

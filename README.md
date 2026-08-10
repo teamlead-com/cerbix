@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" width="120" alt="cerbix logo" />
+</p>
+
 # cerbix
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

@@ -5,9 +5,9 @@ go 1.25.12
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/go-jose/go-jose/v4 v4.1.4
-	github.com/go-sql-driver/mysql v1.9.3
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/pressly/goose/v3 v3.27.1
+	github.com/pressly/goose/v3 v3.27.3
 	github.com/rabbitmq/amqp091-go v1.10.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.57.0

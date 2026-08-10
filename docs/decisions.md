@@ -2691,3 +2691,13 @@ literal reading of §9 and gives operators a complete lifecycle trail; the NOTIF
 narrow so no-op-for-scheduling changes don't churn the leader. Consequence: an un-orphan with an
 unchanged config is audited (an ownership transition) but does NOT bump `execution_revision` or
 NOTIFY (D-0142 revision-safety preserved).
+
+## D-0149 — GitLab CI removed from the project (2026-08-10)
+GitLab CI is not used for this project, so the pipeline is removed: `.gitlab-ci.yml`, the
+`.ci/` includes (`common`/`backend`/`frontend`), and the `ops-cicd.md` skeleton spec are
+deleted. The former NFR-008 ("CI runs lint + `go test -race` + coverage gate") is retired and
+its rows dropped from `docs/status.md` and `docs/traceability.md`. Quality gates remain enforced
+locally per the docs workflow: `go vet`, `go build`, `go test -race -count=1 ./...` (both storage
+modes for heartbeat/retention changes), the docker frontend `vue-tsc` build, and the live-stack
+E2E (`e2e/run.sh`, `e2e/mac-smoke.sh`). If a hosted pipeline is reintroduced later, it should
+re-run exactly those commands. This is a deliberate scope removal, not a regression.

@@ -4,6 +4,5 @@ dist
 docker-compose*
 .dockerignore
 .gitignore
-.gitlab-ci.yml
 Makefile
 *.log

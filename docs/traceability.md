@@ -20,7 +20,6 @@ Mapping from requirements to code, tests, and metrics. Updated every iteration.
 | NFR-003 (logging, no secrets) | `internal/logging/logger.go` | `internal/logging/logger_test.go` | — | infra |
 | NFR-004 (`cerbix_` metrics) | `internal/metrics/metrics.go` | `internal/metrics/metrics_test.go` | `cerbix_build_info`, `cerbix_up`, `cerbix_ready`, `cerbix_uptime_seconds` | infra |
 | NFR-005 (graceful shutdown) | `internal/cli/cli.go` (`signal.NotifyContext`) | smoke (iter-0001 report) | — | application |
-| NFR-008 (CI gates) | `.gitlab-ci.yml`, `.ci/.gitlab-ci-backend.yml`, `.ci/.gitlab-ci-common.yml` | CI pipeline | — | infra |
 | FR-005 (org/project/membership model) | `internal/domain/domain.go`, `internal/store/{organizations,projects,users,memberships}.go` | `internal/domain/domain_test.go`, `internal/store/store_integration_test.go` | — | domain (rules) / infra (persistence) |
 | FR-006 / NFR-006 (tenant isolation) | `internal/store/organizations.go` (`ListOrganizationsForUser`), `projects.go` (`ListProjectsForUser`), `migrations/00001_init.sql` (composite FK) | `store_integration_test.go` (`TestTenantIsolation`, `TestProjectMembershipMustBelongToOrg`) | — | domain |
 | FR-014 (migrations) | `internal/store/migrate.go`, `migrations/00001_init.sql`, `internal/cli/cli.go` (`runMigrate`) | `internal/cli/cli_test.go` (`TestMigrate*`), `store_integration_test.go` | — | infra |

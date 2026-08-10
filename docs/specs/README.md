@@ -19,7 +19,7 @@ part of the system. Unlike `docs/checks/` (immutable snapshots) and `docs/iterat
 | Prefix | Purpose | Examples |
 | --- | --- | --- |
 | `func-` | Functional behavior. What the service does. | `func-monitoring-checks.md`, `func-tenancy-rbac.md` |
-| `ops-` | Operations: pipeline, runtime, deployment, monitoring, logging. | `ops-cicd.md`, `ops-logging.md` |
+| `ops-` | Operations: runtime, deployment, monitoring, logging. | `ops-logging.md` |
 | `sec-` | Security: authn/authz, secrets, audit, attack surface. | `sec-authn-authz.md` |
 | `cross-` | Cross-cutting norms that do not fit the other categories. Use sparingly. | (none yet) |
 
@@ -40,7 +40,6 @@ part of the system. Unlike `docs/checks/` (immutable snapshots) and `docs/iterat
 | `func-result-protocol.md` | Result ingest: typed origins, timestamp hygiene, `execution_revision` (P0a/P0b, D-0142) | spec |
 | `func-monitoring-as-code.md` | Hot-reconciled, tenant-scoped Monitoring as Code file provider (FR-017, D-0145) | spec |
 | `sec-authn-authz.md` | OIDC (any issuer), local login, sessions, API tokens, client-credentials | implemented |
-| `ops-cicd.md` | GitLab CI (backend/frontend), build, coverage gate | skeleton |
 | `ops-keycloak-oidc.md` | Setup and integration guide for Keycloak and any OIDC providers | implemented |
 | `ops-logging.md` | slog, levels, format, ban on logging secrets | skeleton |
 | `ops-monitoring.md` | `cerbix_` metrics, health/readiness, alerts | skeleton |

@@ -23,7 +23,7 @@ go test ./internal/store/ -run TestName -count=1 -v   # single test
 Test DB discipline:
 - **Never point tests at the dev `cerbix` DB** — tests run `TruncateAll`. Use `cerbix_test`.
 - Migrations auto-apply in test helpers (`Migrate → Open → TruncateAll`). After **changing** an already-applied migration file, drop and recreate `cerbix_test`.
-- The dev compose Postgres is `timescale/timescaledb` and its extension lives in `template1`, so a fresh `cerbix_test` runs the suite in **hypertable mode**. CI (`.ci/`) uses plain `postgres:16-alpine` → **declarative-partition mode**. Storage is adaptive (migration 00043); changes touching `heartbeats`/retention must pass in **both modes** — spin a throwaway `postgres:16-alpine` on another port for the second run.
+- The dev compose Postgres is `timescale/timescaledb` and its extension lives in `template1`, so a fresh `cerbix_test` runs the suite in **hypertable mode**. Storage is adaptive (migration 00043); changes touching `heartbeats`/retention must pass in **both modes** — to cover **declarative-partition mode**, spin a throwaway plain `postgres:16-alpine` on another port for the second run.
 
 ### Frontend (from `frontend/`) — no local node; use docker
 

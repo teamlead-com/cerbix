@@ -1,47 +1,66 @@
 version: 2
+# Grouped updates: instead of one PR per dependency (which produced ~20 PRs on the
+# first run), each ecosystem opens a SINGLE PR bundling all minor+patch bumps.
+# Major bumps still open their own PRs (they can break and deserve individual review).
 updates:
-  # Maintain dependencies for Go backend
+  # Go backend
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
       time: "04:00"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      go-modules:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     labels:
       - "dependencies"
       - "backend"
     commit-message:
       prefix: "build(deps)"
 
-  # Maintain dependencies for Vue 3 frontend
+  # Vue 3 frontend
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
       interval: "weekly"
       day: "monday"
       time: "04:00"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      frontend:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     labels:
       - "dependencies"
       - "frontend"
     commit-message:
       prefix: "build(deps-frontend)"
 
-  # Maintain Dockerfile base images
+  # Dockerfile base images — group everything (few, low-risk)
   - package-ecosystem: "docker"
     directory: "/docker"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      docker:
+        patterns: ["*"]
     labels:
       - "dependencies"
       - "docker"
 
-  # Maintain GitHub Actions versions
+  # GitHub Actions — group everything (version/SHA bumps, low-risk)
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
     labels:
       - "dependencies"
       - "ci"

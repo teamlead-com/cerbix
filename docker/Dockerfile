@@ -6,7 +6,7 @@
 # because this Dockerfile needs both frontend/ and the Go module at the root.
 
 # Stage 1 — build the SPA.
-FROM node:22-alpine AS spa
+FROM node:26-alpine AS spa
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci

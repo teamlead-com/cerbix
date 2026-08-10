@@ -1,17 +1,97 @@
-# Example Monitoring-as-Code bundle (format 1). Copy to `example.yaml` and set organization/
-# project to slugs that exist in your database — the file provider never creates tenants.
-# Instance scope (per config.dev.yaml) requires both `organization` and `project` here.
+# ─────────────────────────────────────────────────────────────────────────────
+# Monitoring-as-Code — example ProjectBundle (format 1)
+#
+# ONE file = ONE project. Every monitor below belongs to organization/project set
+# in the header. To manage a second project, add a SECOND *.yaml file.
+#
+# To use: copy this file to `example.yaml` (drop the `.example` — the provider only
+# reads *.yaml / *.yml), then set `organization:` / `project:` to slugs that ALREADY
+# EXIST in your database. The file provider never creates tenants (spec §5).
+#
+# The map KEY under `monitors:` is the "source UID" — a stable identifier you choose,
+# matching ^[a-z][a-z0-9-]{0,62}$. Renaming a UID = delete the old monitor + create a
+# new one, so keep it stable. Changing a monitor's `type:` is rejected (immutable).
+#
+# Durations are whole-second strings: "30s", "1m", "2m", "1h" (no "500ms", no "1.5s").
+# Inline secrets are FORBIDDEN anywhere (passwords/tokens/keys) — the bundle is rejected.
+# ─────────────────────────────────────────────────────────────────────────────
 format: 1
-organization: acme
-project: payments
+organization: acme          # existing organization slug
+project: payments           # existing project slug within that organization
+
 monitors:
+  # ── HTTP: the full-featured shape (all common fields shown) ─────────────────
   api:
-    name: Payments API
+    name: Payments API                         # display name (free text; provenance only)
     type: http
     target: https://payments.internal/health
+    method: GET                                # GET | POST | HEAD | PUT | DELETE (default GET)
+    interval: 30s                              # how often to probe
+    timeout: 5s                                # per-probe timeout
+    retries: 1                                 # immediate in-probe retries before a fail counts
+    failure_threshold: 3                       # consecutive fails before the monitor flips DOWN
+    confirm_interval: 10s                      # faster probing WHILE confirming (needs threshold > 1)
+    renotify: 1h                               # re-send the down alert every hour while down (0/absent = off)
+    conditions:                                # declarative pass conditions (ALL must hold)
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 800"
+      - '[BODY] contains "ok"'
+    tags: [payments, tier-1]                   # free-form labels (filter/group in the UI)
+    auto_incident: true                        # open/resolve an incident on down/recover (default true)
+    # region: core                             # which prober pool runs this (default core). A non-core
+    #                                          # region needs a LIVE worker/agent or the job TTL-expires.
+    # enabled: false                           # declaratively pause without deleting (keeps history)
+
+  # ── TCP: reachability of a host:port (e.g. a database socket) ───────────────
+  db-tcp:
+    name: Payments DB socket
+    type: tcp
+    target: db.internal:5432
     interval: 30s
     timeout: 5s
-  heartbeat:
-    name: Nightly job heartbeat
+    conditions:
+      - "[CONNECTED] == 1"
+
+  # ── DNS: resolve a name ─────────────────────────────────────────────────────
+  dns:
+    name: Payments DNS
+    type: dns
+    target: payments.internal
+    interval: 1m
+    timeout: 5s
+
+  # ── TLS: certificate/handshake health of host:port ─────────────────────────
+  tls:
+    name: Payments TLS
+    type: tls
+    target: payments.internal:443
+    interval: 5m
+    timeout: 5s
+
+  # ── ICMP: ping reachability (edge/network device) ──────────────────────────
+  gateway-ping:
+    name: Gateway reachability
+    type: icmp
+    target: 10.0.0.1
+    interval: 1m
+    timeout: 3s
+
+  # ── Dependency: this monitor's alerts are SUPPRESSED while its parent is down
+  #    (avoids alert storms). depends_on references OTHER UIDs in THIS bundle. ──
+  checkout:
+    name: Checkout API
+    type: http
+    target: https://checkout.internal/health
+    interval: 30s
+    timeout: 5s
+    depends_on: [api, db-tcp]                  # if api or db-tcp is down, checkout alerts are muted
+    conditions:
+      - "[STATUS] == 200"
+
+  # ── PUSH (dead-man's-switch): the JOB calls cerbix; cerbix has NO target and
+  #    flips DOWN if no ping arrives within interval (+ grace). Great for cron. ─
+  cron-nightly:
+    name: Nightly billing job
     type: push
-    interval: 3600s
+    interval: 24h                              # expected max gap between pings
+    grace: 1h                                  # extra tolerance before declaring DOWN

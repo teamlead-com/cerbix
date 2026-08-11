@@ -57,8 +57,9 @@ provider.
 3. **Confirmation.** The UI requires typing the project **slug** to enable the delete
    button (mirrors the create dialog's slug centrality and GitHub-style destructive
    confirms). The API itself does not require a confirm token — the guard is RBAC.
-4. **Audit.** One `project.delete` audit row (actor, org_id, project_id, slug/name),
-   written in the same transaction as the delete.
+4. **Audit.** One best-effort `project.delete` audit row is written by the handler after
+   a successful delete (`h.audit`, org-scoped — the org survives — with the project id as
+   the target), matching the codebase's existing post-commit audit pattern.
 5. **In-flight checks.** The scheduler works off an in-memory snapshot (15 s refresh)
    plus `monitor_config_changed`; removed monitors drop out on the next refresh. A late
    heartbeat insert for an already-deleted monitor simply fails its FK and is logged —
@@ -143,9 +144,10 @@ prevent it.
 // Returns ErrManagedByFile when the project has file-provider-managed monitors/bundles.
 func (s *Store) DeleteProject(ctx context.Context, orgID, projectID string) error
 ```
-- One tx: (a) `SELECT 1 FROM managed_monitors … / file_provider_bundles …` guard →
-  `ErrManagedByFile`; (b) `DELETE FROM projects WHERE id=$1 AND org_id=$2` → `ErrNotFound`
-  if `RowsAffected()==0`; (c) `RecordAudit(tx, actor, orgID, "project.delete", projectID, …)`.
+- One tx: (a) `SELECT 1 … FROM file_provider_bundles / managed_monitors WHERE project_id`
+  guard → `ErrManagedByFile`; (b) `DELETE FROM projects WHERE id=$1 AND org_id=$2` →
+  `ErrNotFound` if `RowsAffected()==0`. The store does **not** audit; the `project.delete`
+  audit is written by the handler (`h.audit`, best-effort, post-commit) — see §4.4.
 - Adding `DeleteProject` to the `Store` interface in `internal/api/api.go` will break
   `fakeStore` in `internal/api/api_test.go` (intentional — implement the stub). The
   scheduler/outbox fakes do not include project-lifecycle methods and are unaffected.
@@ -196,9 +198,11 @@ func (s *Store) DeleteProject(ctx context.Context, orgID, projectID string) erro
 3. API tests: 204 for org/global admin; 403 for project-admin/member; 404 for
    outsider/unknown; 409 for a file-managed project.
 4. Frontend: docker `npm run build` (vue-tsc).
-5. **E2E** on a live stack (`e2e/run.sh`): create an `e2e-`prefixed project + a monitor,
-   open Settings → Danger Zone, type-slug-confirm delete, assert it disappears from the
-   switcher and its monitors/incidents 404; assert a non-admin cannot see the control.
+5. **E2E** on a live stack (`e2e/run.sh`, `e2e/tests/project-delete.spec.ts`): create an
+   `e2e-`prefixed project + a monitor, open Settings → Danger Zone, type-slug-confirm
+   delete, assert the redirect to the dashboard and that the project and (via cascade) its
+   monitor return 404. Non-admin authorization is covered by the api unit test
+   (`TestDeleteProjectAuthz`), not the shared-session E2E.
 
 ## 13. Deliverables (process)
 

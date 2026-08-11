@@ -161,9 +161,11 @@ func (s *Store) DeleteOrganization(ctx context.Context, orgID string) error
 3. API tests: 204 for global admin; 403 for org admin / member / outsider; 404 for a
    global admin on an unknown org; 409 for a file-managed org.
 4. Frontend: docker `npm run build` (vue-tsc).
-5. **E2E** on a live stack: as a global admin, create an `e2e-` org + a project + monitor,
-   open Settings → org Danger Zone, type-slug-confirm delete, assert the org (and its
-   project/monitor) 404 and it leaves the workspace switcher.
+5. **E2E** on a live stack (`e2e/tests/org-delete.spec.ts`): as a global admin, create an
+   `e2e-` org + a project + monitor, open Settings → org Danger Zone, type-slug-confirm
+   delete, assert the redirect to the dashboard and that the org and (via cascade) its
+   project + monitor return 404. Non-admin authorization is covered by the api unit test
+   (`TestDeleteOrganizationAuthz`).
 
 ## 12. Deliverables (process)
 

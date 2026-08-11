@@ -25,6 +25,7 @@ type Store interface {
 	ListOrganizationsForUser(ctx context.Context, userID string) ([]domain.Organization, error)
 	CreateOrganization(ctx context.Context, slug, name string) (domain.Organization, error)
 	GetOrganization(ctx context.Context, id string) (domain.Organization, error)
+	DeleteOrganization(ctx context.Context, orgID string) error
 	ListProjectsByOrg(ctx context.Context, orgID string) ([]domain.Project, error)
 	CreateProject(ctx context.Context, orgID, slug, name string) (domain.Project, error)
 	GetProject(ctx context.Context, id string) (domain.Project, error)
@@ -364,6 +365,7 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/organizations", h.listOrganizations)
 	mux.HandleFunc("POST /api/v1/organizations", h.createOrganization)
 	mux.HandleFunc("GET /api/v1/organizations/{orgID}", h.getOrganization)
+	mux.HandleFunc("DELETE /api/v1/organizations/{orgID}", h.deleteOrganization)
 	mux.HandleFunc("GET /api/v1/organizations/{orgID}/projects", h.listProjects)
 	mux.HandleFunc("POST /api/v1/organizations/{orgID}/projects", h.createProject)
 	mux.HandleFunc("GET /api/v1/organizations/{orgID}/members", h.listMembers)

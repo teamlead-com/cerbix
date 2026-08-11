@@ -274,6 +274,23 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Organization' }
         '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [organizations]
+      summary: Delete an organization (global admin)
+      description: >
+        Permanently deletes the organization and everything it owns — all projects and
+        their subtrees (monitors & history, incidents, SLA, escalation/on-call, channels),
+        memberships, org-level status pages, and org-scoped tokens/webhooks. Irreversible.
+        Global admin only; refused for organizations that own file-provider-managed projects.
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The organization owns file-provider-managed projects — remove their files instead.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/organizations/{orgID}/projects:
     parameters: [ { $ref: '#/components/parameters/OrgID' } ]

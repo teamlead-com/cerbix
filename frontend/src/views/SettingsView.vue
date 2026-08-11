@@ -7,6 +7,7 @@ import AppShell from "@/components/AppShell.vue";
 import AgentTokensPanel from "@/components/settings/AgentTokensPanel.vue";
 import DangerZonePanel from "@/components/settings/DangerZonePanel.vue";
 import MembersPanel from "@/components/settings/MembersPanel.vue";
+import OrgDangerZonePanel from "@/components/settings/OrgDangerZonePanel.vue";
 import UsersPanel from "@/components/settings/UsersPanel.vue";
 import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
@@ -38,6 +39,7 @@ type Tab =
   | "tokens"
   | "webhooks"
   | "danger"
+  | "orgdanger"
   | "security";
 const instanceTabs: { key: Tab; label: string; scope: string }[] = [
   { key: "users", label: "Users", scope: "instance" },
@@ -60,6 +62,10 @@ const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
   { key: "members", label: "Members", scope: "org" },
   { key: "tokens", label: "API tokens", scope: "org" },
   { key: "webhooks", label: "Webhooks", scope: "org" },
+  // Deleting an organization is a global-admin action.
+  ...(session.isGlobalAdmin
+    ? ([{ key: "orgdanger", label: "Danger zone", scope: "org" }] as { key: Tab; label: string; scope: string }[])
+    : []),
   { key: "security", label: "Security", scope: "account" },
 ]);
 const tab = ref<Tab>("channels");
@@ -1167,6 +1173,9 @@ watch(tab, loadActive);
 
       <!-- ── Danger zone (project-scoped, org admin) ── -->
       <DangerZonePanel v-else-if="tab === 'danger'" />
+
+      <!-- ── Danger zone (org-scoped, global admin) ── -->
+      <OrgDangerZonePanel v-else-if="tab === 'orgdanger'" />
 
       <!-- ── Tokens ── -->
       <template v-else-if="tab === 'tokens' && !activeError">

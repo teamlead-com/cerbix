@@ -2721,3 +2721,22 @@ concurrent apply can't reclaim ownership between them. Confirmation is type-the-
 mislabeled `delete: Remove a member` operation that `openapi.yaml` had attached to
 `/organizations/{orgID}/projects` is moved to its real path
 `/organizations/{orgID}/members/{membershipID}` (it had drifted out of sync with `schema.d.ts`).
+
+## D-0151 — Organization deletion is a hard cascade delete, global-admin-only, refused for file-managed orgs (iter-0112)
+`DELETE /api/v1/organizations/{orgID}` (FR-019) is the org-level analogue of D-0150. (1)
+**Hard delete** — every FK into `organizations` is `ON DELETE CASCADE` (memberships, projects →
+their whole subtrees, org-level status pages, org-scoped tokens/webhooks, audit_logs), so one
+`DELETE FROM organizations WHERE id` wipes the tenant in one tx; no new migration. (2)
+**Global-admin (`ActionGlobalManage`) only** — symmetric with `createOrganization`; an org admin
+cannot delete their own org. The gate is checked *before* any existence lookup so non-admins get
+`403` with no existence leak; a global admin hitting a missing org gets `404`. (3) **Refused `409
+managed_by_file` when the org owns file-provider-managed projects** — unlike a deleted project
+(which a reconcile recreates), a reconcile does NOT recreate a missing org; it fails tenant
+resolution (`ErrBundleTenantNotFound`) and would error on every pass, so refusing keeps the
+provider out of a perpetual error state. The check and the `DELETE` share one tx. (4) The
+`org.delete` **audit is written with `org_id = NULL`** (an instance action; `audit_logs.org_id` is
+nullable since migration 00047) precisely so the row survives the cascade that drops the org's own
+`audit_logs`. Confirmation is type-the-slug in the UI; the API guard is RBAC. Verified:
+`store.TestDeleteOrganization` (both storage modes — two-level cascade, tenant survival,
+`ErrManagedByFile`), `api.TestDeleteOrganizationAuthz` (204/403/404/409), and a live-stack E2E
+(`e2e/tests/org-delete.spec.ts`).

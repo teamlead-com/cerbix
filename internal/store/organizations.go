@@ -45,6 +45,44 @@ func (s *Store) GetOrganization(ctx context.Context, id string) (domain.Organiza
 	return o, nil
 }
 
+// DeleteOrganization removes an organization and (via ON DELETE CASCADE) everything it
+// owns — projects and their subtrees, memberships, org-level status pages, org-scoped
+// tokens/webhooks, and the org's audit rows. Returns ErrNotFound when 0 rows match, and
+// ErrManagedByFile when the org owns file-provider-managed projects/monitors (deleting it
+// would leave the reconcile unable to resolve its tenant on every pass — spec
+// func-org-deletion §7.2). The ownership check and the delete share one transaction.
+func (s *Store) DeleteOrganization(ctx context.Context, orgID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: delete organization: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var one int
+	err = tx.QueryRow(ctx,
+		`SELECT 1 WHERE EXISTS (SELECT 1 FROM file_provider_bundles WHERE org_id = $1)
+		              OR EXISTS (SELECT 1 FROM managed_monitors WHERE org_id = $1)`,
+		orgID).Scan(&one)
+	if err == nil {
+		return ErrManagedByFile
+	}
+	if !noRows(err) {
+		return fmt.Errorf("store: delete organization: ownership check: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM organizations WHERE id = $1`, orgID)
+	if err != nil {
+		return fmt.Errorf("store: delete organization: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: delete organization: commit: %w", err)
+	}
+	return nil
+}
+
 // ListOrganizations returns all organizations (for Global Admin use).
 func (s *Store) ListOrganizations(ctx context.Context) ([]domain.Organization, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+orgColumns+` FROM organizations ORDER BY slug`)

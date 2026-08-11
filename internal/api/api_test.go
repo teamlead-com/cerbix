@@ -38,6 +38,7 @@ type fakeStore struct {
 	monitors           map[string]domain.Monitor
 	managed            map[string]store.FileManagement // monitor id → file provenance (ownership)
 	managedProjects    map[string]bool                 // project id → owned by a file provider (blocks delete)
+	managedOrgs        map[string]bool                 // org id → owns a file-managed project (blocks delete)
 	diagnostics        []fakeDiag                      // file-provider bundle diagnostics
 	passwords          map[string]string
 	sessionsDeletedFor []string
@@ -157,6 +158,16 @@ func (f *fakeStore) GetOrganization(_ context.Context, id string) (domain.Organi
 		return domain.Organization{}, store.ErrNotFound
 	}
 	return o, nil
+}
+func (f *fakeStore) DeleteOrganization(_ context.Context, orgID string) error {
+	if _, ok := f.orgs[orgID]; !ok {
+		return store.ErrNotFound
+	}
+	if f.managedOrgs[orgID] {
+		return store.ErrManagedByFile
+	}
+	delete(f.orgs, orgID)
+	return nil
 }
 func (f *fakeStore) ListProjectsByOrg(_ context.Context, orgID string) ([]domain.Project, error) {
 	return f.byOrg[orgID], nil
@@ -1218,6 +1229,44 @@ func TestDeleteProjectAuthz(t *testing.T) {
 	}
 	if rec := do(h2, globalAdmin, http.MethodDelete, "/api/v1/projects/p2", ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("global admin delete = %d, want 204", rec.Code)
+	}
+}
+
+// TestDeleteOrganizationAuthz covers FR-019: global-admin only, 403 for everyone else
+// (no existence leak), 404 for a global admin on an unknown org, 409 for a file-managed
+// org (spec func-org-deletion §6/§10).
+func TestDeleteOrganizationAuthz(t *testing.T) {
+	// Non-global-admins are refused with 403 regardless of membership.
+	h := newHandler(seededStore())
+	if rec := do(h, o1Admin, http.MethodDelete, "/api/v1/organizations/o1", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("org admin delete org = %d, want 403", rec.Code)
+	}
+	if rec := do(h, o1Viewer, http.MethodDelete, "/api/v1/organizations/o1", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("member delete org = %d, want 403", rec.Code)
+	}
+	if rec := do(h, outsider, http.MethodDelete, "/api/v1/organizations/o1", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("outsider delete org = %d, want 403", rec.Code)
+	}
+
+	// Global admin: 404 for an unknown org.
+	if rec := do(h, globalAdmin, http.MethodDelete, "/api/v1/organizations/nope", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("global admin delete unknown org = %d, want 404", rec.Code)
+	}
+
+	// File-provider-owned org ⇒ 409 even for a global admin.
+	fs := seededStore()
+	fs.managedOrgs = map[string]bool{"o1": true}
+	if rec := do(newHandler(fs), globalAdmin, http.MethodDelete, "/api/v1/organizations/o1", ""); rec.Code != http.StatusConflict {
+		t.Fatalf("global admin delete file-managed org = %d, want 409", rec.Code)
+	}
+
+	// Happy path: global admin deletes o1; a re-delete then 404s (it's gone).
+	h2 := newHandler(seededStore())
+	if rec := do(h2, globalAdmin, http.MethodDelete, "/api/v1/organizations/o1", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("global admin delete org = %d, want 204", rec.Code)
+	}
+	if rec := do(h2, globalAdmin, http.MethodDelete, "/api/v1/organizations/o1", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("re-delete gone org = %d, want 404", rec.Code)
 	}
 }
 

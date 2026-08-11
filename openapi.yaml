@@ -397,6 +397,23 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Project' }
         '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [projects]
+      summary: Delete a project (org admin)
+      description: >
+        Permanently deletes the project and everything it owns — monitors and their
+        history, incidents, SLA, escalation/on-call, notification channels, and
+        project-scoped tokens/webhooks/status pages. Irreversible. Requires org-manage on
+        the owning organization; refused for projects owned by a file provider.
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The project is managed by a file provider — remove its files instead.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/regions:
     get:

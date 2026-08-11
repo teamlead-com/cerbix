@@ -179,6 +179,46 @@ func (h *Handler) getProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, proj)
 }
 
+// deleteProject permanently removes a project the caller org-administers (FR-018).
+// Irreversible: the DB cascade wipes the project's monitors + history, incidents, SLA,
+// escalation/on-call, channels, and project-scoped tokens/webhooks/status-pages. Refused
+// (409 managed_by_file) for file-provider-owned projects (spec func-project-deletion §7).
+func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
+	p, _ := h.principal(r)
+	proj, err := h.store.GetProject(r.Context(), r.PathValue("projectID"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		h.serverError(w, "delete_project", err)
+		return
+	}
+	// Invisible ⇒ 404 (never leak existence); then require org-manage on the owning org
+	// (same right as creating a project — org admin / global admin).
+	if !p.VisibleProject(proj.OrgID, proj.ID) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if !p.Can(authz.ActionOrgManage, proj.OrgID, "") {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	switch err := h.store.DeleteProject(r.Context(), proj.OrgID, proj.ID); {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	case errors.Is(err, store.ErrManagedByFile):
+		writeError(w, http.StatusConflict, "managed_by_file")
+		return
+	case err != nil:
+		h.serverError(w, "delete_project", err)
+		return
+	}
+	h.audit(r, proj.OrgID, "project.delete", proj.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // listMembers lists an org's memberships (org admin).
 func (h *Handler) listMembers(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)

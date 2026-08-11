@@ -1694,3 +1694,66 @@ func TestFileManagedOwnershipGuard(t *testing.T) {
 		t.Fatalf("monitor project drift: %s", got.ProjectID)
 	}
 }
+
+// TestDeleteProject covers FR-018: hard delete via DB cascade, tenant scoping, and the
+// file-provider refusal (spec func-project-deletion §5/§7).
+func TestDeleteProject(t *testing.T) {
+	st, ctx := testStore(t)
+
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	other, _ := st.CreateOrganization(ctx, "globex", "Globex")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "web", Type: domain.MonitorHTTP,
+		Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create monitor: %v", err)
+	}
+
+	// Tenant scoping: deleting under the wrong org matches nothing and leaves it intact.
+	if err := st.DeleteProject(ctx, other.ID, proj.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("cross-tenant delete = %v, want ErrNotFound", err)
+	}
+	if _, err := st.GetProject(ctx, proj.ID); err != nil {
+		t.Fatalf("project must survive a cross-tenant delete: %v", err)
+	}
+
+	// Happy path: the project is gone and its monitors cascade away.
+	if err := st.DeleteProject(ctx, org.ID, proj.ID); err != nil {
+		t.Fatalf("delete project: %v", err)
+	}
+	if _, err := st.GetProject(ctx, proj.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("project after delete = %v, want ErrNotFound", err)
+	}
+	if _, err := st.GetMonitor(ctx, mon.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("monitor after project delete = %v, want ErrNotFound (cascade)", err)
+	}
+	if mons, err := st.ListMonitorsByProject(ctx, proj.ID); err != nil || len(mons) != 0 {
+		t.Fatalf("monitors after delete = %d err=%v, want 0", len(mons), err)
+	}
+
+	// A file-provider-owned project is refused and survives (a reconcile would recreate it).
+	proj2, _ := st.CreateProject(ctx, org.ID, "orders", "Orders")
+	mon2, _ := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj2.ID, Name: "orders", Type: domain.MonitorHTTP,
+		Target: "https://y", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+	})
+	conn, err := pgx.Connect(ctx, os.Getenv("CERBIX_TEST_DATABASE_DSN"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx,
+		`INSERT INTO managed_monitors (monitor_id, provider_id, org_id, project_id, source_uid, source_path)
+		 VALUES ($1, 'platform', $2, $3, 'orders', 'orders.yaml')`,
+		mon2.ID, org.ID, proj2.ID); err != nil {
+		t.Fatalf("seed ownership: %v", err)
+	}
+	if err := st.DeleteProject(ctx, org.ID, proj2.ID); !errors.Is(err, store.ErrManagedByFile) {
+		t.Fatalf("delete file-managed project = %v, want ErrManagedByFile", err)
+	}
+	if _, err := st.GetProject(ctx, proj2.ID); err != nil {
+		t.Fatalf("file-managed project must survive a refused delete: %v", err)
+	}
+}

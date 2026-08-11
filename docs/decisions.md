@@ -2701,3 +2701,23 @@ locally per the docs workflow: `go vet`, `go build`, `go test -race -count=1 ./.
 modes for heartbeat/retention changes), the docker frontend `vue-tsc` build, and the live-stack
 E2E (`e2e/run.sh`, `e2e/mac-smoke.sh`). If a hosted pipeline is reintroduced later, it should
 re-run exactly those commands. This is a deliberate scope removal, not a regression.
+
+## D-0150 — Project deletion is a hard cascade delete, org-admin-only, refused for file-managed projects (iter-0111)
+`DELETE /api/v1/projects/{projectID}` (FR-018) permanently removes a project. Three choices:
+(1) **Hard delete, not archive** — every FK into `projects` is already `ON DELETE CASCADE`
+(monitors → heartbeats/rollups/incidents/notifications/dependencies, SLA, escalation, on-call,
+notification channels, project-scoped tokens/webhooks/status-pages, file bundles), so a single
+`DELETE FROM projects WHERE id AND org_id` wipes the subtree in one tx; a soft-delete/trash column
+would fight the schema for no product ask. (2) **Org-admin (`ActionOrgManage`) only** — symmetric
+with project creation, which already requires org-manage; a project-scoped Project Admin
+administers content inside a project but not its existence. Global admin passes. (3) **Refused
+`409 managed_by_file` when the project owns file-provider bundles/monitors** — a running file
+provider would recreate it on the next reconcile, so an API delete would be silently undone; the
+operator must remove the YAML instead. The file-ownership check and the `DELETE` share one tx so a
+concurrent apply can't reclaim ownership between them. Confirmation is type-the-slug in the UI
+(irreversible, GitHub-style); the API guard is purely RBAC. Verified: `store.TestDeleteProject`
+(both storage modes — cascade, tenant scoping, `ErrManagedByFile`), `api.TestDeleteProjectAuthz`
+(204/403/404/409), and a live-stack E2E (`e2e/tests/project-delete.spec.ts`). Drive-by: the
+mislabeled `delete: Remove a member` operation that `openapi.yaml` had attached to
+`/organizations/{orgID}/projects` is moved to its real path
+`/organizations/{orgID}/members/{membershipID}` (it had drifted out of sync with `schema.d.ts`).

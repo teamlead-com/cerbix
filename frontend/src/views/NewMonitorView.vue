@@ -1338,7 +1338,7 @@ const selectCls =
                 <p class="mt-[2px] text-[12px] text-ink-3">Probe this target from several regions; alert by quorum.</p>
               </div>
               <button type="button" class="ml-auto h-[22px] w-[38px] flex-none rounded-full transition-colors" :class="multiRegion ? 'bg-accent' : 'bg-inset'" role="switch" :aria-checked="multiRegion" @click="multiRegion = !multiRegion">
-                <span class="block h-[18px] w-[18px] translate-x-[2px] rounded-full bg-white transition-transform" :class="multiRegion ? 'translate-x-4' : ''"></span>
+                <span class="block h-[18px] w-[18px] rounded-full bg-white transition-transform" :class="multiRegion ? 'translate-x-[18px]' : 'translate-x-[2px]'"></span>
               </button>
             </div>
             <div v-if="multiRegion" class="border-t border-border px-4 py-[13px]">

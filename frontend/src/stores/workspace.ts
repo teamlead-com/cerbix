@@ -135,5 +135,29 @@ export const useWorkspace = defineStore("workspace", {
       }
       return "";
     },
+    // deleteOrg permanently deletes an organization and switches to another. Returns ""
+    // on success or a human-readable error. Requires a global admin (enforced by the API);
+    // refused for orgs that own file-provider-managed projects.
+    async deleteOrg(id: string): Promise<string> {
+      const res = await api.DELETE("/api/v1/organizations/{orgID}", {
+        params: { path: { orgID: id } },
+      });
+      if (res.error) {
+        const code = (res.error as { error?: string })?.error;
+        if (code === "managed_by_file") {
+          return "This organization has file-provider-managed projects — remove their config files to delete it.";
+        }
+        return code || "Could not delete the organization.";
+      }
+      this.orgs = this.orgs.filter((o) => o.id !== id);
+      if (this.orgId === id) {
+        this.orgId = this.orgs[0]?.id ?? "";
+        if (this.orgId) localStorage.setItem(LAST_ORG, this.orgId);
+        else localStorage.removeItem(LAST_ORG);
+        localStorage.removeItem(LAST_PROJECT);
+        await this.loadProjects();
+      }
+      return "";
+    },
   },
 });

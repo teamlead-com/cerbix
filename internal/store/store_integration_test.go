@@ -1757,3 +1757,68 @@ func TestDeleteProject(t *testing.T) {
 		t.Fatalf("file-managed project must survive a refused delete: %v", err)
 	}
 }
+
+// TestDeleteOrganization covers FR-019: hard delete via DB cascade (through projects to
+// monitors), other orgs untouched, unknown ⇒ ErrNotFound, and the file-provider refusal
+// (spec func-org-deletion §5/§7).
+func TestDeleteOrganization(t *testing.T) {
+	st, ctx := testStore(t)
+
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	other, _ := st.CreateOrganization(ctx, "globex", "Globex")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "web", Type: domain.MonitorHTTP,
+		Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create monitor: %v", err)
+	}
+
+	// Unknown org ⇒ ErrNotFound (a valid but absent UUID).
+	if err := st.DeleteOrganization(ctx, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("delete unknown org = %v, want ErrNotFound", err)
+	}
+
+	// Happy path: cascades through projects → monitors; other orgs survive.
+	if err := st.DeleteOrganization(ctx, org.ID); err != nil {
+		t.Fatalf("delete org: %v", err)
+	}
+	if _, err := st.GetOrganization(ctx, org.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("org after delete = %v, want ErrNotFound", err)
+	}
+	if _, err := st.GetProject(ctx, proj.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("project after org delete = %v, want ErrNotFound (cascade)", err)
+	}
+	if _, err := st.GetMonitor(ctx, mon.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("monitor after org delete = %v, want ErrNotFound (cascade)", err)
+	}
+	if _, err := st.GetOrganization(ctx, other.ID); err != nil {
+		t.Fatalf("unrelated org must survive: %v", err)
+	}
+
+	// A file-provider-owned org is refused and survives.
+	org2, _ := st.CreateOrganization(ctx, "beta", "Beta")
+	proj2, _ := st.CreateProject(ctx, org2.ID, "svc", "Svc")
+	mon2, _ := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj2.ID, Name: "svc", Type: domain.MonitorHTTP,
+		Target: "https://y", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+	})
+	conn, err := pgx.Connect(ctx, os.Getenv("CERBIX_TEST_DATABASE_DSN"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx,
+		`INSERT INTO managed_monitors (monitor_id, provider_id, org_id, project_id, source_uid, source_path)
+		 VALUES ($1, 'platform', $2, $3, 'svc', 'svc.yaml')`,
+		mon2.ID, org2.ID, proj2.ID); err != nil {
+		t.Fatalf("seed ownership: %v", err)
+	}
+	if err := st.DeleteOrganization(ctx, org2.ID); !errors.Is(err, store.ErrManagedByFile) {
+		t.Fatalf("delete file-managed org = %v, want ErrManagedByFile", err)
+	}
+	if _, err := st.GetOrganization(ctx, org2.ID); err != nil {
+		t.Fatalf("file-managed org must survive a refused delete: %v", err)
+	}
+}

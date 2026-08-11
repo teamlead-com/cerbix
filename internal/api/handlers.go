@@ -106,6 +106,42 @@ func (h *Handler) getOrganization(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, org)
 }
 
+// deleteOrganization permanently removes an organization (FR-019, global admin only).
+// Irreversible: the DB cascade wipes all its projects (and their subtrees), memberships,
+// org-level status pages, and org-scoped tokens/webhooks. Refused (409 managed_by_file)
+// when the org owns file-provider-managed projects (spec func-org-deletion §7).
+func (h *Handler) deleteOrganization(w http.ResponseWriter, r *http.Request) {
+	p, _ := h.principal(r)
+	// Global-admin only, checked before any existence lookup (no existence leak).
+	if !p.Can(authz.ActionGlobalManage, "", "") {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	orgID := r.PathValue("orgID")
+	if _, err := h.store.GetOrganization(r.Context(), orgID); errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	} else if err != nil {
+		h.serverError(w, "delete_organization", err)
+		return
+	}
+	switch err := h.store.DeleteOrganization(r.Context(), orgID); {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	case errors.Is(err, store.ErrManagedByFile):
+		writeError(w, http.StatusConflict, "managed_by_file")
+		return
+	case err != nil:
+		h.serverError(w, "delete_organization", err)
+		return
+	}
+	// Instance-level audit (org_id NULL) so the row survives the cascade that removes the
+	// org's own audit_logs.
+	h.audit(r, "", "org.delete", orgID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // listProjects lists the projects of an org visible to the caller.
 func (h *Handler) listProjects(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)

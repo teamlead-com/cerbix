@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import AgentTokensPanel from "@/components/settings/AgentTokensPanel.vue";
+import DangerZonePanel from "@/components/settings/DangerZonePanel.vue";
 import MembersPanel from "@/components/settings/MembersPanel.vue";
 import UsersPanel from "@/components/settings/UsersPanel.vue";
 import { useBranding } from "@/stores/branding";
@@ -36,6 +37,7 @@ type Tab =
   | "members"
   | "tokens"
   | "webhooks"
+  | "danger"
   | "security";
 const instanceTabs: { key: Tab; label: string; scope: string }[] = [
   { key: "users", label: "Users", scope: "instance" },
@@ -49,6 +51,10 @@ const instanceTabs: { key: Tab; label: string; scope: string }[] = [
 const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
   { key: "channels", label: "Notification channels", scope: "project" },
   { key: "incoming", label: "Incoming alerts", scope: "project" },
+  // Deleting a project is an org-manage action, so only org admins see it.
+  ...(canManageOrg.value
+    ? ([{ key: "danger", label: "Danger zone", scope: "project" }] as { key: Tab; label: string; scope: string }[])
+    : []),
   // Instance-wide settings — global-admin only.
   ...(session.isGlobalAdmin ? instanceTabs : []),
   { key: "members", label: "Members", scope: "org" },
@@ -1158,6 +1164,9 @@ watch(tab, loadActive);
 
       <!-- ── Agent tokens (instance-wide, global admin, self-loading panel) ── -->
       <AgentTokensPanel v-else-if="tab === 'agenttokens'" />
+
+      <!-- ── Danger zone (project-scoped, org admin) ── -->
+      <DangerZonePanel v-else-if="tab === 'danger'" />
 
       <!-- ── Tokens ── -->
       <template v-else-if="tab === 'tokens' && !activeError">

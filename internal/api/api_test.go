@@ -37,6 +37,7 @@ type fakeStore struct {
 	members            map[string][]domain.Membership
 	monitors           map[string]domain.Monitor
 	managed            map[string]store.FileManagement // monitor id → file provenance (ownership)
+	managedProjects    map[string]bool                 // project id → owned by a file provider (blocks delete)
 	diagnostics        []fakeDiag                      // file-provider bundle diagnostics
 	passwords          map[string]string
 	sessionsDeletedFor []string
@@ -176,6 +177,17 @@ func (f *fakeStore) GetProject(_ context.Context, id string) (domain.Project, er
 		return domain.Project{}, store.ErrNotFound
 	}
 	return p, nil
+}
+func (f *fakeStore) DeleteProject(_ context.Context, orgID, projectID string) error {
+	p, ok := f.projects[projectID]
+	if !ok || p.OrgID != orgID {
+		return store.ErrNotFound
+	}
+	if f.managedProjects[projectID] {
+		return store.ErrManagedByFile
+	}
+	delete(f.projects, projectID)
+	return nil
 }
 func (f *fakeStore) CreateMembership(_ context.Context, m domain.Membership) (domain.Membership, error) {
 	if _, ok := f.users[m.UserID]; !ok {
@@ -1165,6 +1177,47 @@ func TestGetProjectIsolation(t *testing.T) {
 	}
 	if rec := do(h, p1Viewer, http.MethodGet, "/api/v1/projects/p3", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("p1 viewer get p3 = %d, want 404", rec.Code)
+	}
+}
+
+// TestDeleteProjectAuthz covers FR-018 authorization + status mapping: only an org
+// admin (or global admin) may delete; a project admin cannot; invisible/unknown ⇒ 404;
+// a file-managed project ⇒ 409 (spec func-project-deletion §6/§11).
+func TestDeleteProjectAuthz(t *testing.T) {
+	p1Admin := authz.Principal{UserID: "pa", Memberships: []domain.Membership{{OrgID: "o1", ProjectID: "p1", Role: domain.RoleProjectAdmin}}}
+
+	// Denials — nothing is actually deleted here.
+	h := newHandler(seededStore())
+	if rec := do(h, outsider, http.MethodDelete, "/api/v1/projects/p1", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("outsider delete = %d, want 404", rec.Code)
+	}
+	if rec := do(h, p1Viewer, http.MethodDelete, "/api/v1/projects/p1", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("project viewer delete = %d, want 403", rec.Code)
+	}
+	if rec := do(h, p1Admin, http.MethodDelete, "/api/v1/projects/p1", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("project admin delete = %d, want 403", rec.Code)
+	}
+	if rec := do(h, o1Admin, http.MethodDelete, "/api/v1/projects/nope", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown project delete = %d, want 404", rec.Code)
+	}
+
+	// A file-provider-owned project is refused with 409 even for an org admin.
+	fs := seededStore()
+	fs.managedProjects = map[string]bool{"p1": true}
+	if rec := do(newHandler(fs), o1Admin, http.MethodDelete, "/api/v1/projects/p1", ""); rec.Code != http.StatusConflict {
+		t.Fatalf("delete file-managed project = %d, want 409", rec.Code)
+	}
+
+	// Happy path: org admin deletes p1 (then it's gone); global admin deletes p2.
+	h2 := newHandler(seededStore())
+	if rec := do(h2, o1Admin, http.MethodDelete, "/api/v1/projects/p1", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("org admin delete = %d, want 204", rec.Code)
+	}
+	if rec := do(h2, o1Admin, http.MethodGet, "/api/v1/projects/p1", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("get deleted project = %d, want 404", rec.Code)
+	}
+	if rec := do(h2, globalAdmin, http.MethodDelete, "/api/v1/projects/p2", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("global admin delete = %d, want 204", rec.Code)
 	}
 }
 

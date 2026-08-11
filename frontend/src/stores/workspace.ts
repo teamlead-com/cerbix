@@ -114,5 +114,26 @@ export const useWorkspace = defineStore("workspace", {
       this.selectProject(res.data.id!);
       return "";
     },
+    // deleteProject permanently deletes a project and switches away from it. Returns ""
+    // on success or a human-readable error. Requires org-admin on the owning org
+    // (enforced by the API); refused for file-provider-managed projects.
+    async deleteProject(id: string): Promise<string> {
+      const res = await api.DELETE("/api/v1/projects/{projectID}", {
+        params: { path: { projectID: id } },
+      });
+      if (res.error) {
+        const code = (res.error as { error?: string })?.error;
+        if (code === "managed_by_file") {
+          return "This project is managed by a file provider — remove its config files to delete it.";
+        }
+        return code || "Could not delete the project.";
+      }
+      this.projects = this.projects.filter((p) => p.id !== id);
+      if (this.projectId === id) {
+        localStorage.removeItem(LAST_PROJECT);
+        this.selectProject(this.projects[0]?.id ?? "");
+      }
+      return "";
+    },
   },
 });

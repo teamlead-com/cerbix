@@ -45,6 +45,48 @@ func (s *Store) GetProject(ctx context.Context, id string) (domain.Project, erro
 	return p, nil
 }
 
+// DeleteProject permanently removes a project and everything it owns. The database's
+// ON DELETE CASCADE fanout (monitors + heartbeats/rollups, incidents, SLA, escalation,
+// on-call, notification channels, project-scoped tokens/webhooks/status-pages, file
+// bundles) does the child cleanup in one transaction (spec func-project-deletion §5).
+//
+// Scoped by org for tenant safety: a wrong (id, org_id) pair matches 0 rows and returns
+// ErrNotFound — never a cross-tenant delete. Returns ErrManagedByFile when the project is
+// owned by a file provider (a reconcile would recreate it — remove the provider's files
+// instead, §7.3). The ownership check and the delete share one transaction so a concurrent
+// file apply cannot claim ownership between the check and the delete.
+func (s *Store) DeleteProject(ctx context.Context, orgID, projectID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: delete project: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var one int
+	err = tx.QueryRow(ctx,
+		`SELECT 1 WHERE EXISTS (SELECT 1 FROM file_provider_bundles WHERE project_id = $1)
+		              OR EXISTS (SELECT 1 FROM managed_monitors WHERE project_id = $1)`,
+		projectID).Scan(&one)
+	if err == nil {
+		return ErrManagedByFile
+	}
+	if !noRows(err) {
+		return fmt.Errorf("store: delete project: ownership check: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM projects WHERE id = $1 AND org_id = $2`, projectID, orgID)
+	if err != nil {
+		return fmt.Errorf("store: delete project: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: delete project: commit: %w", err)
+	}
+	return nil
+}
+
 // ListProjectsByOrg returns all projects in an organization.
 func (s *Store) ListProjectsByOrg(ctx context.Context, orgID string) ([]domain.Project, error) {
 	rows, err := s.pool.Query(ctx,

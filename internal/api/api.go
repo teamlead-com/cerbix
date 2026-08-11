@@ -28,6 +28,7 @@ type Store interface {
 	ListProjectsByOrg(ctx context.Context, orgID string) ([]domain.Project, error)
 	CreateProject(ctx context.Context, orgID, slug, name string) (domain.Project, error)
 	GetProject(ctx context.Context, id string) (domain.Project, error)
+	DeleteProject(ctx context.Context, orgID, projectID string) error
 	ListProjectsForUser(ctx context.Context, userID string) ([]domain.Project, error)
 	CreateMembership(ctx context.Context, m domain.Membership) (domain.Membership, error)
 	ListOrgMembers(ctx context.Context, orgID string) ([]domain.Member, error)
@@ -371,6 +372,7 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/organizations/{orgID}/members/{membershipID}", h.removeMember)
 	mux.HandleFunc("GET /api/v1/organizations/{orgID}/audit", h.listAudit)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}", h.getProject)
+	mux.HandleFunc("DELETE /api/v1/projects/{projectID}", h.deleteProject)
 	mux.HandleFunc("GET /api/v1/regions", h.listRegions)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/monitors", h.listMonitors)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/monitors", h.createMonitor)

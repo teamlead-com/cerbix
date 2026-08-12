@@ -400,12 +400,21 @@ func runServe(args []string) int {
 			logging.Critical(logger, "db_migrate_failed", "error", err.Error())
 			return 1
 		}
-		opened, err := store.Open(ctx, cfg.Database.DSN)
+		// Only api/all actually spawn file-provider leaders (see startFileProviders), so only
+		// those roles need the pool sized for the leader pins; other roles stay at the floor.
+		fpCount := 0
+		if *role == "all" || *role == "api" {
+			fpCount = len(cfg.Providers.File)
+		}
+		opened, err := store.Open(ctx, cfg.Database.DSN, store.WithFileProviderPool(fpCount, maxConcurrentReconciles))
 		if err != nil {
 			logging.Critical(logger, "db_connect_failed", "error", err.Error())
 			return 1
 		}
 		st = opened
+		logger.Info("db_pool_sized",
+			"max_conns", store.RequiredMaxConns(fpCount, maxConcurrentReconciles),
+			"file_providers", fpCount)
 		defer st.Close()
 		// Result-ingest timestamp policy (spec func-result-protocol): skew bound + the
 		// retention floor below which a result is ignored (= the raw heartbeat window).

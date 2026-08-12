@@ -2785,3 +2785,20 @@ direction: rows that fall back INSIDE a widened scope resume normal valid-absenc
 absent from the snapshot is orphaned as usual). Verified: `config.TestProviderScopeIncludes` (matrix)
 and `runtime.TestReconcileSkipsOutOfScopeOwnedProjects` (in-scope absence orphaned; out-of-scope owned
 untouched).
+
+## D-0154 — Repo-wide golangci-lint pre-existing debt is waived for the fix/mac-hardening branch; tracked as a dedicated cleanup MR (iter-0114)
+`AGENTS.md` (Makefile:24-25) makes `golangci-lint run ./...` a DoD gate. On `fix/mac-hardening`
+that command exits 1 with **42 findings** (errcheck 32, forbidigo 2, staticcheck 8), **all
+pre-existing in files this hardening pass never modified** (e.g. `internal/cli/cli.go:91-93,612`
+help-text `Fprintln`/`disp.Close`; `internal/store/projects.go` + test `conn.Close`/`tx.Rollback`;
+forbidigo ×2 in `internal/store/{oidc.go,reencrypt.go}` where the `client_secret` column is
+legitimately queried; staticcheck ×8 across unrelated packages). This pass's own changed scope is
+lint-clean: `golangci-lint run ./internal/fileprovider/... ./internal/config/...` = 0 issues, and no
+finding lands on a line this pass changed (the three it briefly introduced — 2 gofmt + 1 QF1008 —
+were fixed in `45ba456`). **Decision:** the owner **waives** the pre-existing repo-wide lint debt for
+this branch rather than expanding the branch to touch unrelated files (which would violate scope
+discipline and mix concerns). The hardening pass therefore meets DoD on its changed scope. Clearing
+the 42 findings is tracked as a **separate, dedicated cleanup MR** — consistent with the existing
+`.golangci.yml` note that style-heavy linters are "intentionally deferred to a dedicated cleanup MR".
+No monitoring/reliability contract changes; nothing is silently marked green — the repo-wide RED is
+recorded (iter-0114 §4) and explicitly waived here.

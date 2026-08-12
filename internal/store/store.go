@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -48,17 +49,22 @@ func isUniqueViolation(err error) bool {
 // (64) providers, that many pinned conns would exhaust a floor-sized pool and block both
 // further leader acquisition AND the reconcile pool queries (FileProviderProjects/Counts)
 // — a subsystem deadlock. So Open sizes MaxConns to fit every leader pin plus reconcile
-// and app headroom; see requiredMaxConns.
+// and app headroom; see RequiredMaxConns.
 const (
 	poolMinConns          = 2
 	poolMaxConnsFloor     = 12
 	poolMaxConnLifetime   = time.Hour
 	poolMaxConnIdleTime   = 30 * time.Minute
 	poolHealthCheckPeriod = time.Minute
-	// poolAppBaseline is connection headroom kept beyond the file-provider leader pins and
-	// concurrent reconcile queries, for the rest of the process: the scheduler leadership
-	// lock, the LISTEN notifiers, and ordinary query traffic.
-	poolAppBaseline = 4
+	// poolPinnedAppBaseline covers the connections that OTHER subsystems pin for the whole
+	// process lifetime, independent of file providers: the scheduler's leadership advisory
+	// lock and the Confirm/Config/Pull LISTEN notifiers. Like file-provider leaders these
+	// are checked out for life, so they must be reserved on top of the leader pins.
+	poolPinnedAppBaseline = 4
+	// poolQueryHeadroom is a small extra reserve for ordinary, short-lived pooled query
+	// traffic (API reads, ingest, metrics) so it is not starved by the pinned connections
+	// and the concurrent reconcile queries. Kept small on purpose.
+	poolQueryHeadroom = 2
 )
 
 // openConfig holds Open's tunables set via Option.
@@ -84,8 +90,14 @@ func WithFileProviderPool(fileProviders, reconcileConcurrency int) Option {
 
 // RequiredMaxConns is the minimum pool MaxConns that lets every file-provider leader pin
 // its connection for life while reconcile queries and the rest of the app still acquire
-// connections. It is fileProviders (one pinned leader conn each) + reconcileConcurrency
-// (concurrent reconcile queries) + poolAppBaseline, never below poolMaxConnsFloor.
+// connections. It sums the connections that are pinned or in-flight concurrently:
+//
+//	fileProviders        — one pinned leader conn each (fencing, LeaderSession)
+//	reconcileConcurrency  — concurrent reconcile pool queries (FileProviderProjects/Counts)
+//	poolPinnedAppBaseline — scheduler lock + Confirm/Config/Pull LISTEN pins (pinned for life)
+//	poolQueryHeadroom     — small reserve for ordinary short-lived query traffic
+//
+// The result is never below poolMaxConnsFloor.
 func RequiredMaxConns(fileProviders, reconcileConcurrency int) int32 {
 	if fileProviders < 0 {
 		fileProviders = 0
@@ -93,19 +105,44 @@ func RequiredMaxConns(fileProviders, reconcileConcurrency int) int32 {
 	if reconcileConcurrency < 0 {
 		reconcileConcurrency = 0
 	}
-	need := fileProviders + reconcileConcurrency + poolAppBaseline
+	need := fileProviders + reconcileConcurrency + poolPinnedAppBaseline + poolQueryHeadroom
 	if need < poolMaxConnsFloor {
 		need = poolMaxConnsFloor
 	}
 	return int32(need)
 }
 
-// dsnSetsMaxConns reports whether the operator explicitly capped the pool via
-// pool_max_conns in the DSN (URL query or keyword form). Used to tell an operator cap
-// apart from pgx's implicit MaxConns default so an explicit-but-too-small cap fails fast
-// instead of silently deadlocking the file-provider subsystem.
+// dsnSetsMaxConns reports whether the operator EXPLICITLY capped the pool via a
+// pool_max_conns key in the DSN. Detection is structural, not a substring scan: the same
+// literal appearing inside a username, password, or dbname must NOT be mistaken for a cap
+// (that would make Open falsely reject a valid DSN). URL DSNs are checked via the parsed
+// query string; keyword DSNs via exact key= tokens. Used so an explicit-but-too-small cap
+// fails fast instead of silently deadlocking the file-provider subsystem.
 func dsnSetsMaxConns(dsn string) bool {
-	return strings.Contains(dsn, "pool_max_conns")
+	// URL form (postgres:// or postgresql://): only the query string can carry pool options,
+	// so parsing isolates it from userinfo/host/path and avoids false positives.
+	if strings.Contains(dsn, "://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return false
+		}
+		return u.Query().Has("pool_max_conns")
+	}
+	// Keyword/DSN form: space-separated key=value pairs. Only an exact key token counts, so
+	// "pool_max_conns" appearing inside a value (e.g. dbname=pool_max_conns) is ignored.
+	for _, field := range strings.Fields(dsn) {
+		if k, _, ok := strings.Cut(field, "="); ok && k == "pool_max_conns" {
+			return true
+		}
+	}
+	return false
+}
+
+// PoolMaxConns returns the pool's effective MaxConns after Open applied sizing (leader
+// pins + reconcile/app headroom, or a larger operator-set cap). Exposed so startup logging
+// can report the ACTUAL configured cap rather than only the computed minimum.
+func (s *Store) PoolMaxConns() int32 {
+	return s.pool.Config().MaxConns
 }
 
 // Store wraps a pgx connection pool.

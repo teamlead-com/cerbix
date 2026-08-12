@@ -412,8 +412,11 @@ func runServe(args []string) int {
 			return 1
 		}
 		st = opened
+		// Log the ACTUAL configured cap (an operator may set a larger valid pool_max_conns)
+		// alongside the computed minimum, so the line never understates the real pool size.
 		logger.Info("db_pool_sized",
-			"max_conns", store.RequiredMaxConns(fpCount, maxConcurrentReconciles),
+			"actual", st.PoolMaxConns(),
+			"required_min", store.RequiredMaxConns(fpCount, maxConcurrentReconciles),
 			"file_providers", fpCount)
 		defer st.Close()
 		// Result-ingest timestamp policy (spec func-result-protocol): skew bound + the

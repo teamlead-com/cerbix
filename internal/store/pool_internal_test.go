@@ -68,6 +68,9 @@ func TestDSNSetsMaxConns(t *testing.T) {
 		{"url query with other opts", "postgresql://u:p@h:5432/db?sslmode=require&pool_max_conns=20"},
 		{"keyword form", "host=h user=u dbname=db pool_max_conns=8"},
 		{"keyword form reordered", "pool_max_conns=8 host=h user=u dbname=db"},
+		// libpq grammar a hand-rolled scan gets wrong — must still detect the cap:
+		{"keyword spaces around equals", "host=h user=u dbname=db pool_max_conns = 8"},
+		{"keyword scheme in quoted value", `host=h user=u password='p://q' dbname=db pool_max_conns=5`},
 	}
 	for _, tc := range positives {
 		t.Run("positive/"+tc.name, func(t *testing.T) {
@@ -87,6 +90,8 @@ func TestDSNSetsMaxConns(t *testing.T) {
 		{"substring in dbname url", "postgres://u:p@h:5432/pool_max_conns"},
 		{"substring in dbname keyword", "host=h user=u dbname=pool_max_conns"},
 		{"substring in password keyword", "host=h user=u password=pool_max_conns dbname=db"},
+		// literal inside a single-quoted value with spaces is a value, not a cap key:
+		{"literal in quoted password value", `host=h user=u password='a b pool_max_conns=8' dbname=db`},
 	}
 	for _, tc := range negatives {
 		t.Run("negative/"+tc.name, func(t *testing.T) {

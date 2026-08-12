@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -112,30 +111,24 @@ func RequiredMaxConns(fileProviders, reconcileConcurrency int) int32 {
 	return int32(need)
 }
 
-// dsnSetsMaxConns reports whether the operator EXPLICITLY capped the pool via a
-// pool_max_conns key in the DSN. Detection is structural, not a substring scan: the same
-// literal appearing inside a username, password, or dbname must NOT be mistaken for a cap
-// (that would make Open falsely reject a valid DSN). URL DSNs are checked via the parsed
-// query string; keyword DSNs via exact key= tokens. Used so an explicit-but-too-small cap
-// fails fast instead of silently deadlocking the file-provider subsystem.
+// dsnSetsMaxConns reports whether the operator EXPLICITLY set a pool_max_conns cap in the
+// DSN. Rather than reimplement the libpq keyword/URL grammar (spaces around '=', single-
+// quoted values with embedded spaces, backslash escapes, service-file merges) — where a
+// hand-rolled scan mis-handles `pool_max_conns = 8`, a quoted password containing the
+// literal, or a `://` inside a quoted value — it defers to pgx's own parser, the exact
+// first stage pgxpool.ParseConfig runs, and checks RuntimeParams for the pool_max_conns
+// key. That is precisely where pgxpool reads the cap (before consuming it), so detection is
+// identical to what the pool actually honors, and the literal appearing inside a
+// username/password/dbname is never mistaken for a cap. Used so an explicit-but-too-small
+// cap fails fast instead of silently deadlocking the file-provider subsystem. A DSN pgx
+// cannot parse yields false here; Open's own pgxpool.ParseConfig surfaces the real error.
 func dsnSetsMaxConns(dsn string) bool {
-	// URL form (postgres:// or postgresql://): only the query string can carry pool options,
-	// so parsing isolates it from userinfo/host/path and avoids false positives.
-	if strings.Contains(dsn, "://") {
-		u, err := url.Parse(dsn)
-		if err != nil {
-			return false
-		}
-		return u.Query().Has("pool_max_conns")
+	cc, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return false
 	}
-	// Keyword/DSN form: space-separated key=value pairs. Only an exact key token counts, so
-	// "pool_max_conns" appearing inside a value (e.g. dbname=pool_max_conns) is ignored.
-	for _, field := range strings.Fields(dsn) {
-		if k, _, ok := strings.Cut(field, "="); ok && k == "pool_max_conns" {
-			return true
-		}
-	}
-	return false
+	_, ok := cc.Config.RuntimeParams["pool_max_conns"]
+	return ok
 }
 
 // PoolMaxConns returns the pool's effective MaxConns after Open applied sizing (leader

@@ -324,8 +324,13 @@ func (p *Provider) Run(ctx context.Context) {
 // on a debounced directory change, on the mandatory periodic resync (a lost/coalesced event
 // must not stall progress), and steps down if the advisory lock is lost.
 func (p *Provider) leaderLoop(ctx context.Context, session LeaderSession) {
-	p.reconcile(ctx, session)
+	// Sample the fingerprint BEFORE reconciling, not after: a file written WHILE a reconcile
+	// runs must still be seen. Sampling after would fold the mid-reconcile change into lastFP,
+	// so the next poll sees no diff and the change is absorbed until the periodic resync (§17
+	// requires a change during reconcile to trigger another rescan). Sampling before means at
+	// worst one redundant no-op reconcile, never a missed change.
 	lastFP := p.fingerprint()
+	p.reconcile(ctx, session)
 
 	resyncT := time.NewTicker(p.resync)
 	defer resyncT.Stop()
@@ -348,8 +353,9 @@ func (p *Provider) leaderLoop(ctx context.Context, session LeaderSession) {
 				return
 			}
 		case <-resyncT.C:
+			fp := p.fingerprint() // sample before (see leader-loop entry): don't absorb a mid-reconcile change
 			p.reconcile(ctx, session) // mandatory resync (§11): the lost-notification recovery path
-			lastFP = p.fingerprint()
+			lastFP = fp
 			dirty = false
 		case <-pollT.C:
 			// Poll-based watch: fingerprint the directory (name+size+mtime, no content read);
@@ -362,8 +368,9 @@ func (p *Provider) leaderLoop(ctx context.Context, session LeaderSession) {
 			}
 			if dirty && !time.Now().Before(debounceUntil) {
 				dirty = false
+				fp := p.fingerprint() // sample before (see leader-loop entry): don't absorb a mid-reconcile change
 				p.reconcile(ctx, session)
-				lastFP = p.fingerprint()
+				lastFP = fp
 			}
 		}
 	}

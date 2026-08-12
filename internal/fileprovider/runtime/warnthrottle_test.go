@@ -114,3 +114,39 @@ func TestWarnThrottledEmissionBudget(t *testing.T) {
 		t.Fatalf("logging did not resume in the new window (warns %d -> %d)", warnsBefore, h.warns)
 	}
 }
+
+// TestWarnThrottledEvictsAtCap drives the LRU past its cap by ADMITTING more than
+// warnThrottleMax distinct keys — which, given the per-window emission budget, takes many
+// windows (an injected clock advances between batches). It exercises the real Back()/eviction
+// branch and asserts the map and list stay in lockstep at the cap.
+func TestWarnThrottledEvictsAtCap(t *testing.T) {
+	h := &countingHandler{}
+	cur := time.Unix(1_700_000_000, 0)
+	p := &Provider{logger: slog.New(h), nowFn: func() time.Time { return cur }}
+
+	id := 0
+	admitted := 0
+	for admitted <= warnThrottleMax+warnEmitBudget { // enough windows to overflow the cap
+		for j := 0; j < warnEmitBudget; j++ { // exactly the budget of fresh keys per window
+			p.warnThrottled(fmt.Sprintf("k-%d", id), "file_provider_file_rejected")
+			id++
+			admitted++
+		}
+		cur = cur.Add(errorLogEvery + time.Second) // roll to the next window
+	}
+
+	if got := p.throttleLRU.Len(); got != warnThrottleMax {
+		t.Fatalf("LRU should be full at the cap %d after admitting %d keys, got %d", warnThrottleMax, admitted, got)
+	}
+	if len(p.throttle) != p.throttleLRU.Len() {
+		t.Fatalf("map (%d) and LRU (%d) diverged after eviction", len(p.throttle), p.throttleLRU.Len())
+	}
+	// The most-recently-admitted key is resident; the oldest was evicted.
+	newest := fmt.Sprintf("file_provider_file_rejected|k-%d", id-1)
+	if _, ok := p.throttle[newest]; !ok {
+		t.Fatal("most-recently-admitted key must be resident")
+	}
+	if _, ok := p.throttle["file_provider_file_rejected|k-0"]; ok {
+		t.Fatal("oldest key should have been evicted at the cap")
+	}
+}

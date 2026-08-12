@@ -181,14 +181,80 @@ func TestGroupBundlesDuplicateFreezesNotSuspend(t *testing.T) {
 	if _, ok := res.Valid["acme/payments"]; ok {
 		t.Fatal("duplicate project must be out of Valid")
 	}
-	if !res.Frozen["acme/payments"] {
-		t.Fatal("duplicate project must be marked Frozen (kept out of orphaning)")
+	if r, ok := res.Frozen["acme/payments"]; !ok || r != ReasonDuplicateProject {
+		t.Fatalf("duplicate project must be Frozen with reason duplicate_project (kept out of orphaning), got %q ok=%v", r, ok)
 	}
 	if res.SuspendOrphan {
 		t.Fatal("a bindable duplicate must NOT suspend orphaning provider-wide")
 	}
 	if _, ok := res.Valid["acme/billing"]; !ok {
 		t.Fatal("the independently valid project must still apply")
+	}
+}
+
+// TestGroupBundlesBoundMonitorErrorFreezesNotSuspend covers the #4 fix: a bundle whose tenant
+// resolves but whose MONITOR is invalid is frozen per-project with its real reason — it must
+// NOT set the provider-wide SuspendOrphan, and an independent valid project still applies.
+func TestGroupBundlesBoundMonitorErrorFreezesNotSuspend(t *testing.T) {
+	scope := config.ProviderScopeConfig{Type: config.ProviderScopeInstance}
+	bad := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: bogus\n    target: t\n"
+	res := GroupBundles([]Candidate{
+		{RelPath: "bad.yaml", Data: []byte(bad)},
+		{RelPath: "ok.yaml", Data: []byte(bundleYAML("acme", "billing", "api"))},
+	}, scope)
+	if res.SuspendOrphan {
+		t.Fatal("a tenant-bound monitor error must NOT suspend orphaning provider-wide")
+	}
+	if r, ok := res.Frozen["acme/payments"]; !ok || r != ReasonUnsupportedType {
+		t.Fatalf("bad bundle's project must be frozen with its real reason (unsupported_type), got %q ok=%v", r, ok)
+	}
+	if _, ok := res.Valid["acme/billing"]; !ok {
+		t.Fatal("the independent valid bundle must still apply")
+	}
+}
+
+// TestGroupBundlesDuplicateByClaim covers PART C: a BOUND-invalid file (valid header, invalid
+// monitor) still DECLARES its project, so a competing valid file claiming the same project is a
+// duplicate — both are rejected and the project is frozen (never silently applied), without
+// suspending orphaning provider-wide.
+func TestGroupBundlesDuplicateByClaim(t *testing.T) {
+	scope := config.ProviderScopeConfig{Type: config.ProviderScopeInstance}
+	// Bound-invalid: valid acme/payments header, invalid monitor type.
+	bad := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: bogus\n    target: t\n"
+	res := GroupBundles([]Candidate{
+		{RelPath: "bad.yaml", Data: []byte(bad)},
+		{RelPath: "good.yaml", Data: []byte(bundleYAML("acme", "payments", "api"))}, // valid, SAME claim
+	}, scope)
+	if r, ok := res.Frozen["acme/payments"]; !ok || r != ReasonDuplicateProject {
+		t.Fatalf("a bound-invalid + a valid file claiming one project is a DUPLICATE, got %q ok=%v", r, ok)
+	}
+	if _, ok := res.Valid["acme/payments"]; ok {
+		t.Fatal("a duplicate-by-claim project must NOT be in Valid (never silently applied)")
+	}
+	if res.SuspendOrphan {
+		t.Fatal("a bindable duplicate-by-claim must NOT suspend orphaning provider-wide")
+	}
+}
+
+// TestGroupBundlesDuplicateEmitsEveryCompetingPath covers P0-A diagnostics: when two valid files
+// declare one project, BOTH paths must surface as duplicate errors (not just the first), so every
+// rejected file's bundle row is marked. Runs both candidate orderings.
+func TestGroupBundlesDuplicateEmitsEveryCompetingPath(t *testing.T) {
+	scope := config.ProviderScopeConfig{Type: config.ProviderScopeInstance}
+	for _, order := range [][2]string{{"z.yaml", "a.yaml"}, {"a.yaml", "z.yaml"}} {
+		res := GroupBundles([]Candidate{
+			{RelPath: order[0], Data: []byte(bundleYAML("acme", "payments", "api"))},
+			{RelPath: order[1], Data: []byte(bundleYAML("acme", "payments", "web"))},
+		}, scope)
+		dupPaths := map[string]bool{}
+		for _, e := range res.Errors {
+			if e.Err.Reason == ReasonDuplicateProject {
+				dupPaths[e.RelPath] = true
+			}
+		}
+		if !dupPaths["z.yaml"] || !dupPaths["a.yaml"] {
+			t.Fatalf("order %v: both competing paths must get a duplicate error, got %v", order, dupPaths)
+		}
 	}
 }
 

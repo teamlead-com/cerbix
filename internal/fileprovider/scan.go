@@ -168,11 +168,13 @@ type GroupResult struct {
 	Valid map[string]*DesiredProject
 	// Paths maps "org/project" → the tenant-safe relative source path (for provenance).
 	Paths map[string]string
-	// Frozen holds tenant keys that resolved to a tenant but were REJECTED (a duplicate-target
-	// project). Such a project keeps its last-known-good and must NOT be orphaned this scan —
-	// it is neither applied (out of Valid) nor treated as absent (spec §6/§9.1). Distinct from
-	// SuspendOrphan, which is provider-wide.
-	Frozen map[string]bool
+	// Frozen maps tenant keys that resolved to a tenant but were REJECTED (a duplicate-target
+	// project, OR a bundle that bound to a tenant but failed a monitor-level/dependency check)
+	// to the reject reason. Such a project keeps its last-known-good and must NOT be orphaned
+	// this scan — it is neither applied (out of Valid) nor treated as absent (spec §6/§9.1).
+	// Distinct from SuspendOrphan, which is provider-wide. The value is the reason so the
+	// per-project diagnostic reports the real cause, not always "duplicate".
+	Frozen map[string]Reason
 	// Errors are bounded per-file rejections (decode/scope/duplicate).
 	Errors []ScanError
 	// SuspendOrphan is set when a file could not be bound to a tenant (unbound_error): a
@@ -188,10 +190,35 @@ type GroupResult struct {
 // (decode/scope failure) is an unbound_error that suspends orphaning provider-wide (§9.1);
 // independently valid bundles still group for a non-destructive apply.
 func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResult {
-	res := GroupResult{Valid: map[string]*DesiredProject{}, Paths: map[string]string{}, Frozen: map[string]bool{}}
-	seen := map[string]int{}                // tenant key → candidate count
-	firstPath := map[string]string{}        // tenant key → first path (for dup diagnostics)
-	decoded := map[string]*DesiredProject{} // tenant key → decoded bundle
+	res := GroupResult{Valid: map[string]*DesiredProject{}, Paths: map[string]string{}, Frozen: map[string]Reason{}}
+
+	// A claim is every DECLARATION of a tenant key this scan — from a valid decode OR a
+	// bound-invalid decode. A bound-invalid file still CLAIMS its project, so duplicate
+	// detection (§6) must count it too: otherwise a bound-invalid file + a valid file both
+	// targeting one project would let the valid one silently apply, missing the collision.
+	type claim struct {
+		valid         int             // # of valid decodes claiming this key
+		invalid       int             // # of bound-invalid decodes claiming this key
+		decoded       *DesiredProject // the first valid decode (applied only if it wins uniquely)
+		invalidReason Reason          // a bound-invalid reason (used only for a lone bound-invalid)
+		validPaths    []string        // paths of the VALID decodes (bound-invalid ones self-report)
+	}
+	claims := map[string]*claim{}
+	order := make([]string, 0, len(cands)) // keys in first-seen order → deterministic output
+
+	note := func(key, path string) *claim {
+		cl, ok := claims[key]
+		if !ok {
+			cl = &claim{}
+			claims[key] = cl
+			order = append(order, key)
+		}
+		// Provenance is the FIRST path seen for the key (valid or bound-invalid).
+		if _, seenPath := res.Paths[key]; !seenPath {
+			res.Paths[key] = path
+		}
+		return cl
+	}
 
 	for _, c := range cands {
 		dp, err := Decode(c.Data, scope)
@@ -201,31 +228,59 @@ func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResu
 				be = &BundleError{Reason: ReasonInvalidFormat, Msg: "invalid bundle"}
 			}
 			res.Errors = append(res.Errors, ScanError{RelPath: c.RelPath, Err: be})
-			// A file we cannot bind to a tenant freezes orphaning (ambiguous absence).
-			res.SuspendOrphan = true
+			if be.Org != "" && be.Project != "" {
+				// The tenant resolved but the bundle is invalid (a monitor-level/dependency
+				// error): it still DECLARES this project. Count it as a claim so a competing valid
+				// file is detected as a duplicate (§6), and if it stands alone freeze just this
+				// project — keep its last-known-good, don't orphan it — instead of suspending
+				// orphaning provider-wide (§9.1).
+				cl := note(be.Org+"/"+be.Project, c.RelPath)
+				cl.invalid++
+				if cl.invalidReason == "" {
+					cl.invalidReason = be.Reason
+				}
+			} else {
+				// Unbound (format/scope/tenant error): cannot attribute to a project, so absence
+				// is ambiguous → suspend orphaning provider-wide.
+				res.SuspendOrphan = true
+			}
 			continue
 		}
-		key := dp.Organization + "/" + dp.Project
-		seen[key]++
-		if seen[key] == 1 {
-			decoded[key] = dp
-			firstPath[key] = c.RelPath
-			res.Paths[key] = c.RelPath
-		} else {
-			res.Errors = append(res.Errors, ScanError{RelPath: c.RelPath, Err: &BundleError{Reason: ReasonDuplicateProject, Msg: "project " + key + " is declared by more than one file"}})
+		cl := note(dp.Organization+"/"+dp.Project, c.RelPath)
+		cl.valid++
+		cl.validPaths = append(cl.validPaths, c.RelPath)
+		if cl.decoded == nil {
+			cl.decoded = dp
 		}
 	}
-	for key, n := range seen {
-		if n == 1 {
-			res.Valid[key] = decoded[key]
-		} else {
-			// Duplicate target: reject BOTH competitors and FREEZE this project — drop it from
-			// Valid AND mark it Frozen so the reconcile loop keeps its last-known-good instead
-			// of reading it as absent and orphaning it (spec §6/§9.1). This is a per-project
-			// freeze, not a provider-wide orphan suspension.
-			delete(res.Valid, key)
-			res.Frozen[key] = true
-			res.Errors = append(res.Errors, ScanError{RelPath: firstPath[key], Err: &BundleError{Reason: ReasonDuplicateProject, Msg: "project " + key + " is declared by more than one file"}})
+
+	for _, key := range order {
+		cl := claims[key]
+		switch {
+		case cl.valid+cl.invalid > 1:
+			// Duplicate by claim: MORE THAN ONE declaration for this project (any mix of valid
+			// and bound-invalid) rejects them all and FREEZES the project — never partially
+			// applied, and kept out of orphaning so the reconcile keeps its last-known-good
+			// (spec §6/§9.1). A per-project freeze, not a provider-wide orphan suspension.
+			res.Frozen[key] = ReasonDuplicateProject
+			// Emit a duplicate error for EVERY valid competing path (not just the first), so each
+			// rejected file's bundle row is marked — a bound-invalid competitor already reported
+			// its own error above. Safety (path freeze) does not depend on this cardinality; it is
+			// for diagnostic completeness (§15). Fall back to the provenance path if a duplicate
+			// somehow has no valid path (all competitors bound-invalid).
+			dupPaths := cl.validPaths
+			if len(dupPaths) == 0 {
+				dupPaths = []string{res.Paths[key]}
+			}
+			for _, pth := range dupPaths {
+				res.Errors = append(res.Errors, ScanError{RelPath: pth, Err: &BundleError{Reason: ReasonDuplicateProject, Msg: "project " + key + " is declared by more than one file"}})
+			}
+		case cl.valid == 1:
+			// Exactly one valid declaration, no other claim → applies.
+			res.Valid[key] = cl.decoded
+		default:
+			// Exactly one bound-invalid declaration (0 valid) → freeze with its real reason.
+			res.Frozen[key] = cl.invalidReason
 		}
 	}
 	return res

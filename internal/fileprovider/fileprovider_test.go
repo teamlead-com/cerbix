@@ -84,10 +84,89 @@ func TestDecodeStrictRejections(t *testing.T) {
 		{"unsupported type (credentialed)", "format: 1\norganization: acme\nproject: p\nmonitors:\n  db:\n    name: DB\n    type: postgres\n    target: pg:5432\n", ReasonUnsupportedType},
 		{"unsupported settings on http", base + "    settings:\n      foo: bar\n", ReasonUnsupportedField},
 		{"inline secret", base + "    settings:\n      password: hunter2\n", ReasonInlineSecret},
+		{"target userinfo user:pass", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://u:pw@h/\n", ReasonInlineSecret},
+		{"target userinfo user only", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://u@h/\n", ReasonInlineSecret},
+		{"target dsn userinfo", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: tcp\n    target: postgres://u:pw@h/db\n", ReasonInlineSecret},
+		// P1 bypass: a URL-shaped target that FAILS to parse (invalid %-escape after the
+		// userinfo) must still be rejected — url.Parse errors, so the userinfo guard alone
+		// would let the raw credential through.
+		{"target malformed url with creds", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://u:pw@h/%zz\n", ReasonInlineSecret},
+		// password-only userinfo (empty username) still parses and must be rejected.
+		{"target userinfo password only", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://:pw@h/\n", ReasonInlineSecret},
+		// A known secret-bearing query key in the target is an inline secret too (§2.9/§14).
+		{"target query token", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://h/?token=cleartext\n", ReasonInlineSecret},
+		{"target query mixed-case api_key", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://h/?API_KEY=x\n", ReasonInlineSecret},
+		{"target query percent-encoded key", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://h/?tok%65n=x\n", ReasonInlineSecret},
+		{"target query duplicate secret key", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://h/?token=a&token=b\n", ReasonInlineSecret},
+		{"target query malformed encoding", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://h/?token=%zz\n", ReasonInlineSecret},
 		{"empty name", "format: 1\norganization: acme\nproject: p\nmonitors:\n  x:\n    type: http\n    target: https://x\n", ReasonDomainInvalid},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { wantReason(t, c.y, instanceScope(), c.r) })
+	}
+}
+
+// TestDecodeTargetNoUserinfoAccepted guards against false positives: the target-userinfo
+// secret check must reject only genuine URL credentials, never legitimate non-URL targets
+// (bare host:port, hostnames) or clean URLs with query strings.
+func TestDecodeTargetNoUserinfoAccepted(t *testing.T) {
+	cases := []struct {
+		name, typ, target string
+	}{
+		{"http query no userinfo", "http", "https://h/path?x=1"},
+		{"tcp host:port", "tcp", "localhost:5432"},
+		{"icmp hostname", "icmp", "db.internal"},
+		{"ssh host:port", "ssh", "host:22"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			y := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  m:\n    name: A\n    type: " + c.typ + "\n    target: " + c.target + "\n"
+			if _, err := Decode([]byte(y), instanceScope()); err != nil {
+				t.Fatalf("target %q (%s) should be accepted, got %v", c.target, c.typ, err)
+			}
+		})
+	}
+}
+
+// TestDecodeTargetRejectionDoesNotLeakSecret asserts the credential in a rejected target
+// is never echoed back through the (loggable) error, for both the well-formed userinfo
+// path and the malformed-URL path.
+func TestDecodeTargetRejectionDoesNotLeakSecret(t *testing.T) {
+	const (
+		user = "secretuser"
+		pass = "secretpass"
+	)
+	cases := []struct {
+		name, target string
+	}{
+		{"well-formed userinfo", "https://" + user + ":" + pass + "@h/"},
+		{"malformed url after userinfo", "https://" + user + ":" + pass + "@h/%zz"},
+		{"secret query value", "https://h/?token=" + pass},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			y := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: " + c.target + "\n"
+			var be *BundleError
+			_, err := Decode([]byte(y), instanceScope())
+			if !errors.As(err, &be) || be.Reason != ReasonInlineSecret {
+				t.Fatalf("want *BundleError(%s), got %v", ReasonInlineSecret, err)
+			}
+			if msg := be.Error(); strings.Contains(msg, user) || strings.Contains(msg, pass) {
+				t.Fatalf("rejection error leaks the credential: %q", msg)
+			}
+		})
+	}
+}
+
+// TestBuildMonitorControlCharTargetRejected covers the promised control-character case for
+// the malformed-URL guard directly (a raw control char in a target cannot survive a YAML
+// scalar, so it is exercised at the buildMonitor boundary).
+func TestBuildMonitorControlCharTargetRejected(t *testing.T) {
+	rm := rawMonitor{Name: "A", Type: "http", Target: "https://h/\x01path"}
+	_, err := buildMonitor("api", rm)
+	var be *BundleError
+	if !errors.As(err, &be) || be.Reason != ReasonInlineSecret {
+		t.Fatalf("control-char URL target: want *BundleError(%s), got %v", ReasonInlineSecret, err)
 	}
 }
 

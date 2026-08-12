@@ -5,7 +5,9 @@
 package runtime
 
 import (
+	"container/list"
 	"context"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"os"
@@ -51,16 +53,48 @@ type MetricsSink interface {
 	SetFileProviderReconcileStats(name string, durationSeconds float64, lastSuccessUnix int64, bundleErrors int)
 }
 
-// fileProviderLeaderBaseKey namespaces per-provider advisory locks away from the scheduler
-// (…0001) and migrate (…0002) keys. The low 32 bits are an FNV hash of the provider name, so
-// each provider elects independently and a name change (a restart-only event) re-keys.
-const fileProviderLeaderBaseKey int64 = 0x6365726269781000
+// fileProviderLeaderNamespace tags the high byte of every file-provider leadership advisory
+// key. It is disjoint from the scheduler (0x6365726269780001) and migrate
+// (0x6365726269780002) fixed keys — those sit under the 0x6365726269780000 prefix — and
+// leaves the low 56 bits for a per-provider identity hash.
+const fileProviderLeaderNamespace int64 = 0x46 << 56 // 'F' for file provider
 
-// leaderKeyFor derives a stable, provider-specific advisory-lock key.
+// leaderKeyFor derives a stable, provider-specific advisory-lock key from the provider name
+// (a file provider's only persisted identity — provider_id is the name). The old scheme was
+// base | FNV-1a-32(name): a single 32-bit hash under a fixed prefix, so two provider names
+// whose 32-bit hash collided produced the SAME advisory key and serialized permanently — one
+// provider never led while the other was healthy (spec §12). This hashes the name with
+// FNV-1a-64 into the low 56 bits under the namespace byte, cutting the accidental-collision
+// probability from ~2^-32 to ~2^-56; and AssertDistinctLeaderKeys makes leadership
+// collision-FREE for any real deployment by refusing to start if two CONFIGURED names still
+// map to one key.
 func leaderKeyFor(name string) int64 {
-	h := fnv.New32a()
+	h := fnv.New64a()
 	_, _ = h.Write([]byte(name))
-	return fileProviderLeaderBaseKey | int64(h.Sum32())
+	return fileProviderLeaderNamespace | int64(h.Sum64()&0x00FFFFFFFFFFFFFF)
+}
+
+// AssertDistinctLeaderKeys fails if any two provider names derive the same leadership advisory
+// key. Provider names are operator-trusted and bounded, and this runs once at startup, so it
+// turns the (already tiny) hash-collision risk into a hard, deterministic guarantee: a colliding
+// pair refuses to start with an actionable message rather than silently letting one provider
+// never lead (spec §12).
+func AssertDistinctLeaderKeys(names []string) error {
+	return assertDistinctKeys(names, leaderKeyFor)
+}
+
+// assertDistinctKeys is the collision check parameterized by the key function, so the
+// fail-fast branch is unit-testable without hunting a real 56-bit hash collision.
+func assertDistinctKeys(names []string, keyFn func(string) int64) error {
+	seen := make(map[int64]string, len(names))
+	for _, name := range names {
+		k := keyFn(name)
+		if other, dup := seen[k]; dup {
+			return fmt.Errorf("file providers %q and %q derive the same leadership lock key %#x; rename one of them", other, name, k)
+		}
+		seen[k] = name
+	}
+	return nil
 }
 
 // Provider is one configured file provider's live reconciler.
@@ -81,24 +115,107 @@ type Provider struct {
 
 	leaderCheckEvery time.Duration
 	pollEvery        time.Duration
-	lastLog          map[string]time.Time // per-reason log throttle (single reconcile goroutine)
+	// throttle rate-limits repeated warnings per (msg,key). It is a bounded LRU: without a cap
+	// a churning directory (up to ReadDirBounded distinct filenames per scan) would grow the
+	// map for the process lifetime (spec §16/§17). Single reconcile goroutine (no lock).
+	throttle    map[string]*list.Element
+	throttleLRU *list.List // front = most-recently-touched; evicted from the back
+	// Provider-wide fixed-window emission budget. The per-key LRU bounds memory but not the
+	// LOG VOLUME: a working set wider than the LRU cap (round-robin over up to ReadDirBounded
+	// distinct paths) would evict each key before its next touch and re-log it every scan. The
+	// window caps how many warnings are actually emitted per errorLogEvery and folds the rest
+	// into one suppressed-count summary (spec §16).
+	winStart      time.Time
+	winEmitted    int
+	winSuppressed int
+	nowFn         func() time.Time // injectable clock (tests); nil = time.Now
 }
 
 // errorLogEvery rate-limits repeated parse/apply/watcher error logs (spec §16).
 const errorLogEvery = 30 * time.Second
 
-// warnThrottled logs a warning at most once per errorLogEvery per (msg,key) so a persistently
-// broken bundle doesn't flood the log. Runs on the single reconcile goroutine (no lock).
-func (p *Provider) warnThrottled(key, msg string, kv ...any) {
-	if p.lastLog == nil {
-		p.lastLog = map[string]time.Time{}
+// warnThrottleMax bounds the number of distinct (msg,key) throttle entries kept in memory.
+// Well below ReadDirBounded (50k) so per-file/per-tenant churn cannot grow it without bound,
+// yet large enough to retain the working set of a realistic broken snapshot.
+const warnThrottleMax = 2048
+
+// warnEmitBudget caps the warnings actually emitted per errorLogEvery window across ALL keys.
+// Beyond it, occurrences are counted and reported once as an aggregate summary, so even a
+// working set wider than warnThrottleMax cannot flood the log every scan (spec §16).
+const warnEmitBudget = 64
+
+// throttleEntry is one LRU entry: the throttle key and when it last actually logged.
+type throttleEntry struct {
+	id   string
+	last time.Time
+}
+
+func (p *Provider) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
 	}
+	return time.Now()
+}
+
+// warnThrottled emits a warning under two independent bounds, so both retained state and log
+// volume have hard upper bounds (spec §16/§17):
+//   - per-(msg,key) dedupe via a bounded LRU (warnThrottleMax): a repeated key logs at most
+//     once per errorLogEvery; every touch refreshes recency so a hot key stays resident and
+//     rate-limited, and stale keys are evicted from the back at the cap;
+//   - a provider-wide fixed-window budget (warnEmitBudget per errorLogEvery): once the budget
+//     is spent, further first-seen/eligible warnings are counted, not logged, and one
+//     "file_provider_warnings_suppressed" summary is emitted when the window rolls. Over-budget
+//     keys are NOT inserted into the LRU, so a wide round-robin working set can neither grow the
+//     map nor re-log every scan.
+//
+// Runs on the single reconcile goroutine (no lock).
+func (p *Provider) warnThrottled(key, msg string, kv ...any) {
 	id := msg + "|" + key
-	now := time.Now()
-	if last, ok := p.lastLog[id]; ok && now.Sub(last) < errorLogEvery {
+	now := p.now()
+	if p.throttle == nil {
+		p.throttle = map[string]*list.Element{}
+		p.throttleLRU = list.New()
+		p.winStart = now
+	}
+	// Roll the emission window: report what was suppressed in the window just ended, then reset.
+	if now.Sub(p.winStart) >= errorLogEvery {
+		if p.winSuppressed > 0 {
+			p.logger.Warn("file_provider_warnings_suppressed",
+				"suppressed", p.winSuppressed, "window_seconds", int(errorLogEvery.Seconds()))
+		}
+		p.winStart = now
+		p.winEmitted = 0
+		p.winSuppressed = 0
+	}
+	if el, ok := p.throttle[id]; ok {
+		p.throttleLRU.MoveToFront(el) // touched → most-recently-used, so a hot key is never evicted
+		ent := el.Value.(*throttleEntry)
+		if now.Sub(ent.last) < errorLogEvery {
+			return // deduped: this key already logged within its window
+		}
+		// Eligible to log again, but only within the provider-wide window budget.
+		if p.winEmitted >= warnEmitBudget {
+			p.winSuppressed++
+			return
+		}
+		ent.last = now
+		p.winEmitted++
+		p.logger.Warn(msg, kv...)
 		return
 	}
-	p.lastLog[id] = now
+	// First-seen key. Over budget → count as suppressed and do NOT insert (keeps both the LRU
+	// and the emitted-log count bounded under a wide working set).
+	if p.winEmitted >= warnEmitBudget {
+		p.winSuppressed++
+		return
+	}
+	p.throttle[id] = p.throttleLRU.PushFront(&throttleEntry{id: id, last: now})
+	for p.throttleLRU.Len() > warnThrottleMax {
+		back := p.throttleLRU.Back()
+		p.throttleLRU.Remove(back)
+		delete(p.throttle, back.Value.(*throttleEntry).id)
+	}
+	p.winEmitted++
 	p.logger.Warn(msg, kv...)
 }
 
@@ -207,8 +324,13 @@ func (p *Provider) Run(ctx context.Context) {
 // on a debounced directory change, on the mandatory periodic resync (a lost/coalesced event
 // must not stall progress), and steps down if the advisory lock is lost.
 func (p *Provider) leaderLoop(ctx context.Context, session LeaderSession) {
-	p.reconcile(ctx, session)
+	// Sample the fingerprint BEFORE reconciling, not after: a file written WHILE a reconcile
+	// runs must still be seen. Sampling after would fold the mid-reconcile change into lastFP,
+	// so the next poll sees no diff and the change is absorbed until the periodic resync (§17
+	// requires a change during reconcile to trigger another rescan). Sampling before means at
+	// worst one redundant no-op reconcile, never a missed change.
 	lastFP := p.fingerprint()
+	p.reconcile(ctx, session)
 
 	resyncT := time.NewTicker(p.resync)
 	defer resyncT.Stop()
@@ -231,8 +353,9 @@ func (p *Provider) leaderLoop(ctx context.Context, session LeaderSession) {
 				return
 			}
 		case <-resyncT.C:
+			fp := p.fingerprint()     // sample before (see leader-loop entry): don't absorb a mid-reconcile change
 			p.reconcile(ctx, session) // mandatory resync (§11): the lost-notification recovery path
-			lastFP = p.fingerprint()
+			lastFP = fp
 			dirty = false
 		case <-pollT.C:
 			// Poll-based watch: fingerprint the directory (name+size+mtime, no content read);
@@ -245,8 +368,9 @@ func (p *Provider) leaderLoop(ctx context.Context, session LeaderSession) {
 			}
 			if dirty && !time.Now().Before(debounceUntil) {
 				dirty = false
+				fp := p.fingerprint() // sample before (see leader-loop entry): don't absorb a mid-reconcile change
 				p.reconcile(ctx, session)
-				lastFP = p.fingerprint()
+				lastFP = fp
 			}
 		}
 	}
@@ -281,6 +405,26 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		p.logger.Warn("file_provider_scan_failed", "error", err.Error())
 		return rep
 	}
+	// Path state for orphan safety (§9.1), tracked by PATH — independent of how many diagnostics
+	// we emit per project (safety cardinality ≠ diagnostic cardinality). presentPaths = every
+	// path that EXISTS this scan (a candidate read, or a scan-level rejection); cleanlyApplied =
+	// the subset that produced a clean apply below. Before orphaning an owned project we require
+	// its prior last-known-good path to be truly ABSENT (gone) or cleanly RE-applied. A path that
+	// is present but did NOT cleanly apply — a duplicate, a decode/scope failure, an over-limit
+	// bundle, an apply error, or a header typo now naming a different project — freezes the prior
+	// tenant instead of orphaning it (the P0 fix).
+	presentPaths := make(map[string]bool, len(cands)+len(scanErrs))
+	cleanlyApplied := map[string]bool{}
+	for _, c := range cands {
+		if c.RelPath != "" {
+			presentPaths[c.RelPath] = true
+		}
+	}
+	for _, se := range scanErrs {
+		if se.RelPath != "" {
+			presentPaths[se.RelPath] = true
+		}
+	}
 	for _, se := range scanErrs {
 		rep.Rejected++
 		rep.LastError = string(se.Err.Reason)
@@ -297,12 +441,14 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		// a duplicate is also persisted per-tenant by the Frozen loop below.
 		p.persistAttemptByPath(ctx, session, se.RelPath, string(se.Err.Reason))
 	}
-	// Persist tenant-bound (duplicate) rejections to diagnostics so a frozen project SHOWS as
-	// rejected, not silently process-local (§15). Unbound decode/scope/scan rejections have no
-	// tenant to pin, so they remain log-only (documented limitation).
-	for key := range grp.Frozen {
+	// Persist tenant-bound (frozen) rejections to diagnostics so a frozen project SHOWS as
+	// rejected, not silently process-local (§15) — with its ACTUAL reason (duplicate, or a
+	// monitor-level/dependency error in a bundle that bound to this tenant), not always
+	// "duplicate". Unbound decode/scope/scan rejections have no tenant to pin, so they remain
+	// log-only (documented limitation).
+	for key, reason := range grp.Frozen {
 		if org, proj, ok := splitTenantKey(key); ok {
-			p.persistAttempt(ctx, session, org, proj, grp.Paths[key], "rejected", string(fileprovider.ReasonDuplicateProject))
+			p.persistAttempt(ctx, session, org, proj, grp.Paths[key], "rejected", string(reason))
 		}
 	}
 
@@ -335,6 +481,9 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		presentKeys[key] = true
 		res, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace, p.limits.MaxManagedMonitors, allowAbsence)
 		if aerr != nil {
+			// Present but did NOT cleanly apply (e.g. tenant not found): the path is left OUT of
+			// cleanlyApplied, so a prior tenant whose last-known-good path is this file is frozen
+			// below, not orphaned.
 			rep.Rejected++
 			reason, status := classify(aerr), "error"
 			rep.LastError = reason
@@ -345,6 +494,11 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 			p.warnThrottled(key, "file_provider_apply_failed", "org", dp.Organization, "project", dp.Project, "reason", reason)
 			p.persistAttempt(ctx, session, dp.Organization, dp.Project, grp.Paths[key], status, reason)
 			continue
+		}
+		// Cleanly applied (a no-op counts): this path re-established its bundle, so absence for a
+		// prior tenant at this path IS now trusted (e.g. an intentional migration to a new tenant).
+		if pth := grp.Paths[key]; pth != "" {
+			cleanlyApplied[pth] = true
 		}
 		// A pure no-op (unchanged bundle) is NOT an "applied" change — leaving rep.Applied at 0
 		// keeps reconcile_total{outcome="noop"} reachable in steady state (§16/§17).
@@ -366,8 +520,30 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 			return rep
 		}
 		for _, t := range owned {
+			// Never orphan a previously-managed project that is OUTSIDE the current scope. The
+			// owned set is keyed on provider name alone, so after a restart with the same name but
+			// a narrower/different scope value the old-scope rows would look absent and be
+			// orphaned/disabled — there is no scope-identity guard in the store. Skipping them
+			// keeps their last-known-good; only in-scope absence is trusted (§9.1/§10).
+			if !p.scope.Includes(t.Organization, t.Project) {
+				p.warnThrottled(t.Organization+"/"+t.Project, "file_provider_owned_out_of_scope",
+					"org", t.Organization, "project", t.Project, "scope", p.scope.Type)
+				continue
+			}
+			// Path-driven orphan protection (§9.1, P0): the file at this project's prior
+			// last-known-good source path IS present this scan but did NOT cleanly apply (a
+			// duplicate, decode/scope error, over-limit bundle, or apply error). Absence cannot be
+			// trusted for THIS tenant — regardless of that file's current header (a typo now naming
+			// a different project) or an invalid body — so freeze its last-known-good instead of
+			// orphaning it. Only a truly-absent path (gone) or a cleanly re-applied one (possibly a
+			// migration to a different tenant) lets absence be trusted here.
+			if t.SourcePath != "" && presentPaths[t.SourcePath] && !cleanlyApplied[t.SourcePath] {
+				p.warnThrottled(t.Organization+"/"+t.Project, "file_provider_owned_path_rejected",
+					"org", t.Organization, "project", t.Project, "path", t.SourcePath)
+				continue
+			}
 			key := t.Organization + "/" + t.Project
-			if presentKeys[key] || grp.Frozen[key] {
+			if _, frozen := grp.Frozen[key]; presentKeys[key] || frozen {
 				continue
 			}
 			empty := &fileprovider.DesiredProject{Organization: t.Organization, Project: t.Project, Monitors: map[string]fileprovider.DesiredMonitor{}}

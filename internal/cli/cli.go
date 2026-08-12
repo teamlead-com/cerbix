@@ -400,12 +400,24 @@ func runServe(args []string) int {
 			logging.Critical(logger, "db_migrate_failed", "error", err.Error())
 			return 1
 		}
-		opened, err := store.Open(ctx, cfg.Database.DSN)
+		// Only api/all actually spawn file-provider leaders (see startFileProviders), so only
+		// those roles need the pool sized for the leader pins; other roles stay at the floor.
+		fpCount := 0
+		if *role == "all" || *role == "api" {
+			fpCount = len(cfg.Providers.File)
+		}
+		opened, err := store.Open(ctx, cfg.Database.DSN, store.WithFileProviderPool(fpCount, maxConcurrentReconciles))
 		if err != nil {
 			logging.Critical(logger, "db_connect_failed", "error", err.Error())
 			return 1
 		}
 		st = opened
+		// Log the ACTUAL configured cap (an operator may set a larger valid pool_max_conns)
+		// alongside the computed minimum, so the line never understates the real pool size.
+		logger.Info("db_pool_sized",
+			"actual", st.PoolMaxConns(),
+			"required_min", store.RequiredMaxConns(fpCount, maxConcurrentReconciles),
+			"file_providers", fpCount)
 		defer st.Close()
 		// Result-ingest timestamp policy (spec func-result-protocol): skew bound + the
 		// retention floor below which a result is ignored (= the raw heartbeat window).
@@ -847,6 +859,12 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// Provider leadership advisory keys are derived from the provider name; refuse to start if
+	// two configured names collide on one key, so leadership is collision-free by construction
+	// rather than merely improbable (§12).
+	if err := fpruntime.AssertDistinctLeaderKeys(names); err != nil {
+		return err
+	}
 	// One process-local status registry backs the diagnostics API (§15): every provider
 	// (writer) registers at New so configured-but-idle providers surface before their first
 	// reconcile; the api handler reads a snapshot on demand.

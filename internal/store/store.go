@@ -41,13 +41,102 @@ func isUniqueViolation(err error) bool {
 // notifiers (confirm-phase, pull) — so pgx's default MaxConns of max(4, numCPU)
 // can starve query traffic on a small host (2 CPUs → 4 conns, 3 pinned, 1 left).
 // Enforce a floor and set lifetimes/health-check so dead connections are pruned.
+//
+// The floor alone is NOT enough once Monitoring-as-Code file providers are in play:
+// each configured file provider elects its own leader and pins ONE connection for the
+// leader's whole life (fencing, see LeaderSession). With up to maxConfiguredFileProviders
+// (64) providers, that many pinned conns would exhaust a floor-sized pool and block both
+// further leader acquisition AND the reconcile pool queries (FileProviderProjects/Counts)
+// — a subsystem deadlock. So Open sizes MaxConns to fit every leader pin plus reconcile
+// and app headroom; see RequiredMaxConns.
 const (
 	poolMinConns          = 2
 	poolMaxConnsFloor     = 12
 	poolMaxConnLifetime   = time.Hour
 	poolMaxConnIdleTime   = 30 * time.Minute
 	poolHealthCheckPeriod = time.Minute
+	// poolPinnedAppBaseline covers the connections that OTHER subsystems pin for the whole
+	// process lifetime, independent of file providers: the scheduler's leadership advisory
+	// lock and the Confirm/Config/Pull LISTEN notifiers. Like file-provider leaders these
+	// are checked out for life, so they must be reserved on top of the leader pins.
+	poolPinnedAppBaseline = 4
+	// poolQueryHeadroom is a small extra reserve for ordinary, short-lived pooled query
+	// traffic (API reads, ingest, metrics) so it is not starved by the pinned connections
+	// and the concurrent reconcile queries. Kept small on purpose.
+	poolQueryHeadroom = 2
 )
+
+// openConfig holds Open's tunables set via Option.
+type openConfig struct {
+	fileProviderCount    int
+	reconcileConcurrency int
+}
+
+// Option customizes Open (pool sizing so far).
+type Option func(*openConfig)
+
+// WithFileProviderPool tells Open that up to fileProviders Monitoring-as-Code file
+// providers will run in this process, each pinning ONE leader connection for its whole
+// life (fencing, see LeaderSession). reconcileConcurrency is the process-wide cap on
+// concurrent reconciles, whose pool queries must not be starved by those pinned leaders.
+// Open sizes MaxConns to fit all of them plus an app baseline (see requiredMaxConns).
+func WithFileProviderPool(fileProviders, reconcileConcurrency int) Option {
+	return func(o *openConfig) {
+		o.fileProviderCount = fileProviders
+		o.reconcileConcurrency = reconcileConcurrency
+	}
+}
+
+// RequiredMaxConns is the minimum pool MaxConns that lets every file-provider leader pin
+// its connection for life while reconcile queries and the rest of the app still acquire
+// connections. It sums the connections that are pinned or in-flight concurrently:
+//
+//	fileProviders        — one pinned leader conn each (fencing, LeaderSession)
+//	reconcileConcurrency  — concurrent reconcile pool queries (FileProviderProjects/Counts)
+//	poolPinnedAppBaseline — scheduler lock + Confirm/Config/Pull LISTEN pins (pinned for life)
+//	poolQueryHeadroom     — small reserve for ordinary short-lived query traffic
+//
+// The result is never below poolMaxConnsFloor.
+func RequiredMaxConns(fileProviders, reconcileConcurrency int) int32 {
+	if fileProviders < 0 {
+		fileProviders = 0
+	}
+	if reconcileConcurrency < 0 {
+		reconcileConcurrency = 0
+	}
+	need := fileProviders + reconcileConcurrency + poolPinnedAppBaseline + poolQueryHeadroom
+	if need < poolMaxConnsFloor {
+		need = poolMaxConnsFloor
+	}
+	return int32(need)
+}
+
+// dsnSetsMaxConns reports whether the operator EXPLICITLY set a pool_max_conns cap in the
+// DSN. Rather than reimplement the libpq keyword/URL grammar (spaces around '=', single-
+// quoted values with embedded spaces, backslash escapes, service-file merges) — where a
+// hand-rolled scan mis-handles `pool_max_conns = 8`, a quoted password containing the
+// literal, or a `://` inside a quoted value — it defers to pgx's own parser, the exact
+// first stage pgxpool.ParseConfig runs, and checks RuntimeParams for the pool_max_conns
+// key. That is precisely where pgxpool reads the cap (before consuming it), so detection is
+// identical to what the pool actually honors, and the literal appearing inside a
+// username/password/dbname is never mistaken for a cap. Used so an explicit-but-too-small
+// cap fails fast instead of silently deadlocking the file-provider subsystem. A DSN pgx
+// cannot parse yields false here; Open's own pgxpool.ParseConfig surfaces the real error.
+func dsnSetsMaxConns(dsn string) bool {
+	cc, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return false
+	}
+	_, ok := cc.RuntimeParams["pool_max_conns"]
+	return ok
+}
+
+// PoolMaxConns returns the pool's effective MaxConns after Open applied sizing (leader
+// pins + reconcile/app headroom, or a larger operator-set cap). Exposed so startup logging
+// can report the ACTUAL configured cap rather than only the computed minimum.
+func (s *Store) PoolMaxConns() int32 {
+	return s.pool.Config().MaxConns
+}
 
 // Store wraps a pgx connection pool.
 type Store struct {
@@ -93,17 +182,29 @@ func (s *Store) WithCipher(c *secret.Cipher) *Store {
 	return s
 }
 
-// Open creates a Store from a Postgres DSN and verifies connectivity.
-func Open(ctx context.Context, dsn string) (*Store, error) {
+// Open creates a Store from a Postgres DSN and verifies connectivity. Pass
+// WithFileProviderPool so the pool is sized to fit every file-provider leader pin.
+func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
+	var oc openConfig
+	for _, opt := range opts {
+		opt(&oc)
+	}
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: parse dsn: %w", err)
 	}
-	// Honor an operator-set pool_max_conns in the DSN, but never drop below the
-	// floor — we pin several connections for the process lifetime (leader lock +
-	// notifiers) and must keep headroom for actual queries.
-	if cfg.MaxConns < poolMaxConnsFloor {
-		cfg.MaxConns = poolMaxConnsFloor
+	// Size the pool so every file-provider leader can pin its connection for life (fencing)
+	// while reconcile queries and the rest of the app still acquire connections. This is
+	// always at least the floor, so it subsumes the old floor-only clamp.
+	want := RequiredMaxConns(oc.fileProviderCount, oc.reconcileConcurrency)
+	// Honor an operator-set pool_max_conns in the DSN when it still fits the requirement, but
+	// fail fast on an explicit cap that is too small: silently keeping it would deadlock the
+	// file-provider subsystem (pinned leaders exhaust the pool, reconcile queries never run).
+	if dsnSetsMaxConns(dsn) && cfg.MaxConns < want {
+		return nil, fmt.Errorf("store: pool_max_conns=%d is too small for %d file provider(s): need at least %d connections (one pinned leader conn per provider plus reconcile/app headroom)", cfg.MaxConns, oc.fileProviderCount, want)
+	}
+	if cfg.MaxConns < want {
+		cfg.MaxConns = want
 	}
 	if cfg.MinConns < poolMinConns {
 		cfg.MinConns = poolMinConns

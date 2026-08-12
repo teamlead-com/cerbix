@@ -2740,3 +2740,65 @@ nullable since migration 00047) precisely so the row survives the cascade that d
 `store.TestDeleteOrganization` (both storage modes — two-level cascade, tenant survival,
 `ErrManagedByFile`), `api.TestDeleteOrganizationAuthz` (204/403/404/409), and a live-stack E2E
 (`e2e/tests/org-delete.spec.ts`).
+
+## D-0152 — MaC target inline-secret guard: reject URL userinfo AND known secret query keys AND malformed URL-shaped targets (FR-017)
+The file provider forbids inline secrets everywhere (§2.9, §19, NFR-014). For a monitor `target`
+this is enforced structurally in `buildMonitor` before type support, so a credential can never leak
+through a different reason. (1) A well-formed URL whose **userinfo** is populated
+(`https://user:pass@host`, `postgres://user:pass@host/db`, password-only `https://:pass@host`)
+rejects with `inline_secret_forbidden`. (2) A well-formed URL whose **query string** carries a key
+in the finite `secretSettingKeys` set (`token`, `api_key`/`apikey`, `password`, `secret`,
+`client_secret`, …) rejects — reusing the *same* classification that already rejects inline settings
+secrets, matched case-insensitively and after percent-decoding, so `https://h/?token=…`,
+`?API_KEY=…`, `?tok%65n=…` and duplicate secret keys are all caught. A query that fails
+`url.ParseQuery` (e.g. `?token=%zz`) rejects conservatively — it cannot be proven free of a secret
+key. A query with only non-secret keys (`?x=1`) is accepted. (3) A **URL-shaped** target (carries a
+`://` scheme separator) that FAILS `url.Parse` also rejects: a parse failure (invalid percent-escape
+like `https://u:pw@h/%zz`, or a control character) means the target cannot be proven free of
+embedded credentials, and `domain.Monitor.Validate` only checks the target is non-empty — so a
+malformed-but-credentialed target would otherwise be persisted verbatim (the P1 bypass this decision
+closes). (4) Rejection messages **never echo the raw target or any query value** (they name only a
+known key label), so logs/status/metrics don't leak the credential. **This does NOT weaken §2.9/§19/
+NFR-014**: query credentials are rejected, not tolerated — an earlier draft that scoped them out was
+withdrawn as an unacceptable silent requirement simplification. Verified:
+`fileprovider.TestDecodeStrictRejections` (userinfo user:pass / user-only / DSN / malformed-with-
+creds / password-only; query token / mixed-case API_KEY / percent-encoded key / duplicate key /
+malformed encoding), `TestDecodeTargetNoUserinfoAccepted` (host:port, ICMP/SSH hostname, clean
+`?x=1`), `TestDecodeTargetRejectionDoesNotLeakSecret` (userinfo + malformed + secret query value),
+and `TestBuildMonitorControlCharTargetRejected`.
+
+## D-0153 — A provider scope change quarantines prior-scope managed rows; it never silently adopts or deletes them (FR-017)
+The file provider owns rows by provider NAME (`provider_id` is the name; D-0152 context), and absence
+is trusted only within the provider's current static scope (§9.1/§10, the #2 fix:
+`ProviderScopeConfig.Includes`). A consequence must be documented as deliberate policy, not a trap:
+when a provider restarts with the SAME name but a NARROWER or DIFFERENT scope value, its prior-scope
+projects fall outside the current authority. Those rows are **quarantined**: they keep running, remain
+provider-owned and read-only in the UI/API, still count in diagnostics, and are NEITHER changed nor
+orphaned/deleted by the new scope — the reconcile skips them before the absence check and emits a
+throttled `file_provider_owned_out_of_scope` warning. This is a safety quarantine: the provider cannot
+observe the old scope's directory intent, so silently orphaning (destroy) or adopting (take over) would
+both be wrong. **Operator procedure** (runbook): to move authority, give the new scope a NEW provider
+name (the old name's rows stay put, cleanly separable); to retire the old scope, either revert the
+provider to its old scope and let normal reconcile manage/orphan the rows, or perform an explicit,
+reviewed release/migration — never rely on the scope change itself to clean up. **Widening** is the safe
+direction: rows that fall back INSIDE a widened scope resume normal valid-absence semantics (a project
+absent from the snapshot is orphaned as usual). Verified: `config.TestProviderScopeIncludes` (matrix)
+and `runtime.TestReconcileSkipsOutOfScopeOwnedProjects` (in-scope absence orphaned; out-of-scope owned
+untouched).
+
+## D-0154 — Repo-wide golangci-lint pre-existing debt is waived for the fix/mac-hardening branch; tracked as a dedicated cleanup MR (iter-0114)
+`AGENTS.md` (Makefile:24-25) makes `golangci-lint run ./...` a DoD gate. On `fix/mac-hardening`
+that command exits 1 with **42 findings** (errcheck 32, forbidigo 2, staticcheck 8), **all
+pre-existing in files this hardening pass never modified** (e.g. `internal/cli/cli.go:91-93,612`
+help-text `Fprintln`/`disp.Close`; `internal/store/projects.go` + test `conn.Close`/`tx.Rollback`;
+forbidigo ×2 in `internal/store/{oidc.go,reencrypt.go}` where the `client_secret` column is
+legitimately queried; staticcheck ×8 across unrelated packages). This pass's own changed scope is
+lint-clean: `golangci-lint run ./internal/fileprovider/... ./internal/config/...` = 0 issues, and no
+finding lands on a line this pass changed (the three it briefly introduced — 2 gofmt + 1 QF1008 —
+were fixed in `45ba456`). **Decision:** the owner **waives** the pre-existing repo-wide lint debt for
+this branch rather than expanding the branch to touch unrelated files (which would violate scope
+discipline and mix concerns). The hardening pass therefore meets DoD on its changed scope. Clearing
+the 42 findings is tracked as a **separate, dedicated cleanup MR** — consistent with the existing
+`.golangci.yml` note that style-heavy linters are "intentionally deferred to a dedicated cleanup MR".
+No monitoring/reliability contract changes; nothing is silently marked green — the repo-wide RED is
+recorded (iter-0114 §4) and explicitly waived here.

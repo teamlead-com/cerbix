@@ -41,6 +41,25 @@ type ProviderScopeConfig struct {
 	Project      string `yaml:"project"`
 }
 
+// Includes reports whether a tenant (org/project slugs) falls within this scope. It is used by
+// the reconcile loop to decide which previously-managed projects this provider may orphan:
+// instance sees every tenant, organization only its own org, project only its exact pair. A
+// provider that restarts with the SAME name but a narrower/different scope value therefore does
+// NOT treat its prior-scope projects as absent (which would orphan/disable them) — they simply
+// fall outside the current scope (§9.1/§10).
+func (s ProviderScopeConfig) Includes(org, project string) bool {
+	switch s.Type {
+	case ProviderScopeInstance:
+		return true
+	case ProviderScopeOrganization:
+		return org == s.Organization
+	case ProviderScopeProject:
+		return org == s.Organization && project == s.Project
+	default:
+		return false
+	}
+}
+
 // ProviderLimits bounds one provider's work (§4/§17). Zero means "use the default".
 type ProviderLimits struct {
 	MaxFiles             int   `yaml:"max_files"`

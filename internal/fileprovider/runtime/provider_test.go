@@ -61,13 +61,17 @@ type fakeSession struct {
 	calls          []applyCall
 	attempts       int
 	attemptsByPath int
-	noChange       bool // when true, every apply reports NoChange (steady-state no-op)
+	noChange       bool   // when true, every apply reports NoChange (steady-state no-op)
+	applyErrProj   string // when non-empty, ApplyFileManagedBundle fails for this project
 }
 
 func (s *fakeSession) Check(context.Context) (bool, error) { return true, nil }
 func (s *fakeSession) Release()                            {}
 func (s *fakeSession) ApplyFileManagedBundle(_ context.Context, _ string, dp *fileprovider.DesiredProject, path string, _ time.Duration, _ int, allowAbsence bool) (store.ApplyResult, error) {
 	s.calls = append(s.calls, applyCall{dp.Organization, dp.Project, len(dp.Monitors), path, allowAbsence})
+	if s.applyErrProj != "" && dp.Project == s.applyErrProj {
+		return store.ApplyResult{}, store.ErrBundleTenantNotFound
+	}
 	return store.ApplyResult{Organization: dp.Organization, Project: dp.Project, NoChange: s.noChange}, nil
 }
 func (s *fakeSession) RecordBundleAttempt(_ context.Context, _, _, _, _, _, _ string) error {
@@ -160,6 +164,208 @@ func TestReconcileSuspendsOrphanOnUnbound(t *testing.T) {
 	}
 }
 
+// TestReconcileBoundMonitorErrorDoesNotSuspendOrphaning covers the #4 fix end to end: a bundle
+// with a resolved tenant but an invalid monitor is FROZEN per-project (not orphaned), and it
+// must NOT suspend orphaning provider-wide — an independent absent, in-scope project is still
+// orphaned. Pre-fix, the bad bundle set SuspendOrphan and legacy was NOT orphaned.
+func TestReconcileBoundMonitorErrorDoesNotSuspendOrphaning(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "bad.yaml", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: bogus\n    target: t\n")
+	write(t, dir, "billing.yaml", bundle("acme", "billing"))
+	fa := &fakeApplier{owned: []store.TenantRef{
+		{Organization: "acme", Project: "payments"}, // frozen (bad bundle) → must NOT be orphaned
+		{Organization: "acme", Project: "billing"},  // present/valid → applied
+		{Organization: "acme", Project: "legacy"},   // absent, in-scope → must STILL be orphaned
+	}}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+
+	var legacyOrphaned, paymentsOrphaned bool
+	for _, c := range fa.sess().calls {
+		if c.monitors == 0 && c.project == "legacy" {
+			legacyOrphaned = true
+		}
+		if c.monitors == 0 && c.project == "payments" {
+			paymentsOrphaned = true
+		}
+	}
+	if !legacyOrphaned {
+		t.Fatalf("absent in-scope project must still be orphaned; a bound monitor-error bundle must not suspend orphaning: %+v", fa.sess().calls)
+	}
+	if paymentsOrphaned {
+		t.Fatal("the frozen (invalid) project must NOT be orphaned")
+	}
+	if rep.Orphaned != 1 {
+		t.Fatalf("exactly legacy should be orphaned, rep = %+v", rep)
+	}
+}
+
+// TestReconcileSkipsOutOfScopeOwnedProjects covers the #2 fix: a previously-managed project
+// OUTSIDE the provider's current scope (e.g. after a restart with the same name but a changed
+// scope value) must NOT be orphaned, while an absent IN-scope project still is.
+func TestReconcileSkipsOutOfScopeOwnedProjects(t *testing.T) {
+	dir := t.TempDir()
+	// Organization-scoped bundle: `project` only, no `organization` field.
+	write(t, dir, "payments.yaml", "format: 1\nproject: payments\nmonitors:\n  api:\n    name: M\n    type: http\n    target: https://x\n")
+	fa := &fakeApplier{owned: []store.TenantRef{
+		{Organization: "acme", Project: "payments"}, // present → applied
+		{Organization: "acme", Project: "billing"},  // absent, in-scope → orphaned
+		{Organization: "beta", Project: "legacy"},   // absent, OUT of scope (prior scope) → skipped
+	}}
+	p := testProvider(dir, fa)
+	p.scope = config.ProviderScopeConfig{Type: config.ProviderScopeOrganization, Organization: "acme"}
+	rep := p.reconcile(context.Background(), fa.sess())
+
+	var billingOrphaned, betaOrphaned bool
+	for _, c := range fa.sess().calls {
+		if c.monitors == 0 && c.project == "billing" {
+			billingOrphaned = true
+		}
+		if c.monitors == 0 && c.project == "legacy" {
+			betaOrphaned = true
+		}
+	}
+	if !billingOrphaned {
+		t.Fatal("an absent in-scope project must be orphaned")
+	}
+	if betaOrphaned {
+		t.Fatal("an owned project OUTSIDE the current scope must NOT be orphaned (a scope change must not destroy prior-scope rows)")
+	}
+	if rep.Orphaned != 1 {
+		t.Fatalf("only in-scope billing should be orphaned, rep = %+v", rep)
+	}
+}
+
+// TestReconcileKnownPathTypoDoesNotOrphan is the P0 (§9.1): a file at a project's prior
+// last-known-good source path is present this scan but its HEADER now has a typo (naming a
+// different project) AND its body is invalid. The prior tenant at that path must NOT be
+// orphaned — absence is not trusted while the path is present-but-rejected — regardless of the
+// file's current header. Pre-fix, keying the freeze on the file's header froze the wrong key
+// and let the real prior tenant get orphaned.
+func TestReconcileKnownPathTypoDoesNotOrphan(t *testing.T) {
+	dir := t.TempDir()
+	// svc.yaml WAS bound to acme/payments; now header says paymnts (TYPO) with an invalid monitor.
+	write(t, dir, "svc.yaml", "format: 1\norganization: acme\nproject: paymnts\nmonitors:\n  api:\n    name: A\n    type: bogus\n    target: t\n")
+	fa := &fakeApplier{owned: []store.TenantRef{{Organization: "acme", Project: "payments", SourcePath: "svc.yaml"}}}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+
+	for _, c := range fa.sess().calls {
+		if c.project == "payments" && c.monitors == 0 {
+			t.Fatalf("the real prior tenant at a rejected path must NOT be orphaned: %+v", fa.sess().calls)
+		}
+	}
+	if rep.Orphaned != 0 {
+		t.Fatalf("want 0 orphaned (prior tenant frozen by path), rep = %+v", rep)
+	}
+}
+
+// TestReconcileKnownPathApplyFailureDoesNotOrphan covers §9.1 path-freeze on an APPLY failure:
+// the file at a project's prior path is a VALID bundle that resolves to a DIFFERENT tenant
+// whose apply FAILS. The path is therefore present-but-not-cleanly-applied, so the prior tenant
+// (same path) must NOT be orphaned.
+func TestReconcileKnownPathApplyFailureDoesNotOrphan(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "svc.yaml", bundle("acme", "ghost")) // valid, resolves to a DIFFERENT tenant
+	fs := &fakeSession{applyErrProj: "ghost"}          // ...whose apply fails
+	fa := &fakeApplier{session: fs, owned: []store.TenantRef{{Organization: "acme", Project: "payments", SourcePath: "svc.yaml"}}}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+
+	for _, c := range fs.calls {
+		if c.project == "payments" && c.monitors == 0 {
+			t.Fatalf("prior tenant at an apply-failed path must NOT be orphaned: %+v", fs.calls)
+		}
+	}
+	if rep.Orphaned != 0 {
+		t.Fatalf("want 0 orphaned (prior tenant frozen by rejected path), rep = %+v", rep)
+	}
+}
+
+// TestReconcileCustomTagBodyDoesNotSuspend covers PART D: a bundle with a VALID instance header
+// but a custom YAML tag in its body binds the policy rejection to its project (frozen), so it
+// must NOT suspend orphaning provider-wide — an independent absent in-scope project is STILL
+// orphaned, while the custom-tag file's own project is frozen (not orphaned).
+func TestReconcileCustomTagBodyDoesNotSuspend(t *testing.T) {
+	dir := t.TempDir()
+	// Valid acme/payments header, but a custom (!custom) tag in the body → policy rejection BOUND.
+	write(t, dir, "payments.yaml", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: !custom https://x\n")
+	write(t, dir, "other.yaml", bundle("acme", "other")) // present valid
+	fa := &fakeApplier{owned: []store.TenantRef{
+		{Organization: "acme", Project: "payments", SourcePath: "payments.yaml"}, // frozen (custom tag) → NOT orphaned
+		{Organization: "acme", Project: "other", SourcePath: "other.yaml"},       // present valid → applied
+		{Organization: "acme", Project: "billing", SourcePath: ""},               // absent (path gone) → orphaned
+	}}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+
+	var billingOrphaned, paymentsOrphaned bool
+	for _, c := range fa.sess().calls {
+		if c.monitors == 0 && c.project == "billing" {
+			billingOrphaned = true
+		}
+		if c.monitors == 0 && c.project == "payments" {
+			paymentsOrphaned = true
+		}
+	}
+	if !billingOrphaned {
+		t.Fatalf("a custom-tag file with a valid header must NOT suspend provider-wide: absent billing must still be orphaned: %+v", fa.sess().calls)
+	}
+	if paymentsOrphaned {
+		t.Fatal("the custom-tag file's project must be frozen (not orphaned)")
+	}
+	if rep.Orphaned != 1 {
+		t.Fatalf("only billing should be orphaned, rep = %+v", rep)
+	}
+}
+
+// TestReconcileDuplicateAtCompetingPathPreservesPrior covers P0-A: an owned project's prior
+// LKG path becomes one of several files that DUPLICATE-claim a different project. The prior
+// project must NOT be orphaned even though only "one" duplicate diagnostic is emitted — every
+// competing path is present-but-not-cleanly-applied.
+func TestReconcileDuplicateAtCompetingPathPreservesPrior(t *testing.T) {
+	dir := t.TempDir()
+	// z.yaml (the prior LKG path of acme/payments) and a.yaml both now claim acme/billing →
+	// billing is a duplicate (frozen, not applied); neither path applies cleanly.
+	write(t, dir, "z.yaml", bundle("acme", "billing"))
+	write(t, dir, "a.yaml", bundle("acme", "billing"))
+	fa := &fakeApplier{owned: []store.TenantRef{
+		{Organization: "acme", Project: "payments", SourcePath: "z.yaml"},
+	}}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+	for _, c := range fa.sess().calls {
+		if c.project == "payments" && c.monitors == 0 {
+			t.Fatalf("prior tenant at a now-duplicated competing path must NOT be orphaned: %+v", fa.sess().calls)
+		}
+	}
+	if rep.Orphaned != 0 {
+		t.Fatalf("nothing should be orphaned, rep = %+v", rep)
+	}
+}
+
+// TestReconcileOversizedBundleAtPriorPathPreservesPrior covers P0-B: an owned project's prior
+// LKG path is edited to claim a different project with an over-limit bundle (rejected by the
+// runtime, not the decoder). The prior project must be preserved — the path is present but did
+// not cleanly apply.
+func TestReconcileOversizedBundleAtPriorPathPreservesPrior(t *testing.T) {
+	dir := t.TempDir()
+	// svc.yaml (prior LKG of acme/payments) now declares acme/ghost with TWO monitors.
+	twoMon := "format: 1\norganization: acme\nproject: ghost\nmonitors:\n" +
+		"  a:\n    name: A\n    type: http\n    target: https://x\n" +
+		"  b:\n    name: B\n    type: http\n    target: https://y\n"
+	write(t, dir, "svc.yaml", twoMon)
+	fa := &fakeApplier{owned: []store.TenantRef{
+		{Organization: "acme", Project: "payments", SourcePath: "svc.yaml"},
+	}}
+	p := testProvider(dir, fa)
+	p.limits.MaxMonitorsPerBundle = 1 // make the 2-monitor bundle over the limit
+	rep := p.reconcile(context.Background(), fa.sess())
+	for _, c := range fa.sess().calls {
+		if c.project == "payments" && c.monitors == 0 {
+			t.Fatalf("prior tenant at an over-limit-rejected path must NOT be orphaned: %+v", fa.sess().calls)
+		}
+	}
+	if rep.Orphaned != 0 {
+		t.Fatalf("nothing should be orphaned, rep = %+v", rep)
+	}
+}
+
 func TestReconcileDegradedOnUnreadableDir(t *testing.T) {
 	fa := &fakeApplier{}
 	rep := testProvider(filepath.Join(t.TempDir(), "does-not-exist"), fa).reconcile(context.Background(), fa.sess())
@@ -169,7 +375,8 @@ func TestReconcileDegradedOnUnreadableDir(t *testing.T) {
 }
 
 // TestLeaderKeyDerivation covers §12: each provider elects on its own advisory key, distinct
-// per name and namespaced away from the scheduler (…0001) and migrate (…0002) keys.
+// per name, in the file-provider namespace and away from the scheduler (…0001) and migrate
+// (…0002) keys.
 func TestLeaderKeyDerivation(t *testing.T) {
 	a := leaderKeyFor("platform")
 	b := leaderKeyFor("acme")
@@ -182,13 +389,47 @@ func TestLeaderKeyDerivation(t *testing.T) {
 		if k == schedulerKey || k == migrateKey {
 			t.Fatalf("provider leader key %#x collides with a reserved key", k)
 		}
-		if k&fileProviderLeaderBaseKey != fileProviderLeaderBaseKey {
-			t.Fatalf("provider leader key %#x is not in the file-provider namespace", k)
+		if k>>56 != 0x46 {
+			t.Fatalf("provider leader key %#x is not in the file-provider namespace (top byte != 0x46)", k)
 		}
 	}
 	// Deterministic across calls.
 	if leaderKeyFor("platform") != a {
 		t.Fatal("leader key must be stable for a given name")
+	}
+}
+
+// TestLeaderKeyNoFNV32Collision guards the #6 regression: two names whose FNV-1a-32 hashes
+// collide (0x7d48fcb7) must NOT map to the same advisory key under the FNV-1a-64 derivation.
+func TestLeaderKeyNoFNV32Collision(t *testing.T) {
+	const n1, n2 = "p18s8xllr6dp", "p1lxyx1cpu7tz"
+	if leaderKeyFor(n1) == leaderKeyFor(n2) {
+		t.Fatalf("names %q and %q (equal FNV-32) must derive distinct leader keys", n1, n2)
+	}
+	if err := AssertDistinctLeaderKeys([]string{n1, n2, "platform", "acme"}); err != nil {
+		t.Fatalf("distinct names should pass the collision guard: %v", err)
+	}
+}
+
+// TestAssertDistinctKeysCollisionBranch exercises the fail-fast branch deterministically with
+// a forced-collision key function, and confirms the message names both colliding providers.
+func TestAssertDistinctKeysCollisionBranch(t *testing.T) {
+	// A key function that maps two specific names to the same key.
+	keyFn := func(name string) int64 {
+		if name == "alpha" || name == "beta" {
+			return 0x4600000000000042
+		}
+		return leaderKeyFor(name)
+	}
+	if err := assertDistinctKeys([]string{"gamma", "alpha"}, keyFn); err != nil {
+		t.Fatalf("no collision yet, want nil: %v", err)
+	}
+	err := assertDistinctKeys([]string{"alpha", "gamma", "beta"}, keyFn)
+	if err == nil {
+		t.Fatal("expected a collision error for alpha/beta")
+	}
+	if !strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "beta") {
+		t.Fatalf("collision error should name both providers, got: %v", err)
 	}
 }
 

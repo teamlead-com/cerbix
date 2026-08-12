@@ -84,10 +84,35 @@ func TestDecodeStrictRejections(t *testing.T) {
 		{"unsupported type (credentialed)", "format: 1\norganization: acme\nproject: p\nmonitors:\n  db:\n    name: DB\n    type: postgres\n    target: pg:5432\n", ReasonUnsupportedType},
 		{"unsupported settings on http", base + "    settings:\n      foo: bar\n", ReasonUnsupportedField},
 		{"inline secret", base + "    settings:\n      password: hunter2\n", ReasonInlineSecret},
+		{"target userinfo user:pass", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://u:pw@h/\n", ReasonInlineSecret},
+		{"target userinfo user only", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://u@h/\n", ReasonInlineSecret},
+		{"target dsn userinfo", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: tcp\n    target: postgres://u:pw@h/db\n", ReasonInlineSecret},
 		{"empty name", "format: 1\norganization: acme\nproject: p\nmonitors:\n  x:\n    type: http\n    target: https://x\n", ReasonDomainInvalid},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { wantReason(t, c.y, instanceScope(), c.r) })
+	}
+}
+
+// TestDecodeTargetNoUserinfoAccepted guards against false positives: the target-userinfo
+// secret check must reject only genuine URL credentials, never legitimate non-URL targets
+// (bare host:port, hostnames) or clean URLs with query strings.
+func TestDecodeTargetNoUserinfoAccepted(t *testing.T) {
+	cases := []struct {
+		name, typ, target string
+	}{
+		{"http query no userinfo", "http", "https://h/path?x=1"},
+		{"tcp host:port", "tcp", "localhost:5432"},
+		{"icmp hostname", "icmp", "db.internal"},
+		{"ssh host:port", "ssh", "host:22"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			y := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  m:\n    name: A\n    type: " + c.typ + "\n    target: " + c.target + "\n"
+			if _, err := Decode([]byte(y), instanceScope()); err != nil {
+				t.Fatalf("target %q (%s) should be accepted, got %v", c.target, c.typ, err)
+			}
+		})
 	}
 }
 

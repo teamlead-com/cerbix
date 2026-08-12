@@ -3,6 +3,7 @@ package fileprovider
 import (
 	"errors"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -204,6 +205,16 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 		if secretSettingKeys[strings.ToLower(strings.TrimSpace(k))] {
 			return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "settings key %q carries a secret; inline secrets are forbidden", k)
 		}
+	}
+	// A URL-style target must not carry credentials in its userinfo (e.g.
+	// https://user:pass@host or a postgres://user:pass@host DSN): that is an inline secret,
+	// stored/echoed in cleartext and usable as Basic Auth. url.Parse only populates User when
+	// the target genuinely has a URL authority component, so bare host:port, ICMP/SSH
+	// hostnames and other non-URL targets never trip this. Checked before type support so a
+	// secret is never echoed through a different reason. (Secret-like query parameters are
+	// intentionally NOT covered by this guard.)
+	if u, err := url.Parse(strings.TrimSpace(rm.Target)); err == nil && u.User != nil {
+		return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "target carries credentials in its URL userinfo; inline secrets are forbidden")
 	}
 
 	typ := domain.MonitorType(rm.Type)

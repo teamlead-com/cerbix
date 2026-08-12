@@ -127,7 +127,7 @@ func dsnSetsMaxConns(dsn string) bool {
 	if err != nil {
 		return false
 	}
-	_, ok := cc.Config.RuntimeParams["pool_max_conns"]
+	_, ok := cc.RuntimeParams["pool_max_conns"]
 	return ok
 }
 

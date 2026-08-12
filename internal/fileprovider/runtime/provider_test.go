@@ -265,7 +265,7 @@ func TestReconcileKnownPathTypoDoesNotOrphan(t *testing.T) {
 func TestReconcileKnownPathApplyFailureDoesNotOrphan(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "svc.yaml", bundle("acme", "ghost")) // valid, resolves to a DIFFERENT tenant
-	fs := &fakeSession{applyErrProj: "ghost"}           // ...whose apply fails
+	fs := &fakeSession{applyErrProj: "ghost"}          // ...whose apply fails
 	fa := &fakeApplier{session: fs, owned: []store.TenantRef{{Organization: "acme", Project: "payments", SourcePath: "svc.yaml"}}}
 	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
 

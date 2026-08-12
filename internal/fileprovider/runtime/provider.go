@@ -353,7 +353,7 @@ func (p *Provider) leaderLoop(ctx context.Context, session LeaderSession) {
 				return
 			}
 		case <-resyncT.C:
-			fp := p.fingerprint() // sample before (see leader-loop entry): don't absorb a mid-reconcile change
+			fp := p.fingerprint()     // sample before (see leader-loop entry): don't absorb a mid-reconcile change
 			p.reconcile(ctx, session) // mandatory resync (§11): the lost-notification recovery path
 			lastFP = fp
 			dirty = false

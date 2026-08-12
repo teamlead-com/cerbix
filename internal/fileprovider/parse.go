@@ -208,13 +208,26 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 	}
 	// A URL-style target must not carry credentials in its userinfo (e.g.
 	// https://user:pass@host or a postgres://user:pass@host DSN): that is an inline secret,
-	// stored/echoed in cleartext and usable as Basic Auth. url.Parse only populates User when
-	// the target genuinely has a URL authority component, so bare host:port, ICMP/SSH
-	// hostnames and other non-URL targets never trip this. Checked before type support so a
-	// secret is never echoed through a different reason. (Secret-like query parameters are
-	// intentionally NOT covered by this guard.)
-	if u, err := url.Parse(strings.TrimSpace(rm.Target)); err == nil && u.User != nil {
-		return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "target carries credentials in its URL userinfo; inline secrets are forbidden")
+	// stored/echoed in cleartext and usable as Basic Auth. Two guards, both checked before
+	// type support so a secret is never echoed through a different reason, and neither
+	// message ever includes the raw target:
+	//   1. A well-formed URL whose userinfo is populated is rejected. url.Parse only
+	//      populates User when the target has a real URL authority, so bare host:port,
+	//      ICMP/SSH hostnames and other non-URL targets never trip this.
+	//   2. A URL-SHAPED target (carries a "://" scheme separator) that FAILS to parse is
+	//      also rejected: a parse failure means we cannot prove it is free of embedded
+	//      credentials (e.g. https://u:pw@h/%zz or a control char after the authority), and
+	//      domain validation only checks the target is non-empty — so a malformed-but-
+	//      credentialed target would otherwise be persisted verbatim (the P1 bypass).
+	// Secret-like query parameters remain out of scope (see D-0152 / spec func-mac §14):
+	// arbitrary ?k=v cannot be reliably classified as secret vs. legitimate in v1.
+	target := strings.TrimSpace(rm.Target)
+	if u, err := url.Parse(target); err == nil {
+		if u.User != nil {
+			return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "target carries credentials in its URL userinfo; inline secrets are forbidden")
+		}
+	} else if strings.Contains(target, "://") {
+		return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "target is a malformed URL and cannot be verified free of inline credentials; fix the URL or move any credentials to a secret_ref")
 	}
 
 	typ := domain.MonitorType(rm.Type)

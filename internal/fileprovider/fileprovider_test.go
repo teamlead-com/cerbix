@@ -87,6 +87,12 @@ func TestDecodeStrictRejections(t *testing.T) {
 		{"target userinfo user:pass", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://u:pw@h/\n", ReasonInlineSecret},
 		{"target userinfo user only", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://u@h/\n", ReasonInlineSecret},
 		{"target dsn userinfo", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: tcp\n    target: postgres://u:pw@h/db\n", ReasonInlineSecret},
+		// P1 bypass: a URL-shaped target that FAILS to parse (invalid %-escape after the
+		// userinfo) must still be rejected — url.Parse errors, so the userinfo guard alone
+		// would let the raw credential through.
+		{"target malformed url with creds", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://u:pw@h/%zz\n", ReasonInlineSecret},
+		// password-only userinfo (empty username) still parses and must be rejected.
+		{"target userinfo password only", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://:pw@h/\n", ReasonInlineSecret},
 		{"empty name", "format: 1\norganization: acme\nproject: p\nmonitors:\n  x:\n    type: http\n    target: https://x\n", ReasonDomainInvalid},
 	}
 	for _, c := range cases {
@@ -111,6 +117,35 @@ func TestDecodeTargetNoUserinfoAccepted(t *testing.T) {
 			y := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  m:\n    name: A\n    type: " + c.typ + "\n    target: " + c.target + "\n"
 			if _, err := Decode([]byte(y), instanceScope()); err != nil {
 				t.Fatalf("target %q (%s) should be accepted, got %v", c.target, c.typ, err)
+			}
+		})
+	}
+}
+
+// TestDecodeTargetRejectionDoesNotLeakSecret asserts the credential in a rejected target
+// is never echoed back through the (loggable) error, for both the well-formed userinfo
+// path and the malformed-URL path.
+func TestDecodeTargetRejectionDoesNotLeakSecret(t *testing.T) {
+	const (
+		user = "secretuser"
+		pass = "secretpass"
+	)
+	cases := []struct {
+		name, target string
+	}{
+		{"well-formed userinfo", "https://" + user + ":" + pass + "@h/"},
+		{"malformed url after userinfo", "https://" + user + ":" + pass + "@h/%zz"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			y := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: " + c.target + "\n"
+			var be *BundleError
+			_, err := Decode([]byte(y), instanceScope())
+			if !errors.As(err, &be) || be.Reason != ReasonInlineSecret {
+				t.Fatalf("want *BundleError(%s), got %v", ReasonInlineSecret, err)
+			}
+			if msg := be.Error(); strings.Contains(msg, user) || strings.Contains(msg, pass) {
+				t.Fatalf("rejection error leaks the credential: %q", msg)
 			}
 		})
 	}

@@ -2740,3 +2740,24 @@ nullable since migration 00047) precisely so the row survives the cascade that d
 `store.TestDeleteOrganization` (both storage modes — two-level cascade, tenant survival,
 `ErrManagedByFile`), `api.TestDeleteOrganizationAuthz` (204/403/404/409), and a live-stack E2E
 (`e2e/tests/org-delete.spec.ts`).
+
+## D-0152 — MaC target inline-secret guard: reject URL userinfo (incl. malformed URL-shaped targets); query-string secrets out of scope for v1 (FR-017)
+The file provider forbids inline secrets (§2.9, §14). For a monitor `target` this is enforced
+structurally in `buildMonitor` before type support, so a credential can never leak through a
+different reason. (1) A well-formed URL whose **userinfo** is populated
+(`https://user:pass@host`, `postgres://user:pass@host/db`, password-only `https://:pass@host`)
+rejects with `inline_secret_forbidden`. (2) A **URL-shaped** target (carries a `://` scheme
+separator) that FAILS `url.Parse` also rejects: a parse failure means the target cannot be proven
+free of embedded credentials (e.g. `https://u:pw@h/%zz`, or a control char after the authority),
+and `domain.Monitor.Validate` only checks the target is non-empty — so a malformed-but-
+credentialed target would otherwise be persisted verbatim (the P1 bypass this decision closes).
+(3) The rejection message **never echoes the raw target**, so logs/status/metrics don't leak the
+credential (`TestDecodeTargetRejectionDoesNotLeakSecret` asserts neither username nor password
+appears in the error). (4) **Query-string** secrets (`?token=…`) are explicitly **out of scope for
+v1**: arbitrary `?k=v` cannot be reliably classified as secret vs. legitimate parameter, so a clean
+`?x=1` target is accepted. This is a stated boundary (recorded here and in §14), not a silent
+requirement simplification; credentials belong in a `secret_ref`, and a conservative known-secret-
+query-key denylist is the recorded follow-up. Verified:
+`fileprovider.TestDecodeStrictRejections` (userinfo user:pass / user-only / DSN / malformed-with-
+creds / password-only), `TestDecodeTargetNoUserinfoAccepted` (host:port, ICMP/SSH hostname, clean
+`?x=1`), and `TestDecodeTargetRejectionDoesNotLeakSecret`.

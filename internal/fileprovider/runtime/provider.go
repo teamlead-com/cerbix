@@ -114,6 +114,15 @@ type Provider struct {
 	// map for the process lifetime (spec §16/§17). Single reconcile goroutine (no lock).
 	throttle    map[string]*list.Element
 	throttleLRU *list.List // front = most-recently-touched; evicted from the back
+	// Provider-wide fixed-window emission budget. The per-key LRU bounds memory but not the
+	// LOG VOLUME: a working set wider than the LRU cap (round-robin over up to ReadDirBounded
+	// distinct paths) would evict each key before its next touch and re-log it every scan. The
+	// window caps how many warnings are actually emitted per errorLogEvery and folds the rest
+	// into one suppressed-count summary (spec §16).
+	winStart      time.Time
+	winEmitted    int
+	winSuppressed int
+	nowFn         func() time.Time // injectable clock (tests); nil = time.Now
 }
 
 // errorLogEvery rate-limits repeated parse/apply/watcher error logs (spec §16).
@@ -124,33 +133,74 @@ const errorLogEvery = 30 * time.Second
 // yet large enough to retain the working set of a realistic broken snapshot.
 const warnThrottleMax = 2048
 
+// warnEmitBudget caps the warnings actually emitted per errorLogEvery window across ALL keys.
+// Beyond it, occurrences are counted and reported once as an aggregate summary, so even a
+// working set wider than warnThrottleMax cannot flood the log every scan (spec §16).
+const warnEmitBudget = 64
+
 // throttleEntry is one LRU entry: the throttle key and when it last actually logged.
 type throttleEntry struct {
 	id   string
 	last time.Time
 }
 
-// warnThrottled logs a warning at most once per errorLogEvery per (msg,key) so a persistently
-// broken bundle doesn't flood the log. Backed by a bounded LRU so a churning directory cannot
-// grow the throttle map without bound: every touch (even a suppressed one) refreshes recency,
-// so a persistently-hot key stays resident and stays rate-limited, while stale keys age out
-// and are evicted from the back once the cap is reached. Runs on the single reconcile
-// goroutine (no lock).
+func (p *Provider) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
+	}
+	return time.Now()
+}
+
+// warnThrottled emits a warning under two independent bounds, so both retained state and log
+// volume have hard upper bounds (spec §16/§17):
+//   - per-(msg,key) dedupe via a bounded LRU (warnThrottleMax): a repeated key logs at most
+//     once per errorLogEvery; every touch refreshes recency so a hot key stays resident and
+//     rate-limited, and stale keys are evicted from the back at the cap;
+//   - a provider-wide fixed-window budget (warnEmitBudget per errorLogEvery): once the budget
+//     is spent, further first-seen/eligible warnings are counted, not logged, and one
+//     "file_provider_warnings_suppressed" summary is emitted when the window rolls. Over-budget
+//     keys are NOT inserted into the LRU, so a wide round-robin working set can neither grow the
+//     map nor re-log every scan.
+//
+// Runs on the single reconcile goroutine (no lock).
 func (p *Provider) warnThrottled(key, msg string, kv ...any) {
 	id := msg + "|" + key
-	now := time.Now()
+	now := p.now()
 	if p.throttle == nil {
 		p.throttle = map[string]*list.Element{}
 		p.throttleLRU = list.New()
+		p.winStart = now
+	}
+	// Roll the emission window: report what was suppressed in the window just ended, then reset.
+	if now.Sub(p.winStart) >= errorLogEvery {
+		if p.winSuppressed > 0 {
+			p.logger.Warn("file_provider_warnings_suppressed",
+				"suppressed", p.winSuppressed, "window_seconds", int(errorLogEvery.Seconds()))
+		}
+		p.winStart = now
+		p.winEmitted = 0
+		p.winSuppressed = 0
 	}
 	if el, ok := p.throttle[id]; ok {
 		p.throttleLRU.MoveToFront(el) // touched → most-recently-used, so a hot key is never evicted
 		ent := el.Value.(*throttleEntry)
 		if now.Sub(ent.last) < errorLogEvery {
-			return // still inside the window: suppress (do NOT reset the window)
+			return // deduped: this key already logged within its window
 		}
-		ent.last = now // window elapsed: log again and restart the window
+		// Eligible to log again, but only within the provider-wide window budget.
+		if p.winEmitted >= warnEmitBudget {
+			p.winSuppressed++
+			return
+		}
+		ent.last = now
+		p.winEmitted++
 		p.logger.Warn(msg, kv...)
+		return
+	}
+	// First-seen key. Over budget → count as suppressed and do NOT insert (keeps both the LRU
+	// and the emitted-log count bounded under a wide working set).
+	if p.winEmitted >= warnEmitBudget {
+		p.winSuppressed++
 		return
 	}
 	p.throttle[id] = p.throttleLRU.PushFront(&throttleEntry{id: id, last: now})
@@ -159,6 +209,7 @@ func (p *Provider) warnThrottled(key, msg string, kv ...any) {
 		p.throttleLRU.Remove(back)
 		delete(p.throttle, back.Value.(*throttleEntry).id)
 	}
+	p.winEmitted++
 	p.logger.Warn(msg, kv...)
 }
 

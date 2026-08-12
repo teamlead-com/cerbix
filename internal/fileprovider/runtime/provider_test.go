@@ -205,6 +205,28 @@ func TestLeaderKeyNoFNV32Collision(t *testing.T) {
 	}
 }
 
+// TestAssertDistinctKeysCollisionBranch exercises the fail-fast branch deterministically with
+// a forced-collision key function, and confirms the message names both colliding providers.
+func TestAssertDistinctKeysCollisionBranch(t *testing.T) {
+	// A key function that maps two specific names to the same key.
+	keyFn := func(name string) int64 {
+		if name == "alpha" || name == "beta" {
+			return 0x4600000000000042
+		}
+		return leaderKeyFor(name)
+	}
+	if err := assertDistinctKeys([]string{"gamma", "alpha"}, keyFn); err != nil {
+		t.Fatalf("no collision yet, want nil: %v", err)
+	}
+	err := assertDistinctKeys([]string{"alpha", "gamma", "beta"}, keyFn)
+	if err == nil {
+		t.Fatal("expected a collision error for alpha/beta")
+	}
+	if !strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "beta") {
+		t.Fatalf("collision error should name both providers, got: %v", err)
+	}
+}
+
 // TestFingerprintDetectsChanges covers the watcher's change-detection (§11/§18.3): the
 // directory fingerprint changes on create, content write, and rename, and is stable when
 // nothing changed — so the poll loop coalesces to exactly the rescans it should.

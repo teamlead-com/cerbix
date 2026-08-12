@@ -80,9 +80,15 @@ func leaderKeyFor(name string) int64 {
 // pair refuses to start with an actionable message rather than silently letting one provider
 // never lead (spec §12).
 func AssertDistinctLeaderKeys(names []string) error {
+	return assertDistinctKeys(names, leaderKeyFor)
+}
+
+// assertDistinctKeys is the collision check parameterized by the key function, so the
+// fail-fast branch is unit-testable without hunting a real 56-bit hash collision.
+func assertDistinctKeys(names []string, keyFn func(string) int64) error {
 	seen := make(map[int64]string, len(names))
 	for _, name := range names {
-		k := leaderKeyFor(name)
+		k := keyFn(name)
 		if other, dup := seen[k]; dup {
 			return fmt.Errorf("file providers %q and %q derive the same leadership lock key %#x; rename one of them", other, name, k)
 		}

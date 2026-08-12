@@ -236,6 +236,28 @@ func TestGroupBundlesDuplicateByClaim(t *testing.T) {
 	}
 }
 
+// TestGroupBundlesDuplicateEmitsEveryCompetingPath covers P0-A diagnostics: when two valid files
+// declare one project, BOTH paths must surface as duplicate errors (not just the first), so every
+// rejected file's bundle row is marked. Runs both candidate orderings.
+func TestGroupBundlesDuplicateEmitsEveryCompetingPath(t *testing.T) {
+	scope := config.ProviderScopeConfig{Type: config.ProviderScopeInstance}
+	for _, order := range [][2]string{{"z.yaml", "a.yaml"}, {"a.yaml", "z.yaml"}} {
+		res := GroupBundles([]Candidate{
+			{RelPath: order[0], Data: []byte(bundleYAML("acme", "payments", "api"))},
+			{RelPath: order[1], Data: []byte(bundleYAML("acme", "payments", "web"))},
+		}, scope)
+		dupPaths := map[string]bool{}
+		for _, e := range res.Errors {
+			if e.Err.Reason == ReasonDuplicateProject {
+				dupPaths[e.RelPath] = true
+			}
+		}
+		if !dupPaths["z.yaml"] || !dupPaths["a.yaml"] {
+			t.Fatalf("order %v: both competing paths must get a duplicate error, got %v", order, dupPaths)
+		}
+	}
+}
+
 // TestScanTotalBytesBound covers the cumulative byte limit and the bounded reader: a second
 // file that pushes total past max_total_bytes is rejected (never fully loaded).
 func TestScanTotalBytesBound(t *testing.T) {

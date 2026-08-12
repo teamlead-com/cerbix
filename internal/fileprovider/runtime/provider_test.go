@@ -315,6 +315,57 @@ func TestReconcileCustomTagBodyDoesNotSuspend(t *testing.T) {
 	}
 }
 
+// TestReconcileDuplicateAtCompetingPathPreservesPrior covers P0-A: an owned project's prior
+// LKG path becomes one of several files that DUPLICATE-claim a different project. The prior
+// project must NOT be orphaned even though only "one" duplicate diagnostic is emitted — every
+// competing path is present-but-not-cleanly-applied.
+func TestReconcileDuplicateAtCompetingPathPreservesPrior(t *testing.T) {
+	dir := t.TempDir()
+	// z.yaml (the prior LKG path of acme/payments) and a.yaml both now claim acme/billing →
+	// billing is a duplicate (frozen, not applied); neither path applies cleanly.
+	write(t, dir, "z.yaml", bundle("acme", "billing"))
+	write(t, dir, "a.yaml", bundle("acme", "billing"))
+	fa := &fakeApplier{owned: []store.TenantRef{
+		{Organization: "acme", Project: "payments", SourcePath: "z.yaml"},
+	}}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+	for _, c := range fa.sess().calls {
+		if c.project == "payments" && c.monitors == 0 {
+			t.Fatalf("prior tenant at a now-duplicated competing path must NOT be orphaned: %+v", fa.sess().calls)
+		}
+	}
+	if rep.Orphaned != 0 {
+		t.Fatalf("nothing should be orphaned, rep = %+v", rep)
+	}
+}
+
+// TestReconcileOversizedBundleAtPriorPathPreservesPrior covers P0-B: an owned project's prior
+// LKG path is edited to claim a different project with an over-limit bundle (rejected by the
+// runtime, not the decoder). The prior project must be preserved — the path is present but did
+// not cleanly apply.
+func TestReconcileOversizedBundleAtPriorPathPreservesPrior(t *testing.T) {
+	dir := t.TempDir()
+	// svc.yaml (prior LKG of acme/payments) now declares acme/ghost with TWO monitors.
+	twoMon := "format: 1\norganization: acme\nproject: ghost\nmonitors:\n" +
+		"  a:\n    name: A\n    type: http\n    target: https://x\n" +
+		"  b:\n    name: B\n    type: http\n    target: https://y\n"
+	write(t, dir, "svc.yaml", twoMon)
+	fa := &fakeApplier{owned: []store.TenantRef{
+		{Organization: "acme", Project: "payments", SourcePath: "svc.yaml"},
+	}}
+	p := testProvider(dir, fa)
+	p.limits.MaxMonitorsPerBundle = 1 // make the 2-monitor bundle over the limit
+	rep := p.reconcile(context.Background(), fa.sess())
+	for _, c := range fa.sess().calls {
+		if c.project == "payments" && c.monitors == 0 {
+			t.Fatalf("prior tenant at an over-limit-rejected path must NOT be orphaned: %+v", fa.sess().calls)
+		}
+	}
+	if rep.Orphaned != 0 {
+		t.Fatalf("nothing should be orphaned, rep = %+v", rep)
+	}
+}
+
 func TestReconcileDegradedOnUnreadableDir(t *testing.T) {
 	fa := &fakeApplier{}
 	rep := testProvider(filepath.Join(t.TempDir(), "does-not-exist"), fa).reconcile(context.Background(), fa.sess())

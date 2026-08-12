@@ -201,6 +201,7 @@ func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResu
 		invalid       int             // # of bound-invalid decodes claiming this key
 		decoded       *DesiredProject // the first valid decode (applied only if it wins uniquely)
 		invalidReason Reason          // a bound-invalid reason (used only for a lone bound-invalid)
+		validPaths    []string        // paths of the VALID decodes (bound-invalid ones self-report)
 	}
 	claims := map[string]*claim{}
 	order := make([]string, 0, len(cands)) // keys in first-seen order → deterministic output
@@ -247,6 +248,7 @@ func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResu
 		}
 		cl := note(dp.Organization+"/"+dp.Project, c.RelPath)
 		cl.valid++
+		cl.validPaths = append(cl.validPaths, c.RelPath)
 		if cl.decoded == nil {
 			cl.decoded = dp
 		}
@@ -261,7 +263,18 @@ func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResu
 			// applied, and kept out of orphaning so the reconcile keeps its last-known-good
 			// (spec §6/§9.1). A per-project freeze, not a provider-wide orphan suspension.
 			res.Frozen[key] = ReasonDuplicateProject
-			res.Errors = append(res.Errors, ScanError{RelPath: res.Paths[key], Err: &BundleError{Reason: ReasonDuplicateProject, Msg: "project " + key + " is declared by more than one file"}})
+			// Emit a duplicate error for EVERY valid competing path (not just the first), so each
+			// rejected file's bundle row is marked — a bound-invalid competitor already reported
+			// its own error above. Safety (path freeze) does not depend on this cardinality; it is
+			// for diagnostic completeness (§15). Fall back to the provenance path if a duplicate
+			// somehow has no valid path (all competitors bound-invalid).
+			dupPaths := cl.validPaths
+			if len(dupPaths) == 0 {
+				dupPaths = []string{res.Paths[key]}
+			}
+			for _, pth := range dupPaths {
+				res.Errors = append(res.Errors, ScanError{RelPath: pth, Err: &BundleError{Reason: ReasonDuplicateProject, Msg: "project " + key + " is declared by more than one file"}})
+			}
 		case cl.valid == 1:
 			// Exactly one valid declaration, no other claim → applies.
 			res.Valid[key] = cl.decoded

@@ -168,11 +168,13 @@ type GroupResult struct {
 	Valid map[string]*DesiredProject
 	// Paths maps "org/project" → the tenant-safe relative source path (for provenance).
 	Paths map[string]string
-	// Frozen holds tenant keys that resolved to a tenant but were REJECTED (a duplicate-target
-	// project). Such a project keeps its last-known-good and must NOT be orphaned this scan —
-	// it is neither applied (out of Valid) nor treated as absent (spec §6/§9.1). Distinct from
-	// SuspendOrphan, which is provider-wide.
-	Frozen map[string]bool
+	// Frozen maps tenant keys that resolved to a tenant but were REJECTED (a duplicate-target
+	// project, OR a bundle that bound to a tenant but failed a monitor-level/dependency check)
+	// to the reject reason. Such a project keeps its last-known-good and must NOT be orphaned
+	// this scan — it is neither applied (out of Valid) nor treated as absent (spec §6/§9.1).
+	// Distinct from SuspendOrphan, which is provider-wide. The value is the reason so the
+	// per-project diagnostic reports the real cause, not always "duplicate".
+	Frozen map[string]Reason
 	// Errors are bounded per-file rejections (decode/scope/duplicate).
 	Errors []ScanError
 	// SuspendOrphan is set when a file could not be bound to a tenant (unbound_error): a
@@ -188,7 +190,7 @@ type GroupResult struct {
 // (decode/scope failure) is an unbound_error that suspends orphaning provider-wide (§9.1);
 // independently valid bundles still group for a non-destructive apply.
 func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResult {
-	res := GroupResult{Valid: map[string]*DesiredProject{}, Paths: map[string]string{}, Frozen: map[string]bool{}}
+	res := GroupResult{Valid: map[string]*DesiredProject{}, Paths: map[string]string{}, Frozen: map[string]Reason{}}
 	seen := map[string]int{}                // tenant key → candidate count
 	firstPath := map[string]string{}        // tenant key → first path (for dup diagnostics)
 	decoded := map[string]*DesiredProject{} // tenant key → decoded bundle
@@ -201,8 +203,21 @@ func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResu
 				be = &BundleError{Reason: ReasonInvalidFormat, Msg: "invalid bundle"}
 			}
 			res.Errors = append(res.Errors, ScanError{RelPath: c.RelPath, Err: be})
-			// A file we cannot bind to a tenant freezes orphaning (ambiguous absence).
-			res.SuspendOrphan = true
+			if be.Org != "" && be.Project != "" {
+				// The tenant resolved but the bundle is invalid (a monitor-level/dependency
+				// error): freeze just this project — keep its last-known-good, don't orphan it —
+				// instead of suspending orphaning provider-wide (§9.1). A valid file for the same
+				// project later in the scan still lands in Valid and is applied.
+				key := be.Org + "/" + be.Project
+				res.Frozen[key] = be.Reason
+				if _, seenPath := res.Paths[key]; !seenPath {
+					res.Paths[key] = c.RelPath
+				}
+			} else {
+				// Unbound (format/scope/tenant error): cannot attribute to a project, so absence
+				// is ambiguous → suspend orphaning provider-wide.
+				res.SuspendOrphan = true
+			}
 			continue
 		}
 		key := dp.Organization + "/" + dp.Project
@@ -224,7 +239,7 @@ func GroupBundles(cands []Candidate, scope config.ProviderScopeConfig) GroupResu
 			// of reading it as absent and orphaning it (spec §6/§9.1). This is a per-project
 			// freeze, not a provider-wide orphan suspension.
 			delete(res.Valid, key)
-			res.Frozen[key] = true
+			res.Frozen[key] = ReasonDuplicateProject
 			res.Errors = append(res.Errors, ScanError{RelPath: firstPath[key], Err: &BundleError{Reason: ReasonDuplicateProject, Msg: "project " + key + " is declared by more than one file"}})
 		}
 	}

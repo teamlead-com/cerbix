@@ -76,44 +76,126 @@ func Decode(data []byte, scope config.ProviderScopeConfig) (*DesiredProject, err
 		return nil, be
 	}
 
+	// Recover a BINDABLE tenant identity from the parsed header up front, from the node tree
+	// (not the typed struct), so that even a strict typed-decode failure below (unknown monitor
+	// field, wrong field type, a nested duplicate key) can be attributed to a project when the
+	// tenant header is unambiguous — §9.1 draws the line at "cannot be associated with a
+	// tenant", not "the typed decode failed". A bindable error freezes just that project;
+	// only a genuinely unbindable one (ambiguous/duplicate/malformed header, or a scope that
+	// leaves the tenant undetermined) suspends orphaning provider-wide. bind() is a no-op when
+	// the tenant is unbindable, so those errors stay unbound.
+	boundOrg, boundProject, tenantOK := bindableTenant(scope, &doc)
+	bind := func(err error) error {
+		if tenantOK {
+			return bindTenant(err, boundOrg, boundProject)
+		}
+		return err
+	}
+
 	var raw rawBundle
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true) // unknown root/monitor fields (incl. server-owned) reject
 	if err := dec.Decode(&raw); err != nil {
-		return nil, decodeError(err)
+		return nil, bind(decodeError(err))
 	}
 	// Exactly one document per file.
 	if err := dec.Decode(new(struct{})); !errors.Is(err, io.EOF) {
-		return nil, rejectf(ReasonInvalidFormat, "", "a bundle file must contain exactly one YAML document")
+		return nil, bind(rejectf(ReasonInvalidFormat, "", "a bundle file must contain exactly one YAML document"))
 	}
 
 	if raw.Format == nil {
-		return nil, rejectf(ReasonInvalidFormat, "", "root `format` is required")
+		return nil, bind(rejectf(ReasonInvalidFormat, "", "root `format` is required"))
 	}
 	if *raw.Format != 1 {
-		return nil, rejectf(ReasonInvalidFormat, "", "unsupported bundle format %d (want 1)", *raw.Format)
+		return nil, bind(rejectf(ReasonInvalidFormat, "", "unsupported bundle format %d (want 1)", *raw.Format))
 	}
 
+	// Authoritative scope-contract resolution from the typed header. On success it equals the
+	// header-derived bindable tenant; on failure (a scope violation) the error is still bound
+	// when the tenant is determinable, else provider-wide.
 	org, project, err := resolveTenant(scope, raw.Organization, raw.Project)
 	if err != nil {
-		return nil, err
+		return nil, bind(err)
 	}
 	if raw.Monitors == nil {
-		return nil, rejectf(ReasonEmptyBundle, "", "root `monitors` map is required (empty map is allowed, but the key must be present)")
+		return nil, bind(rejectf(ReasonEmptyBundle, "", "root `monitors` map is required (empty map is allowed, but the key must be present)"))
 	}
 
 	dp := &DesiredProject{Organization: org, Project: project, Monitors: make(map[string]DesiredMonitor, len(raw.Monitors))}
 	for uid, rm := range raw.Monitors {
 		dm, err := buildMonitor(uid, rm)
 		if err != nil {
-			return nil, err
+			return nil, bind(err)
 		}
 		dp.Monitors[uid] = dm
 	}
 	if err := checkDependencyDAG(dp); err != nil {
-		return nil, err
+		return nil, bind(err)
 	}
 	return dp, nil
+}
+
+// bindableTenant recovers the (org, project) a bundle can be attributed to, from the parsed
+// header node, per the scope→tenant matrix (§5) but WITHOUT the scope-contract validation
+// resolveTenant enforces — the point is orphan-safety attribution (§9.1), not acceptance:
+//   - project scope: the tenant is static (from config), always bindable;
+//   - organization scope: bindable when the header has exactly one unambiguous scalar `project`;
+//   - instance scope: bindable when the header has unique scalar `organization` AND `project`.
+//
+// A missing, repeated, or non-scalar tenant key leaves the tenant undetermined (ok=false), so a
+// decode failure there stays provider-wide.
+func bindableTenant(scope config.ProviderScopeConfig, doc *yaml.Node) (org, project string, ok bool) {
+	hdrOrg, hdrProject := tenantHeaderFromNode(doc)
+	switch scope.Type {
+	case config.ProviderScopeProject:
+		return scope.Organization, scope.Project, true
+	case config.ProviderScopeOrganization:
+		if hdrProject != "" {
+			return scope.Organization, hdrProject, true
+		}
+	case config.ProviderScopeInstance:
+		if hdrOrg != "" && hdrProject != "" {
+			return hdrOrg, hdrProject, true
+		}
+	}
+	return "", "", false
+}
+
+// tenantHeaderFromNode reads the root `organization`/`project` scalars from the parsed document
+// for tenant binding. It returns a value ONLY for an unambiguous header: a key present exactly
+// once with a scalar value. A key that is absent, repeated (duplicate root key), or non-scalar
+// (a map/seq) yields "" so the tenant is treated as undetermined (§9.1).
+func tenantHeaderFromNode(doc *yaml.Node) (org, project string) {
+	root := doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return "", ""
+	}
+	return uniqueScalarValue(root, "organization"), uniqueScalarValue(root, "project")
+}
+
+// uniqueScalarValue returns the scalar value of key in a mapping node only when the key appears
+// exactly once with a scalar value; otherwise "".
+func uniqueScalarValue(m *yaml.Node, key string) string {
+	var val string
+	seen := 0
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value != key {
+			continue
+		}
+		seen++
+		if v := m.Content[i+1]; v.Kind == yaml.ScalarNode {
+			val = v.Value
+		} else {
+			return "" // non-scalar tenant header → undetermined
+		}
+	}
+	if seen != 1 {
+		return "" // absent or duplicated → not unambiguous
+	}
+	return val
 }
 
 // YAML structural bounds (spec §14): defense against deeply-nested / oversized / custom-tagged

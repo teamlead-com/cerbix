@@ -160,6 +160,41 @@ func TestReconcileSuspendsOrphanOnUnbound(t *testing.T) {
 	}
 }
 
+// TestReconcileBoundMonitorErrorDoesNotSuspendOrphaning covers the #4 fix end to end: a bundle
+// with a resolved tenant but an invalid monitor is FROZEN per-project (not orphaned), and it
+// must NOT suspend orphaning provider-wide — an independent absent, in-scope project is still
+// orphaned. Pre-fix, the bad bundle set SuspendOrphan and legacy was NOT orphaned.
+func TestReconcileBoundMonitorErrorDoesNotSuspendOrphaning(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "bad.yaml", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: bogus\n    target: t\n")
+	write(t, dir, "billing.yaml", bundle("acme", "billing"))
+	fa := &fakeApplier{owned: []store.TenantRef{
+		{Organization: "acme", Project: "payments"}, // frozen (bad bundle) → must NOT be orphaned
+		{Organization: "acme", Project: "billing"},  // present/valid → applied
+		{Organization: "acme", Project: "legacy"},   // absent, in-scope → must STILL be orphaned
+	}}
+	rep := testProvider(dir, fa).reconcile(context.Background(), fa.sess())
+
+	var legacyOrphaned, paymentsOrphaned bool
+	for _, c := range fa.sess().calls {
+		if c.monitors == 0 && c.project == "legacy" {
+			legacyOrphaned = true
+		}
+		if c.monitors == 0 && c.project == "payments" {
+			paymentsOrphaned = true
+		}
+	}
+	if !legacyOrphaned {
+		t.Fatalf("absent in-scope project must still be orphaned; a bound monitor-error bundle must not suspend orphaning: %+v", fa.sess().calls)
+	}
+	if paymentsOrphaned {
+		t.Fatal("the frozen (invalid) project must NOT be orphaned")
+	}
+	if rep.Orphaned != 1 {
+		t.Fatalf("exactly legacy should be orphaned, rep = %+v", rep)
+	}
+}
+
 func TestReconcileDegradedOnUnreadableDir(t *testing.T) {
 	fa := &fakeApplier{}
 	rep := testProvider(filepath.Join(t.TempDir(), "does-not-exist"), fa).reconcile(context.Background(), fa.sess())

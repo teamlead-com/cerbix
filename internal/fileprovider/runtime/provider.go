@@ -421,12 +421,14 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		// a duplicate is also persisted per-tenant by the Frozen loop below.
 		p.persistAttemptByPath(ctx, session, se.RelPath, string(se.Err.Reason))
 	}
-	// Persist tenant-bound (duplicate) rejections to diagnostics so a frozen project SHOWS as
-	// rejected, not silently process-local (§15). Unbound decode/scope/scan rejections have no
-	// tenant to pin, so they remain log-only (documented limitation).
-	for key := range grp.Frozen {
+	// Persist tenant-bound (frozen) rejections to diagnostics so a frozen project SHOWS as
+	// rejected, not silently process-local (§15) — with its ACTUAL reason (duplicate, or a
+	// monitor-level/dependency error in a bundle that bound to this tenant), not always
+	// "duplicate". Unbound decode/scope/scan rejections have no tenant to pin, so they remain
+	// log-only (documented limitation).
+	for key, reason := range grp.Frozen {
 		if org, proj, ok := splitTenantKey(key); ok {
-			p.persistAttempt(ctx, session, org, proj, grp.Paths[key], "rejected", string(fileprovider.ReasonDuplicateProject))
+			p.persistAttempt(ctx, session, org, proj, grp.Paths[key], "rejected", string(reason))
 		}
 	}
 
@@ -491,7 +493,7 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		}
 		for _, t := range owned {
 			key := t.Organization + "/" + t.Project
-			if presentKeys[key] || grp.Frozen[key] {
+			if _, frozen := grp.Frozen[key]; presentKeys[key] || frozen {
 				continue
 			}
 			empty := &fileprovider.DesiredProject{Organization: t.Organization, Project: t.Project, Monitors: map[string]fileprovider.DesiredMonitor{}}

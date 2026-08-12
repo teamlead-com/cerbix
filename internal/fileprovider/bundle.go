@@ -41,6 +41,13 @@ type BundleError struct {
 	Reason Reason
 	UID    string // optional: the offending monitor UID
 	Msg    string
+	// Org/Project are set when the rejection happened AFTER the bundle's tenant was resolved
+	// (a monitor-level or dependency error in an otherwise-bound bundle). They let the grouping
+	// layer freeze just that project instead of suspending orphaning provider-wide (§9.1): a
+	// tenant-bindable invalid is per-project, not an unbound error. Empty when the tenant could
+	// not be resolved (format/scope/tenant errors), which remain provider-wide.
+	Org     string
+	Project string
 }
 
 func (e *BundleError) Error() string {
@@ -52,6 +59,16 @@ func (e *BundleError) Error() string {
 
 func rejectf(r Reason, uid, format string, args ...any) *BundleError {
 	return &BundleError{Reason: r, UID: uid, Msg: fmt.Sprintf(format, args...)}
+}
+
+// bindTenant tags a post-tenant-resolution rejection with the resolved (org, project) so the
+// grouping layer can freeze just that project instead of suspending orphaning provider-wide
+// (§9.1: a tenant-bindable invalid is per-project). Non-*BundleError values pass through.
+func bindTenant(err error, org, project string) error {
+	if be, ok := err.(*BundleError); ok {
+		be.Org, be.Project = org, project
+	}
+	return err
 }
 
 // DesiredMonitor is one normalized, validated monitor from a bundle (pre-apply). ProjectID

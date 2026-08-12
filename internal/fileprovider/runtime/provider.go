@@ -405,9 +405,19 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		p.logger.Warn("file_provider_scan_failed", "error", err.Error())
 		return rep
 	}
+	// rejectedPaths is the set of relative paths that ARE present this scan but did NOT cleanly
+	// apply — a scan error, a decode/scope failure, or (below) an apply failure. It drives the
+	// path-keyed orphan protection (§9.1): an owned project whose prior last-known-good path is
+	// in this set is frozen (kept), NOT orphaned — even if that file's header now names a
+	// different tenant (a typo) or its body is invalid. This is the P0 fix: absence is only
+	// trusted when the prior path is truly gone or was cleanly re-applied.
+	rejectedPaths := map[string]bool{}
 	for _, se := range scanErrs {
 		rep.Rejected++
 		rep.LastError = string(se.Err.Reason)
+		if se.RelPath != "" {
+			rejectedPaths[se.RelPath] = true
+		}
 		p.warnThrottled(se.RelPath, "file_provider_file_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
 		// A scan-level rejection at a previously-applied path marks that known bundle rejected.
 		p.persistAttemptByPath(ctx, session, se.RelPath, string(se.Err.Reason))
@@ -416,6 +426,9 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 	for _, se := range grp.Errors {
 		rep.Rejected++
 		rep.LastError = string(se.Err.Reason)
+		if se.RelPath != "" {
+			rejectedPaths[se.RelPath] = true
+		}
 		p.warnThrottled(se.RelPath, "file_provider_bundle_rejected", "path", se.RelPath, "reason", string(se.Err.Reason))
 		// A decode/scope failure at a known path marks that known LKG bundle rejected (§9.1);
 		// a duplicate is also persisted per-tenant by the Frozen loop below.
@@ -462,6 +475,11 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 		res, aerr := session.ApplyFileManagedBundle(ctx, p.name, dp, grp.Paths[key], p.orphanGrace, p.limits.MaxManagedMonitors, allowAbsence)
 		if aerr != nil {
 			rep.Rejected++
+			// Present but did NOT cleanly apply (e.g. tenant not found): the path is rejected, so
+			// a prior tenant whose last-known-good path is this file is frozen below, not orphaned.
+			if pth := grp.Paths[key]; pth != "" {
+				rejectedPaths[pth] = true
+			}
 			reason, status := classify(aerr), "error"
 			rep.LastError = reason
 			var be *fileprovider.BundleError
@@ -500,6 +518,18 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 			if !p.scope.Includes(t.Organization, t.Project) {
 				p.warnThrottled(t.Organization+"/"+t.Project, "file_provider_owned_out_of_scope",
 					"org", t.Organization, "project", t.Project, "scope", p.scope.Type)
+				continue
+			}
+			// Path-driven orphan protection (§9.1, P0): the file at this project's prior
+			// last-known-good source path IS present this scan but did NOT cleanly apply (scan
+			// error / decode error / apply error). Absence cannot be trusted for THIS tenant —
+			// regardless of that file's current header (a typo now naming a different project) or
+			// an invalid body — so freeze its last-known-good instead of orphaning it. Only a
+			// truly-absent path (gone) or a cleanly re-applied one (possibly a migration) lets
+			// absence be trusted here.
+			if t.SourcePath != "" && rejectedPaths[t.SourcePath] {
+				p.warnThrottled(t.Organization+"/"+t.Project, "file_provider_owned_path_rejected",
+					"org", t.Organization, "project", t.Project, "path", t.SourcePath)
 				continue
 			}
 			key := t.Organization + "/" + t.Project

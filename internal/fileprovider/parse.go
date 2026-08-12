@@ -72,24 +72,30 @@ func Decode(data []byte, scope config.ProviderScopeConfig) (*DesiredProject, err
 		}
 		return nil, decodeError(err)
 	}
-	if be := checkYAMLPolicy(&doc, 0, new(int)); be != nil {
-		return nil, be
-	}
-
 	// Recover a BINDABLE tenant identity from the parsed header up front, from the node tree
 	// (not the typed struct), so that even a strict typed-decode failure below (unknown monitor
-	// field, wrong field type, a nested duplicate key) can be attributed to a project when the
-	// tenant header is unambiguous — §9.1 draws the line at "cannot be associated with a
-	// tenant", not "the typed decode failed". A bindable error freezes just that project;
-	// only a genuinely unbindable one (ambiguous/duplicate/malformed header, or a scope that
-	// leaves the tenant undetermined) suspends orphaning provider-wide. bind() is a no-op when
-	// the tenant is unbindable, so those errors stay unbound.
+	// field, wrong field type, a nested duplicate key) — OR a structural-policy rejection
+	// (custom tag / depth / node-count) in a bundle whose header is unambiguous — can be
+	// attributed to a project. §9.1 draws the line at "cannot be associated with a tenant", not
+	// "the decode/policy check failed". Extracting from the already-parsed `doc` node is safe
+	// even if the policy check below rejects the document. A bindable error freezes just that
+	// project; only a genuinely unbindable one (ambiguous/duplicate/malformed header, or a scope
+	// that leaves the tenant undetermined) suspends orphaning provider-wide. bind() is a no-op
+	// when the tenant is unbindable, so those errors stay unbound.
 	boundOrg, boundProject, tenantOK := bindableTenant(scope, &doc)
 	bind := func(err error) error {
 		if tenantOK {
 			return bindTenant(err, boundOrg, boundProject)
 		}
 		return err
+	}
+
+	// Structural policy (spec §14): bound nesting depth + total node count and reject
+	// custom/non-core YAML tags, BEFORE binding to the typed struct. A policy rejection in a
+	// header-unambiguous bundle is bound to its project (see above) so it freezes per-project
+	// instead of suspending orphaning provider-wide.
+	if be := checkYAMLPolicy(&doc, 0, new(int)); be != nil {
+		return nil, bind(be)
 	}
 
 	var raw rawBundle
@@ -116,6 +122,17 @@ func Decode(data []byte, scope config.ProviderScopeConfig) (*DesiredProject, err
 	org, project, err := resolveTenant(scope, raw.Organization, raw.Project)
 	if err != nil {
 		return nil, bind(err)
+	}
+	// The authoritative resolution now wins over the up-front node-scan for any POST-resolve
+	// error (a monitor-level/dependency/empty-bundle rejection below): rebind to it, so a header
+	// expressed through decoder-resolved forms the raw node-scan cannot see (YAML merge
+	// keys/anchors) is still attributed to its project. EXCEPT when a tenant header is directly
+	// declared with a non-string value (organization: 123): yaml coerces it to a string for the
+	// typed struct, but a numeric/bool value is not a slug (D3) — adopting it would bind a
+	// rejection to a bogus tenant. A header absent from the direct node content (resolved only
+	// through a merge-key/anchor) is NOT poisoned, so that legitimate case still rebinds.
+	if !tenantHeaderPoisoned(&doc) {
+		boundOrg, boundProject, tenantOK = org, project, true
 	}
 	if raw.Monitors == nil {
 		return nil, bind(rejectf(ReasonEmptyBundle, "", "root `monitors` map is required (empty map is allowed, but the key must be present)"))
@@ -176,6 +193,33 @@ func tenantHeaderFromNode(doc *yaml.Node) (org, project string) {
 	return uniqueScalarValue(root, "organization"), uniqueScalarValue(root, "project")
 }
 
+// tenantHeaderPoisoned reports whether the root header DIRECTLY declares `organization` or
+// `project` with a value that is present but NOT a plain string (a numeric/bool/other-tagged
+// scalar, or a map/seq). Such a value is not a slug (D3), so the authoritative rebind must not
+// adopt the decoder's coerced form. A key resolved only through a merge-key/anchor is ABSENT
+// from the direct content and therefore NOT poisoned, so that legitimate rebind still proceeds.
+func tenantHeaderPoisoned(doc *yaml.Node) bool {
+	root := doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	poisoned := func(key string) bool {
+		for i := 0; i+1 < len(root.Content); i += 2 {
+			if root.Content[i].Value != key {
+				continue
+			}
+			if v := root.Content[i+1]; v.Kind != yaml.ScalarNode || (v.Tag != "" && v.Tag != "!!str") {
+				return true
+			}
+		}
+		return false
+	}
+	return poisoned("organization") || poisoned("project")
+}
+
 // uniqueScalarValue returns the scalar value of key in a mapping node only when the key appears
 // exactly once with a scalar value; otherwise "".
 func uniqueScalarValue(m *yaml.Node, key string) string {
@@ -186,10 +230,13 @@ func uniqueScalarValue(m *yaml.Node, key string) string {
 			continue
 		}
 		seen++
-		if v := m.Content[i+1]; v.Kind == yaml.ScalarNode {
+		// A tenant slug is a plain string: accept only a scalar carrying the core string tag
+		// (untagged or !!str). A numeric/bool/other-tagged value (organization: 123, project:
+		// true, a !!binary, …) is NOT a slug → treat the tenant as undetermined/unbound.
+		if v := m.Content[i+1]; v.Kind == yaml.ScalarNode && (v.Tag == "" || v.Tag == "!!str") {
 			val = v.Value
 		} else {
-			return "" // non-scalar tenant header → undetermined
+			return "" // non-scalar / non-string-tagged tenant header → undetermined
 		}
 	}
 	if seen != 1 {

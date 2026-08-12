@@ -443,10 +443,14 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 	}, nil
 }
 
-// TenantRef is an (organization, project) slug pair a provider owns bundles for.
+// TenantRef is an (organization, project) slug pair a provider owns bundles for, plus the
+// tenant's last-known-good source path. SourcePath is the path the bundle was last applied
+// from; the reconcile loop uses it to key path-driven orphan protection (§9.1): an owned
+// project whose prior path is present-but-rejected this scan is frozen, not orphaned.
 type TenantRef struct {
 	Organization string
 	Project      string
+	SourcePath   string
 }
 
 // FileProviderProjects lists the distinct tenants a provider currently owns a bundle for
@@ -455,7 +459,7 @@ type TenantRef struct {
 // scan suspended orphaning). Ordered for deterministic processing.
 func (s *Store) FileProviderProjects(ctx context.Context, providerID string) ([]TenantRef, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT o.slug, p.slug
+		`SELECT o.slug, p.slug, b.source_path
 		   FROM file_provider_bundles b
 		   JOIN organizations o ON o.id = b.org_id
 		   JOIN projects p ON p.id = b.project_id
@@ -468,7 +472,7 @@ func (s *Store) FileProviderProjects(ctx context.Context, providerID string) ([]
 	var out []TenantRef
 	for rows.Next() {
 		var t TenantRef
-		if err := rows.Scan(&t.Organization, &t.Project); err != nil {
+		if err := rows.Scan(&t.Organization, &t.Project, &t.SourcePath); err != nil {
 			return nil, fmt.Errorf("store: scan provider project: %w", err)
 		}
 		out = append(out, t)

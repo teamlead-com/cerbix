@@ -69,6 +69,21 @@ func TestDecodeUnboundOnAmbiguousHeader(t *testing.T) {
 	}
 }
 
+// TestDecodeNumericTenantHeaderUnbound covers PART D3: a numeric (non-string) tenant value is
+// not a plain-string slug, so the header is undetermined and a rejection stays UNBOUND
+// (provider-wide) rather than binding to the bogus "123/payments" key.
+func TestDecodeNumericTenantHeaderUnbound(t *testing.T) {
+	y := "format: 1\norganization: 123\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: bogus\n    target: t\n"
+	_, err := Decode([]byte(y), instanceScope())
+	var be *BundleError
+	if !errors.As(err, &be) {
+		t.Fatalf("want *BundleError, got %v", err)
+	}
+	if be.Org != "" || be.Project != "" {
+		t.Fatalf("a numeric tenant value is not a plain-string slug → must stay unbound, got %q/%q", be.Org, be.Project)
+	}
+}
+
 // TestDecodeUnboundOnMissingInstanceHeader: instance scope with no org/project header cannot
 // determine a tenant → unbound.
 func TestDecodeUnboundOnMissingInstanceHeader(t *testing.T) {

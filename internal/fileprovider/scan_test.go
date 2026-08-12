@@ -213,6 +213,29 @@ func TestGroupBundlesBoundMonitorErrorFreezesNotSuspend(t *testing.T) {
 	}
 }
 
+// TestGroupBundlesDuplicateByClaim covers PART C: a BOUND-invalid file (valid header, invalid
+// monitor) still DECLARES its project, so a competing valid file claiming the same project is a
+// duplicate — both are rejected and the project is frozen (never silently applied), without
+// suspending orphaning provider-wide.
+func TestGroupBundlesDuplicateByClaim(t *testing.T) {
+	scope := config.ProviderScopeConfig{Type: config.ProviderScopeInstance}
+	// Bound-invalid: valid acme/payments header, invalid monitor type.
+	bad := "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: bogus\n    target: t\n"
+	res := GroupBundles([]Candidate{
+		{RelPath: "bad.yaml", Data: []byte(bad)},
+		{RelPath: "good.yaml", Data: []byte(bundleYAML("acme", "payments", "api"))}, // valid, SAME claim
+	}, scope)
+	if r, ok := res.Frozen["acme/payments"]; !ok || r != ReasonDuplicateProject {
+		t.Fatalf("a bound-invalid + a valid file claiming one project is a DUPLICATE, got %q ok=%v", r, ok)
+	}
+	if _, ok := res.Valid["acme/payments"]; ok {
+		t.Fatal("a duplicate-by-claim project must NOT be in Valid (never silently applied)")
+	}
+	if res.SuspendOrphan {
+		t.Fatal("a bindable duplicate-by-claim must NOT suspend orphaning provider-wide")
+	}
+}
+
 // TestScanTotalBytesBound covers the cumulative byte limit and the bounded reader: a second
 // file that pushes total past max_total_bytes is rejected (never fully loaded).
 func TestScanTotalBytesBound(t *testing.T) {

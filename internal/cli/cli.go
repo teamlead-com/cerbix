@@ -859,6 +859,12 @@ func startFileProviders(ctx context.Context, cfg *config.Config, role string, st
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// Provider leadership advisory keys are derived from the provider name; refuse to start if
+	// two configured names collide on one key, so leadership is collision-free by construction
+	// rather than merely improbable (§12).
+	if err := fpruntime.AssertDistinctLeaderKeys(names); err != nil {
+		return err
+	}
 	// One process-local status registry backs the diagnostics API (§15): every provider
 	// (writer) registers at New so configured-but-idle providers surface before their first
 	// reconcile; the api handler reads a snapshot on demand.

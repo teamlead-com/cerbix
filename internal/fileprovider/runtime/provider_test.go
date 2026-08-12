@@ -169,7 +169,8 @@ func TestReconcileDegradedOnUnreadableDir(t *testing.T) {
 }
 
 // TestLeaderKeyDerivation covers §12: each provider elects on its own advisory key, distinct
-// per name and namespaced away from the scheduler (…0001) and migrate (…0002) keys.
+// per name, in the file-provider namespace and away from the scheduler (…0001) and migrate
+// (…0002) keys.
 func TestLeaderKeyDerivation(t *testing.T) {
 	a := leaderKeyFor("platform")
 	b := leaderKeyFor("acme")
@@ -182,13 +183,25 @@ func TestLeaderKeyDerivation(t *testing.T) {
 		if k == schedulerKey || k == migrateKey {
 			t.Fatalf("provider leader key %#x collides with a reserved key", k)
 		}
-		if k&fileProviderLeaderBaseKey != fileProviderLeaderBaseKey {
-			t.Fatalf("provider leader key %#x is not in the file-provider namespace", k)
+		if k>>56 != 0x46 {
+			t.Fatalf("provider leader key %#x is not in the file-provider namespace (top byte != 0x46)", k)
 		}
 	}
 	// Deterministic across calls.
 	if leaderKeyFor("platform") != a {
 		t.Fatal("leader key must be stable for a given name")
+	}
+}
+
+// TestLeaderKeyNoFNV32Collision guards the #6 regression: two names whose FNV-1a-32 hashes
+// collide (0x7d48fcb7) must NOT map to the same advisory key under the FNV-1a-64 derivation.
+func TestLeaderKeyNoFNV32Collision(t *testing.T) {
+	const n1, n2 = "p18s8xllr6dp", "p1lxyx1cpu7tz"
+	if leaderKeyFor(n1) == leaderKeyFor(n2) {
+		t.Fatalf("names %q and %q (equal FNV-32) must derive distinct leader keys", n1, n2)
+	}
+	if err := AssertDistinctLeaderKeys([]string{n1, n2, "platform", "acme"}); err != nil {
+		t.Fatalf("distinct names should pass the collision guard: %v", err)
 	}
 }
 

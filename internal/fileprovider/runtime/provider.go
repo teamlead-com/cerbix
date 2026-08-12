@@ -7,6 +7,7 @@ package runtime
 import (
 	"container/list"
 	"context"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"os"
@@ -52,16 +53,42 @@ type MetricsSink interface {
 	SetFileProviderReconcileStats(name string, durationSeconds float64, lastSuccessUnix int64, bundleErrors int)
 }
 
-// fileProviderLeaderBaseKey namespaces per-provider advisory locks away from the scheduler
-// (…0001) and migrate (…0002) keys. The low 32 bits are an FNV hash of the provider name, so
-// each provider elects independently and a name change (a restart-only event) re-keys.
-const fileProviderLeaderBaseKey int64 = 0x6365726269781000
+// fileProviderLeaderNamespace tags the high byte of every file-provider leadership advisory
+// key. It is disjoint from the scheduler (0x6365726269780001) and migrate
+// (0x6365726269780002) fixed keys — those sit under the 0x6365726269780000 prefix — and
+// leaves the low 56 bits for a per-provider identity hash.
+const fileProviderLeaderNamespace int64 = 0x46 << 56 // 'F' for file provider
 
-// leaderKeyFor derives a stable, provider-specific advisory-lock key.
+// leaderKeyFor derives a stable, provider-specific advisory-lock key from the provider name
+// (a file provider's only persisted identity — provider_id is the name). The old scheme was
+// base | FNV-1a-32(name): a single 32-bit hash under a fixed prefix, so two provider names
+// whose 32-bit hash collided produced the SAME advisory key and serialized permanently — one
+// provider never led while the other was healthy (spec §12). This hashes the name with
+// FNV-1a-64 into the low 56 bits under the namespace byte, cutting the accidental-collision
+// probability from ~2^-32 to ~2^-56; and AssertDistinctLeaderKeys makes leadership
+// collision-FREE for any real deployment by refusing to start if two CONFIGURED names still
+// map to one key.
 func leaderKeyFor(name string) int64 {
-	h := fnv.New32a()
+	h := fnv.New64a()
 	_, _ = h.Write([]byte(name))
-	return fileProviderLeaderBaseKey | int64(h.Sum32())
+	return fileProviderLeaderNamespace | int64(h.Sum64()&0x00FFFFFFFFFFFFFF)
+}
+
+// AssertDistinctLeaderKeys fails if any two provider names derive the same leadership advisory
+// key. Provider names are operator-trusted and bounded, and this runs once at startup, so it
+// turns the (already tiny) hash-collision risk into a hard, deterministic guarantee: a colliding
+// pair refuses to start with an actionable message rather than silently letting one provider
+// never lead (spec §12).
+func AssertDistinctLeaderKeys(names []string) error {
+	seen := make(map[int64]string, len(names))
+	for _, name := range names {
+		k := leaderKeyFor(name)
+		if other, dup := seen[k]; dup {
+			return fmt.Errorf("file providers %q and %q derive the same leadership lock key %#x; rename one of them", other, name, k)
+		}
+		seen[k] = name
+	}
+	return nil
 }
 
 // Provider is one configured file provider's live reconciler.

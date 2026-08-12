@@ -5,6 +5,7 @@
 package runtime
 
 import (
+	"container/list"
 	"context"
 	"hash/fnv"
 	"log/slog"
@@ -81,24 +82,56 @@ type Provider struct {
 
 	leaderCheckEvery time.Duration
 	pollEvery        time.Duration
-	lastLog          map[string]time.Time // per-reason log throttle (single reconcile goroutine)
+	// throttle rate-limits repeated warnings per (msg,key). It is a bounded LRU: without a cap
+	// a churning directory (up to ReadDirBounded distinct filenames per scan) would grow the
+	// map for the process lifetime (spec §16/§17). Single reconcile goroutine (no lock).
+	throttle    map[string]*list.Element
+	throttleLRU *list.List // front = most-recently-touched; evicted from the back
 }
 
 // errorLogEvery rate-limits repeated parse/apply/watcher error logs (spec §16).
 const errorLogEvery = 30 * time.Second
 
+// warnThrottleMax bounds the number of distinct (msg,key) throttle entries kept in memory.
+// Well below ReadDirBounded (50k) so per-file/per-tenant churn cannot grow it without bound,
+// yet large enough to retain the working set of a realistic broken snapshot.
+const warnThrottleMax = 2048
+
+// throttleEntry is one LRU entry: the throttle key and when it last actually logged.
+type throttleEntry struct {
+	id   string
+	last time.Time
+}
+
 // warnThrottled logs a warning at most once per errorLogEvery per (msg,key) so a persistently
-// broken bundle doesn't flood the log. Runs on the single reconcile goroutine (no lock).
+// broken bundle doesn't flood the log. Backed by a bounded LRU so a churning directory cannot
+// grow the throttle map without bound: every touch (even a suppressed one) refreshes recency,
+// so a persistently-hot key stays resident and stays rate-limited, while stale keys age out
+// and are evicted from the back once the cap is reached. Runs on the single reconcile
+// goroutine (no lock).
 func (p *Provider) warnThrottled(key, msg string, kv ...any) {
-	if p.lastLog == nil {
-		p.lastLog = map[string]time.Time{}
-	}
 	id := msg + "|" + key
 	now := time.Now()
-	if last, ok := p.lastLog[id]; ok && now.Sub(last) < errorLogEvery {
+	if p.throttle == nil {
+		p.throttle = map[string]*list.Element{}
+		p.throttleLRU = list.New()
+	}
+	if el, ok := p.throttle[id]; ok {
+		p.throttleLRU.MoveToFront(el) // touched → most-recently-used, so a hot key is never evicted
+		ent := el.Value.(*throttleEntry)
+		if now.Sub(ent.last) < errorLogEvery {
+			return // still inside the window: suppress (do NOT reset the window)
+		}
+		ent.last = now // window elapsed: log again and restart the window
+		p.logger.Warn(msg, kv...)
 		return
 	}
-	p.lastLog[id] = now
+	p.throttle[id] = p.throttleLRU.PushFront(&throttleEntry{id: id, last: now})
+	for p.throttleLRU.Len() > warnThrottleMax {
+		back := p.throttleLRU.Back()
+		p.throttleLRU.Remove(back)
+		delete(p.throttle, back.Value.(*throttleEntry).id)
+	}
 	p.logger.Warn(msg, kv...)
 }
 

@@ -195,6 +195,42 @@ func TestReconcileBoundMonitorErrorDoesNotSuspendOrphaning(t *testing.T) {
 	}
 }
 
+// TestReconcileSkipsOutOfScopeOwnedProjects covers the #2 fix: a previously-managed project
+// OUTSIDE the provider's current scope (e.g. after a restart with the same name but a changed
+// scope value) must NOT be orphaned, while an absent IN-scope project still is.
+func TestReconcileSkipsOutOfScopeOwnedProjects(t *testing.T) {
+	dir := t.TempDir()
+	// Organization-scoped bundle: `project` only, no `organization` field.
+	write(t, dir, "payments.yaml", "format: 1\nproject: payments\nmonitors:\n  api:\n    name: M\n    type: http\n    target: https://x\n")
+	fa := &fakeApplier{owned: []store.TenantRef{
+		{Organization: "acme", Project: "payments"}, // present → applied
+		{Organization: "acme", Project: "billing"},  // absent, in-scope → orphaned
+		{Organization: "beta", Project: "legacy"},   // absent, OUT of scope (prior scope) → skipped
+	}}
+	p := testProvider(dir, fa)
+	p.scope = config.ProviderScopeConfig{Type: config.ProviderScopeOrganization, Organization: "acme"}
+	rep := p.reconcile(context.Background(), fa.sess())
+
+	var billingOrphaned, betaOrphaned bool
+	for _, c := range fa.sess().calls {
+		if c.monitors == 0 && c.project == "billing" {
+			billingOrphaned = true
+		}
+		if c.monitors == 0 && c.project == "legacy" {
+			betaOrphaned = true
+		}
+	}
+	if !billingOrphaned {
+		t.Fatal("an absent in-scope project must be orphaned")
+	}
+	if betaOrphaned {
+		t.Fatal("an owned project OUTSIDE the current scope must NOT be orphaned (a scope change must not destroy prior-scope rows)")
+	}
+	if rep.Orphaned != 1 {
+		t.Fatalf("only in-scope billing should be orphaned, rep = %+v", rep)
+	}
+}
+
 func TestReconcileDegradedOnUnreadableDir(t *testing.T) {
 	fa := &fakeApplier{}
 	rep := testProvider(filepath.Join(t.TempDir(), "does-not-exist"), fa).reconcile(context.Background(), fa.sess())

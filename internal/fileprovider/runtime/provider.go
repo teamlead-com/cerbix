@@ -492,6 +492,16 @@ func (p *Provider) reconcileInner(ctx context.Context, session LeaderSession) Re
 			return rep
 		}
 		for _, t := range owned {
+			// Never orphan a previously-managed project that is OUTSIDE the current scope. The
+			// owned set is keyed on provider name alone, so after a restart with the same name but
+			// a narrower/different scope value the old-scope rows would look absent and be
+			// orphaned/disabled — there is no scope-identity guard in the store. Skipping them
+			// keeps their last-known-good; only in-scope absence is trusted (§9.1/§10).
+			if !p.scope.Includes(t.Organization, t.Project) {
+				p.warnThrottled(t.Organization+"/"+t.Project, "file_provider_owned_out_of_scope",
+					"org", t.Organization, "project", t.Project, "scope", p.scope.Type)
+				continue
+			}
 			key := t.Organization + "/" + t.Project
 			if _, frozen := grp.Frozen[key]; presentKeys[key] || frozen {
 				continue

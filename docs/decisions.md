@@ -2766,3 +2766,22 @@ creds / password-only; query token / mixed-case API_KEY / percent-encoded key / 
 malformed encoding), `TestDecodeTargetNoUserinfoAccepted` (host:port, ICMP/SSH hostname, clean
 `?x=1`), `TestDecodeTargetRejectionDoesNotLeakSecret` (userinfo + malformed + secret query value),
 and `TestBuildMonitorControlCharTargetRejected`.
+
+## D-0153 — A provider scope change quarantines prior-scope managed rows; it never silently adopts or deletes them (FR-017)
+The file provider owns rows by provider NAME (`provider_id` is the name; D-0152 context), and absence
+is trusted only within the provider's current static scope (§9.1/§10, the #2 fix:
+`ProviderScopeConfig.Includes`). A consequence must be documented as deliberate policy, not a trap:
+when a provider restarts with the SAME name but a NARROWER or DIFFERENT scope value, its prior-scope
+projects fall outside the current authority. Those rows are **quarantined**: they keep running, remain
+provider-owned and read-only in the UI/API, still count in diagnostics, and are NEITHER changed nor
+orphaned/deleted by the new scope — the reconcile skips them before the absence check and emits a
+throttled `file_provider_owned_out_of_scope` warning. This is a safety quarantine: the provider cannot
+observe the old scope's directory intent, so silently orphaning (destroy) or adopting (take over) would
+both be wrong. **Operator procedure** (runbook): to move authority, give the new scope a NEW provider
+name (the old name's rows stay put, cleanly separable); to retire the old scope, either revert the
+provider to its old scope and let normal reconcile manage/orphan the rows, or perform an explicit,
+reviewed release/migration — never rely on the scope change itself to clean up. **Widening** is the safe
+direction: rows that fall back INSIDE a widened scope resume normal valid-absence semantics (a project
+absent from the snapshot is orphaned as usual). Verified: `config.TestProviderScopeIncludes` (matrix)
+and `runtime.TestReconcileSkipsOutOfScopeOwnedProjects` (in-scope absence orphaned; out-of-scope owned
+untouched).

@@ -431,6 +431,17 @@ Removing/renaming a provider from the static config also performs no data mutati
 leaves managed objects and their last-known-good provenance in PostgreSQL; provider
 decommission/release requires an explicit future operation.
 
+**Scope change is a quarantine, not adoption or deletion (D-0153).** Absence is trusted only
+within the provider's current static scope: a project OUTSIDE the current scope is never
+orphaned, even when absent from the snapshot. So a provider that restarts under the same name
+with a narrower/different scope value leaves its prior-scope rows running, provider-owned,
+read-only, and counted in diagnostics — skipped before the absence check with a throttled
+`file_provider_owned_out_of_scope` warning. The provider cannot see the old scope's directory
+intent, so it neither adopts nor destroys those rows. To move authority, give the new scope a
+new provider name; to retire the old scope, revert to it and reconcile, or run an explicit
+release/migration. Widening scope is safe: rows that fall back inside the widened scope resume
+normal valid-absence semantics.
+
 ## 11. Filesystem/watch contract
 
 - The provider watches the configured directory itself, not individual file inodes.

@@ -206,25 +206,41 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 			return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "settings key %q carries a secret; inline secrets are forbidden", k)
 		}
 	}
-	// A URL-style target must not carry credentials in its userinfo (e.g.
-	// https://user:pass@host or a postgres://user:pass@host DSN): that is an inline secret,
-	// stored/echoed in cleartext and usable as Basic Auth. Two guards, both checked before
-	// type support so a secret is never echoed through a different reason, and neither
-	// message ever includes the raw target:
-	//   1. A well-formed URL whose userinfo is populated is rejected. url.Parse only
-	//      populates User when the target has a real URL authority, so bare host:port,
-	//      ICMP/SSH hostnames and other non-URL targets never trip this.
-	//   2. A URL-SHAPED target (carries a "://" scheme separator) that FAILS to parse is
-	//      also rejected: a parse failure means we cannot prove it is free of embedded
-	//      credentials (e.g. https://u:pw@h/%zz or a control char after the authority), and
-	//      domain validation only checks the target is non-empty — so a malformed-but-
-	//      credentialed target would otherwise be persisted verbatim (the P1 bypass).
-	// Secret-like query parameters remain out of scope (see D-0152 / spec func-mac §14):
-	// arbitrary ?k=v cannot be reliably classified as secret vs. legitimate in v1.
+	// A URL-style target must not carry credentials, in its userinfo OR its query string:
+	// either is an inline secret, stored/echoed in cleartext and usable directly. All guards
+	// are checked before type support so a secret is never echoed through a different reason,
+	// and no message ever includes the raw target or a query value:
+	//   1. A well-formed URL whose userinfo is populated (https://user:pass@host, a
+	//      postgres://user:pass@host DSN, password-only https://:pass@host) is rejected.
+	//      url.Parse only populates User when the target has a real URL authority, so bare
+	//      host:port, ICMP/SSH hostnames and other non-URL targets never trip this.
+	//   2. A well-formed URL whose query carries a known secret-bearing key (token, api_key,
+	//      password, …) is rejected, reusing the same finite secretSettingKeys set that
+	//      classifies inline settings secrets — https://h/?token=… is an inline secret just
+	//      like https://user:token@h. A query that cannot be cleanly decoded is rejected
+	//      conservatively, since we then cannot prove it carries no such key.
+	//   3. A URL-SHAPED target (carries a "://" scheme separator) that FAILS to parse is
+	//      also rejected: a parse failure (e.g. an invalid percent-escape like
+	//      https://u:pw@h/%zz, or a control character in the URL) means we cannot prove it is
+	//      free of embedded credentials, and domain validation only checks the target is
+	//      non-empty — so a malformed-but-credentialed target would otherwise be persisted
+	//      verbatim (the P1 bypass).
+	// See D-0152 / spec func-monitoring-as-code §14.
 	target := strings.TrimSpace(rm.Target)
 	if u, err := url.Parse(target); err == nil {
 		if u.User != nil {
 			return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "target carries credentials in its URL userinfo; inline secrets are forbidden")
+		}
+		if u.RawQuery != "" {
+			vals, qerr := url.ParseQuery(u.RawQuery)
+			if qerr != nil {
+				return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "target query string cannot be decoded and cannot be verified free of inline credentials; move any credentials to a secret_ref")
+			}
+			for k := range vals {
+				if secretSettingKeys[strings.ToLower(strings.TrimSpace(k))] {
+					return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "target query key %q carries a secret; inline secrets are forbidden", k)
+				}
+			}
 		}
 	} else if strings.Contains(target, "://") {
 		return DesiredMonitor{}, rejectf(ReasonInlineSecret, uid, "target is a malformed URL and cannot be verified free of inline credentials; fix the URL or move any credentials to a secret_ref")

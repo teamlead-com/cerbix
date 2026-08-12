@@ -521,14 +521,17 @@ No reconcile may rotate/replace a token on update, no-op, file rename, orphan, o
   records, plan diffs, and metrics never expose the submitted value.
   - A monitor `target` that carries credentials in its URL **userinfo**
     (`https://user:pass@host`, `postgres://user:pass@host/db`, password-only
-    `https://:pass@host`) rejects. A **URL-shaped** target (one bearing a `://` scheme
-    separator) that fails to parse also rejects, because a parse failure means the target
-    cannot be proven free of embedded credentials and domain validation only checks the
-    target is non-empty. The rejection reason never echoes the raw target (D-0152).
-  - **Query-string** secrets in a target (`?token=…`) are out of scope for v1: arbitrary
-    `?k=v` cannot be reliably classified as secret vs. legitimate parameter. This is a
-    stated boundary, not an oversight — credentials belong in a `secret_ref`, and a
-    conservative known-secret-query-key denylist is the recorded follow-up (D-0152).
+    `https://:pass@host`) rejects.
+  - A monitor `target` whose **query string** carries a known secret-bearing key
+    (`?token=…`, `?api_key=…`, `?password=…`, …) rejects — the same finite secret-key set
+    that classifies inline settings secrets applies to the target query, so a cleartext
+    credential in the URL is caught wherever it sits. A query that cannot be decoded rejects
+    conservatively; a query with only non-secret keys (`?x=1`) is accepted.
+  - A **URL-shaped** target (one bearing a `://` scheme separator) that fails to parse
+    (e.g. an invalid percent-escape or a control character) also rejects, because the target
+    cannot then be proven free of embedded credentials and domain validation only checks the
+    target is non-empty.
+  - Rejection reasons never echo the raw target or any query value (D-0152).
 - Absolute provider paths are visible only to global operators/logs. Tenant UI/API returns
   provider name and a sanitized relative path only.
 - Parser nesting/alias expansion and all file/resource sizes are bounded to prevent CPU/

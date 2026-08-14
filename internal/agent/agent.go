@@ -94,7 +94,11 @@ func (a *Agent) WithCredentialKeyring(ring *dispatch.CredentialKeyring) *Agent {
 func (a *Agent) WithCredentialHealth(health CredentialHealth) *Agent {
 	a.credentialHealth = health
 	if health != nil {
-		health.SetCredentialReady(a.credentials != nil, domain.ProbeErrorNoDispatchKey)
+		reason := ""
+		if a.credentials == nil {
+			reason = domain.ProbeErrorNoDispatchKey
+		}
+		health.SetCredentialReady(a.credentials != nil, reason)
 	}
 	return a
 }

@@ -133,6 +133,9 @@ func TestCredentialReadinessRecoversAfterSuccessfulDecrypt(t *testing.T) {
 	disp := dispatch.NewInProc(2)
 	readiness := &fakeCredentialReadiness{}
 	pool := New(disp, fakeRunner{}, 1, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCredentialKeyring(ring).WithCredentialReadiness(readiness)
+	if got := readiness.last(); !got.ready || got.reason != "" {
+		t.Fatalf("initial readiness with keyring = %+v", got)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go pool.Run(ctx)

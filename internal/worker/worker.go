@@ -40,7 +40,11 @@ func (p *Pool) WithCredentialKeyring(ring *dispatch.CredentialKeyring) *Pool {
 func (p *Pool) WithCredentialReadiness(sink CredentialReadiness) *Pool {
 	p.credentialReadiness = sink
 	if sink != nil {
-		sink.SetCredentialReady(p.credentials != nil, "no_dispatch_key")
+		reason := ""
+		if p.credentials == nil {
+			reason = domain.ProbeErrorNoDispatchKey
+		}
+		sink.SetCredentialReady(p.credentials != nil, reason)
 	}
 	return p
 }

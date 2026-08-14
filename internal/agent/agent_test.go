@@ -88,6 +88,56 @@ func TestCredentialHealthDegradesAndRecovers(t *testing.T) {
 	}
 }
 
+func TestFutureCredentialEnvelopeIsProbeErrorWithoutReadinessDowngrade(t *testing.T) {
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "worker", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := domain.Monitor{ID: "m-future", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	envelope, err := ring.Seal("pull1", "job-future", monitor.ID, monitor.ExecutionRevision, map[string][]byte{"password": []byte("secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.V++
+	job := dispatch.CheckJob{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: envelope}
+
+	var result domain.Heartbeat
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agent/v2/jobs":
+			body, _ := json.Marshal(job)
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []json.RawMessage{body}, "tokens": []string{"lease"}})
+		case "/api/v1/agent/results":
+			var request struct {
+				Results []domain.Heartbeat `json:"results"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			if len(request.Results) == 1 {
+				result = request.Results[0]
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	health := &fakeCredentialHealth{}
+	a := New(srv.URL, "tok", "pull1", fixedRunner{}, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithCredentialKeyring(ring).
+		WithCredentialHealth(health)
+	a.poll(context.Background())
+
+	if result.ProbeError == nil || result.ProbeError.Reason != domain.ProbeErrorUnsupportedVersion || result.ProbeError.JobID != "job-future" {
+		t.Fatalf("future envelope result = %+v", result)
+	}
+	health.mu.Lock()
+	defer health.mu.Unlock()
+	if !health.ready || health.reason != "" || len(health.errors) != 1 || health.errors[0] != domain.ProbeErrorUnsupportedVersion {
+		t.Fatalf("future envelope health: ready=%v reason=%q errors=%v", health.ready, health.reason, health.errors)
+	}
+}
+
 // TestEdgeBufferFlush: when /results fails, the cycle's results are buffered; on the next
 // successful cycle they are flushed to /backfill (historical), never re-posted as live.
 func TestEdgeBufferFlush(t *testing.T) {

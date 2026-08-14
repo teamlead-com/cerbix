@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# FR-020 live single-binary smoke. Uses one isolated throwaway database and role=all so
-# the authoritative materializer, v2 in-process envelope, worker JIT decrypt, prober and
-# result fence execute in one real process. No source/dev database is touched.
+# FR-020 live control-plane + pull-agent smoke. Uses one isolated throwaway database;
+# role=all owns the master/materializer and a separate DB-less role=agent owns only its
+# regional dispatch key. No source/dev database is touched.
 set -euo pipefail
 
 PG_CONTAINER="${PG_CONTAINER:-cerbix-it1-pg}"
@@ -17,6 +17,7 @@ TMP="$(mktemp -d)"
 mkdir -p "$TMP/monitoring.d"
 
 cleanup() {
+  if [ -n "${AGENT_PID:-}" ]; then kill "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; fi
   if [ -n "${CERBIX_PID:-}" ]; then kill "$CERBIX_PID" 2>/dev/null || true; wait "$CERBIX_PID" 2>/dev/null || true; fi
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d postgres -c "DROP DATABASE IF EXISTS $DB_NAME WITH (FORCE)" >/dev/null 2>&1 || true
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d postgres -c "DROP ROLE IF EXISTS $TARGET_USER" >/dev/null 2>&1 || true
@@ -37,10 +38,14 @@ prober: {allow_private_ips: true, allow_metadata_ips: false}
 security:
   encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
   dispatch:
-    default:
-      primary: {id: "smoke-2026a", key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}
-      previous: []
+    regions:
+      edge:
+        primary: {id: "smoke-2026a", key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}
+        previous: []
 secrets: {enabled: true, dispatch_envelope: "enforced"}
+pull:
+  regions: [edge]
+  token: "$TOKEN"
 providers:
   file:
     platform:
@@ -49,6 +54,34 @@ providers:
       resync_interval: 5s
       orphan_grace_period: 30s
       scope: {type: instance}
+YAML
+
+cat >"$TMP/agent-bad.yaml" <<YAML
+server: {listen: "127.0.0.1:18083"}
+log: {level: info}
+prober: {allow_private_ips: true, allow_metadata_ips: false}
+security:
+  dispatch:
+    regions:
+      edge:
+        primary: {id: "smoke-2026a", key: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="}
+        previous: []
+secrets: {enabled: true, dispatch_envelope: "enforced"}
+pull: {server_url: "$BASE_URL", token: "$TOKEN"}
+YAML
+
+cat >"$TMP/agent-good.yaml" <<YAML
+server: {listen: "127.0.0.1:18084"}
+log: {level: info}
+prober: {allow_private_ips: true, allow_metadata_ips: false}
+security:
+  dispatch:
+    regions:
+      edge:
+        primary: {id: "smoke-2026a", key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}
+        previous: []
+secrets: {enabled: true, dispatch_envelope: "enforced"}
+pull: {server_url: "$BASE_URL", token: "$TOKEN"}
 YAML
 
 "$TMP/cerbix" migrate --config "$TMP/config.yaml" >/dev/null
@@ -79,6 +112,7 @@ monitors:
     name: Database
     type: postgres
     target: 127.0.0.1:$PG_PORT
+    region: edge
     interval: 10s
     timeout: 5s
     settings:
@@ -92,13 +126,31 @@ YAML
 for _ in $(seq 1 60); do [ "$(PSQL "SELECT count(*) FROM monitors WHERE name='Database'")" = 1 ] && break; sleep 0.25; done
 MONITOR_ID="$(PSQL "SELECT id FROM monitors WHERE name='Database'")"
 [ -n "$MONITOR_ID" ] || { echo "FAIL: file-managed postgres monitor was not created"; cat "$TMP/serve.log"; exit 1; }
-for _ in $(seq 1 80); do [ "$(PSQL "SELECT count(*) FROM heartbeats WHERE monitor_id='$MONITOR_ID' AND up")" -gt 0 ] 2>/dev/null && break; sleep 0.25; done
+
+# A v2-capable agent with the right key id but wrong key bytes remains process-live,
+# reports decrypt_auth_failed as a diagnostic (never a heartbeat/DOWN), and degrades
+# both local readiness and its central credential_ready capability.
+"$TMP/cerbix" serve --config "$TMP/agent-bad.yaml" --role agent --region edge >"$TMP/agent-bad.log" 2>&1 & AGENT_PID=$!
+for _ in $(seq 1 120); do [ "$(PSQL "SELECT COALESCE(last_probe_error_reason,'') FROM monitors WHERE id='$MONITOR_ID'")" = decrypt_auth_failed ] && break; sleep 0.25; done
+[ "$(PSQL "SELECT COALESCE(last_probe_error_reason,'') FROM monitors WHERE id='$MONITOR_ID'")" = decrypt_auth_failed ] || { echo "FAIL: wrong-key agent did not report decrypt_auth_failed"; cat "$TMP/agent-bad.log" "$TMP/serve.log"; exit 1; }
+[ "$(PSQL "SELECT count(*) FROM heartbeats WHERE monitor_id='$MONITOR_ID'")" = 0 ] || { echo "FAIL: probe_error was stored as a heartbeat"; exit 1; }
+[ "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18083/readyz)" = 503 ] || { echo "FAIL: wrong-key agent readiness did not degrade"; exit 1; }
+for _ in $(seq 1 80); do [ "$(PSQL "SELECT count(*) FROM agent_heartbeats WHERE region='edge' AND NOT credential_ready")" -gt 0 ] && break; sleep 0.25; done
+[ "$(PSQL "SELECT count(*) FROM agent_heartbeats WHERE region='edge' AND NOT credential_ready")" -gt 0 ] || { echo "FAIL: central capability did not record degraded agent"; exit 1; }
+kill "$AGENT_PID"; wait "$AGENT_PID" 2>/dev/null || true; unset AGENT_PID
+
+# A correctly keyed replacement agent recovers capability/readiness and executes the
+# next authoritative v2 job against a real PostgreSQL target.
+"$TMP/cerbix" serve --config "$TMP/agent-good.yaml" --role agent --region edge >"$TMP/agent-good.log" 2>&1 & AGENT_PID=$!
+for _ in $(seq 1 160); do [ "$(PSQL "SELECT count(*) FROM heartbeats WHERE monitor_id='$MONITOR_ID' AND up")" -gt 0 ] 2>/dev/null && break; sleep 0.25; done
 [ "$(PSQL "SELECT count(*) FROM heartbeats WHERE monitor_id='$MONITOR_ID' AND up")" -gt 0 ] || { echo "FAIL: credentialed postgres probe did not become UP: $(PSQL "SELECT msg FROM heartbeats WHERE monitor_id='$MONITOR_ID' ORDER BY ts DESC LIMIT 1")"; cat "$TMP/serve.log"; exit 1; }
+[ "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18084/readyz)" = 200 ] || { echo "FAIL: correctly keyed agent is not ready"; exit 1; }
+[ "$(PSQL "SELECT count(*) FROM agent_heartbeats WHERE region='edge' AND credential_ready")" -gt 0 ] || { echo "FAIL: central capability did not recover"; exit 1; }
 
 [ "$(PSQL "SELECT config->>'password_ref' FROM monitors WHERE id='$MONITOR_ID'")" = db-password ] || { echo "FAIL: monitor reference was not persisted"; exit 1; }
 [ "$(PSQL "SELECT count(*) FROM project_secrets WHERE project_id='$PROJECT_ID' AND value_encrypted LIKE 'enc:v2a:%'")" = 1 ] || { echo "FAIL: inventory value is not AAD ciphertext"; exit 1; }
 [ "$(PSQL "SELECT count(*) FROM monitors WHERE id='$MONITOR_ID' AND (config ? 'password')")" = 0 ] || { echo "FAIL: MaC monitor persisted an inline password"; exit 1; }
-if grep -q "$VALUE" "$TMP/serve.log"; then echo "FAIL: secret value appeared in service logs"; exit 1; fi
+if grep -q "$VALUE" "$TMP/serve.log" "$TMP/agent-bad.log" "$TMP/agent-good.log"; then echo "FAIL: secret value appeared in service logs"; exit 1; fi
 
 REV_BEFORE="$(PSQL "SELECT execution_revision FROM monitors WHERE id='$MONITOR_ID'")"
 GEN_BEFORE="$(PSQL "SELECT generation FROM file_provider_bundles WHERE provider_id='platform'")"
@@ -120,4 +172,4 @@ DELETE_CODE="$(curl -sS -o "$TMP/delete.json" -w '%{http_code}' -X DELETE -H "Au
 [ "$DELETE_CODE" = 409 ] && grep -q secret_in_use "$TMP/delete.json" || { echo "FAIL: delete guard returned $DELETE_CODE"; cat "$TMP/delete.json"; exit 1; }
 
 kill -0 "$CERBIX_PID" || { echo "FAIL: cerbix process exited"; exit 1; }
-echo "PASS: secret API → MaC ref → AAD at rest → v2 materialize/JIT decrypt → postgres UP → rotate fence/no generation drift → rename/delete guards"
+echo "PASS: secret API → MaC ref → AAD at rest → pull-v2 wrong-key degradation → keyed recovery/JIT decrypt → postgres UP → rotate fence/no generation drift → rename/delete guards"

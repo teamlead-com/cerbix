@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -15,6 +16,15 @@ func materializerRing(t *testing.T) *dispatch.CredentialKeyring {
 	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{
 		ID: "core-2026a", Key: bytes.Repeat([]byte{7}, 32),
 	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ring
+}
+
+func materializerRingWithByte(t *testing.T, id string, b byte) *dispatch.CredentialKeyring {
+	t.Helper()
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: id, Key: bytes.Repeat([]byte{b}, 32)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,5 +126,81 @@ func TestMaterializerCurrentStateAndTenantIntegrity(t *testing.T) {
 	}
 	if strings.Contains(item.Reason, secretA.Name) {
 		t.Fatal("bounded reason leaked secret metadata")
+	}
+}
+
+func TestMaterializerAuthoritativeReadBoundaries(t *testing.T) {
+	st, ctx := secretsTestStore(t)
+	coreRing := materializerRingWithByte(t, "core-key", 7)
+	geoRing := materializerRingWithByte(t, "geo-key", 8)
+	st.WithCredentialKeyrings(dispatch.CredentialKeyrings{Regions: map[string]*dispatch.CredentialKeyring{
+		"core": coreRing,
+		"geo":  geoRing,
+	}})
+	_, projectID := secretsFixture(t, st, ctx, "materialize-authoritative", "app")
+	createdSecret, err := st.CreateProjectSecret(ctx, testSecretActor, projectID, "db-password", "old-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mon, err := st.CreateMonitor(ctx, postgresRefMonitor(projectID, "db", createdSecret.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both an inventory rotation and an ordinary config/routing edit commit before the
+	// authoritative read. The job must contain one coherent NEW row/value/revision.
+	newValue := "rotated-value"
+	if _, rotated, _, err := st.UpdateProjectSecret(ctx, testSecretActor, projectID, createdSecret.Name, nil, &newValue); err != nil || !rotated {
+		t.Fatalf("rotate: rotated=%v err=%v", rotated, err)
+	}
+	current, err := st.GetMonitor(ctx, mon.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Target = "new.internal:5432"
+	current.Region = "geo"
+	current.IntervalSeconds = 123
+	updated, err := st.UpdateMonitor(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := st.MaterializeExecutionConfig(ctx, mon.ID)
+	if err != nil || item.Reason != "" {
+		t.Fatalf("materialize: item=%+v err=%v", item, err)
+	}
+	if item.Job.Monitor.Target != updated.Target || item.Job.Monitor.Region != "geo" || item.Job.Monitor.IntervalSeconds != 123 || item.Job.Monitor.ExecutionRevision != updated.ExecutionRevision {
+		t.Fatalf("job is not the authoritative row: %+v, update=%+v", item.Job.Monitor, updated)
+	}
+	probeMonitor, cleanup, err := geoRing.MaterializeForProbe(item.Job)
+	if err != nil {
+		t.Fatalf("geo decrypt: %v", err)
+	}
+	if probeMonitor.Config["password"] != newValue {
+		t.Fatalf("materialized password = %q, want rotated value", probeMonitor.Config["password"])
+	}
+	cleanup()
+	if _, _, err := coreRing.MaterializeForProbe(item.Job); err == nil {
+		t.Fatal("old-region keyring opened a job routed to the new region")
+	}
+
+	// A change committed AFTER the read cannot recall the payload, but its revision bump
+	// must fence the old job's result before any heartbeat or state mutation.
+	afterRead, err := st.GetMonitor(ctx, mon.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRead.Target = "newer.internal:5432"
+	if _, err := st.UpdateMonitor(ctx, afterRead); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := st.RecordScheduledResult(ctx, domain.Heartbeat{
+		MonitorID: item.Job.Monitor.ID, ExecutionRevision: item.Job.Monitor.ExecutionRevision,
+		Ts: time.Now().UTC(), Up: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Reason != ReasonStaleRevision || outcome.Applied || outcome.Inserted {
+		t.Fatalf("post-read old result = %+v", outcome)
 	}
 }

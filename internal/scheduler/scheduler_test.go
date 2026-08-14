@@ -29,7 +29,8 @@ type fakeStore struct {
 	listCalls     int32 // ListEnabledMonitors invocations (snapshot reloads)
 	// checkHeld, when set, is what the leadership watchdog check() returns; nil
 	// means "still leader" (true, nil).
-	checkHeld func() (bool, error)
+	checkHeld   func() (bool, error)
+	materialize func([]string) ([]store.MaterializedExecution, error)
 }
 
 type staticCredentialRegions map[string]bool
@@ -48,6 +49,9 @@ func (f *fakeStore) ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.M
 }
 
 func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string) ([]store.MaterializedExecution, error) {
+	if f.materialize != nil {
+		return f.materialize(ids)
+	}
 	byID := make(map[string]domain.Monitor, len(f.monitors))
 	for _, m := range f.monitors {
 		byID[m.ID] = m
@@ -340,6 +344,38 @@ func TestCredentialDispatchRequiresV2AMQPConsumer(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCredentialCadenceUsesAuthoritativeMaterializedInterval(t *testing.T) {
+	snapshot := domain.Monitor{
+		ID: "credential-monitor", Type: domain.MonitorPostgres, Target: "old:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 1, TimeoutSeconds: 5,
+	}
+	authoritative := snapshot
+	authoritative.Target = "new:5432"
+	authoritative.IntervalSeconds = 60
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{snapshot}}
+	fs.materialize = func(ids []string) ([]store.MaterializedExecution, error) {
+		return []store.MaterializedExecution{{MonitorID: ids[0], Job: dispatch.CheckJob{Monitor: authoritative, ProtocolVersion: dispatch.ProtocolV2}}}, nil
+	}
+	disp := dispatch.NewInProc(4)
+	s := New(fs, disp, testLogger()).WithCredentialEnvelopes(true).WithCredentialLiveRegions(staticCredentialRegions{"secure": true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+	select {
+	case job := <-disp.Jobs():
+		if job.Monitor.Target != authoritative.Target || job.Monitor.IntervalSeconds != authoritative.IntervalSeconds {
+			t.Fatalf("published stale snapshot instead of authoritative row: %+v", job.Monitor)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("credential job was not published")
+	}
+	select {
+	case job := <-disp.Jobs():
+		t.Fatalf("cadence advanced from stale 1s snapshot; unexpected second job: %+v", job)
+	case <-time.After(2500 * time.Millisecond):
 	}
 }
 

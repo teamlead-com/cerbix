@@ -14,7 +14,7 @@ import (
 // value — only names and metadata leave the server.
 
 // secretMaxBody caps create/update request bodies. A secret value is at most
-// 4 KiB (enforced by the store); 16 KiB leaves headroom for JSON framing while
+// 4 KiB (enforced by the store); 32 KiB leaves headroom for JSON framing while
 // bounding memory against an oversized body.
 const secretMaxBody = 32 << 10 // 32 KiB: a 4096-byte value can JSON-encode at ~6x (\u0000 escapes)
 

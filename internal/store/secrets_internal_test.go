@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -196,10 +195,11 @@ func TestProjectSecretQuota(t *testing.T) {
 	}
 }
 
-// TestProjectSecretQuotaConcurrentSpellings drives the quota boundary with two REAL
-// concurrent creates that spell the same project uuid differently. The tx canonicalizes
-// the id before taking the advisory lock, so both spellings serialize on the SAME lock
-// and exactly one create passes the boundary (P0-2b).
+// TestProjectSecretQuotaConcurrentSpellings deterministically proves equivalent UUID
+// spellings serialize on the SAME quota lock. A separate transaction holds the lock
+// for the canonical id; Create through the uppercase spelling must block until its
+// own context expires. After release, exactly one boundary create succeeds and the
+// next is refused by the quota.
 func TestProjectSecretQuotaConcurrentSpellings(t *testing.T) {
 	st, ctx := secretsTestStore(t)
 	_, projID := secretsFixture(t, st, ctx, "acme", "api")
@@ -210,30 +210,39 @@ func TestProjectSecretQuotaConcurrentSpellings(t *testing.T) {
 		}
 	}
 
-	spellings := []string{projID, strings.ToUpper(projID)}
-	errs := make([]error, 2)
-	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_, errs[i] = st.CreateProjectSecret(ctx, testSecretActor, spellings[i], fmt.Sprintf("race-%d", i), "v")
-		}(i)
+	lockConn, err := st.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire lock connection: %v", err)
 	}
-	wg.Wait()
+	defer lockConn.Release()
+	lockTx, err := lockConn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin lock transaction: %v", err)
+	}
+	defer lockTx.Rollback(ctx) //nolint:errcheck // no-op after explicit rollback
+	canon, _, err := canonicalProject(ctx, lockTx, projID)
+	if err != nil {
+		t.Fatalf("canonical project: %v", err)
+	}
+	if _, err := lockTx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('project_secrets_quota'), hashtext($1))`, canon); err != nil {
+		t.Fatalf("hold canonical quota lock: %v", err)
+	}
 
-	quotaHits := 0
-	for i, err := range errs {
-		switch {
-		case err == nil:
-		case errors.Is(err, ErrSecretQuota):
-			quotaHits++
-		default:
-			t.Fatalf("racer %d unexpected err: %v", i, err)
-		}
+	blockedCtx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := st.CreateProjectSecret(blockedCtx, testSecretActor, strings.ToUpper(projID), "blocked", "v"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("uppercase create while canonical lock held err = %v, want context deadline", err)
 	}
-	if quotaHits != 1 {
-		t.Fatalf("quota hits = %d, want exactly 1 (one racer past the boundary)", quotaHits)
+	if err := lockTx.Rollback(ctx); err != nil {
+		t.Fatalf("release canonical quota lock: %v", err)
+	}
+
+	if _, err := st.CreateProjectSecret(ctx, testSecretActor, strings.ToUpper(projID), "boundary", "v"); err != nil {
+		t.Fatalf("100th create after lock release: %v", err)
+	}
+	if _, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "over-quota", "v"); !errors.Is(err, ErrSecretQuota) {
+		t.Fatalf("101st create err = %v, want ErrSecretQuota", err)
 	}
 	var n int
 	if err := st.pool.QueryRow(ctx,

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -10,12 +11,82 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 type fixedRunner struct{ hb domain.Heartbeat }
 
 func (f fixedRunner) Run(context.Context, domain.Monitor) domain.Heartbeat { return f.hb }
+
+type fakeCredentialHealth struct {
+	mu     sync.Mutex
+	ready  bool
+	reason string
+	errors []string
+}
+
+func (f *fakeCredentialHealth) SetCredentialReady(ready bool, reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ready, f.reason = ready, reason
+}
+
+func (f *fakeCredentialHealth) RecordExecutorProbeError(reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.errors = append(f.errors, reason)
+}
+
+func TestCredentialHealthDegradesAndRecovers(t *testing.T) {
+	workerRing, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "worker", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRing, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "other", Key: bytes.Repeat([]byte{2}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := domain.Monitor{ID: "m1", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	badEnvelope, _ := otherRing.Seal("pull1", "job-bad", monitor.ID, monitor.ExecutionRevision, map[string][]byte{"password": []byte("secret")})
+	goodEnvelope, _ := workerRing.Seal("pull1", "job-good", monitor.ID, monitor.ExecutionRevision, map[string][]byte{"password": []byte("secret")})
+	jobs := []dispatch.CheckJob{
+		{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: badEnvelope},
+		{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: goodEnvelope},
+	}
+	claim := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agent/v2/jobs":
+			body, _ := json.Marshal(jobs[claim])
+			claim++
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []json.RawMessage{body}, "tokens": []string{"lease"}})
+		case "/api/v1/agent/results":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	health := &fakeCredentialHealth{}
+	a := New(srv.URL, "tok", "pull1", fixedRunner{hb: domain.Heartbeat{MonitorID: "m1", Up: true}}, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithCredentialKeyring(workerRing).
+		WithCredentialHealth(health)
+	a.poll(context.Background())
+	health.mu.Lock()
+	if health.ready || health.reason != domain.ProbeErrorUnknownKeyID || len(health.errors) != 1 {
+		t.Fatalf("health after mismatch: ready=%v reason=%q errors=%v", health.ready, health.reason, health.errors)
+	}
+	health.mu.Unlock()
+
+	a.poll(context.Background())
+	health.mu.Lock()
+	defer health.mu.Unlock()
+	if !health.ready || health.reason != "" || len(health.errors) != 1 {
+		t.Fatalf("health after recovery: ready=%v reason=%q errors=%v", health.ready, health.reason, health.errors)
+	}
+}
 
 // TestEdgeBufferFlush: when /results fails, the cycle's results are buffered; on the next
 // successful cycle they are flushed to /backfill (historical), never re-posted as live.

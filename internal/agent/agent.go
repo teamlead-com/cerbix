@@ -39,6 +39,11 @@ type Runner interface {
 	Run(ctx context.Context, m domain.Monitor) domain.Heartbeat
 }
 
+type CredentialHealth interface {
+	SetCredentialReady(ready bool, reason string)
+	RecordExecutorProbeError(reason string)
+}
+
 // Agent polls the central API for its region's jobs and posts back results.
 type Agent struct {
 	serverURL      string
@@ -53,10 +58,11 @@ type Agent struct {
 
 	// Edge buffer (accessed only from the single Run loop, so no locking): results held
 	// while the API is unreachable, flushed as HISTORICAL backfill on reconnect.
-	buf             []domain.Heartbeat
-	dropped         int
-	credentials     *dispatch.CredentialKeyring
-	credentialReady atomic.Bool
+	buf              []domain.Heartbeat
+	dropped          int
+	credentials      *dispatch.CredentialKeyring
+	credentialReady  atomic.Bool
+	credentialHealth CredentialHealth
 }
 
 // New builds an agent. serverURL is the central base URL (e.g. https://cerbix.core);
@@ -83,6 +89,33 @@ func (a *Agent) WithCredentialKeyring(ring *dispatch.CredentialKeyring) *Agent {
 	a.credentials = ring
 	a.credentialReady.Store(ring != nil)
 	return a
+}
+
+func (a *Agent) WithCredentialHealth(health CredentialHealth) *Agent {
+	a.credentialHealth = health
+	if health != nil {
+		health.SetCredentialReady(a.credentials != nil, domain.ProbeErrorNoDispatchKey)
+	}
+	return a
+}
+
+func (a *Agent) recordCredentialFailure(reason string) {
+	if reason != domain.ProbeErrorUnsupportedVersion {
+		a.credentialReady.Store(false)
+		if a.credentialHealth != nil {
+			a.credentialHealth.SetCredentialReady(false, reason)
+		}
+	}
+	if a.credentialHealth != nil {
+		a.credentialHealth.RecordExecutorProbeError(reason)
+	}
+}
+
+func (a *Agent) recordCredentialSuccess() {
+	a.credentialReady.Store(true)
+	if a.credentialHealth != nil {
+		a.credentialHealth.SetCredentialReady(true, "")
+	}
 }
 
 // Run polls and heartbeats until ctx is cancelled. Polling and heartbeating run on
@@ -128,6 +161,7 @@ func (a *Agent) pollTest(ctx context.Context) {
 	if job.CredentialEnvelope != nil {
 		if a.credentials == nil {
 			hb := dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorNoDispatchKey)
+			a.recordCredentialFailure(hb.ProbeError.Reason)
 			a.logger.Error("agent_credential_test_rejected", "reason", hb.ProbeError.Reason)
 			_ = a.postTestResult(ctx, id, hb)
 			return
@@ -136,14 +170,12 @@ func (a *Agent) pollTest(ctx context.Context) {
 		monitor, cleanup, err = a.credentials.MaterializeForProbe(job)
 		if err != nil {
 			reason := dispatch.CredentialProbeErrorReason(err)
-			if reason != domain.ProbeErrorUnsupportedVersion {
-				a.credentialReady.Store(false)
-			}
+			a.recordCredentialFailure(reason)
 			a.logger.Error("agent_credential_test_rejected", "reason", reason)
 			_ = a.postTestResult(ctx, id, dispatch.ProbeErrorHeartbeat(job, reason))
 			return
 		}
-		a.credentialReady.Store(true)
+		a.recordCredentialSuccess()
 	}
 	hb := a.runner.Run(ctx, monitor)
 	cleanup()
@@ -261,6 +293,7 @@ func (a *Agent) poll(ctx context.Context) {
 		cleanup := func() {}
 		if job.CredentialEnvelope != nil {
 			if a.credentials == nil {
+				a.recordCredentialFailure(domain.ProbeErrorNoDispatchKey)
 				results = append(results, dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorNoDispatchKey))
 				a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", domain.ProbeErrorNoDispatchKey)
 				if i < len(tokens) {
@@ -271,9 +304,7 @@ func (a *Agent) poll(ctx context.Context) {
 			monitor, cleanup, err = a.credentials.MaterializeForProbe(job)
 			if err != nil {
 				reason := dispatch.CredentialProbeErrorReason(err)
-				if reason != domain.ProbeErrorUnsupportedVersion {
-					a.credentialReady.Store(false)
-				}
+				a.recordCredentialFailure(reason)
 				results = append(results, dispatch.ProbeErrorHeartbeat(job, reason))
 				a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", reason)
 				if i < len(tokens) {
@@ -281,7 +312,7 @@ func (a *Agent) poll(ctx context.Context) {
 				}
 				continue
 			}
-			a.credentialReady.Store(true)
+			a.recordCredentialSuccess()
 		}
 		results = append(results, a.runner.Run(ctx, monitor))
 		cleanup()

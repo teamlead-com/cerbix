@@ -858,9 +858,15 @@ func runServe(args []string) int {
 					amqpd.ServeTestsV2(func(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
 						m, cleanup, err := ring.MaterializeForProbe(job)
 						if err != nil {
-							return dispatch.ProbeErrorHeartbeat(job, dispatch.CredentialProbeErrorReason(err)), nil
+							reason := dispatch.CredentialProbeErrorReason(err)
+							registry.RecordExecutorProbeError(reason)
+							if reason != domain.ProbeErrorUnsupportedVersion {
+								registry.SetCredentialReady(false, reason)
+							}
+							return dispatch.ProbeErrorHeartbeat(job, reason), nil
 						}
 						defer cleanup()
+						registry.SetCredentialReady(true, "")
 						return runner.Run(ctx, m), nil
 					})
 				}
@@ -943,7 +949,7 @@ func runAgent(ctx context.Context, cfg *config.Config, region string, credential
 	runner := prober.NewRunnerWithGuard(prober.NewGuard(cfg.Prober.AllowPrivateIPs, cfg.Prober.AllowMetadataIPs))
 	a := agent.New(cfg.Pull.ServerURL, cfg.Pull.Token, region, runner, logger)
 	if ring, ok := credentialRings.ForRegion(region); ok && cfg.Secrets.EnvelopeEnforced() {
-		a.WithCredentialKeyring(ring)
+		a.WithCredentialKeyring(ring).WithCredentialHealth(registry)
 	}
 	go a.Run(ctx)
 	logger.Info("agent_role_started", "region", region, "server", cfg.Pull.ServerURL)

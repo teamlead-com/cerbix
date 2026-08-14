@@ -19,6 +19,7 @@ type Runner interface {
 
 type CredentialReadiness interface {
 	SetCredentialReady(ready bool, reason string)
+	RecordExecutorProbeError(reason string)
 }
 
 // Pool is a fixed-size worker pool.
@@ -116,6 +117,9 @@ func (p *Pool) setCredentialReady(ready bool, reason string) {
 }
 
 func (p *Pool) publishProbeError(ctx context.Context, job dispatch.CheckJob, reason string) {
+	if p.credentialReadiness != nil {
+		p.credentialReadiness.RecordExecutorProbeError(reason)
+	}
 	if err := p.dispatcher.PublishResult(ctx, dispatch.ProbeErrorHeartbeat(job, reason)); err != nil && ctx.Err() == nil {
 		p.logger.Error("publish_probe_error_failed", "monitor_id", job.Monitor.ID, "reason", reason, "error", err.Error())
 	}

@@ -25,8 +25,15 @@ type credentialReadinessCall struct {
 }
 
 type fakeCredentialReadiness struct {
-	mu    sync.Mutex
-	calls []credentialReadinessCall
+	mu          sync.Mutex
+	calls       []credentialReadinessCall
+	probeErrors []string
+}
+
+func (f *fakeCredentialReadiness) RecordExecutorProbeError(reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.probeErrors = append(f.probeErrors, reason)
 }
 
 func (f *fakeCredentialReadiness) SetCredentialReady(ready bool, reason string) {
@@ -103,6 +110,11 @@ func TestCredentialFailurePublishesTypedProbeError(t *testing.T) {
 		if got := readiness.last(); got.ready || got.reason != domain.ProbeErrorUnknownKeyID {
 			t.Fatalf("readiness after key mismatch = %+v", got)
 		}
+		readiness.mu.Lock()
+		if len(readiness.probeErrors) != 1 || readiness.probeErrors[0] != domain.ProbeErrorUnknownKeyID {
+			t.Fatalf("executor probe error metrics = %v", readiness.probeErrors)
+		}
+		readiness.mu.Unlock()
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker did not publish probe_error")
 	}

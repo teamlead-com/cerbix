@@ -755,3 +755,36 @@ func TestProjectSecretProjectDeleteCascade(t *testing.T) {
 		t.Fatalf("list of deleted project err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestProjectSecretAuditFailureRollsBackMutation is the reviewer-required real-PG proof in
+// the OTHER direction: when the IN-TX audit insert itself fails, the secret mutation commits
+// nothing. A non-UUID actor id makes the audit_logs.actor_user_id cast fail inside the tx.
+func TestProjectSecretAuditFailureRollsBackMutation(t *testing.T) {
+	st, ctx := secretsTestStore(t)
+	_, projID := secretsFixture(t, st, ctx, "acme", "api")
+	badActor := SecretActor{ActorUserID: "not-a-uuid", ViaToken: false}
+
+	if _, err := st.CreateProjectSecret(ctx, badActor, projID, "db-pass", "v"); err == nil {
+		t.Fatal("create with a failing audit insert must error")
+	}
+	var n int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM project_secrets WHERE project_id = $1`, projID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("audit failure must roll back the secret mutation; %d rows persisted", n)
+	}
+
+	// Same for rotate: seed with a good actor, rotate with the failing one.
+	if _, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "db-pass", "v1"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	nv := "v2"
+	if _, _, _, err := st.UpdateProjectSecret(ctx, badActor, projID, "db-pass", nil, &nv); err == nil {
+		t.Fatal("rotate with a failing audit insert must error")
+	}
+	if _, got, err := st.resolveProjectSecret(ctx, projID, "db-pass"); err != nil || string(got) != "v1" {
+		t.Fatalf("rotate must be rolled back with the audit: value=%q err=%v", got, err)
+	}
+}

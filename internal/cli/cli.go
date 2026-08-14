@@ -55,6 +55,28 @@ var validRoles = map[string]bool{
 	"agent":     true,
 }
 
+// roleServices is the single owner map for role-specific runtime components.
+// Executors intentionally have no core control-plane services: in particular a
+// master-less worker must never claim the generic outbox or mount the user API.
+// API/scheduler/all are the master-key trust domain and own delivery today; the
+// same materializing bit is reserved for the authoritative secret materializer.
+type roleServices struct {
+	api           bool
+	coreDelivery  bool
+	materializing bool
+}
+
+func servicesForRole(role string) roleServices {
+	switch role {
+	case "all", "api":
+		return roleServices{api: true, coreDelivery: true, materializing: true}
+	case "scheduler":
+		return roleServices{coreDelivery: true, materializing: true}
+	default: // worker/agent (unknown roles are rejected before this is called)
+		return roleServices{}
+	}
+}
+
 const (
 	dbPingInterval = 10 * time.Second
 	workerPoolSize = 4
@@ -398,6 +420,7 @@ func runServe(args []string) int {
 	if *role == "agent" {
 		return runAgent(ctx, cfg, *region, registry, logger)
 	}
+	owned := servicesForRole(*role)
 
 	// Database wiring. Configured DB → migrate + connect (fail-fast, no
 	// self-healing); readiness then tracks live connectivity. No DB → scaffold
@@ -470,7 +493,7 @@ func runServe(args []string) int {
 	// resolves its SMTP endpoint per send from these settings (live-reconfigurable).
 	var settingsSvc *settings.Service
 	var mail *mailer.Mailer
-	if st != nil {
+	if st != nil && owned.coreDelivery {
 		settingsSvc = settings.New(st, settings.Bootstrap{
 			MinPasswordLen:    cfg.Local.MinPasswordLength,
 			SessionTTLSeconds: int(cfg.Session.TTL.Std().Seconds()),
@@ -510,9 +533,13 @@ func runServe(args []string) int {
 	// RabbitMQ management lookup (which worker pools have a live consumer): used by the
 	// region picker (API) and region-worker alerting (scheduler). Best-effort — derived
 	// from the AMQP URL unless overridden; nil when no broker is configured.
-	mgmt, merr := rabbitManagementClient(cfg.RabbitMQ)
-	if merr != nil {
-		logger.Warn("mqadmin_init_failed", "error", merr.Error())
+	var mgmt *mqadmin.Client
+	if owned.api || owned.materializing {
+		var merr error
+		mgmt, merr = rabbitManagementClient(cfg.RabbitMQ)
+		if merr != nil {
+			logger.Warn("mqadmin_init_failed", "error", merr.Error())
+		}
 	}
 
 	// Auth + API wiring. Requires a database (sessions, JIT users, and the OIDC
@@ -521,7 +548,7 @@ func runServe(args []string) int {
 	// (re)configured at runtime from the Settings UI.
 	var app http.Handler
 	var apiHandler *api.Handler
-	if st != nil {
+	if st != nil && owned.api {
 		authn, err := auth.New(ctx, cfg, st, logger)
 		if err != nil {
 			logging.Critical(logger, "auth_init_failed", "error", err.Error())

@@ -86,3 +86,29 @@ func TestHelpAndUnknownCommand(t *testing.T) {
 		t.Fatalf("unknown command = %d, want 2", code)
 	}
 }
+
+// TestServicesForRoleControlPlaneIsolation pins the runtime wiring boundary from
+// func-secret-inventory §4.1/D-0155. A worker has a DB connection for the existing
+// composite-prober surface, but it must remain an executor: no settings/mailer,
+// generic outbox claimant, user API, or future authoritative materializer. Thus a
+// pending generic outbox row remains claimable by an api/scheduler/all replica in
+// the master-key trust domain instead of being consumed by a master-less worker.
+func TestServicesForRoleControlPlaneIsolation(t *testing.T) {
+	cases := []struct {
+		role string
+		want roleServices
+	}{
+		{"all", roleServices{api: true, coreDelivery: true, materializing: true}},
+		{"api", roleServices{api: true, coreDelivery: true, materializing: true}},
+		{"scheduler", roleServices{coreDelivery: true, materializing: true}},
+		{"worker", roleServices{}},
+		{"agent", roleServices{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			if got := servicesForRole(tc.role); got != tc.want {
+				t.Fatalf("servicesForRole(%q) = %+v, want %+v", tc.role, got, tc.want)
+			}
+		})
+	}
+}

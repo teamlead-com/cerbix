@@ -126,9 +126,10 @@ func (c *Config) validateSecrets() error {
 //     dispatch keyring; `enforced` alone (expand phase) likewise needs both — it
 //     moves pre-existing inline-value monitors onto envelopes, which are sealed
 //     from master-decrypted values.
-//   - worker/agent (executors): need the dispatch keyring covering THEIR region
-//     (or the default) whenever envelopes are in play — and must NOT hold the
-//     at-rest master or its previous keys. "Executors never receive the master"
+//   - worker/agent (executors): must NEVER hold the at-rest master or its
+//     previous keys, including while envelopes are disabled; when envelopes are
+//     in play they additionally need the dispatch keyring covering THEIR region
+//     (or the default). "Executors never receive the master"
 //     is a hard boundary (NFR-015): a master key on an executor profile is a
 //     misconfiguration, rejected rather than ignored.
 //
@@ -156,11 +157,14 @@ func (c *Config) ValidateSecretsForRole(role, region string) error {
 		if !domain.ValidRegion(region) {
 			return fmt.Errorf("secrets: --region %q is not a valid region name", region)
 		}
-		if !envelopes {
-			return nil
-		}
+		// The master key is never executor material, even while the feature and
+		// envelope mode are disabled. Allowing it in an inactive profile would make
+		// a later feature flip silently widen the worker's trust boundary.
 		if c.Security.EncryptionKey != "" || len(c.Security.PreviousKeys) > 0 {
 			return fmt.Errorf("secrets: role %s must NOT hold the at-rest master key (security.encryption_key/previous_keys) — executors receive only their region's dispatch keys", role)
+		}
+		if !envelopes {
+			return nil
 		}
 		if !c.Security.Dispatch.HasRegion(region) {
 			return fmt.Errorf("secrets: role %s in region %q has no security.dispatch keyring for it (configure security.dispatch.regions[%q] or a default)", role, region, region)

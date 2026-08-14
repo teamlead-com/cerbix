@@ -75,6 +75,11 @@ func TestValidateSecretsForRole(t *testing.T) {
 		wantErr string // "" = ok
 	}{
 		{"disabled any role ok", defaultsConfig(), "worker", "geo2", ""},
+		{"disabled executor still rejects master", func() *Config {
+			c := defaultsConfig()
+			c.Security.EncryptionKey = b64Key32
+			return c
+		}(), "worker", "geo2", "must NOT hold the at-rest master"},
 		{"all requires master", build(func(c *Config) {}), "all", "", "encryption_key"},
 		{"api requires master", build(func(c *Config) {}), "api", "", "encryption_key"},
 		{"scheduler with master+ring ok", build(func(c *Config) { c.Security.EncryptionKey = b64Key32 }), "scheduler", "", ""},

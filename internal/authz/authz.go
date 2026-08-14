@@ -79,7 +79,7 @@ const SyntheticTokenActorPrefix = "apitoken:"
 // AuditUserID returns the value an audit row's actor_user_id (uuid, nullable) may carry for
 // this principal: the user uuid, or "" (NULL) for a synthetic token identity.
 func (p Principal) AuditUserID() string {
-	if strings.HasPrefix(p.UserID, SyntheticTokenActorPrefix) {
+	if p.ViaToken && strings.HasPrefix(p.UserID, SyntheticTokenActorPrefix) {
 		return ""
 	}
 	return p.UserID

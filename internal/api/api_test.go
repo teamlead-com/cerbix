@@ -1846,31 +1846,36 @@ func (f *fakeStore) UpdateProjectSecret(_ context.Context, actor store.SecretAct
 			return false, false, 0, store.ErrSecretExists
 		}
 	}
-	if newValue != nil {
-		s.value = *newValue
-		now := time.Unix(1700000100, 0)
-		s.rotatedAt = &now
-		rotated = true
-	}
-	if newName != nil && *newName != name {
-		delete(ps, name)
-		ps[*newName] = s
+	rotated = newValue != nil
+	renamed = newName != nil && *newName != name
+	if renamed {
 		ui, _ := f.secretRefCounts(projectID, name)
 		repointed = ui
-		if f.secretRefs != nil {
-			delete(f.secretRefs, projectID+"/"+name)
-			f.secretRefs[projectID+"/"+*newName] = ui
-		}
-		renamed = true
 	}
 	if renamed || rotated {
 		target := name
 		if renamed {
 			target = name + " → " + *newName
 		}
+		// Validate and append the fake audit BEFORE mutating any map/value. The real
+		// store does both inside one transaction; ordering this way gives the fake
+		// the same rollback outcome when the audit insert fails.
 		if err := f.recordSecretAudit(projectID, actor, "secret.update",
 			fmt.Sprintf("%s · renamed=%t rotated=%t repointed=%d", target, renamed, rotated, repointed)); err != nil {
-			return false, false, 0, err // real tx would roll everything back
+			return false, false, 0, err
+		}
+	}
+	if newValue != nil {
+		s.value = *newValue
+		now := time.Unix(1700000100, 0)
+		s.rotatedAt = &now
+	}
+	if newName != nil && *newName != name {
+		delete(ps, name)
+		ps[*newName] = s
+		if f.secretRefs != nil {
+			delete(f.secretRefs, projectID+"/"+name)
+			f.secretRefs[projectID+"/"+*newName] = repointed
 		}
 	}
 	return renamed, rotated, repointed, nil

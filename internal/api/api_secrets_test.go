@@ -11,6 +11,7 @@ import (
 	"github.com/teamlead-com/cerbix/internal/api"
 	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // newSecretsHandler builds a router with the secret inventory feature ON.
@@ -403,5 +404,36 @@ func TestSecretsAPITokenActorContract(t *testing.T) {
 	}
 	if e := fs.audit[0]; e.Action != "secret.create" || e.ActorUserID != "cc-user-uuid" || !e.ViaToken {
 		t.Fatalf("cc audit = %+v, want secret.create by cc-user-uuid via_token", e)
+	}
+}
+
+func TestFakeSecretUpdateAuditFailureRollsBackMutation(t *testing.T) {
+	fs := seededStore()
+	good := store.SecretActor{ActorUserID: "pe"}
+	if _, err := fs.CreateProjectSecret(t.Context(), good, "p1", "db-pass", "v1"); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+	if fs.secretRefs == nil {
+		fs.secretRefs = map[string]int{}
+	}
+	fs.secretRefs["p1/db-pass"] = 1
+	beforeAudit := len(fs.audit)
+	newName, newValue := "db-pass-new", "v2"
+	bad := store.SecretActor{ActorUserID: "invalid:actor"}
+	if _, _, _, err := fs.UpdateProjectSecret(t.Context(), bad, "p1", "db-pass", &newName, &newValue); err == nil {
+		t.Fatal("update with failing audit actor must error")
+	}
+	old := fs.projectSecrets("p1")["db-pass"]
+	if old == nil || old.value != "v1" || old.rotatedAt != nil {
+		t.Fatalf("audit failure mutated original secret: %+v", old)
+	}
+	if _, exists := fs.projectSecrets("p1")[newName]; exists {
+		t.Fatal("audit failure persisted renamed secret")
+	}
+	if fs.secretRefs["p1/db-pass"] != 1 || fs.secretRefs["p1/"+newName] != 0 {
+		t.Fatalf("audit failure repointed refs: %+v", fs.secretRefs)
+	}
+	if len(fs.audit) != beforeAudit {
+		t.Fatalf("audit failure changed audit rows: %d -> %d", beforeAudit, len(fs.audit))
 	}
 }

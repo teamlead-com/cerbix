@@ -16,7 +16,7 @@ import (
 // secretMaxBody caps create/update request bodies. A secret value is at most
 // 4 KiB (enforced by the store); 16 KiB leaves headroom for JSON framing while
 // bounding memory against an oversized body.
-const secretMaxBody = 16 << 10 // 16 KiB
+const secretMaxBody = 32 << 10 // 32 KiB: a 4096-byte value can JSON-encode at ~6x (\u0000 escapes)
 
 // secretUsedByView is the reference-count block of a secret listing row.
 type secretUsedByView struct {
@@ -57,6 +57,8 @@ func (h *Handler) secretsFeatureEnabled(w http.ResponseWriter) bool {
 // listSecrets returns the project's secret inventory: names and metadata, never
 // values (ProjectRead — names are metadata, matching the monitor list).
 func (h *Handler) listSecrets(w http.ResponseWriter, r *http.Request) {
+	// §5: the whole secret surface is uncacheable — including errors/404/409.
+	w.Header().Set("Cache-Control", "no-store")
 	if !h.secretsFeatureEnabled(w) {
 		return
 	}
@@ -76,13 +78,14 @@ func (h *Handler) listSecrets(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	// Names are still sensitive metadata: keep the listing out of shared caches.
-	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, out)
 }
 
 // createSecret adds a named secret to the project inventory (editor+). The
 // value is accepted, encrypted, and never echoed back.
 func (h *Handler) createSecret(w http.ResponseWriter, r *http.Request) {
+	// §5: the whole secret surface is uncacheable — including errors/404/409.
+	w.Header().Set("Cache-Control", "no-store")
 	if !h.secretsFeatureEnabled(w) {
 		return
 	}
@@ -112,6 +115,8 @@ func (h *Handler) createSecret(w http.ResponseWriter, r *http.Request) {
 // updateSecret renames and/or rotates a secret in one transaction (editor+).
 // At least one of name/value must be provided; 204 on success.
 func (h *Handler) updateSecret(w http.ResponseWriter, r *http.Request) {
+	// §5: the whole secret surface is uncacheable — including errors/404/409.
+	w.Header().Set("Cache-Control", "no-store")
 	if !h.secretsFeatureEnabled(w) {
 		return
 	}
@@ -146,6 +151,8 @@ func (h *Handler) updateSecret(w http.ResponseWriter, r *http.Request) {
 // deleteSecret removes an unreferenced secret (editor+). While monitor settings
 // still reference it, the delete is refused with the reference count.
 func (h *Handler) deleteSecret(w http.ResponseWriter, r *http.Request) {
+	// §5: the whole secret surface is uncacheable — including errors/404/409.
+	w.Header().Set("Cache-Control", "no-store")
 	if !h.secretsFeatureEnabled(w) {
 		return
 	}

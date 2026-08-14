@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -1757,7 +1756,6 @@ func (f *fakeStore) ReplaceRecoveryCodes(_ context.Context, userID string, hashe
 // Mutations record their audit entry themselves, mirroring the real store's
 // audit-in-tx behavior (spec §5): the handler no longer writes secret audit rows.
 
-var fakeSecretNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 func fakeSecretValueInvalid(value string) bool {
 	return len(value) == 0 || len(value) > 4096 || !utf8.ValidString(value)
@@ -1791,7 +1789,7 @@ func (f *fakeStore) secretRefCounts(projectID, name string) (ui, file int) {
 }
 
 func (f *fakeStore) CreateProjectSecret(_ context.Context, actor store.SecretActor, projectID, name, value string) (store.ProjectSecret, error) {
-	if !fakeSecretNameRe.MatchString(name) {
+	if !domain.ValidSecretName(name) {
 		return store.ProjectSecret{}, store.ErrSecretNameInvalid
 	}
 	if fakeSecretValueInvalid(value) {
@@ -1823,7 +1821,7 @@ func (f *fakeStore) UpdateProjectSecret(_ context.Context, actor store.SecretAct
 	if newValue != nil && fakeSecretValueInvalid(*newValue) {
 		return false, false, 0, store.ErrSecretValueInvalid
 	}
-	if newName != nil && !fakeSecretNameRe.MatchString(*newName) {
+	if newName != nil && !domain.ValidSecretName(*newName) {
 		return false, false, 0, store.ErrSecretNameInvalid
 	}
 	if newName != nil && *newName != name {

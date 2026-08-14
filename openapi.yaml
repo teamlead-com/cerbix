@@ -561,6 +561,8 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [id, name, created_at]
+                additionalProperties: false
                 properties:
                   id: { type: string, format: uuid }
                   name: { type: string }
@@ -2122,29 +2124,36 @@ components:
       description: >
         One project-inventory secret: names and metadata only. Values are
         write-only and never appear in any API response.
+      required: [id, name, created_at, rotated_at, used_by]
+      additionalProperties: false
       properties:
         id: { type: string, format: uuid }
-        name: { type: string, description: 'Slug, unique within the project (^[a-z][a-z0-9-]{0,62}$).' }
+        name: { type: string, pattern: '^[a-z][a-z0-9-]{0,62}$', maxLength: 63, description: Slug, unique within the project. }
         created_at: { type: string, format: date-time }
         rotated_at: { type: string, format: date-time, nullable: true, description: Last time the value was rotated; null if never. }
         used_by:
           type: object
           description: Monitor-setting references pointing at this secret.
+          required: [total, file_managed]
+          additionalProperties: false
           properties:
             total: { type: integer }
             file_managed: { type: integer, description: References owned by a Monitoring-as-Code file provider. }
     CreateSecretRequest:
       type: object
       required: [name, value]
+      additionalProperties: false
       properties:
-        name: { type: string, description: 'Slug, unique within the project (^[a-z][a-z0-9-]{0,62}$).' }
-        value: { type: string, format: password, writeOnly: true, description: 'Secret value, ≤ 4096 UTF-8 bytes; never returned.' }
+        name: { type: string, pattern: '^[a-z][a-z0-9-]{0,62}$', maxLength: 63, description: Slug, unique within the project. }
+        value: { type: string, format: password, writeOnly: true, minLength: 1, description: 'Secret value, ≤ 4096 UTF-8 bytes; never returned.' }
     UpdateSecretRequest:
       type: object
       description: At least one of `name` (rename) or `value` (rotate) is required.
+      minProperties: 1
+      additionalProperties: false
       properties:
-        name: { type: string, description: New slug (rename). }
-        value: { type: string, format: password, writeOnly: true, description: 'New value (rotate), ≤ 4096 UTF-8 bytes; never returned.' }
+        name: { type: string, pattern: '^[a-z][a-z0-9-]{0,62}$', maxLength: 63, description: New slug (rename). }
+        value: { type: string, format: password, writeOnly: true, minLength: 1, description: 'New value (rotate), ≤ 4096 UTF-8 bytes; never returned.' }
     LoginRequest:
       type: object
       required: [username, password]

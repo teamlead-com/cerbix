@@ -1257,10 +1257,10 @@ export interface paths {
                     content: {
                         "application/json": {
                             /** Format: uuid */
-                            id?: string;
-                            name?: string;
+                            id: string;
+                            name: string;
                             /** Format: date-time */
-                            created_at?: string;
+                            created_at: string;
                         };
                     };
                 };
@@ -4927,25 +4927,25 @@ export interface components {
         /** @description One project-inventory secret: names and metadata only. Values are write-only and never appear in any API response. */
         ProjectSecret: {
             /** Format: uuid */
-            id?: string;
-            /** @description Slug, unique within the project (^[a-z][a-z0-9-]{0,62}$). */
-            name?: string;
+            id: string;
+            /** @description Slug */
+            name: string;
             /** Format: date-time */
-            created_at?: string;
+            created_at: string;
             /**
              * Format: date-time
              * @description Last time the value was rotated; null if never.
              */
-            rotated_at?: string | null;
+            rotated_at: string | null;
             /** @description Monitor-setting references pointing at this secret. */
-            used_by?: {
-                total?: number;
+            used_by: {
+                total: number;
                 /** @description References owned by a Monitoring-as-Code file provider. */
-                file_managed?: number;
+                file_managed: number;
             };
         };
         CreateSecretRequest: {
-            /** @description Slug, unique within the project (^[a-z][a-z0-9-]{0,62}$). */
+            /** @description Slug */
             name: string;
             /**
              * Format: password

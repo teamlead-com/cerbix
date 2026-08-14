@@ -259,3 +259,96 @@ func TestSecretsAudit(t *testing.T) {
 		}
 	}
 }
+
+// TestSecretsNoStoreEverywhere: §5 — the WHOLE secret surface is uncacheable, including
+// error, 404 and 409 responses, not only the successful GET.
+func TestSecretsNoStoreEverywhere(t *testing.T) {
+	fs := seededStore()
+	h := newSecretsHandler(fs)
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/projects/p1/secrets", `{"name":"db-pass","value":"v"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("seed create = %d", rec.Code)
+	}
+	cases := []struct {
+		name         string
+		principal    authz.Principal
+		method, path string
+		body         string
+		wantCode     int
+	}{
+		{"get ok", p1Editor, http.MethodGet, "/api/v1/projects/p1/secrets", "", http.StatusOK},
+		{"create conflict", p1Editor, http.MethodPost, "/api/v1/projects/p1/secrets", `{"name":"db-pass","value":"v"}`, http.StatusConflict},
+		{"patch validation", p1Editor, http.MethodPatch, "/api/v1/projects/p1/secrets/db-pass", `{}`, http.StatusBadRequest},
+		{"delete missing", p1Editor, http.MethodDelete, "/api/v1/projects/p1/secrets/nope", "", http.StatusNotFound},
+		{"foreign 404", p1Editor, http.MethodGet, "/api/v1/projects/p3/secrets", "", http.StatusNotFound},
+		{"viewer 403", p1Viewer, http.MethodDelete, "/api/v1/projects/p1/secrets/db-pass", "", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		rec := do(h, tc.principal, tc.method, tc.path, tc.body)
+		if rec.Code != tc.wantCode {
+			t.Fatalf("%s = %d, want %d", tc.name, rec.Code, tc.wantCode)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("%s: Cache-Control = %q, want no-store", tc.name, cc)
+		}
+	}
+	// Feature-off responses are uncacheable too.
+	hOff := newHandler(seededStore())
+	rec := do(hOff, o1Admin, http.MethodGet, "/api/v1/projects/p1/secrets", "")
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("feature-off: Cache-Control = %q, want no-store", cc)
+	}
+}
+
+// TestSecretsBodyBoundContract: a legal 4096-BYTE value may JSON-encode at up to ~6x
+// (a control character escapes to a six-byte \u00XX sequence), so the transport cap must
+// not reject it; 4097 decoded bytes still reject at the store rule.
+func TestSecretsBodyBoundContract(t *testing.T) {
+	h := newSecretsHandler(seededStore())
+	big, err := json.Marshal(strings.Repeat("\x00", 4096))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"name":"ctrl-value","value":` + string(big) + `}`
+	if len(body) < 20<<10 {
+		t.Fatalf("test setup: body should exceed the old 16KiB cap, got %d bytes", len(body))
+	}
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/projects/p1/secrets", body); rec.Code != http.StatusCreated {
+		t.Fatalf("4096-byte control-char value = %d (%s), want 201", rec.Code, rec.Body.String())
+	}
+	over, _ := json.Marshal(strings.Repeat("a", 4097))
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/projects/p1/secrets", `{"name":"too-big","value":`+string(over)+`}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("4097-byte value = %d, want 400", rec.Code)
+	}
+}
+
+// TestSecretsPatchNoOpAuditsNothing: PATCH{name: current} persists nothing → no audit row
+// (audit is written in the store tx only on actual change).
+func TestSecretsPatchNoOpAuditsNothing(t *testing.T) {
+	fs := seededStore()
+	h := newSecretsHandler(fs)
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/projects/p1/secrets", `{"name":"db-pass","value":"v"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d", rec.Code)
+	}
+	before := len(fs.audit)
+	if rec := do(h, p1Editor, http.MethodPatch, "/api/v1/projects/p1/secrets/db-pass", `{"name":"db-pass"}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("no-op rename = %d, want 204", rec.Code)
+	}
+	if len(fs.audit) != before {
+		t.Fatalf("no-op PATCH must not audit; rows grew %d -> %d: %+v", before, len(fs.audit), fs.audit[before:])
+	}
+}
+
+// TestSecretsForeignProjectMutations: PATCH and DELETE against a foreign project are hidden
+// as 404 exactly like GET/POST (completes the authz regression).
+func TestSecretsForeignProjectMutations(t *testing.T) {
+	h := newSecretsHandler(seededStore())
+	if rec := do(h, p1Editor, http.MethodPatch, "/api/v1/projects/p3/secrets/db-pass", `{"value":"v"}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign patch = %d, want 404", rec.Code)
+	}
+	if rec := do(h, p1Editor, http.MethodDelete, "/api/v1/projects/p3/secrets/db-pass", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign delete = %d, want 404", rec.Code)
+	}
+	if rec := do(h, outsider, http.MethodPatch, "/api/v1/projects/p1/secrets/db-pass", `{"value":"v"}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("outsider patch = %d, want 404", rec.Code)
+	}
+}

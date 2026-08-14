@@ -3,6 +3,7 @@ package prober
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -393,6 +394,73 @@ func TestRedisProber(t *testing.T) {
 	m.Target = "127.0.0.1:1"
 	if hb := r.Run(context.Background(), m); hb.Up {
 		t.Fatalf("closed port should be down: %+v", hb)
+	}
+}
+
+func TestRedisTLSRequiresTrustUnlessExplicitlySkipped(t *testing.T) {
+	seed := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	seed.StartTLS()
+	serverTLS := seed.TLS.Clone()
+	seed.Close()
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				r := bufio.NewReader(c)
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					n, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "*")))
+					command := ""
+					for i := 0; i < n; i++ {
+						_, _ = r.ReadString('\n')
+						arg, _ := r.ReadString('\n')
+						if i == 0 {
+							command = strings.ToUpper(strings.TrimSpace(arg))
+						}
+					}
+					if command == "PING" {
+						_, _ = c.Write([]byte("+PONG\r\n"))
+					}
+				}
+			}(conn)
+		}
+	}()
+	runner := NewRunner()
+	monitor := domain.Monitor{
+		ID: "redis-tls", ProjectID: "p", Name: "redis-tls", Type: domain.MonitorRedis,
+		Target: ln.Addr().String(), IntervalSeconds: 60, TimeoutSeconds: 5,
+		Config: map[string]string{"tls": "true"},
+	}
+	if hb := runner.Run(context.Background(), monitor); hb.Up {
+		t.Fatalf("untrusted Redis certificate passed verified TLS: %+v", hb)
+	}
+	monitor.Config["tls_skip_verify"] = "true"
+	if hb := runner.Run(context.Background(), monitor); !hb.Up {
+		t.Fatalf("explicit Redis skip-verify failed: %+v", hb)
+	}
+}
+
+func TestMySQLTLSConfigPolicy(t *testing.T) {
+	if got := mysqlTLSConfig(nil); got != "" {
+		t.Fatalf("legacy/unset TLS config = %q", got)
+	}
+	if got := mysqlTLSConfig(map[string]string{"tls": "true"}); got != "true" {
+		t.Fatalf("verified TLS config = %q", got)
+	}
+	if got := mysqlTLSConfig(map[string]string{"tls": "true", "tls_skip_verify": "true"}); got != "skip-verify" {
+		t.Fatalf("explicit skip-verify config = %q", got)
 	}
 }
 

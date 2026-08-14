@@ -3,6 +3,7 @@ package prober
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -29,6 +30,17 @@ func (p redisProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	defer conn.Close()
 	if d, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(d)
+	}
+	if m.Config["tls"] == "true" {
+		tlsConn := tls.Client(conn, &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			ServerName:         host,
+			InsecureSkipVerify: m.Config["tls_skip_verify"] == "true", //nolint:gosec // explicit operator opt-in
+		})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
+		}
+		conn = tlsConn
 	}
 	r := bufio.NewReader(conn)
 

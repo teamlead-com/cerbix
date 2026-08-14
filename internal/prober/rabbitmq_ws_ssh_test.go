@@ -203,3 +203,27 @@ func TestRabbitMQProberManagement(t *testing.T) {
 		t.Fatalf("404 management path should be down: %+v", hb)
 	}
 }
+
+func TestRabbitMQManagementTLSIsExplicitAndVerifiedByDefault(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	r := NewRunner()
+	m := domain.Monitor{
+		ID: "rm-tls", ProjectID: "p", Name: "rabbit-mgmt-tls", Type: domain.MonitorRabbitMQ,
+		Target: srv.URL, IntervalSeconds: 60, TimeoutSeconds: 5,
+		Config: map[string]string{"mode": "management", "username": "guest", "password": "guest", "tls": "true"},
+	}
+	if hb := r.Run(context.Background(), m); hb.Up {
+		t.Fatalf("untrusted certificate passed verified TLS: %+v", hb)
+	}
+	m.Config["tls_skip_verify"] = "true"
+	if hb := r.Run(context.Background(), m); !hb.Up {
+		t.Fatalf("explicit skip-verify TLS should connect: %+v", hb)
+	}
+	m.Target = strings.Replace(srv.URL, "https://", "http://", 1)
+	if hb := r.Run(context.Background(), m); hb.Up || !strings.Contains(hb.Msg, "must use https") {
+		t.Fatalf("tls=true accepted http target: %+v", hb)
+	}
+}

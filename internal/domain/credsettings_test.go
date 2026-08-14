@@ -18,8 +18,9 @@ func TestCredentialedType(t *testing.T) {
 	}
 }
 
-// TestValidateCredentialSettingsMatrix is the §4.2 accept/reject table.
-func TestValidateCredentialSettingsMatrix(t *testing.T) {
+// TestPrepareCredentialSettingsMatrix is the §4.2 accept/reject table through
+// the only exported prepare gate (normalization and validation are inseparable).
+func TestPrepareCredentialSettingsMatrix(t *testing.T) {
 	pg := func(mut func(map[string]string)) map[string]string {
 		m := map[string]string{"username": "monitor_ro", "database": "payments", "password_ref": "payments-db-ro"}
 		mut(m)
@@ -68,7 +69,7 @@ func TestValidateCredentialSettingsMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateCredentialSettings(tc.typ, tc.s, tc.surface)
+			_, err := PrepareCredentialSettings(tc.typ, tc.s, tc.surface)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("want ok, got %v", err)
@@ -82,15 +83,15 @@ func TestValidateCredentialSettingsMatrix(t *testing.T) {
 	}
 }
 
-// TestValidateCredentialSettingsNeverEchoesValues: error text must not leak submitted values.
-func TestValidateCredentialSettingsNeverEchoesValues(t *testing.T) {
+// TestPrepareCredentialSettingsNeverEchoesValues: error text must not leak submitted values.
+func TestPrepareCredentialSettingsNeverEchoesValues(t *testing.T) {
 	secretVal := "SuperSecret123"
 	cases := []map[string]string{
 		{"username": "u", "database": "d", "password": secretVal, "password_ref": "r1"}, // both → error
 		{"username": "u", "database": "d", "password_ref": "r1", "sslmode": secretVal},  // bad sslmode value
 	}
 	for _, s := range cases {
-		err := ValidateCredentialSettings(MonitorPostgres, s, SurfaceAPI)
+		_, err := PrepareCredentialSettings(MonitorPostgres, s, SurfaceAPI)
 		if err == nil {
 			t.Fatalf("case %v must be rejected (a regression accepting it would silently skip the leak assertion)", s)
 		}
@@ -100,10 +101,10 @@ func TestValidateCredentialSettingsNeverEchoesValues(t *testing.T) {
 	}
 }
 
-// TestNormalizeCredentialSettings: canonical defaults materialize (§4.2/§4.8), implicit ==
+// TestPrepareCredentialSettings: canonical defaults materialize (§4.2/§4.8), implicit ==
 // explicit (same effective map, hence same future hash), the input is never mutated, and
-// normalized output validates.
-func TestNormalizeCredentialSettings(t *testing.T) {
+// empty runtime-default values canonicalize at the same boundary.
+func TestPrepareCredentialSettings(t *testing.T) {
 	assertEq := func(t *testing.T, got, want map[string]string) {
 		t.Helper()
 		if len(got) != len(want) {
@@ -117,47 +118,77 @@ func TestNormalizeCredentialSettings(t *testing.T) {
 	}
 	// postgres: implicit == explicit
 	in := map[string]string{"username": "u", "database": "d", "password_ref": "r1"}
-	got := NormalizeCredentialSettings(MonitorPostgres, in)
+	got, err := PrepareCredentialSettings(MonitorPostgres, in, SurfaceFile)
+	if err != nil {
+		t.Fatalf("prepare postgres: %v", err)
+	}
 	want := map[string]string{"username": "u", "database": "d", "password_ref": "r1", "sslmode": "require", "query": "SELECT 1"}
 	assertEq(t, got, want)
-	explicit := NormalizeCredentialSettings(MonitorPostgres, want)
+	explicit, err := PrepareCredentialSettings(MonitorPostgres, want, SurfaceFile)
+	if err != nil {
+		t.Fatalf("prepare explicit postgres: %v", err)
+	}
 	assertEq(t, explicit, want)
 	if _, ok := in["sslmode"]; ok {
 		t.Fatal("input map must not be mutated")
 	}
-	if err := ValidateCredentialSettings(MonitorPostgres, got, SurfaceFile); err != nil {
-		t.Fatalf("normalized postgres must validate: %v", err)
-	}
 	// explicit non-default wins
-	ov := NormalizeCredentialSettings(MonitorPostgres, map[string]string{"username": "u", "database": "d", "password_ref": "r1", "sslmode": "disable"})
+	ov, err := PrepareCredentialSettings(MonitorPostgres, map[string]string{"username": "u", "database": "d", "password_ref": "r1", "sslmode": "disable"}, SurfaceFile)
+	if err != nil {
+		t.Fatalf("prepare postgres override: %v", err)
+	}
 	if ov["sslmode"] != "disable" {
 		t.Fatal("explicit value must not be overridden by the default")
 	}
 	// mysql / redis tls default
-	my := NormalizeCredentialSettings(MonitorMySQL, map[string]string{"username": "u", "database": "d", "password_ref": "r1"})
+	my, err := PrepareCredentialSettings(MonitorMySQL, map[string]string{"username": "u", "database": "d", "password_ref": "r1"}, SurfaceFile)
+	if err != nil {
+		t.Fatalf("prepare mysql: %v", err)
+	}
 	if my["tls"] != "true" || my["query"] != "SELECT 1" {
 		t.Fatalf("mysql defaults missing: %v", my)
 	}
-	rd := NormalizeCredentialSettings(MonitorRedis, map[string]string{"password_ref": "r1"})
+	rd, err := PrepareCredentialSettings(MonitorRedis, map[string]string{"password_ref": "r1"}, SurfaceFile)
+	if err != nil {
+		t.Fatalf("prepare redis: %v", err)
+	}
 	if rd["tls"] != "true" {
 		t.Fatalf("redis tls default missing: %v", rd)
 	}
 	// skip-verify with absent tls is safe ONLY because normalization sets tls=true first
-	sv := NormalizeCredentialSettings(MonitorRedis, map[string]string{"password_ref": "r1", "tls_skip_verify": "true"})
+	sv, err := PrepareCredentialSettings(MonitorRedis, map[string]string{"password_ref": "r1", "tls_skip_verify": "true"}, SurfaceFile)
+	if err != nil {
+		t.Fatalf("prepare redis skip verify: %v", err)
+	}
 	if sv["tls"] != "true" {
 		t.Fatalf("normalization must set tls before skip-verify is judged: %v", sv)
 	}
-	if err := ValidateCredentialSettings(MonitorRedis, sv, SurfaceFile); err != nil {
-		t.Fatalf("normalized skip-verify must validate: %v", err)
-	}
 	// rabbitmq management: tls + canonical path; amqp untouched
-	rm := NormalizeCredentialSettings(MonitorRabbitMQ, map[string]string{"mode": "management", "username": "u", "password_ref": "r1"})
+	rm, err := PrepareCredentialSettings(MonitorRabbitMQ, map[string]string{"mode": "management", "username": "u", "password_ref": "r1"}, SurfaceFile)
+	if err != nil {
+		t.Fatalf("prepare rabbitmq management: %v", err)
+	}
 	if rm["tls"] != "true" || rm["path"] != "/api/overview" {
 		t.Fatalf("rabbit management defaults missing: %v", rm)
 	}
-	if err := ValidateCredentialSettings(MonitorRabbitMQ, rm, SurfaceFile); err != nil {
-		t.Fatalf("normalized rabbit management must validate: %v", err)
+	ra, err := PrepareCredentialSettings(MonitorRabbitMQ, map[string]string{"mode": "amqp"}, SurfaceFile)
+	if err != nil {
+		t.Fatalf("prepare rabbitmq amqp: %v", err)
 	}
-	ra := NormalizeCredentialSettings(MonitorRabbitMQ, map[string]string{"mode": "amqp"})
 	assertEq(t, ra, map[string]string{"mode": "amqp"})
+
+	// Empty values that the historical probers default at runtime are canonicalized
+	// here, before hashing/persistence, so a writer cannot preserve a second spelling.
+	pgBlank, err := PrepareCredentialSettings(MonitorPostgres, map[string]string{
+		"username": "u", "database": "d", "password_ref": "r1", "query": " \t ",
+	}, SurfaceFile)
+	if err != nil || pgBlank["query"] != "SELECT 1" {
+		t.Fatalf("blank postgres query = %q, err %v", pgBlank["query"], err)
+	}
+	rmBlank, err := PrepareCredentialSettings(MonitorRabbitMQ, map[string]string{
+		"mode": "management", "username": "u", "password_ref": "r1", "path": "  ",
+	}, SurfaceFile)
+	if err != nil || rmBlank["path"] != "/api/overview" {
+		t.Fatalf("blank rabbitmq path = %q, err %v", rmBlank["path"], err)
+	}
 }

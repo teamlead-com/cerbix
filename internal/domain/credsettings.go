@@ -10,6 +10,7 @@ package domain
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // CredentialSurface tells the validator which write surface the settings came from —
@@ -57,16 +58,28 @@ var credentialedTypes = map[MonitorType]bool{
 // CredentialedType reports whether typ carries credentials governed by §4.2.
 func CredentialedType(typ MonitorType) bool { return credentialedTypes[typ] }
 
-// NormalizeCredentialSettings returns a NEW map with the spec's canonical defaults
-// materialized (§4.2/§4.8), so an implicit and an explicit default produce the SAME
-// effective config — and therefore the same canonical hash. Callers validate the
-// NORMALIZED result: absence can then never reach a prober as an insecure runtime
-// default (postgres `prefer`, plaintext mysql/redis, http rabbitmq management).
+// PrepareCredentialSettings is the ONLY exported settings entrypoint. It returns
+// a NEW, normalized map after validating it for the requested write surface.
+// Keeping normalization and validation inseparable makes omission fail-closed:
+// no caller can accidentally validate a raw map and let a prober supply an
+// insecure historical runtime default.
+func PrepareCredentialSettings(typ MonitorType, input map[string]string, surface CredentialSurface) (map[string]string, error) {
+	normalized := normalizeCredentialSettings(typ, input)
+	if err := validateCredentialSettings(typ, normalized, surface); err != nil {
+		return nil, err
+	}
+	return normalized, nil
+}
+
+// normalizeCredentialSettings returns a NEW map with the spec's canonical defaults
+// materialized (§4.2/§4.8), so an implicit, empty-runtime-default and explicit
+// default produce the SAME effective config — and therefore the same canonical
+// hash. It is deliberately unexported; callers use PrepareCredentialSettings.
 // Defaults: postgres sslmode=require + query=SELECT 1; mysql tls=true + query=SELECT 1;
 // redis tls=true; rabbitmq management tls=true + path=/api/overview (the prober's
 // canonical path). Unknown types and rabbitmq amqp mode pass through unchanged —
 // validation rejects/bounds them. The input map is never mutated.
-func NormalizeCredentialSettings(typ MonitorType, settings map[string]string) map[string]string {
+func normalizeCredentialSettings(typ MonitorType, settings map[string]string) map[string]string {
 	out := make(map[string]string, len(settings)+3)
 	for k, v := range settings {
 		out[k] = v
@@ -76,30 +89,34 @@ func NormalizeCredentialSettings(typ MonitorType, settings map[string]string) ma
 			out[k] = v
 		}
 	}
+	setDefaultIfBlank := func(k, v string) {
+		if current, ok := out[k]; !ok || strings.TrimSpace(current) == "" {
+			out[k] = v
+		}
+	}
 	switch typ {
 	case MonitorPostgres:
 		setDefault("sslmode", "require")
-		setDefault("query", "SELECT 1")
+		setDefaultIfBlank("query", "SELECT 1")
 	case MonitorMySQL:
 		setDefault("tls", "true")
-		setDefault("query", "SELECT 1")
+		setDefaultIfBlank("query", "SELECT 1")
 	case MonitorRedis:
 		setDefault("tls", "true")
 	case MonitorRabbitMQ:
 		if out["mode"] == "management" {
 			setDefault("tls", "true")
-			setDefault("path", "/api/overview")
+			setDefaultIfBlank("path", "/api/overview")
 		}
 	}
 	return out
 }
 
-// ValidateCredentialSettings validates the typed settings of a credentialed monitor
-// for the given surface. Callers pass the NormalizeCredentialSettings output, so the
-// secure defaults are already materialized. Pure and side-effect free; unknown keys
-// reject — there is no generic config escape hatch (§3.1 of func-monitoring-as-code
-// holds). Errors name keys and rules only — never a submitted value.
-func ValidateCredentialSettings(typ MonitorType, settings map[string]string, surface CredentialSurface) error {
+// validateCredentialSettings validates an already-normalized settings map. It is
+// deliberately unexported so every external writer must cross the prepare gate.
+// Pure and side-effect free; unknown keys reject — there is no generic config
+// escape hatch. Errors name keys and rules only, never a submitted value.
+func validateCredentialSettings(typ MonitorType, settings map[string]string, surface CredentialSurface) error {
 	switch typ {
 	case MonitorPostgres:
 		if err := allowKeys(settings, "username", "database", "sslmode", "query", "password", "password_ref"); err != nil {

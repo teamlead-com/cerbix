@@ -2,11 +2,57 @@ package store
 
 import (
 	"crypto/rand"
+	"fmt"
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/secret"
 )
+
+func TestReencryptProjectSecretsConvergesAcrossBatches(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	keyA, keyB := randKey(t), randKey(t)
+	cA, _ := secret.New(keyA)
+	st.WithCipher(cA).WithSecretsEnabled(true)
+	org, _ := st.CreateOrganization(ctx, "batch-org", "Batch org")
+	proj, _ := st.CreateProject(ctx, org.ID, "batch-project", "Batch project")
+
+	const total = reencryptInventoryBatch + 1
+	ids := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		var id string
+		if err := st.pool.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ciphertext, err := cA.EncryptBytes([]byte(fmt.Sprintf("value-%d", i)), secret.CanonicalAAD(proj.ID, id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx,
+			`INSERT INTO project_secrets(id, project_id, name, value_encrypted) VALUES($1,$2,$3,$4)`,
+			id, proj.ID, fmt.Sprintf("secret-%03d", i), ciphertext); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+
+	rotated, _ := secret.New(keyB, keyA)
+	st.WithCipher(rotated)
+	if err := st.reencryptProjectSecrets(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cB, _ := secret.New(keyB)
+	for _, id := range ids {
+		var ciphertext string
+		if err := st.pool.QueryRow(ctx, `SELECT value_encrypted FROM project_secrets WHERE id=$1`, id).Scan(&ciphertext); err != nil {
+			t.Fatal(err)
+		}
+		needs, err := cB.NeedsReencryptBytes(ciphertext, secret.CanonicalAAD(proj.ID, id))
+		if err != nil || needs {
+			t.Fatalf("row %s did not converge to primary: needs=%v err=%v", id, needs, err)
+		}
+	}
+}
 
 // TestReencryptProjectSecretCASDoesNotOverwriteRotate exercises the exact
 // rotate-vs-reencrypt linearization point. Reencrypt prepares a replacement from an old

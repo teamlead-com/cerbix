@@ -877,14 +877,20 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	var lastTs *time.Time
 	var dbNow time.Time
 	var curRev int64
+	var enabled bool
 	err = tx.QueryRow(ctx,
-		`SELECT last_result_ts, statement_timestamp(), execution_revision FROM monitors WHERE id = $1 FOR UPDATE`,
-		hb.MonitorID).Scan(&lastTs, &dbNow, &curRev)
+		`SELECT last_result_ts, statement_timestamp(), execution_revision, enabled FROM monitors WHERE id = $1 FOR UPDATE`,
+		hb.MonitorID).Scan(&lastTs, &dbNow, &curRev, &enabled)
 	if noRows(err) {
 		return ResultOutcome{}, ErrNotFound
 	}
 	if err != nil {
 		return ResultOutcome{}, fmt.Errorf("store: record result lock: %w", err)
+	}
+	// A disable committed before this authoritative ingest lock invalidates the
+	// in-flight probe. It must not add an SLA row or mutate liveness.
+	if !enabled {
+		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: MaterializeSkippedCurrentState})
 	}
 
 	// Step 3 — revision gate (BEFORE any insert): a result produced under a stale config

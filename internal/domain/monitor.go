@@ -107,7 +107,9 @@ type Monitor struct {
 	// liveness and is never exposed by public status pages.
 	LastProbeErrorReason string     `json:"last_probe_error_reason,omitempty"`
 	LastProbeErrorAt     *time.Time `json:"last_probe_error_at,omitempty"`
-	LastProbeErrorJobID  string     `json:"last_probe_error_job_id,omitempty"`
+	// JobID is retained only for internal correlation and structured logs. The monitor API
+	// exposes the bounded reason/time pair from the FR-020 contract, not queue identifiers.
+	LastProbeErrorJobID string `json:"-"`
 	// StateSequence is a per-monitor monotonic counter bumped on every applied
 	// status transition. It rides along in the transition outbox event and is
 	// checked at delivery so a stale DOWN (or reminder) can't fire after a newer

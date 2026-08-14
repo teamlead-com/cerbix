@@ -31,6 +31,7 @@ type Config struct {
 	Result             ResultConfig             `yaml:"result"`
 	Heartbeats         HeartbeatsConfig         `yaml:"heartbeats"`
 	Security           SecurityConfig           `yaml:"security"`
+	Secrets            SecretsConfig            `yaml:"secrets"`
 	Mail               MailConfig               `yaml:"mail"`
 	Pull               PullConfig               `yaml:"pull"`
 	Providers          ProvidersConfig          `yaml:"providers"`
@@ -191,6 +192,10 @@ type HeartbeatsConfig struct {
 type SecurityConfig struct {
 	EncryptionKey string   `yaml:"encryption_key"`
 	PreviousKeys  []string `yaml:"previous_keys"`
+	// Dispatch holds the per-region dispatch keyrings for credential envelopes
+	// (spec func-secret-inventory §4.7). SEPARATE from the at-rest keyring above:
+	// executors receive only their region's dispatch keys, never the master.
+	Dispatch DispatchConfig `yaml:"dispatch"`
 	// AdminEmail/AdminPassword define the instance's global admin account,
 	// created once on an empty system at first startup (requires local login to
 	// be enabled). The password is never generated or logged; rotate it via the
@@ -481,6 +486,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if _, err := c.Security.Keys(); err != nil {
+		return err
+	}
+	if err := c.validateSecrets(); err != nil {
 		return err
 	}
 	if c.Mail.Enabled() {

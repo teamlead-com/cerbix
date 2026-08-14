@@ -139,6 +139,16 @@ func TestAADKeyringRotation(t *testing.T) {
 	if pt, err := rotated.DecryptBytes(tok, aad); err != nil || string(pt) != "v" {
 		t.Fatalf("previous key must open old tokens, got %q err=%v", pt, err)
 	}
+	if needs, err := rotated.NeedsReencryptBytes(tok, aad); err != nil || !needs {
+		t.Fatalf("old-key token needs=%v err=%v, want true", needs, err)
+	}
+	primaryToken, err := rotated.EncryptBytes([]byte("v"), aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needs, err := rotated.NeedsReencryptBytes(primaryToken, aad); err != nil || needs {
+		t.Fatalf("primary token needs=%v err=%v, want false", needs, err)
+	}
 	foreign := testCipher(t, keyB)
 	if _, err := foreign.DecryptBytes(tok, aad); err == nil {
 		t.Fatal("a keyring without the original key must fail")

@@ -8,6 +8,69 @@ import (
 	"github.com/teamlead-com/cerbix/internal/secret"
 )
 
+// TestReencryptProjectSecretCASDoesNotOverwriteRotate exercises the exact
+// rotate-vs-reencrypt linearization point. Reencrypt prepares a replacement from an old
+// ciphertext, a user rotation commits a newer value, and the stale CAS must lose.
+func TestReencryptProjectSecretCASDoesNotOverwriteRotate(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	keyA, keyB := randKey(t), randKey(t)
+	cA, _ := secret.New(keyA)
+	st.WithCipher(cA).WithSecretsEnabled(true)
+
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	created, err := st.CreateProjectSecret(ctx, testSecretActor, proj.ID, "database-password", "old-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldCiphertext string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT value_encrypted FROM project_secrets WHERE id=$1 AND project_id=$2`,
+		created.ID, proj.ID).Scan(&oldCiphertext); err != nil {
+		t.Fatal(err)
+	}
+
+	rotated, _ := secret.New(keyB, keyA)
+	st.WithCipher(rotated)
+	aad := secret.CanonicalAAD(proj.ID, created.ID)
+	oldPlain, err := rotated.DecryptBytes(oldCiphertext, aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleReplacement, err := rotated.EncryptBytes(oldPlain, aad)
+	wipe(oldPlain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newValue := "concurrent-value"
+	if _, didRotate, _, err := st.UpdateProjectSecret(ctx, testSecretActor, proj.ID, created.Name, nil, &newValue); err != nil || !didRotate {
+		t.Fatalf("concurrent rotate: rotated=%v err=%v", didRotate, err)
+	}
+	applied, err := st.reencryptProjectSecretCAS(ctx, created.ID, proj.ID, oldCiphertext, staleReplacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied {
+		t.Fatal("stale reencrypt CAS overwrote a concurrent user rotation")
+	}
+
+	var current string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT value_encrypted FROM project_secrets WHERE id=$1 AND project_id=$2`,
+		created.ID, proj.ID).Scan(&current); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := rotated.DecryptBytes(current, aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wipe(plain)
+	if string(plain) != newValue {
+		t.Fatalf("stored value = %q, want concurrent rotation", plain)
+	}
+}
+
 func randKey(t *testing.T) []byte {
 	t.Helper()
 	k := make([]byte, 32)
@@ -25,10 +88,14 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 	keyA, keyB := randKey(t), randKey(t)
 
 	cA, _ := secret.New(keyA)
-	st.WithCipher(cA)
+	st.WithCipher(cA).WithSecretsEnabled(true)
 
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	inventory, err := st.CreateProjectSecret(ctx, testSecretActor, proj.ID, "database-password", "inventory-secret")
+	if err != nil {
+		t.Fatalf("create inventory secret: %v", err)
+	}
 	wh, _ := st.CreateWebhook(ctx, domain.Webhook{OrgID: org.ID, URL: "https://hook", Secret: "whsecret", Enabled: true})
 	ch, _ := st.CreateNotificationChannel(ctx, domain.NotificationChannel{
 		ProjectID: proj.ID, Type: domain.ChannelTelegram, Name: "tg", Enabled: true,
@@ -100,6 +167,18 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 	}
 	if _, err := cA.Decrypt(rawTOTP); err == nil {
 		t.Fatal("after reencrypt, old key A must no longer read the TOTP secret")
+	}
+
+	var rawInventory string
+	if err := st.pool.QueryRow(ctx, `SELECT value_encrypted FROM project_secrets WHERE id=$1 AND project_id=$2`, inventory.ID, proj.ID).Scan(&rawInventory); err != nil {
+		t.Fatal(err)
+	}
+	aad := secret.CanonicalAAD(proj.ID, inventory.ID)
+	if got, err := cB.DecryptBytes(rawInventory, aad); err != nil || string(got) != "inventory-secret" {
+		t.Fatalf("after reencrypt, B should read inventory secret: got %q err=%v", got, err)
+	}
+	if _, err := cA.DecryptBytes(rawInventory, aad); err == nil {
+		t.Fatal("after convergence, old key A must no longer read inventory secret")
 	}
 
 	// The push token must also have rotated to B, stay looked-up-able by its blind

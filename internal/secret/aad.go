@@ -98,5 +98,41 @@ func (c *Cipher) DecryptBytes(token string, aad []byte) ([]byte, error) {
 	return nil, errors.New("secret: authentication failed for this value and context")
 }
 
+// NeedsReencryptBytes authenticates token with the keyring and reports whether it was
+// sealed by a previous key rather than the current primary. It never returns plaintext;
+// callers use it to prove rotation convergence without exposing secret values.
+func (c *Cipher) NeedsReencryptBytes(token string, aad []byte) (bool, error) {
+	if c == nil || len(c.aeads) == 0 {
+		return false, errors.New("secret: AAD keyring is not configured")
+	}
+	if !strings.HasPrefix(token, aadPrefix) || len(aad) == 0 {
+		return false, errors.New("secret: invalid AAD-bound ciphertext or context")
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(token, aadPrefix))
+	if err != nil {
+		return false, fmt.Errorf("secret: decode: %w", err)
+	}
+	primary := c.aeads[0]
+	ns := primary.NonceSize()
+	if len(raw) >= ns {
+		if pt, err := primary.Open(nil, raw[:ns], raw[ns:], aad); err == nil {
+			for i := range pt {
+				pt[i] = 0
+			}
+			return false, nil
+		}
+	}
+	// Distinguish a valid previous-key token from corrupt/foreign ciphertext without
+	// revealing which previous key matched.
+	pt, err := c.DecryptBytes(token, aad)
+	if err != nil {
+		return false, err
+	}
+	for i := range pt {
+		pt[i] = 0
+	}
+	return true, nil
+}
+
 // IsAADEncrypted reports whether s carries the AAD-bound ciphertext prefix.
 func IsAADEncrypted(s string) bool { return strings.HasPrefix(s, aadPrefix) }

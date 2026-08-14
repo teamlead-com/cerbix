@@ -72,6 +72,9 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 	if s.cipher == nil {
 		return 0, 0, nil
 	}
+	if err := s.reencryptProjectSecrets(ctx); err != nil {
+		return 0, 0, err
+	}
 
 	// Webhooks: read (decrypt) + rewrite (encrypt under primary).
 	whRows, err := s.pool.Query(ctx, `SELECT id, secret FROM webhooks`)
@@ -101,10 +104,13 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		if eerr != nil {
 			return webhooks, 0, fmt.Errorf("store: encrypt webhook %s: %w", r.id, eerr)
 		}
-		if _, uerr := s.pool.Exec(ctx, `UPDATE webhooks SET secret = $2 WHERE id = $1`, r.id, enc); uerr != nil {
+		ct, uerr := s.pool.Exec(ctx, `UPDATE webhooks SET secret = $2 WHERE id = $1 AND secret = $3`, r.id, enc, r.val)
+		if uerr != nil {
 			return webhooks, 0, fmt.Errorf("store: rewrite webhook %s: %w", r.id, uerr)
 		}
-		webhooks++
+		if ct.RowsAffected() == 1 {
+			webhooks++
+		}
 	}
 
 	// Channels: read (decrypt each config value) + rewrite (encrypt under primary).
@@ -152,10 +158,13 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		if merr != nil {
 			return webhooks, channels, fmt.Errorf("store: encode channel %s config: %w", r.id, merr)
 		}
-		if _, uerr := s.pool.Exec(ctx, `UPDATE notification_channels SET config = $2 WHERE id = $1`, r.id, string(out)); uerr != nil {
+		ct, uerr := s.pool.Exec(ctx, `UPDATE notification_channels SET config = $2 WHERE id = $1 AND config = $3::jsonb`, r.id, string(out), string(r.cfg))
+		if uerr != nil {
 			return webhooks, channels, fmt.Errorf("store: rewrite channel %s: %w", r.id, uerr)
 		}
-		channels++
+		if ct.RowsAffected() == 1 {
+			channels++
+		}
 	}
 
 	// OIDC client secret (singleton row): decrypt with the keyring, re-encrypt under
@@ -171,7 +180,7 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		if eerr != nil {
 			return webhooks, channels, fmt.Errorf("store: encrypt oidc client secret: %w", eerr)
 		}
-		if _, uerr := s.pool.Exec(ctx, `UPDATE oidc_settings SET client_secret = $1 WHERE id = true`, enc); uerr != nil {
+		if _, uerr := s.pool.Exec(ctx, `UPDATE oidc_settings SET client_secret = $1 WHERE id = true AND client_secret = $2`, enc, oidcSecret); uerr != nil {
 			return webhooks, channels, fmt.Errorf("store: rewrite oidc client secret: %w", uerr)
 		}
 	} else if !noRows(oerr) {
@@ -198,8 +207,8 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 				return webhooks, channels, fmt.Errorf("store: encrypt mail password: %w", eerr)
 			}
 			if _, uerr := s.pool.Exec(ctx,
-				`UPDATE instance_settings SET mail = jsonb_set(mail, '{smtp_password}', to_jsonb($1::text)) WHERE id = true`,
-				enc); uerr != nil {
+				`UPDATE instance_settings SET mail = jsonb_set(mail, '{smtp_password}', to_jsonb($1::text))
+				  WHERE id = true AND mail = $2::jsonb`, enc, string(mailRaw)); uerr != nil {
 				return webhooks, channels, fmt.Errorf("store: rewrite mail password: %w", uerr)
 			}
 		}
@@ -262,7 +271,7 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		if merr != nil {
 			return webhooks, channels, fmt.Errorf("store: encode monitor %s config: %w", r.id, merr)
 		}
-		if _, uerr := s.pool.Exec(ctx, `UPDATE monitors SET config = $2 WHERE id = $1`, r.id, string(out)); uerr != nil {
+		if _, uerr := s.pool.Exec(ctx, `UPDATE monitors SET config = $2 WHERE id = $1 AND config = $3::jsonb`, r.id, string(out), string(r.cfg)); uerr != nil {
 			return webhooks, channels, fmt.Errorf("store: rewrite monitor %s: %w", r.id, uerr)
 		}
 	}
@@ -295,7 +304,7 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		if eerr != nil {
 			return webhooks, channels, fmt.Errorf("store: encrypt totp secret %s: %w", r.id, eerr)
 		}
-		if _, uerr := s.pool.Exec(ctx, `UPDATE users SET totp_secret = $2 WHERE id = $1`, r.id, enc); uerr != nil {
+		if _, uerr := s.pool.Exec(ctx, `UPDATE users SET totp_secret = $2 WHERE id = $1 AND totp_secret = $3`, r.id, enc, r.val); uerr != nil {
 			return webhooks, channels, fmt.Errorf("store: rewrite totp secret %s: %w", r.id, uerr)
 		}
 	}
@@ -330,9 +339,122 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		if eerr != nil {
 			return webhooks, channels, fmt.Errorf("store: encrypt push token %s: %w", r.id, eerr)
 		}
-		if _, uerr := s.pool.Exec(ctx, `UPDATE monitors SET push_token_enc = $2 WHERE id = $1`, r.id, enc); uerr != nil {
+		if _, uerr := s.pool.Exec(ctx, `UPDATE monitors SET push_token_enc = $2 WHERE id = $1 AND push_token_enc = $3`, r.id, enc, r.val); uerr != nil {
 			return webhooks, channels, fmt.Errorf("store: rewrite push token %s: %w", r.id, uerr)
 		}
 	}
 	return webhooks, channels, nil
+}
+
+const (
+	reencryptInventoryBatch    = 100
+	reencryptInventoryAttempts = 8
+)
+
+// reencryptProjectSecrets converges the AAD-bound inventory to the current primary key.
+// Every rewrite is an exact-ciphertext CAS, so a concurrent rotate wins rather than being
+// overwritten. Success is returned only after a full bounded scan proves zero old-key rows.
+func (s *Store) reencryptProjectSecrets(ctx context.Context) error {
+	for attempt := 1; attempt <= reencryptInventoryAttempts; attempt++ {
+		remaining, err := s.sweepProjectSecrets(ctx, true)
+		if err != nil {
+			return err
+		}
+		if remaining == 0 {
+			return nil
+		}
+	}
+	remaining, err := s.sweepProjectSecrets(ctx, false)
+	if err != nil {
+		return err
+	}
+	if remaining != 0 {
+		return fmt.Errorf("store: reencrypt project secrets did not converge: %d old-key row(s) remain", remaining)
+	}
+	return nil
+}
+
+func (s *Store) sweepProjectSecrets(ctx context.Context, rewrite bool) (int, error) {
+	var after *string
+	remaining := 0
+	for {
+		rows, err := s.pool.Query(ctx,
+			`SELECT id::text, project_id::text, value_encrypted
+			   FROM project_secrets
+			  WHERE ($1::uuid IS NULL OR id > $1::uuid)
+			  ORDER BY id
+			  LIMIT $2`, after, reencryptInventoryBatch)
+		if err != nil {
+			return 0, fmt.Errorf("store: scan project secrets for reencrypt: %w", err)
+		}
+		type inventoryRow struct{ id, projectID, ciphertext string }
+		batch := make([]inventoryRow, 0, reencryptInventoryBatch)
+		for rows.Next() {
+			var row inventoryRow
+			if err := rows.Scan(&row.id, &row.projectID, &row.ciphertext); err != nil {
+				rows.Close()
+				return 0, fmt.Errorf("store: scan project secret: %w", err)
+			}
+			batch = append(batch, row)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return 0, fmt.Errorf("store: iterate project secrets: %w", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		last := batch[len(batch)-1].id
+		after = &last
+		for _, row := range batch {
+			aad := secret.CanonicalAAD(row.projectID, row.id)
+			needs, err := s.cipher.NeedsReencryptBytes(row.ciphertext, aad)
+			if err != nil {
+				return 0, fmt.Errorf("store: inspect project secret %s for reencrypt: %w", row.id, err)
+			}
+			if !needs {
+				continue
+			}
+			remaining++
+			if !rewrite {
+				continue
+			}
+			plain, err := s.cipher.DecryptBytes(row.ciphertext, aad)
+			if err != nil {
+				return 0, fmt.Errorf("store: decrypt project secret %s: %w", row.id, err)
+			}
+			next, encErr := s.cipher.EncryptBytes(plain, aad)
+			for i := range plain {
+				plain[i] = 0
+			}
+			if encErr != nil {
+				return 0, fmt.Errorf("store: encrypt project secret %s: %w", row.id, encErr)
+			}
+			applied, err := s.reencryptProjectSecretCAS(ctx, row.id, row.projectID, row.ciphertext, next)
+			if err != nil {
+				return 0, fmt.Errorf("store: rewrite project secret %s: %w", row.id, err)
+			}
+			if applied {
+				remaining--
+			}
+		}
+		if len(batch) < reencryptInventoryBatch {
+			break
+		}
+	}
+	return remaining, nil
+}
+
+// reencryptProjectSecretCAS is the rotation linearization point for an inventory row.
+// A concurrent UpdateProjectSecret that already replaced oldCiphertext wins; reencrypt
+// never resurrects the stale plaintext it read before that update.
+func (s *Store) reencryptProjectSecretCAS(ctx context.Context, id, projectID, oldCiphertext, nextCiphertext string) (bool, error) {
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE project_secrets SET value_encrypted=$4
+		  WHERE id=$1 AND project_id=$2 AND value_encrypted=$3`,
+		id, projectID, oldCiphertext, nextCiphertext)
+	if err != nil {
+		return false, err
+	}
+	return ct.RowsAffected() == 1, nil
 }

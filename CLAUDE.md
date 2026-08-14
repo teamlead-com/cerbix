@@ -36,10 +36,12 @@ docker run --rm -v "$PWD":/app -v "$PWD/../openapi.yaml":/openapi.yaml -w /app n
 ### E2E (from repo root) — Playwright in docker, against a LIVE stack
 
 ```bash
-# Stack must be up first (single profile; + sso for the OIDC spec, + mail for mail flows):
-./e2e/run.sh                          # full suite (~2min, 34 tests)
-./e2e/run.sh tests/monitors.spec.ts   # one spec
-CERBIX_URL=http://host:8080 ./e2e/run.sh
+# Canonical single-stack gate starts the required SSO and mail dependencies:
+make dev-up
+make dev-test                         # 37 pass; idle-provider MaC UI may skip
+
+# Advanced targeted run against that same local stack:
+CERBIX_TOPOLOGY=single CERBIX_URL=http://localhost:8080 ./e2e/run.sh tests/monitors.spec.ts
 ```
 
 The suite signs in ONCE (local logins are rate-limited — never add per-test logins;
@@ -49,16 +51,25 @@ Tests create `e2e-`prefixed entities and clean them up — dev stacks only.
 ### Image & stacks (from repo root)
 
 ```bash
-cp docker/.env.dev.example docker/.env.dev                    # once; pins the broker image to its volume
-docker compose --env-file docker/.env.dev -f docker/docker-compose.yml build            # multi-stage: node builds SPA → embedded → distroless
-# Single-geo file is profile-driven; `single` and `distributed` are mutually exclusive:
-docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile single up -d          # one process --role all, :8080 (static IPs 10.5.0.x)
-docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile distributed run --rm api migrate --config /etc/cerbix/config.yaml  # migrate ONCE first — roles racing a new migration fail with "relation already exists"
-docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile distributed up -d     # scheduler + api (:8082) + worker
-# add --profile sso to either for Keycloak (:8081) + MariaDB
-# docker/docker-compose.geo.yml  — multi-geo: central always, remote sites via --profile geo1/geo2 (3 isolated subnets)
+make dev-init              # once, fresh base broker volume only
+make dev-build             # multi-stage SPA + Go image
+make dev-up                # role=all :8080 + SSO + mail
+make dev-test              # browser suite; idle-provider MaC UI assertion may skip
+make dev-down              # stop single before switching topology
+make dev-up-distributed    # scheduler + api :8082 + worker; one explicit migration first
+make dev-test-distributed  # targeted distributed-role/prober smoke
+make dev-down              # no -v; base named volumes survive
+
+make geo-init              # once, fresh geo broker volume only (separate image pin)
+make geo-build
+make geo-up-all            # central + geo1 AMQP worker + geo2 pull agent
+make geo-test
+make geo-down              # no -v; geo named volumes survive
 # docker/docker-compose.prod.yml — prod role=all, secrets from docker/.env (see .env.prod.example)
 ```
+
+Base and geo use different env files because they own different retained RabbitMQ volumes.
+Make fails on conflicting live topologies and never performs broker upgrades.
 
 Dev login: `admin@cerbix.local` / `devpassword123` (local auth; Keycloak on :8081 optional).
 

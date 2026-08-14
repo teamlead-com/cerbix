@@ -2892,9 +2892,10 @@ responses always contain array-valued `bundles`; empty means `[]`, never `null` 
 
 The shipped Compose files require an explicit, persisted `CERBIX_RABBITMQ_IMAGE`: no static
 default is safe for both a retained 3.12 volume and a volume already upgraded to 4.3. The fresh
-production/dev env templates select 4.3, while an existing installation must first pin its current
-image and then follow `3.12 → 3.13 → 4.2 → 4.3`, or a reviewed blue/green migration. The operator
-procedure and rollback rules live in `docs/runbook.md`.
+production, base-dev, and geo-dev env templates select 4.3, while an existing installation must
+first pin its current image and then follow `3.12 → 3.13 → 4.2 → 4.3`, or a reviewed blue/green
+migration. Each env file maps one-to-one to its named RabbitMQ volume. The operator procedure and
+rollback rules live in `docs/runbook.md`.
 
 Queue names, routing, and the physical v1/v2 credential wire separation are unchanged and both
 protocol paths are exercised live against 4.3. The shared regional test-RPC queues
@@ -2913,3 +2914,30 @@ shape must therefore be migrated on the old broker with test traffic stopped and
 drained before any broker hop; rollback across that boundary likewise requires stopping workers
 and deleting only empty test queues. No procedure may delete heartbeat, incident, audit, or
 non-empty broker data.
+
+## D-0158 — Make orchestrates only fixed non-production topologies and never guesses persisted state (iter-0118)
+
+The repository exposes a small Make facade for repeatable local verification of the shipped
+single-process, distributed-role, and geo Compose topologies. Existing `build`, `test`, `race`,
+and `lint` retain their native Go meanings. Dev-stack goals use only the fixed
+`docker/docker-compose.yml`, `docker/docker-compose.geo.yml`, `docker/.env.dev`, and
+`docker/.env.geo` paths; they cannot be redirected to the production manifest. Base and geo use
+separate env files because they own separate RabbitMQ volumes that can legitimately be at different
+upgrade checkpoints. Each env file is mandatory and pins its own broker volume. Make never invents
+a broker default and never rewrites an existing pin. Compose execution discards a same-named shell
+image override and pins the project name, so neither `CERBIX_RABBITMQ_IMAGE` nor
+`COMPOSE_PROJECT_NAME` can bypass the file/volume binding. Initializing either file from its
+fresh-install template is a separate, explicit operation and is refused when the corresponding
+dev broker volume already exists.
+
+Topology changes are explicit. An `up` goal fails when a mutually exclusive base/geo or
+single/distributed topology is already running instead of silently stopping it. Distributed and
+geo startup order is build, healthy infrastructure, one explicit migration, role processes, then
+per-role `/readyz`; unpublished role endpoints are checked from a short-lived container on the
+internal Compose network. `down` removes containers and networks only: no goal passes `-v`, prunes
+volumes, or deletes application data. E2E goals target hard-coded loopback URLs and run only after
+the corresponding readiness contract; they never point the state-mutating browser suite at an
+arbitrary host.
+
+These goals are development/test conveniences, not RabbitMQ migration tooling. D-0157 and the raw,
+per-hop runbook commands remain authoritative for retained-volume upgrade and rollback.

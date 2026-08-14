@@ -183,8 +183,9 @@ One `--role=all` process + infrastructure:
 
 The SPA is served by the binary itself from `embed.FS` on :8080 — no separate nginx layer is needed. **The image
 is self-contained:** `docker/Dockerfile` is a root-context multi-stage build (node builds the SPA → the Go stage
-embeds `dist` into the binary → distroless), so `docker compose --env-file docker/.env.dev -f
-docker/docker-compose.yml build cerbix` builds both the frontend and the backend into one image.
+embeds `dist` into the binary → distroless), so `make dev-build` builds both the frontend and the backend into
+one image. `make dev-up`, `make dev-up-distributed`, and `make geo-up-all` are the fixed non-production topology
+entrypoints; base and geo retain separate RabbitMQ image pins and cannot run concurrently on their fixed ports.
 For local development with hot-reload —
 `make -C frontend dev` (Vite server on :5173).
 

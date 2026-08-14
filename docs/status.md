@@ -2,13 +2,12 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current corrective iteration (iter-0117)
+## Current iteration (iter-0118)
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| FR-017/AC-0117-1 | The shipped single and distributed Compose profiles start with the configured file-provider directory, and diagnostics encode empty collections as arrays. | DONE | [`docker/docker-compose.yml`](../docker/docker-compose.yml), [`handlers_fileproviders.go`](../internal/api/handlers_fileproviders.go), required-array OpenAPI/TS contract; `TestComposeFileProviderMountMatchesOwningRoles`, `TestFileProviderDiagnosticsEmptyCollectionsAreArrays`; live single 38/38 and distributed 11/11 browser E2E (iter-0117). |
-| NFR-005/AC-0117-2 | Every startup failure cancels background services, attempts a bounded drain, then closes shared infrastructure; timeout is explicit and observable, and no process retries forever against a closed DB pool. | DONE | [`cleanupServeResources`](../internal/cli/cli.go), caller-owned settings/OIDC loops, `TestCleanupServeResourcesCancelsAndDrainsBeforeClosingInfrastructure`, bounded-timeout and loop-cancellation tests; live missing-root run exited 1 in 0.2 s with no `closed pool` loop (D-0156, iter-0117). |
-| DoD-0117 | Repo-wide lint, dependency audit, backend/frontend builds, dual-storage tests, and live single/distributed E2E are green. | DONE | `go test -race ./...`; dual-storage store `-race`; build/vet/gofmt/diff clean; golangci-lint v2.12.2 `0 issues`; frontend 6/6 + build + audit `0`; RabbitMQ 4.3 AMQP/RPC plus all live E2E green (iter-0117). |
+| AC-0118-1 | Non-production single, distributed, and geo stacks have explicit Make build/up/ready/test/down entrypoints; topology conflicts and missing broker-image state fail closed, and teardown never deletes named volumes. | DONE | Fixed-path lifecycle in [`Makefile`](../Makefile); separate fresh-volume pins in [`docker/.env.dev.example`](../docker/.env.dev.example) and [`docker/.env.geo.example`](../docker/.env.geo.example); static + expanded dry-run + network regressions in [`compose_wiring_test.go`](../internal/cli/compose_wiring_test.go); live single/distributed/geo proof in [iter-0118](iterations/iter-0118.md) (D-0158). |
+| DoD-0118 | The Make facade is documented and verified without weakening the existing Go test/build targets or the explicit RabbitMQ upgrade boundary. | DONE | `go build`/`vet`/format/diff clean; `make race` green; golangci-lint v2.12.2 `0 issues`; both Compose configs valid; single twice 37 pass/1 intentional MaC skip, distributed 10/1, geo 11/11; README/runbook/traceability/decision synchronized in [iter-0118](iterations/iter-0118.md). |
 
 ## Functional Requirements
 

@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 
-// Requires the sso compose profile (Keycloak with the cerbix realm). Skips
-// cleanly when the SSO button is absent.
+// The single-stack Make gate requires the SSO profile and fails if the
+// configured Keycloak button is absent.
 test.use({ storageState: { cookies: [], origins: [] } });
 
 test.describe("OIDC login (sso profile)", () => {
@@ -10,7 +10,7 @@ test.describe("OIDC login (sso profile)", () => {
     const sso = page.locator("button", { hasText: /SSO|Keycloak/ });
     // The button appears after /auth/config resolves — wait, don't race it.
     const configured = await sso.waitFor({ state: "visible", timeout: 8_000 }).then(() => true).catch(() => false);
-    test.skip(!configured, "OIDC is not configured on this instance");
+    expect(configured, "single-stack E2E requires the configured Keycloak profile").toBeTruthy();
     await sso.click();
     await page.waitForURL(/realms\/cerbix/, { timeout: 15_000 });
     await page.fill("#username", "testuser@example.com");

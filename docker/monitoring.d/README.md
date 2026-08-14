@@ -59,8 +59,8 @@ rejection. The dev stack uses **instance** scope, so the example sets both.
 
 ```bash
 # 1. bring up the dev stack (file provider is already configured, idle)
-cp docker/.env.dev.example docker/.env.dev
-docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile single up -d --build
+make dev-init  # only for a fresh broker volume
+make dev-up
 
 # 2. create the tenant the example targets (slugs must exist first) — via the UI, or SQL:
 #    INSERT INTO organizations (slug,name) VALUES ('acme','Acme');

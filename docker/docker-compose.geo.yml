@@ -3,9 +3,9 @@
 # Central site (postgres, rabbitmq, scheduler, api, worker-core) always starts;
 # remote sites are opt-in via profiles:
 #
-#   cp docker/.env.dev.example docker/.env.dev
-#   docker compose --env-file docker/.env.dev -f docker/docker-compose.geo.yml up -d --build
-#   docker compose --env-file docker/.env.dev -f docker/docker-compose.geo.yml --profile geo1 --profile geo2 up -d --build
+#   make geo-init     # once, fresh geo broker volume only
+#   make geo-up       # central only
+#   make geo-up-all   # central + both remote transports
 #
 # Reproduces the production topology on one host using THREE isolated networks, so
 # remote roles reach only what they would across a real geo boundary:

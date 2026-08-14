@@ -25,11 +25,25 @@ well-known local credentials: never reuse it or this file outside the disposable
 Production must inject its own random key and follow the rotation procedure below.
 
 ```bash
-cp docker/.env.dev.example docker/.env.dev  # once; keep the broker image pinned thereafter
-docker compose --env-file docker/.env.dev -f docker/docker-compose.yml \
-  --profile single --profile sso --profile mail up --build
+make dev-init  # once, and only when no retained base broker volume exists
+make dev-up
 # Postgres :5432 · RabbitMQ :5672 (mgmt :15672) · Keycloak :8081 · cerbix :8080
 ```
+
+Available non-production lifecycle gates:
+
+| Topology | Build | Start + ready | Browser/smoke gate | Stop |
+| --- | --- | --- | --- | --- |
+| Single (`all`, SSO, mail) | `make dev-build` | `make dev-up` | `make dev-test` | `make dev-down` |
+| Distributed (`api`/`scheduler`/`worker`) | `make dev-build-distributed` | `make dev-up-distributed` | `make dev-test-distributed` | `make dev-down` |
+| Geo central only | `make geo-build` | `make geo-up` | readiness only | `make geo-down` |
+| Geo central + geo1/geo2 | `make geo-build` | `make geo-up-all` | `make geo-test` | `make geo-down` |
+
+For a fresh geo broker volume, run `make geo-init` once. Base and geo use separate
+`docker/.env.dev` and `docker/.env.geo` pins because their retained RabbitMQ volumes may be on
+different upgrade checkpoints. Every `up` refuses a conflicting live topology; switch explicitly
+with its `down` goal. `down` never passes `-v` and preserves Postgres, RabbitMQ, and MariaDB data.
+The Make facade is not broker-upgrade tooling: use the raw staged procedure below for D-0157.
 
 ## Endpoints
 
@@ -162,12 +176,12 @@ socket) and push (dead-man's-switch, D-0028).
 ### RabbitMQ baseline and upgrade
 
 Compose requires `CERBIX_RABBITMQ_IMAGE` on every invocation: no default can safely describe both
-an old 3.12 data volume and one already upgraded to 4.3. Fresh installs copy an env template that
-pins 4.3 explicitly:
+an old 3.12 data volume and one already upgraded to 4.3. A fresh base-dev install uses the guarded
+initializer, which refuses to overwrite a pin or attach the template to an existing broker volume:
 
 ```bash
-cp docker/.env.dev.example docker/.env.dev
-docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile single up -d
+make dev-init
+make dev-up
 ```
 
 For retained queues/messages, first set the env file to the image that already owns the volume.
@@ -213,6 +227,18 @@ $DC exec rabbitmq rabbitmqctl stop
 
 # Persist the next supported hop in docker/.env.dev, then:
 $DC up -d rabbitmq  # 3.12→3.13, then repeat for 3.13→4.2 and 4.2→4.3
+```
+
+The geo stack has an independent volume and pin. Perform the same queue, feature-flag, clean-stop,
+snapshot, and per-hop checks using its own explicit command surface; do not reuse `.env.dev`:
+
+```bash
+GEO_DC='docker compose --env-file docker/.env.geo -f docker/docker-compose.geo.yml --profile geo1 --profile geo2'
+$GEO_DC exec rabbitmq rabbitmqctl enable_feature_flag all
+$GEO_DC stop scheduler api worker-core worker-geo1 worker-geo2
+$GEO_DC exec rabbitmq rabbitmqctl stop
+# take an offline/storage-consistent snapshot, persist the next image in docker/.env.geo, then:
+$GEO_DC up -d rabbitmq
 ```
 
 The env-file update is part of the commit point: every later Compose command must use that same

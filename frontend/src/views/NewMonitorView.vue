@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
+import { applyCredentialSelection } from "@/lib/monitorCredentials";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -11,6 +12,7 @@ type MonitorType = "http" | "tcp" | "icmp" | "dns" | "tls" | "grpc" | "composite
 type CreateMonitor = components["schemas"]["CreateMonitor"];
 type UpdateMonitor = components["schemas"]["UpdateMonitor"];
 type Channel = components["schemas"]["NotificationChannel"];
+type ProjectSecret = components["schemas"]["ProjectSecret"];
 
 const httpMethods = ["GET", "POST", "HEAD", "PUT", "DELETE"];
 
@@ -145,14 +147,27 @@ const isRedis = computed(() => form.type === "redis");
 const isPromQL = computed(() => form.type === "promql");
 const isRabbitMQ = computed(() => form.type === "rabbitmq");
 
+const credentialMode = ref<"value" | "ref">("value");
+const initialCredentialMode = ref<"value" | "ref">("value");
+const secretRef = ref("");
+const projectSecrets = ref<ProjectSecret[]>([]);
+const secretFeatureDisabled = ref(false);
+const tlsSettings = reactive({ enabled: true, skipVerify: false });
+
 // RabbitMQ: AMQP protocol handshake (default) or the management HTTP API. The
 // management mode uses basic auth (username + write-only password, reusing `pg`)
 // and an optional path.
 const rabbitMode = ref<"amqp" | "management">("amqp");
 const rabbitPath = ref("");
+const credentialRequired = computed(() => isDB.value || isRedis.value || (isRabbitMQ.value && rabbitMode.value === "management"));
 function rabbitConfig(): Record<string, string> {
   if (rabbitMode.value !== "management") return { mode: "amqp" };
-  const base: Record<string, string> = { mode: "management", username: pg.username.trim() };
+  const base: Record<string, string> = {
+    mode: "management",
+    username: pg.username.trim(),
+    tls: String(tlsSettings.enabled),
+    tls_skip_verify: String(tlsSettings.skipVerify),
+  };
   if (rabbitPath.value.trim()) base.path = rabbitPath.value.trim();
   return withSecret(base);
 }
@@ -160,16 +175,23 @@ function rabbitConfig(): Record<string, string> {
 // Connection config. `password` is write-only: it's never returned by the API,
 // so on edit an empty field means "keep the stored password". Reused across the
 // DB types; `query` doubles as the PromQL expression.
-const pg = reactive({ database: "", username: "", password: "", sslmode: "prefer", query: "" });
+const pg = reactive({ database: "", username: "", password: "", sslmode: "require", query: "" });
 function withSecret(base: Record<string, string>): Record<string, string> {
-  if (pg.password) base.password = pg.password; // omit-when-empty preserves the stored secret on edit
-  return base;
+  return credentialMode.value === "ref"
+    ? applyCredentialSelection(base, { mode: "ref", ref: secretRef.value })
+    : applyCredentialSelection(base, { mode: "value", value: pg.password });
 }
 function pgConfig(): Record<string, string> {
-  return withSecret({ database: pg.database.trim(), username: pg.username.trim(), sslmode: pg.sslmode, query: pg.query.trim() });
+  const base: Record<string, string> = { database: pg.database.trim(), username: pg.username.trim(), query: pg.query.trim() };
+  if (form.type === "postgres") base.sslmode = pg.sslmode;
+  else {
+    base.tls = String(tlsSettings.enabled);
+    base.tls_skip_verify = String(tlsSettings.skipVerify);
+  }
+  return withSecret(base);
 }
 function redisConfig(): Record<string, string> {
-  return withSecret({ username: pg.username.trim() });
+  return withSecret({ username: pg.username.trim(), tls: String(tlsSettings.enabled), tls_skip_verify: String(tlsSettings.skipVerify) });
 }
 function promqlConfig(): Record<string, string> {
   return { query: pg.query.trim() };
@@ -441,6 +463,10 @@ const canSubmit = computed(() => {
   if (!writeAllowed.value || !form.name.trim() || submitting.value) return false;
   if (form.type === "push") return true;
   if (form.type === "composite") return childIds.value.size > 0;
+  if (credentialRequired.value) {
+    if (credentialMode.value === "ref" && !secretRef.value) return false;
+    if (credentialMode.value === "value" && !pg.password && (!isEdit.value || initialCredentialMode.value !== "value")) return false;
+  }
   return !!form.target.trim();
 });
 
@@ -635,9 +661,11 @@ async function loadForEdit() {
   if (m.type === "postgres" || m.type === "mysql" || m.type === "redis" || m.type === "promql") {
     pg.database = m.config?.database ?? "";
     pg.username = m.config?.username ?? "";
-    pg.sslmode = m.config?.sslmode || "prefer";
+    pg.sslmode = m.config?.sslmode || "require";
     pg.query = m.config?.query ?? "";
     pg.password = "";
+    tlsSettings.enabled = m.config?.tls !== "false";
+    tlsSettings.skipVerify = m.config?.tls_skip_verify === "true";
   }
   // RabbitMQ: prefill mode + management basic-auth username/path (password redacted).
   if (m.type === "rabbitmq") {
@@ -645,6 +673,17 @@ async function loadForEdit() {
     rabbitPath.value = m.config?.path ?? "";
     pg.username = m.config?.username ?? "";
     pg.password = "";
+    tlsSettings.enabled = m.config?.tls !== "false";
+    tlsSettings.skipVerify = m.config?.tls_skip_verify === "true";
+  }
+  if (credentialRequired.value && m.config?.password_ref) {
+    credentialMode.value = "ref";
+    initialCredentialMode.value = "ref";
+    secretRef.value = m.config.password_ref;
+  } else {
+    credentialMode.value = "value";
+    initialCredentialMode.value = "value";
+    secretRef.value = "";
   }
   // Preselect the channels already linked to this monitor.
   const linked = await api.GET("/api/v1/monitors/{monitorID}/notifications", { params: { path: { monitorID: editId } } });
@@ -670,6 +709,14 @@ async function loadProjectMonitors() {
   if (!ws.projectId) return;
   const res = await api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID: ws.projectId } } });
   projectMonitors.value = res.data ?? [];
+}
+
+async function loadProjectSecrets() {
+  if (!ws.projectId) return;
+  const res = await api.GET("/api/v1/projects/{projectID}/secrets", { params: { path: { projectID: ws.projectId } } });
+  const code = (res.error as { error?: string } | undefined)?.error;
+  secretFeatureDisabled.value = code === "feature_disabled";
+  projectSecrets.value = res.data ?? [];
 }
 
 type Region = { name: string; live: boolean };
@@ -756,7 +803,7 @@ async function applyInstanceDefaults() {
 
 onMounted(async () => {
   await ws.init();
-  await Promise.all([loadChannels(), loadEscalationPolicies(), loadProjectMonitors(), loadRegions()]);
+  await Promise.all([loadChannels(), loadEscalationPolicies(), loadProjectMonitors(), loadProjectSecrets(), loadRegions()]);
   if (isEdit.value) await loadForEdit();
   else await applyInstanceDefaults();
 });
@@ -924,21 +971,27 @@ const selectCls =
                 </label>
                 <label class="flex flex-col gap-[6px]">
                   <span class="text-[12px] font-semibold text-ink-2">SSL mode</span>
-                  <select v-model="pg.sslmode" :class="[selectCls, 'h-[38px]']">
+                  <select v-if="form.type === 'postgres'" v-model="pg.sslmode" :class="[selectCls, 'h-[38px]']">
                     <option value="disable">disable</option>
-                    <option value="prefer">prefer</option>
                     <option value="require">require</option>
+                    <option value="verify-ca">verify-ca</option>
                     <option value="verify-full">verify-full</option>
                   </select>
+                  <div v-else class="flex h-[38px] items-center gap-4 rounded-sm border border-border bg-surface-2 px-3 text-[12.5px]">
+                    <label class="flex items-center gap-2"><input v-model="tlsSettings.enabled" type="checkbox" /> TLS</label>
+                    <label class="flex items-center gap-2" :class="!tlsSettings.enabled && 'opacity-50'"><input v-model="tlsSettings.skipVerify" type="checkbox" :disabled="!tlsSettings.enabled" /> Skip verify</label>
+                  </div>
                 </label>
                 <label class="flex flex-col gap-[6px]">
                   <span class="text-[12px] font-semibold text-ink-2">Username</span>
                   <input v-model="pg.username" type="text" placeholder="cerbix" :class="[inputCls, 'font-mono text-[13px]']" />
                 </label>
-                <label class="flex flex-col gap-[6px]">
-                  <span class="text-[12px] font-semibold text-ink-2">Password</span>
-                  <input v-model="pg.password" type="password" :placeholder="isEdit ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
-                </label>
+                <div class="flex flex-col gap-[6px]">
+                  <span class="text-[12px] font-semibold text-ink-2">Credential</span>
+                  <div class="flex gap-3 text-[12px]"><label><input v-model="credentialMode" type="radio" value="value" /> Value</label><label :class="secretFeatureDisabled && 'opacity-50'"><input v-model="credentialMode" type="radio" value="ref" :disabled="secretFeatureDisabled" /> Secret reference</label></div>
+                  <select v-if="credentialMode === 'ref'" v-model="secretRef" data-testid="monitor-secret-ref" :class="[selectCls, 'h-[38px]']"><option value="" disabled>Select a project secret</option><option v-for="s in projectSecrets" :key="s.id" :value="s.name">{{ s.name }}</option></select>
+                  <input v-else v-model="pg.password" type="password" :placeholder="isEdit && initialCredentialMode === 'value' ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
+                </div>
               </div>
               <label class="flex flex-col gap-[6px]">
                 <span class="text-[12px] font-semibold text-ink-2">Query <span class="font-normal text-ink-3">· default SELECT 1</span></span>
@@ -958,10 +1011,16 @@ const selectCls =
                 <span class="text-[12px] font-semibold text-ink-2">Username <span class="font-normal text-ink-3">· ACL, optional</span></span>
                 <input v-model="pg.username" type="text" placeholder="default" :class="[inputCls, 'font-mono text-[13px]']" />
               </label>
-              <label class="flex flex-col gap-[6px]">
-                <span class="text-[12px] font-semibold text-ink-2">Password</span>
-                <input v-model="pg.password" type="password" :placeholder="isEdit ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
-              </label>
+              <div class="flex flex-col gap-[6px]">
+                <span class="text-[12px] font-semibold text-ink-2">Credential</span>
+                <div class="flex gap-3 text-[12px]"><label><input v-model="credentialMode" type="radio" value="value" /> Value</label><label :class="secretFeatureDisabled && 'opacity-50'"><input v-model="credentialMode" type="radio" value="ref" :disabled="secretFeatureDisabled" /> Secret reference</label></div>
+                <select v-if="credentialMode === 'ref'" v-model="secretRef" data-testid="monitor-secret-ref" :class="[selectCls, 'h-[38px]']"><option value="" disabled>Select a project secret</option><option v-for="s in projectSecrets" :key="s.id" :value="s.name">{{ s.name }}</option></select>
+                <input v-else v-model="pg.password" type="password" :placeholder="isEdit && initialCredentialMode === 'value' ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
+              </div>
+              <div class="col-span-2 flex items-center gap-4 text-[12.5px] max-[560px]:col-span-1">
+                <label class="flex items-center gap-2"><input v-model="tlsSettings.enabled" type="checkbox" /> TLS (verified)</label>
+                <label class="flex items-center gap-2" :class="!tlsSettings.enabled && 'opacity-50'"><input v-model="tlsSettings.skipVerify" type="checkbox" :disabled="!tlsSettings.enabled" /> Skip certificate verification</label>
+              </div>
             </div>
           </section>
 
@@ -995,10 +1054,16 @@ const selectCls =
                   <span class="text-[12px] font-semibold text-ink-2">Username</span>
                   <input v-model="pg.username" type="text" placeholder="guest" :class="[inputCls, 'font-mono text-[13px]']" />
                 </label>
-                <label class="flex flex-col gap-[6px]">
-                  <span class="text-[12px] font-semibold text-ink-2">Password <span class="font-normal text-ink-3">· write-only</span></span>
-                  <input v-model="pg.password" type="password" :placeholder="isEdit ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
-                </label>
+                <div class="flex flex-col gap-[6px]">
+                  <span class="text-[12px] font-semibold text-ink-2">Credential</span>
+                  <div class="flex gap-3 text-[12px]"><label><input v-model="credentialMode" type="radio" value="value" /> Value</label><label :class="secretFeatureDisabled && 'opacity-50'"><input v-model="credentialMode" type="radio" value="ref" :disabled="secretFeatureDisabled" /> Secret reference</label></div>
+                  <select v-if="credentialMode === 'ref'" v-model="secretRef" data-testid="monitor-secret-ref" :class="[selectCls, 'h-[38px]']"><option value="" disabled>Select a project secret</option><option v-for="s in projectSecrets" :key="s.id" :value="s.name">{{ s.name }}</option></select>
+                  <input v-else v-model="pg.password" type="password" :placeholder="isEdit && initialCredentialMode === 'value' ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
+                </div>
+                <div class="col-span-2 flex items-center gap-4 text-[12.5px] max-[560px]:col-span-1">
+                  <label class="flex items-center gap-2"><input v-model="tlsSettings.enabled" type="checkbox" /> TLS (verified)</label>
+                  <label class="flex items-center gap-2" :class="!tlsSettings.enabled && 'opacity-50'"><input v-model="tlsSettings.skipVerify" type="checkbox" :disabled="!tlsSettings.enabled" /> Skip certificate verification</label>
+                </div>
                 <label class="col-span-2 flex flex-col gap-[6px] max-[560px]:col-span-1">
                   <span class="text-[12px] font-semibold text-ink-2">Path <span class="font-normal text-ink-3">· defaults to /api/overview</span></span>
                   <input v-model="rabbitPath" type="text" placeholder="/api/overview" :class="[inputCls, 'font-mono text-[13px]']" />

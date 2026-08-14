@@ -2361,6 +2361,16 @@ components:
         escalation_policy_id: { type: string, description: 'On-call escalation policy for down alerts. Empty = flat notification to all linked channels.' }
         status: { type: string, enum: [pending, up, down] }
         push_token: { type: string, description: 'Set for push monitors; the secret in their heartbeat URL.' }
+        last_probe_error_reason:
+          type: string
+          readOnly: true
+          enum: [no_dispatch_key, unknown_key_id, decrypt_auth_failed, unsupported_version]
+          description: 'Latest executor credential-envelope failure. Diagnostic only; never changes target liveness.'
+        last_probe_error_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: 'Server time of the latest credential-envelope diagnostic.'
         management:
           $ref: '#/components/schemas/MonitorManagement'
         created_at: { type: string, format: date-time }

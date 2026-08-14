@@ -5200,6 +5200,10 @@ export interface components {
             status?: "pending" | "up" | "down";
             /** @description Set for push monitors; the secret in their heartbeat URL. */
             push_token?: string;
+            /** @description Latest executor credential-envelope failure. Diagnostic only; never changes target liveness. */
+            readonly last_probe_error_reason?: "no_dispatch_key" | "unknown_key_id" | "decrypt_auth_failed" | "unsupported_version";
+            /** Format: date-time */
+            readonly last_probe_error_at?: string;
             management?: components["schemas"]["MonitorManagement"];
             /** Format: date-time */
             created_at?: string;

@@ -57,10 +57,48 @@ var credentialedTypes = map[MonitorType]bool{
 // CredentialedType reports whether typ carries credentials governed by §4.2.
 func CredentialedType(typ MonitorType) bool { return credentialedTypes[typ] }
 
+// NormalizeCredentialSettings returns a NEW map with the spec's canonical defaults
+// materialized (§4.2/§4.8), so an implicit and an explicit default produce the SAME
+// effective config — and therefore the same canonical hash. Callers validate the
+// NORMALIZED result: absence can then never reach a prober as an insecure runtime
+// default (postgres `prefer`, plaintext mysql/redis, http rabbitmq management).
+// Defaults: postgres sslmode=require + query=SELECT 1; mysql tls=true + query=SELECT 1;
+// redis tls=true; rabbitmq management tls=true + path=/api/overview (the prober's
+// canonical path). Unknown types and rabbitmq amqp mode pass through unchanged —
+// validation rejects/bounds them. The input map is never mutated.
+func NormalizeCredentialSettings(typ MonitorType, settings map[string]string) map[string]string {
+	out := make(map[string]string, len(settings)+3)
+	for k, v := range settings {
+		out[k] = v
+	}
+	setDefault := func(k, v string) {
+		if _, ok := out[k]; !ok {
+			out[k] = v
+		}
+	}
+	switch typ {
+	case MonitorPostgres:
+		setDefault("sslmode", "require")
+		setDefault("query", "SELECT 1")
+	case MonitorMySQL:
+		setDefault("tls", "true")
+		setDefault("query", "SELECT 1")
+	case MonitorRedis:
+		setDefault("tls", "true")
+	case MonitorRabbitMQ:
+		if out["mode"] == "management" {
+			setDefault("tls", "true")
+			setDefault("path", "/api/overview")
+		}
+	}
+	return out
+}
+
 // ValidateCredentialSettings validates the typed settings of a credentialed monitor
-// for the given surface. Pure and side-effect free; unknown keys reject — there is no
-// generic config escape hatch (§3.1 of func-monitoring-as-code holds). Errors name
-// keys and rules only — never a submitted value.
+// for the given surface. Callers pass the NormalizeCredentialSettings output, so the
+// secure defaults are already materialized. Pure and side-effect free; unknown keys
+// reject — there is no generic config escape hatch (§3.1 of func-monitoring-as-code
+// holds). Errors name keys and rules only — never a submitted value.
 func ValidateCredentialSettings(typ MonitorType, settings map[string]string, surface CredentialSurface) error {
 	switch typ {
 	case MonitorPostgres:

@@ -90,10 +90,74 @@ func TestValidateCredentialSettingsNeverEchoesValues(t *testing.T) {
 		{"username": "u", "database": "d", "password_ref": "r1", "sslmode": secretVal},  // bad sslmode value
 	}
 	for _, s := range cases {
-		if err := ValidateCredentialSettings(MonitorPostgres, s, SurfaceAPI); err != nil {
-			if strings.Contains(err.Error(), secretVal) {
-				t.Fatalf("error must not echo submitted values: %v", err)
+		err := ValidateCredentialSettings(MonitorPostgres, s, SurfaceAPI)
+		if err == nil {
+			t.Fatalf("case %v must be rejected (a regression accepting it would silently skip the leak assertion)", s)
+		}
+		if strings.Contains(err.Error(), secretVal) {
+			t.Fatalf("error must not echo submitted values: %v", err)
+		}
+	}
+}
+
+// TestNormalizeCredentialSettings: canonical defaults materialize (§4.2/§4.8), implicit ==
+// explicit (same effective map, hence same future hash), the input is never mutated, and
+// normalized output validates.
+func TestNormalizeCredentialSettings(t *testing.T) {
+	assertEq := func(t *testing.T, got, want map[string]string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("map size %d != %d: got %v want %v", len(got), len(want), got, want)
+		}
+		for k, v := range want {
+			if got[k] != v {
+				t.Fatalf("key %q = %q, want %q (got %v)", k, got[k], v, got)
 			}
 		}
 	}
+	// postgres: implicit == explicit
+	in := map[string]string{"username": "u", "database": "d", "password_ref": "r1"}
+	got := NormalizeCredentialSettings(MonitorPostgres, in)
+	want := map[string]string{"username": "u", "database": "d", "password_ref": "r1", "sslmode": "require", "query": "SELECT 1"}
+	assertEq(t, got, want)
+	explicit := NormalizeCredentialSettings(MonitorPostgres, want)
+	assertEq(t, explicit, want)
+	if _, ok := in["sslmode"]; ok {
+		t.Fatal("input map must not be mutated")
+	}
+	if err := ValidateCredentialSettings(MonitorPostgres, got, SurfaceFile); err != nil {
+		t.Fatalf("normalized postgres must validate: %v", err)
+	}
+	// explicit non-default wins
+	ov := NormalizeCredentialSettings(MonitorPostgres, map[string]string{"username": "u", "database": "d", "password_ref": "r1", "sslmode": "disable"})
+	if ov["sslmode"] != "disable" {
+		t.Fatal("explicit value must not be overridden by the default")
+	}
+	// mysql / redis tls default
+	my := NormalizeCredentialSettings(MonitorMySQL, map[string]string{"username": "u", "database": "d", "password_ref": "r1"})
+	if my["tls"] != "true" || my["query"] != "SELECT 1" {
+		t.Fatalf("mysql defaults missing: %v", my)
+	}
+	rd := NormalizeCredentialSettings(MonitorRedis, map[string]string{"password_ref": "r1"})
+	if rd["tls"] != "true" {
+		t.Fatalf("redis tls default missing: %v", rd)
+	}
+	// skip-verify with absent tls is safe ONLY because normalization sets tls=true first
+	sv := NormalizeCredentialSettings(MonitorRedis, map[string]string{"password_ref": "r1", "tls_skip_verify": "true"})
+	if sv["tls"] != "true" {
+		t.Fatalf("normalization must set tls before skip-verify is judged: %v", sv)
+	}
+	if err := ValidateCredentialSettings(MonitorRedis, sv, SurfaceFile); err != nil {
+		t.Fatalf("normalized skip-verify must validate: %v", err)
+	}
+	// rabbitmq management: tls + canonical path; amqp untouched
+	rm := NormalizeCredentialSettings(MonitorRabbitMQ, map[string]string{"mode": "management", "username": "u", "password_ref": "r1"})
+	if rm["tls"] != "true" || rm["path"] != "/api/overview" {
+		t.Fatalf("rabbit management defaults missing: %v", rm)
+	}
+	if err := ValidateCredentialSettings(MonitorRabbitMQ, rm, SurfaceFile); err != nil {
+		t.Fatalf("normalized rabbit management must validate: %v", err)
+	}
+	ra := NormalizeCredentialSettings(MonitorRabbitMQ, map[string]string{"mode": "amqp"})
+	assertEq(t, ra, map[string]string{"mode": "amqp"})
 }

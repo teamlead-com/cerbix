@@ -76,3 +76,19 @@ func TestResolveBootstrapThenOverride(t *testing.T) {
 		t.Fatalf("snapshot changed after failed save: %+v", svc.Branding())
 	}
 }
+
+func TestRunReturnsAfterContextCancellation(t *testing.T) {
+	svc := testService(&fakeStore{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.Run(ctx)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("settings Run did not return after cancellation")
+	}
+}

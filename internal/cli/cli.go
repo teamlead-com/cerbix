@@ -137,19 +137,25 @@ func Main(args []string) int {
 		usage(os.Stdout)
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
+		_, _ = fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
 		usage(os.Stderr)
 		return 2
 	}
 }
 
-func usage(w *os.File) {
-	fmt.Fprintln(w, "cerbix — internal uptime & SLA monitoring")
-	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]")
-	fmt.Fprintln(w, "  cerbix migrate --config <path>")
-	fmt.Fprintln(w, "  cerbix reencrypt --config <path>")
-	fmt.Fprintln(w, "  cerbix version")
+func usage(w io.Writer) {
+	for _, line := range []string{
+		"cerbix — internal uptime & SLA monitoring",
+		"usage:",
+		"  cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]",
+		"  cerbix migrate --config <path>",
+		"  cerbix reencrypt --config <path>",
+		"  cerbix version",
+	} {
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return
+		}
+	}
 }
 
 func runVersion() int {
@@ -364,7 +370,7 @@ func runMigrate(args []string) int {
 		return 2
 	}
 	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "migrate: --config is required")
+		_, _ = fmt.Fprintln(os.Stderr, "migrate: --config is required")
 		return 2
 	}
 	cfg := loadConfig(*configPath)
@@ -397,7 +403,7 @@ func runReencrypt(args []string) int {
 		return 2
 	}
 	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "reencrypt: --config is required")
+		_, _ = fmt.Fprintln(os.Stderr, "reencrypt: --config is required")
 		return 2
 	}
 	cfg := loadConfig(*configPath)
@@ -459,11 +465,11 @@ func runServe(args []string) int {
 		return 2
 	}
 	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "serve: --config is required")
+		_, _ = fmt.Fprintln(os.Stderr, "serve: --config is required")
 		return 2
 	}
 	if !validRoles[*role] {
-		fmt.Fprintf(os.Stderr, "serve: invalid --role %q\n", *role)
+		_, _ = fmt.Fprintf(os.Stderr, "serve: invalid --role %q\n", *role)
 		return 2
 	}
 
@@ -500,7 +506,6 @@ func runServe(args []string) int {
 		"listen", cfg.Server.Listen)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	// bg tracks the long-lived background goroutines (outbox, ingest, scheduler,
 	// worker, LISTEN notifiers) so shutdown DRAINS them — waits for each Run(ctx) to
@@ -510,6 +515,27 @@ func runServe(args []string) int {
 		bg.Add(1)
 		go func() { defer bg.Done(); f() }()
 	}
+	var st *store.Store
+	var disp dispatch.Dispatcher
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			cleanupServeResources(stop, &bg, func() error {
+				if disp == nil {
+					return nil
+				}
+				return disp.Close()
+			}, func() {
+				if st != nil {
+					st.Close()
+				}
+			}, 10*time.Second, logger)
+		})
+	}
+	// This defer covers every startup return as well as the normal serving path. In
+	// particular, cancel and drain users of the DB before closing its pool: reversing
+	// that order leaves background services retrying forever against a closed pool.
+	defer cleanup()
 
 	// The HTTP-pull agent is DB-less and broker-less: it only needs the prober and
 	// outbound HTTPS to the central API. Handle it before any DB/auth/dispatcher setup.
@@ -521,7 +547,6 @@ func runServe(args []string) int {
 	// Database wiring. Configured DB → migrate + connect (fail-fast, no
 	// self-healing); readiness then tracks live connectivity. No DB → scaffold
 	// mode, ready immediately.
-	var st *store.Store
 	if cfg.Database.DSN != "" {
 		if err := store.Migrate(ctx, cfg.Database.DSN); err != nil {
 			logging.Critical(logger, "db_migrate_failed", "error", err.Error())
@@ -545,7 +570,6 @@ func runServe(args []string) int {
 			"actual", st.PoolMaxConns(),
 			"required_min", store.RequiredMaxConns(fpCount, maxConcurrentReconciles),
 			"file_providers", fpCount)
-		defer st.Close()
 		// Result-ingest timestamp policy (spec func-result-protocol): skew bound + the
 		// retention floor below which a result is ignored (= the raw heartbeat window).
 		st.WithResultPolicy(cfg.Result.AllowedSkew.Std(), time.Duration(cfg.Heartbeats.RetentionDays)*24*time.Hour)
@@ -578,7 +602,7 @@ func runServe(args []string) int {
 		}
 		registry.SetDatabaseUp(true)
 		logger.Info("database_connected")
-		go pingDatabase(ctx, st, registry, logger)
+		spawn(func() { pingDatabase(ctx, st, registry, logger) })
 	} else {
 		logger.Info("database_disabled", "mode", "scaffold")
 	}
@@ -603,7 +627,10 @@ func runServe(args []string) int {
 				From: cfg.Mail.From, PublicBaseURL: cfg.Mail.PublicBaseURL,
 			},
 		}, logger)
-		settingsSvc.Start(ctx)
+		if err := settingsSvc.Load(ctx); err != nil {
+			logger.Warn("instance_settings_load_failed", "error", err.Error())
+		}
+		spawn(func() { settingsSvc.Run(ctx) })
 		mail = mailer.NewLive(func() mailer.Settings {
 			m := settingsSvc.Mail()
 			return mailer.Settings{
@@ -643,7 +670,7 @@ func runServe(args []string) int {
 	}
 
 	// Auth + API wiring. Requires a database (sessions, JIT users, and the OIDC
-	// override all live in Postgres). OIDC is built asynchronously by StartOIDC —
+	// override all live in Postgres). OIDC is built asynchronously by RunOIDC —
 	// discovery is a network call that must not block or crash startup — and can be
 	// (re)configured at runtime from the Settings UI.
 	var app http.Handler
@@ -661,7 +688,7 @@ func runServe(args []string) int {
 			logging.Critical(logger, "bootstrap_admin_failed", "error", err.Error())
 			return 1
 		}
-		authn.StartOIDC(ctx) // first sync + background reloader (non-fatal, retrying)
+		spawn(func() { authn.RunOIDC(ctx) }) // first sync + reloader (non-fatal, retrying)
 		authn.WithSettings(settingsSvc)
 		appMux := http.NewServeMux()
 		authn.Routes(appMux)
@@ -693,7 +720,7 @@ func runServe(args []string) int {
 			}
 			// Long-poll wake source: LISTEN pull_jobs, fan out to held /agent/jobs requests.
 			notifier := st.NewPullNotifier(logger)
-			go notifier.Run(ctx)
+			spawn(func() { notifier.Run(ctx) })
 			apiHandler.WithAgentToken(cfg.Pull.Token).WithAgentRegionTokens(regionTokens).
 				WithAgentDBTokens().WithPullWaiter(notifier)
 			appMux.Handle("/api/v1/agent/", apiHandler.AgentRouter())
@@ -723,7 +750,6 @@ func runServe(args []string) int {
 	// Checking pipeline. --role=all runs every role in one process over the
 	// in-process dispatcher; distributed roles (api|scheduler|worker) use the
 	// RabbitMQ dispatcher and each run only their part.
-	var disp dispatch.Dispatcher
 	switch {
 	case *role == "all" && st != nil:
 		disp = dispatch.NewInProc(0)
@@ -745,7 +771,6 @@ func runServe(args []string) int {
 		disp = amqpd
 	}
 	if disp != nil {
-		defer disp.Close()
 		// The push endpoint publishes heartbeats into the same pipeline.
 		if apiHandler != nil {
 			apiHandler.WithResultSink(disp)
@@ -849,14 +874,17 @@ func runServe(args []string) int {
 		case "worker":
 			// Answer region-scoped "Test connection" RPCs for this worker's region.
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
-				amqpd.ServeTests(runner.Run)
+				if err := amqpd.ServeTests(runner.Run); err != nil {
+					logging.Critical(logger, "dispatch_test_consumer_start_failed", "error", err.Error())
+					return 1
+				}
 				if cfg.Secrets.EnvelopeEnforced() {
 					workerRegion := *region
 					if workerRegion == "" {
 						workerRegion = domain.DefaultRegion
 					}
 					ring, _ := credentialRings.ForRegion(workerRegion) // role validation guarantees coverage
-					amqpd.ServeTestsV2(func(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
+					if err := amqpd.ServeTestsV2(func(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
 						m, cleanup, err := ring.MaterializeForProbe(job)
 						if err != nil {
 							reason := dispatch.CredentialProbeErrorReason(err)
@@ -869,7 +897,10 @@ func runServe(args []string) int {
 						defer cleanup()
 						registry.SetCredentialReady(true, "")
 						return runner.Run(ctx, m), nil
-					})
+					}); err != nil {
+						logging.Critical(logger, "dispatch_test_v2_consumer_start_failed", "error", err.Error())
+						return 1
+					}
 				}
 			}
 			wk := worker.New(disp, runner, workerPoolSize, logger)
@@ -918,22 +949,31 @@ func runServe(args []string) int {
 	if httpErr != nil {
 		logger.Error("graceful_shutdown_failed", "error", httpErr.Error())
 	}
-	// Drain background goroutines so none is left mid-write. ctx is cancelled by the
-	// signal (NotifyContext); stop() also covers the errCh exit path. Bounded so a
-	// wedged goroutine can't hang the process forever.
-	stop()
-	drained := make(chan struct{})
-	go func() { bg.Wait(); close(drained) }()
-	select {
-	case <-drained:
-	case <-time.After(10 * time.Second):
-		logger.Warn("background_drain_timeout")
-	}
+	cleanup()
 	if httpErr != nil {
 		return 1
 	}
 	logger.Info("stopped")
 	return 0
+}
+
+// cleanupServeResources is the single shutdown order for normal exit and every
+// fail-fast startup return: cancel producers, drain them, then close dispatcher and
+// database infrastructure. Keeping it independent of concrete services makes the
+// ordering deterministic under test.
+func cleanupServeResources(stop func(), bg *sync.WaitGroup, closeDispatcher func() error, closeStore func(), drainTimeout time.Duration, logger *slog.Logger) {
+	stop()
+	drained := make(chan struct{})
+	go func() { bg.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(drainTimeout):
+		logger.Warn("background_drain_timeout")
+	}
+	if err := closeDispatcher(); err != nil {
+		logger.Warn("dispatcher_close_failed", "error", err.Error())
+	}
+	closeStore()
 }
 
 // runAgent runs the HTTP-pull prober role: claim jobs for --region from the central
@@ -952,7 +992,20 @@ func runAgent(ctx context.Context, cfg *config.Config, region string, credential
 	if ring, ok := credentialRings.ForRegion(region); ok && cfg.Secrets.EnvelopeEnforced() {
 		a.WithCredentialKeyring(ring).WithCredentialHealth(registry)
 	}
-	go a.Run(ctx)
+	agentCtx, stopAgent := context.WithCancel(ctx)
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		a.Run(agentCtx)
+	}()
+	defer func() {
+		stopAgent()
+		select {
+		case <-agentDone:
+		case <-time.After(10 * time.Second):
+			logger.Warn("agent_drain_timeout")
+		}
+	}()
 	logger.Info("agent_role_started", "region", region, "server", cfg.Pull.ServerURL)
 
 	srv := httpsrv.New(cfg.Server, registry, nil)

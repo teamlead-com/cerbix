@@ -32,6 +32,22 @@ func localAuthenticator(t *testing.T, fs *fakeStore, bootEmail, bootPass string)
 	return a
 }
 
+func TestRunOIDCReturnsAfterContextCancellation(t *testing.T) {
+	a := localAuthenticator(t, newFakeStore(), "", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.RunOIDC(ctx)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("OIDC Run did not return after cancellation")
+	}
+}
+
 func TestLocalLogin(t *testing.T) {
 	fs := newFakeStore()
 	a := localAuthenticator(t, fs, "", "")

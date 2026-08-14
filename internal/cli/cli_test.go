@@ -1,9 +1,16 @@
 package cli
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -111,4 +118,74 @@ func TestServicesForRoleControlPlaneIsolation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCleanupServeResourcesCancelsAndDrainsBeforeClosingInfrastructure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var bg sync.WaitGroup
+	drained := make(chan struct{})
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		<-ctx.Done()
+		close(drained)
+	}()
+
+	dispatcherClosed := false
+	storeClosed := false
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cleanupServeResources(cancel, &bg, func() error {
+		select {
+		case <-drained:
+		default:
+			return fmt.Errorf("dispatcher closed before background drain")
+		}
+		dispatcherClosed = true
+		return nil
+	}, func() {
+		if !dispatcherClosed {
+			t.Error("store closed before dispatcher")
+		}
+		storeClosed = true
+	}, time.Second, logger)
+
+	if !dispatcherClosed || !storeClosed {
+		t.Fatalf("cleanup incomplete: dispatcher=%t store=%t", dispatcherClosed, storeClosed)
+	}
+}
+
+func TestCleanupServeResourcesBoundsNonCooperativeDrain(t *testing.T) {
+	var bg sync.WaitGroup
+	release := make(chan struct{})
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		<-release
+	}()
+	var logOutput strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	var closeOrder []string
+	drainTimeout := 10 * time.Millisecond
+	started := time.Now()
+	cleanupServeResources(func() {}, &bg, func() error {
+		closeOrder = append(closeOrder, "dispatcher")
+		return nil
+	}, func() {
+		closeOrder = append(closeOrder, "store")
+	}, drainTimeout, logger)
+	if got := strings.Join(closeOrder, ","); got != "dispatcher,store" {
+		t.Fatalf("timeout close order = %q, want dispatcher,store", got)
+	}
+	elapsed := time.Since(started)
+	if elapsed < drainTimeout {
+		t.Fatalf("cleanup skipped the configured drain wait: elapsed=%s timeout=%s", elapsed, drainTimeout)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("bounded drain took %s", elapsed)
+	}
+	if !strings.Contains(logOutput.String(), "background_drain_timeout") {
+		t.Fatalf("timeout warning missing from log: %q", logOutput.String())
+	}
+	close(release)
+	bg.Wait()
 }

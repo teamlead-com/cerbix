@@ -125,7 +125,7 @@ func (a *Authenticator) WithMailer(m *mailer.Mailer) *Authenticator {
 // (local login on + a mailer to send the link).
 func (a *Authenticator) resetEnabled() bool { return a.local && a.mailer != nil && a.mailer.Enabled() }
 
-// New builds an Authenticator. OIDC is not built here — call StartOIDC after
+// New builds an Authenticator. OIDC is not built here — run RunOIDC after
 // construction so the provider is assembled asynchronously (discovery is a network
 // call and must not block or crash startup; see the reloader). Local login is
 // configured from cfg.Local.
@@ -255,33 +255,27 @@ func (a *Authenticator) SyncOIDC(ctx context.Context) error {
 	return nil
 }
 
-// StartOIDC performs the first OIDC sync and then runs a background reloader that
-// retries while OIDC is intended-enabled but not yet active (e.g. the IdP was
-// unreachable at boot). It never blocks startup and never crashes the process.
-func (a *Authenticator) StartOIDC(ctx context.Context) {
-	go func() {
-		// The first sync runs here, NOT inline, so a slow/hung IdP (even with the
-		// bounded client) can never delay process startup. OIDC becomes active once
-		// this returns; until then the login page offers local auth / retries.
-		_ = a.SyncOIDC(ctx)
-		ticker := time.NewTicker(oidcRetryEvery)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				// Only retry when inactive; an active provider is already current, and a
-				// UI save re-syncs synchronously.
-				if a.rt() != nil {
-					continue
-				}
-				if err := a.SyncOIDC(ctx); err == nil && a.rt() != nil {
-					// became active; keep looping in case it's later disabled+re-enabled
-				}
+// RunOIDC performs the first OIDC sync and then runs a reloader until ctx is
+// cancelled. The caller owns the goroutine so shutdown can wait for an in-flight
+// database/network sync before closing shared infrastructure. Run it asynchronously:
+// discovery remains non-fatal and never delays HTTP startup.
+func (a *Authenticator) RunOIDC(ctx context.Context) {
+	_ = a.SyncOIDC(ctx)
+	ticker := time.NewTicker(oidcRetryEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Only retry when inactive; an active provider is already current, and a
+			// UI save re-syncs synchronously.
+			if a.rt() != nil {
+				continue
 			}
+			_ = a.SyncOIDC(ctx) // keep retrying if inactive; a successful sync updates a.rt
 		}
-	}()
+	}
 }
 
 // OIDCActive reports whether the OIDC provider is currently built and serving.

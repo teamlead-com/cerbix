@@ -16,24 +16,26 @@ import (
 
 // Registry holds process-level metrics and readiness state.
 type Registry struct {
-	mu              sync.RWMutex
-	info            buildinfo.Info
-	role            string
-	startTime       time.Time
-	ready           bool
-	lastError       string
-	dbEnabled       bool
-	dbUp            bool
-	checksUp        uint64
-	checksDown      uint64
-	incidentsOpened uint64
-	outboxDelivered uint64
-	outboxDead      uint64
-	pullStats       []PullStat
-	leaderTracked   bool
-	leader          bool
-	brokerTracked   bool
-	brokerUp        bool
+	mu                sync.RWMutex
+	info              buildinfo.Info
+	role              string
+	startTime         time.Time
+	ready             bool
+	lastError         string
+	credentialTracked bool
+	credentialReady   bool
+	dbEnabled         bool
+	dbUp              bool
+	checksUp          uint64
+	checksDown        uint64
+	incidentsOpened   uint64
+	outboxDelivered   uint64
+	outboxDead        uint64
+	pullStats         []PullStat
+	leaderTracked     bool
+	leader            bool
+	brokerTracked     bool
+	brokerUp          bool
 	// Result-ingest outcome counters (spec func-result-protocol). Low-cardinality: keyed by
 	// a fixed reason/origin set, never by monitor_id/job_id (those go to logs).
 	resultQuarantined        map[string]uint64            // reason → count (future_timestamp)
@@ -140,6 +142,19 @@ func (r *Registry) SetReady(ready bool, reason string) {
 	defer r.mu.Unlock()
 	r.ready = ready
 	r.lastError = reason
+}
+
+// SetCredentialReady tracks the executor's dispatch-key health independently from base
+// process/database readiness. A persistent envelope authentication failure makes /readyz
+// fail without letting a later generic SetReady(true) erase the component failure.
+func (r *Registry) SetCredentialReady(ready bool, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.credentialTracked = true
+	r.credentialReady = ready
+	if !ready {
+		r.lastError = reason
+	}
 }
 
 // SetDatabaseUp records database connectivity. Calling it marks the database as
@@ -304,20 +319,23 @@ func (r *Registry) SetBrokerUp(up bool) {
 func (r *Registry) Ready() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.ready
+	return r.ready && (!r.credentialTracked || r.credentialReady)
 }
 
 // LastError returns the last recorded not-ready reason.
 func (r *Registry) LastError() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.credentialTracked && !r.credentialReady {
+		return "credential envelope decrypt unavailable"
+	}
 	return r.lastError
 }
 
 // WritePrometheus emits the current metrics in Prometheus text exposition format.
 func (r *Registry) WritePrometheus(w io.Writer) {
 	r.mu.RLock()
-	ready := r.ready
+	ready := r.ready && (!r.credentialTracked || r.credentialReady)
 	dbEnabled := r.dbEnabled
 	dbUp := r.dbUp
 	checksUp := r.checksUp

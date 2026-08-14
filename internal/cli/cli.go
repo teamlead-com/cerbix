@@ -820,7 +820,7 @@ func runServe(args []string) int {
 			spawn(func() { sch.Run(ctx) })
 			wk := worker.New(disp, runner, workerPoolSize, logger)
 			if ring, ok := credentialRings.ForRegion(domain.DefaultRegion); ok && cfg.Secrets.EnvelopeEnforced() {
-				wk.WithCredentialKeyring(ring)
+				wk.WithCredentialKeyring(ring).WithCredentialReadiness(registry)
 			}
 			spawn(func() { wk.Run(ctx) })
 			startIngest()
@@ -871,7 +871,7 @@ func runServe(args []string) int {
 				workerRegion = domain.DefaultRegion
 			}
 			if ring, ok := credentialRings.ForRegion(workerRegion); ok && cfg.Secrets.EnvelopeEnforced() {
-				wk.WithCredentialKeyring(ring)
+				wk.WithCredentialKeyring(ring).WithCredentialReadiness(registry)
 			}
 			spawn(func() { wk.Run(ctx) })
 		case "api":

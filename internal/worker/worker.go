@@ -17,17 +17,30 @@ type Runner interface {
 	Run(ctx context.Context, m domain.Monitor) domain.Heartbeat
 }
 
+type CredentialReadiness interface {
+	SetCredentialReady(ready bool, reason string)
+}
+
 // Pool is a fixed-size worker pool.
 type Pool struct {
-	dispatcher  dispatch.Dispatcher
-	runner      Runner
-	logger      *slog.Logger
-	size        int
-	credentials *dispatch.CredentialKeyring
+	dispatcher          dispatch.Dispatcher
+	runner              Runner
+	logger              *slog.Logger
+	size                int
+	credentials         *dispatch.CredentialKeyring
+	credentialReadiness CredentialReadiness
 }
 
 func (p *Pool) WithCredentialKeyring(ring *dispatch.CredentialKeyring) *Pool {
 	p.credentials = ring
+	return p
+}
+
+func (p *Pool) WithCredentialReadiness(sink CredentialReadiness) *Pool {
+	p.credentialReadiness = sink
+	if sink != nil {
+		sink.SetCredentialReady(p.credentials != nil, "no_dispatch_key")
+	}
 	return p
 }
 
@@ -68,6 +81,7 @@ func (p *Pool) loop(ctx context.Context) {
 				if p.credentials == nil {
 					p.logger.Error("credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", "no_dispatch_key")
 					p.publishProbeError(ctx, job, domain.ProbeErrorNoDispatchKey)
+					p.setCredentialReady(false, domain.ProbeErrorNoDispatchKey)
 					continue
 				}
 				var err error
@@ -76,8 +90,12 @@ func (p *Pool) loop(ctx context.Context) {
 					reason := dispatch.CredentialProbeErrorReason(err)
 					p.logger.Error("credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", reason)
 					p.publishProbeError(ctx, job, reason)
+					if reason != domain.ProbeErrorUnsupportedVersion {
+						p.setCredentialReady(false, reason)
+					}
 					continue
 				}
+				p.setCredentialReady(true, "")
 			}
 			hb := p.runner.Run(ctx, monitor)
 			cleanup()
@@ -88,6 +106,12 @@ func (p *Pool) loop(ctx context.Context) {
 				p.logger.Error("publish_result_failed", "monitor_id", job.Monitor.ID, "error", err.Error())
 			}
 		}
+	}
+}
+
+func (p *Pool) setCredentialReady(ready bool, reason string) {
+	if p.credentialReadiness != nil {
+		p.credentialReadiness.SetCredentialReady(ready, reason)
 	}
 }
 

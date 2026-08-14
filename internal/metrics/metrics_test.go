@@ -126,6 +126,19 @@ func TestReadinessTransitions(t *testing.T) {
 	if !reg.Ready() {
 		t.Fatal("registry should be ready")
 	}
+	reg.SetCredentialReady(false, "decrypt_auth_failed")
+	if reg.Ready() || !strings.Contains(reg.LastError(), "credential envelope") {
+		t.Fatalf("credential failure did not degrade readiness: ready=%v err=%q", reg.Ready(), reg.LastError())
+	}
+	// A generic health transition must not erase the component failure.
+	reg.SetReady(true, "")
+	if reg.Ready() {
+		t.Fatal("generic SetReady(true) erased credential degradation")
+	}
+	reg.SetCredentialReady(true, "")
+	if !reg.Ready() {
+		t.Fatal("successful envelope decrypt did not restore readiness")
+	}
 }
 
 // TestResultOutcomeMetrics proves the result-ingest outcome counters render with their

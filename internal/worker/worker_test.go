@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,28 @@ type fakeRunner struct{}
 
 func (fakeRunner) Run(_ context.Context, m domain.Monitor) domain.Heartbeat {
 	return domain.Heartbeat{MonitorID: m.ID, Up: true, Code: 200}
+}
+
+type credentialReadinessCall struct {
+	ready  bool
+	reason string
+}
+
+type fakeCredentialReadiness struct {
+	mu    sync.Mutex
+	calls []credentialReadinessCall
+}
+
+func (f *fakeCredentialReadiness) SetCredentialReady(ready bool, reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, credentialReadinessCall{ready: ready, reason: reason})
+}
+
+func (f *fakeCredentialReadiness) last() credentialReadinessCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[len(f.calls)-1]
 }
 
 func TestPoolProcessesJobs(t *testing.T) {
@@ -61,7 +84,8 @@ func TestCredentialFailurePublishesTypedProbeError(t *testing.T) {
 		t.Fatal(err)
 	}
 	disp := dispatch.NewInProc(2)
-	pool := New(disp, fakeRunner{}, 1, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCredentialKeyring(workerRing)
+	readiness := &fakeCredentialReadiness{}
+	pool := New(disp, fakeRunner{}, 1, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCredentialKeyring(workerRing).WithCredentialReadiness(readiness)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go pool.Run(ctx)
@@ -76,7 +100,42 @@ func TestCredentialFailurePublishesTypedProbeError(t *testing.T) {
 		if !hb.Ts.IsZero() {
 			t.Fatalf("probe_error must not masquerade as heartbeat: ts=%v", hb.Ts)
 		}
+		if got := readiness.last(); got.ready || got.reason != domain.ProbeErrorUnknownKeyID {
+			t.Fatalf("readiness after key mismatch = %+v", got)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker did not publish probe_error")
+	}
+}
+
+func TestCredentialReadinessRecoversAfterSuccessfulDecrypt(t *testing.T) {
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "worker", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := domain.Monitor{ID: "m-secret", Type: domain.MonitorPostgres, Region: "core", ExecutionRevision: 7}
+	envelope, err := ring.Seal("core", "job-2", monitor.ID, monitor.ExecutionRevision, map[string][]byte{"password": []byte("secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disp := dispatch.NewInProc(2)
+	readiness := &fakeCredentialReadiness{}
+	pool := New(disp, fakeRunner{}, 1, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCredentialKeyring(ring).WithCredentialReadiness(readiness)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go pool.Run(ctx)
+	if err := disp.PublishJob(ctx, dispatch.CheckJob{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: envelope}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case hb := <-disp.Results():
+		if hb.ProbeError != nil || !hb.Up {
+			t.Fatalf("result = %+v", hb)
+		}
+		if got := readiness.last(); !got.ready || got.reason != "" {
+			t.Fatalf("readiness after successful decrypt = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not publish successful result")
 	}
 }

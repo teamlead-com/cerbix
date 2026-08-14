@@ -39,7 +39,11 @@ type secretView struct {
 // best-effort post-commit h.audit path).
 func (h *Handler) secretActor(r *http.Request) store.SecretActor {
 	p, _ := h.principal(r)
-	return store.SecretActor{ActorUserID: p.UserID, ViaToken: p.ViaToken}
+	// Audit-identity contract: a synthetic API-token id maps to a NULL actor (via_token
+	// carries the machine attribution); an OIDC client-credentials principal has a real
+	// JIT user uuid and keeps it. A non-uuid actor would abort the in-tx audit insert
+	// and roll back the whole mutation (fail-closed by design).
+	return store.SecretActor{ActorUserID: p.AuditUserID(), ViaToken: p.ViaToken}
 }
 
 // secretsFeatureEnabled gates every inventory endpoint on the instance-wide

@@ -352,3 +352,56 @@ func TestSecretsForeignProjectMutations(t *testing.T) {
 		t.Fatalf("outsider patch = %d, want 404", rec.Code)
 	}
 }
+
+// TestSecretsAPITokenActorContract: a Cerbix API-token principal carries the synthetic
+// "apitoken:<id>" UserID — the audit-identity contract maps it to a NULL actor with
+// via_token=true, so mutations COMMIT (pre-fix the in-tx uuid cast aborted them all).
+// An OIDC client-credentials principal has a real JIT user uuid and keeps attribution.
+func TestSecretsAPITokenActorContract(t *testing.T) {
+	fs := seededStore()
+	h := newSecretsHandler(fs)
+	tokenPrincipal := authz.Principal{
+		UserID:      authz.SyntheticTokenActorPrefix + "tok1",
+		Memberships: []domain.Membership{{OrgID: "o1", ProjectID: "p1", Role: domain.RoleEditor}},
+		ViaToken:    true,
+	}
+
+	if rec := do(h, tokenPrincipal, http.MethodPost, "/api/v1/projects/p1/secrets", `{"name":"db-pass","value":"v"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("api-token create = %d (%s), want 201", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, tokenPrincipal, http.MethodPatch, "/api/v1/projects/p1/secrets/db-pass", `{"value":"v2"}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("api-token rotate = %d, want 204", rec.Code)
+	}
+	if rec := do(h, tokenPrincipal, http.MethodDelete, "/api/v1/projects/p1/secrets/db-pass", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("api-token delete = %d, want 204", rec.Code)
+	}
+	seen := 0
+	for _, e := range fs.audit {
+		if !strings.HasPrefix(e.Action, "secret.") {
+			continue
+		}
+		seen++
+		if e.ActorUserID != "" {
+			t.Fatalf("%s actor = %q, want NULL for a synthetic token identity", e.Action, e.ActorUserID)
+		}
+		if !e.ViaToken {
+			t.Fatalf("%s must be attributed via_token=true", e.Action)
+		}
+	}
+	if seen != 3 {
+		t.Fatalf("expected 3 secret audit rows, got %d", seen)
+	}
+
+	// OIDC client-credentials: a REAL user uuid + ViaToken — attribution is kept.
+	ccPrincipal := authz.Principal{
+		UserID:      "cc-user-uuid",
+		Memberships: []domain.Membership{{OrgID: "o1", ProjectID: "p1", Role: domain.RoleEditor}},
+		ViaToken:    true,
+	}
+	if rec := do(h, ccPrincipal, http.MethodPost, "/api/v1/projects/p1/secrets", `{"name":"cc-pass","value":"v"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("cc create = %d, want 201", rec.Code)
+	}
+	if e := fs.audit[0]; e.Action != "secret.create" || e.ActorUserID != "cc-user-uuid" || !e.ViaToken {
+		t.Fatalf("cc audit = %+v, want secret.create by cc-user-uuid via_token", e)
+	}
+}

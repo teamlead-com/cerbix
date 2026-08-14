@@ -788,3 +788,34 @@ func TestProjectSecretAuditFailureRollsBackMutation(t *testing.T) {
 		t.Fatalf("rotate must be rolled back with the audit: value=%q err=%v", got, err)
 	}
 }
+
+// TestProjectSecretNullActorCommits: the audit-identity contract's committed side — a
+// synthetic API-token principal maps to SecretActor{ActorUserID: "", ViaToken: true}, and
+// that actor COMMITS: the mutation persists and the audit row carries a NULL actor with
+// via_token=true (pre-contract, the "apitoken:*" string aborted every token mutation).
+func TestProjectSecretNullActorCommits(t *testing.T) {
+	st, ctx := secretsTestStore(t)
+	orgID, projID := secretsFixture(t, st, ctx, "acme", "api")
+	tokenActor := SecretActor{ActorUserID: "", ViaToken: true}
+
+	if _, err := st.CreateProjectSecret(ctx, tokenActor, projID, "db-pass", "v1"); err != nil {
+		t.Fatalf("token-actor create must commit: %v", err)
+	}
+	nv := "v2"
+	if _, _, _, err := st.UpdateProjectSecret(ctx, tokenActor, projID, "db-pass", nil, &nv); err != nil {
+		t.Fatalf("token-actor rotate must commit: %v", err)
+	}
+	if err := st.DeleteProjectSecret(ctx, tokenActor, projID, "db-pass"); err != nil {
+		t.Fatalf("token-actor delete must commit: %v", err)
+	}
+	var n int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_logs
+		  WHERE org_id = $1 AND action LIKE 'secret.%'
+		    AND actor_user_id IS NULL AND via_token`, orgID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("want 3 NULL-actor via_token secret audit rows, got %d", n)
+	}
+}

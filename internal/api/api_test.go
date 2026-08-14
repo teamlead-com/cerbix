@@ -1756,13 +1756,23 @@ func (f *fakeStore) ReplaceRecoveryCodes(_ context.Context, userID string, hashe
 // Mutations record their audit entry themselves, mirroring the real store's
 // audit-in-tx behavior (spec §5): the handler no longer writes secret audit rows.
 
-
 func fakeSecretValueInvalid(value string) bool {
 	return len(value) == 0 || len(value) > 4096 || !utf8.ValidString(value)
 }
 
-// recordSecretAudit is the fake's stand-in for the store-level in-tx audit row.
-func (f *fakeStore) recordSecretAudit(projectID string, actor store.SecretActor, action, target string) {
+// fakeActorRe mirrors Postgres's uuid column strictness: the real audit insert casts
+// actor_user_id to uuid and ABORTS the whole tx on a non-uuid (fail-closed). The fake
+// enforces the same contract so a synthetic "apitoken:*" id can never slip through
+// silently in api tests. Fixture ids like "pe"/"u1" are accepted as test uuids stand-ins
+// only when they carry no colon (the synthetic marker).
+func fakeActorValid(id string) bool { return !strings.Contains(id, ":") }
+
+// recordSecretAudit is the fake's stand-in for the store-level in-tx audit row. It
+// returns an error exactly where Postgres would (non-uuid actor → 22P02 → tx rollback).
+func (f *fakeStore) recordSecretAudit(projectID string, actor store.SecretActor, action, target string) error {
+	if !fakeActorValid(actor.ActorUserID) {
+		return fmt.Errorf("store: audit %s: invalid input syntax for type uuid (fake 22P02): %q", action, actor.ActorUserID)
+	}
 	org := ""
 	if p, ok := f.projects[projectID]; ok {
 		org = p.OrgID
@@ -1771,6 +1781,7 @@ func (f *fakeStore) recordSecretAudit(projectID string, actor store.SecretActor,
 		ID: "au-new", OrgID: org, ActorUserID: actor.ActorUserID, ViaToken: actor.ViaToken,
 		Action: action, Target: target,
 	}}, f.audit...)
+	return nil
 }
 
 func (f *fakeStore) projectSecrets(projectID string) map[string]*fakeSecret {
@@ -1808,7 +1819,10 @@ func (f *fakeStore) CreateProjectSecret(_ context.Context, actor store.SecretAct
 	f.secretSeq++
 	s := &fakeSecret{id: fmt.Sprintf("sec-%d", f.secretSeq), value: value, createdAt: time.Unix(1700000000, 0)}
 	ps[name] = s
-	f.recordSecretAudit(projectID, actor, "secret.create", name)
+	if err := f.recordSecretAudit(projectID, actor, "secret.create", name); err != nil {
+		delete(f.projectSecrets(projectID), name) // tx rollback
+		return store.ProjectSecret{}, err
+	}
 	return store.ProjectSecret{ID: s.id, Name: name, CreatedAt: s.createdAt}, nil
 }
 
@@ -1854,8 +1868,10 @@ func (f *fakeStore) UpdateProjectSecret(_ context.Context, actor store.SecretAct
 		if renamed {
 			target = name + " → " + *newName
 		}
-		f.recordSecretAudit(projectID, actor, "secret.update",
-			fmt.Sprintf("%s · renamed=%t rotated=%t repointed=%d", target, renamed, rotated, repointed))
+		if err := f.recordSecretAudit(projectID, actor, "secret.update",
+			fmt.Sprintf("%s · renamed=%t rotated=%t repointed=%d", target, renamed, rotated, repointed)); err != nil {
+			return false, false, 0, err // real tx would roll everything back
+		}
 	}
 	return renamed, rotated, repointed, nil
 }
@@ -1868,8 +1884,10 @@ func (f *fakeStore) DeleteProjectSecret(_ context.Context, actor store.SecretAct
 	if ui, file := f.secretRefCounts(projectID, name); ui+file > 0 {
 		return store.SecretInUseError{Count: ui + file}
 	}
+	if err := f.recordSecretAudit(projectID, actor, "secret.delete", name); err != nil {
+		return err // real tx: audit failure rolls back the delete
+	}
 	delete(ps, name)
-	f.recordSecretAudit(projectID, actor, "secret.delete", name)
 	return nil
 }
 

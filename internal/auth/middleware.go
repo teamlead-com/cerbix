@@ -86,7 +86,7 @@ func (a *Authenticator) principalFromToken(ctx context.Context, presented string
 		a.logger.Warn("token_touch_failed", "error", err.Error())
 	}
 	return authz.Principal{
-		UserID:      "apitoken:" + t.ID,
+		UserID:      authz.SyntheticTokenActorPrefix + t.ID,
 		Memberships: []domain.Membership{{OrgID: t.OrgID, ProjectID: t.ProjectID, Role: t.Role}},
 		ViaToken:    true,
 	}, nil

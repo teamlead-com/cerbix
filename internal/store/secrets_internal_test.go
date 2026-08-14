@@ -50,18 +50,6 @@ func secretsFixture(t *testing.T, st *Store, ctx context.Context, orgSlug, projS
 	return org.ID, proj.ID
 }
 
-// insertSecretRef is retained for corruption/low-level FK arrangements. Normal monitor
-// writes maintain monitor_secret_refs themselves (iteration 2).
-func insertSecretRef(t *testing.T, st *Store, ctx context.Context, monitorID, projectID, settingKey, secretID string) {
-	t.Helper()
-	if _, err := st.pool.Exec(ctx,
-		`INSERT INTO monitor_secret_refs (monitor_id, project_id, setting_key, secret_id)
-		 VALUES ($1, $2, $3, $4)`,
-		monitorID, projectID, settingKey, secretID); err != nil {
-		t.Fatalf("insert secret ref: %v", err)
-	}
-}
-
 // createRefMonitor creates a credentialed monitor whose config references refName.
 func createRefMonitor(t *testing.T, st *Store, ctx context.Context, projID, name, refName string, enabled bool) domain.Monitor {
 	t.Helper()

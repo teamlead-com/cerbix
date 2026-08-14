@@ -389,9 +389,9 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	fmt.Fprintln(w, "# TYPE cerbix_ready gauge")
 	fmt.Fprintf(w, "cerbix_ready %d\n", b2i(ready))
 
-	fmt.Fprintln(w, "# HELP cerbix_dispatch_shared_trust Whether one acknowledged fallback dispatch key can open more than one region's retained credential payloads.")
-	fmt.Fprintln(w, "# TYPE cerbix_dispatch_shared_trust gauge")
-	fmt.Fprintf(w, "cerbix_dispatch_shared_trust %d\n", b2i(dispatchSharedTrust))
+	_, _ = fmt.Fprintln(w, "# HELP cerbix_dispatch_shared_trust Whether one acknowledged fallback dispatch key can open more than one region's retained credential payloads.")
+	_, _ = fmt.Fprintln(w, "# TYPE cerbix_dispatch_shared_trust gauge")
+	_, _ = fmt.Fprintf(w, "cerbix_dispatch_shared_trust %d\n", b2i(dispatchSharedTrust))
 
 	fmt.Fprintln(w, "# HELP cerbix_uptime_seconds Seconds since process start.")
 	fmt.Fprintln(w, "# TYPE cerbix_uptime_seconds gauge")

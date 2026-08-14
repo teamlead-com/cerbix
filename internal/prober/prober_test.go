@@ -406,7 +406,7 @@ func TestRedisTLSRequiresTrustUnlessExplicitlySkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -414,7 +414,7 @@ func TestRedisTLSRequiresTrustUnlessExplicitlySkipped(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				r := bufio.NewReader(c)
 				for {
 					line, err := r.ReadString('\n')

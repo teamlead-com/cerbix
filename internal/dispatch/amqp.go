@@ -586,7 +586,7 @@ func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, run func(con
 	if err != nil {
 		return
 	}
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 	if _, err := ch.QueueDeclare(queue, false, true, false, false, nil); err != nil {
 		return
 	}

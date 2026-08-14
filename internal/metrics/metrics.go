@@ -16,26 +16,27 @@ import (
 
 // Registry holds process-level metrics and readiness state.
 type Registry struct {
-	mu                sync.RWMutex
-	info              buildinfo.Info
-	role              string
-	startTime         time.Time
-	ready             bool
-	lastError         string
-	credentialTracked bool
-	credentialReady   bool
-	dbEnabled         bool
-	dbUp              bool
-	checksUp          uint64
-	checksDown        uint64
-	incidentsOpened   uint64
-	outboxDelivered   uint64
-	outboxDead        uint64
-	pullStats         []PullStat
-	leaderTracked     bool
-	leader            bool
-	brokerTracked     bool
-	brokerUp          bool
+	mu                  sync.RWMutex
+	info                buildinfo.Info
+	role                string
+	startTime           time.Time
+	ready               bool
+	lastError           string
+	credentialTracked   bool
+	credentialReady     bool
+	dispatchSharedTrust bool
+	dbEnabled           bool
+	dbUp                bool
+	checksUp            uint64
+	checksDown          uint64
+	incidentsOpened     uint64
+	outboxDelivered     uint64
+	outboxDead          uint64
+	pullStats           []PullStat
+	leaderTracked       bool
+	leader              bool
+	brokerTracked       bool
+	brokerUp            bool
 	// Result-ingest outcome counters (spec func-result-protocol). Low-cardinality: keyed by
 	// a fixed reason/origin set, never by monitor_id/job_id (those go to logs).
 	resultQuarantined        map[string]uint64            // reason → count (future_timestamp)
@@ -155,6 +156,14 @@ func (r *Registry) SetCredentialReady(ready bool, reason string) {
 	if !ready {
 		r.lastError = reason
 	}
+}
+
+// SetDispatchSharedTrust surfaces the explicitly acknowledged wider dispatch-key trust
+// domain from static config (func-secret-inventory §4.7 / D-0155).
+func (r *Registry) SetDispatchSharedTrust(shared bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dispatchSharedTrust = shared
 }
 
 // SetDatabaseUp records database connectivity. Calling it marks the database as
@@ -358,6 +367,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	missingRev := r.resultMissingRev
 	executorProbeErrors := copyCounts(r.executorProbeErrors)
 	secretResolutionFailures := copyCounts(r.secretResolutionFailures)
+	dispatchSharedTrust := r.dispatchSharedTrust
 	fileProviders := map[string]fileProviderStat{}
 	for name, s := range r.fileProviders {
 		cp := fileProviderStat{leader: s.leader, reconciles: copyCounts(s.reconciles), lastDuration: s.lastDuration, lastSuccessUnix: s.lastSuccessUnix, managed: s.managed, orphaned: s.orphaned, bundleErrors: s.bundleErrors}
@@ -378,6 +388,10 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	fmt.Fprintln(w, "# HELP cerbix_ready Whether the service reports ready (1) or not (0).")
 	fmt.Fprintln(w, "# TYPE cerbix_ready gauge")
 	fmt.Fprintf(w, "cerbix_ready %d\n", b2i(ready))
+
+	fmt.Fprintln(w, "# HELP cerbix_dispatch_shared_trust Whether one acknowledged fallback dispatch key can open more than one region's retained credential payloads.")
+	fmt.Fprintln(w, "# TYPE cerbix_dispatch_shared_trust gauge")
+	fmt.Fprintf(w, "cerbix_dispatch_shared_trust %d\n", b2i(dispatchSharedTrust))
 
 	fmt.Fprintln(w, "# HELP cerbix_uptime_seconds Seconds since process start.")
 	fmt.Fprintln(w, "# TYPE cerbix_uptime_seconds gauge")

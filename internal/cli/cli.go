@@ -488,6 +488,7 @@ func runServe(args []string) int {
 	}
 	info := buildinfo.Current()
 	registry := metrics.New(info, *role)
+	registry.SetDispatchSharedTrust(cfg.Security.Dispatch.SharedTrustAcknowledged)
 	// In-process realtime bus: ingest publishes status changes, the SSE handler
 	// streams them. Single-process (front with Redis pub/sub for multi-replica).
 	broker := events.NewBroker()

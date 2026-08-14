@@ -82,3 +82,42 @@ func TestMonitoringAsCodeAlertRules(t *testing.T) {
 		t.Fatalf("expected at least 3 file-provider alerts, got %d", alerts)
 	}
 }
+
+func TestSecretInventoryAlertRules(t *testing.T) {
+	const path = "../../docker/alerts/secret-inventory.rules.yml"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read alert rules: %v", err)
+	}
+	var doc struct {
+		Groups []struct {
+			Rules []struct {
+				Alert       string            `yaml:"alert"`
+				Expr        string            `yaml:"expr"`
+				For         string            `yaml:"for"`
+				Labels      map[string]string `yaml:"labels"`
+				Annotations map[string]string `yaml:"annotations"`
+			} `yaml:"rules"`
+		} `yaml:"groups"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse alert rules: %v", err)
+	}
+	known := []string{"cerbix_secret_resolution_failed_total", "cerbix_executor_probe_error_total", "cerbix_dispatch_shared_trust"}
+	alerts := 0
+	for _, group := range doc.Groups {
+		for _, rule := range group.Rules {
+			alerts++
+			found := false
+			for _, metric := range known {
+				found = found || strings.Contains(rule.Expr, metric)
+			}
+			if rule.Alert == "" || !found || rule.For == "" || rule.Labels["severity"] == "" || rule.Annotations["summary"] == "" {
+				t.Fatalf("incomplete or drifting secret-inventory alert: %+v", rule)
+			}
+		}
+	}
+	if alerts != 3 {
+		t.Fatalf("secret-inventory alerts = %d, want 3", alerts)
+	}
+}

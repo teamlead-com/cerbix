@@ -141,6 +141,16 @@ func TestReadinessTransitions(t *testing.T) {
 	}
 }
 
+func TestDispatchSharedTrustMetric(t *testing.T) {
+	reg := New(buildinfo.Info{}, "scheduler")
+	reg.SetDispatchSharedTrust(true)
+	var out strings.Builder
+	reg.WritePrometheus(&out)
+	if !strings.Contains(out.String(), "cerbix_dispatch_shared_trust 1") {
+		t.Fatalf("shared-trust posture metric missing: %s", out.String())
+	}
+}
+
 // TestResultOutcomeMetrics proves the result-ingest outcome counters render with their
 // low-cardinality labels and that empty families are omitted.
 func TestResultOutcomeMetrics(t *testing.T) {

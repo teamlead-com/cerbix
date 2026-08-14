@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,13 +26,15 @@ const (
 const (
 	// Jobs are routed per region: checks.jobs.<region>. A worker consumes only its
 	// region's queue; the scheduler publishes to the queue of each monitor's region.
-	jobsQueuePrefix = "checks.jobs."
+	jobsQueuePrefix   = "checks.jobs."
+	jobsV2QueuePrefix = "checks.jobs.v2."
 	// Test probes ("Test connection") are RPCs per region: the API publishes to
 	// checks.tests.<region> with a reply queue; a worker in that region runs the
 	// probe and replies. The queue is auto-delete, so with no worker present the
 	// request is unroutable and the caller times out ("no worker in region").
-	testsQueuePrefix = "checks.tests."
-	resultsQueue     = "checks.results"
+	testsQueuePrefix   = "checks.tests."
+	testsV2QueuePrefix = "checks.tests.v2."
+	resultsQueue       = "checks.results"
 	// deadQueue holds poison messages (unparseable job/result bodies) that a consumer
 	// would otherwise Nack-drop and lose. Forwarding them here preserves the raw body
 	// for inspection. Results themselves carry NO time-TTL — a slow ingest must never
@@ -60,12 +63,26 @@ func jobsQueueForRegion(region string) string {
 	return jobsQueuePrefix + region
 }
 
+func jobsV2QueueForRegion(region string) string {
+	if region == "" {
+		region = domain.DefaultRegion
+	}
+	return jobsV2QueuePrefix + region
+}
+
 // testsQueueForRegion returns the per-region test-RPC queue name (empty → core).
 func testsQueueForRegion(region string) string {
 	if region == "" {
 		region = domain.DefaultRegion
 	}
 	return testsQueuePrefix + region
+}
+
+func testsV2QueueForRegion(region string) string {
+	if region == "" {
+		region = domain.DefaultRegion
+	}
+	return testsV2QueuePrefix + region
 }
 
 // AMQP is a RabbitMQ-backed Dispatcher for cross-process roles. Publishing is
@@ -98,6 +115,7 @@ type AMQP struct {
 	cancel context.CancelFunc
 
 	jobRegion  string          // region this dispatcher's Jobs() consumes (worker); default core
+	protocolV2 bool            // worker consumes versioned envelope jobs/tests too
 	declaredMu sync.Mutex      // guards declared
 	declared   map[string]bool // idempotent-declare cache for per-region job queues
 
@@ -106,6 +124,7 @@ type AMQP struct {
 	resultsOnce sync.Once
 	resultsCh   chan domain.Heartbeat
 	testsOnce   sync.Once // guards the per-region test-RPC server (worker side)
+	testsV2Once sync.Once
 }
 
 // dialAndSetup opens a connection plus the publish channel and declares the
@@ -287,6 +306,14 @@ func (d *AMQP) WithJobRegion(region string) *AMQP {
 	return d
 }
 
+// WithProtocolV2 enables consumption of the physically separate v2 jobs/tests queues.
+// Publishers route from CheckJob.ProtocolVersion; an old worker never calls this and
+// therefore can never receive an envelope-bearing payload.
+func (d *AMQP) WithProtocolV2(enabled bool) *AMQP {
+	d.protocolV2 = enabled
+	return d
+}
+
 // declareJobQueue idempotently declares a per-region job queue (cached). Publishing
 // to an undeclared queue via the default exchange is silently dropped, so both the
 // publisher and the consuming worker must ensure their queue exists.
@@ -380,6 +407,14 @@ func (d *AMQP) PublishJob(_ context.Context, job CheckJob) error {
 		region = domain.DefaultRegion
 	}
 	queue := jobsQueueForRegion(region)
+	if job.ProtocolVersion == ProtocolV2 {
+		if job.CredentialEnvelope == nil {
+			return errors.New("dispatch: protocol v2 job is missing credential envelope")
+		}
+		queue = jobsV2QueueForRegion(region)
+	} else if job.CredentialEnvelope != nil {
+		return errors.New("dispatch: credential envelope cannot be published to a v1 queue")
+	}
 	if err := d.declareJobQueue(queue); err != nil {
 		return fmt.Errorf("dispatch: declare %s: %w", queue, err)
 	}
@@ -399,21 +434,26 @@ func (d *AMQP) PublishResult(_ context.Context, hb domain.Heartbeat) error {
 // channel. Only call it in a role that executes jobs (worker).
 func (d *AMQP) Jobs() <-chan CheckJob {
 	d.jobsOnce.Do(func() {
-		queue := jobsQueueForRegion(d.jobRegion)
-		go consume(d, queue, true, func(body []byte) bool {
-			var job CheckJob
-			if err := json.Unmarshal(body, &job); err != nil {
-				d.logger.Error("dispatch_bad_job", "error", err.Error())
-				d.deadLetter("jobs", body)
-				return false
-			}
-			select {
-			case d.jobsCh <- job:
-				return true
-			case <-d.ctx.Done():
-				return false
-			}
-		})
+		consumeQueue := func(queue, source string) {
+			go consume(d, queue, true, func(body []byte) bool {
+				var job CheckJob
+				if err := json.Unmarshal(body, &job); err != nil {
+					d.logger.Error("dispatch_bad_job", "error", err.Error())
+					d.deadLetter(source, body)
+					return false
+				}
+				select {
+				case d.jobsCh <- job:
+					return true
+				case <-d.ctx.Done():
+					return false
+				}
+			})
+		}
+		consumeQueue(jobsQueueForRegion(d.jobRegion), "jobs")
+		if d.protocolV2 {
+			consumeQueue(jobsV2QueueForRegion(d.jobRegion), "jobs.v2")
+		}
 	})
 	return d.jobsCh
 }
@@ -447,11 +487,24 @@ func (d *AMQP) Results() <-chan domain.Heartbeat {
 // auto-delete, so with no live worker the publish is unroutable and the caller times
 // out. Composite/push types are rejected by the caller before reaching here.
 func (d *AMQP) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
+	return d.RunJobTest(ctx, CheckJob{Monitor: m, ProtocolVersion: ProtocolV1})
+}
+
+func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, error) {
+	m := job.Monitor
 	region := m.Region
 	if region == "" {
 		region = domain.DefaultRegion
 	}
 	queue := testsQueueForRegion(region)
+	if job.ProtocolVersion == ProtocolV2 {
+		if job.CredentialEnvelope == nil {
+			return domain.Heartbeat{}, errors.New("dispatch: protocol v2 test is missing credential envelope")
+		}
+		queue = testsV2QueueForRegion(region)
+	} else if job.CredentialEnvelope != nil {
+		return domain.Heartbeat{}, errors.New("dispatch: credential test cannot use a v1 queue")
+	}
 
 	// A dedicated channel keeps this RPC off the shared publish channel; the
 	// exclusive, auto-delete reply queue self-cleans when the channel closes, and
@@ -475,7 +528,7 @@ func (d *AMQP) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat,
 	if s := m.TimeoutSeconds; s > 0 {
 		timeout = time.Duration(s)*time.Second + testRPCSlack
 	}
-	body, err := json.Marshal(CheckJob{Monitor: m})
+	body, err := json.Marshal(job)
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: marshal test: %w", err)
 	}
@@ -501,7 +554,68 @@ func (d *AMQP) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat,
 		if err := json.Unmarshal(msg.Body, &hb); err != nil {
 			return domain.Heartbeat{}, fmt.Errorf("dispatch: decode test reply: %w", err)
 		}
+		if hb.ProbeError != nil {
+			return domain.Heartbeat{}, *hb.ProbeError
+		}
 		return hb, nil
+	}
+}
+
+// ServeTestsV2 consumes only the physically separate envelope test queue. It is started
+// exclusively by a worker with a validated regional dispatch keyring.
+func (d *AMQP) ServeTestsV2(run func(ctx context.Context, job CheckJob) (domain.Heartbeat, error)) {
+	d.testsV2Once.Do(func() {
+		queue := testsV2QueueForRegion(d.jobRegion)
+		go func() {
+			for {
+				conn, wake := d.current()
+				serveTestsV2Once(d, conn, queue, run)
+				select {
+				case <-d.ctx.Done():
+					return
+				case <-wake:
+				case <-time.After(channelRetryBackoff):
+				}
+			}
+		}()
+	})
+}
+
+func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, run func(context.Context, CheckJob) (domain.Heartbeat, error)) {
+	ch, err := conn.Channel()
+	if err != nil {
+		return
+	}
+	defer ch.Close()
+	if _, err := ch.QueueDeclare(queue, false, true, false, false, nil); err != nil {
+		return
+	}
+	msgs, err := ch.Consume(queue, "", false, false, false, false, nil)
+	if err != nil {
+		return
+	}
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case msg, ok := <-msgs:
+			if !ok {
+				return
+			}
+			var job CheckJob
+			if err := json.Unmarshal(msg.Body, &job); err != nil || job.ProtocolVersion != ProtocolV2 || job.CredentialEnvelope == nil {
+				d.deadLetter("tests.v2", msg.Body)
+				_ = msg.Nack(false, false)
+				continue
+			}
+			hb, runErr := run(d.ctx, job)
+			if runErr == nil && msg.ReplyTo != "" {
+				if reply, err := json.Marshal(hb); err == nil {
+					_ = ch.PublishWithContext(d.ctx, "", msg.ReplyTo, false, false, amqp.Publishing{ContentType: "application/json", Body: reply})
+				}
+			}
+			_ = msg.Ack(false)
+		}
 	}
 }
 

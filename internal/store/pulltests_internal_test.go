@@ -55,3 +55,18 @@ func TestPullTestLifecycle(t *testing.T) {
 		t.Fatalf("purge = %d err=%v (want 1)", n, err)
 	}
 }
+
+func TestPullTestProtocolClaimsAreSeparated(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	id, err := st.EnqueuePullTestV2(ctx, "secure", []byte(`{"protocol":2}`), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := st.ClaimPullTest(ctx, "secure"); err != nil || ok {
+		t.Fatalf("v1 claim saw v2 test: ok=%v err=%v", ok, err)
+	}
+	gotID, _, ok, err := st.ClaimPullTestV2(ctx, "secure")
+	if err != nil || !ok || gotID != id {
+		t.Fatalf("v2 claim: id=%q ok=%v err=%v", gotID, ok, err)
+	}
+}

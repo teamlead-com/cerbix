@@ -611,6 +611,9 @@ func (f *fakeStore) ClaimPullJobs(_ context.Context, region string, _, _ int) ([
 	}
 	return out, nil
 }
+func (f *fakeStore) ClaimPullJobsV2(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
+	return f.ClaimPullJobs(ctx, region, max, lease)
+}
 
 func (f *fakeStore) AckPullJobs(_ context.Context, tokens []string) error {
 	f.acked = append(f.acked, tokens...)
@@ -629,6 +632,9 @@ func (f *fakeStore) ClaimPullTest(_ context.Context, region string) (string, []b
 	}
 	return "", nil, false, nil
 }
+func (f *fakeStore) ClaimPullTestV2(ctx context.Context, region string) (string, []byte, bool, error) {
+	return f.ClaimPullTest(ctx, region)
+}
 func (f *fakeStore) SavePullTestResult(_ context.Context, id, region string, result []byte) error {
 	if pt, ok := f.pullTests[id]; ok && pt.region == region {
 		pt.result = result
@@ -643,6 +649,9 @@ func (f *fakeStore) RecordAgentHeartbeat(_ context.Context, region, agentID stri
 	}
 	f.agentHeartbeats[region] = agentID
 	return nil
+}
+func (f *fakeStore) RecordAgentCapabilities(ctx context.Context, region, agentID string, _ int, _ bool) error {
+	return f.RecordAgentHeartbeat(ctx, region, agentID)
 }
 func (f *fakeStore) RecordHistoricalResults(_ context.Context, hbs []domain.Heartbeat) (int, int, error) {
 	f.backfilled = append(f.backfilled, hbs...)

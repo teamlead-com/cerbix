@@ -210,6 +210,18 @@ func (h *Handler) testMonitor(w http.ResponseWriter, r *http.Request) {
 		Conditions: body.Conditions, Config: body.Config,
 	}
 	m.Normalize()
+	if domain.CredentialedType(m.Type) {
+		if !h.secretsEnabled && m.Config["password_ref"] != "" {
+			writeError(w, http.StatusNotFound, "feature_disabled")
+			return
+		}
+		prepared, err := domain.PrepareCredentialSettings(m.Type, m.Config, domain.SurfaceAPI)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		m.Config = prepared
+	}
 	if m.Type == domain.MonitorPush || m.Type == domain.MonitorComposite {
 		writeError(w, http.StatusBadRequest, "this monitor type cannot be tested")
 		return
@@ -318,6 +330,18 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 		EscalationPolicyID:     body.EscalationPolicyID,
 	}
 	m.Normalize()
+	if domain.CredentialedType(m.Type) {
+		if !h.secretsEnabled && m.Config["password_ref"] != "" {
+			writeError(w, http.StatusNotFound, "feature_disabled")
+			return
+		}
+		prepared, err := domain.PrepareCredentialSettings(m.Type, m.Config, domain.SurfaceAPI)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		m.Config = prepared
+	}
 	// Push monitors are passive: give them a secret token for their heartbeat URL.
 	if m.Type == domain.MonitorPush {
 		m.PushToken = generatePushToken()
@@ -334,6 +358,15 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := h.store.CreateMonitor(r.Context(), m)
 	if err != nil {
+		if errors.Is(err, store.ErrSecretsFeatureDisabled) {
+			writeError(w, http.StatusNotFound, "feature_disabled")
+			return
+		}
+		var missing store.SecretRefNotFoundError
+		if errors.As(err, &missing) {
+			writeError(w, http.StatusBadRequest, missing.Error())
+			return
+		}
 		h.serverError(w, "create_monitor", err)
 		return
 	}
@@ -511,6 +544,18 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		mon.EscalationPolicyID = *body.EscalationPolicyID
 	}
 	mon.Normalize()
+	if domain.CredentialedType(mon.Type) && body.Config != nil {
+		if !h.secretsEnabled && mon.Config["password_ref"] != "" {
+			writeError(w, http.StatusNotFound, "feature_disabled")
+			return
+		}
+		prepared, err := domain.PrepareCredentialSettings(mon.Type, mon.Config, domain.SurfaceAPI)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		mon.Config = prepared
+	}
 	if err := mon.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -530,6 +575,15 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := h.store.UpdateMonitor(r.Context(), mon)
 	if err != nil {
+		if errors.Is(err, store.ErrSecretsFeatureDisabled) {
+			writeError(w, http.StatusNotFound, "feature_disabled")
+			return
+		}
+		var missing store.SecretRefNotFoundError
+		if errors.As(err, &missing) {
+			writeError(w, http.StatusBadRequest, missing.Error())
+			return
+		}
 		if h.rejectIfManaged(w, r, mon.ID, err) {
 			return
 		}

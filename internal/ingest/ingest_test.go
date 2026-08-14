@@ -104,6 +104,22 @@ func (f *fakeStore) RecordScheduledResult(_ context.Context, hb domain.Heartbeat
 	return store.ResultOutcome{Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed}, nil
 }
 
+func (f *fakeStore) RecordProbeError(_ context.Context, monitorID string, revision int64, probeErr domain.ProbeError) (store.ProbeErrorOutcome, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m, ok := f.monitors[monitorID]
+	if !ok {
+		return store.ProbeErrorOutcome{}, store.ErrNotFound
+	}
+	if revision != m.ExecutionRevision {
+		return store.ProbeErrorOutcome{Reason: store.ReasonStaleRevision}, nil
+	}
+	m.LastProbeErrorReason = probeErr.Reason
+	m.LastProbeErrorJobID = probeErr.JobID
+	f.monitors[monitorID] = m
+	return store.ProbeErrorOutcome{Recorded: true}, nil
+}
+
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -188,6 +204,7 @@ type fakeRecorder struct {
 	incidentsOpen int
 	missingRev    int
 	outcomes      map[string]int // reason → count
+	probeErrors   map[string]int
 }
 
 func (r *fakeRecorder) RecordCheck(up bool) {
@@ -219,6 +236,15 @@ func (r *fakeRecorder) RecordResultMissingRevision() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.missingRev++
+}
+
+func (r *fakeRecorder) RecordExecutorProbeError(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.probeErrors == nil {
+		r.probeErrors = map[string]int{}
+	}
+	r.probeErrors[reason]++
 }
 
 func (r *fakeRecorder) RecordIncidentOpened() {
@@ -264,6 +290,30 @@ func TestHandleMapsNonAppliedOutcome(t *testing.T) {
 			t.Fatalf("handle did not record the outcome metric")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestHandleProbeErrorNeverRecordsHeartbeatOrStatus(t *testing.T) {
+	fs := newFakeStore()
+	fs.monitors["m-secret"] = domain.Monitor{ID: "m-secret", ExecutionRevision: 4, Status: domain.StatusUp}
+	fs.statuses["m-secret"] = domain.StatusUp
+	recorder := &fakeRecorder{}
+	consumer := New(fs, dispatch.NewInProc(1), recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	consumer.handle(context.Background(), domain.Heartbeat{
+		MonitorID: "m-secret", ExecutionRevision: 4,
+		ProbeError: &domain.ProbeError{Reason: domain.ProbeErrorDecryptAuthFailed, JobID: "job-4"},
+	})
+	if len(fs.hbs) != 0 || fs.statuses["m-secret"] != domain.StatusUp {
+		t.Fatalf("probe_error mutated liveness: hbs=%d status=%s", len(fs.hbs), fs.statuses["m-secret"])
+	}
+	if got := fs.monitors["m-secret"].LastProbeErrorReason; got != domain.ProbeErrorDecryptAuthFailed {
+		t.Fatalf("diagnostic reason=%q", got)
+	}
+	recorder.mu.Lock()
+	count := recorder.probeErrors[domain.ProbeErrorDecryptAuthFailed]
+	recorder.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("probe error metric=%d, want 1", count)
 	}
 }
 

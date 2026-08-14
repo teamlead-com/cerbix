@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
@@ -52,8 +53,10 @@ type Agent struct {
 
 	// Edge buffer (accessed only from the single Run loop, so no locking): results held
 	// while the API is unreachable, flushed as HISTORICAL backfill on reconnect.
-	buf     []domain.Heartbeat
-	dropped int
+	buf             []domain.Heartbeat
+	dropped         int
+	credentials     *dispatch.CredentialKeyring
+	credentialReady atomic.Bool
 }
 
 // New builds an agent. serverURL is the central base URL (e.g. https://cerbix.core);
@@ -74,6 +77,12 @@ func New(serverURL, token, region string, runner Runner, logger *slog.Logger) *A
 		pollEvery:      defaultPollEvery,
 		heartbeatEvery: defaultHeartbeatEvery,
 	}
+}
+
+func (a *Agent) WithCredentialKeyring(ring *dispatch.CredentialKeyring) *Agent {
+	a.credentials = ring
+	a.credentialReady.Store(ring != nil)
+	return a
 }
 
 // Run polls and heartbeats until ctx is cancelled. Polling and heartbeating run on
@@ -114,18 +123,48 @@ func (a *Agent) pollTest(ctx context.Context) {
 		a.logger.Error("agent_bad_test", "error", err.Error())
 		return
 	}
-	hb := a.runner.Run(ctx, job.Monitor)
+	monitor := job.Monitor
+	cleanup := func() {}
+	if job.CredentialEnvelope != nil {
+		if a.credentials == nil {
+			hb := dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorNoDispatchKey)
+			a.logger.Error("agent_credential_test_rejected", "reason", hb.ProbeError.Reason)
+			_ = a.postTestResult(ctx, id, hb)
+			return
+		}
+		var err error
+		monitor, cleanup, err = a.credentials.MaterializeForProbe(job)
+		if err != nil {
+			reason := dispatch.CredentialProbeErrorReason(err)
+			if reason != domain.ProbeErrorUnsupportedVersion {
+				a.credentialReady.Store(false)
+			}
+			a.logger.Error("agent_credential_test_rejected", "reason", reason)
+			_ = a.postTestResult(ctx, id, dispatch.ProbeErrorHeartbeat(job, reason))
+			return
+		}
+		a.credentialReady.Store(true)
+	}
+	hb := a.runner.Run(ctx, monitor)
+	cleanup()
 	if err := a.postTestResult(ctx, id, hb); err != nil {
 		a.logger.Warn("agent_test_result_failed", "error", err.Error())
 	}
 }
 
 func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, ok bool) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.serverURL+"/api/v1/agent/tests?region="+a.region, nil)
+	path := "/api/v1/agent/tests"
+	if a.credentials != nil {
+		path = "/api/v1/agent/v2/tests"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.serverURL+path+"?region="+a.region, nil)
 	if err != nil {
 		return "", nil, false
 	}
 	a.auth(req)
+	if a.credentials != nil {
+		req.Header.Set("X-Cerbix-Credential-Envelope", "1")
+	}
 	resp, err := a.http.Do(req)
 	if err != nil {
 		return "", nil, false
@@ -218,7 +257,34 @@ func (a *Agent) poll(ctx context.Context) {
 			a.logger.Error("agent_bad_job", "error", err.Error())
 			continue
 		}
-		results = append(results, a.runner.Run(ctx, job.Monitor))
+		monitor := job.Monitor
+		cleanup := func() {}
+		if job.CredentialEnvelope != nil {
+			if a.credentials == nil {
+				results = append(results, dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorNoDispatchKey))
+				a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", domain.ProbeErrorNoDispatchKey)
+				if i < len(tokens) {
+					ackTokens = append(ackTokens, tokens[i])
+				}
+				continue
+			}
+			monitor, cleanup, err = a.credentials.MaterializeForProbe(job)
+			if err != nil {
+				reason := dispatch.CredentialProbeErrorReason(err)
+				if reason != domain.ProbeErrorUnsupportedVersion {
+					a.credentialReady.Store(false)
+				}
+				results = append(results, dispatch.ProbeErrorHeartbeat(job, reason))
+				a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", reason)
+				if i < len(tokens) {
+					ackTokens = append(ackTokens, tokens[i])
+				}
+				continue
+			}
+			a.credentialReady.Store(true)
+		}
+		results = append(results, a.runner.Run(ctx, monitor))
+		cleanup()
 		if i < len(tokens) {
 			ackTokens = append(ackTokens, tokens[i])
 		}
@@ -238,7 +304,13 @@ func (a *Agent) poll(ctx context.Context) {
 
 // bufferResults appends to the edge buffer, dropping the oldest past the cap (a ring).
 func (a *Agent) bufferResults(hbs []domain.Heartbeat) {
-	a.buf = append(a.buf, hbs...)
+	// probe_error is a current execution diagnostic, never historical/SLA data. A failed
+	// live POST leaves its job unacked for redelivery; do not replay it through backfill.
+	for _, hb := range hbs {
+		if hb.ProbeError == nil {
+			a.buf = append(a.buf, hb)
+		}
+	}
 	if over := len(a.buf) - bufferCap; over > 0 {
 		a.buf = a.buf[over:]
 		a.dropped += over
@@ -260,12 +332,19 @@ func (a *Agent) flushBuffer(ctx context.Context) {
 }
 
 func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []string, err error) {
-	url := fmt.Sprintf("%s/api/v1/agent/jobs?region=%s&max=%d", a.serverURL, a.region, claimBatch)
+	path := "/api/v1/agent/jobs"
+	if a.credentials != nil {
+		path = "/api/v1/agent/v2/jobs"
+	}
+	url := fmt.Sprintf("%s%s?region=%s&max=%d", a.serverURL, path, a.region, claimBatch)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, nil, err
 	}
 	a.auth(req)
+	if a.credentials != nil {
+		req.Header.Set("X-Cerbix-Credential-Envelope", "1")
+	}
 	resp, err := a.http.Do(req)
 	if err != nil {
 		return nil, nil, err
@@ -326,11 +405,23 @@ func (a *Agent) postHeartbeats(ctx context.Context, path string, results []domai
 
 func (a *Agent) heartbeat(ctx context.Context) {
 	url := fmt.Sprintf("%s/api/v1/agent/heartbeat?region=%s&agent_id=%s", a.serverURL, a.region, a.agentID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	capability := 0
+	if a.credentials != nil {
+		capability = 1
+	}
+	body, err := json.Marshal(map[string]any{
+		"capabilities":     map[string]int{"credential_envelope": capability},
+		"credential_ready": capability == 1 && a.credentialReady.Load(),
+	})
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return
 	}
 	a.auth(req)
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.http.Do(req)
 	if err != nil {
 		a.logger.Warn("agent_heartbeat_failed", "error", err.Error())

@@ -8,14 +8,22 @@ import (
 // EnqueuePullTest stores a one-off "Test connection" probe for a pull-served region and
 // returns its id. TTL bounds how long the API will wait for the agent's result.
 func (s *Store) EnqueuePullTest(ctx context.Context, region string, payload []byte, ttlSeconds int) (string, error) {
+	return s.enqueuePullTest(ctx, region, payload, ttlSeconds, 1)
+}
+
+func (s *Store) EnqueuePullTestV2(ctx context.Context, region string, payload []byte, ttlSeconds int) (string, error) {
+	return s.enqueuePullTest(ctx, region, payload, ttlSeconds, 2)
+}
+
+func (s *Store) enqueuePullTest(ctx context.Context, region string, payload []byte, ttlSeconds, protocolVersion int) (string, error) {
 	if ttlSeconds <= 0 {
 		ttlSeconds = 20
 	}
 	var id string
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO pull_tests (region, payload, expires_at)
-		 VALUES ($1, $2, now() + make_interval(secs => $3)) RETURNING id`,
-		region, payload, ttlSeconds).Scan(&id)
+		`INSERT INTO pull_tests (region, payload, expires_at, protocol_version)
+		 VALUES ($1, $2, now() + make_interval(secs => $3), $4) RETURNING id`,
+		region, payload, ttlSeconds, protocolVersion).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("store: enqueue pull test: %w", err)
 	}
@@ -28,16 +36,24 @@ func (s *Store) EnqueuePullTest(ctx context.Context, region string, payload []by
 // SKIP LOCKED so concurrent agents don't double-run it) and returns its id and payload.
 // ok is false when there is nothing to claim.
 func (s *Store) ClaimPullTest(ctx context.Context, region string) (id string, payload []byte, ok bool, err error) {
+	return s.claimPullTest(ctx, region, 1)
+}
+
+func (s *Store) ClaimPullTestV2(ctx context.Context, region string) (id string, payload []byte, ok bool, err error) {
+	return s.claimPullTest(ctx, region, 2)
+}
+
+func (s *Store) claimPullTest(ctx context.Context, region string, protocolVersion int) (id string, payload []byte, ok bool, err error) {
 	err = s.pool.QueryRow(ctx,
 		`UPDATE pull_tests SET claimed_at = now()
 		  WHERE id = (
 		     SELECT id FROM pull_tests
-		      WHERE region = $1 AND claimed_at IS NULL AND result IS NULL AND expires_at > now()
+		      WHERE region = $1 AND protocol_version = $2 AND claimed_at IS NULL AND result IS NULL AND expires_at > now()
 		      ORDER BY created_at
 		      LIMIT 1
 		      FOR UPDATE SKIP LOCKED
 		  )
-		  RETURNING id, payload`, region).Scan(&id, &payload)
+		  RETURNING id, payload`, region, protocolVersion).Scan(&id, &payload)
 	if noRows(err) {
 		return "", nil, false, nil
 	}

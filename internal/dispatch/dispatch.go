@@ -14,7 +14,9 @@ import (
 // CheckJob carries a monitor snapshot to execute. The snapshot is taken at
 // publish time so workers need no database access.
 type CheckJob struct {
-	Monitor domain.Monitor
+	Monitor            domain.Monitor      `json:"monitor"`
+	ProtocolVersion    int                 `json:"protocol_version,omitempty"`
+	CredentialEnvelope *CredentialEnvelope `json:"credential_envelope,omitempty"`
 }
 
 // Dispatcher moves jobs and results between components.

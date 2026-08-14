@@ -19,10 +19,16 @@ type Runner interface {
 
 // Pool is a fixed-size worker pool.
 type Pool struct {
-	dispatcher dispatch.Dispatcher
-	runner     Runner
-	logger     *slog.Logger
-	size       int
+	dispatcher  dispatch.Dispatcher
+	runner      Runner
+	logger      *slog.Logger
+	size        int
+	credentials *dispatch.CredentialKeyring
+}
+
+func (p *Pool) WithCredentialKeyring(ring *dispatch.CredentialKeyring) *Pool {
+	p.credentials = ring
+	return p
 }
 
 // New builds a worker pool of the given size (minimum 1).
@@ -56,7 +62,25 @@ func (p *Pool) loop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			hb := p.runner.Run(ctx, job.Monitor)
+			monitor := job.Monitor
+			cleanup := func() {}
+			if job.CredentialEnvelope != nil {
+				if p.credentials == nil {
+					p.logger.Error("credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", "no_dispatch_key")
+					p.publishProbeError(ctx, job, domain.ProbeErrorNoDispatchKey)
+					continue
+				}
+				var err error
+				monitor, cleanup, err = p.credentials.MaterializeForProbe(job)
+				if err != nil {
+					reason := dispatch.CredentialProbeErrorReason(err)
+					p.logger.Error("credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", reason)
+					p.publishProbeError(ctx, job, reason)
+					continue
+				}
+			}
+			hb := p.runner.Run(ctx, monitor)
+			cleanup()
 			if err := p.dispatcher.PublishResult(ctx, hb); err != nil {
 				if ctx.Err() != nil {
 					return
@@ -64,5 +88,11 @@ func (p *Pool) loop(ctx context.Context) {
 				p.logger.Error("publish_result_failed", "monitor_id", job.Monitor.ID, "error", err.Error())
 			}
 		}
+	}
+}
+
+func (p *Pool) publishProbeError(ctx context.Context, job dispatch.CheckJob, reason string) {
+	if err := p.dispatcher.PublishResult(ctx, dispatch.ProbeErrorHeartbeat(job, reason)); err != nil && ctx.Err() == nil {
+		p.logger.Error("publish_probe_error_failed", "monitor_id", job.Monitor.ID, "reason", reason, "error", err.Error())
 	}
 }

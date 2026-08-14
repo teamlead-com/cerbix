@@ -34,9 +34,11 @@ const maxAgentClaimBatch = 64
 func (h *Handler) AgentRouter() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/agent/jobs", h.agentAuth(h.agentJobs))
+	mux.HandleFunc("GET /api/v1/agent/v2/jobs", h.agentAuth(h.agentJobsV2))
 	mux.HandleFunc("POST /api/v1/agent/results", h.agentAuth(h.agentResults))
 	mux.HandleFunc("POST /api/v1/agent/backfill", h.agentAuth(h.agentBackfill))
 	mux.HandleFunc("GET /api/v1/agent/tests", h.agentAuth(h.agentTests))
+	mux.HandleFunc("GET /api/v1/agent/v2/tests", h.agentAuth(h.agentTestsV2))
 	mux.HandleFunc("POST /api/v1/agent/test-results", h.agentAuth(h.agentTestResult))
 	mux.HandleFunc("POST /api/v1/agent/heartbeat", h.agentAuth(h.agentHeartbeat))
 	return maxBytes(mux, agentMaxBody)
@@ -99,6 +101,18 @@ func (h *Handler) agentAuth(next http.HandlerFunc) http.HandlerFunc {
 // agentJobs claims up to `max` due jobs for the agent's region and returns their raw
 // CheckJob payloads (the agent decodes and probes them). A job is delivered once.
 func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
+	h.agentJobsProtocol(w, r, 1)
+}
+
+func (h *Handler) agentJobsV2(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Cerbix-Credential-Envelope") != "1" {
+		writeError(w, http.StatusBadRequest, "credential_envelope capability 1 is required on every v2 claim")
+		return
+	}
+	h.agentJobsProtocol(w, r, 2)
+}
+
+func (h *Handler) agentJobsProtocol(w http.ResponseWriter, r *http.Request, protocolVersion int) {
 	region := r.URL.Query().Get("region")
 	if region == "" {
 		writeError(w, http.StatusBadRequest, "region is required")
@@ -116,7 +130,11 @@ func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
 	if max > maxAgentClaimBatch {
 		max = maxAgentClaimBatch
 	}
-	claimed, err := h.store.ClaimPullJobs(r.Context(), region, max, pullJobLeaseSeconds)
+	claim := h.store.ClaimPullJobs
+	if protocolVersion == 2 {
+		claim = h.store.ClaimPullJobsV2
+	}
+	claimed, err := claim(r.Context(), region, max, pullJobLeaseSeconds)
 	if err != nil {
 		h.serverError(w, "agent_claim_jobs", err)
 		return
@@ -126,7 +144,7 @@ func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
 	// the query rate to near-zero while keeping dispatch near-instant, over plain HTTP.
 	if len(claimed) == 0 && h.pullWaiter != nil {
 		h.pullWaiter.Wait(r.Context(), region, agentLongPollHold)
-		if claimed, err = h.store.ClaimPullJobs(r.Context(), region, max, pullJobLeaseSeconds); err != nil {
+		if claimed, err = claim(r.Context(), region, max, pullJobLeaseSeconds); err != nil {
 			h.serverError(w, "agent_claim_jobs", err)
 			return
 		}
@@ -245,12 +263,28 @@ func (h *Handler) agentBackfill(w http.ResponseWriter, r *http.Request) {
 // to run and report back — the pull-transport equivalent of the RabbitMQ test-RPC. The
 // response is {"test": {"id","job"}} or {"test": null}.
 func (h *Handler) agentTests(w http.ResponseWriter, r *http.Request) {
+	h.agentTestsProtocol(w, r, 1)
+}
+
+func (h *Handler) agentTestsV2(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Cerbix-Credential-Envelope") != "1" {
+		writeError(w, http.StatusBadRequest, "credential_envelope capability 1 is required on every v2 claim")
+		return
+	}
+	h.agentTestsProtocol(w, r, 2)
+}
+
+func (h *Handler) agentTestsProtocol(w http.ResponseWriter, r *http.Request, protocolVersion int) {
 	region := r.URL.Query().Get("region")
 	if region == "" {
 		writeError(w, http.StatusBadRequest, "region is required")
 		return
 	}
-	id, payload, ok, err := h.store.ClaimPullTest(r.Context(), region)
+	claim := h.store.ClaimPullTest
+	if protocolVersion == 2 {
+		claim = h.store.ClaimPullTestV2
+	}
+	id, payload, ok, err := claim(r.Context(), region)
 	if err != nil {
 		h.serverError(w, "agent_claim_test", err)
 		return
@@ -301,7 +335,26 @@ func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "region and agent_id are required")
 		return
 	}
-	if err := h.store.RecordAgentHeartbeat(r.Context(), region, agentID); err != nil {
+	var body struct {
+		Capabilities struct {
+			CredentialEnvelope int `json:"credential_envelope"`
+		} `json:"capabilities"`
+		CredentialReady bool `json:"credential_ready"`
+	}
+	if r.ContentLength != 0 {
+		if !decodeJSON(w, r, &body) {
+			return
+		}
+	}
+	if body.Capabilities.CredentialEnvelope < 0 || body.Capabilities.CredentialEnvelope > 1 {
+		writeError(w, http.StatusBadRequest, "unsupported credential_envelope capability")
+		return
+	}
+	if body.CredentialReady && body.Capabilities.CredentialEnvelope != 1 {
+		writeError(w, http.StatusBadRequest, "credential_ready requires credential_envelope capability 1")
+		return
+	}
+	if err := h.store.RecordAgentCapabilities(r.Context(), region, agentID, body.Capabilities.CredentialEnvelope, body.CredentialReady); err != nil {
 		h.serverError(w, "agent_heartbeat", err)
 		return
 	}

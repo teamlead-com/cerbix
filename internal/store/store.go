@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/secret"
 )
 
@@ -142,6 +143,13 @@ func (s *Store) PoolMaxConns() int32 {
 type Store struct {
 	pool   *pgxpool.Pool
 	cipher *secret.Cipher // nil = secrets stored/read as plaintext
+	// secretsEnabled is the authoritative persistence-boundary feature gate for
+	// project inventory references. API handlers also gate the public surface, but
+	// MaC and future internal writers must fail closed here rather than bypass it.
+	secretsEnabled bool
+	// credentialKeyrings are the separate per-region dispatch trust domain. They are
+	// configured only on materializing roles; executors never instantiate Store.
+	credentialKeyrings dispatch.CredentialKeyrings
 	// timescale reports that heartbeats is a TimescaleDB hypertable (migration
 	// 00043 converts it when the extension is installed). Partition maintenance
 	// branches on it: hypertables auto-create chunks and are purged with
@@ -179,6 +187,22 @@ func (s *Store) WithResultRevisionMode(mode string) *Store {
 // notification-channel credentials). A nil cipher leaves them as plaintext.
 func (s *Store) WithCipher(c *secret.Cipher) *Store {
 	s.cipher = c
+	return s
+}
+
+// WithSecretsEnabled permits monitor writes to bind project-inventory references.
+// It is deliberately independent from WithCipher: encryption may be configured for
+// other persisted secrets while the inventory contract remains disabled.
+func (s *Store) WithSecretsEnabled(enabled bool) *Store {
+	s.secretsEnabled = enabled
+	return s
+}
+
+// WithCredentialKeyrings wires the per-region envelope sealers into the authoritative
+// materializer. It is intentionally separate from WithCipher: the two trust domains must
+// never silently substitute for one another (D-0155).
+func (s *Store) WithCredentialKeyrings(rings dispatch.CredentialKeyrings) *Store {
+	s.credentialKeyrings = rings
 	return s
 }
 

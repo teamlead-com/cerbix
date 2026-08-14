@@ -34,6 +34,12 @@ type DispatchKeyEntry struct {
 	Key string `yaml:"key"`
 }
 
+// Bytes returns the validated AES-256 key material. Config validation calls the same
+// decoder, and runtime wiring uses this method rather than reimplementing base64 rules.
+func (e DispatchKeyEntry) Bytes(path string) ([]byte, error) {
+	return decodeKey(path, e.Key)
+}
+
 // DispatchRegionKeys is one region's dispatch keyring: core encrypts with Primary;
 // executors decrypt by key id (Primary or Previous), so a dispatch-key rotation can
 // drain queued/DLQ payloads before the old key is retired (its own runbook —

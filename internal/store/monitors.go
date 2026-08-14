@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -11,9 +13,101 @@ import (
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
+// SecretRefNotFoundError means a prepared monitor setting references no secret with
+// that name in the monitor's project. The name is inventory metadata (never a value),
+// safe to return as a bounded 400/bundle diagnostic.
+type SecretRefNotFoundError struct {
+	Setting string
+	Name    string
+}
+
+// ErrSecretsFeatureDisabled prevents non-HTTP writers (notably MaC) from
+// introducing inventory references while the operator-visible feature is off.
+var ErrSecretsFeatureDisabled = errors.New("store: secret inventory is disabled")
+
+func (e SecretRefNotFoundError) Error() string {
+	return fmt.Sprintf("store: secret reference %q for setting %q was not found in the project", e.Name, e.Setting)
+}
+
+// monitorSecretBindings resolves every prepared *_ref setting under FOR KEY SHARE.
+// Callers MUST invoke it before locking/writing monitor rows: secret rows by id, then
+// monitor rows is the fixed §4.3 lock order shared with rename/rotation. The query carries
+// project_id in every predicate, so a same-named secret in another tenant is invisible.
+func (s *Store) monitorSecretBindings(ctx context.Context, tx pgx.Tx, projectID string, m domain.Monitor) (map[string]string, error) {
+	refs := map[string]string{}
+	if !domain.CredentialedType(m.Type) {
+		return refs, nil
+	}
+	for _, setting := range []string{"password_ref"} {
+		if name := m.Config[setting]; name != "" {
+			refs[setting] = name
+		}
+	}
+	if len(refs) == 0 {
+		return refs, nil
+	}
+	if !s.secretsEnabled {
+		return nil, ErrSecretsFeatureDisabled
+	}
+	names := make([]string, 0, len(refs))
+	for _, name := range refs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	rows, err := tx.Query(ctx,
+		`SELECT id::text, name FROM project_secrets
+		  WHERE project_id = $1 AND name = ANY($2::text[])
+		  ORDER BY id FOR KEY SHARE`, projectID, names)
+	if err != nil {
+		return nil, fmt.Errorf("store: resolve monitor secret refs: %w", err)
+	}
+	defer rows.Close()
+	idByName := make(map[string]string, len(names))
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("store: scan monitor secret ref: %w", err)
+		}
+		idByName[name] = id
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate monitor secret refs: %w", err)
+	}
+	bindings := make(map[string]string, len(refs))
+	for setting, name := range refs {
+		id, ok := idByName[name]
+		if !ok {
+			return nil, SecretRefNotFoundError{Setting: setting, Name: name}
+		}
+		bindings[setting] = id
+	}
+	return bindings, nil
+}
+
+// replaceMonitorSecretRefsTx makes the normalized ref table exactly match the
+// already-prepared config. The referenced secret rows remain key-share locked until commit.
+func replaceMonitorSecretRefsTx(ctx context.Context, tx pgx.Tx, monitorID, projectID string, bindings map[string]string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM monitor_secret_refs WHERE monitor_id = $1 AND project_id = $2`, monitorID, projectID); err != nil {
+		return fmt.Errorf("store: clear monitor secret refs: %w", err)
+	}
+	keys := make([]string, 0, len(bindings))
+	for setting := range bindings {
+		keys = append(keys, setting)
+	}
+	sort.Strings(keys)
+	for _, setting := range keys {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO monitor_secret_refs (monitor_id, project_id, setting_key, secret_id)
+			 VALUES ($1,$2,$3,$4)`, monitorID, projectID, setting, bindings[setting]); err != nil {
+			return fmt.Errorf("store: insert monitor secret ref %q: %w", setting, err)
+		}
+	}
+	return nil
+}
+
 // monitorColumns includes a correlated aggregate for depends_on; the bare `id`
 // inside it resolves to the outer monitors row under any table alias.
-const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, execution_revision, state_sequence, " +
+const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, execution_revision, state_sequence, last_probe_error_reason, last_probe_error_at, last_probe_error_job_id, " +
 	"(SELECT COALESCE(array_agg(d.depends_on_id::text ORDER BY d.created_at), '{}') FROM monitor_dependencies d WHERE d.monitor_id = id) AS depends_on"
 
 // methodOrGet keeps the NOT NULL method column concrete; the prober ignores it
@@ -38,17 +132,30 @@ func nullableID(id string) *string {
 // letting a caller pull additional trailing columns (e.g. statement_timestamp()) selected
 // alongside monitorColumns in the same query.
 func (s *Store) scanMonitor(row pgx.Row, extra ...any) (domain.Monitor, error) {
+	return s.scanMonitorMode(row, true, extra...)
+}
+
+// scanMonitorNoSecrets is the display/snapshot read boundary (§4.4.2). Secret config
+// keys are omitted from the decoded schema without ever invoking Decrypt; references
+// remain visible metadata. This is intentionally a separate scanner, not post-decrypt
+// redaction, so APIs and scheduler snapshots cannot transiently hold credential plaintext.
+func (s *Store) scanMonitorNoSecrets(row pgx.Row, extra ...any) (domain.Monitor, error) {
+	return s.scanMonitorMode(row, false, extra...)
+}
+
+func (s *Store) scanMonitorMode(row pgx.Row, decryptConfigSecrets bool, extra ...any) (domain.Monitor, error) {
 	var (
-		m         domain.Monitor
-		typ       string
-		stat      string
-		pushToken *string
-		escPolicy *string
+		m                       domain.Monitor
+		typ                     string
+		stat                    string
+		pushToken               *string
+		escPolicy               *string
+		probeReason, probeJobID *string
 	)
 	var config []byte
 	dests := []any{&m.ID, &m.ProjectID, &m.Name, &typ, &m.Target,
 		&m.IntervalSeconds, &m.TimeoutSeconds, &m.Retries, &m.Conditions,
-		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.StateSequence, &m.DependsOn}
+		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.StateSequence, &probeReason, &m.LastProbeErrorAt, &probeJobID, &m.DependsOn}
 	dests = append(dests, extra...)
 	err := row.Scan(dests...)
 	if err != nil {
@@ -68,12 +175,22 @@ func (s *Store) scanMonitor(row pgx.Row, extra ...any) (domain.Monitor, error) {
 	if escPolicy != nil {
 		m.EscalationPolicyID = *escPolicy
 	}
+	if probeReason != nil {
+		m.LastProbeErrorReason = *probeReason
+	}
+	if probeJobID != nil {
+		m.LastProbeErrorJobID = *probeJobID
+	}
 	if len(config) > 0 {
 		if err := json.Unmarshal(config, &m.Config); err != nil {
 			return domain.Monitor{}, fmt.Errorf("store: decode monitor config: %w", err)
 		}
 		for k := range domain.SecretMonitorConfigKeys {
 			if v, ok := m.Config[k]; ok {
+				if !decryptConfigSecrets {
+					delete(m.Config, k)
+					continue
+				}
 				plain, err := s.cipher.Decrypt(v)
 				if err != nil {
 					return domain.Monitor{}, fmt.Errorf("store: decrypt monitor config %q: %w", k, err)
@@ -83,6 +200,56 @@ func (s *Store) scanMonitor(row pgx.Row, extra ...any) (domain.Monitor, error) {
 		}
 	}
 	return m, nil
+}
+
+// prepareCredentialUpdate validates a full safe-read config while allowing an omitted
+// write-only inline password to mean "preserve the current ciphertext". The placeholder
+// exists only to traverse the single domain validator; it is removed before persistence.
+// A password_ref is never implicit and therefore never uses this path.
+func prepareCredentialUpdate(typ domain.MonitorType, input map[string]string) (map[string]string, bool, error) {
+	if input["password"] != "" || input["password_ref"] != "" || (typ == domain.MonitorRabbitMQ && input["mode"] == "amqp") {
+		prepared, err := domain.PrepareCredentialSettings(typ, input, domain.SurfaceAPI)
+		return prepared, false, err
+	}
+	tmp := make(map[string]string, len(input)+1)
+	for k, v := range input {
+		tmp[k] = v
+	}
+	tmp["password"] = "preserved-write-only-value"
+	prepared, err := domain.PrepareCredentialSettings(typ, tmp, domain.SurfaceAPI)
+	if err != nil {
+		return nil, false, err
+	}
+	delete(prepared, "password")
+	return prepared, true, nil
+}
+
+// marshalConfigForUpdateTx preserves the exact old ciphertext for a write-only inline
+// password omitted by a safe reader. It never decrypts that value. An explicit password
+// or password_ref replaces the old credential normally.
+func (s *Store) marshalConfigForUpdateTx(ctx context.Context, tx pgx.Tx, m domain.Monitor, preserveInline bool) ([]byte, error) {
+	config, err := s.marshalConfig(m)
+	if err != nil || !preserveInline {
+		return config, err
+	}
+	var oldRaw []byte
+	if err := tx.QueryRow(ctx, `SELECT config FROM monitors WHERE id=$1 AND project_id=$2`, m.ID, m.ProjectID).Scan(&oldRaw); err != nil {
+		return nil, fmt.Errorf("store: read write-only monitor config: %w", err)
+	}
+	oldConfig := map[string]string{}
+	if err := json.Unmarshal(oldRaw, &oldConfig); err != nil {
+		return nil, fmt.Errorf("store: decode write-only monitor config: %w", err)
+	}
+	oldPassword, ok := oldConfig["password"]
+	if !ok || oldPassword == "" {
+		return nil, fmt.Errorf("store: credential settings require an existing write-only password to preserve")
+	}
+	encoded := map[string]string{}
+	if err := json.Unmarshal(config, &encoded); err != nil {
+		return nil, fmt.Errorf("store: decode prepared monitor config: %w", err)
+	}
+	encoded["password"] = oldPassword
+	return json.Marshal(encoded)
 }
 
 // marshalConfig encrypts secret config values (when a cipher is set) and encodes
@@ -134,41 +301,31 @@ func (s *Store) MonitorStatuses(ctx context.Context, ids []string) (map[string]d
 
 // CreateMonitor inserts a monitor. The caller validates via domain first.
 func (s *Store) CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error) {
-	conditions := m.Conditions
-	if conditions == nil {
-		conditions = []string{}
-	}
-	tags := m.Tags
-	if tags == nil {
-		tags = []string{}
-	}
-	region := m.Region
-	if region == "" {
-		region = domain.DefaultRegion
-	}
-	// Push token is stored as a blind index (SHA-256, for lookup) plus an encrypted
-	// value (for display); the plaintext is never persisted. Encrypt is nil- and
-	// empty-tolerant, so a non-push monitor stores NULLs.
-	var pushHash, pushEnc *string
-	if m.PushToken != "" {
-		h := HashToken(m.PushToken)
-		enc, eerr := s.cipher.Encrypt(m.PushToken)
-		if eerr != nil {
-			return domain.Monitor{}, fmt.Errorf("store: encrypt push token: %w", eerr)
+	if domain.CredentialedType(m.Type) {
+		prepared, err := domain.PrepareCredentialSettings(m.Type, m.Config, domain.SurfaceAPI)
+		if err != nil {
+			return domain.Monitor{}, err
 		}
-		pushHash, pushEnc = &h, &enc
+		m.Config = prepared
 	}
-	config, err := s.marshalConfig(m)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Monitor{}, fmt.Errorf("store: begin create monitor: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	bindings, err := s.monitorSecretBindings(ctx, tx, m.ProjectID, m)
 	if err != nil {
 		return domain.Monitor{}, err
 	}
-	row := s.pool.QueryRow(ctx,
-		`INSERT INTO monitors (project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, push_token_hash, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING `+monitorColumns,
-		m.ProjectID, m.Name, string(m.Type), m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, pushHash, pushEnc, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds)
-	created, err := s.scanMonitor(row)
+	created, err := insertMonitorTx(ctx, tx, s, m)
 	if err != nil {
-		return domain.Monitor{}, fmt.Errorf("store: create monitor: %w", err)
+		return domain.Monitor{}, err
+	}
+	if err := replaceMonitorSecretRefsTx(ctx, tx, created.ID, m.ProjectID, bindings); err != nil {
+		return domain.Monitor{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Monitor{}, fmt.Errorf("store: commit create monitor: %w", err)
 	}
 	return created, nil
 }
@@ -236,7 +393,13 @@ func (s *Store) RecordPushResult(ctx context.Context, monitorID string, up bool,
 	if err != nil {
 		return ResultOutcome{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE monitors SET last_result_ts = $2 WHERE id = $1`, monitorID, receivedAt); err != nil {
+	if _, err := tx.Exec(ctx,
+		`UPDATE monitors
+		    SET last_result_ts = $2,
+		        last_probe_error_reason = CASE WHEN last_probe_error_at <= $2 THEN NULL ELSE last_probe_error_reason END,
+		        last_probe_error_at = CASE WHEN last_probe_error_at <= $2 THEN NULL ELSE last_probe_error_at END,
+		        last_probe_error_job_id = CASE WHEN last_probe_error_at <= $2 THEN NULL ELSE last_probe_error_job_id END
+		  WHERE id = $1`, monitorID, receivedAt); err != nil {
 		return ResultOutcome{}, fmt.Errorf("store: advance last_result_ts: %w", err)
 	}
 	return s.commitOutcome(ctx, tx, ResultOutcome{
@@ -250,13 +413,27 @@ func (s *Store) RecordPushResult(ctx context.Context, monitorID string, up bool,
 // claims ownership cannot slip past a stale handler-level check (spec §8/§9.2). Type and
 // push_token are immutable. ErrNotFound if the monitor is gone. Caller validates via domain.
 func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error) {
+	preserveInline := false
+	if domain.CredentialedType(m.Type) {
+		prepared, preserve, err := prepareCredentialUpdate(m.Type, m.Config)
+		if err != nil {
+			return domain.Monitor{}, err
+		}
+		m.Config = prepared
+		preserveInline = preserve
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: begin update monitor: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	// Fixed §4.3 order: referenced secret rows first, monitor row second.
+	bindings, err := s.monitorSecretBindings(ctx, tx, m.ProjectID, m)
+	if err != nil {
+		return domain.Monitor{}, err
+	}
 	var exists int
-	if err := tx.QueryRow(ctx, `SELECT 1 FROM monitors WHERE id = $1 FOR UPDATE`, m.ID).Scan(&exists); noRows(err) {
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM monitors WHERE id = $1 AND project_id = $2 FOR UPDATE`, m.ID, m.ProjectID).Scan(&exists); noRows(err) {
 		return domain.Monitor{}, ErrNotFound
 	} else if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: lock monitor: %w", err)
@@ -264,8 +441,11 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 	if err := assertNotFileManagedTx(ctx, tx, m.ID); err != nil {
 		return domain.Monitor{}, err
 	}
-	updated, err := updateMonitorTx(ctx, tx, s, m)
+	updated, err := updateMonitorTxPrepared(ctx, tx, s, m, preserveInline)
 	if err != nil {
+		return domain.Monitor{}, err
+	}
+	if err := replaceMonitorSecretRefsTx(ctx, tx, m.ID, m.ProjectID, bindings); err != nil {
 		return domain.Monitor{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -279,6 +459,19 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 // user path (UpdateMonitor, after its ownership guard) and the file-apply path (which owns
 // the row and must NOT be blocked by the guard) call it inside their own transaction.
 func updateMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor) (domain.Monitor, error) {
+	preserveInline := false
+	if domain.CredentialedType(m.Type) {
+		prepared, preserve, err := prepareCredentialUpdate(m.Type, m.Config)
+		if err != nil {
+			return domain.Monitor{}, err
+		}
+		m.Config = prepared
+		preserveInline = preserve
+	}
+	return updateMonitorTxPrepared(ctx, tx, s, m, preserveInline)
+}
+
+func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor, preserveInline bool) (domain.Monitor, error) {
 	conditions := m.Conditions
 	if conditions == nil {
 		conditions = []string{}
@@ -291,7 +484,7 @@ func updateMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor)
 	if region == "" {
 		region = domain.DefaultRegion
 	}
-	config, err := s.marshalConfig(m)
+	config, err := s.marshalConfigForUpdateTx(ctx, tx, m, preserveInline)
 	if err != nil {
 		return domain.Monitor{}, err
 	}
@@ -321,7 +514,7 @@ func updateMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor)
 		        state_sequence = CASE WHEN NOT enabled AND $8 THEN state_sequence + 1 ELSE state_sequence END
 		  WHERE id = $1 RETURNING `+monitorColumns,
 		m.ID, m.Name, m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds)
-	updated, err := s.scanMonitor(row)
+	updated, err := s.scanMonitorNoSecrets(row)
 	if noRows(err) {
 		return domain.Monitor{}, ErrNotFound
 	}
@@ -334,7 +527,7 @@ func updateMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor)
 // GetMonitor returns a monitor by id.
 func (s *Store) GetMonitor(ctx context.Context, id string) (domain.Monitor, error) {
 	row := s.pool.QueryRow(ctx, `SELECT `+monitorColumns+` FROM monitors WHERE id = $1`, id)
-	m, err := s.scanMonitor(row)
+	m, err := s.scanMonitorNoSecrets(row)
 	if noRows(err) {
 		return domain.Monitor{}, ErrNotFound
 	}
@@ -350,7 +543,7 @@ func (s *Store) ListMonitorsByProject(ctx context.Context, projectID string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("store: list monitors by project: %w", err)
 	}
-	return s.collectMonitors(rows)
+	return s.collectMonitorsNoSecrets(rows)
 }
 
 // MonitorRegions returns the region of each given monitor id (missing/deleted ids are
@@ -382,6 +575,17 @@ func (s *Store) ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, erro
 		return nil, fmt.Errorf("store: list enabled monitors: %w", err)
 	}
 	return s.collectMonitors(rows)
+}
+
+// ListEnabledMonitorSnapshots is the ciphertext/plaintext-free scheduler surface used
+// when credential envelopes are enforced. Legacy mode retains ListEnabledMonitors until
+// the rollout flips, so existing inline monitors keep their current transport semantics.
+func (s *Store) ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+monitorColumns+` FROM monitors WHERE enabled ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list enabled monitor snapshots: %w", err)
+	}
+	return s.collectMonitorsNoSecrets(rows)
 }
 
 // StalePushMonitors returns enabled push monitors whose dead-man's switch has
@@ -603,6 +807,45 @@ type ResultOutcome struct {
 	MissingRevisionObserved bool
 }
 
+// ProbeErrorOutcome reports whether an executor diagnostic was recorded. It is separate
+// from ResultOutcome so callers cannot accidentally interpret diagnostics as live checks.
+type ProbeErrorOutcome struct {
+	Recorded bool
+	Reason   string
+}
+
+// RecordProbeError stores a revision-fenced executor diagnostic without touching the
+// heartbeat/SLA/status/counter/incident/outbox paths. The UPDATE is the CAS/linearization
+// point; a stale revision is rejected exactly like a stale normal result.
+func (s *Store) RecordProbeError(ctx context.Context, monitorID string, revision int64, probeErr domain.ProbeError) (ProbeErrorOutcome, error) {
+	if monitorID == "" || revision < 1 || !domain.ValidProbeErrorReason(probeErr.Reason) {
+		return ProbeErrorOutcome{}, errors.New("store: invalid probe_error result")
+	}
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE monitors
+		    SET last_probe_error_reason=$3,
+		        last_probe_error_at=statement_timestamp(),
+		        last_probe_error_job_id=NULLIF($4,'')
+		  WHERE id=$1 AND execution_revision=$2 AND enabled`,
+		monitorID, revision, probeErr.Reason, probeErr.JobID)
+	if err != nil {
+		return ProbeErrorOutcome{}, fmt.Errorf("store: record probe error: %w", err)
+	}
+	if ct.RowsAffected() == 1 {
+		return ProbeErrorOutcome{Recorded: true}, nil
+	}
+	var currentRevision int64
+	if err := s.pool.QueryRow(ctx, `SELECT execution_revision FROM monitors WHERE id=$1`, monitorID).Scan(&currentRevision); noRows(err) {
+		return ProbeErrorOutcome{}, ErrNotFound
+	} else if err != nil {
+		return ProbeErrorOutcome{}, fmt.Errorf("store: classify rejected probe error: %w", err)
+	}
+	if currentRevision != revision {
+		return ProbeErrorOutcome{Reason: ReasonStaleRevision}, nil
+	}
+	return ProbeErrorOutcome{Reason: MaterializeSkippedCurrentState}, nil
+}
+
 // withMissing tags the outcome as an observe-mode missing-revision acceptance.
 func (o ResultOutcome) withMissing(b bool) ResultOutcome { o.MissingRevisionObserved = b; return o }
 
@@ -692,7 +935,13 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	if err != nil {
 		return ResultOutcome{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE monitors SET last_result_ts = $2 WHERE id = $1`, hb.MonitorID, ts); err != nil {
+	if _, err := tx.Exec(ctx,
+		`UPDATE monitors
+		    SET last_result_ts = $2,
+		        last_probe_error_reason = CASE WHEN last_probe_error_at <= $3 THEN NULL ELSE last_probe_error_reason END,
+		        last_probe_error_at = CASE WHEN last_probe_error_at <= $3 THEN NULL ELSE last_probe_error_at END,
+		        last_probe_error_job_id = CASE WHEN last_probe_error_at <= $3 THEN NULL ELSE last_probe_error_job_id END
+		  WHERE id = $1`, hb.MonitorID, ts, dbNow); err != nil {
 		return ResultOutcome{}, fmt.Errorf("store: advance last_result_ts: %w", err)
 	}
 	return s.commitOutcome(ctx, tx, ResultOutcome{
@@ -855,6 +1104,22 @@ func (s *Store) collectMonitors(rows pgx.Rows) ([]domain.Monitor, error) {
 	var out []domain.Monitor
 	for rows.Next() {
 		m, err := s.scanMonitor(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan monitor: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate monitors: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) collectMonitorsNoSecrets(rows pgx.Rows) ([]domain.Monitor, error) {
+	defer rows.Close()
+	var out []domain.Monitor
+	for rows.Next() {
+		m, err := s.scanMonitorNoSecrets(rows)
 		if err != nil {
 			return nil, fmt.Errorf("store: scan monitor: %w", err)
 		}

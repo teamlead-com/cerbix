@@ -29,6 +29,8 @@ const (
 	ReasonDomainInvalid     Reason = "domain_invalid"
 	ReasonDependencyInvalid Reason = "dependency_invalid"
 	ReasonDependencyCycle   Reason = "dependency_cycle"
+	ReasonSecretRefNotFound Reason = "secret_ref_not_found"
+	ReasonFeatureDisabled   Reason = "feature_disabled"
 	ReasonTypeChange        Reason = "type_change"
 	ReasonDuplicateProject  Reason = "duplicate_project"
 	ReasonEmptyBundle       Reason = "empty_bundle"
@@ -103,6 +105,10 @@ var fileSupportedTypes = map[domain.MonitorType]bool{
 	domain.MonitorWebSocket: true,
 	domain.MonitorSSH:       true,
 	domain.MonitorPush:      true,
+	domain.MonitorPostgres:  true,
+	domain.MonitorMySQL:     true,
+	domain.MonitorRedis:     true,
+	domain.MonitorRabbitMQ:  true,
 }
 
 // secretSettingKeys are field/settings keys that carry credentials. Their presence anywhere

@@ -32,6 +32,7 @@ func secretsTestStore(t *testing.T) (*Store, context.Context) {
 		t.Fatalf("cipher: %v", err)
 	}
 	st.WithCipher(cipher)
+	st.WithSecretsEnabled(true)
 	return st, ctx
 }
 
@@ -49,8 +50,8 @@ func secretsFixture(t *testing.T, st *Store, ctx context.Context, orgSlug, projS
 	return org.ID, proj.ID
 }
 
-// insertSecretRef seeds a monitor_secret_refs row the way a future monitor save would
-// (iteration 2 wires that path; here the schema contract itself is under test).
+// insertSecretRef is retained for corruption/low-level FK arrangements. Normal monitor
+// writes maintain monitor_secret_refs themselves (iteration 2).
 func insertSecretRef(t *testing.T, st *Store, ctx context.Context, monitorID, projectID, settingKey, secretID string) {
 	t.Helper()
 	if _, err := st.pool.Exec(ctx,
@@ -364,12 +365,11 @@ func TestProjectSecretDeleteAndRenameGuards(t *testing.T) {
 	st, ctx := secretsTestStore(t)
 	orgID, projID := secretsFixture(t, st, ctx, "acme", "api")
 
-	sec, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "db-password", "v1")
+	_, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "db-password", "v1")
 	if err != nil {
 		t.Fatalf("create secret: %v", err)
 	}
 	mon := createRefMonitor(t, st, ctx, projID, "db", "db-password", true)
-	insertSecretRef(t, st, ctx, mon.ID, projID, "password_ref", sec.ID)
 
 	// Delete guard: referenced → typed error with the exact under-lock count, no delete.
 	err = st.DeleteProjectSecret(ctx, testSecretActor, projID, "db-password")
@@ -463,12 +463,11 @@ func TestProjectSecretRepointBrokenInvariant(t *testing.T) {
 	st, ctx := secretsTestStore(t)
 	_, projID := secretsFixture(t, st, ctx, "acme", "api")
 
-	sec, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "db-password", "v1")
+	_, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "db-password", "v1")
 	if err != nil {
 		t.Fatalf("create secret: %v", err)
 	}
 	mon := createRefMonitor(t, st, ctx, projID, "db", "db-password", true)
-	insertSecretRef(t, st, ctx, mon.ID, projID, "password_ref", sec.ID)
 
 	// Corrupt the config value behind the ref row's back.
 	var raw []byte
@@ -558,15 +557,16 @@ func TestProjectSecretRotationFence(t *testing.T) {
 	st, ctx := secretsTestStore(t)
 	orgID, projID := secretsFixture(t, st, ctx, "acme", "api")
 
-	sec, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "db-password", "v1")
+	_, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "db-password", "v1")
 	if err != nil {
 		t.Fatalf("create secret: %v", err)
 	}
 	refEnabled := createRefMonitor(t, st, ctx, projID, "db-enabled", "db-password", true)
 	refDisabled := createRefMonitor(t, st, ctx, projID, "db-disabled", "db-password", false)
 	other := createRefMonitor(t, st, ctx, projID, "db-other", "db-password", true) // config mentions the name but has NO ref row
-	insertSecretRef(t, st, ctx, refEnabled.ID, projID, "password_ref", sec.ID)
-	insertSecretRef(t, st, ctx, refDisabled.ID, projID, "password_ref", sec.ID)
+	if _, err := st.pool.Exec(ctx, `DELETE FROM monitor_secret_refs WHERE monitor_id = $1`, other.ID); err != nil {
+		t.Fatalf("arrange missing ref row: %v", err)
+	}
 
 	// Give every monitor a freshness watermark so the reset is observable.
 	if _, err := st.pool.Exec(ctx,
@@ -733,12 +733,11 @@ func TestProjectSecretProjectDeleteCascade(t *testing.T) {
 	st, ctx := secretsTestStore(t)
 	orgID, projID := secretsFixture(t, st, ctx, "acme", "api")
 
-	sec, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "db-password", "v")
+	_, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "db-password", "v")
 	if err != nil {
 		t.Fatalf("create secret: %v", err)
 	}
-	mon := createRefMonitor(t, st, ctx, projID, "db", "db-password", true)
-	insertSecretRef(t, st, ctx, mon.ID, projID, "password_ref", sec.ID)
+	createRefMonitor(t, st, ctx, projID, "db", "db-password", true)
 
 	// The deferred NO ACTION FK keeps the cascade order-independent: secrets and
 	// monitors (→ refs) both vanish inside the delete tx, and the commit-time check

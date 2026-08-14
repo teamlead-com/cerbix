@@ -106,6 +106,42 @@ func TestPullQueueStats(t *testing.T) {
 	}
 }
 
+func TestPullProtocolClaimsArePhysicallySeparated(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+		t.Fatal(err)
+	}
+	if jobs, err := st.ClaimPullJobs(ctx, "secure", 10, 30); err != nil || len(jobs) != 0 {
+		t.Fatalf("v1 claim saw v2 row: jobs=%d err=%v", len(jobs), err)
+	}
+	jobs, err := st.ClaimPullJobsV2(ctx, "secure", 10, 30)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("v2 claim: jobs=%d err=%v", len(jobs), err)
+	}
+}
+
+func TestCredentialReadyAgentRegionIsExistential(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if err := st.RecordAgentCapabilities(ctx, "secure", "legacy", 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute); err != nil || ready["secure"] {
+		t.Fatalf("legacy-only region reported ready: %#v err=%v", ready, err)
+	}
+	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-degraded", 1, false); err != nil {
+		t.Fatal(err)
+	}
+	if ready, _ := st.LiveCredentialReadyAgentRegions(ctx, time.Minute); ready["secure"] {
+		t.Fatalf("degraded v2 agent reported ready: %#v", ready)
+	}
+	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-ready", 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute); err != nil || !ready["secure"] {
+		t.Fatalf("ready v2 agent not discovered: %#v err=%v", ready, err)
+	}
+}
+
 func TestAgentHeartbeatLiveRegions(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	if err := st.RecordAgentHeartbeat(ctx, "geo3", "agent-a"); err != nil {

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -12,12 +13,20 @@ import (
 // (ttlSeconds), so an agent can claim it over HTTP. A non-positive TTL falls back to
 // 60s. The payload is an opaque JSON snapshot (a dispatch.CheckJob).
 func (s *Store) EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds int) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 1)
+}
+
+func (s *Store) EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds int) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 2)
+}
+
+func (s *Store) enqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, protocolVersion int) error {
 	if ttlSeconds <= 0 {
 		ttlSeconds = 60
 	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO pull_jobs (region, payload, expires_at) VALUES ($1, $2, now() + make_interval(secs => $3))`,
-		region, payload, ttlSeconds)
+		`INSERT INTO pull_jobs (region, payload, expires_at, protocol_version) VALUES ($1, $2, now() + make_interval(secs => $3), $4)`,
+		region, payload, ttlSeconds, protocolVersion)
 	if err != nil {
 		return fmt.Errorf("store: enqueue pull job: %w", err)
 	}
@@ -47,6 +56,14 @@ type PullJob struct {
 // concurrent agents safe. Jobs are removed only by AckPullJobs (on report) or the TTL
 // purge. A non-positive leaseSeconds falls back to 30s.
 func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 1)
+}
+
+func (s *Store) ClaimPullJobsV2(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 2)
+}
+
+func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeconds, protocolVersion int) ([]PullJob, error) {
 	if max <= 0 {
 		max = 16
 	}
@@ -58,14 +75,14 @@ func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeco
 		        lease_expires_at = now() + make_interval(secs => $3)
 		  WHERE id IN (
 		     SELECT id FROM pull_jobs
-		      WHERE region = $1 AND expires_at > now()
+		      WHERE region = $1 AND protocol_version = $4 AND expires_at > now()
 		        AND (lease_expires_at IS NULL OR lease_expires_at <= now())
 		      ORDER BY created_at
 		      LIMIT $2
 		      FOR UPDATE SKIP LOCKED
 		  )
 		  RETURNING claim_token::text, payload`,
-		region, max, leaseSeconds)
+		region, max, leaseSeconds, protocolVersion)
 	if err != nil {
 		return nil, fmt.Errorf("store: claim pull jobs: %w", err)
 	}
@@ -130,14 +147,52 @@ func (s *Store) PullQueueStats(ctx context.Context) ([]metrics.PullStat, error) 
 
 // RecordAgentHeartbeat upserts a pull agent's last-seen time for its region.
 func (s *Store) RecordAgentHeartbeat(ctx context.Context, region, agentID string) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO agent_heartbeats (region, agent_id, seen_at) VALUES ($1, $2, now())
-		 ON CONFLICT (region, agent_id) DO UPDATE SET seen_at = now()`,
-		region, agentID)
+	return s.RecordAgentCapabilities(ctx, region, agentID, 0, false)
+}
+
+func (s *Store) RecordAgentCapabilities(ctx context.Context, region, agentID string, credentialEnvelope int, credentialReady bool) error {
+	capabilities, err := json.Marshal(map[string]int{"credential_envelope": credentialEnvelope})
+	if err != nil {
+		return fmt.Errorf("store: encode agent capabilities: %w", err)
+	}
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO agent_heartbeats (region, agent_id, seen_at, capabilities, credential_ready)
+		 VALUES ($1, $2, now(), $3, $4)
+		 ON CONFLICT (region, agent_id) DO UPDATE
+		 SET seen_at = now(), capabilities = EXCLUDED.capabilities,
+		     credential_ready = EXCLUDED.credential_ready`,
+		region, agentID, capabilities, credentialReady)
 	if err != nil {
 		return fmt.Errorf("store: record agent heartbeat: %w", err)
 	}
 	return nil
+}
+
+// LiveCredentialReadyAgentRegions is existential and never vacuous: a region appears
+// only when at least one recent agent reasserted v2 capability and key readiness.
+func (s *Store) LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration) (map[string]bool, error) {
+	secs := int(within.Seconds())
+	if secs <= 0 {
+		secs = 60
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT region FROM agent_heartbeats
+		  WHERE seen_at > now() - make_interval(secs => $1)
+		    AND credential_ready
+		    AND COALESCE((capabilities->>'credential_envelope')::int, 0) >= 1`, secs)
+	if err != nil {
+		return nil, fmt.Errorf("store: live credential-ready agent regions: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var region string
+		if err := rows.Scan(&region); err != nil {
+			return nil, fmt.Errorf("store: scan credential-ready agent region: %w", err)
+		}
+		out[region] = true
+	}
+	return out, rows.Err()
 }
 
 // PurgeStaleAgentHeartbeats deletes heartbeat rows older than the given age. Each agent

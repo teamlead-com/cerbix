@@ -116,6 +116,27 @@ func TestAgentJobsLongPoll(t *testing.T) {
 	}
 }
 
+func TestAgentV2ClaimsRequireCapabilityOnEveryRequest(t *testing.T) {
+	fs := seededStore()
+	fs.pullJobs = map[string][][]byte{"secure": {[]byte(`{"protocol_version":2}`)}}
+	fs.pullTests = map[string]fakePullTest{"v2-test": {region: "secure", payload: []byte(`{"protocol_version":2}`)}}
+	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentToken("s3cr3t").AgentRouter()
+
+	for _, path := range []string{"/api/v1/agent/v2/jobs?region=secure", "/api/v1/agent/v2/tests?region=secure"} {
+		if rec := agentReq(h, http.MethodGet, path, "s3cr3t", ""); rec.Code != http.StatusBadRequest {
+			t.Fatalf("missing capability for %s = %d, want 400", path, rec.Code)
+		}
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer s3cr3t")
+		req.Header.Set("X-Cerbix-Credential-Envelope", "1")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("capable claim for %s = %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestAgentTestEndpoints(t *testing.T) {
 	fs := seededStore()
 	fs.pullTests = map[string]fakePullTest{

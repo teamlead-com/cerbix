@@ -30,6 +30,8 @@ func TestLiveJobRegions(t *testing.T) {
 			{"name":"checks.jobs.core","consumers":2},
 			{"name":"checks.jobs.geo1","consumers":0},
 			{"name":"checks.jobs.geo2","consumers":1},
+			{"name":"checks.jobs.v2.core","consumers":0},
+			{"name":"checks.jobs.v2.secure","consumers":1},
 			{"name":"checks.results","consumers":1}
 		]`))
 	}))
@@ -42,5 +44,12 @@ func TestLiveJobRegions(t *testing.T) {
 	}
 	if !live["core"] || live["geo1"] || !live["geo2"] || len(live) != 2 {
 		t.Fatalf("live = %#v, want {core,geo2}", live)
+	}
+	credentialLive, err := c.LiveCredentialJobRegions(context.Background())
+	if err != nil {
+		t.Fatalf("credential live regions: %v", err)
+	}
+	if credentialLive["core"] || !credentialLive["secure"] || len(credentialLive) != 1 {
+		t.Fatalf("credential live = %#v, want {secure}", credentialLive)
 	}
 }

@@ -217,6 +217,10 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 		case fileprovider.ActionCreate:
 			m := desired.Monitors[e.UID].Monitor
 			m.ProjectID = projID
+			bindings, berr := s.monitorSecretBindings(ctx, tx, projID, m)
+			if berr != nil {
+				return ApplyResult{}, bindFileSecretRefError(berr, e.UID, desired)
+			}
 			if m.Type == domain.MonitorPush {
 				tok, terr := generatePushTokenStore()
 				if terr != nil {
@@ -227,6 +231,9 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			created, cerr := insertMonitorTx(ctx, tx, s, m)
 			if cerr != nil {
 				return ApplyResult{}, cerr
+			}
+			if err := replaceMonitorSecretRefsTx(ctx, tx, created.ID, projID, bindings); err != nil {
+				return ApplyResult{}, err
 			}
 			idByUID[e.UID] = created.ID
 			if _, err := tx.Exec(ctx,
@@ -241,8 +248,15 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			id := idByUID[e.UID]
 			m := desired.Monitors[e.UID].Monitor
 			m.ID, m.ProjectID = id, projID
+			bindings, berr := s.monitorSecretBindings(ctx, tx, projID, m)
+			if berr != nil {
+				return ApplyResult{}, bindFileSecretRefError(berr, e.UID, desired)
+			}
 			if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
 				return ApplyResult{}, uerr
+			}
+			if err := replaceMonitorSecretRefsTx(ctx, tx, id, projID, bindings); err != nil {
+				return ApplyResult{}, err
 			}
 			if _, err := tx.Exec(ctx,
 				`UPDATE managed_monitors SET spec_hash=$2, source_path=$3, generation=$4, orphaned_at=NULL, applied_at=$5
@@ -263,8 +277,15 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			if enabledByUID[e.UID] != desired.Monitors[e.UID].Monitor.Enabled || desired.Monitors[e.UID].Hash != curHash[e.UID] {
 				m := desired.Monitors[e.UID].Monitor
 				m.ID, m.ProjectID = id, projID
+				bindings, berr := s.monitorSecretBindings(ctx, tx, projID, m)
+				if berr != nil {
+					return ApplyResult{}, bindFileSecretRefError(berr, e.UID, desired)
+				}
 				if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
 					return ApplyResult{}, uerr
+				}
+				if err := replaceMonitorSecretRefsTx(ctx, tx, id, projID, bindings); err != nil {
+					return ApplyResult{}, err
 				}
 				if _, err := tx.Exec(ctx,
 					`UPDATE managed_monitors SET spec_hash=$2, source_path=$3, generation=$4, orphaned_at=NULL, applied_at=$5 WHERE monitor_id=$1`,
@@ -441,6 +462,31 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 		Generation: effGen, Counts: plan.Counts(),
 		Changed: execChanged, NoChange: !stateChanged,
 	}, nil
+}
+
+// bindFileSecretRefError converts a store resolution miss into the file provider's
+// bounded, tenant-bindable rejection. Other infrastructure failures retain their cause.
+func bindFileSecretRefError(err error, uid string, desired *fileprovider.DesiredProject) error {
+	if errors.Is(err, ErrSecretsFeatureDisabled) {
+		return &fileprovider.BundleError{
+			Reason:  fileprovider.ReasonFeatureDisabled,
+			UID:     uid,
+			Msg:     "secret inventory references are disabled",
+			Org:     desired.Organization,
+			Project: desired.Project,
+		}
+	}
+	var missing SecretRefNotFoundError
+	if !errors.As(err, &missing) {
+		return err
+	}
+	return &fileprovider.BundleError{
+		Reason:  fileprovider.ReasonSecretRefNotFound,
+		UID:     uid,
+		Msg:     fmt.Sprintf("secret reference %q for setting %q does not exist in the project", missing.Name, missing.Setting),
+		Org:     desired.Organization,
+		Project: desired.Project,
+	}
 }
 
 // TenantRef is an (organization, project) slug pair a provider owns bundles for, plus the
@@ -680,7 +726,7 @@ func insertMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor)
 		`INSERT INTO monitors (project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, push_token_hash, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING `+monitorColumns,
 		m.ProjectID, m.Name, string(m.Type), m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, pushHash, pushEnc, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds)
-	created, err := s.scanMonitor(row)
+	created, err := s.scanMonitorNoSecrets(row)
 	if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: insert monitor: %w", err)
 	}
@@ -690,7 +736,7 @@ func insertMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor)
 // getMonitorTx reads one monitor by id inside a transaction.
 func getMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, id string) (domain.Monitor, error) {
 	row := tx.QueryRow(ctx, `SELECT `+monitorColumns+` FROM monitors WHERE id = $1`, id)
-	m, err := s.scanMonitor(row)
+	m, err := s.scanMonitorNoSecrets(row)
 	if noRows(err) {
 		return domain.Monitor{}, ErrNotFound
 	}

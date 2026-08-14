@@ -77,6 +77,40 @@ func servicesForRole(role string) roleServices {
 	}
 }
 
+func buildCredentialKeyrings(cfg config.DispatchConfig) (dispatch.CredentialKeyrings, error) {
+	build := func(path string, kr config.DispatchRegionKeys) (*dispatch.CredentialKeyring, error) {
+		primary, err := kr.Primary.Bytes(path + ".primary.key")
+		if err != nil {
+			return nil, err
+		}
+		previous := make([]dispatch.CredentialKeyMaterial, 0, len(kr.Previous))
+		for i, entry := range kr.Previous {
+			key, err := entry.Bytes(fmt.Sprintf("%s.previous[%d].key", path, i))
+			if err != nil {
+				return nil, err
+			}
+			previous = append(previous, dispatch.CredentialKeyMaterial{ID: entry.ID, Key: key})
+		}
+		return dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: kr.Primary.ID, Key: primary}, previous)
+	}
+	out := dispatch.CredentialKeyrings{Regions: make(map[string]*dispatch.CredentialKeyring, len(cfg.Regions))}
+	for region, configured := range cfg.Regions {
+		ring, err := build("security.dispatch.regions["+region+"]", configured)
+		if err != nil {
+			return dispatch.CredentialKeyrings{}, err
+		}
+		out.Regions[region] = ring
+	}
+	if cfg.Default != nil {
+		ring, err := build("security.dispatch.default", *cfg.Default)
+		if err != nil {
+			return dispatch.CredentialKeyrings{}, err
+		}
+		out.Default = ring
+	}
+	return out, nil
+}
+
 const (
 	dbPingInterval = 10 * time.Second
 	workerPoolSize = 4
@@ -187,11 +221,30 @@ func (u liveRegionsUnion) LiveJobRegions(ctx context.Context) (map[string]bool, 
 // localTester adapts a local prober to api.RegionTester for the inproc (--role=all)
 // build, where region is cosmetic and the probe runs in-process.
 type localTester struct {
-	run func(ctx context.Context, m domain.Monitor) domain.Heartbeat
+	run         func(ctx context.Context, m domain.Monitor) domain.Heartbeat
+	credentials *dispatch.CredentialKeyring
 }
 
 func (l localTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
 	return l.run(ctx, m), nil
+}
+
+func (l localTester) RunJobTest(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
+	m := job.Monitor
+	cleanup := func() {}
+	if job.CredentialEnvelope != nil {
+		if l.credentials == nil {
+			return domain.Heartbeat{}, domain.ProbeError{Reason: domain.ProbeErrorNoDispatchKey}
+		}
+		var err error
+		m, cleanup, err = l.credentials.MaterializeForProbe(job)
+		if err != nil {
+			return domain.Heartbeat{}, domain.ProbeError{Reason: dispatch.CredentialProbeErrorReason(err)}
+		}
+	}
+	hb := l.run(ctx, m)
+	cleanup()
+	return hb, nil
 }
 
 // pullTester runs "Test connection" for a pull-served region: it enqueues a one-off
@@ -200,7 +253,12 @@ func (l localTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Hear
 type pullTester struct{ store *store.Store }
 
 func (p pullTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
-	payload, err := json.Marshal(dispatch.CheckJob{Monitor: m})
+	return p.RunJobTest(ctx, dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1})
+}
+
+func (p pullTester) RunJobTest(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
+	m := job.Monitor
+	payload, err := json.Marshal(job)
 	if err != nil {
 		return domain.Heartbeat{}, err
 	}
@@ -208,7 +266,12 @@ func (p pullTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heart
 	if ttl <= 0 {
 		ttl = 26
 	}
-	id, err := p.store.EnqueuePullTest(ctx, m.Region, payload, ttl)
+	var id string
+	if job.ProtocolVersion == dispatch.ProtocolV2 {
+		id, err = p.store.EnqueuePullTestV2(ctx, m.Region, payload, ttl)
+	} else {
+		id, err = p.store.EnqueuePullTest(ctx, m.Region, payload, ttl)
+	}
 	if err != nil {
 		return domain.Heartbeat{}, err
 	}
@@ -232,6 +295,9 @@ func (p pullTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heart
 				if err := json.Unmarshal(raw, &hb); err != nil {
 					return domain.Heartbeat{}, err
 				}
+				if hb.ProbeError != nil {
+					return domain.Heartbeat{}, *hb.ProbeError
+				}
 				return hb, nil
 			}
 		}
@@ -242,19 +308,43 @@ func (p pullTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heart
 // pull tester (HTTP → agent), everything else to the AMQP fallback tester.
 type regionRoutedTester struct {
 	pullRegions map[string]bool
-	pull        api.RegionTester
-	fallback    api.RegionTester
+	pull        jobRegionTester
+	fallback    jobRegionTester
+}
+
+type jobRegionTester interface {
+	RunJobTest(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error)
 }
 
 func (t regionRoutedTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
-	region := m.Region
+	return t.RunJobTest(ctx, dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1})
+}
+
+func (t regionRoutedTester) RunJobTest(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
+	region := job.Monitor.Region
 	if region == "" {
 		region = domain.DefaultRegion
 	}
 	if t.pullRegions[region] {
-		return t.pull.RunTest(ctx, m)
+		return t.pull.RunJobTest(ctx, job)
 	}
-	return t.fallback.RunTest(ctx, m)
+	return t.fallback.RunJobTest(ctx, job)
+}
+
+type materializingTester struct {
+	store  *store.Store
+	routes jobRegionTester
+}
+
+func (t materializingTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
+	item, err := t.store.MaterializeTestExecutionConfig(ctx, m)
+	if err != nil {
+		return domain.Heartbeat{}, err
+	}
+	if item.Reason != "" {
+		return domain.Heartbeat{}, fmt.Errorf("credential test rejected: %s", item.Reason)
+	}
+	return t.routes.RunJobTest(ctx, item.Job)
 }
 
 func loadConfig(path string) *config.Config {
@@ -391,6 +481,11 @@ func runServe(args []string) int {
 		logging.Critical(logger, "secrets_role_config_invalid", "role", *role, "error", err.Error())
 		return 1
 	}
+	credentialRings, err := buildCredentialKeyrings(cfg.Security.Dispatch)
+	if err != nil {
+		logging.Critical(logger, "dispatch_keyring_init_failed", "error", err.Error())
+		return 1
+	}
 	info := buildinfo.Current()
 	registry := metrics.New(info, *role)
 	// In-process realtime bus: ingest publishes status changes, the SSE handler
@@ -418,7 +513,7 @@ func runServe(args []string) int {
 	// The HTTP-pull agent is DB-less and broker-less: it only needs the prober and
 	// outbound HTTPS to the central API. Handle it before any DB/auth/dispatcher setup.
 	if *role == "agent" {
-		return runAgent(ctx, cfg, *region, registry, logger)
+		return runAgent(ctx, cfg, *region, credentialRings, registry, logger)
 	}
 	owned := servicesForRole(*role)
 
@@ -475,6 +570,10 @@ func runServe(args []string) int {
 			} else if n > 0 {
 				logger.Info("push_token_backfill_complete", "converted", n)
 			}
+		}
+		st.WithSecretsEnabled(cfg.Secrets.Enabled)
+		if owned.materializing && cfg.Secrets.EnvelopeEnforced() {
+			st.WithCredentialKeyrings(credentialRings)
 		}
 		registry.SetDatabaseUp(true)
 		logger.Info("database_connected")
@@ -640,7 +739,7 @@ func runServe(args []string) int {
 		}
 		// A worker consumes only its region's jobs queue (checks.jobs.<region>);
 		// harmless no-op for scheduler/api (they don't consume jobs).
-		amqpd.WithJobRegion(*region)
+		amqpd.WithJobRegion(*region).WithProtocolV2(*role == "worker" && cfg.Secrets.EnvelopeEnforced())
 		amqpd.WithBrokerState(registry.SetBrokerUp) // cerbix_broker_up gauge
 		disp = amqpd
 	}
@@ -661,11 +760,15 @@ func runServe(args []string) int {
 			// pull routing wraps EITHER base so pull-region tests reach the agent even in
 			// --role=all (matching how pull jobs are routed) — strict region affinity, no
 			// silent fallback to the local prober.
-			var base api.RegionTester
+			var base jobRegionTester
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
 				base = amqpd
 			} else {
-				base = localTester{run: runner.Run}
+				local := localTester{run: runner.Run}
+				if ring, ok := credentialRings.ForRegion(domain.DefaultRegion); ok && cfg.Secrets.EnvelopeEnforced() {
+					local.credentials = ring
+				}
+				base = local
 			}
 			pullSet := make(map[string]bool, len(cfg.Pull.Regions))
 			for _, r := range cfg.Pull.Regions {
@@ -673,10 +776,11 @@ func runServe(args []string) int {
 					pullSet[r] = true
 				}
 			}
-			if len(pullSet) > 0 && st != nil {
-				apiHandler.WithTester(regionRoutedTester{pullRegions: pullSet, pull: pullTester{store: st}, fallback: base})
+			routes := regionRoutedTester{pullRegions: pullSet, pull: pullTester{store: st}, fallback: base}
+			if cfg.Secrets.EnvelopeEnforced() {
+				apiHandler.WithTester(materializingTester{store: st, routes: routes})
 			} else {
-				apiHandler.WithTester(base)
+				apiHandler.WithTester(routes)
 			}
 		}
 		startIngest := func() {
@@ -704,6 +808,9 @@ func runServe(args []string) int {
 		switch *role {
 		case "all":
 			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
+				WithSecretResolutionMetrics(registry).
+				WithLocalCredentialRegions(domain.DefaultRegion).
 				WithPullRegions(cfg.Pull.Regions).                                  // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
 				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
@@ -712,6 +819,9 @@ func runServe(args []string) int {
 				WithConfigSignals(configSignals()) // file-apply config changes wake the leader
 			spawn(func() { sch.Run(ctx) })
 			wk := worker.New(disp, runner, workerPoolSize, logger)
+			if ring, ok := credentialRings.ForRegion(domain.DefaultRegion); ok && cfg.Secrets.EnvelopeEnforced() {
+				wk.WithCredentialKeyring(ring)
+			}
 			spawn(func() { wk.Run(ctx) })
 			startIngest()
 		case "scheduler":
@@ -720,6 +830,8 @@ func runServe(args []string) int {
 				return 1
 			}
 			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
+				WithSecretResolutionMetrics(registry).
 				WithPullRegions(cfg.Pull.Regions).                                  // pull-served regions get jobs via pull_jobs, not AMQP
 				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
@@ -729,13 +841,38 @@ func runServe(args []string) int {
 			// Alert when a region with enabled monitors loses its worker/agent. Liveness
 			// unions RabbitMQ consumers with recent pull-agent heartbeats.
 			sch.WithLiveRegions(newLiveRegions(mgmt, st))
+			if mgmt != nil {
+				sch.WithCredentialLiveRegions(mgmt)
+			}
 			spawn(func() { sch.Run(ctx) })
 		case "worker":
 			// Answer region-scoped "Test connection" RPCs for this worker's region.
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
 				amqpd.ServeTests(runner.Run)
+				if cfg.Secrets.EnvelopeEnforced() {
+					workerRegion := *region
+					if workerRegion == "" {
+						workerRegion = domain.DefaultRegion
+					}
+					ring, _ := credentialRings.ForRegion(workerRegion) // role validation guarantees coverage
+					amqpd.ServeTestsV2(func(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
+						m, cleanup, err := ring.MaterializeForProbe(job)
+						if err != nil {
+							return dispatch.ProbeErrorHeartbeat(job, dispatch.CredentialProbeErrorReason(err)), nil
+						}
+						defer cleanup()
+						return runner.Run(ctx, m), nil
+					})
+				}
 			}
 			wk := worker.New(disp, runner, workerPoolSize, logger)
+			workerRegion := *region
+			if workerRegion == "" {
+				workerRegion = domain.DefaultRegion
+			}
+			if ring, ok := credentialRings.ForRegion(workerRegion); ok && cfg.Secrets.EnvelopeEnforced() {
+				wk.WithCredentialKeyring(ring)
+			}
 			spawn(func() { wk.Run(ctx) })
 		case "api":
 			if st == nil {
@@ -795,7 +932,7 @@ func runServe(args []string) int {
 // runAgent runs the HTTP-pull prober role: claim jobs for --region from the central
 // API, probe them, post results, heartbeat. It serves only the ops endpoints
 // (health/readyz/metrics) and blocks until ctx is cancelled.
-func runAgent(ctx context.Context, cfg *config.Config, region string, registry *metrics.Registry, logger *slog.Logger) int {
+func runAgent(ctx context.Context, cfg *config.Config, region string, credentialRings dispatch.CredentialKeyrings, registry *metrics.Registry, logger *slog.Logger) int {
 	if cfg.Pull.ServerURL == "" || cfg.Pull.Token == "" {
 		logging.Critical(logger, "agent_requires_pull_config", "hint", "set pull.server_url and pull.token for --role agent")
 		return 1
@@ -804,7 +941,11 @@ func runAgent(ctx context.Context, cfg *config.Config, region string, registry *
 		region = domain.DefaultRegion
 	}
 	runner := prober.NewRunnerWithGuard(prober.NewGuard(cfg.Prober.AllowPrivateIPs, cfg.Prober.AllowMetadataIPs))
-	go agent.New(cfg.Pull.ServerURL, cfg.Pull.Token, region, runner, logger).Run(ctx)
+	a := agent.New(cfg.Pull.ServerURL, cfg.Pull.Token, region, runner, logger)
+	if ring, ok := credentialRings.ForRegion(region); ok && cfg.Secrets.EnvelopeEnforced() {
+		a.WithCredentialKeyring(ring)
+	}
+	go a.Run(ctx)
 	logger.Info("agent_role_started", "region", region, "server", cfg.Pull.ServerURL)
 
 	srv := httpsrv.New(cfg.Server, registry, nil)

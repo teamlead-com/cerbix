@@ -32,9 +32,36 @@ type fakeStore struct {
 	checkHeld func() (bool, error)
 }
 
+type staticCredentialRegions map[string]bool
+
+func (s staticCredentialRegions) LiveCredentialJobRegions(context.Context) (map[string]bool, error) {
+	return s, nil
+}
+
 func (f *fakeStore) ListEnabledMonitors(context.Context) ([]domain.Monitor, error) {
 	atomic.AddInt32(&f.listCalls, 1)
 	return f.monitors, nil
+}
+
+func (f *fakeStore) ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error) {
+	return f.ListEnabledMonitors(ctx)
+}
+
+func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string) ([]store.MaterializedExecution, error) {
+	byID := make(map[string]domain.Monitor, len(f.monitors))
+	for _, m := range f.monitors {
+		byID[m.ID] = m
+	}
+	out := make([]store.MaterializedExecution, 0, len(ids))
+	for _, id := range ids {
+		m, ok := byID[id]
+		if !ok || !m.Enabled {
+			out = append(out, store.MaterializedExecution{MonitorID: id, Reason: store.MaterializeSkippedCurrentState})
+			continue
+		}
+		out = append(out, store.MaterializedExecution{MonitorID: id, Job: dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV2}})
+	}
+	return out, nil
 }
 
 func (f *fakeStore) StalePushMonitors(context.Context) ([]domain.Monitor, error) {
@@ -82,9 +109,13 @@ func (f *fakeStore) EnqueueDueSLAReports(context.Context) (int, error)     { ret
 func (f *fakeStore) EvaluateRegionWorkerAlerts(context.Context, map[string]bool, int) (int, int, error) {
 	return 0, 0, nil
 }
-func (f *fakeStore) AdvanceEscalations(context.Context) (int, error)           { return 0, nil }
-func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error { return nil }
-func (f *fakeStore) PurgeExpiredPullJobs(context.Context) (int, error)         { return 0, nil }
+func (f *fakeStore) AdvanceEscalations(context.Context) (int, error)             { return 0, nil }
+func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error   { return nil }
+func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int) error { return nil }
+func (f *fakeStore) LiveCredentialReadyAgentRegions(context.Context, time.Duration) (map[string]bool, error) {
+	return map[string]bool{}, nil
+}
+func (f *fakeStore) PurgeExpiredPullJobs(context.Context) (int, error) { return 0, nil }
 func (f *fakeStore) PurgeDeliveredOutbox(context.Context, time.Duration) (int, error) {
 	return 0, nil
 }
@@ -252,6 +283,43 @@ func TestConfigSignalForcesSnapshotReload(t *testing.T) {
 	waitUntil(t, 4*time.Second, "config-signal-forced reload", func() bool {
 		return atomic.LoadInt32(&fs.listCalls) > n0
 	})
+}
+
+func TestCredentialDispatchRequiresV2AMQPConsumer(t *testing.T) {
+	monitor := domain.Monitor{
+		ID: "credential-monitor", Type: domain.MonitorPostgres, Target: "db:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
+	}
+	for _, tc := range []struct {
+		name    string
+		ready   staticCredentialRegions
+		wantJob bool
+	}{
+		{name: "legacy-or-absent-consumer-does-not-authorize", ready: staticCredentialRegions{}, wantJob: false},
+		{name: "v2-consumer-authorizes", ready: staticCredentialRegions{"secure": true}, wantJob: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor}}
+			disp := dispatch.NewInProc(2)
+			s := New(fs, disp, testLogger()).WithCredentialEnvelopes(true).WithCredentialLiveRegions(tc.ready)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go s.Run(ctx)
+			select {
+			case job := <-disp.Jobs():
+				if !tc.wantJob {
+					t.Fatalf("credential job reached transport without v2 consumer: %+v", job)
+				}
+				if job.ProtocolVersion != dispatch.ProtocolV2 {
+					t.Fatalf("protocol=%d, want v2", job.ProtocolVersion)
+				}
+			case <-time.After(1500 * time.Millisecond):
+				if tc.wantJob {
+					t.Fatal("credential job was not published to capable region")
+				}
+			}
+		})
+	}
 }
 
 // waitUntil polls cond until true or the deadline elapses (then fails with msg).

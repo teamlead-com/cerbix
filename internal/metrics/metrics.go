@@ -36,11 +36,13 @@ type Registry struct {
 	brokerUp        bool
 	// Result-ingest outcome counters (spec func-result-protocol). Low-cardinality: keyed by
 	// a fixed reason/origin set, never by monitor_id/job_id (those go to logs).
-	resultQuarantined map[string]uint64            // reason → count (future_timestamp)
-	resultIgnored     map[string]uint64            // reason → count (out_of_order, outside_retention)
-	resultRejected    map[string]uint64            // reason → count (missing_timestamp, stale_revision, missing_revision)
-	resultClockSkew   map[string]map[string]uint64 // origin → reason → count (push future|past)
-	resultMissingRev  uint64                       // observe-mode: scheduled result with no revision
+	resultQuarantined        map[string]uint64            // reason → count (future_timestamp)
+	resultIgnored            map[string]uint64            // reason → count (out_of_order, outside_retention)
+	resultRejected           map[string]uint64            // reason → count (missing_timestamp, stale_revision, missing_revision)
+	resultClockSkew          map[string]map[string]uint64 // origin → reason → count (push future|past)
+	resultMissingRev         uint64                       // observe-mode: scheduled result with no revision
+	executorProbeErrors      map[string]uint64            // bounded reason → count
+	secretResolutionFailures map[string]uint64            // bounded reason → count
 	// File-provider metrics (spec func-monitoring-as-code §16). Keyed by the bounded provider
 	// name only — never by file/project/monitor id.
 	fileProviders map[string]*fileProviderStat
@@ -215,6 +217,26 @@ func (r *Registry) RecordResultMissingRevision() {
 	r.resultMissingRev++
 }
 
+// RecordExecutorProbeError counts a typed executor diagnostic. Reasons are validated at
+// ingest/store before this boundary and never include monitor/job/key identifiers.
+func (r *Registry) RecordExecutorProbeError(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.executorProbeErrors == nil {
+		r.executorProbeErrors = map[string]uint64{}
+	}
+	r.executorProbeErrors[reason]++
+}
+
+func (r *Registry) RecordSecretResolutionFailure(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.secretResolutionFailures == nil {
+		r.secretResolutionFailures = map[string]uint64{}
+	}
+	r.secretResolutionFailures[reason]++
+}
+
 // RecordResultOutcome routes a store result-outcome reason to its metric family (the
 // single entry point callers use, so the reason→family mapping lives in one place). An
 // empty reason (applied) or an unmapped one (e.g. "duplicate") is a no-op.
@@ -316,6 +338,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		clockSkew[origin] = copyCounts(byReason)
 	}
 	missingRev := r.resultMissingRev
+	executorProbeErrors := copyCounts(r.executorProbeErrors)
+	secretResolutionFailures := copyCounts(r.secretResolutionFailures)
 	fileProviders := map[string]fileProviderStat{}
 	for name, s := range r.fileProviders {
 		cp := fileProviderStat{leader: s.leader, reconciles: copyCounts(s.reconciles), lastDuration: s.lastDuration, lastSuccessUnix: s.lastSuccessUnix, managed: s.managed, orphaned: s.orphaned, bundleErrors: s.bundleErrors}
@@ -359,6 +383,10 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		"Results not applied to live state (by reason).", ignored)
 	writeReasonCounter(w, "cerbix_result_rejected_total",
 		"Results fail-closed rejected with no insert (by reason).", rejected)
+	writeReasonCounter(w, "cerbix_executor_probe_error_total",
+		"Typed credential-envelope execution errors that did not mutate monitor liveness.", executorProbeErrors)
+	writeReasonCounter(w, "cerbix_secret_resolution_failed_total",
+		"Credential materialization or capability rejections before dispatch.", secretResolutionFailures)
 	if len(clockSkew) > 0 {
 		fmt.Fprintln(w, "# HELP cerbix_result_clock_skew_total Accepted results with an anomalous client clock (by origin, reason).")
 		fmt.Fprintln(w, "# TYPE cerbix_result_clock_skew_total counter")

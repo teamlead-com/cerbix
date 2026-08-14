@@ -56,6 +56,13 @@ func TestProbeErrorClearsOnlyOnLiveAppliedNormalResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A normal-looking result from a different execution generation is rejected before
+	// heartbeat insertion and cannot clear the current generation's diagnostic.
+	if outcome, err := st.RecordScheduledResult(ctx, domain.Heartbeat{MonitorID: monitor.ID, ExecutionRevision: monitor.ExecutionRevision + 1, Ts: time.Now().UTC(), Up: true}); err != nil || outcome.Reason != ReasonStaleRevision {
+		t.Fatalf("stale-revision heartbeat: outcome=%+v err=%v", outcome, err)
+	}
+	assertProbeDiagnosticOnly(t, st, ctx, monitor.ID, domain.ProbeErrorUnknownKeyID, "job-new", domain.StatusUp, 1)
+
 	// An older SLA-only result is valid but not live-applied and must not clear the error.
 	old := base.Add(-time.Second)
 	if outcome, err := st.RecordScheduledResult(ctx, domain.Heartbeat{MonitorID: monitor.ID, ExecutionRevision: monitor.ExecutionRevision, Ts: old, Up: false}); err != nil || outcome.Reason != ReasonOutOfOrder {

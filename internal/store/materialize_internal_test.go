@@ -79,6 +79,9 @@ func TestMaterializerSnapshotAndPayloadPlaintextAbsence(t *testing.T) {
 		if bytes.Contains(body, []byte(want[item.MonitorID])) {
 			t.Fatalf("transport payload leaked plaintext: %s", body)
 		}
+		if err := st.EnqueuePullJobV2(ctx, item.Job.Monitor.Region, body, item.Job.Monitor.IntervalSeconds); err != nil {
+			t.Fatalf("persist v2 pull payload: %v", err)
+		}
 		probeMonitor, cleanup, err := ring.MaterializeForProbe(item.Job)
 		if err != nil {
 			t.Fatalf("executor open %s: %v", item.MonitorID, err)
@@ -87,6 +90,29 @@ func TestMaterializerSnapshotAndPayloadPlaintextAbsence(t *testing.T) {
 			t.Fatalf("executor password %q, want %q", probeMonitor.Config["password"], want[item.MonitorID])
 		}
 		cleanup()
+	}
+
+	// The physical pull-queue row is the transport persistence boundary. It must carry
+	// only the envelope ciphertext; neither inventory nor legacy inline plaintext may
+	// survive the authoritative materialization step.
+	persisted, err := st.ClaimPullJobsV2(ctx, "core", len(items), 30)
+	if err != nil || len(persisted) != len(items) {
+		t.Fatalf("claim persisted v2 payloads: count=%d err=%v", len(persisted), err)
+	}
+	for _, claimed := range persisted {
+		if bytes.Contains(claimed.Payload, []byte("inventory-plaintext")) || bytes.Contains(claimed.Payload, []byte("inline-plaintext")) {
+			t.Fatalf("pull_jobs payload leaked plaintext: %s", claimed.Payload)
+		}
+		var job dispatch.CheckJob
+		if err := json.Unmarshal(claimed.Payload, &job); err != nil {
+			t.Fatalf("decode persisted v2 payload: %v", err)
+		}
+		if job.ProtocolVersion != dispatch.ProtocolV2 || job.CredentialEnvelope == nil || len(job.CredentialEnvelope.Fields) != 1 {
+			t.Fatalf("persisted payload lost the v2 envelope: %+v", job)
+		}
+		if _, exists := job.Monitor.Config["password"]; exists {
+			t.Fatalf("persisted monitor config contains password: %#v", job.Monitor.Config)
+		}
 	}
 }
 

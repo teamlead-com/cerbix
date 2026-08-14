@@ -328,7 +328,8 @@ The repository provides a pre-configured Keycloak container in `docker/docker-co
 
 ```bash
 # Start the full dev stack (PostgreSQL, RabbitMQ, Keycloak, cerbix)
-docker compose -f docker/docker-compose.yml up -d
+cp docker/.env.dev.example docker/.env.dev
+docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile single --profile sso up -d
 ```
 
 ### Dev Environment Pre-sets:

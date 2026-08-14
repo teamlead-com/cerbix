@@ -117,7 +117,8 @@ cerbix is structured as a Go + Vue 3 monorepo:
 
 2. **Start the local dev infrastructure**:
    ```bash
-   docker compose -f docker/docker-compose.yml up --build
+   cp docker/.env.dev.example docker/.env.dev
+   docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile single --profile sso up --build
    ```
    This spins up PostgreSQL, RabbitMQ, Keycloak, and the cerbix monolith (`--role all`) on `http://localhost:8080`.
 

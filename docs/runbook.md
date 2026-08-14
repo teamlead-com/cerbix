@@ -19,8 +19,15 @@ curl -s localhost:8080/metrics   # cerbix_* series
 
 ## Run the dev stack
 
+`docker/config.dev.yaml` contains a fixed, public development-only at-rest key so the persistent
+local database remains readable after E2E creates encrypted bearer values. Treat it like the other
+well-known local credentials: never reuse it or this file outside the disposable development stack.
+Production must inject its own random key and follow the rotation procedure below.
+
 ```bash
-docker compose -f docker/docker-compose.yml up --build
+cp docker/.env.dev.example docker/.env.dev  # once; keep the broker image pinned thereafter
+docker compose --env-file docker/.env.dev -f docker/docker-compose.yml \
+  --profile single --profile sso --profile mail up --build
 # Postgres :5432 · RabbitMQ :5672 (mgmt :15672) · Keycloak :8081 · cerbix :8080
 ```
 
@@ -152,6 +159,82 @@ Distributed roles run as separate processes over the RabbitMQ dispatcher (`--rol
 types are implemented, including ICMP (`internal/prober/icmp.go`, D-0032; unprivileged-first
 socket) and push (dead-man's-switch, D-0028).
 
+### RabbitMQ baseline and upgrade
+
+Compose requires `CERBIX_RABBITMQ_IMAGE` on every invocation: no default can safely describe both
+an old 3.12 data volume and one already upgraded to 4.3. Fresh installs copy an env template that
+pins 4.3 explicitly:
+
+```bash
+cp docker/.env.dev.example docker/.env.dev
+docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile single up -d
+```
+
+For retained queues/messages, first set the env file to the image that already owns the volume.
+Before every hop, quiesce all Cerbix publishers/consumers, record and accept/drain the remaining
+queue depth per the maintenance plan, cleanly stop RabbitMQ, and take a storage-consistent volume
+snapshot (or prepare a Rabbit-supported blue/green old-cluster switchback). Never snapshot a live,
+mutating broker and call it a rollback point. RabbitMQ does **not** support downgrade or a direct
+3.12→4.3 jump.
+See the vendor [upgrade guide](https://www.rabbitmq.com/docs/upgrade) and
+[release support table](https://www.rabbitmq.com/release-information).
+
+First migrate the Cerbix test-queue shape while the broker is still 3.12:
+
+1. Stop new Test Connection requests and drain/stop every old worker in the region.
+2. Run `docker compose --env-file <deployment.env> -f <compose.yml> exec rabbitmq rabbitmqctl
+   list_queues name durable auto_delete exclusive consumers messages` and wait until
+   `checks.tests.<region>` / `checks.tests.v2.<region>` have no consumers and auto-delete.
+   If an empty stale queue remains, delete only that named empty test queue; never delete a queue
+   with messages.
+3. Deploy the new worker binary against 3.12. Worker readiness now waits for both enabled test
+   consumers. Verify each test queue reports `durable=true auto_delete=true exclusive=false`.
+4. Run the live v1/v2 gate:
+
+```bash
+CERBIX_TEST_RABBITMQ_URL='amqp://user:pass@broker:5672/' \
+  go test -race ./internal/dispatch -run TestAMQPRoundTrip -count=1 -v
+```
+
+Then advance the broker one supported hop at a time. The commands below use `docker/.env.dev`;
+production uses its filled `docker/.env`. Before each next image, enable all stable feature flags,
+stop every Cerbix role, cleanly stop the broker, take the offline snapshot, persist the next image
+in the env file, and start it. After start, repeat health/feature/queue checks before starting roles:
+
+```bash
+DC='docker compose --env-file docker/.env.dev -f docker/docker-compose.yml'
+$DC exec rabbitmq rabbitmqctl enable_feature_flag all
+$DC exec rabbitmq rabbitmq-diagnostics -q ping
+$DC exec rabbitmq rabbitmqctl list_feature_flags
+$DC exec rabbitmq rabbitmqctl list_queues name messages consumers durable auto_delete
+$DC stop cerbix api scheduler worker
+$DC exec rabbitmq rabbitmqctl stop
+# take an offline/storage-consistent snapshot now
+
+# Persist the next supported hop in docker/.env.dev, then:
+$DC up -d rabbitmq  # 3.12→3.13, then repeat for 3.13→4.2 and 4.2→4.3
+```
+
+The env-file update is part of the commit point: every later Compose command must use that same
+file. A one-shot shell override is forbidden because the next unqualified command could attempt an
+unsupported downgrade against the upgraded volume.
+
+Do not roll an upgraded data directory back by starting an older image. On a failed hop, stop the
+new node and restore that hop's volume snapshot with its old image, or switch clients back to the
+untouched blue/green cluster. To roll the *application* back across the durable test-queue change,
+stop new workers, confirm both test queues are empty, delete those two named queues, then start the
+old workers. A disposable dev broker may be recreated only after explicitly accepting loss of its
+queued messages.
+
+On 4.3, `checks.tests.<region>` and `checks.tests.v2.<region>` must report `durable=true`,
+`auto_delete=true`, `exclusive=false`. Do not enable the deprecated
+`transient_nonexcl_queues` compatibility switch: Cerbix no longer needs it. The queue remains
+shared by workers in the region and disappears after its last consumer leaves. Its definition,
+not an in-flight RPC message, is durable. A repeating
+`INTERNAL_ERROR - Feature transient_nonexcl_queues is deprecated` means an old worker binary is
+still declaring the former queue shape; finish the worker rollout before treating the region as
+ready.
+
 ## SLA / SLI
 
 Availability is computed from heartbeats over rolling windows (24h / 7d / 30d / 90d):
@@ -213,7 +296,15 @@ live runtime view of every configured provider (leadership, last scan, last succ
 including configured-but-idle providers. Leadership/scan times are process-local: query each
 `api`/`all` replica to see which one currently leads. `?provider=<name>` narrows to one provider.
 `GET /api/v1/organizations/{orgID}/file-providers` (org admin) returns `{bundles}` scoped to that
-organization only (no cross-tenant path/error).
+organization only (no cross-tenant path/error). Collection keys are stable: an empty result is
+`[]`, never `null` or an omitted key.
+
+**Startup wiring:** every role that owns file providers (`api`/`all`) must mount every configured
+provider root at the exact static-config path and read-only. The shipped single and distributed
+Compose profiles mount `./monitoring.d` at `/etc/cerbix/monitoring.d:ro`. A missing or unreadable
+root is a fail-fast `file_provider_startup_failed`: the process cancels and drains started
+background work before closing the dispatcher/database and exits non-zero. Fix the mount or
+permissions; do not create the directory at runtime or downgrade the provider silently.
 
 **Smoke:** `e2e/mac-smoke.sh` proves the full live lifecycle on a throwaway DB with the process
 never restarting: create → scheduler executes the file-managed monitor → in-place semantic

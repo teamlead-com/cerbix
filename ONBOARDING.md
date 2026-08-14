@@ -19,7 +19,8 @@ Postgres, RabbitMQ, Vue 3 SPA. Monorepo: the Go module at the root (`cmd/`, `int
 
 ```bash
 # full dev stack (pg+timescale, rabbitmq, an OIDC IdP [Keycloak in dev], cerbix)
-docker compose -f docker/docker-compose.yml up --build
+cp docker/.env.dev.example docker/.env.dev
+docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile single --profile sso up --build
 
 # or just the backend against your own Postgres:
 ./bin/cerbix migrate --config docker/config.example.yaml

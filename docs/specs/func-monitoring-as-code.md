@@ -586,6 +586,12 @@ admins may see only diagnostics wholly inside their organization; project member
 only per-monitor provenance already visible through normal project RBAC. No tenant can
 observe another tenant's bundle/error/path.
 
+The global response is always `{ "bundles": [], "providers": [] }` shaped and the
+organization response is always `{ "bundles": [] }` shaped: these collection fields are
+required JSON arrays and encode an empty result as `[]`, never `null` or an omitted key.
+This applies even when the process has no runtime status source and after a named-provider
+filter matches no rows.
+
 Version 1 has no endpoint that edits YAML, forces adoption, or performs hard prune.
 
 ## 16. Observability and readiness

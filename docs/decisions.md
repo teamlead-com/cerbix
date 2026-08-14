@@ -756,6 +756,15 @@ return plaintext; a legacy plaintext row still reads), a config test (key valida
 e2e (encryption on → a webhook created via the API stores `enc:v1:…` in the column while the API
 round-trips the plaintext secret). No schema change; config addition only.
 
+**Persistent dev-stack clarification (iter-0117):** `docker/config.dev.yaml` opts in with one fixed,
+public, development-only key so its persistent Postgres volume remains readable across E2E runs that
+create encrypted push tokens. It is deliberately not a production secret and must never be reused;
+`config.example.yaml` keeps encryption empty/opt-in and production injects a random key. Distributed
+workers continue using `config.worker-core.yaml` with no at-rest key, as required by D-0155. A wiring
+test validates both sides. This avoids a dev-only split-brain state where the server reports ready but
+every monitor-list read fails on ciphertext left by an earlier security test; it does not add a
+decrypt fallback or weaken the hard error for a genuinely missing key.
+
 ## D-0041 — Encryption key rotation: keyring (try-all decrypt) + `cerbix reencrypt`
 
 **Context:** iter-0033 encrypted secrets under a single key with no rotation path — a compromised or
@@ -2803,6 +2812,15 @@ the 42 findings is tracked as a **separate, dedicated cleanup MR** — consisten
 No monitoring/reliability contract changes; nothing is silently marked green — the repo-wide RED is
 recorded (iter-0114 §4) and explicitly waived here.
 
+**Close-out (iter-0117):** the owner subsequently made the dedicated cleanup explicit with
+“fix everything”, so the waiver no longer applies to the current branch state. All 42 findings
+were fixed without disabling or weakening a linter; `golangci-lint v2.12.2 run ./...` is the
+repo-wide gate. Intentional reads of the `client_secret` column remain two narrow, inline
+`forbidigo` suppressions at the database encryption boundary; neither value is logged. Output,
+close, rollback, and stream errors are now handled or explicitly discarded where no recovery is
+possible, and Prometheus rendering stops after the first writer error. This is cleanup of the
+recorded debt, not a change to monitoring, tenant, or reliability semantics.
+
 ## D-0155 — Secret inventory (FR-020): two keyrings, AAD context binding, verifiable wire barrier, linearization-point dispatch (design contract)
 Design decisions behind spec `func-secret-inventory` (r6, independently design-approved after six
 review passes). (1) **Two keyrings, never shared:** the at-rest master (`security.encryption_key`)
@@ -2849,3 +2867,49 @@ version-predicated pull jobs/tests; the authoritative read supplies routing and 
 as config/revision; executor key failures are diagnostic-only and readiness-visible; at-rest
 reencryption uses exact-ciphertext CAS plus a bounded zero-old-key convergence proof. The
 dispatch-key and at-rest-key rotation procedures are deliberately separate in `runbook.md`.
+
+## D-0156 — Startup failure uses cancel/drain-before-close; deployment wiring mirrors role ownership (iter-0117)
+
+The `serve` lifecycle has one idempotent cleanup order for both normal shutdown and every
+fail-fast startup return: **cancel the root context → wait a bounded interval for background
+users → close the dispatcher → close the database**. Closing shared infrastructure first lets
+already-started goroutines repeatedly hit a closed pool and can leave an HTTP-less process alive;
+defer order is therefore part of the application reliability contract, not an implementation
+detail. Settings and OIDC refresh loops are caller-owned and join the same tracked group. Cleanup
+waits for that group up to its explicit bound, warns on timeout, and only then closes dependencies;
+tests cover both cooperative drain and the bounded non-cooperative case. A live missing-file-
+provider-root start must exit promptly without `closed pool` churn.
+
+Static role ownership also applies to deployment manifests. Every shipped `api`/`all` service
+must mount its configured Monitoring-as-Code root read-only at the exact configured path; the
+single and distributed Compose profiles are checked from parsed Compose YAML. Missing or
+unreadable roots remain strict fail-fast errors — runtime directory creation or silent provider
+downgrade is forbidden. Finally, the diagnostics transport contract is stable for empty state:
+global responses always contain array-valued `bundles` and `providers`, and organization
+responses always contain array-valued `bundles`; empty means `[]`, never `null` or omission.
+
+## D-0157 — RabbitMQ 4.3 compatibility is verified; retained data upgrades stay explicit and staged (iter-0117)
+
+The shipped Compose files require an explicit, persisted `CERBIX_RABBITMQ_IMAGE`: no static
+default is safe for both a retained 3.12 volume and a volume already upgraded to 4.3. The fresh
+production/dev env templates select 4.3, while an existing installation must first pin its current
+image and then follow `3.12 → 3.13 → 4.2 → 4.3`, or a reviewed blue/green migration. The operator
+procedure and rollback rules live in `docs/runbook.md`.
+
+Queue names, routing, and the physical v1/v2 credential wire separation are unchanged and both
+protocol paths are exercised live against 4.3. The shared regional test-RPC queues
+(`checks.tests[.v2].<region>`) do change from transient+auto-delete to durable+auto-delete:
+RabbitMQ 4.3 rejects transient non-exclusive queues, while exclusive queues cannot be shared by
+multiple workers. The durable queue *definition* survives broker restart; individual test requests
+remain transient, time-bounded RPCs and may be lost during a restart. Auto-delete removes the
+queue after its last consumer leaves. Per-request reply queues remain server-named transient
+exclusive. Worker startup synchronously establishes both enabled test consumers before readiness,
+and RPC publishes are mandatory so a nonexistent regional queue fails promptly. If an auto-delete
+queue still exists briefly with zero consumers, the routed request remains bounded by the normal
+RPC timeout; mandatory publish cannot detect that consumer gap.
+
+Changing durability under the same queue name is not rolling-compatible. The application queue
+shape must therefore be migrated on the old broker with test traffic stopped and old workers fully
+drained before any broker hop; rollback across that boundary likewise requires stopping workers
+and deleting only empty test queues. No procedure may delete heartbeat, incident, audit, or
+non-empty broker data.

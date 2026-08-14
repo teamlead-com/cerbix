@@ -49,11 +49,12 @@ Tests create `e2e-`prefixed entities and clean them up — dev stacks only.
 ### Image & stacks (from repo root)
 
 ```bash
-docker compose -f docker/docker-compose.yml build            # multi-stage: node builds SPA → embedded → distroless
+cp docker/.env.dev.example docker/.env.dev                    # once; pins the broker image to its volume
+docker compose --env-file docker/.env.dev -f docker/docker-compose.yml build            # multi-stage: node builds SPA → embedded → distroless
 # Single-geo file is profile-driven; `single` and `distributed` are mutually exclusive:
-docker compose -f docker/docker-compose.yml --profile single up -d          # one process --role all, :8080 (static IPs 10.5.0.x)
-docker compose -f docker/docker-compose.yml --profile distributed run --rm api migrate --config /etc/cerbix/config.yaml  # migrate ONCE first — roles racing a new migration fail with "relation already exists"
-docker compose -f docker/docker-compose.yml --profile distributed up -d     # scheduler + api (:8082) + worker
+docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile single up -d          # one process --role all, :8080 (static IPs 10.5.0.x)
+docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile distributed run --rm api migrate --config /etc/cerbix/config.yaml  # migrate ONCE first — roles racing a new migration fail with "relation already exists"
+docker compose --env-file docker/.env.dev -f docker/docker-compose.yml --profile distributed up -d     # scheduler + api (:8082) + worker
 # add --profile sso to either for Keycloak (:8081) + MariaDB
 # docker/docker-compose.geo.yml  — multi-geo: central always, remote sites via --profile geo1/geo2 (3 isolated subnets)
 # docker/docker-compose.prod.yml — prod role=all, secrets from docker/.env (see .env.prod.example)

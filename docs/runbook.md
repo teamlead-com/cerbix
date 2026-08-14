@@ -219,3 +219,72 @@ organization only (no cross-tenant path/error).
 never restarting: create → scheduler executes the file-managed monitor → in-place semantic
 update (generation bump, same DB id) → last-known-good on invalid input → orphan-disable (no
 hard delete) → restore (same DB id and push token).
+
+## Project secret inventory and credential dispatch (FR-020)
+
+Secret values are write-only project data. Core materializing roles (`all`, `api`,
+`scheduler`) hold the at-rest master and dispatch public configuration; executor roles
+(`worker`, `agent`) must hold only their own region's dispatch keyring. Startup rejects an
+executor config containing `security.encryption_key` or `previous_keys`.
+
+### Enable or roll out
+
+Use an expand-then-enable rollout; never temporarily send credentialed jobs through v1:
+
+1. Configure `security.dispatch` on every process and set
+   `secrets.dispatch_envelope: enforced`, while leaving `secrets.enabled: false`. Core roles
+   also need `security.encryption_key`; executor configs must not contain it.
+2. Roll all workers/agents. Confirm worker v2 consumers or pull-agent capabilities are live
+   for every credentialed region and `/readyz` is 200 on executors.
+3. Roll core roles, then set `secrets.enabled: true`. The Secrets API and `*_ref` writes are
+   unavailable until this final switch; there is no accepted-but-undispatchable legacy mode.
+
+`security.dispatch.default` is a single trust-domain fallback. Combining it with explicit
+regional keyrings requires `shared_trust_acknowledged: true`; this deliberately sets
+`cerbix_dispatch_shared_trust 1` and fires the informational posture alert.
+
+### Rotate the at-rest master
+
+1. Put the new key in `security.encryption_key` and retain the old key in
+   `security.previous_keys` on every core role. Do not place either on executors.
+2. Roll core roles so all readers can decrypt old rows while writers use the new primary.
+3. Run `cerbix reencrypt --config <core-config>`. A zero exit is a bounded fixed-point proof
+   that no `project_secrets` row remains under an old key; an exhausted convergence budget
+   exits non-zero. Exact-ciphertext CAS prevents a concurrent secret rotation from being
+   overwritten. The command also re-encrypts the older secret-bearing tables.
+4. Remove the old key only after the command succeeds and every core replica has the new
+   config. Run the command again after concurrent rotations if it reports non-convergence.
+
+### Rotate a regional dispatch key
+
+At-rest `reencrypt` does not touch broker or pull payloads. For one region:
+
+1. Deploy `{primary: new, previous: [old]}` to materializers and executors. Executors must
+   receive the overlap before materializers begin sealing with the new primary.
+2. Verify executor readiness and that
+   `cerbix_executor_probe_error_total{reason=~"unknown_key_id|decrypt_auth_failed"}` is not
+   increasing.
+3. Retain the old key for at least the maximum job/test TTL and until pull leases have
+   drained. Also inspect and explicitly purge `checks.dead` (for example
+   `rabbitmqctl purge_queue checks.dead`) or record that any retained old-key poison payload
+   is intentionally unrecoverable.
+4. Only then remove the old entry from `previous` everywhere.
+
+A leaked regional key opens all retained payloads for that region until ACK/TTL/dead-queue
+purge. Rotating a Cerbix inventory value fences results through `execution_revision`, but it
+cannot recall a job already materialized; immediate revocation requires changing the
+credential at the monitored target.
+
+### Diagnose failures
+
+| Symptom | Meaning / action |
+| --- | --- |
+| `CerbixCredentialDispatchUnavailable` or rising `cerbix_secret_resolution_failed_total{reason="no_capable_executor"}` | The scheduler withheld a credentialed job because no v2 credential-ready executor exists in its authoritative region. Check region routing, worker v2 queue consumers, pull-agent heartbeat capability and keyring presence. This is not DOWN. |
+| `CerbixCredentialEnvelopeFailures`, executor `/readyz` 503 | A job could not be opened. Compare region and key ids across core/executor configs; retain both rotation keys. Values and ciphertext must never be copied into tickets or logs. A successful decrypt restores readiness. |
+| Monitor detail shows `last_probe_error` | Typed execution diagnostic only: no heartbeat/status/SLA mutation occurred. A revision-valid live UP or DOWN result clears it; stale or SLA-only results do not. |
+| Secret ref bundle is rejected/frozen | Create the named secret in the bundle's project, or correct `password_ref`. The file provider preserves last-known-good and never resolves across projects. |
+| PostgreSQL `sslmode=require` | Transport is encrypted but server identity is not verified. Use `verify-ca`/`verify-full` for identity verification. MySQL/Redis ref monitors default to verified TLS; disabling TLS or `tls_skip_verify` is an explicit audited posture. |
+
+Prometheus rules are in `docker/alerts/secret-inventory.rules.yml`. The live smoke
+`e2e/secret-inventory-smoke.sh` covers inventory → MaC ref → wrong-key pull-agent degradation
+→ correctly keyed recovery/JIT decrypt → real PostgreSQL UP → rotation fence and guards.

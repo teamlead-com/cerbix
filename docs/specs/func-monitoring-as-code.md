@@ -61,10 +61,14 @@ Version 1 manages:
 - read-only source metadata in the API/UI;
 - operational diagnostics, audit, and scheduler wake-up.
 
-All existing monitor types MAY be represented only when every required type-specific field
-has a strict non-secret schema. A type that needs credentials is unavailable through the
-file provider until the referenced secret-inventory contract exists. Unsupported types or
-fields reject the bundle; there is no generic `config: map[string]string` escape hatch.
+The common-field types are `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `websocket`, `ssh`
+and `push`. FR-020 adds strict typed `settings` for `postgres`, `mysql`, `redis` and
+`rabbitmq`: their credential slots accept inventory references such as `password_ref`, never
+inline values. The schema, TLS defaults and reference lifecycle are normative in
+[`func-secret-inventory.md`](func-secret-inventory.md) §§4.2–4.8. `composite`, `synthetic`,
+`promql` and any future type without a strict file schema remain unavailable. Unsupported
+types or fields reject the bundle; there is no generic `config: map[string]string` escape
+hatch.
 
 ### 3.2 Explicitly outside version 1
 

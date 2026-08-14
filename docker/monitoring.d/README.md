@@ -99,10 +99,12 @@ explicit admin action.
 - **UID = the map key** under `monitors:` (`^[a-z][a-z0-9-]{0,62}$`). It is the stable identity —
   renaming a UID is treated as delete-old + create-new. Keep it stable.
 - **`type` is immutable** for a UID (push-token/identity semantics). To change type, use a new UID.
-- **No inline secrets** — any password/token/key field rejects the whole bundle. Credentialed
-  monitor types (postgres/mysql/redis/…) and `settings` objects are **not** available via files yet.
-- **Supported types:** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `websocket`, `ssh`, `push`.
-  (Composite/synthetic and credentialed types are UI/API-only for now.)
+- **No inline secrets** — any password/token/key field rejects the whole bundle. Create the
+  secret in the project's Secrets inventory, then use `password_ref` in typed `settings`.
+- **Supported types:** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `websocket`, `ssh`, `push`,
+  `postgres`, `mysql`, `redis`, `rabbitmq`. Credentialed settings and encrypted-by-default TLS
+  rules are defined in `docs/specs/func-secret-inventory.md`; composite/synthetic/promql remain
+  unavailable through files.
 - **Durations are whole seconds:** `30s`, `1m`, `2m`, `1h` — not `500ms`, not `1.5s`.
 - **`region:`** routes a monitor to a prober pool (default `core`). A non-core region needs a
   **live** worker/agent or its jobs TTL-expire (nothing probes them). Composite monitors are

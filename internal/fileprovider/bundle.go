@@ -90,11 +90,10 @@ type DesiredProject struct {
 	Monitors     map[string]DesiredMonitor // by source UID
 }
 
-// fileSupportedTypes are the monitor types the v1 file provider can express with a strict
-// non-secret schema (common fields only). Types needing a typed `settings` object
-// (composite, synthetic) or credentials (postgres/mysql/redis/promql/rabbitmq) are rejected
-// until their strict schema / secret_ref contract lands (spec §3.1). This is an explicit
-// scope boundary, not a generic escape hatch.
+// fileSupportedTypes are the monitor types the v1 file provider can express through either
+// common fields or a strict typed settings schema. The credentialed subset uses inventory
+// references only; composite, synthetic, promql and any future untyped shape remain rejected.
+// This is an explicit scope boundary, not a generic config escape hatch.
 var fileSupportedTypes = map[domain.MonitorType]bool{
 	domain.MonitorHTTP:      true,
 	domain.MonitorTCP:       true,

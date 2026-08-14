@@ -2844,3 +2844,8 @@ materialization, envelope, fencing and prober TLS per the spec's §10 plan. Runt
 part of the trust boundary, not deployment convention: `worker` mounts ops HTTP and regional
 consumers only; generic outbox/settings/mailer/user API and the future authoritative materializer
 are owned by `api`/`scheduler`/`all`, which are the roles permitted to hold the at-rest master.
+Implementation closed in iter-0116: the wire barrier covers AMQP jobs/tests and physically
+version-predicated pull jobs/tests; the authoritative read supplies routing and cadence as well
+as config/revision; executor key failures are diagnostic-only and readiness-visible; at-rest
+reencryption uses exact-ciphertext CAS plus a bounded zero-old-key convergence proof. The
+dispatch-key and at-rest-key rotation procedures are deliberately separate in `runbook.md`.

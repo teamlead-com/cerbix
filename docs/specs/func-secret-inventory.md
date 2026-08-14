@@ -7,6 +7,10 @@ the authoritative read is the dispatch-authorization **linearization point**. Th
 the SPEC, not the future implementation — code is accepted only against the §9 test matrix
 plus D-0155/traceability/runbook/iteration evidence.
 
+Implementation acceptance: **DONE in iter-0116**. This does not retroactively conflate the
+design approval with implementation approval; the latter is evidenced in
+[`iter-0116`](../iterations/iter-0116.md), `status.md` and `traceability.md` against §9.
+
 ## 1. Context & motivation
 
 The Monitoring-as-Code file provider (FR-017) forbids inline secrets (D-0152) and rejects
@@ -417,4 +421,5 @@ capabilities + probe_error protocol; (3) rotation fencing + reencrypt hardening 
 TLS + UI monitor-form refs + E2E. `-race` both storage modes throughout; **D-0155** records
 the two-keyring model, AAD contract, wire barrier, trust + exposure statements, rollout;
 iteration reports; status (`FR-020`, `NFR-015`); traceability; func-monitoring-as-code §3.1
-cross-reference update.
+cross-reference update. Slice 1 closed in iter-0115; slices 2–3 and acceptance closed
+together in iter-0116, with the per-contract evidence table in that report.

@@ -151,6 +151,10 @@ type Store interface {
 	EnqueueOutbox(ctx context.Context, topic string, payload []byte) error
 	RecordAudit(ctx context.Context, e domain.AuditEntry) error
 	ListAuditByOrg(ctx context.Context, orgID string, limit int) ([]domain.AuditEntry, error)
+	CreateProjectSecret(ctx context.Context, projectID, name, value string) (store.ProjectSecret, error)
+	UpdateProjectSecret(ctx context.Context, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error)
+	DeleteProjectSecret(ctx context.Context, projectID, name string) error
+	ListProjectSecrets(ctx context.Context, projectID string) ([]store.ProjectSecret, error)
 }
 
 // Mailer sends status-page subscription emails. Optional; nil means email is not
@@ -201,6 +205,7 @@ type Handler struct {
 	agentDBTokens     bool                     // also resolve agent tokens from the database
 	pullWaiter        PullWaiter               // long-poll wake source (LISTEN/NOTIFY); nil = no long-poll
 	fpStatus          FileProviderStatusSource // process-local file-provider runtime status; nil = none
+	secretsEnabled    bool                     // project secret inventory feature switch (cfg.Secrets.Enabled)
 }
 
 // PullWaiter blocks until a pull job is enqueued for a region (or the max hold / request
@@ -322,6 +327,14 @@ func (h *Handler) WithFileProviderStatus(src FileProviderStatusSource) *Handler 
 	return h
 }
 
+// WithSecretsEnabled sets the project-secret-inventory feature switch
+// (cfg.Secrets.Enabled). Off (the default), every secrets endpoint answers
+// 404 feature_disabled (spec func-secret-inventory §4.1).
+func (h *Handler) WithSecretsEnabled(enabled bool) *Handler {
+	h.secretsEnabled = enabled
+	return h
+}
+
 // WithAgentToken sets the optional catch-all agent bearer token (authorizes any
 // region). Empty (the default) leaves it unset.
 func (h *Handler) WithAgentToken(token string) *Handler {
@@ -389,6 +402,10 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/availability", h.projectAvailability)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla", h.projectSLA)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-report", h.setProjectSLAReport)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/secrets", h.listSecrets)
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/secrets", h.createSecret)
+	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/secrets/{name}", h.updateSecret)
+	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/secrets/{name}", h.deleteSecret)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/maintenance", h.listMaintenance)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/maintenance", h.createMaintenance)
 	mux.HandleFunc("DELETE /api/v1/maintenance/{maintenanceID}", h.deleteMaintenance)

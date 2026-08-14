@@ -538,7 +538,8 @@ func runServe(args []string) int {
 		authn.WithSettings(settingsSvc)
 		appMux := http.NewServeMux()
 		authn.Routes(appMux)
-		apiHandler = api.New(st, logger, cfg.Local.MinPasswordLength).WithMetrics(registry).WithEvents(broker).WithOIDC(authn).WithSettings(settingsSvc)
+		apiHandler = api.New(st, logger, cfg.Local.MinPasswordLength).WithMetrics(registry).WithEvents(broker).WithOIDC(authn).WithSettings(settingsSvc).
+			WithSecretsEnabled(cfg.Secrets.Enabled)
 		if mail != nil {
 			apiHandler.WithMailer(mail)
 		}

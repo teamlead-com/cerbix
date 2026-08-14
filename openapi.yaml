@@ -20,6 +20,7 @@ tags:
   - name: organizations
   - name: projects
   - name: monitors
+  - name: secrets
   - name: sla
   - name: incidents
   - name: status-pages
@@ -523,6 +524,109 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/secrets:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [secrets]
+      summary: List the project's secret inventory (names and metadata; never values)
+      description: >
+        Names, dates, and used-by reference counts only — secret values are
+        write-only and never returned by any endpoint. Served with
+        `Cache-Control: no-store`. Returns 404 `feature_disabled` when the
+        instance-wide secret inventory feature is off (`secrets.enabled: false`).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/ProjectSecret' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [secrets]
+      summary: Create a project secret (editor+)
+      description: >
+        Adds a named secret to the project inventory. The value is encrypted at
+        rest and never echoed back. Returns 404 `feature_disabled` when the
+        feature is off.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSecretRequest' }
+      responses:
+        '201':
+          description: Created (the value is not echoed).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  name: { type: string }
+                  created_at: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Duplicate name (`secret_exists`) or per-project quota exceeded (`secret_quota`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/secrets/{name}:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/SecretName' }
+    patch:
+      tags: [secrets]
+      summary: Rename and/or rotate a project secret (editor+)
+      description: >
+        One PATCH = rename and/or rotate, in one transaction; at least one of
+        `name`/`value` is required. A rename re-points UI-managed monitor
+        references atomically; file-managed references block it
+        (`409 secret_renamed_in_use` with the count — rename in the file source).
+        Returns 404 `feature_disabled` when the feature is off.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateSecretRequest' }
+      responses:
+        '204': { description: No Content }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >
+            Rename blocked by file-managed references (`secret_renamed_in_use`,
+            with `count`) or the new name is taken (`secret_exists`).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  count: { type: integer, description: 'File-managed references blocking the rename (secret_renamed_in_use only).' }
+    delete:
+      tags: [secrets]
+      summary: Delete a project secret (editor+)
+      description: >
+        Refused while monitor settings still reference the secret — there is no
+        force-delete. Returns 404 `feature_disabled` when the feature is off.
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Still referenced by monitor settings (`secret_in_use`, with `count`).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  count: { type: integer, description: References that still point at the secret. }
 
   /api/v1/projects/{projectID}/sla:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
@@ -1967,6 +2071,12 @@ components:
       name: pageID
       required: true
       schema: { type: string, format: uuid }
+    SecretName:
+      in: path
+      name: name
+      required: true
+      schema: { type: string, pattern: '^[a-z][a-z0-9-]{0,62}$' }
+      description: Secret name (slug) within the project inventory.
     FeedFormat:
       in: query
       name: format
@@ -2007,6 +2117,34 @@ components:
       type: object
       properties:
         error: { type: string }
+    ProjectSecret:
+      type: object
+      description: >
+        One project-inventory secret: names and metadata only. Values are
+        write-only and never appear in any API response.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, description: 'Slug, unique within the project (^[a-z][a-z0-9-]{0,62}$).' }
+        created_at: { type: string, format: date-time }
+        rotated_at: { type: string, format: date-time, nullable: true, description: Last time the value was rotated; null if never. }
+        used_by:
+          type: object
+          description: Monitor-setting references pointing at this secret.
+          properties:
+            total: { type: integer }
+            file_managed: { type: integer, description: References owned by a Monitoring-as-Code file provider. }
+    CreateSecretRequest:
+      type: object
+      required: [name, value]
+      properties:
+        name: { type: string, description: 'Slug, unique within the project (^[a-z][a-z0-9-]{0,62}$).' }
+        value: { type: string, format: password, writeOnly: true, description: 'Secret value, ≤ 4096 UTF-8 bytes; never returned.' }
+    UpdateSecretRequest:
+      type: object
+      description: At least one of `name` (rename) or `value` (rotate) is required.
+      properties:
+        name: { type: string, description: New slug (rename). }
+        value: { type: string, format: password, writeOnly: true, description: 'New value (rotate), ≤ 4096 UTF-8 bytes; never returned.' }
     LoginRequest:
       type: object
       required: [username, password]

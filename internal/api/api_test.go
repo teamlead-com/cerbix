@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -79,6 +80,20 @@ type fakeStore struct {
 		enabled bool
 	}
 	recovery map[string]bool // userID|hash -> available
+
+	secrets        map[string]map[string]*fakeSecret // project id → name → secret
+	secretRefs     map[string]int                    // "projectID/name" → UI-managed ref count
+	secretFileRefs map[string]int                    // "projectID/name" → file-managed ref count
+	secretSeq      int
+}
+
+// fakeSecret backs the project secret inventory in memory. The value is kept
+// only so tests can assert it never appears in any response body.
+type fakeSecret struct {
+	id        string
+	value     string
+	createdAt time.Time
+	rotatedAt *time.Time
 }
 
 func seededStore() *fakeStore {
@@ -1735,4 +1750,117 @@ func (f *fakeStore) ReplaceRecoveryCodes(_ context.Context, userID string, hashe
 		f.recovery[userID+"|"+h] = true
 	}
 	return nil
+}
+
+// Project secret inventory (map-backed, honoring the store's typed errors).
+
+var fakeSecretNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
+func (f *fakeStore) projectSecrets(projectID string) map[string]*fakeSecret {
+	if f.secrets == nil {
+		f.secrets = map[string]map[string]*fakeSecret{}
+	}
+	if f.secrets[projectID] == nil {
+		f.secrets[projectID] = map[string]*fakeSecret{}
+	}
+	return f.secrets[projectID]
+}
+
+func (f *fakeStore) secretRefCounts(projectID, name string) (ui, file int) {
+	key := projectID + "/" + name
+	return f.secretRefs[key], f.secretFileRefs[key]
+}
+
+func (f *fakeStore) CreateProjectSecret(_ context.Context, projectID, name, value string) (store.ProjectSecret, error) {
+	if !fakeSecretNameRe.MatchString(name) {
+		return store.ProjectSecret{}, store.ErrSecretNameInvalid
+	}
+	if strings.TrimSpace(value) == "" || len(value) > 4096 {
+		return store.ProjectSecret{}, store.ErrSecretValueInvalid
+	}
+	if _, ok := f.projects[projectID]; !ok {
+		return store.ProjectSecret{}, store.ErrNotFound
+	}
+	ps := f.projectSecrets(projectID)
+	if _, ok := ps[name]; ok {
+		return store.ProjectSecret{}, store.ErrSecretExists
+	}
+	if len(ps) >= 100 {
+		return store.ProjectSecret{}, store.ErrSecretQuota
+	}
+	f.secretSeq++
+	s := &fakeSecret{id: fmt.Sprintf("sec-%d", f.secretSeq), value: value, createdAt: time.Unix(1700000000, 0)}
+	ps[name] = s
+	return store.ProjectSecret{ID: s.id, Name: name, CreatedAt: s.createdAt}, nil
+}
+
+func (f *fakeStore) UpdateProjectSecret(_ context.Context, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error) {
+	ps := f.projectSecrets(projectID)
+	s, ok := ps[name]
+	if !ok {
+		return false, false, 0, store.ErrNotFound
+	}
+	if newValue != nil && (strings.TrimSpace(*newValue) == "" || len(*newValue) > 4096) {
+		return false, false, 0, store.ErrSecretValueInvalid
+	}
+	if newName != nil && !fakeSecretNameRe.MatchString(*newName) {
+		return false, false, 0, store.ErrSecretNameInvalid
+	}
+	if newName != nil && *newName != name {
+		if _, file := f.secretRefCounts(projectID, name); file > 0 {
+			return false, false, 0, store.SecretRenamedInUseError{Count: file}
+		}
+		if _, exists := ps[*newName]; exists {
+			return false, false, 0, store.ErrSecretExists
+		}
+	}
+	if newValue != nil {
+		s.value = *newValue
+		now := time.Unix(1700000100, 0)
+		s.rotatedAt = &now
+		rotated = true
+	}
+	if newName != nil && *newName != name {
+		delete(ps, name)
+		ps[*newName] = s
+		ui, _ := f.secretRefCounts(projectID, name)
+		repointed = ui
+		if f.secretRefs != nil {
+			delete(f.secretRefs, projectID+"/"+name)
+			f.secretRefs[projectID+"/"+*newName] = ui
+		}
+		renamed = true
+	}
+	return renamed, rotated, repointed, nil
+}
+
+func (f *fakeStore) DeleteProjectSecret(_ context.Context, projectID, name string) error {
+	ps := f.projectSecrets(projectID)
+	if _, ok := ps[name]; !ok {
+		return store.ErrNotFound
+	}
+	if ui, file := f.secretRefCounts(projectID, name); ui+file > 0 {
+		return store.SecretInUseError{Count: ui + file}
+	}
+	delete(ps, name)
+	return nil
+}
+
+func (f *fakeStore) ListProjectSecrets(_ context.Context, projectID string) ([]store.ProjectSecret, error) {
+	ps := f.projectSecrets(projectID)
+	names := make([]string, 0, len(ps))
+	for n := range ps {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]store.ProjectSecret, 0, len(names))
+	for _, n := range names {
+		s := ps[n]
+		ui, file := f.secretRefCounts(projectID, n)
+		out = append(out, store.ProjectSecret{
+			ID: s.id, Name: n, CreatedAt: s.createdAt, RotatedAt: s.rotatedAt,
+			UsedByTotal: ui + file, UsedByFileManaged: file,
+		})
+	}
+	return out, nil
 }

@@ -94,6 +94,9 @@ const (
 	// snapshot, so the per-tick full scan is gone. A new/edited monitor is picked
 	// up within this window.
 	refreshEvery = 15 * time.Second
+	// credentialFailureLogEvery bounds names-only logs for a persistently broken
+	// credential reference/key without hiding the low-cardinality counter.
+	credentialFailureLogEvery = 5 * time.Minute
 	// pushCheckEvery is how often the leader runs the single batched query that
 	// finds push monitors whose dead-man's switch has tripped.
 	pushCheckEvery = 5 * time.Second
@@ -345,6 +348,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 // was lost (the caller re-contends), false on a clean context cancellation.
 func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool, error)) bool {
 	nextRun := map[string]time.Time{}
+	credentialFailures := map[string]int{}
+	credentialLastLog := map[string]time.Time{}
 	var monitors []domain.Monitor
 	byID := map[string]domain.Monitor{}
 	// confirmFast holds monitors currently probed at their confirm interval,
@@ -422,6 +427,12 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 					byID = make(map[string]domain.Monitor, len(monitors))
 					for _, m := range monitors {
 						byID[m.ID] = m
+					}
+					for id := range credentialFailures {
+						if _, ok := byID[id]; !ok {
+							delete(credentialFailures, id)
+							delete(credentialLastLog, id)
+						}
 					}
 					// The fresh snapshot is authoritative: drop acceleration for
 					// monitors no longer mid-confirmation, and pick up ones whose
@@ -611,18 +622,26 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 						if s.secretResolution != nil {
 							s.secretResolution.RecordSecretResolutionFailure("batch_error")
 						}
+						for _, id := range ids[start:end] {
+							if snap, ok := byID[id]; ok {
+								credentialFailures[id]++
+								nextRun[id] = now.Add(credentialFailureRetry(snap.Interval(), credentialFailures[id]))
+							}
+						}
 						continue
 					}
 					for _, item := range items {
 						if item.Reason != "" {
-							s.logger.Warn("credential_materialization_rejected", "monitor_id", item.MonitorID, "reason", item.Reason)
+							if last := credentialLastLog[item.MonitorID]; last.IsZero() || now.Sub(last) >= credentialFailureLogEvery {
+								credentialLastLog[item.MonitorID] = now
+								s.logger.Warn("credential_materialization_rejected", "monitor_id", item.MonitorID, "reason", item.Reason)
+							}
 							if s.secretResolution != nil {
 								s.secretResolution.RecordSecretResolutionFailure(item.Reason)
 							}
-							// Backoff floor: failure is not a sent cadence advance, but it must not
-							// hammer DB/decrypt every scheduler tick. Retry no faster than interval.
 							if snap, ok := byID[item.MonitorID]; ok {
-								nextRun[item.MonitorID] = now.Add(snap.Interval())
+								credentialFailures[item.MonitorID]++
+								nextRun[item.MonitorID] = now.Add(credentialFailureRetry(snap.Interval(), credentialFailures[item.MonitorID]))
 							}
 							continue
 						}
@@ -633,11 +652,15 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 								ready = credentialReadyPull[m.Region]
 							}
 							if !ready {
-								s.logger.Warn("credential_materialization_rejected", "monitor_id", m.ID, "reason", "no_capable_executor")
+								if last := credentialLastLog[m.ID]; last.IsZero() || now.Sub(last) >= credentialFailureLogEvery {
+									credentialLastLog[m.ID] = now
+									s.logger.Warn("credential_materialization_rejected", "monitor_id", m.ID, "reason", "no_capable_executor")
+								}
 								if s.secretResolution != nil {
 									s.secretResolution.RecordSecretResolutionFailure("no_capable_executor")
 								}
-								nextRun[m.ID] = now.Add(m.Interval())
+								credentialFailures[m.ID]++
+								nextRun[m.ID] = now.Add(credentialFailureRetry(m.Interval(), credentialFailures[m.ID]))
 								continue
 							}
 						}
@@ -653,6 +676,8 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 							publishErr = err.Error()
 							continue
 						}
+						delete(credentialFailures, m.ID)
+						delete(credentialLastLog, m.ID)
 						nextRun[m.ID] = now.Add(iv)
 					}
 				}
@@ -663,6 +688,30 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 			}
 		}
 	}
+}
+
+// credentialFailureRetry applies the §4.4.5 floor and bounded exponential backoff.
+// The normal monitor interval is the minimum. refreshEvery is the materializer's
+// authoritative resync cadence; intervals already slower than that remain their own cap.
+func credentialFailureRetry(interval time.Duration, failures int) time.Duration {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	capDelay := refreshEvery
+	if interval > capDelay {
+		capDelay = interval
+	}
+	delay := interval
+	for i := 1; i < failures && delay < capDelay; i++ {
+		if delay > capDelay/2 {
+			return capDelay
+		}
+		delay *= 2
+	}
+	if delay > capDelay {
+		return capDelay
+	}
+	return delay
 }
 
 func (s *Scheduler) publishScheduledJob(ctx context.Context, job dispatch.CheckJob, interval time.Duration) error {

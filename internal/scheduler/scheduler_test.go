@@ -64,6 +64,27 @@ func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string)
 	return out, nil
 }
 
+func TestCredentialFailureRetryHasIntervalFloorAndResyncCap(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval time.Duration
+		failures int
+		want     time.Duration
+	}{
+		{name: "floor", interval: 2 * time.Second, failures: 1, want: 2 * time.Second},
+		{name: "exponential", interval: 2 * time.Second, failures: 3, want: 8 * time.Second},
+		{name: "resync cap", interval: 2 * time.Second, failures: 8, want: refreshEvery},
+		{name: "slow monitor remains floor", interval: time.Minute, failures: 8, want: time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := credentialFailureRetry(tt.interval, tt.failures); got != tt.want {
+				t.Fatalf("retry = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func (f *fakeStore) StalePushMonitors(context.Context) ([]domain.Monitor, error) {
 	return f.stalePush, nil
 }

@@ -50,7 +50,7 @@ func (p rabbitmqProber) probeAMQP(ctx context.Context, m domain.Monitor) Result 
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if d, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(d)
 	}
@@ -97,7 +97,7 @@ func (p rabbitmqProber) probeManagement(ctx context.Context, m domain.Monitor) R
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	lat := elapsedMS(start)
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	res := Result{Connected: true, LatencyMS: lat, Code: resp.StatusCode, Body: string(body)}

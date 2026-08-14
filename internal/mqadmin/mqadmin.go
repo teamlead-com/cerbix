@@ -112,7 +112,7 @@ func (c *Client) liveQueues(ctx context.Context) ([]queue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mqadmin: get queues: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("mqadmin: queues status %d", resp.StatusCode)
 	}

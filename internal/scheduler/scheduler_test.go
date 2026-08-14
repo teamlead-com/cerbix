@@ -465,10 +465,7 @@ func TestLeadershipWatchdogStepsDown(t *testing.T) {
 	// The lost lock makes it flap: acquire → first tick detects loss → step down →
 	// re-contend. Expect several elections and a leader-gauge that went true then false.
 	deadline := time.After(2 * time.Second)
-	for {
-		if atomic.LoadInt32(&fs.elections) >= 2 {
-			break
-		}
+	for atomic.LoadInt32(&fs.elections) < 2 {
 		select {
 		case <-deadline:
 			t.Fatalf("watchdog did not re-contend after losing the lock (elections=%d)", atomic.LoadInt32(&fs.elections))

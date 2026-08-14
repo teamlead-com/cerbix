@@ -170,7 +170,7 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 	// OIDC client secret (singleton row): decrypt with the keyring, re-encrypt under
 	// the primary. Folded into the channel count so key rotation covers it too.
 	var oidcSecret string
-	oerr := s.pool.QueryRow(ctx, `SELECT client_secret FROM oidc_settings WHERE id = true`).Scan(&oidcSecret)
+	oerr := s.pool.QueryRow(ctx, `SELECT client_secret FROM oidc_settings WHERE id = true`).Scan(&oidcSecret) //nolint:forbidigo // encryption-boundary key rotation; value is never logged
 	if oerr == nil {
 		plain, derr := s.cipher.Decrypt(oidcSecret)
 		if derr != nil {

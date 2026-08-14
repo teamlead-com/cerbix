@@ -63,7 +63,7 @@ func (mysqlProber) Probe(ctx context.Context, m domain.Monitor) Result {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
 	db := sql.OpenDB(connector)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	query := m.Config["query"]
 	if strings.TrimSpace(query) == "" {

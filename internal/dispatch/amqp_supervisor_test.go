@@ -165,7 +165,11 @@ func TestAMQPPublisherReopensChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer d.Close()
+	t.Cleanup(func() {
+		if err := d.Close(); err != nil {
+			t.Errorf("close dispatcher: %v", err)
+		}
+	})
 
 	if err := d.PublishResult(context.Background(), domain.Heartbeat{MonitorID: "m1", Up: true}); err != nil {
 		t.Fatalf("first publish: %v", err)
@@ -199,7 +203,11 @@ func TestAMQPDeadLettersPoison(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer d.Close()
+	t.Cleanup(func() {
+		if err := d.Close(); err != nil {
+			t.Errorf("close dispatcher: %v", err)
+		}
+	})
 
 	// Drain the dead queue first so we assert on THIS run's poison message.
 	conn, _ := d.current()
@@ -207,7 +215,11 @@ func TestAMQPDeadLettersPoison(t *testing.T) {
 	if err != nil {
 		t.Fatalf("channel: %v", err)
 	}
-	defer pch.Close()
+	t.Cleanup(func() {
+		if err := pch.Close(); err != nil {
+			t.Errorf("close poison channel: %v", err)
+		}
+	})
 	if _, err := pch.QueuePurge(deadQueue, false); err != nil {
 		t.Fatalf("purge dead: %v", err)
 	}

@@ -43,7 +43,7 @@ func (p pgProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	query := m.Config["query"]
 	if strings.TrimSpace(query) == "" {

@@ -36,7 +36,7 @@ func acceptOnce(t *testing.T, fn func(net.Conn)) string {
 func TestSSHProber(t *testing.T) {
 	// A server that greets with an SSH identification banner.
 	addr := acceptOnce(t, func(c net.Conn) {
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		_, _ = c.Write([]byte("SSH-2.0-OpenSSH_9.6\r\n"))
 	})
 	r := NewRunner()
@@ -56,7 +56,7 @@ func TestSSHProber(t *testing.T) {
 
 	// A non-SSH server (no banner starting with SSH-) → down.
 	bad := acceptOnce(t, func(c net.Conn) {
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		_, _ = c.Write([]byte("220 smtp ready\r\n"))
 	})
 	m.Conditions = nil
@@ -74,7 +74,7 @@ func TestSSHProber(t *testing.T) {
 func TestWebSocketProber(t *testing.T) {
 	// A minimal server that completes the RFC 6455 handshake with a valid accept.
 	good := acceptOnce(t, func(c net.Conn) {
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		req, err := http.ReadRequest(bufio.NewReader(c))
 		if err != nil {
 			return
@@ -92,7 +92,7 @@ func TestWebSocketProber(t *testing.T) {
 
 	// Server that returns 101 but a wrong accept → down.
 	badAccept := acceptOnce(t, func(c net.Conn) {
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		_, _ = http.ReadRequest(bufio.NewReader(c))
 		_, _ = c.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: wrong\r\n\r\n"))
 	})
@@ -120,7 +120,7 @@ func TestWebSocketProber(t *testing.T) {
 func TestRabbitMQProberAMQP(t *testing.T) {
 	// A broker that replies to the protocol header with a METHOD frame (type 0x01).
 	broker := acceptOnce(t, func(c net.Conn) {
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		hdr := make([]byte, 8)
 		if _, err := c.Read(hdr); err != nil {
 			return
@@ -135,7 +135,7 @@ func TestRabbitMQProberAMQP(t *testing.T) {
 
 	// A version-mismatch broker echoes the protocol header ('A'...) — still alive.
 	echo := acceptOnce(t, func(c net.Conn) {
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		hdr := make([]byte, 8)
 		if _, err := c.Read(hdr); err != nil {
 			return
@@ -149,7 +149,7 @@ func TestRabbitMQProberAMQP(t *testing.T) {
 
 	// A non-AMQP service (HTTP-ish reply) → down.
 	notAMQP := acceptOnce(t, func(c net.Conn) {
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		hdr := make([]byte, 8)
 		if _, err := c.Read(hdr); err != nil {
 			return

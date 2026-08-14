@@ -227,7 +227,7 @@ func (d *Dispatcher) post(ctx context.Context, _ domain.NotificationChannel, tar
 	if err != nil {
 		return fmt.Errorf("post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("non-2xx status %d", resp.StatusCode)
 	}

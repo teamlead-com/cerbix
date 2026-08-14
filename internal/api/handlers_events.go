@@ -46,7 +46,9 @@ func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
 	sub, unsub := h.eventSrc.Subscribe()
 	defer unsub()
 
-	fmt.Fprint(w, ": connected\n\n")
+	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
+		return
+	}
 	flusher.Flush()
 
 	ping := time.NewTicker(25 * time.Second)
@@ -61,7 +63,9 @@ func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
 			// browser's EventSource API, so the client watchdog could not tell
 			// a healthy-quiet stream from a dead socket. Any bytes keep
 			// proxies from idling the connection out.
-			fmt.Fprint(w, "event: ping\ndata: {}\n\n")
+			if _, err := fmt.Fprint(w, "event: ping\ndata: {}\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		case ev, ok := <-sub:
 			if !ok {
@@ -74,7 +78,9 @@ func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, data)
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, data); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}

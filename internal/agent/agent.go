@@ -205,7 +205,7 @@ func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, 
 	if err != nil {
 		return "", nil, false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", nil, false
 	}
@@ -236,7 +236,7 @@ func (a *Agent) postTestResult(ctx context.Context, id string, hb domain.Heartbe
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("test-results status %d", resp.StatusCode)
 	}
@@ -384,7 +384,7 @@ func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []str
 	if err != nil {
 		return nil, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
@@ -430,7 +430,7 @@ func (a *Agent) postHeartbeats(ctx context.Context, path string, results []domai
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("%s status %d: %s", path, resp.StatusCode, string(b))

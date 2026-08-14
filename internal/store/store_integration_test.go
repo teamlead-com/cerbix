@@ -127,7 +127,7 @@ func TestUpsertUserByOIDCIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("raw connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	var legacyID string
 	if err := conn.QueryRow(ctx,
 		`INSERT INTO users (oidc_sub, email, display_name) VALUES ('legacy-sub', 'l@x', 'L') RETURNING id`,
@@ -897,7 +897,7 @@ func TestStateSequenceIncrementsOnTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("raw connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	rows, err := conn.Query(ctx,
 		`SELECT payload FROM outbox_events WHERE topic = 'monitor_transition' ORDER BY created_at, id`)
 	if err != nil {
@@ -1669,7 +1669,7 @@ func TestFileManagedOwnershipGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	if _, err := conn.Exec(ctx,
 		`INSERT INTO managed_monitors (monitor_id, provider_id, org_id, project_id, source_uid, source_path)
 		 VALUES ($1, 'platform', $2, $3, 'api', 'acme-payments.yaml')`,
@@ -1743,7 +1743,7 @@ func TestDeleteProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	if _, err := conn.Exec(ctx,
 		`INSERT INTO managed_monitors (monitor_id, provider_id, org_id, project_id, source_uid, source_path)
 		 VALUES ($1, 'platform', $2, $3, 'orders', 'orders.yaml')`,
@@ -1808,7 +1808,7 @@ func TestDeleteOrganization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	if _, err := conn.Exec(ctx,
 		`INSERT INTO managed_monitors (monitor_id, provider_id, org_id, project_id, source_uid, source_path)
 		 VALUES ($1, 'platform', $2, $3, 'svc', 'svc.yaml')`,

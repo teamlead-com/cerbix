@@ -32,7 +32,7 @@ func (p icmpProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	if err != nil {
 		return Result{Connected: false, Msg: "icmp listen: " + err.Error()}
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)

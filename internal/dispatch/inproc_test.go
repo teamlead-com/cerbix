@@ -9,7 +9,11 @@ import (
 
 func TestInProcJobsAndResults(t *testing.T) {
 	d := NewInProc(4)
-	defer d.Close()
+	t.Cleanup(func() {
+		if err := d.Close(); err != nil {
+			t.Errorf("close dispatcher: %v", err)
+		}
+	})
 	ctx := context.Background()
 
 	if err := d.PublishJob(ctx, CheckJob{Monitor: domain.Monitor{ID: "m1"}}); err != nil {

@@ -80,7 +80,11 @@ func TestTCPProber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("close TCP listener: %v", err)
+		}
+	})
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -339,7 +343,11 @@ func TestRedisProber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("close Redis listener: %v", err)
+		}
+	})
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -347,7 +355,7 @@ func TestRedisProber(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				r := bufio.NewReader(c)
 				for {
 					line, err := r.ReadString('\n')

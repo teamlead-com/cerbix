@@ -74,7 +74,7 @@ func (p syntheticProber) Probe(ctx context.Context, m domain.Monitor) Result {
 			return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: stepLabel(i, st) + ": " + err.Error()}
 		}
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		lastCode = resp.StatusCode
 		latency := time.Since(stepStart).Milliseconds()
 

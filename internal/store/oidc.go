@@ -15,7 +15,7 @@ func (s *Store) GetOIDCSettings(ctx context.Context) (domain.OIDCSettings, error
 		st     domain.OIDCSettings
 		secret string
 	)
-	err := s.pool.QueryRow(ctx,
+	err := s.pool.QueryRow(ctx, //nolint:forbidigo // encrypted OIDC secret is read only at the store decryption boundary; never logged
 		`SELECT enabled, issuer, client_id, client_secret, redirect_url, scopes,
 		        post_logout_url, button_label, bootstrap_admins
 		   FROM oidc_settings WHERE id = true`).

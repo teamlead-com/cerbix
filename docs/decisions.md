@@ -2802,3 +2802,45 @@ the 42 findings is tracked as a **separate, dedicated cleanup MR** — consisten
 `.golangci.yml` note that style-heavy linters are "intentionally deferred to a dedicated cleanup MR".
 No monitoring/reliability contract changes; nothing is silently marked green — the repo-wide RED is
 recorded (iter-0114 §4) and explicitly waived here.
+
+## D-0155 — Secret inventory (FR-020): two keyrings, AAD context binding, verifiable wire barrier, linearization-point dispatch (design contract)
+Design decisions behind spec `func-secret-inventory` (r6, independently design-approved after six
+review passes). (1) **Two keyrings, never shared:** the at-rest master (`security.encryption_key`)
+encrypts the inventory and NEVER leaves core; per-region **dispatch keyrings**
+(`security.dispatch`, `{primary{id,key}, previous[]}` per region) seal credential envelopes —
+an executor holds only its region's keys, so a compromised worker/agent exposes at most **all
+retained payloads of its region until TTL/DLQ purge** (the recorded exposure statement), never
+the database. Executor profiles carrying the master key are REJECTED at startup, not ignored. A
+`default` keyring is single-trust-domain only; combining it with per-region keys requires
+`shared_trust_acknowledged: true`, which widens the exposure statement explicitly. (2) **AAD
+context binding, canonical length-prefixed encoding (`enc:v2a`)**: at rest AAD =
+`(project_id, secret_id)` (stable ids — rename stays metadata-only; cross-tenant ciphertext
+transplant fails authentication); in dispatch AAD = `(v, region, key_id, monitor_id,
+execution_revision, field_name, job_id)` (no cross-context transplant; exact same-job replay is
+transport behavior, fenced at ingest). Auth failure NEVER falls back to a legacy AAD-less
+decrypt, and the legacy string API rejects `enc:v2a` tokens instead of passing ciphertext
+through. (3) **Verifiable wire barrier:** envelope payloads ride versioned queues
+(`checks.jobs.v2.<region>`, `checks.tests.v2.<region>`) and version-predicated pull claims
+(`protocol_version` in the claim query); `secrets.enabled` REQUIRES
+`dispatch_envelope: enforced` — keys can ship ahead (enforced + enabled:false, the expand
+phase), but the inventory can never dispatch over legacy plaintext. Executor config/decrypt
+failures are a typed `probe_error` outcome (no heartbeat, no status flip — operational, never a
+false DOWN). (4) **Linearization point:** the authoritative per-dispatch DB read (config +
+eligibility + routing + cadence from ONE read) is the dispatch-authorization boundary — changes
+committed before the read are honored; a change committed after cannot recall the enqueued job:
+it remains in-flight exposure until ACK/TTL/DLQ purge, its result rejected by the D-0142 fence.
+Immediate revocation = rotate the credential at the target; hard recall is a non-goal.
+(5) **Target transport is honest egress:** ref-based monitors default to encrypted transport
+(postgres `sslmode: require` — stated as encrypted-NOT-verified; mysql/redis `tls: true`
+verified per Go defaults; rabbitmq management https); insecure/skip-verify is an explicit,
+visible opt-in in the monitor definition. (6) **Tenant invariant at the store surface:** every
+secret query takes and predicates `project_id`; the materializer resolves via
+`monitors JOIN monitor_secret_refs JOIN project_secrets` with equality on all project ids;
+referential integrity is a normalized ref table whose secret FK is
+`ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED` (commit-time delete guard mapped to
+`409 secret_in_use`; project-delete cascade stays order-independent). Delivery is iterative:
+iteration 1 = inventory + config + API/UI (this decision's contract), iterations 2–3 wire refs,
+materialization, envelope, fencing and prober TLS per the spec's §10 plan. Runtime ownership is
+part of the trust boundary, not deployment convention: `worker` mounts ops HTTP and regional
+consumers only; generic outbox/settings/mailer/user API and the future authoritative materializer
+are owned by `api`/`scheduler`/`all`, which are the roles permitted to hold the at-rest master.

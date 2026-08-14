@@ -72,6 +72,12 @@ the central loader at startup:
   reports it in its heartbeat/capabilities (§4.7);
 - `secrets.enabled: false` (default): Secrets API → `404 feature_disabled`; `*_ref` bundles
   reject as bindable errors (per-project freeze); nothing else changes;
+- **role-ownership gate (closed in iteration 1 review):** `worker` owns only operational
+  HTTP plus its regional jobs/tests consumers. It does not instantiate instance settings,
+  mailer, generic outbox delivery, the user/API router, or the authoritative materializer;
+  those stay in the master-key trust domain (`api`/`scheduler`/`all`). Thus a DB-backed
+  executor cannot claim master-encrypted core work, and executor profiles carrying the
+  master are rejected even while the feature/envelope mode is disabled;
 - `CreateProjectSecret`/`UpdateProjectSecret` hard-fail on a nil cipher; empty values →
   `400`.
 

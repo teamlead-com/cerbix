@@ -77,6 +77,11 @@ func (c *Cipher) DecryptBytes(token string, aad []byte) ([]byte, error) {
 	if c == nil {
 		return nil, errors.New("secret: AAD-bound value found but no encryption key is configured")
 	}
+	// Symmetric precondition with EncryptBytes: this API never operates without a
+	// binding context, even on a token some other producer sealed with empty AAD.
+	if len(aad) == 0 {
+		return nil, errors.New("secret: empty AAD")
+	}
 	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(token, aadPrefix))
 	if err != nil {
 		return nil, fmt.Errorf("secret: decode: %w", err)

@@ -77,8 +77,36 @@ func TestAADNoLegacyFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	if out, err := c.Decrypt(tok); err == nil && out != tok {
-		t.Fatal("legacy Decrypt must not open a v2a token")
+	// The v2a prefix is RESERVED in the legacy API: it must error, never pass the
+	// ciphertext through as "plaintext" (a wrong-API caller would otherwise feed
+	// ciphertext to a prober as a credential).
+	if out, err := c.Decrypt(tok); err == nil {
+		t.Fatalf("legacy Decrypt must reject a v2a token, got %q", out)
+	}
+}
+
+// TestAADMalformedTokens pins the external-boundary negatives: invalid base64 and
+// truncated ciphertexts return bounded errors, never panic, never open.
+func TestAADMalformedTokens(t *testing.T) {
+	c := testCipher(t, keyA)
+	aad := CanonicalAAD("p", "s")
+	for _, tok := range []string{
+		"enc:v2a:!!!not-base64!!!",           // invalid base64
+		"enc:v2a:",                           // empty body
+		"enc:v2a:AAAA",                       // shorter than a nonce
+		"enc:v2a:" + strings.Repeat("A", 20), // nonce-sized but no GCM tag
+	} {
+		if _, err := c.DecryptBytes(tok, aad); err == nil {
+			t.Fatalf("malformed token %q must fail", tok)
+		}
+	}
+	// Valid token with empty AAD at decrypt: the API enforces its own precondition.
+	tok, err := c.EncryptBytes([]byte("v"), aad)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	if _, err := c.DecryptBytes(tok, nil); err == nil {
+		t.Fatal("DecryptBytes must reject empty AAD")
 	}
 }
 

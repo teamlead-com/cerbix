@@ -8,15 +8,12 @@ import { apiGet, firstProject } from "./helpers";
 test.describe("monitoring-as-code UI", () => {
   test("global-admin diagnostics endpoint returns the {bundles,providers} contract", async ({ page }) => {
     const r = await page.request.get("/api/v1/admin/file-providers");
-    // A stack built before FR-017 has no such route — skip rather than fail on a stale image.
-    test.skip(r.status() === 404, "diagnostics endpoint not present in this build (pre-FR-017 stack)");
     expect(r.status(), "global admin should reach the diagnostics endpoint").toBe(200);
     const body = await r.json();
     expect(body, "diagnostics body must carry a bundles array").toHaveProperty("bundles");
     expect(Array.isArray(body.bundles)).toBeTruthy();
-    // providers (runtime status) is present when this process runs file providers; it may be
-    // absent/empty on a stack with none configured — assert the key is at least well-typed.
-    if (body.providers !== undefined) expect(Array.isArray(body.providers)).toBeTruthy();
+    expect(body, "diagnostics body must carry a providers array").toHaveProperty("providers");
+    expect(Array.isArray(body.providers)).toBeTruthy();
   });
 
   test("file-managed monitor shows badge + read-only controls + named-provider filter", async ({ page }) => {

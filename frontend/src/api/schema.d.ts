@@ -4735,8 +4735,8 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            bundles?: components["schemas"]["FileProviderDiagnostic"][];
-                            providers?: components["schemas"]["FileProviderRuntimeStatus"][];
+                            bundles: components["schemas"]["FileProviderDiagnostic"][];
+                            providers: components["schemas"]["FileProviderRuntimeStatus"][];
                         };
                     };
                 };
@@ -4780,7 +4780,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            bundles?: components["schemas"]["FileProviderDiagnostic"][];
+                            bundles: components["schemas"]["FileProviderDiagnostic"][];
                         };
                     };
                 };
@@ -5200,9 +5200,15 @@ export interface components {
             status?: "pending" | "up" | "down";
             /** @description Set for push monitors; the secret in their heartbeat URL. */
             push_token?: string;
-            /** @description Latest executor credential-envelope failure. Diagnostic only; never changes target liveness. */
+            /**
+             * @description Latest executor credential-envelope failure. Diagnostic only; never changes target liveness.
+             * @enum {string}
+             */
             readonly last_probe_error_reason?: "no_dispatch_key" | "unknown_key_id" | "decrypt_auth_failed" | "unsupported_version";
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Server time of the latest credential-envelope diagnostic.
+             */
             readonly last_probe_error_at?: string;
             management?: components["schemas"]["MonitorManagement"];
             /** Format: date-time */

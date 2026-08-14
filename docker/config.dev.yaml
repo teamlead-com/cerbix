@@ -52,5 +52,9 @@ providers:
         type: instance
 
 security:
+  # Fixed, public DEVELOPMENT-ONLY key: keeps the persistent dev volume readable
+  # across E2E runs that create encrypted push tokens. Never reuse outside this
+  # disposable local stack; production must inject its own random key.
+  encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
   admin_email: "admin@cerbix.local"
   admin_password: "devpassword123"

@@ -30,8 +30,11 @@ const (
 	jobsV2QueuePrefix = "checks.jobs.v2."
 	// Test probes ("Test connection") are RPCs per region: the API publishes to
 	// checks.tests.<region> with a reply queue; a worker in that region runs the
-	// probe and replies. The queue is auto-delete, so with no worker present the
-	// request is unroutable and the caller times out ("no worker in region").
+	// probe and replies. The queue is durable+auto-delete: it can be shared by N
+	// workers (so it cannot be exclusive), recreates cleanly across broker/worker
+	// restarts, and is removed after the last consumer leaves. Individual RPC
+	// requests remain transient and time-bounded. Non-durable, non-exclusive queues
+	// are rejected by RabbitMQ 4.3.
 	testsQueuePrefix   = "checks.tests."
 	testsV2QueuePrefix = "checks.tests.v2."
 	resultsQueue       = "checks.results"
@@ -514,7 +517,7 @@ func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, 
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: test channel: %w", err)
 	}
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 	replyQ, err := ch.QueueDeclare("", false, true, true, false, nil)
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: reply queue: %w", err)
@@ -523,6 +526,7 @@ func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, 
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: consume reply: %w", err)
 	}
+	returns := ch.NotifyReturn(make(chan amqp.Return, 1))
 
 	timeout := testRPCTimeout
 	if s := m.TimeoutSeconds; s > 0 {
@@ -532,7 +536,7 @@ func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, 
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: marshal test: %w", err)
 	}
-	if err := ch.PublishWithContext(ctx, "", queue, false, false, amqp.Publishing{
+	if err := ch.PublishWithContext(ctx, "", queue, true, false, amqp.Publishing{
 		ContentType: "application/json",
 		ReplyTo:     replyQ.Name,
 		Expiration:  strconv.FormatInt(timeout.Milliseconds(), 10),
@@ -544,6 +548,8 @@ func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, 
 	select {
 	case <-ctx.Done():
 		return domain.Heartbeat{}, ctx.Err()
+	case returned := <-returns:
+		return domain.Heartbeat{}, fmt.Errorf("no worker queue for region %q (AMQP %d %s)", region, returned.ReplyCode, returned.ReplyText)
 	case <-time.After(timeout):
 		return domain.Heartbeat{}, fmt.Errorf("no worker responded in region %q", region)
 	case msg, ok := <-replies:
@@ -562,14 +568,19 @@ func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, 
 }
 
 // ServeTestsV2 consumes only the physically separate envelope test queue. It is started
-// exclusively by a worker with a validated regional dispatch keyring.
-func (d *AMQP) ServeTestsV2(run func(ctx context.Context, job CheckJob) (domain.Heartbeat, error)) {
+// exclusively by a worker with a validated regional dispatch keyring. It returns only
+// after the initial queue declaration and consumer registration succeed, forming a
+// startup-readiness barrier.
+func (d *AMQP) ServeTestsV2(run func(ctx context.Context, job CheckJob) (domain.Heartbeat, error)) error {
+	var initialErr error
 	d.testsV2Once.Do(func() {
 		queue := testsV2QueueForRegion(d.jobRegion)
+		ready := make(chan error, 1)
 		go func() {
 			for {
 				conn, wake := d.current()
-				serveTestsV2Once(d, conn, queue, run)
+				serveTestsV2Once(d, conn, queue, run, ready)
+				ready = nil
 				select {
 				case <-d.ctx.Done():
 					return
@@ -578,22 +589,31 @@ func (d *AMQP) ServeTestsV2(run func(ctx context.Context, job CheckJob) (domain.
 				}
 			}
 		}()
+		initialErr = <-ready
 	})
+	return initialErr
 }
 
-func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, run func(context.Context, CheckJob) (domain.Heartbeat, error)) {
+func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, run func(context.Context, CheckJob) (domain.Heartbeat, error), ready chan<- error) {
 	ch, err := conn.Channel()
 	if err != nil {
+		d.logger.Error("dispatch_test_v2_channel", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: v2 test channel: %w", err))
 		return
 	}
 	defer func() { _ = ch.Close() }()
-	if _, err := ch.QueueDeclare(queue, false, true, false, false, nil); err != nil {
+	if _, err := ch.QueueDeclare(queue, true, true, false, false, nil); err != nil {
+		d.logger.Error("dispatch_declare_tests_v2", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: declare %s: %w", queue, err))
 		return
 	}
 	msgs, err := ch.Consume(queue, "", false, false, false, false, nil)
 	if err != nil {
+		d.logger.Error("dispatch_consume_tests_v2", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: consume %s: %w", queue, err))
 		return
 	}
+	signalTestConsumerReady(ready, nil)
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -622,15 +642,20 @@ func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, run func(con
 // ServeTests starts (once) a consumer of this dispatcher's region test-RPC queue
 // (checks.tests.<region>) and answers each request by running run and publishing the
 // heartbeat back to the delivery's ReplyTo. Only call it in a role that executes probes
-// (worker). The queue is auto-delete so it disappears when this worker disconnects,
-// which makes a stale region cleanly unroutable for the API.
-func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain.Heartbeat) {
+// (worker). The durable, shared queue auto-deletes after its last worker disconnects,
+// which makes a stale region cleanly unroutable for the API while supporting multiple
+// workers and RabbitMQ 4.3 (which rejects transient non-exclusive queues). It returns
+// only after the initial declaration and consumer registration succeed.
+func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain.Heartbeat) error {
+	var initialErr error
 	d.testsOnce.Do(func() {
 		queue := testsQueueForRegion(d.jobRegion)
+		ready := make(chan error, 1)
 		go func() {
 			for {
 				conn, wake := d.current()
-				serveTestsOnce(d, conn, queue, run)
+				serveTestsOnce(d, conn, queue, run, ready)
+				ready = nil
 				select {
 				case <-d.ctx.Done():
 					return
@@ -643,27 +668,33 @@ func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain
 				}
 			}
 		}()
+		initialErr = <-ready
 	})
+	return initialErr
 }
 
 // serveTestsOnce runs one test-RPC consume session on conn; returns on
 // shutdown or when the delivery channel dies.
-func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx context.Context, m domain.Monitor) domain.Heartbeat) {
+func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx context.Context, m domain.Monitor) domain.Heartbeat, ready chan<- error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		d.logger.Error("dispatch_test_channel", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: test channel: %w", err))
 		return
 	}
-	defer ch.Close()
-	if _, err := ch.QueueDeclare(queue, false, true, false, false, nil); err != nil {
+	defer func() { _ = ch.Close() }()
+	if _, err := ch.QueueDeclare(queue, true, true, false, false, nil); err != nil {
 		d.logger.Error("dispatch_declare_tests", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: declare %s: %w", queue, err))
 		return
 	}
 	msgs, err := ch.Consume(queue, "", false, false, false, false, nil)
 	if err != nil {
 		d.logger.Error("dispatch_consume_tests", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: consume %s: %w", queue, err))
 		return
 	}
+	signalTestConsumerReady(ready, nil)
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -689,6 +720,12 @@ func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx c
 			}
 			_ = m.Ack(false)
 		}
+	}
+}
+
+func signalTestConsumerReady(ready chan<- error, err error) {
+	if ready != nil {
+		ready <- err
 	}
 }
 
@@ -721,7 +758,7 @@ func consumeOnce(d *AMQP, conn *amqp.Connection, queue string, handle func(body 
 		d.logger.Error("dispatch_consumer_channel", "queue", queue, "error", err.Error())
 		return
 	}
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 	// Declare on every session, not via the publisher's declare cache: the
 	// reason we're (re)subscribing may be that the queue was deleted, which the
 	// cache would not know about. Durable, matching dialAndSetup/declareJobQueue.

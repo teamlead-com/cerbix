@@ -15,6 +15,7 @@ frontend/.vite/
 .claude/
 *.log
 .env
+/docker/.env.dev
 .DS_Store
 frontend/tsconfig.tsbuildinfo
 

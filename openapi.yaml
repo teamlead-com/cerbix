@@ -1956,6 +1956,7 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [bundles, providers]
                 properties:
                   bundles: { type: array, items: { $ref: '#/components/schemas/FileProviderDiagnostic' } }
                   providers: { type: array, items: { $ref: '#/components/schemas/FileProviderRuntimeStatus' } }
@@ -1979,6 +1980,7 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [bundles]
                 properties:
                   bundles: { type: array, items: { $ref: '#/components/schemas/FileProviderDiagnostic' } }
         '403': { $ref: '#/components/responses/Forbidden' }

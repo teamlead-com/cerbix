@@ -3,8 +3,9 @@
 # Central site (postgres, rabbitmq, scheduler, api, worker-core) always starts;
 # remote sites are opt-in via profiles:
 #
-#   docker compose -f docker/docker-compose.geo.yml up -d --build                  # central only
-#   docker compose -f docker/docker-compose.geo.yml --profile geo1 --profile geo2 up -d --build
+#   cp docker/.env.dev.example docker/.env.dev
+#   docker compose --env-file docker/.env.dev -f docker/docker-compose.geo.yml up -d --build
+#   docker compose --env-file docker/.env.dev -f docker/docker-compose.geo.yml --profile geo1 --profile geo2 up -d --build
 #
 # Reproduces the production topology on one host using THREE isolated networks, so
 # remote roles reach only what they would across a real geo boundary:
@@ -63,7 +64,7 @@ services:
       retries: 10
 
   rabbitmq:
-    image: rabbitmq:3.12-management
+    image: ${CERBIX_RABBITMQ_IMAGE:?set CERBIX_RABBITMQ_IMAGE to the broker image matching the persisted volume}
     <<: [*infraLog, *dataCaps]
     hostname: cerbix-rabbit
     environment:

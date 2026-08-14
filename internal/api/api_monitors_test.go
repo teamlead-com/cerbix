@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
@@ -154,6 +155,15 @@ func TestFileProviderDiagnostics(t *testing.T) {
 		t.Fatalf("provider=platform should keep all platform rows, got %d bundles / %d providers", len(filtered.Bundles), len(filtered.Providers))
 	}
 	recNone := do(h, globalAdmin, http.MethodGet, "/api/v1/admin/file-providers?provider=nope", "")
+	var noneRaw map[string]json.RawMessage
+	if err := json.Unmarshal(recNone.Body.Bytes(), &noneRaw); err != nil {
+		t.Fatalf("decode provider=nope diagnostics: %v", err)
+	}
+	for _, key := range []string{"bundles", "providers"} {
+		if string(noneRaw[key]) != "[]" {
+			t.Errorf("provider=nope %s = %s, want []", key, noneRaw[key])
+		}
+	}
 	var none struct {
 		Bundles   []store.FileProviderDiagnostic  `json:"bundles"`
 		Providers []api.FileProviderRuntimeStatus `json:"providers"`
@@ -181,5 +191,37 @@ func TestFileProviderDiagnostics(t *testing.T) {
 	// Foreign org → not found / forbidden (never another tenant's data).
 	if rec := do(h, o1Admin, http.MethodGet, "/api/v1/organizations/o2/file-providers", ""); rec.Code == http.StatusOK {
 		t.Fatalf("org admin must not read another org's diagnostics, got %d", rec.Code)
+	}
+}
+
+func TestFileProviderDiagnosticsEmptyCollectionsAreArrays(t *testing.T) {
+	fs := seededStore()
+
+	for _, tc := range []struct {
+		name string
+		h    http.Handler
+		path string
+		who  authz.Principal
+		keys []string
+	}{
+		{name: "global with runtime source", h: newHandlerWithFPStatus(fs, fakeFPStatus(nil)), path: "/api/v1/admin/file-providers", who: globalAdmin, keys: []string{"bundles", "providers"}},
+		{name: "global without runtime source", h: newHandler(fs), path: "/api/v1/admin/file-providers", who: globalAdmin, keys: []string{"bundles", "providers"}},
+		{name: "organization", h: newHandler(fs), path: "/api/v1/organizations/o1/file-providers", who: o1Admin, keys: []string{"bundles"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(tc.h, tc.who, http.MethodGet, tc.path, "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("diagnostics = %d (%s)", rec.Code, rec.Body.String())
+			}
+			var body map[string]json.RawMessage
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode diagnostics: %v", err)
+			}
+			for _, key := range tc.keys {
+				if string(body[key]) != "[]" {
+					t.Errorf("%s = %s, want []", key, body[key])
+				}
+			}
+		})
 	}
 }

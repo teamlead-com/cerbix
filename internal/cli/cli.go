@@ -361,32 +361,13 @@ func runServe(args []string) int {
 	}
 
 	logger := logging.New(cfg.Log, os.Stdout)
-	// Role-dependent secret-inventory presence rules (spec func-secret-inventory §4.1):
-	// structural keyring validity is checked in config.Validate; WHICH keys a role must
-	// hold depends on --role, so it is enforced here — fail-fast, no warn-and-continue.
-	if cfg.Secrets.Enabled {
-		switch *role {
-		case "all", "api", "scheduler":
-			// Materializing roles decrypt at-rest values and seal dispatch envelopes:
-			// both keyrings are required (encryption_key already required by Validate).
-			if !cfg.Security.Dispatch.Configured() {
-				logging.Critical(logger, "secrets_requires_dispatch_keyring", "role", *role,
-					"hint", "set security.dispatch (per-region keyrings) for materializing roles")
-				return 1
-			}
-		case "worker", "agent":
-			// Executors decrypt envelopes for their region: they need that region's
-			// keyring (or the default) — and never the at-rest master.
-			r := *region
-			if r == "" {
-				r = domain.DefaultRegion
-			}
-			if _, ok := cfg.Security.Dispatch.Regions[r]; !ok && cfg.Security.Dispatch.Default == nil {
-				logging.Critical(logger, "secrets_requires_region_dispatch_key", "role", *role, "region", r,
-					"hint", "configure security.dispatch.regions[\""+r+"\"] (or a default keyring) on this executor")
-				return 1
-			}
-		}
+	// Role-dependent secret-inventory key presence/absence (spec func-secret-inventory
+	// §4.1/§4.7): structural keyring validity is checked in config.Validate; which keys
+	// this role must (or must NOT) hold is a pure config-owned rule — fail-fast here,
+	// before any runtime wiring, for every role including the DB-less agent.
+	if err := cfg.ValidateSecretsForRole(*role, *region); err != nil {
+		logging.Critical(logger, "secrets_role_config_invalid", "role", *role, "error", err.Error())
+		return 1
 	}
 	info := buildinfo.Current()
 	registry := metrics.New(info, *role)

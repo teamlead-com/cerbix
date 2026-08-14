@@ -32,21 +32,84 @@ func TestSecretsDisabledByDefaultIsValid(t *testing.T) {
 	}
 }
 
-func TestSecretsEnabledRequiresMasterKeyAndKeyring(t *testing.T) {
+func TestSecretsEnabledRequiresEnforcedEnvelope(t *testing.T) {
+	// enabled with the legacy transport mode is a hard error: ref credentials never
+	// ride legacy plaintext dispatch (§4.7 wire barrier is not a later wiring detail).
 	c := defaultsConfig()
 	c.Secrets.Enabled = true
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "security.encryption_key") {
-		t.Fatalf("enabled without master key must fail with the key hint, got %v", err)
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "enforced") {
+		t.Fatalf("enabled without dispatch_envelope=enforced must fail, got %v", err)
 	}
-	c.Security.EncryptionKey = b64Key32
+	c.Secrets.DispatchEnvelope = "enforced"
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "dispatch keyring") {
-		t.Fatalf("enabled without any dispatch keyring must fail, got %v", err)
+		t.Fatalf("enforced without any keyring must fail, got %v", err)
 	}
 	c.Security.Dispatch.Regions = map[string]DispatchRegionKeys{
 		"geo2": {Primary: DispatchKeyEntry{ID: "geo2-2026a", Key: b64Key32B}},
 	}
+	// Load-time validation is role-agnostic: NO master key required here (a worker's
+	// config must validate without one); presence rules are per-role below.
 	if err := c.Validate(); err != nil {
-		t.Fatalf("enabled with master key + region keyring must validate: %v", err)
+		t.Fatalf("enabled+enforced with a keyring must validate role-agnostically: %v", err)
+	}
+}
+
+// TestValidateSecretsForRole is the role/key separation matrix (§4.1/§4.7): materializing
+// roles need master+keyring; executors need their region's keyring and must NOT hold the
+// master; the role region is validated even when a default keyring exists.
+func TestValidateSecretsForRole(t *testing.T) {
+	ring := DispatchRegionKeys{Primary: DispatchKeyEntry{ID: "k1", Key: b64Key32B}}
+	build := func(mut func(*Config)) *Config {
+		c := defaultsConfig()
+		c.Secrets.Enabled = true
+		c.Secrets.DispatchEnvelope = "enforced"
+		c.Security.Dispatch.Regions = map[string]DispatchRegionKeys{"geo2": ring}
+		mut(c)
+		return c
+	}
+	cases := []struct {
+		name    string
+		cfg     *Config
+		role    string
+		region  string
+		wantErr string // "" = ok
+	}{
+		{"disabled any role ok", defaultsConfig(), "worker", "geo2", ""},
+		{"all requires master", build(func(c *Config) {}), "all", "", "encryption_key"},
+		{"api requires master", build(func(c *Config) {}), "api", "", "encryption_key"},
+		{"scheduler with master+ring ok", build(func(c *Config) { c.Security.EncryptionKey = b64Key32 }), "scheduler", "", ""},
+		{"materializer needs a keyring", build(func(c *Config) {
+			c.Security.EncryptionKey = b64Key32
+			c.Security.Dispatch = DispatchConfig{}
+			c.Secrets.Enabled = false
+			c.Secrets.DispatchEnvelope = "enforced"
+		}), "all", "", "dispatch keyring"},
+		{"worker exact region ok (no master)", build(func(c *Config) {}), "worker", "geo2", ""},
+		{"agent exact region ok (no master)", build(func(c *Config) {}), "agent", "geo2", ""},
+		{"worker region mismatch fails", build(func(c *Config) {}), "worker", "geo9", "no security.dispatch keyring"},
+		{"worker default covers empty region", build(func(c *Config) {
+			c.Security.Dispatch = DispatchConfig{Default: &DispatchRegionKeys{Primary: DispatchKeyEntry{ID: "d1", Key: b64Key32B}}}
+		}), "worker", "", ""},
+		{"executor must not hold master", build(func(c *Config) { c.Security.EncryptionKey = b64Key32 }), "agent", "geo2", "must NOT hold the at-rest master"},
+		{"executor must not hold previous keys", build(func(c *Config) { c.Security.PreviousKeys = []string{b64Key32} }), "worker", "geo2", "must NOT hold the at-rest master"},
+		{"invalid role region fails even with default", build(func(c *Config) {
+			c.Security.Dispatch = DispatchConfig{Default: &DispatchRegionKeys{Primary: DispatchKeyEntry{ID: "d1", Key: b64Key32B}}}
+		}), "agent", "Bad Region", "not a valid region"},
+		{"unknown role fails", build(func(c *Config) {}), "controller", "", "unknown role"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.ValidateSecretsForRole(tc.role, tc.region)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want ok, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 
@@ -56,9 +119,16 @@ func TestDispatchEnvelopeModeStrict(t *testing.T) {
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "dispatch_envelope") {
 		t.Fatalf("bogus dispatch_envelope must fail, got %v", err)
 	}
+	// enforced promises ciphertext transport: without any keyring it is meaningless config.
 	c.Secrets.DispatchEnvelope = "enforced"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "dispatch keyring") {
+		t.Fatalf("enforced without keys must fail, got %v", err)
+	}
+	c.Security.Dispatch.Regions = map[string]DispatchRegionKeys{
+		"geo2": {Primary: DispatchKeyEntry{ID: "k1", Key: b64Key32B}},
+	}
 	if err := c.Validate(); err != nil {
-		t.Fatalf("enforced must validate: %v", err)
+		t.Fatalf("enforced with a keyring must validate: %v", err)
 	}
 }
 

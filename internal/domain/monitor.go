@@ -395,6 +395,11 @@ const DefaultRegion = "core"
 // regionSlug bounds region names (worker-pool labels).
 var regionSlug = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 
+// ValidRegion reports whether s is a well-formed region name. The domain owns this
+// rule (single owner); config/cli validation reuses it rather than duplicating the
+// pattern.
+func ValidRegion(s string) bool { return regionSlug.MatchString(s) }
+
 // maxTags / maxTagLen bound label sprawl.
 const (
 	maxTags   = 20

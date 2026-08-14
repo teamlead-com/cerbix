@@ -128,7 +128,8 @@ security:
 # (password_ref) instead of inline values. DISABLED by default — enabling requires
 # security.encryption_key AND a security.dispatch keyring (fail-fast at startup).
 # dispatch_envelope: "" (legacy) | "enforced" (credentials ride only encrypted
-# envelopes; required before *_ref monitors can dispatch — see the rollout runbook).
+# envelopes). enabled: true REQUIRES "enforced" — during an expand rollout ship the
+# keys first (enforced, enabled: false), flip enabled only after executors are v2.
 secrets:
   enabled: false
   dispatch_envelope: ""

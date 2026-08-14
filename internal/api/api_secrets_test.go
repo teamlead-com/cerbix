@@ -243,6 +243,10 @@ func TestSecretsAudit(t *testing.T) {
 		if e.OrgID != "o1" {
 			t.Fatalf("%s audit org = %q, want o1", action, e.OrgID)
 		}
+		// The actor travels store.SecretActor → in-tx audit row, not a handler recorder.
+		if e.ActorUserID != p1Editor.UserID || e.ViaToken {
+			t.Fatalf("%s audit actor = (%q, via_token=%t), want (%q, false)", action, e.ActorUserID, e.ViaToken, p1Editor.UserID)
+		}
 		if strings.Contains(e.Target, value) {
 			t.Fatalf("%s audit target contains the value: %q", action, e.Target)
 		}

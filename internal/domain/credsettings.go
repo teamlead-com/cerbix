@@ -28,6 +28,15 @@ const (
 // secretRefRe bounds `*_ref` values: they are inventory secret NAMES (slugs).
 var secretRefRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
+// ValidSecretName reports whether s is a valid inventory secret name (spec
+// func-secret-inventory §4.1). The domain is the single owner of the slug rule:
+// `*_ref` settings values and the store's name validation both resolve to this
+// one regexp, so they can never drift apart.
+func ValidSecretName(s string) bool { return secretRefRe.MatchString(s) }
+
+// SecretNamePattern exposes the slug rule's source for error messages.
+func SecretNamePattern() string { return secretRefRe.String() }
+
 // Field bounds (spec §4.2).
 const (
 	maxCredFieldLen = 256  // username, database

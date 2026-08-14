@@ -151,9 +151,9 @@ type Store interface {
 	EnqueueOutbox(ctx context.Context, topic string, payload []byte) error
 	RecordAudit(ctx context.Context, e domain.AuditEntry) error
 	ListAuditByOrg(ctx context.Context, orgID string, limit int) ([]domain.AuditEntry, error)
-	CreateProjectSecret(ctx context.Context, projectID, name, value string) (store.ProjectSecret, error)
-	UpdateProjectSecret(ctx context.Context, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error)
-	DeleteProjectSecret(ctx context.Context, projectID, name string) error
+	CreateProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name, value string) (store.ProjectSecret, error)
+	UpdateProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error)
+	DeleteProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string) error
 	ListProjectSecrets(ctx context.Context, projectID string) ([]store.ProjectSecret, error)
 }
 

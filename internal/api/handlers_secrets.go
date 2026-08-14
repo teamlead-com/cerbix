@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -35,6 +34,14 @@ type secretView struct {
 	UsedBy    secretUsedByView `json:"used_by"`
 }
 
+// secretActor carries the request's principal into the store, which writes the
+// audit row INSIDE the mutation transaction (atomic with the change, unlike the
+// best-effort post-commit h.audit path).
+func (h *Handler) secretActor(r *http.Request) store.SecretActor {
+	p, _ := h.principal(r)
+	return store.SecretActor{ActorUserID: p.UserID, ViaToken: p.ViaToken}
+}
+
 // secretsFeatureEnabled gates every inventory endpoint on the instance-wide
 // feature switch (spec §4.1: secrets.enabled=false → 404 feature_disabled).
 // Checked before authz on purpose: the switch is instance configuration, not
@@ -58,8 +65,7 @@ func (h *Handler) listSecrets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secrets, err := h.store.ListProjectSecrets(r.Context(), proj.ID)
-	if err != nil {
-		h.serverError(w, "list_secrets", err)
+	if h.writeSecretError(w, err) { // ErrNotFound: project vanished after authz
 		return
 	}
 	out := make([]secretView, 0, len(secrets))
@@ -92,11 +98,11 @@ func (h *Handler) createSecret(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	created, err := h.store.CreateProjectSecret(r.Context(), proj.ID, body.Name, body.Value)
+	// The store writes the secret.create audit row inside the mutation tx.
+	created, err := h.store.CreateProjectSecret(r.Context(), h.secretActor(r), proj.ID, body.Name, body.Value)
 	if h.writeSecretError(w, err) {
 		return
 	}
-	h.audit(r, proj.OrgID, "secret.create", created.Name)
 	h.logEvent(r, "secret_created", "project_id", proj.ID, "name", created.Name)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": created.ID, "name": created.Name, "created_at": created.CreatedAt,
@@ -126,16 +132,12 @@ func (h *Handler) updateSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "nothing to update: provide name and/or value")
 		return
 	}
-	renamed, rotated, repointed, err := h.store.UpdateProjectSecret(r.Context(), proj.ID, name, body.Name, body.Value)
+	// The store writes the secret.update audit row (renamed/rotated flags + re-point
+	// count) inside the mutation tx.
+	renamed, rotated, repointed, err := h.store.UpdateProjectSecret(r.Context(), h.secretActor(r), proj.ID, name, body.Name, body.Value)
 	if h.writeSecretError(w, err) {
 		return
 	}
-	target := name
-	if renamed {
-		target = name + " → " + *body.Name
-	}
-	h.audit(r, proj.OrgID, "secret.update",
-		fmt.Sprintf("%s · renamed=%t rotated=%t repointed=%d", target, renamed, rotated, repointed))
 	h.logEvent(r, "secret_updated", "project_id", proj.ID, "name", name,
 		"renamed", renamed, "rotated", rotated, "repointed", repointed)
 	w.WriteHeader(http.StatusNoContent)
@@ -152,10 +154,10 @@ func (h *Handler) deleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	if err := h.store.DeleteProjectSecret(r.Context(), proj.ID, name); h.writeSecretError(w, err) {
+	// The store writes the secret.delete audit row inside the mutation tx.
+	if err := h.store.DeleteProjectSecret(r.Context(), h.secretActor(r), proj.ID, name); h.writeSecretError(w, err) {
 		return
 	}
-	h.audit(r, proj.OrgID, "secret.delete", name)
 	h.logEvent(r, "secret_deleted", "project_id", proj.ID, "name", name)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -178,7 +180,7 @@ func (h *Handler) writeSecretError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, store.ErrSecretNameInvalid):
 		writeError(w, http.StatusBadRequest, "invalid secret name: must match ^[a-z][a-z0-9-]{0,62}$")
 	case errors.Is(err, store.ErrSecretValueInvalid):
-		writeError(w, http.StatusBadRequest, "invalid secret value: must be non-empty and at most 4096 UTF-8 bytes")
+		writeError(w, http.StatusBadRequest, "invalid secret value: must be non-empty valid UTF-8, at most 4096 bytes")
 	case errors.As(err, &inUse):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "secret_in_use", "count": inUse.Count})
 	case errors.As(err, &renamedInUse):

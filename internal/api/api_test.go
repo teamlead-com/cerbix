@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/teamlead-com/cerbix/internal/api"
 	"github.com/teamlead-com/cerbix/internal/auth"
@@ -1753,8 +1754,26 @@ func (f *fakeStore) ReplaceRecoveryCodes(_ context.Context, userID string, hashe
 }
 
 // Project secret inventory (map-backed, honoring the store's typed errors).
+// Mutations record their audit entry themselves, mirroring the real store's
+// audit-in-tx behavior (spec §5): the handler no longer writes secret audit rows.
 
 var fakeSecretNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
+func fakeSecretValueInvalid(value string) bool {
+	return len(value) == 0 || len(value) > 4096 || !utf8.ValidString(value)
+}
+
+// recordSecretAudit is the fake's stand-in for the store-level in-tx audit row.
+func (f *fakeStore) recordSecretAudit(projectID string, actor store.SecretActor, action, target string) {
+	org := ""
+	if p, ok := f.projects[projectID]; ok {
+		org = p.OrgID
+	}
+	f.audit = append([]domain.AuditEntry{{
+		ID: "au-new", OrgID: org, ActorUserID: actor.ActorUserID, ViaToken: actor.ViaToken,
+		Action: action, Target: target,
+	}}, f.audit...)
+}
 
 func (f *fakeStore) projectSecrets(projectID string) map[string]*fakeSecret {
 	if f.secrets == nil {
@@ -1771,11 +1790,11 @@ func (f *fakeStore) secretRefCounts(projectID, name string) (ui, file int) {
 	return f.secretRefs[key], f.secretFileRefs[key]
 }
 
-func (f *fakeStore) CreateProjectSecret(_ context.Context, projectID, name, value string) (store.ProjectSecret, error) {
+func (f *fakeStore) CreateProjectSecret(_ context.Context, actor store.SecretActor, projectID, name, value string) (store.ProjectSecret, error) {
 	if !fakeSecretNameRe.MatchString(name) {
 		return store.ProjectSecret{}, store.ErrSecretNameInvalid
 	}
-	if strings.TrimSpace(value) == "" || len(value) > 4096 {
+	if fakeSecretValueInvalid(value) {
 		return store.ProjectSecret{}, store.ErrSecretValueInvalid
 	}
 	if _, ok := f.projects[projectID]; !ok {
@@ -1791,16 +1810,17 @@ func (f *fakeStore) CreateProjectSecret(_ context.Context, projectID, name, valu
 	f.secretSeq++
 	s := &fakeSecret{id: fmt.Sprintf("sec-%d", f.secretSeq), value: value, createdAt: time.Unix(1700000000, 0)}
 	ps[name] = s
+	f.recordSecretAudit(projectID, actor, "secret.create", name)
 	return store.ProjectSecret{ID: s.id, Name: name, CreatedAt: s.createdAt}, nil
 }
 
-func (f *fakeStore) UpdateProjectSecret(_ context.Context, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error) {
+func (f *fakeStore) UpdateProjectSecret(_ context.Context, actor store.SecretActor, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error) {
 	ps := f.projectSecrets(projectID)
 	s, ok := ps[name]
 	if !ok {
 		return false, false, 0, store.ErrNotFound
 	}
-	if newValue != nil && (strings.TrimSpace(*newValue) == "" || len(*newValue) > 4096) {
+	if newValue != nil && fakeSecretValueInvalid(*newValue) {
 		return false, false, 0, store.ErrSecretValueInvalid
 	}
 	if newName != nil && !fakeSecretNameRe.MatchString(*newName) {
@@ -1831,10 +1851,18 @@ func (f *fakeStore) UpdateProjectSecret(_ context.Context, projectID, name strin
 		}
 		renamed = true
 	}
+	if renamed || rotated {
+		target := name
+		if renamed {
+			target = name + " → " + *newName
+		}
+		f.recordSecretAudit(projectID, actor, "secret.update",
+			fmt.Sprintf("%s · renamed=%t rotated=%t repointed=%d", target, renamed, rotated, repointed))
+	}
 	return renamed, rotated, repointed, nil
 }
 
-func (f *fakeStore) DeleteProjectSecret(_ context.Context, projectID, name string) error {
+func (f *fakeStore) DeleteProjectSecret(_ context.Context, actor store.SecretActor, projectID, name string) error {
 	ps := f.projectSecrets(projectID)
 	if _, ok := ps[name]; !ok {
 		return store.ErrNotFound
@@ -1843,6 +1871,7 @@ func (f *fakeStore) DeleteProjectSecret(_ context.Context, projectID, name strin
 		return store.SecretInUseError{Count: ui + file}
 	}
 	delete(ps, name)
+	f.recordSecretAudit(projectID, actor, "secret.delete", name)
 	return nil
 }
 

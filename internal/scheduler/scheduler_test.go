@@ -137,7 +137,7 @@ func (f *fakeStore) EvaluateRegionWorkerAlerts(context.Context, map[string]bool,
 func (f *fakeStore) AdvanceEscalations(context.Context) (int, error)             { return 0, nil }
 func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error   { return nil }
 func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int) error { return nil }
-func (f *fakeStore) LiveCredentialReadyAgentRegions(context.Context, time.Duration) (map[string]bool, error) {
+func (f *fakeStore) LiveCredentialReadyAgentRegions(context.Context, time.Duration, int) (map[string]bool, error) {
 	return map[string]bool{}, nil
 }
 func (f *fakeStore) PurgeExpiredPullJobs(context.Context) (int, error) { return 0, nil }

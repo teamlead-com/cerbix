@@ -125,19 +125,19 @@ func TestCredentialReadyAgentRegionIsExistential(t *testing.T) {
 	if err := st.RecordAgentCapabilities(ctx, "secure", "legacy", 0, false); err != nil {
 		t.Fatal(err)
 	}
-	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute); err != nil || ready["secure"] {
+	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute, 1); err != nil || ready["secure"] {
 		t.Fatalf("legacy-only region reported ready: %#v err=%v", ready, err)
 	}
 	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-degraded", 1, false); err != nil {
 		t.Fatal(err)
 	}
-	if ready, _ := st.LiveCredentialReadyAgentRegions(ctx, time.Minute); ready["secure"] {
+	if ready, _ := st.LiveCredentialReadyAgentRegions(ctx, time.Minute, 1); ready["secure"] {
 		t.Fatalf("degraded v2 agent reported ready: %#v", ready)
 	}
 	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-ready", 1, true); err != nil {
 		t.Fatal(err)
 	}
-	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute); err != nil || !ready["secure"] {
+	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute, 1); err != nil || !ready["secure"] {
 		t.Fatalf("ready v2 agent not discovered: %#v err=%v", ready, err)
 	}
 }

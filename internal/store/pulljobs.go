@@ -20,6 +20,12 @@ func (s *Store) EnqueuePullJobV2(ctx context.Context, region string, payload []b
 	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 2)
 }
 
+// EnqueuePullJobV3 enqueues on the carrier generation that carries envelope v2. It is used
+// only for a region whose executors have declared capability 2 (§4.7, D-0160).
+func (s *Store) EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds int) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 3)
+}
+
 func (s *Store) enqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, protocolVersion int) error {
 	if ttlSeconds <= 0 {
 		ttlSeconds = 60
@@ -69,6 +75,11 @@ func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeco
 // two independent claims each honour `max` separately and over-lease.
 func (s *Store) ClaimPullJobsV2(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
 	return s.claimPullJobs(ctx, region, max, leaseSeconds, 2)
+}
+
+// ClaimPullJobsV3 serves the capability-2 endpoint: every generation up to 3.
+func (s *Store) ClaimPullJobsV3(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 3)
 }
 
 // claimPullJobs atomically LEASES up to max claimable jobs for a region, of any generation
@@ -187,18 +198,24 @@ func (s *Store) RecordAgentCapabilities(ctx context.Context, region, agentID str
 	return nil
 }
 
-// LiveCredentialReadyAgentRegions is existential and never vacuous: a region appears
-// only when at least one recent agent reasserted v2 capability and key readiness.
-func (s *Store) LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration) (map[string]bool, error) {
+// LiveCredentialReadyAgentRegions is existential and never vacuous: a region appears only
+// when at least one recent agent reasserted key readiness AND a credential-envelope
+// capability of at least minCapability. The floor is a parameter because capability is
+// GENERATIONAL: an executor that can only open envelope v1 is not evidence of readiness
+// for a region core is about to emit envelope v2 into (§4.7, D-0160).
+func (s *Store) LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error) {
 	secs := int(within.Seconds())
 	if secs <= 0 {
 		secs = 60
+	}
+	if minCapability < 1 {
+		minCapability = 1
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT region FROM agent_heartbeats
 		  WHERE seen_at > now() - make_interval(secs => $1)
 		    AND credential_ready
-		    AND COALESCE((capabilities->>'credential_envelope')::int, 0) >= 1`, secs)
+		    AND COALESCE((capabilities->>'credential_envelope')::int, 0) >= $2`, secs, minCapability)
 	if err != nil {
 		return nil, fmt.Errorf("store: live credential-ready agent regions: %w", err)
 	}

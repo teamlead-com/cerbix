@@ -459,3 +459,62 @@ func TestAgentTestClaimRespectsCapabilityBoundary(t *testing.T) {
 		t.Fatalf("capable endpoint claimed generations %v, want [1 2]", got)
 	}
 }
+
+// TestAgentClaimCapabilityIsGenerational proves the barrier holds at the newest carrier:
+// generation-3 rows are reachable only by a claim that declares capability 2, and a
+// capability-1 agent — which is a legitimate mid-rollout state, not an attack — must never
+// be handed one. A claim may declare MORE than an endpoint needs; never less.
+func TestAgentClaimCapabilityIsGenerational(t *testing.T) {
+	rows := func() map[string][]fakePullRow {
+		return map[string][]fakePullRow{"secure": {
+			{payload: []byte(`{"Monitor":{"id":"plain"}}`), generation: 1},
+			{payload: []byte(`{"Monitor":{"id":"envelope-v1"}}`), generation: 2},
+			{payload: []byte(`{"Monitor":{"id":"envelope-v2"}}`), generation: 3},
+		}}
+	}
+	claim := func(fs *fakeStore, path, capability string) []int {
+		t.Helper()
+		h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentToken("s3cr3t").AgentRouter()
+		headers := map[string]string{}
+		if capability != "" {
+			headers["X-Cerbix-Credential-Envelope"] = capability
+		}
+		rec := agentReqWithHeaders(h, http.MethodGet, path, "s3cr3t", "", headers)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s (capability %q) status %d: %s", path, capability, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			ProtocolVersions []int `json:"protocol_versions"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out.ProtocolVersions
+	}
+
+	fs := seededStore()
+	fs.pullJobs = rows()
+	if got := claim(fs, "/api/v1/agent/v3/jobs?region=secure", "2"); len(got) != 3 {
+		t.Fatalf("capability-2 claim returned generations %v, want all three", got)
+	}
+
+	fs = seededStore()
+	fs.pullJobs = rows()
+	got := claim(fs, "/api/v1/agent/v2/jobs?region=secure", "1")
+	for _, generation := range got {
+		if generation > 2 {
+			t.Fatalf("capability-1 claim reached generation %d: %v", generation, got)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("capability-1 claim returned %v, want the two older generations", got)
+	}
+
+	// A claim that declares less than the endpoint requires is refused outright.
+	h := api.New(seededStore(), slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentToken("s3cr3t").AgentRouter()
+	rec := agentReqWithHeaders(h, http.MethodGet, "/api/v1/agent/v3/jobs?region=secure", "s3cr3t", "",
+		map[string]string{"X-Cerbix-Credential-Envelope": "1"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("understated capability accepted on the generation-3 endpoint: %d", rec.Code)
+	}
+}

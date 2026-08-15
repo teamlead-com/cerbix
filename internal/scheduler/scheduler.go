@@ -39,7 +39,7 @@ type Store interface {
 	AdvanceEscalations(ctx context.Context) (fired int, err error)
 	EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds int) error
 	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds int) error
-	LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration) (map[string]bool, error)
+	LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error)
 	PurgeExpiredPullJobs(ctx context.Context) (int, error)
 	PurgeExpiredPullTests(ctx context.Context) (int, error)
 	PurgeStaleAgentHeartbeats(ctx context.Context, olderThan time.Duration) (int, error)
@@ -590,7 +590,9 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 			credentialReadyPull := map[string]bool{}
 			credentialReadyAMQP := map[string]bool{}
 			if len(regions) > 0 {
-				if ready, err := s.store.LiveCredentialReadyAgentRegions(ctx, 45*time.Second); err != nil {
+				// Capability 1 is the floor for the generation-2 carrier core emits today; the
+				// floor rises with the emitted generation, never independently of it.
+				if ready, err := s.store.LiveCredentialReadyAgentRegions(ctx, 45*time.Second, dispatch.EnvelopeV1); err != nil {
 					s.logger.Warn("credential_agent_capability_lookup_failed", "error", err.Error())
 				} else {
 					credentialReadyPull = ready

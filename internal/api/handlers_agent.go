@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -35,10 +36,12 @@ func (h *Handler) AgentRouter() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/agent/jobs", h.agentAuth(h.agentJobs))
 	mux.HandleFunc("GET /api/v1/agent/v2/jobs", h.agentAuth(h.agentJobsV2))
+	mux.HandleFunc("GET /api/v1/agent/v3/jobs", h.agentAuth(h.agentJobsV3))
 	mux.HandleFunc("POST /api/v1/agent/results", h.agentAuth(h.agentResults))
 	mux.HandleFunc("POST /api/v1/agent/backfill", h.agentAuth(h.agentBackfill))
 	mux.HandleFunc("GET /api/v1/agent/tests", h.agentAuth(h.agentTests))
 	mux.HandleFunc("GET /api/v1/agent/v2/tests", h.agentAuth(h.agentTestsV2))
+	mux.HandleFunc("GET /api/v1/agent/v3/tests", h.agentAuth(h.agentTestsV3))
 	mux.HandleFunc("POST /api/v1/agent/test-results", h.agentAuth(h.agentTestResult))
 	mux.HandleFunc("POST /api/v1/agent/heartbeat", h.agentAuth(h.agentHeartbeat))
 	return maxBytes(mux, agentMaxBody)
@@ -105,11 +108,33 @@ func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) agentJobsV2(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-Cerbix-Credential-Envelope") != "1" {
-		writeError(w, http.StatusBadRequest, "credential_envelope capability 1 is required on every v2 claim")
+	if !requireEnvelopeCapability(w, r, 1) {
 		return
 	}
 	h.agentJobsProtocol(w, r, 2)
+}
+
+// agentJobsV3 serves the carrier generation that carries envelope v2. Capability is
+// re-asserted on EVERY claim, not taken from a heartbeat: the heartbeat says what an agent
+// was a moment ago, the header says what it is for this request (§4.7, D-0160).
+func (h *Handler) agentJobsV3(w http.ResponseWriter, r *http.Request) {
+	if !requireEnvelopeCapability(w, r, 2) {
+		return
+	}
+	h.agentJobsProtocol(w, r, 3)
+}
+
+// requireEnvelopeCapability enforces the per-claim capability declaration. A claim may
+// declare MORE than the endpoint needs (a capability-2 agent polling the older endpoint
+// during a rollout is legitimate), never less.
+func requireEnvelopeCapability(w http.ResponseWriter, r *http.Request, minimum int) bool {
+	declared, err := strconv.Atoi(r.Header.Get("X-Cerbix-Credential-Envelope"))
+	if err != nil || declared < minimum {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("credential_envelope capability %d is required on every claim to this endpoint", minimum))
+		return false
+	}
+	return true
 }
 
 func (h *Handler) agentJobsProtocol(w http.ResponseWriter, r *http.Request, protocolVersion int) {
@@ -131,8 +156,11 @@ func (h *Handler) agentJobsProtocol(w http.ResponseWriter, r *http.Request, prot
 		max = maxAgentClaimBatch
 	}
 	claim := h.store.ClaimPullJobs
-	if protocolVersion == 2 {
+	switch protocolVersion {
+	case 2:
 		claim = h.store.ClaimPullJobsV2
+	case 3:
+		claim = h.store.ClaimPullJobsV3
 	}
 	claimed, err := claim(r.Context(), region, max, pullJobLeaseSeconds)
 	if err != nil {
@@ -272,11 +300,17 @@ func (h *Handler) agentTests(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) agentTestsV2(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-Cerbix-Credential-Envelope") != "1" {
-		writeError(w, http.StatusBadRequest, "credential_envelope capability 1 is required on every v2 claim")
+	if !requireEnvelopeCapability(w, r, 1) {
 		return
 	}
 	h.agentTestsProtocol(w, r, 2)
+}
+
+func (h *Handler) agentTestsV3(w http.ResponseWriter, r *http.Request) {
+	if !requireEnvelopeCapability(w, r, 2) {
+		return
+	}
+	h.agentTestsProtocol(w, r, 3)
 }
 
 func (h *Handler) agentTestsProtocol(w http.ResponseWriter, r *http.Request, protocolVersion int) {
@@ -286,8 +320,11 @@ func (h *Handler) agentTestsProtocol(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 	claim := h.store.ClaimPullTest
-	if protocolVersion == 2 {
+	switch protocolVersion {
+	case 2:
 		claim = h.store.ClaimPullTestV2
+	case 3:
+		claim = h.store.ClaimPullTestV3
 	}
 	id, payload, rowProtocolVersion, ok, err := claim(r.Context(), region)
 	if err != nil {

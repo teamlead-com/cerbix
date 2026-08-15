@@ -57,7 +57,7 @@ func TestCredentialHealthDegradesAndRecovers(t *testing.T) {
 	claim := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/agent/v2/jobs":
+		case "/api/v1/agent/v3/jobs":
 			body, _ := json.Marshal(jobs[claim])
 			claim++
 			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []json.RawMessage{body}, "tokens": []string{"lease"}})
@@ -106,7 +106,7 @@ func TestFutureCredentialEnvelopeIsProbeErrorWithoutReadinessDowngrade(t *testin
 	var result domain.Heartbeat
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/agent/v2/jobs":
+		case "/api/v1/agent/v3/jobs":
 			body, _ := json.Marshal(job)
 			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []json.RawMessage{body}, "tokens": []string{"lease"}})
 		case "/api/v1/agent/results":
@@ -317,7 +317,7 @@ func TestCapableAgentExecutesMixedGenerationClaim(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/agent/v2/jobs":
+		case "/api/v1/agent/v3/jobs":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jobs":              []json.RawMessage{plainJob, credJob},
 				"tokens":            []string{"lease-plain", "lease-cred"},
@@ -363,7 +363,7 @@ func TestEnvelopeOnGeneration1CarrierIsRejectedBeforeProbing(t *testing.T) {
 	var results []domain.Heartbeat
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/agent/v2/jobs":
+		case "/api/v1/agent/v3/jobs":
 			// The row is stamped generation 1 by the server while its body claims v2.
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jobs":              []json.RawMessage{job},
@@ -462,7 +462,7 @@ func TestClaimResponseDesyncIsRefusedNotGuessed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
-				case "/api/v1/agent/v2/jobs":
+				case "/api/v1/agent/v3/jobs":
 					_ = json.NewEncoder(w).Encode(tc.body)
 				case "/api/v1/agent/results":
 					w.WriteHeader(http.StatusOK)
@@ -508,7 +508,7 @@ func TestEnvelopeOnGeneration1TestCarrierIsRejectedBeforeProbing(t *testing.T) {
 	var posted domain.Heartbeat
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/agent/v2/tests":
+		case "/api/v1/agent/v3/tests":
 			_ = json.NewEncoder(w).Encode(map[string]any{"test": map[string]any{
 				"id": "t1", "job": json.RawMessage(job), "protocol_version": 1,
 			}})
@@ -550,7 +550,7 @@ func TestTestClaimStampOutsideRangeIsRefused(t *testing.T) {
 	}
 	job, _ := json.Marshal(dispatch.CheckJob{Monitor: domain.Monitor{ID: "m1", Type: domain.MonitorHTTP}})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/agent/v2/tests" {
+		if r.URL.Path == "/api/v1/agent/v3/tests" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"test": map[string]any{
 				"id": "t1", "job": json.RawMessage(job), "protocol_version": 99,
 			}})
@@ -609,7 +609,7 @@ func TestTestClaimStampPresenceContract(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
-				case "/api/v1/agent/v2/tests":
+				case "/api/v1/agent/v3/tests":
 					_ = json.NewEncoder(w).Encode(map[string]any{"test": tc.test})
 				case "/api/v1/agent/test-results":
 					w.WriteHeader(http.StatusOK)

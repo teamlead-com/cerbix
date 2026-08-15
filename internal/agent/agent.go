@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -184,17 +185,14 @@ func (a *Agent) pollTest(ctx context.Context) {
 }
 
 func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, protocolVersion int, ok bool) {
-	path := "/api/v1/agent/tests"
-	if a.credentials != nil {
-		path = "/api/v1/agent/v2/tests"
-	}
+	path := a.claimPath("tests")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.serverURL+path+"?region="+a.region, nil)
 	if err != nil {
 		return "", nil, 0, false
 	}
 	a.auth(req)
-	if a.credentials != nil {
-		req.Header.Set("X-Cerbix-Credential-Envelope", "1")
+	if capability := a.envelopeCapability(); capability > 0 {
+		req.Header.Set("X-Cerbix-Credential-Envelope", strconv.Itoa(capability))
 	}
 	resp, err := a.http.Do(req)
 	if err != nil {
@@ -362,18 +360,15 @@ func (a *Agent) flushBuffer(ctx context.Context) {
 }
 
 func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []string, protocolVersions []int, err error) {
-	path := "/api/v1/agent/jobs"
-	if a.credentials != nil {
-		path = "/api/v1/agent/v2/jobs"
-	}
+	path := a.claimPath("jobs")
 	url := fmt.Sprintf("%s%s?region=%s&max=%d", a.serverURL, path, a.region, claimBatch)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	a.auth(req)
-	if a.credentials != nil {
-		req.Header.Set("X-Cerbix-Credential-Envelope", "1")
+	if capability := a.envelopeCapability(); capability > 0 {
+		req.Header.Set("X-Cerbix-Credential-Envelope", strconv.Itoa(capability))
 	}
 	resp, err := a.http.Do(req)
 	if err != nil {
@@ -468,13 +463,42 @@ func (a *Agent) resolveTestGeneration(stamped json.RawMessage) (int, error) {
 	return *generation, nil
 }
 
-// claimGeneration is the generation of the claim endpoint this agent polls, which follows
-// from its own capability — not from anything a server or a payload asserts.
-func (a *Agent) claimGeneration() int {
-	if a.credentials != nil {
-		return dispatch.ProtocolV2
+// envelopeCapability is the highest envelope generation this agent can open.
+func (a *Agent) envelopeCapability() int {
+	if a.credentials == nil {
+		return 0
 	}
-	return dispatch.ProtocolV1
+	return dispatch.EnvelopeV2
+}
+
+// claimGeneration is the carrier generation of the claim endpoint this agent polls, which
+// follows from its own capability — not from anything a server or a payload asserts. A
+// capability-2 agent polls the generation-3 endpoint, whose claim also returns every older
+// generation: the barrier stops an incapable executor from receiving a NEWER carrier, and
+// must never stop a capable one from receiving an older.
+func (a *Agent) claimGeneration() int {
+	switch a.envelopeCapability() {
+	case dispatch.EnvelopeV2:
+		return dispatch.ProtocolV3
+	case dispatch.EnvelopeV1:
+		return dispatch.ProtocolV2
+	default:
+		return dispatch.ProtocolV1
+	}
+}
+
+// claimPath and capabilityHeader keep the endpoint and the declared capability in step:
+// they are derived from the same capability, so a future generation cannot update one and
+// forget the other.
+func (a *Agent) claimPath(kind string) string {
+	switch a.claimGeneration() {
+	case dispatch.ProtocolV3:
+		return "/api/v1/agent/v3/" + kind
+	case dispatch.ProtocolV2:
+		return "/api/v1/agent/v2/" + kind
+	default:
+		return "/api/v1/agent/" + kind
+	}
 }
 
 // postResults reports live results and acks (via ack tokens) the claimed jobs they
@@ -518,13 +542,14 @@ func (a *Agent) postHeartbeats(ctx context.Context, path string, results []domai
 
 func (a *Agent) heartbeat(ctx context.Context) {
 	url := fmt.Sprintf("%s/api/v1/agent/heartbeat?region=%s&agent_id=%s", a.serverURL, a.region, a.agentID)
-	capability := 0
-	if a.credentials != nil {
-		capability = 1
-	}
+	// The declared capability is the highest ENVELOPE generation this agent can open, and
+	// core uses it to decide which carrier generation it may emit into this region.
+	// Declaring it generationally rather than as a boolean is what keeps a rollout from
+	// handing an agent a payload it cannot open (§4.7, D-0160).
+	capability := a.envelopeCapability()
 	body, err := json.Marshal(map[string]any{
 		"capabilities":     map[string]int{"credential_envelope": capability},
-		"credential_ready": capability == 1 && a.credentialReady.Load(),
+		"credential_ready": capability > 0 && a.credentialReady.Load(),
 	})
 	if err != nil {
 		return

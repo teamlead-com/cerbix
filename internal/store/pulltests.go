@@ -15,6 +15,11 @@ func (s *Store) EnqueuePullTestV2(ctx context.Context, region string, payload []
 	return s.enqueuePullTest(ctx, region, payload, ttlSeconds, 2)
 }
 
+// EnqueuePullTestV3 enqueues on the carrier generation that carries envelope v2.
+func (s *Store) EnqueuePullTestV3(ctx context.Context, region string, payload []byte, ttlSeconds int) (string, error) {
+	return s.enqueuePullTest(ctx, region, payload, ttlSeconds, 3)
+}
+
 func (s *Store) enqueuePullTest(ctx context.Context, region string, payload []byte, ttlSeconds, protocolVersion int) (string, error) {
 	if ttlSeconds <= 0 {
 		ttlSeconds = 20
@@ -42,6 +47,11 @@ func (s *Store) ClaimPullTest(ctx context.Context, region string) (id string, pa
 // test-connection broken for ordinary monitors in exactly the same way (D-0160).
 func (s *Store) ClaimPullTestV2(ctx context.Context, region string) (id string, payload []byte, protocolVersion int, ok bool, err error) {
 	return s.claimPullTest(ctx, region, 2)
+}
+
+// ClaimPullTestV3 serves the capability-2 endpoint: every generation up to 3.
+func (s *Store) ClaimPullTestV3(ctx context.Context, region string) (id string, payload []byte, protocolVersion int, ok bool, err error) {
+	return s.claimPullTest(ctx, region, 3)
 }
 
 // claimPullTest claims one unclaimed, unexpired test of any generation up to

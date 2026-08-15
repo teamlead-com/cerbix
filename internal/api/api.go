@@ -87,9 +87,11 @@ type Store interface {
 	DeleteEscalationPolicy(ctx context.Context, id string) error
 	ClaimPullJobs(ctx context.Context, region string, max, leaseSeconds int) ([]store.PullJob, error)
 	ClaimPullJobsV2(ctx context.Context, region string, max, leaseSeconds int) ([]store.PullJob, error)
+	ClaimPullJobsV3(ctx context.Context, region string, max, leaseSeconds int) ([]store.PullJob, error)
 	AckPullJobs(ctx context.Context, tokens []string) error
 	ClaimPullTest(ctx context.Context, region string) (id string, payload []byte, protocolVersion int, ok bool, err error)
 	ClaimPullTestV2(ctx context.Context, region string) (id string, payload []byte, protocolVersion int, ok bool, err error)
+	ClaimPullTestV3(ctx context.Context, region string) (id string, payload []byte, protocolVersion int, ok bool, err error)
 	SavePullTestResult(ctx context.Context, id, region string, result []byte) error
 	RecordAgentHeartbeat(ctx context.Context, region, agentID string) error
 	RecordAgentCapabilities(ctx context.Context, region, agentID string, credentialEnvelope int, credentialReady bool) error

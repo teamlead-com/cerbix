@@ -615,6 +615,14 @@ func (f *fakeStore) ClaimPullJobsV2(ctx context.Context, region string, max, lea
 	return f.claimPullJobsUpTo(ctx, region, 2)
 }
 
+func (f *fakeStore) ClaimPullJobsV3(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 3)
+}
+
+func (f *fakeStore) ClaimPullTestV3(ctx context.Context, region string) (string, []byte, int, bool, error) {
+	return f.claimPullTestUpTo(ctx, region, 3)
+}
+
 func (f *fakeStore) claimPullJobsUpTo(_ context.Context, region string, maxGeneration int) ([]store.PullJob, error) {
 	if f.pullJobs == nil {
 		return nil, nil

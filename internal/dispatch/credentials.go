@@ -15,6 +15,11 @@ const (
 	ProtocolV1 = 1
 	ProtocolV2 = 2
 	EnvelopeV1 = 1
+	// EnvelopeV2 binds the execution body and the field set in addition to identity (r7).
+	// It is a NEW generation rather than a redefinition of v1: silently changing what v1
+	// binds would break a rolling upgrade in both directions — an old executor would fail
+	// every new job, and a new one could not open queued old envelopes.
+	EnvelopeV2 = 2
 )
 
 // CredentialEnvelope is the ciphertext-only v2 transport DTO. It is never persisted
@@ -62,39 +67,98 @@ func NewCredentialKeyring(primary CredentialKeyMaterial, previous []CredentialKe
 	return r, nil
 }
 
-func envelopeAAD(e CredentialEnvelope, monitorID string, revision int64, field string) []byte {
-	return secret.CanonicalAAD(
+// envelopeAAD builds the additional authenticated data for one field.
+//
+// Generation 1 binds identity only: (v, region, key_id, monitor_id, execution_revision,
+// field, job_id). Generation 2 appends the two digests that bind the credential to WHAT
+// the job asks it to do and to which field set it belongs — the r7 amendment. The digests
+// enter as RAW 32-byte SHA-256 output, never hex and never base64: one encoding, chosen
+// here, so the two sides cannot each be self-consistent and mutually incompatible.
+//
+// v1 remains openable for as long as v1 emission is permitted, so draining queued and
+// dead-lettered payloads is not a flag day.
+func envelopeAAD(e CredentialEnvelope, monitorID string, revision int64, field string, binding executionBinding) []byte {
+	parts := []string{
 		strconv.Itoa(e.V), e.Region, e.KeyID, monitorID,
 		strconv.FormatInt(revision, 10), field, e.JobID,
-	)
+	}
+	if e.V >= EnvelopeV2 {
+		parts = append(parts, string(binding.fieldSet[:]), string(binding.body[:]))
+	}
+	return secret.CanonicalAAD(parts...)
 }
 
-// Seal binds each plaintext field to the envelope/monitor/job context. The caller owns
-// and wipes the input byte buffers after Seal returns.
-func (r *CredentialKeyring) Seal(region, jobID, monitorID string, revision int64, fields map[string][]byte) (*CredentialEnvelope, error) {
+// executionBinding carries the generation-2 digests. It is computed once per envelope and
+// is never transmitted: both sides derive it from what they hold, which is the whole point.
+type executionBinding struct {
+	fieldSet [32]byte
+	body     [32]byte
+}
+
+// SealContext is the dispatch context a credential is bound to. EnvelopeVersion is an
+// explicit decision at each emit site rather than a package default: which generation a
+// region is emitting is a rollout choice, and a silent default is how a wire change
+// becomes a surprise.
+type SealContext struct {
+	EnvelopeVersion int
+	Region          string
+	JobID           string
+	MonitorID       string
+	Revision        int64
+	// Body is the execution body that will be transmitted alongside this envelope. From
+	// generation 2 its digest is bound into every field's AAD, so the credential cannot be
+	// replayed against a different target, type or transport.
+	Body domain.Monitor
+}
+
+// Seal binds each plaintext field to the dispatch context. The caller owns and wipes the
+// input byte buffers after Seal returns.
+func (r *CredentialKeyring) Seal(sc SealContext, fields map[string][]byte) (*CredentialEnvelope, error) {
 	if r == nil {
 		return nil, errors.New("dispatch: no credential keyring")
 	}
-	if region == "" || jobID == "" || monitorID == "" || revision < 1 {
+	if sc.Region == "" || sc.JobID == "" || sc.MonitorID == "" || sc.Revision < 1 {
 		return nil, errors.New("dispatch: incomplete credential envelope context")
 	}
-	e := &CredentialEnvelope{V: EnvelopeV1, Region: region, KeyID: r.primaryID, JobID: jobID, Fields: make(map[string]string, len(fields))}
+	if sc.EnvelopeVersion != EnvelopeV1 && sc.EnvelopeVersion != EnvelopeV2 {
+		return nil, fmt.Errorf("dispatch: unsupported credential envelope version %d", sc.EnvelopeVersion)
+	}
+	e := &CredentialEnvelope{
+		V: sc.EnvelopeVersion, Region: sc.Region, KeyID: r.primaryID, JobID: sc.JobID,
+		Fields: make(map[string]string, len(fields)),
+	}
 	keys := make([]string, 0, len(fields))
 	for field := range fields {
-		keys = append(keys, field)
-	}
-	sort.Strings(keys)
-	for _, field := range keys {
 		if field == "" {
 			return nil, errors.New("dispatch: empty credential field name")
 		}
-		ciphertext, err := r.byID[r.primaryID].EncryptBytes(fields[field], envelopeAAD(*e, monitorID, revision, field))
+		keys = append(keys, field)
+	}
+	sort.Strings(keys)
+	binding, err := bindingFor(e.V, sc.Body, keys)
+	if err != nil {
+		return nil, err
+	}
+	for _, field := range keys {
+		ciphertext, err := r.byID[r.primaryID].EncryptBytes(fields[field], envelopeAAD(*e, sc.MonitorID, sc.Revision, field, binding))
 		if err != nil {
 			return nil, fmt.Errorf("dispatch: seal credential field %q: %w", field, err)
 		}
 		e.Fields[field] = ciphertext
 	}
 	return e, nil
+}
+
+// bindingFor computes the generation-2 digests, or nothing for generation 1.
+func bindingFor(version int, body domain.Monitor, sortedFields []string) (executionBinding, error) {
+	if version < EnvelopeV2 {
+		return executionBinding{}, nil
+	}
+	digest, err := ExecutionBodyDigest(body)
+	if err != nil {
+		return executionBinding{}, fmt.Errorf("dispatch: execution binding: %w", err)
+	}
+	return executionBinding{fieldSet: FieldSetDigest(sortedFields), body: digest}, nil
 }
 
 // Open authenticates and decrypts a v2 job. It returns caller-owned byte buffers; callers
@@ -104,7 +168,7 @@ func (r *CredentialKeyring) Open(job CheckJob) (map[string][]byte, error) {
 	if e == nil {
 		return nil, errors.New("dispatch: missing credential envelope")
 	}
-	if e.V != EnvelopeV1 {
+	if e.V != EnvelopeV1 && e.V != EnvelopeV2 {
 		return nil, fmt.Errorf("dispatch: unsupported credential envelope version %d", e.V)
 	}
 	if job.ProtocolVersion != ProtocolV2 {
@@ -117,9 +181,21 @@ func (r *CredentialKeyring) Open(job CheckJob) (map[string][]byte, error) {
 	if cipher == nil {
 		return nil, fmt.Errorf("dispatch: unknown credential key id %q", e.KeyID)
 	}
+	// The field-name set is derived from what ARRIVED, so truncating a multi-field envelope
+	// changes every remaining field's AAD and fails authentication — not merely policy.
+	names := make([]string, 0, len(e.Fields))
+	for field := range e.Fields {
+		names = append(names, field)
+	}
+	sort.Strings(names)
+	binding, err := bindingFor(e.V, job.Monitor, names)
+	if err != nil {
+		return nil, err
+	}
 	fields := make(map[string][]byte, len(e.Fields))
-	for field, ciphertext := range e.Fields {
-		plain, err := cipher.DecryptBytes(ciphertext, envelopeAAD(*e, job.Monitor.ID, job.Monitor.ExecutionRevision, field))
+	for _, field := range names {
+		ciphertext := e.Fields[field]
+		plain, err := cipher.DecryptBytes(ciphertext, envelopeAAD(*e, job.Monitor.ID, job.Monitor.ExecutionRevision, field, binding))
 		if err != nil {
 			WipeCredentialFields(fields)
 			return nil, fmt.Errorf("dispatch: decrypt credential field %q: %w", field, err)

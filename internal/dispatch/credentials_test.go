@@ -25,7 +25,7 @@ func TestCredentialEnvelopeRoundTripAndAADTransplants(t *testing.T) {
 		ID: "11111111-1111-1111-1111-111111111111", Region: "geo1", ExecutionRevision: 7,
 		Config: map[string]string{"password_ref": "db-password"},
 	}}
-	envelope, err := ring.Seal("geo1", "job-1", base.Monitor.ID, 7, map[string][]byte{"password": []byte("super-secret")})
+	envelope, err := ring.Seal(SealContext{EnvelopeVersion: EnvelopeV1, Region: "geo1", JobID: "job-1", MonitorID: base.Monitor.ID, Revision: 7, Body: base.Monitor}, map[string][]byte{"password": []byte("super-secret")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,9 @@ func TestCredentialEnvelopeRoundTripAndAADTransplants(t *testing.T) {
 func TestCredentialEnvelopePreviousKeyAndUnknownID(t *testing.T) {
 	old, _ := NewCredentialKeyring(CredentialKeyMaterial{ID: "k-old", Key: bytes.Repeat([]byte{2}, 32)}, nil)
 	job := CheckJob{ProtocolVersion: ProtocolV2, Monitor: domain.Monitor{ID: "m1", Region: "core", ExecutionRevision: 1}}
-	job.CredentialEnvelope, _ = old.Seal("core", "job", "m1", 1, map[string][]byte{"password": []byte("value")})
+	job.CredentialEnvelope, _ = old.Seal(SealContext{
+		EnvelopeVersion: EnvelopeV1, Region: "core", JobID: "job", MonitorID: "m1", Revision: 1,
+	}, map[string][]byte{"password": []byte("value")})
 	rotated := credentialTestRing(t)
 	if _, err := rotated.Open(job); err != nil {
 		t.Fatalf("previous key must open queued payload: %v", err)
@@ -86,8 +88,7 @@ func gateJob(t *testing.T, ring *CredentialKeyring) CheckJob {
 		Type: domain.MonitorPostgres, Target: "db.internal:5432",
 		Config: map[string]string{"username": "ro", "database": "app", "sslmode": "require", "password_ref": "app-db"},
 	}
-	envelope, err := ring.Seal(monitor.Region, "job-gate", monitor.ID, monitor.ExecutionRevision,
-		map[string][]byte{"password": []byte("s3cret")})
+	envelope, err := ring.Seal(SealContext{EnvelopeVersion: EnvelopeV1, Region: monitor.Region, JobID: "job-gate", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("s3cret")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,8 +181,7 @@ func TestZeroLengthCredentialCountsAsMissing(t *testing.T) {
 	// Seal an empty plaintext directly: EncryptBytes refuses one, so build the envelope
 	// with a ciphertext that legitimately decrypts to zero bytes is impossible here —
 	// assert instead that the seal path itself refuses to create that shape.
-	if _, err := ring.Seal(monitor.Region, "job-empty", monitor.ID, monitor.ExecutionRevision,
-		map[string][]byte{"password": {}}); err == nil {
+	if _, err := ring.Seal(SealContext{EnvelopeVersion: EnvelopeV1, Region: monitor.Region, JobID: "job-empty", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": {}}); err == nil {
 		t.Fatal("sealing an empty credential succeeded; the empty value must be refused at the source too")
 	}
 }

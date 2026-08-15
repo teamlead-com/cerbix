@@ -48,8 +48,8 @@ func TestCredentialHealthDegradesAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	monitor := domain.Monitor{ID: "m1", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
-	badEnvelope, _ := otherRing.Seal("pull1", "job-bad", monitor.ID, monitor.ExecutionRevision, map[string][]byte{"password": []byte("secret")})
-	goodEnvelope, _ := workerRing.Seal("pull1", "job-good", monitor.ID, monitor.ExecutionRevision, map[string][]byte{"password": []byte("secret")})
+	badEnvelope, _ := otherRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-bad", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
+	goodEnvelope, _ := workerRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-good", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	jobs := []dispatch.CheckJob{
 		{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: badEnvelope},
 		{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: goodEnvelope},
@@ -94,11 +94,13 @@ func TestFutureCredentialEnvelopeIsProbeErrorWithoutReadinessDowngrade(t *testin
 		t.Fatal(err)
 	}
 	monitor := domain.Monitor{ID: "m-future", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
-	envelope, err := ring.Seal("pull1", "job-future", monitor.ID, monitor.ExecutionRevision, map[string][]byte{"password": []byte("secret")})
+	envelope, err := ring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-future", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope.V++
+	// A genuinely FUTURE generation: v2 is now a real, supported binding, so the
+	// unsupported-version path has to be probed above the newest one we understand.
+	envelope.V = dispatch.EnvelopeV2 + 1
 	job := dispatch.CheckJob{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: envelope}
 
 	var result domain.Heartbeat
@@ -304,8 +306,7 @@ func TestCapableAgentExecutesMixedGenerationClaim(t *testing.T) {
 	}
 	plain := domain.Monitor{ID: "m-plain", Type: domain.MonitorHTTP, Region: "pull1", ExecutionRevision: 1}
 	credentialed := domain.Monitor{ID: "m-cred", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
-	envelope, err := ring.Seal("pull1", "job-cred", credentialed.ID, credentialed.ExecutionRevision,
-		map[string][]byte{"password": []byte("secret")})
+	envelope, err := ring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-cred", MonitorID: credentialed.ID, Revision: credentialed.ExecutionRevision, Body: credentialed}, map[string][]byte{"password": []byte("secret")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,8 +352,7 @@ func TestEnvelopeOnGeneration1CarrierIsRejectedBeforeProbing(t *testing.T) {
 		t.Fatal(err)
 	}
 	monitor := domain.Monitor{ID: "m-mismatch", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
-	envelope, err := ring.Seal("pull1", "job-mismatch", monitor.ID, monitor.ExecutionRevision,
-		map[string][]byte{"password": []byte("secret")})
+	envelope, err := ring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-mismatch", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	if err != nil {
 		t.Fatal(err)
 	}

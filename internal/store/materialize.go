@@ -137,7 +137,16 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 				byID[m.ID] = entry
 				continue
 			}
-			envelope, err := ring.Seal(m.Region, jobID, m.ID, m.ExecutionRevision, fields)
+			// Generation 1 for now: the emitter moves to generation 2 with the carrier-3
+			// rollout, and until then a v2 envelope would reach executors that cannot open it.
+			envelope, err := ring.Seal(dispatch.SealContext{
+				EnvelopeVersion: dispatch.EnvelopeV1,
+				Region:          m.Region,
+				JobID:           jobID,
+				MonitorID:       m.ID,
+				Revision:        m.ExecutionRevision,
+				Body:            job.Monitor,
+			}, fields)
 			dispatch.WipeCredentialFields(fields)
 			if err != nil {
 				entry.Reason = MaterializeDecryptFailed
@@ -245,7 +254,14 @@ func (s *Store) MaterializeTestExecutionConfig(ctx context.Context, m domain.Mon
 		dispatch.WipeCredentialFields(fields)
 		return MaterializedExecution{MonitorID: monitorID, Reason: MaterializeNoDispatchKey}, nil
 	}
-	envelope, err := ring.Seal(m.Region, jobID, monitorID, 1, fields)
+	envelope, err := ring.Seal(dispatch.SealContext{
+		EnvelopeVersion: dispatch.EnvelopeV1,
+		Region:          m.Region,
+		JobID:           jobID,
+		MonitorID:       monitorID,
+		Revision:        1,
+		Body:            job.Monitor,
+	}, fields)
 	dispatch.WipeCredentialFields(fields)
 	if err != nil {
 		return MaterializedExecution{MonitorID: monitorID, Reason: MaterializeDecryptFailed}, nil

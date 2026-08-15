@@ -70,7 +70,7 @@ func TestAMQPRoundTrip(t *testing.T) {
 		t.Fatalf("publish wire-barrier v1 job: %v", err)
 	}
 	barrierMonitor := domain.Monitor{ID: "00000000-0000-4000-8000-000000000123", Region: "wirebarrier", ExecutionRevision: 1}
-	barrierEnvelope, err := keyring.Seal("wirebarrier", "wire-barrier-v2", barrierMonitor.ID, barrierMonitor.ExecutionRevision, map[string][]byte{"password": []byte("barrier")})
+	barrierEnvelope, err := keyring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "wirebarrier", JobID: "wire-barrier-v2", MonitorID: barrierMonitor.ID, Revision: barrierMonitor.ExecutionRevision, Body: barrierMonitor}, map[string][]byte{"password": []byte("barrier")})
 	if err != nil {
 		t.Fatalf("seal wire-barrier v2 job: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestAMQPRoundTrip(t *testing.T) {
 		ID: "00000000-0000-4000-8000-000000000119", Name: "v2", Region: "roundtrip",
 		ExecutionRevision: 2,
 	}
-	v2Envelope, err := keyring.Seal("roundtrip", "job-roundtrip-v2", v2Monitor.ID, v2Monitor.ExecutionRevision, map[string][]byte{"password": []byte("v2-secret")})
+	v2Envelope, err := keyring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "roundtrip", JobID: "job-roundtrip-v2", MonitorID: v2Monitor.ID, Revision: v2Monitor.ExecutionRevision, Body: v2Monitor}, map[string][]byte{"password": []byte("v2-secret")})
 	if err != nil {
 		t.Fatalf("seal v2 job: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestAMQPRoundTrip(t *testing.T) {
 		ID: "00000000-0000-4000-8000-000000000120", Region: "roundtrip",
 		ExecutionRevision: 3, TimeoutSeconds: 1,
 	}
-	v2TestEnvelope, err := keyring.Seal("roundtrip", "test-roundtrip-v2", v2TestMonitor.ID, v2TestMonitor.ExecutionRevision, map[string][]byte{"password": []byte("v2-test-secret")})
+	v2TestEnvelope, err := keyring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "roundtrip", JobID: "test-roundtrip-v2", MonitorID: v2TestMonitor.ID, Revision: v2TestMonitor.ExecutionRevision, Body: v2TestMonitor}, map[string][]byte{"password": []byte("v2-test-secret")})
 	if err != nil {
 		t.Fatalf("seal v2 test job: %v", err)
 	}

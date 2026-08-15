@@ -86,7 +86,7 @@ func TestCredentialFailurePublishesTypedProbeError(t *testing.T) {
 		t.Fatal(err)
 	}
 	monitor := domain.Monitor{ID: "m-secret", Type: domain.MonitorPostgres, Region: "core", ExecutionRevision: 7}
-	envelope, err := sealer.Seal("core", "job-1", monitor.ID, monitor.ExecutionRevision, map[string][]byte{"password": []byte("secret")})
+	envelope, err := sealer.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "core", JobID: "job-1", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestCredentialReadinessRecoversAfterSuccessfulDecrypt(t *testing.T) {
 		t.Fatal(err)
 	}
 	monitor := domain.Monitor{ID: "m-secret", Type: domain.MonitorPostgres, Region: "core", ExecutionRevision: 7}
-	envelope, err := ring.Seal("core", "job-2", monitor.ID, monitor.ExecutionRevision, map[string][]byte{"password": []byte("secret")})
+	envelope, err := ring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "core", JobID: "job-2", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	if err != nil {
 		t.Fatal(err)
 	}

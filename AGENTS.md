@@ -108,6 +108,11 @@ From the repo root:
 - `make test` / `go test ./...` — unit and fake-backed integration tests.
 - `make race` / `go test -race ./...` — concurrency checks (scheduler, worker, SSE).
 - `make build` — builds `bin/cerbix` with version/commit ldflags.
+- `make dev-init && make dev-up` — initialize a fresh base broker pin and start the full single-process dev stack.
+- `make dev-down && make dev-up-distributed` — stop single and start the distributed-role dev stack after the explicit migration barrier.
+- `make dev-down && make geo-init && make geo-up-all` — stop base, initialize a fresh geo broker pin, and start central + both remote transports.
+- `make dev-test` / `make dev-test-distributed` / `make geo-test` — local-only live E2E gates for each ready topology.
+- `make dev-down` / `make geo-down` — stop non-production containers without deleting named volumes.
 - `./bin/cerbix serve --config docker/config.example.yaml --role all` — run locally.
 - `make lint` / `golangci-lint run ./...` — required when configured.
 - `gofmt -w <files>` — format changed Go files before review.

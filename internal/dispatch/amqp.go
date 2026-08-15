@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,13 +26,24 @@ const (
 const (
 	// Jobs are routed per region: checks.jobs.<region>. A worker consumes only its
 	// region's queue; the scheduler publishes to the queue of each monitor's region.
-	jobsQueuePrefix = "checks.jobs."
+	jobsQueuePrefix   = "checks.jobs."
+	jobsV2QueuePrefix = "checks.jobs.v2."
+	// Carrier generation 3 carries envelope v2 (the execution-bound AAD). It is a
+	// physically separate queue, not a flag on the v2 one: a capability-1 consumer sitting
+	// on a shared queue would take a message it cannot open, and a capability check does
+	// not stop a consumer from consuming (func-secret-inventory §4.7, D-0160).
+	jobsV3QueuePrefix = "checks.jobs.v3."
 	// Test probes ("Test connection") are RPCs per region: the API publishes to
 	// checks.tests.<region> with a reply queue; a worker in that region runs the
-	// probe and replies. The queue is auto-delete, so with no worker present the
-	// request is unroutable and the caller times out ("no worker in region").
-	testsQueuePrefix = "checks.tests."
-	resultsQueue     = "checks.results"
+	// probe and replies. The queue is durable+auto-delete: it can be shared by N
+	// workers (so it cannot be exclusive), recreates cleanly across broker/worker
+	// restarts, and is removed after the last consumer leaves. Individual RPC
+	// requests remain transient and time-bounded. Non-durable, non-exclusive queues
+	// are rejected by RabbitMQ 4.3.
+	testsQueuePrefix   = "checks.tests."
+	testsV2QueuePrefix = "checks.tests.v2."
+	testsV3QueuePrefix = "checks.tests.v3."
+	resultsQueue       = "checks.results"
 	// deadQueue holds poison messages (unparseable job/result bodies) that a consumer
 	// would otherwise Nack-drop and lose. Forwarding them here preserves the raw body
 	// for inspection. Results themselves carry NO time-TTL — a slow ingest must never
@@ -60,6 +72,13 @@ func jobsQueueForRegion(region string) string {
 	return jobsQueuePrefix + region
 }
 
+func jobsV2QueueForRegion(region string) string {
+	if region == "" {
+		region = domain.DefaultRegion
+	}
+	return jobsV2QueuePrefix + region
+}
+
 // testsQueueForRegion returns the per-region test-RPC queue name (empty → core).
 func testsQueueForRegion(region string) string {
 	if region == "" {
@@ -67,6 +86,63 @@ func testsQueueForRegion(region string) string {
 	}
 	return testsQueuePrefix + region
 }
+
+func testsV2QueueForRegion(region string) string {
+	if region == "" {
+		region = domain.DefaultRegion
+	}
+	return testsV2QueuePrefix + region
+}
+
+func jobsV3QueueForRegion(region string) string {
+	if region == "" {
+		region = domain.DefaultRegion
+	}
+	return jobsV3QueuePrefix + region
+}
+
+func testsV3QueueForRegion(region string) string {
+	if region == "" {
+		region = domain.DefaultRegion
+	}
+	return testsV3QueuePrefix + region
+}
+
+// jobsQueueForGeneration maps a carrier generation to its physical queue. The mapping is
+// explicit and total: a generation with no queue is a programming error, never a silent
+// fallback onto an older carrier that its consumers could misread.
+func jobsQueueForGeneration(region string, generation int) (string, bool) {
+	switch generation {
+	case ProtocolV1:
+		return jobsQueueForRegion(region), true
+	case ProtocolV2:
+		return jobsV2QueueForRegion(region), true
+	case ProtocolV3:
+		return jobsV3QueueForRegion(region), true
+	default:
+		return "", false
+	}
+}
+
+func testsQueueForGeneration(region string, generation int) (string, bool) {
+	switch generation {
+	case ProtocolV1:
+		return testsQueueForRegion(region), true
+	case ProtocolV2:
+		return testsV2QueueForRegion(region), true
+	case ProtocolV3:
+		return testsV3QueueForRegion(region), true
+	default:
+		return "", false
+	}
+}
+
+// TestRunner answers one test-RPC delivery. Both the legacy and the envelope-bearing test
+// consumers take the SAME callback so neither can quietly grow its own rules: the carrier
+// generation is stamped by whichever consumer received the message, and the callback runs
+// the one executor gate (§4.7, D-0160). The v1 consumer used to call the prober directly
+// with job.Monitor, which is how it became the one executor path with no gate at all.
+type TestRunner func(ctx context.Context, delivered DeliveredJob) (domain.Heartbeat, error)
 
 // AMQP is a RabbitMQ-backed Dispatcher for cross-process roles. Publishing is
 // serialized on a dedicated channel; Jobs()/Results() lazily start a manual-ack
@@ -97,15 +173,18 @@ type AMQP struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	jobRegion  string          // region this dispatcher's Jobs() consumes (worker); default core
-	declaredMu sync.Mutex      // guards declared
-	declared   map[string]bool // idempotent-declare cache for per-region job queues
+	jobRegion            string          // region this dispatcher's Jobs() consumes (worker); default core
+	credentialCapability int             // highest envelope generation this worker can open (0 = none)
+	declaredMu           sync.Mutex      // guards declared
+	declared             map[string]bool // idempotent-declare cache for per-region job queues
 
 	jobsOnce    sync.Once
-	jobsCh      chan CheckJob
+	jobsCh      chan DeliveredJob
 	resultsOnce sync.Once
 	resultsCh   chan domain.Heartbeat
 	testsOnce   sync.Once // guards the per-region test-RPC server (worker side)
+	testsV2Once sync.Once
+	testsV3Once sync.Once
 }
 
 // dialAndSetup opens a connection plus the publish channel and declares the
@@ -171,7 +250,7 @@ func NewAMQP(url string, logger *slog.Logger) (*AMQP, error) {
 		cancel:        cancel,
 		jobRegion:     domain.DefaultRegion,
 		declared:      map[string]bool{},
-		jobsCh:        make(chan CheckJob, forwardBuffer),
+		jobsCh:        make(chan DeliveredJob, forwardBuffer),
 		resultsCh:     make(chan domain.Heartbeat, forwardBuffer),
 	}
 	go d.supervise()
@@ -287,6 +366,17 @@ func (d *AMQP) WithJobRegion(region string) *AMQP {
 	return d
 }
 
+// WithCredentialCapability declares the highest ENVELOPE generation this executor can
+// open, which decides which carrier queues it consumes. It is a level, not a boolean: a
+// capability-1 executor must be physically unable to receive a generation-3 carrier, and
+// widening the set it consumes is the only safe direction to move.
+// Publishers route from CheckJob.ProtocolVersion; an old worker never calls this and
+// therefore can never receive an envelope-bearing payload.
+func (d *AMQP) WithCredentialCapability(capability int) *AMQP {
+	d.credentialCapability = capability
+	return d
+}
+
 // declareJobQueue idempotently declares a per-region job queue (cached). Publishing
 // to an undeclared queue via the default exchange is silently dropped, so both the
 // publisher and the consuming worker must ensure their queue exists.
@@ -379,7 +469,20 @@ func (d *AMQP) PublishJob(_ context.Context, job CheckJob) error {
 	if job.Monitor.Type == domain.MonitorComposite {
 		region = domain.DefaultRegion
 	}
-	queue := jobsQueueForRegion(region)
+	generation := job.ProtocolVersion
+	if generation == 0 {
+		generation = ProtocolV1
+	}
+	queue, ok := jobsQueueForGeneration(region, generation)
+	if !ok {
+		return fmt.Errorf("dispatch: no jobs carrier for generation %d", generation)
+	}
+	if generation >= ProtocolV2 && job.CredentialEnvelope == nil {
+		return fmt.Errorf("dispatch: generation %d job is missing credential envelope", generation)
+	}
+	if generation == ProtocolV1 && job.CredentialEnvelope != nil {
+		return errors.New("dispatch: credential envelope cannot be published to a v1 queue")
+	}
 	if err := d.declareJobQueue(queue); err != nil {
 		return fmt.Errorf("dispatch: declare %s: %w", queue, err)
 	}
@@ -397,23 +500,36 @@ func (d *AMQP) PublishResult(_ context.Context, hb domain.Heartbeat) error {
 
 // Jobs starts (once) a consumer of the jobs queue and returns the forwarding
 // channel. Only call it in a role that executes jobs (worker).
-func (d *AMQP) Jobs() <-chan CheckJob {
+func (d *AMQP) Jobs() <-chan DeliveredJob {
 	d.jobsOnce.Do(func() {
-		queue := jobsQueueForRegion(d.jobRegion)
-		go consume(d, queue, true, func(body []byte) bool {
-			var job CheckJob
-			if err := json.Unmarshal(body, &job); err != nil {
-				d.logger.Error("dispatch_bad_job", "error", err.Error())
-				d.deadLetter("jobs", body)
-				return false
-			}
-			select {
-			case d.jobsCh <- job:
-				return true
-			case <-d.ctx.Done():
-				return false
-			}
-		})
+		// The QUEUE a message was consumed from is the carrier generation, and it is the
+		// only trustworthy source for it: the body's own ProtocolVersion is attacker-
+		// editable (§4.7, D-0160). Each consumer therefore stamps its own generation and
+		// the payload's claim is never consulted here.
+		consumeQueue := func(queue, source string, generation int) {
+			go consume(d, queue, true, func(body []byte) bool {
+				var job CheckJob
+				if err := json.Unmarshal(body, &job); err != nil {
+					d.logger.Error("dispatch_bad_job", "error", err.Error())
+					d.deadLetter(source, body)
+					return false
+				}
+				select {
+				case d.jobsCh <- DeliveredJob{Job: job, CarrierGeneration: generation}:
+					return true
+				case <-d.ctx.Done():
+					return false
+				}
+			})
+		}
+		consumeQueue(jobsQueueForRegion(d.jobRegion), "jobs", ProtocolV1)
+		// One carrier per envelope generation this executor can open, and no others.
+		if d.credentialCapability >= EnvelopeV1 {
+			consumeQueue(jobsV2QueueForRegion(d.jobRegion), "jobs.v2", ProtocolV2)
+		}
+		if d.credentialCapability >= EnvelopeV2 {
+			consumeQueue(jobsV3QueueForRegion(d.jobRegion), "jobs.v3", ProtocolV3)
+		}
 	})
 	return d.jobsCh
 }
@@ -447,11 +563,30 @@ func (d *AMQP) Results() <-chan domain.Heartbeat {
 // auto-delete, so with no live worker the publish is unroutable and the caller times
 // out. Composite/push types are rejected by the caller before reaching here.
 func (d *AMQP) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
+	return d.RunJobTest(ctx, CheckJob{Monitor: m, ProtocolVersion: ProtocolV1})
+}
+
+func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, error) {
+	m := job.Monitor
 	region := m.Region
 	if region == "" {
 		region = domain.DefaultRegion
 	}
-	queue := testsQueueForRegion(region)
+	generation := job.ProtocolVersion
+	if generation == 0 {
+		generation = ProtocolV1
+	}
+	queue, okQueue := testsQueueForGeneration(region, generation)
+	if !okQueue {
+		return domain.Heartbeat{}, fmt.Errorf("dispatch: no tests carrier for generation %d", generation)
+	}
+	if generation >= ProtocolV2 {
+		if job.CredentialEnvelope == nil {
+			return domain.Heartbeat{}, fmt.Errorf("dispatch: generation %d test is missing credential envelope", generation)
+		}
+	} else if job.CredentialEnvelope != nil {
+		return domain.Heartbeat{}, errors.New("dispatch: credential test cannot use a v1 queue")
+	}
 
 	// A dedicated channel keeps this RPC off the shared publish channel; the
 	// exclusive, auto-delete reply queue self-cleans when the channel closes, and
@@ -461,7 +596,7 @@ func (d *AMQP) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat,
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: test channel: %w", err)
 	}
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 	replyQ, err := ch.QueueDeclare("", false, true, true, false, nil)
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: reply queue: %w", err)
@@ -470,16 +605,17 @@ func (d *AMQP) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat,
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: consume reply: %w", err)
 	}
+	returns := ch.NotifyReturn(make(chan amqp.Return, 1))
 
 	timeout := testRPCTimeout
 	if s := m.TimeoutSeconds; s > 0 {
 		timeout = time.Duration(s)*time.Second + testRPCSlack
 	}
-	body, err := json.Marshal(CheckJob{Monitor: m})
+	body, err := json.Marshal(job)
 	if err != nil {
 		return domain.Heartbeat{}, fmt.Errorf("dispatch: marshal test: %w", err)
 	}
-	if err := ch.PublishWithContext(ctx, "", queue, false, false, amqp.Publishing{
+	if err := ch.PublishWithContext(ctx, "", queue, true, false, amqp.Publishing{
 		ContentType: "application/json",
 		ReplyTo:     replyQ.Name,
 		Expiration:  strconv.FormatInt(timeout.Milliseconds(), 10),
@@ -491,6 +627,8 @@ func (d *AMQP) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat,
 	select {
 	case <-ctx.Done():
 		return domain.Heartbeat{}, ctx.Err()
+	case returned := <-returns:
+		return domain.Heartbeat{}, fmt.Errorf("no worker queue for region %q (AMQP %d %s)", region, returned.ReplyCode, returned.ReplyText)
 	case <-time.After(timeout):
 		return domain.Heartbeat{}, fmt.Errorf("no worker responded in region %q", region)
 	case msg, ok := <-replies:
@@ -501,22 +639,113 @@ func (d *AMQP) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat,
 		if err := json.Unmarshal(msg.Body, &hb); err != nil {
 			return domain.Heartbeat{}, fmt.Errorf("dispatch: decode test reply: %w", err)
 		}
+		if hb.ProbeError != nil {
+			return domain.Heartbeat{}, *hb.ProbeError
+		}
 		return hb, nil
+	}
+}
+
+// ServeTestsV2 consumes only the physically separate envelope test queue. It is started
+// exclusively by a worker with a validated regional dispatch keyring. It returns only
+// after the initial queue declaration and consumer registration succeed, forming a
+// startup-readiness barrier.
+func (d *AMQP) ServeTestsV2(run TestRunner) error {
+	return d.serveTestsGeneration(&d.testsV2Once, testsV2QueueForRegion(d.jobRegion), ProtocolV2, run)
+}
+
+// ServeTestsV3 consumes the generation-3 test carrier — the one that carries envelope v2.
+// It exists for the same reason the v3 JOBS consumer does: a generation with a publisher
+// and no consumer is a queue that fills until TTL, and "jobs AND tests, AMQP AND pull" is
+// the contract, not a slogan. Started only by a worker that declared capability 2.
+func (d *AMQP) ServeTestsV3(run TestRunner) error {
+	return d.serveTestsGeneration(&d.testsV3Once, testsV3QueueForRegion(d.jobRegion), ProtocolV3, run)
+}
+
+func (d *AMQP) serveTestsGeneration(once *sync.Once, queue string, generation int, run TestRunner) error {
+	var initialErr error
+	once.Do(func() {
+		ready := make(chan error, 1)
+		go func() {
+			for {
+				conn, wake := d.current()
+				serveEnvelopeTestsOnce(d, conn, queue, generation, run, ready)
+				ready = nil
+				select {
+				case <-d.ctx.Done():
+					return
+				case <-wake:
+				case <-time.After(channelRetryBackoff):
+				}
+			}
+		}()
+		initialErr = <-ready
+	})
+	return initialErr
+}
+
+func serveEnvelopeTestsOnce(d *AMQP, conn *amqp.Connection, queue string, generation int, run TestRunner, ready chan<- error) {
+	ch, err := conn.Channel()
+	if err != nil {
+		d.logger.Error("dispatch_test_v2_channel", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: v2 test channel: %w", err))
+		return
+	}
+	defer func() { _ = ch.Close() }()
+	if _, err := ch.QueueDeclare(queue, true, true, false, false, nil); err != nil {
+		d.logger.Error("dispatch_declare_tests_v2", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: declare %s: %w", queue, err))
+		return
+	}
+	msgs, err := ch.Consume(queue, "", false, false, false, false, nil)
+	if err != nil {
+		d.logger.Error("dispatch_consume_tests_v2", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: consume %s: %w", queue, err))
+		return
+	}
+	signalTestConsumerReady(ready, nil)
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case msg, ok := <-msgs:
+			if !ok {
+				return
+			}
+			var job CheckJob
+			if err := json.Unmarshal(msg.Body, &job); err != nil || job.ProtocolVersion != ProtocolV2 || job.CredentialEnvelope == nil {
+				d.deadLetter("tests.v2", msg.Body)
+				_ = msg.Nack(false, false)
+				continue
+			}
+			hb, runErr := run(d.ctx, DeliveredJob{Job: job, CarrierGeneration: generation})
+			if runErr == nil && msg.ReplyTo != "" {
+				if reply, err := json.Marshal(hb); err == nil {
+					_ = ch.PublishWithContext(d.ctx, "", msg.ReplyTo, false, false, amqp.Publishing{ContentType: "application/json", Body: reply})
+				}
+			}
+			_ = msg.Ack(false)
+		}
 	}
 }
 
 // ServeTests starts (once) a consumer of this dispatcher's region test-RPC queue
 // (checks.tests.<region>) and answers each request by running run and publishing the
 // heartbeat back to the delivery's ReplyTo. Only call it in a role that executes probes
-// (worker). The queue is auto-delete so it disappears when this worker disconnects,
-// which makes a stale region cleanly unroutable for the API.
-func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain.Heartbeat) {
+// (worker). The durable, shared queue auto-deletes after its last worker disconnects,
+// which makes a stale region cleanly unroutable for the API while supporting multiple
+// workers and RabbitMQ 4.3 (which rejects transient non-exclusive queues). It returns
+// only after the initial declaration and consumer registration succeed.
+func (d *AMQP) ServeTests(run TestRunner) error {
+	var initialErr error
 	d.testsOnce.Do(func() {
 		queue := testsQueueForRegion(d.jobRegion)
+		ready := make(chan error, 1)
 		go func() {
 			for {
 				conn, wake := d.current()
-				serveTestsOnce(d, conn, queue, run)
+				serveTestsOnce(d, conn, queue, ProtocolV1, run, ready)
+				ready = nil
 				select {
 				case <-d.ctx.Done():
 					return
@@ -529,27 +758,33 @@ func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain
 				}
 			}
 		}()
+		initialErr = <-ready
 	})
+	return initialErr
 }
 
 // serveTestsOnce runs one test-RPC consume session on conn; returns on
 // shutdown or when the delivery channel dies.
-func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx context.Context, m domain.Monitor) domain.Heartbeat) {
+func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, generation int, run TestRunner, ready chan<- error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		d.logger.Error("dispatch_test_channel", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: test channel: %w", err))
 		return
 	}
-	defer ch.Close()
-	if _, err := ch.QueueDeclare(queue, false, true, false, false, nil); err != nil {
+	defer func() { _ = ch.Close() }()
+	if _, err := ch.QueueDeclare(queue, true, true, false, false, nil); err != nil {
 		d.logger.Error("dispatch_declare_tests", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: declare %s: %w", queue, err))
 		return
 	}
 	msgs, err := ch.Consume(queue, "", false, false, false, false, nil)
 	if err != nil {
 		d.logger.Error("dispatch_consume_tests", "queue", queue, "error", err.Error())
+		signalTestConsumerReady(ready, fmt.Errorf("dispatch: consume %s: %w", queue, err))
 		return
 	}
+	signalTestConsumerReady(ready, nil)
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -564,7 +799,12 @@ func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx c
 				_ = m.Nack(false, false)
 				continue
 			}
-			hb := run(d.ctx, job.Monitor)
+			// The QUEUE this consumer is attached to is the carrier generation, exactly as
+			// on the jobs path: the body's own claim is never consulted (§4.7, D-0160).
+			hb, err := run(d.ctx, DeliveredJob{Job: job, CarrierGeneration: generation})
+			if err != nil {
+				d.logger.Error("dispatch_test_rejected", "queue", queue, "error", err.Error())
+			}
 			if m.ReplyTo != "" {
 				if reply, err := json.Marshal(hb); err == nil {
 					_ = ch.PublishWithContext(d.ctx, "", m.ReplyTo, false, false, amqp.Publishing{
@@ -575,6 +815,12 @@ func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx c
 			}
 			_ = m.Ack(false)
 		}
+	}
+}
+
+func signalTestConsumerReady(ready chan<- error, err error) {
+	if ready != nil {
+		ready <- err
 	}
 }
 
@@ -607,7 +853,7 @@ func consumeOnce(d *AMQP, conn *amqp.Connection, queue string, handle func(body 
 		d.logger.Error("dispatch_consumer_channel", "queue", queue, "error", err.Error())
 		return
 	}
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 	// Declare on every session, not via the publisher's declare cache: the
 	// reason we're (re)subscribing may be that the queue was deleted, which the
 	// cache would not know about. Durable, matching dialAndSetup/declareJobQueue.

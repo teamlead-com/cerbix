@@ -6,7 +6,9 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
@@ -22,6 +24,8 @@ const advisoryLockKey int64 = 0x6365726269780001 // "cerbix" + slot 1
 // Store is the persistence surface the scheduler needs.
 type Store interface {
 	ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, error)
+	ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error)
+	MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string, carrierByRegion map[string]int) ([]store.MaterializedExecution, error)
 	StalePushMonitors(ctx context.Context) ([]domain.Monitor, error)
 	RecordDeadmanResult(ctx context.Context, monitorID string, revision int64, cutoff time.Time) (store.ResultOutcome, error)
 	TryBecomeLeader(ctx context.Context, key int64) (release func(), check func(context.Context) (bool, error), ok bool, err error)
@@ -34,6 +38,9 @@ type Store interface {
 	EvaluateRegionWorkerAlerts(ctx context.Context, live map[string]bool, graceSeconds int) (fired, resolved int, err error)
 	AdvanceEscalations(ctx context.Context) (fired int, err error)
 	EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds int) error
+	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds int) error
+	EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds int) error
+	LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error)
 	PurgeExpiredPullJobs(ctx context.Context) (int, error)
 	PurgeExpiredPullTests(ctx context.Context) (int, error)
 	PurgeStaleAgentHeartbeats(ctx context.Context, olderThan time.Duration) (int, error)
@@ -56,11 +63,25 @@ type LeaderStateSink interface {
 	SetSchedulerLeader(leader bool)
 }
 
+type SecretResolutionSink interface {
+	RecordSecretResolutionFailure(reason string)
+	// RecordDispatchTransportFailure is a separate family: a transport that will not take
+	// a publish is a different operator problem from a credential that will not resolve.
+	RecordDispatchTransportFailure(reason string)
+}
+
 // LiveRegionSource reports which worker-pool regions currently have a live worker
 // (a consumer on checks.jobs.<region>). Implemented by *mqadmin.Client. Optional:
 // without it the scheduler skips region-worker alerting (e.g. the inproc build).
 type LiveRegionSource interface {
 	LiveJobRegions(ctx context.Context) (map[string]bool, error)
+}
+
+// CredentialLiveRegionSource reports only consumers on the physically isolated v2 job
+// queues. Legacy worker liveness is intentionally insufficient for envelope dispatch.
+type CredentialLiveRegionSource interface {
+	LiveCredentialJobRegions(ctx context.Context) (map[string]bool, error)
+	LiveCredentialV3JobRegions(ctx context.Context) (map[string]bool, error)
 }
 
 const (
@@ -78,6 +99,9 @@ const (
 	// snapshot, so the per-tick full scan is gone. A new/edited monitor is picked
 	// up within this window.
 	refreshEvery = 15 * time.Second
+	// credentialFailureLogEvery bounds names-only logs for a persistently broken
+	// credential reference/key without hiding the low-cardinality counter.
+	credentialFailureLogEvery = 5 * time.Minute
 	// pushCheckEvery is how often the leader runs the single batched query that
 	// finds push monitors whose dead-man's switch has tripped.
 	pushCheckEvery = 5 * time.Second
@@ -134,20 +158,37 @@ const (
 
 // Scheduler publishes due check jobs while it holds leadership.
 type Scheduler struct {
-	store         Store
-	dispatcher    dispatch.Dispatcher
-	logger        *slog.Logger
-	tick          time.Duration
-	retry         time.Duration
-	leaderKey     int64
-	retentionDays int
-	liveRegions   LiveRegionSource
-	pullRegions   map[string]bool // regions served over HTTP-pull (jobs go to pull_jobs, not AMQP)
-	pullMetrics   PullStatsSink
-	leaderState   LeaderStateSink
-	confirmCh     <-chan string      // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
-	configCh      <-chan struct{}    // execution-config changes (LISTEN monitor_config_changed) → force a snapshot reload
-	reconciler    *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
+	store                  Store
+	dispatcher             dispatch.Dispatcher
+	logger                 *slog.Logger
+	tick                   time.Duration
+	retry                  time.Duration
+	leaderKey              int64
+	retentionDays          int
+	liveRegions            LiveRegionSource
+	credentialLiveRegions  CredentialLiveRegionSource
+	localCredentialRegions map[string]bool
+	pullRegions            map[string]bool // regions served over HTTP-pull (jobs go to pull_jobs, not AMQP)
+	pullMetrics            PullStatsSink
+	leaderState            LeaderStateSink
+	confirmCh              <-chan string      // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
+	configCh               <-chan struct{}    // execution-config changes (LISTEN monitor_config_changed) → force a snapshot reload
+	reconciler             *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
+	credentialEnvelopes    bool
+	secretResolution       SecretResolutionSink
+}
+
+// WithCredentialEnvelopes switches the scheduler to the decrypt-free snapshot plus
+// authoritative materialization path. Config validation guarantees this is enabled before
+// any *_ref write surface is exposed.
+func (s *Scheduler) WithCredentialEnvelopes(enabled bool) *Scheduler {
+	s.credentialEnvelopes = enabled
+	return s
+}
+
+func (s *Scheduler) WithSecretResolutionMetrics(sink SecretResolutionSink) *Scheduler {
+	s.secretResolution = sink
+	return s
 }
 
 // WithConfirmSignals wires the stream of monitor ids that just entered their
@@ -206,6 +247,23 @@ func (s *Scheduler) WithRetentionDays(days int) *Scheduler {
 // skipped (the inproc build has no broker and always co-locates its worker).
 func (s *Scheduler) WithLiveRegions(src LiveRegionSource) *Scheduler {
 	s.liveRegions = src
+	return s
+}
+
+func (s *Scheduler) WithCredentialLiveRegions(src CredentialLiveRegionSource) *Scheduler {
+	s.credentialLiveRegions = src
+	return s
+}
+
+// WithLocalCredentialRegions authorizes in-process v2 execution for --role=all, where
+// there is no RabbitMQ consumer to discover but the validated local keyring is present.
+func (s *Scheduler) WithLocalCredentialRegions(regions ...string) *Scheduler {
+	if s.localCredentialRegions == nil {
+		s.localCredentialRegions = map[string]bool{}
+	}
+	for _, region := range regions {
+		s.localCredentialRegions[region] = true
+	}
 	return s
 }
 
@@ -295,6 +353,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 // was lost (the caller re-contends), false on a clean context cancellation.
 func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool, error)) bool {
 	nextRun := map[string]time.Time{}
+	credentialFailures := map[string]int{}
+	// Consecutive publish/enqueue failures per monitor, kept apart from credential
+	// failures so the two causes back off independently (§4.4.5).
+	publishFailures := map[string]int{}
+	credentialLastLog := map[string]time.Time{}
 	var monitors []domain.Monitor
 	byID := map[string]domain.Monitor{}
 	// confirmFast holds monitors currently probed at their confirm interval,
@@ -356,7 +419,13 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 			if lastRefresh.IsZero() || now.Sub(lastRefresh) >= refreshEvery {
 				lastRefresh = now
 				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
-					ms, err := s.store.ListEnabledMonitors(c)
+					var ms []domain.Monitor
+					var err error
+					if s.credentialEnvelopes {
+						ms, err = s.store.ListEnabledMonitorSnapshots(c)
+					} else {
+						ms, err = s.store.ListEnabledMonitors(c)
+					}
 					if err != nil {
 						s.logger.Error("list_enabled_monitors_failed", "error", err.Error())
 						return
@@ -366,6 +435,12 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 					byID = make(map[string]domain.Monitor, len(monitors))
 					for _, m := range monitors {
 						byID[m.ID] = m
+					}
+					for id := range credentialFailures {
+						if _, ok := byID[id]; !ok {
+							delete(credentialFailures, id)
+							delete(credentialLastLog, id)
+						}
 					}
 					// The fresh snapshot is authoritative: drop acceleration for
 					// monitors no longer mid-confirmation, and pick up ones whose
@@ -455,13 +530,20 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 					}
 				})
 			}
-			// Publish due active checks from the in-memory snapshot (no DB scan).
+			// Publish due active checks. Non-credentialed monitors keep the snapshot path;
+			// credentialed monitors are nominated by the snapshot then authorized/materialized
+			// in one bounded DB batch immediately before dispatch (§4.4.3/4).
 			publishFailed, publishErr := 0, ""
+			credentialByRegion := map[string][]string{}
 			for _, m := range monitors {
 				if m.Type == domain.MonitorPush || !m.Type.Active() {
 					continue
 				}
 				if due, ok := nextRun[m.ID]; ok && now.Before(due) {
+					continue
+				}
+				if s.credentialEnvelopes && domain.CredentialedType(m.Type) {
+					credentialByRegion[m.Region] = append(credentialByRegion[m.Region], m.ID)
 					continue
 				}
 				// Confirmation phase: probe at the accelerated interval until the
@@ -508,12 +590,229 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 				}
 				nextRun[m.ID] = now.Add(iv)
 			}
+			regions := make([]string, 0, len(credentialByRegion))
+			for region := range credentialByRegion {
+				regions = append(regions, region)
+			}
+			sort.Strings(regions)
+			credentialReadyPull := map[string]bool{}
+			credentialReadyAMQP := map[string]bool{}
+			// carrierGeneration is the HIGHEST carrier a region may be emitted into: 3 once
+			// something there can open envelope v2, otherwise 2. It is derived from the same
+			// existential checks as readiness, never assumed, so core cannot emit a payload
+			// the region's executors are unable to open (§4.7, D-0160).
+			carrierGeneration := map[string]int{}
+			if len(regions) > 0 {
+				// Capability 1 is the floor for the generation-2 carrier; the floor rises with
+				// the emitted generation, never independently of it.
+				if ready, err := s.store.LiveCredentialReadyAgentRegions(ctx, 45*time.Second, dispatch.EnvelopeV1); err != nil {
+					s.logger.Warn("credential_agent_capability_lookup_failed", "error", err.Error())
+				} else {
+					credentialReadyPull = ready
+				}
+				if ready, err := s.store.LiveCredentialReadyAgentRegions(ctx, 45*time.Second, dispatch.EnvelopeV2); err != nil {
+					s.logger.Warn("credential_agent_capability_lookup_failed", "error", err.Error())
+				} else {
+					for region := range ready {
+						if s.pullRegions[region] {
+							carrierGeneration[region] = dispatch.ProtocolV3
+						}
+					}
+				}
+				if s.credentialLiveRegions != nil {
+					if ready, err := s.credentialLiveRegions.LiveCredentialJobRegions(ctx); err != nil {
+						s.logger.Warn("credential_worker_capability_lookup_failed", "error", err.Error())
+					} else {
+						credentialReadyAMQP = ready
+					}
+					if ready, err := s.credentialLiveRegions.LiveCredentialV3JobRegions(ctx); err != nil {
+						s.logger.Warn("credential_worker_capability_lookup_failed", "error", err.Error())
+					} else {
+						for region := range ready {
+							if !s.pullRegions[region] {
+								carrierGeneration[region] = dispatch.ProtocolV3
+							}
+						}
+					}
+				}
+				for region := range s.localCredentialRegions {
+					credentialReadyAMQP[region] = true
+					// A same-process executor IS this binary, so its capability is ours by
+					// construction — there is no wire and no version skew to discover. Without
+					// this the default single-binary role=all never moved past generation 2,
+					// which meant the execution binding and field-set rules — the whole point
+					// of the amendment — were inert in the most common deployment while the
+					// worker inside the same process could open them perfectly well.
+					carrierGeneration[region] = dispatch.ProtocolV3
+				}
+			}
+			for _, snapshotRegion := range regions {
+				ids := credentialByRegion[snapshotRegion]
+				for start := 0; start < len(ids); start += 64 {
+					end := start + 64
+					if end > len(ids) {
+						end = len(ids)
+					}
+					// The whole policy goes in: the batch is nominated by snapshot region,
+					// but each job's carrier is picked from its AUTHORITATIVE region.
+					items, err := s.store.MaterializeExecutionConfigs(ctx, ids[start:end], carrierGeneration)
+					if err != nil {
+						if ctx.Err() != nil {
+							return false
+						}
+						s.logger.Error("credential_materialization_batch_failed", "region", snapshotRegion, "count", end-start, "error", err.Error())
+						if s.secretResolution != nil {
+							s.secretResolution.RecordSecretResolutionFailure("batch_error")
+						}
+						for _, id := range ids[start:end] {
+							if snap, ok := byID[id]; ok {
+								credentialFailures[id]++
+								nextRun[id] = now.Add(credentialFailureRetry(snap.Interval(), credentialFailures[id]))
+							}
+						}
+						continue
+					}
+					for _, item := range items {
+						// A monitor the authoritative read found disabled, deleted or of a
+						// non-dispatchable type is SKIPPED, not failed (§4.4.3). It leaves the
+						// failure path entirely — no warning, no failure counter, no backoff —
+						// because the snapshot nominating a row the row itself has since
+						// disabled is ordinary reconcile churn, and dressing it as an
+						// operational error is how a metric and a log both learn to cry wolf.
+						// Cadence is not advanced either: the monitor simply is not due.
+						if item.Reason == store.MaterializeSkippedCurrentState {
+							delete(credentialFailures, item.MonitorID)
+							delete(credentialLastLog, item.MonitorID)
+							continue
+						}
+						if item.Reason != "" {
+							if last := credentialLastLog[item.MonitorID]; last.IsZero() || now.Sub(last) >= credentialFailureLogEvery {
+								credentialLastLog[item.MonitorID] = now
+								s.logger.Warn("credential_materialization_rejected", "monitor_id", item.MonitorID, "reason", item.Reason)
+							}
+							if s.secretResolution != nil {
+								s.secretResolution.RecordSecretResolutionFailure(item.Reason)
+							}
+							if snap, ok := byID[item.MonitorID]; ok {
+								credentialFailures[item.MonitorID]++
+								nextRun[item.MonitorID] = now.Add(credentialFailureRetry(snap.Interval(), credentialFailures[item.MonitorID]))
+							}
+							continue
+						}
+						m := item.Job.Monitor // authoritative row: region + cadence inputs
+						if item.Job.ProtocolVersion >= dispatch.ProtocolV2 {
+							// Re-checked on the AUTHORITATIVE region, and against the capability
+							// this job's OWN carrier needs — not merely the base one. A job
+							// materialized for generation 3 must not be published into a region
+							// that only proved it can open generation 2, or it lands on a queue
+							// nobody there consumes and expires by TTL.
+							ready := credentialReadyAMQP[m.Region]
+							if s.pullRegions[m.Region] {
+								ready = credentialReadyPull[m.Region]
+							}
+							if ready && item.Job.ProtocolVersion >= dispatch.ProtocolV3 {
+								ready = carrierGeneration[m.Region] >= item.Job.ProtocolVersion
+							}
+							if !ready {
+								if last := credentialLastLog[m.ID]; last.IsZero() || now.Sub(last) >= credentialFailureLogEvery {
+									credentialLastLog[m.ID] = now
+									s.logger.Warn("credential_materialization_rejected", "monitor_id", m.ID, "reason", "no_capable_executor")
+								}
+								if s.secretResolution != nil {
+									s.secretResolution.RecordSecretResolutionFailure("no_capable_executor")
+								}
+								credentialFailures[m.ID]++
+								nextRun[m.ID] = now.Add(credentialFailureRetry(m.Interval(), credentialFailures[m.ID]))
+								continue
+							}
+						}
+						iv := m.Interval()
+						if exp, ok := confirmFast[m.ID]; ok && now.Before(exp) && m.InConfirmPhase() {
+							iv = m.ConfirmInterval()
+						}
+						if err := s.publishScheduledJob(ctx, item.Job, iv); err != nil {
+							if ctx.Err() != nil {
+								return false
+							}
+							publishFailed++
+							publishErr = err.Error()
+							// Retry eligibility is STATE, not a rate (§4.4.5, D-0160): the
+							// failure counter grows, next-eligible moves to now+backoff, and
+							// the probe is not marked sent. Leaving nextRun untouched — as
+							// this path did — is not the same as "not sent": it makes the
+							// monitor due again on the very next tick, so the one fault
+							// guaranteed to hit every credentialed monitor at once, a broker
+							// outage, turned each tick into a full authoritative-read +
+							// decrypt + seal storm across the whole due set. That is the
+							// failure mode the floor exists to prevent, reached through the
+							// door it did not cover. The counter is separate from the
+							// credential one so a transport fault and a secret-resolution
+							// fault back off independently and neither masks the other.
+							if s.secretResolution != nil {
+								s.secretResolution.RecordDispatchTransportFailure("publish_failed")
+							}
+							publishFailures[m.ID]++
+							nextRun[m.ID] = now.Add(credentialFailureRetry(iv, publishFailures[m.ID]))
+							continue
+						}
+						delete(credentialFailures, m.ID)
+						delete(credentialLastLog, m.ID)
+						delete(publishFailures, m.ID)
+						nextRun[m.ID] = now.Add(iv)
+					}
+				}
+			}
 			if publishFailed > 0 && now.Sub(lastPublishWarn) >= 10*time.Second {
 				lastPublishWarn = now
 				s.logger.Warn("jobs_publish_failed", "count", publishFailed, "error", publishErr)
 			}
 		}
 	}
+}
+
+// credentialFailureRetry applies the §4.4.5 floor and bounded exponential backoff.
+// The normal monitor interval is the minimum. refreshEvery is the materializer's
+// authoritative resync cadence; intervals already slower than that remain their own cap.
+func credentialFailureRetry(interval time.Duration, failures int) time.Duration {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	capDelay := refreshEvery
+	if interval > capDelay {
+		capDelay = interval
+	}
+	delay := interval
+	for i := 1; i < failures && delay < capDelay; i++ {
+		if delay > capDelay/2 {
+			return capDelay
+		}
+		delay *= 2
+	}
+	if delay > capDelay {
+		return capDelay
+	}
+	return delay
+}
+
+func (s *Scheduler) publishScheduledJob(ctx context.Context, job dispatch.CheckJob, interval time.Duration) error {
+	region := job.Monitor.Region
+	if s.pullRegions[region] {
+		payload, err := json.Marshal(job)
+		if err != nil {
+			return fmt.Errorf("marshal pull job: %w", err)
+		}
+		// The row's carrier generation IS the job's, so a claim predicate can never hand a
+		// payload to an executor that did not declare the capability to open it.
+		switch {
+		case job.ProtocolVersion >= dispatch.ProtocolV3:
+			return s.store.EnqueuePullJobV3(ctx, region, payload, int(interval/time.Second))
+		case job.ProtocolVersion == dispatch.ProtocolV2:
+			return s.store.EnqueuePullJobV2(ctx, region, payload, int(interval/time.Second))
+		default:
+			return s.store.EnqueuePullJob(ctx, region, payload, int(interval/time.Second))
+		}
+	}
+	return s.dispatcher.PublishJob(ctx, job)
 }
 
 // enterConfirm puts a monitor on the accelerated confirm rhythm: pulls its next

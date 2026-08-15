@@ -5,11 +5,13 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
@@ -34,9 +36,13 @@ const maxAgentClaimBatch = 64
 func (h *Handler) AgentRouter() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/agent/jobs", h.agentAuth(h.agentJobs))
+	mux.HandleFunc("GET /api/v1/agent/v2/jobs", h.agentAuth(h.agentJobsV2))
+	mux.HandleFunc("GET /api/v1/agent/v3/jobs", h.agentAuth(h.agentJobsV3))
 	mux.HandleFunc("POST /api/v1/agent/results", h.agentAuth(h.agentResults))
 	mux.HandleFunc("POST /api/v1/agent/backfill", h.agentAuth(h.agentBackfill))
 	mux.HandleFunc("GET /api/v1/agent/tests", h.agentAuth(h.agentTests))
+	mux.HandleFunc("GET /api/v1/agent/v2/tests", h.agentAuth(h.agentTestsV2))
+	mux.HandleFunc("GET /api/v1/agent/v3/tests", h.agentAuth(h.agentTestsV3))
 	mux.HandleFunc("POST /api/v1/agent/test-results", h.agentAuth(h.agentTestResult))
 	mux.HandleFunc("POST /api/v1/agent/heartbeat", h.agentAuth(h.agentHeartbeat))
 	return maxBytes(mux, agentMaxBody)
@@ -99,6 +105,40 @@ func (h *Handler) agentAuth(next http.HandlerFunc) http.HandlerFunc {
 // agentJobs claims up to `max` due jobs for the agent's region and returns their raw
 // CheckJob payloads (the agent decodes and probes them). A job is delivered once.
 func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
+	h.agentJobsProtocol(w, r, 1)
+}
+
+func (h *Handler) agentJobsV2(w http.ResponseWriter, r *http.Request) {
+	if !requireEnvelopeCapability(w, r, 1) {
+		return
+	}
+	h.agentJobsProtocol(w, r, 2)
+}
+
+// agentJobsV3 serves the carrier generation that carries envelope v2. Capability is
+// re-asserted on EVERY claim, not taken from a heartbeat: the heartbeat says what an agent
+// was a moment ago, the header says what it is for this request (§4.7, D-0160).
+func (h *Handler) agentJobsV3(w http.ResponseWriter, r *http.Request) {
+	if !requireEnvelopeCapability(w, r, 2) {
+		return
+	}
+	h.agentJobsProtocol(w, r, 3)
+}
+
+// requireEnvelopeCapability enforces the per-claim capability declaration. A claim may
+// declare MORE than the endpoint needs (a capability-2 agent polling the older endpoint
+// during a rollout is legitimate), never less.
+func requireEnvelopeCapability(w http.ResponseWriter, r *http.Request, minimum int) bool {
+	declared, err := strconv.Atoi(r.Header.Get("X-Cerbix-Credential-Envelope"))
+	if err != nil || declared < minimum {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("credential_envelope capability %d is required on every claim to this endpoint", minimum))
+		return false
+	}
+	return true
+}
+
+func (h *Handler) agentJobsProtocol(w http.ResponseWriter, r *http.Request, protocolVersion int) {
 	region := r.URL.Query().Get("region")
 	if region == "" {
 		writeError(w, http.StatusBadRequest, "region is required")
@@ -116,7 +156,14 @@ func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
 	if max > maxAgentClaimBatch {
 		max = maxAgentClaimBatch
 	}
-	claimed, err := h.store.ClaimPullJobs(r.Context(), region, max, pullJobLeaseSeconds)
+	claim := h.store.ClaimPullJobs
+	switch protocolVersion {
+	case 2:
+		claim = h.store.ClaimPullJobsV2
+	case 3:
+		claim = h.store.ClaimPullJobsV3
+	}
+	claimed, err := claim(r.Context(), region, max, pullJobLeaseSeconds)
 	if err != nil {
 		h.serverError(w, "agent_claim_jobs", err)
 		return
@@ -126,20 +173,25 @@ func (h *Handler) agentJobs(w http.ResponseWriter, r *http.Request) {
 	// the query rate to near-zero while keeping dispatch near-instant, over plain HTTP.
 	if len(claimed) == 0 && h.pullWaiter != nil {
 		h.pullWaiter.Wait(r.Context(), region, agentLongPollHold)
-		if claimed, err = h.store.ClaimPullJobs(r.Context(), region, max, pullJobLeaseSeconds); err != nil {
+		if claimed, err = claim(r.Context(), region, max, pullJobLeaseSeconds); err != nil {
 			h.serverError(w, "agent_claim_jobs", err)
 			return
 		}
 	}
-	// jobs[i] and tokens[i] are parallel: the agent echoes the tokens it finished on its
-	// results POST to ack (delete) those jobs; anything left un-acked re-leases.
+	// jobs[i], tokens[i] and protocolVersions[i] are parallel: the agent echoes the tokens
+	// it finished on its results POST to ack (delete) those jobs; anything left un-acked
+	// re-leases. protocolVersions carries the SERVER's stamp of each row's carrier
+	// generation — a capable claim mixes generations, and the agent must not read the
+	// generation out of the payload, which is the part an attacker can edit (D-0160).
 	jobs := make([]json.RawMessage, 0, len(claimed))
 	tokens := make([]string, 0, len(claimed))
+	protocolVersions := make([]int, 0, len(claimed))
 	for _, c := range claimed {
 		jobs = append(jobs, json.RawMessage(c.Payload))
 		tokens = append(tokens, c.Token)
+		protocolVersions = append(protocolVersions, c.ProtocolVersion)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "tokens": tokens})
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "tokens": tokens, "protocol_versions": protocolVersions})
 }
 
 // enforceRegionScope rejects (403) a result batch that contains a heartbeat for a
@@ -245,12 +297,37 @@ func (h *Handler) agentBackfill(w http.ResponseWriter, r *http.Request) {
 // to run and report back — the pull-transport equivalent of the RabbitMQ test-RPC. The
 // response is {"test": {"id","job"}} or {"test": null}.
 func (h *Handler) agentTests(w http.ResponseWriter, r *http.Request) {
+	h.agentTestsProtocol(w, r, 1)
+}
+
+func (h *Handler) agentTestsV2(w http.ResponseWriter, r *http.Request) {
+	if !requireEnvelopeCapability(w, r, 1) {
+		return
+	}
+	h.agentTestsProtocol(w, r, 2)
+}
+
+func (h *Handler) agentTestsV3(w http.ResponseWriter, r *http.Request) {
+	if !requireEnvelopeCapability(w, r, 2) {
+		return
+	}
+	h.agentTestsProtocol(w, r, 3)
+}
+
+func (h *Handler) agentTestsProtocol(w http.ResponseWriter, r *http.Request, protocolVersion int) {
 	region := r.URL.Query().Get("region")
 	if region == "" {
 		writeError(w, http.StatusBadRequest, "region is required")
 		return
 	}
-	id, payload, ok, err := h.store.ClaimPullTest(r.Context(), region)
+	claim := h.store.ClaimPullTest
+	switch protocolVersion {
+	case 2:
+		claim = h.store.ClaimPullTestV2
+	case 3:
+		claim = h.store.ClaimPullTestV3
+	}
+	id, payload, rowProtocolVersion, ok, err := claim(r.Context(), region)
 	if err != nil {
 		h.serverError(w, "agent_claim_test", err)
 		return
@@ -259,7 +336,12 @@ func (h *Handler) agentTests(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"test": nil})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"test": map[string]any{"id": id, "job": json.RawMessage(payload)}})
+	// protocol_version is the server's stamp of this row's carrier generation, for the same
+	// reason as on the jobs claim: a capable claim mixes generations and the agent must not
+	// take the generation from the payload (D-0160).
+	writeJSON(w, http.StatusOK, map[string]any{"test": map[string]any{
+		"id": id, "job": json.RawMessage(payload), "protocol_version": rowProtocolVersion,
+	}})
 }
 
 // agentTestResult stores the heartbeat an agent produced for a test, which the waiting
@@ -301,7 +383,31 @@ func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "region and agent_id are required")
 		return
 	}
-	if err := h.store.RecordAgentHeartbeat(r.Context(), region, agentID); err != nil {
+	var body struct {
+		Capabilities struct {
+			CredentialEnvelope int `json:"credential_envelope"`
+		} `json:"capabilities"`
+		CredentialReady bool `json:"credential_ready"`
+	}
+	if r.ContentLength != 0 {
+		if !decodeJSON(w, r, &body) {
+			return
+		}
+	}
+	// The ceiling is the newest envelope generation core understands. It has to move with
+	// that generation: leaving it at 1 rejected the heartbeat of every capability-2 agent,
+	// so the region looked dead to the readiness check and core would never have emitted
+	// the generation those agents exist to consume. Caught by the live smoke, not by a
+	// unit test — the ceiling and the generation live in different packages.
+	if body.Capabilities.CredentialEnvelope < 0 || body.Capabilities.CredentialEnvelope > dispatch.EnvelopeV2 {
+		writeError(w, http.StatusBadRequest, "unsupported credential_envelope capability")
+		return
+	}
+	if body.CredentialReady && body.Capabilities.CredentialEnvelope < dispatch.EnvelopeV1 {
+		writeError(w, http.StatusBadRequest, "credential_ready requires a credential_envelope capability")
+		return
+	}
+	if err := h.store.RecordAgentCapabilities(r.Context(), region, agentID, body.Capabilities.CredentialEnvelope, body.CredentialReady); err != nil {
 		h.serverError(w, "agent_heartbeat", err)
 		return
 	}

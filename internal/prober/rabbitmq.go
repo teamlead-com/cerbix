@@ -2,10 +2,12 @@ package prober
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -48,7 +50,7 @@ func (p rabbitmqProber) probeAMQP(ctx context.Context, m domain.Monitor) Result 
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if d, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(d)
 	}
@@ -70,7 +72,10 @@ func (p rabbitmqProber) probeAMQP(ctx context.Context, m domain.Monitor) Result 
 
 func (p rabbitmqProber) probeManagement(ctx context.Context, m domain.Monitor) Result {
 	start := time.Now()
-	u := rabbitMgmtURL(m.Target, m.Config["path"])
+	u, err := rabbitMgmtURL(m.Target, m.Config["path"], m.Config["tls"] == "true")
+	if err != nil {
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad request: " + err.Error()}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad request: " + err.Error()}
@@ -78,11 +83,21 @@ func (p rabbitmqProber) probeManagement(ctx context.Context, m domain.Monitor) R
 	if user := m.Config["username"]; user != "" {
 		req.SetBasicAuth(user, m.Config["password"])
 	}
-	resp, err := p.client.Do(req)
+	client := p.client
+	if m.Config["tls_skip_verify"] == "true" {
+		base, ok := p.client.Transport.(*http.Transport)
+		if !ok {
+			return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "TLS skip-verify requires HTTP transport"}
+		}
+		transport := base.Clone()
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // explicit operator opt-in
+		client = &http.Client{Transport: transport, Timeout: p.client.Timeout}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	lat := elapsedMS(start)
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	res := Result{Connected: true, LatencyMS: lat, Code: resp.StatusCode, Body: string(body)}
@@ -97,7 +112,7 @@ func (p rabbitmqProber) probeManagement(ctx context.Context, m domain.Monitor) R
 
 // rabbitMgmtURL builds the management API URL from a target (a base URL, or a
 // bare host defaulting to port 15672) and a path (default /api/overview).
-func rabbitMgmtURL(target, path string) string {
+func rabbitMgmtURL(target, path string, tlsEnabled bool) (string, error) {
 	target = strings.TrimSpace(target)
 	if path == "" {
 		path = "/api/overview"
@@ -106,8 +121,21 @@ func rabbitMgmtURL(target, path string) string {
 		path = "/" + path
 	}
 	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-		return strings.TrimRight(target, "/") + path
+		u, err := url.Parse(target)
+		if err != nil {
+			return "", err
+		}
+		if tlsEnabled && u.Scheme != "https" {
+			return "", fmt.Errorf("rabbitmq management target must use https when tls is enabled")
+		}
+		return strings.TrimRight(target, "/") + path, nil
 	}
-	host, port := hostPort(target, 15672)
-	return "http://" + net.JoinHostPort(host, strconv.Itoa(int(port))) + path
+	defaultPort := uint16(15672)
+	scheme := "http"
+	if tlsEnabled {
+		defaultPort = 15671
+		scheme = "https"
+	}
+	host, port := hostPort(target, defaultPort)
+	return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(int(port))) + path, nil
 }

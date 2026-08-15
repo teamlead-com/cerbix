@@ -43,7 +43,7 @@ type Service struct {
 	cur    atomic.Pointer[domain.InstanceSettings]
 }
 
-// New builds a Service. Call Start (or Load) before serving.
+// New builds a Service. Call Load and then run Run under the process lifecycle.
 func New(store Store, boot Bootstrap, logger *slog.Logger) *Service {
 	if boot.MinPasswordLen <= 0 {
 		boot.MinPasswordLen = 8
@@ -105,25 +105,23 @@ func (s *Service) Load(ctx context.Context) error {
 	return nil
 }
 
-// Start loads once and then refreshes the snapshot periodically.
-func (s *Service) Start(ctx context.Context) {
-	if err := s.Load(ctx); err != nil {
-		s.logger.Warn("instance_settings_load_failed", "error", err.Error())
-	}
-	go func() {
-		t := time.NewTicker(refreshEvery)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if err := s.Load(ctx); err != nil {
-					s.logger.Warn("instance_settings_refresh_failed", "error", err.Error())
-				}
+// Run refreshes the snapshot periodically until ctx is cancelled. The caller owns
+// the goroutine so process shutdown can wait for every database user before closing
+// the shared pool. Call Load once before Run when the initial snapshot is required
+// synchronously.
+func (s *Service) Run(ctx context.Context) {
+	t := time.NewTicker(refreshEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := s.Load(ctx); err != nil {
+				s.logger.Warn("instance_settings_refresh_failed", "error", err.Error())
 			}
 		}
-	}()
+	}
 }
 
 // current returns the snapshot, resolving empty defaults if Start/Load never ran.

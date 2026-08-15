@@ -56,7 +56,7 @@ func (s *Store) DeleteOrganization(ctx context.Context, orgID string) error {
 	if err != nil {
 		return fmt.Errorf("store: delete organization: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var one int
 	err = tx.QueryRow(ctx,

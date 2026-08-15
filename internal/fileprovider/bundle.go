@@ -29,6 +29,8 @@ const (
 	ReasonDomainInvalid     Reason = "domain_invalid"
 	ReasonDependencyInvalid Reason = "dependency_invalid"
 	ReasonDependencyCycle   Reason = "dependency_cycle"
+	ReasonSecretRefNotFound Reason = "secret_ref_not_found"
+	ReasonFeatureDisabled   Reason = "feature_disabled"
 	ReasonTypeChange        Reason = "type_change"
 	ReasonDuplicateProject  Reason = "duplicate_project"
 	ReasonEmptyBundle       Reason = "empty_bundle"
@@ -88,11 +90,10 @@ type DesiredProject struct {
 	Monitors     map[string]DesiredMonitor // by source UID
 }
 
-// fileSupportedTypes are the monitor types the v1 file provider can express with a strict
-// non-secret schema (common fields only). Types needing a typed `settings` object
-// (composite, synthetic) or credentials (postgres/mysql/redis/promql/rabbitmq) are rejected
-// until their strict schema / secret_ref contract lands (spec §3.1). This is an explicit
-// scope boundary, not a generic escape hatch.
+// fileSupportedTypes are the monitor types the v1 file provider can express through either
+// common fields or a strict typed settings schema. The credentialed subset uses inventory
+// references only; composite, synthetic, promql and any future untyped shape remain rejected.
+// This is an explicit scope boundary, not a generic config escape hatch.
 var fileSupportedTypes = map[domain.MonitorType]bool{
 	domain.MonitorHTTP:      true,
 	domain.MonitorTCP:       true,
@@ -103,6 +104,10 @@ var fileSupportedTypes = map[domain.MonitorType]bool{
 	domain.MonitorWebSocket: true,
 	domain.MonitorSSH:       true,
 	domain.MonitorPush:      true,
+	domain.MonitorPostgres:  true,
+	domain.MonitorMySQL:     true,
+	domain.MonitorRedis:     true,
+	domain.MonitorRabbitMQ:  true,
 }
 
 // secretSettingKeys are field/settings keys that carry credentials. Their presence anywhere

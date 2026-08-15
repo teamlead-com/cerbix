@@ -73,10 +73,29 @@ Full step-by-step production guides (Docker Compose and bare binary + systemd) l
 ### With Docker Compose (single node)
 
 ```bash
-# From the repo root — builds the SPA + Go binary into one image and runs the dev stack.
-docker compose -f docker/docker-compose.yml --profile single up -d --build
+# For a fresh broker volume only; retained volumes require their matching image pin.
+make dev-init
+make dev-up
+make dev-test             # browser suite; idle-provider MaC UI assertion may skip
+make dev-down             # named volumes survive
 # UI + API on http://localhost:8080 — log in with the bootstrap admin from docker/config.dev.yaml.
 ```
+
+The same facade covers the non-production role and geo topologies:
+
+```bash
+make dev-up-distributed   # api :8082 + scheduler + worker
+make dev-test-distributed # distributed-role browser/prober smoke
+make dev-down             # stop distributed before switching to geo
+make geo-init             # once, fresh geo broker volume only
+make geo-up-all           # central + AMQP geo1 worker + HTTP-pull geo2 agent
+make geo-test             # generic + geo1 AMQP / geo2 pull transport smoke
+make geo-down             # geo stack; named volumes survive
+```
+
+Base and geo cannot run together because their fixed dev ports overlap. Their separate
+`.env.dev`/`.env.geo` pins are intentional: never reuse one broker image selector for the other
+retained volume.
 
 ### Just the binary + Postgres
 
@@ -113,8 +132,11 @@ cd frontend && npm install && npm run build
 rm -rf ../internal/web/dist && cp -r dist ../internal/web/dist
 cd .. && go build -o cerbix ./cmd/cerbix
 
-# Or build the image (multi-stage: SPA + binary → distroless):
-docker compose -f docker/docker-compose.yml build
+# Or build the non-production images (multi-stage: SPA + binary → distroless).
+# Each build requires its initialized env file with the image pin matching that
+# topology's retained RabbitMQ volume:
+make dev-build
+make geo-build
 ```
 
 CLI:

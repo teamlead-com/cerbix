@@ -19,10 +19,31 @@ curl -s localhost:8080/metrics   # cerbix_* series
 
 ## Run the dev stack
 
+`docker/config.dev.yaml` contains a fixed, public development-only at-rest key so the persistent
+local database remains readable after E2E creates encrypted bearer values. Treat it like the other
+well-known local credentials: never reuse it or this file outside the disposable development stack.
+Production must inject its own random key and follow the rotation procedure below.
+
 ```bash
-docker compose -f docker/docker-compose.yml up --build
+make dev-init  # once, and only when no retained base broker volume exists
+make dev-up
 # Postgres :5432 · RabbitMQ :5672 (mgmt :15672) · Keycloak :8081 · cerbix :8080
 ```
+
+Available non-production lifecycle gates:
+
+| Topology | Build | Start + ready | Browser/smoke gate | Stop |
+| --- | --- | --- | --- | --- |
+| Single (`all`, SSO, mail) | `make dev-build` | `make dev-up` | `make dev-test` | `make dev-down` |
+| Distributed (`api`/`scheduler`/`worker`) | `make dev-build-distributed` | `make dev-up-distributed` | `make dev-test-distributed` | `make dev-down` |
+| Geo central only | `make geo-build` | `make geo-up` | readiness only | `make geo-down` |
+| Geo central + geo1/geo2 | `make geo-build` | `make geo-up-all` | `make geo-test` | `make geo-down` |
+
+For a fresh geo broker volume, run `make geo-init` once. Base and geo use separate
+`docker/.env.dev` and `docker/.env.geo` pins because their retained RabbitMQ volumes may be on
+different upgrade checkpoints. Every `up` refuses a conflicting live topology; switch explicitly
+with its `down` goal. `down` never passes `-v` and preserves Postgres, RabbitMQ, and MariaDB data.
+The Make facade is not broker-upgrade tooling: use the raw staged procedure below for D-0157.
 
 ## Endpoints
 
@@ -152,6 +173,94 @@ Distributed roles run as separate processes over the RabbitMQ dispatcher (`--rol
 types are implemented, including ICMP (`internal/prober/icmp.go`, D-0032; unprivileged-first
 socket) and push (dead-man's-switch, D-0028).
 
+### RabbitMQ baseline and upgrade
+
+Compose requires `CERBIX_RABBITMQ_IMAGE` on every invocation: no default can safely describe both
+an old 3.12 data volume and one already upgraded to 4.3. A fresh base-dev install uses the guarded
+initializer, which refuses to overwrite a pin or attach the template to an existing broker volume:
+
+```bash
+make dev-init
+make dev-up
+```
+
+For retained queues/messages, first set the env file to the image that already owns the volume.
+Before every hop, quiesce all Cerbix publishers/consumers, record and accept/drain the remaining
+queue depth per the maintenance plan, cleanly stop RabbitMQ, and take a storage-consistent volume
+snapshot (or prepare a Rabbit-supported blue/green old-cluster switchback). Never snapshot a live,
+mutating broker and call it a rollback point. RabbitMQ does **not** support downgrade or a direct
+3.12→4.3 jump.
+See the vendor [upgrade guide](https://www.rabbitmq.com/docs/upgrade) and
+[release support table](https://www.rabbitmq.com/release-information).
+
+First migrate the Cerbix test-queue shape while the broker is still 3.12:
+
+1. Stop new Test Connection requests and drain/stop every old worker in the region.
+2. Run `docker compose --env-file <deployment.env> -f <compose.yml> exec rabbitmq rabbitmqctl
+   list_queues name durable auto_delete exclusive consumers messages` and wait until
+   `checks.tests.<region>` / `checks.tests.v2.<region>` have no consumers and auto-delete.
+   If an empty stale queue remains, delete only that named empty test queue; never delete a queue
+   with messages.
+3. Deploy the new worker binary against 3.12. Worker readiness now waits for both enabled test
+   consumers. Verify each test queue reports `durable=true auto_delete=true exclusive=false`.
+4. Run the live v1/v2 gate:
+
+```bash
+CERBIX_TEST_RABBITMQ_URL='amqp://user:pass@broker:5672/' \
+  go test -race ./internal/dispatch -run TestAMQPRoundTrip -count=1 -v
+```
+
+Then advance the broker one supported hop at a time. The commands below use `docker/.env.dev`;
+production uses its filled `docker/.env`. Before each next image, enable all stable feature flags,
+stop every Cerbix role, cleanly stop the broker, take the offline snapshot, persist the next image
+in the env file, and start it. After start, repeat health/feature/queue checks before starting roles:
+
+```bash
+DC='docker compose --env-file docker/.env.dev -f docker/docker-compose.yml'
+$DC exec rabbitmq rabbitmqctl enable_feature_flag all
+$DC exec rabbitmq rabbitmq-diagnostics -q ping
+$DC exec rabbitmq rabbitmqctl list_feature_flags
+$DC exec rabbitmq rabbitmqctl list_queues name messages consumers durable auto_delete
+$DC stop cerbix api scheduler worker
+$DC exec rabbitmq rabbitmqctl stop
+# take an offline/storage-consistent snapshot now
+
+# Persist the next supported hop in docker/.env.dev, then:
+$DC up -d rabbitmq  # 3.12→3.13, then repeat for 3.13→4.2 and 4.2→4.3
+```
+
+The geo stack has an independent volume and pin. Perform the same queue, feature-flag, clean-stop,
+snapshot, and per-hop checks using its own explicit command surface; do not reuse `.env.dev`:
+
+```bash
+GEO_DC='docker compose --env-file docker/.env.geo -f docker/docker-compose.geo.yml --profile geo1 --profile geo2'
+$GEO_DC exec rabbitmq rabbitmqctl enable_feature_flag all
+$GEO_DC stop scheduler api worker-core worker-geo1 worker-geo2
+$GEO_DC exec rabbitmq rabbitmqctl stop
+# take an offline/storage-consistent snapshot, persist the next image in docker/.env.geo, then:
+$GEO_DC up -d rabbitmq
+```
+
+The env-file update is part of the commit point: every later Compose command must use that same
+file. A one-shot shell override is forbidden because the next unqualified command could attempt an
+unsupported downgrade against the upgraded volume.
+
+Do not roll an upgraded data directory back by starting an older image. On a failed hop, stop the
+new node and restore that hop's volume snapshot with its old image, or switch clients back to the
+untouched blue/green cluster. To roll the *application* back across the durable test-queue change,
+stop new workers, confirm both test queues are empty, delete those two named queues, then start the
+old workers. A disposable dev broker may be recreated only after explicitly accepting loss of its
+queued messages.
+
+On 4.3, `checks.tests.<region>` and `checks.tests.v2.<region>` must report `durable=true`,
+`auto_delete=true`, `exclusive=false`. Do not enable the deprecated
+`transient_nonexcl_queues` compatibility switch: Cerbix no longer needs it. The queue remains
+shared by workers in the region and disappears after its last consumer leaves. Its definition,
+not an in-flight RPC message, is durable. A repeating
+`INTERNAL_ERROR - Feature transient_nonexcl_queues is deprecated` means an old worker binary is
+still declaring the former queue shape; finish the worker rollout before treating the region as
+ready.
+
 ## SLA / SLI
 
 Availability is computed from heartbeats over rolling windows (24h / 7d / 30d / 90d):
@@ -213,9 +322,151 @@ live runtime view of every configured provider (leadership, last scan, last succ
 including configured-but-idle providers. Leadership/scan times are process-local: query each
 `api`/`all` replica to see which one currently leads. `?provider=<name>` narrows to one provider.
 `GET /api/v1/organizations/{orgID}/file-providers` (org admin) returns `{bundles}` scoped to that
-organization only (no cross-tenant path/error).
+organization only (no cross-tenant path/error). Collection keys are stable: an empty result is
+`[]`, never `null` or an omitted key.
+
+**Startup wiring:** every role that owns file providers (`api`/`all`) must mount every configured
+provider root at the exact static-config path and read-only. The shipped single and distributed
+Compose profiles mount `./monitoring.d` at `/etc/cerbix/monitoring.d:ro`. A missing or unreadable
+root is a fail-fast `file_provider_startup_failed`: the process cancels and drains started
+background work before closing the dispatcher/database and exits non-zero. Fix the mount or
+permissions; do not create the directory at runtime or downgrade the provider silently.
 
 **Smoke:** `e2e/mac-smoke.sh` proves the full live lifecycle on a throwaway DB with the process
 never restarting: create → scheduler executes the file-managed monitor → in-place semantic
 update (generation bump, same DB id) → last-known-good on invalid input → orphan-disable (no
 hard delete) → restore (same DB id and push token).
+
+## Project secret inventory and credential dispatch (FR-020)
+
+Secret values are write-only project data. Core materializing roles (`all`, `api`,
+`scheduler`) hold the at-rest master and dispatch public configuration; executor roles
+(`worker`, `agent`) must hold only their own region's dispatch keyring. Startup rejects an
+executor config containing `security.encryption_key` or `previous_keys`.
+
+### Enable or roll out
+
+Use an expand-then-enable rollout; never temporarily send credentialed jobs through v1:
+
+1. Configure `security.dispatch` on every process and set
+   `secrets.dispatch_envelope: enforced`, while leaving `secrets.enabled: false`. Core roles
+   also need `security.encryption_key`; executor configs must not contain it.
+2. Roll all workers/agents. Confirm that every credentialed region has a live consumer for
+   the carrier generation core will emit into it — a worker consuming
+   `checks.jobs.v2.<region>`, or a pull agent whose heartbeat declares
+   `credential_envelope` — and that `/readyz` is 200 on executors. Core will not emit a
+   generation a region has not proven it can open, so a region that stays silent here goes
+   to the §4.4.4 operational rejection rather than to DOWN.
+3. Roll core roles, then set `secrets.enabled: true`. The Secrets API and `*_ref` writes are
+   unavailable until this final switch; there is no accepted-but-undispatchable legacy mode.
+
+`security.dispatch.default` is a single trust-domain fallback. Combining it with explicit
+regional keyrings requires `shared_trust_acknowledged: true`; this deliberately sets
+`cerbix_dispatch_shared_trust 1` and fires the informational posture alert.
+
+### Rotate the at-rest master
+
+1. Put the new key in `security.encryption_key` and retain the old key in
+   `security.previous_keys` on every core role. Do not place either on executors.
+2. Roll core roles so all readers can decrypt old rows while writers use the new primary.
+3. Run `cerbix reencrypt --config <core-config>`. A zero exit is a bounded fixed-point proof
+   that no `project_secrets` row remains under an old key; an exhausted convergence budget
+   exits non-zero. Exact-ciphertext CAS prevents a concurrent secret rotation from being
+   overwritten. The command also re-encrypts the older secret-bearing tables.
+4. Remove the old key only after the command succeeds and every core replica has the new
+   config. Run the command again after concurrent rotations if it reports non-convergence.
+
+### Carrier generations: roll forward, and drain before support is dropped
+
+A carrier generation is the pair of physically separate queues and claim endpoints that
+carries one envelope generation: generation 2 (`checks.{jobs,tests}.v2.<region>`,
+`/api/v1/agent/v2/*`) carries envelope v1, generation 3 (`…v3…`) carries envelope v2, which
+is the one that binds the execution body. Envelope and carrier are numbered separately on
+purpose: to every already-deployed executor, generation 2 already MEANS envelope v1, so a
+new binding has to arrive on a new carrier rather than redefine an old one.
+
+Three separate things, which this runbook previously ran together:
+
+**1. Rolling forward — executors before core, no manual drain.** Upgrade executors first, as
+in "Enable or roll out" above. Nothing else is required: a capable executor consumes and
+claims EVERY generation at or below its capability, so a mixed fleet is a supported steady
+state and ordinary monitors keep running throughout.
+
+**2. Which generation core emits is an EXISTENTIAL check, not a fleet-wide one.** A region
+moves to generation 3 as soon as ONE credential-ready capability-2 executor exists there —
+a capability-1 straggler does not hold it back. The consequence to plan for is therefore the
+opposite of "the rollout stalls": credentialed work in that region concentrates on the
+capable executors, and if the last of them goes away, generation-3 rows sit unclaimed until
+its heartbeat ages out (45s) and core falls back to generation 2. Size the capable set
+accordingly rather than relying on one upgraded replica.
+
+**3. Dropping support for an old generation is a RELEASE, not an operator action.** The
+current binary always consumes every generation it can open; there is no switch that stops
+the old consumer. Support is removed by a future version that no longer declares it. What an
+operator must do is prove the old generation is drained BEFORE deploying such a version:
+
+1. Compare the capable executor count with the inventory you expect, not with itself:
+   `SELECT region, agent_id, capabilities->>'credential_envelope' FROM agent_heartbeats
+   WHERE seen_at > now() - interval '2 min' ORDER BY region, agent_id` for pull, and the
+   consumer count on `checks.jobs.v3.<region>` against the replica count you deployed for
+   AMQP. A consumer count alone says how many are attached, not that every expected worker
+   was upgraded.
+2. Confirm core has stopped emitting the old generation into that region: no NEW rows appear
+   at it over several scheduler ticks —
+   `SELECT protocol_version, count(*) FILTER (WHERE expires_at > now()) AS live,
+           count(*) FILTER (WHERE expires_at <= now()) AS expired
+      FROM pull_jobs GROUP BY 1 ORDER BY 1` — and the same query against `pull_tests`. Both
+   tables matter: a Test Connection leaves a `pull_tests` row exactly like a scheduled probe
+   leaves a `pull_jobs` one.
+3. Wait out the maximum job/test TTL so live rows expire and in-flight AMQP work drains,
+   then inspect and explicitly purge `checks.dead` (for example
+   `rabbitmqctl purge_queue checks.dead`), or record that any retained old-generation payload
+   is intentionally unrecoverable.
+4. Expired rows are removed by the leader's housekeeping tick, which runs **hourly** — so
+   `live = 0` is not the same as "no rows". Either wait for that tick, or remove only rows
+   that have ALREADY expired:
+   `DELETE FROM pull_jobs WHERE protocol_version = 3 AND expires_at <= now();`
+   `DELETE FROM pull_tests WHERE protocol_version = 3 AND expires_at <= now();`
+   Never delete unexpired rows: those are work an executor may still legitimately claim.
+5. Prove zero in BOTH tables before deploying the version that drops support, because the
+   rollback fence counts them together:
+   `SELECT (SELECT count(*) FROM pull_jobs WHERE protocol_version = 3)
+         + (SELECT count(*) FROM pull_tests WHERE protocol_version = 3);`
+
+Migration `00063` refuses to roll back while any generation-3 row exists in either table and
+reports the total. That refusal is step 5 enforced where a rollback would otherwise discard
+pending jobs and in-flight Test Connections.
+
+### Rotate a regional dispatch key
+
+At-rest `reencrypt` does not touch broker or pull payloads. For one region:
+
+1. Deploy `{primary: new, previous: [old]}` to materializers and executors. Executors must
+   receive the overlap before materializers begin sealing with the new primary.
+2. Verify executor readiness and that
+   `cerbix_executor_probe_error_total{reason=~"unknown_key_id|decrypt_auth_failed"}` is not
+   increasing.
+3. Retain the old key for at least the maximum job/test TTL and until pull leases have
+   drained. Also inspect and explicitly purge `checks.dead` (for example
+   `rabbitmqctl purge_queue checks.dead`) or record that any retained old-key poison payload
+   is intentionally unrecoverable.
+4. Only then remove the old entry from `previous` everywhere.
+
+A leaked regional key opens all retained payloads for that region until ACK/TTL/dead-queue
+purge. Rotating a Cerbix inventory value fences results through `execution_revision`, but it
+cannot recall a job already materialized; immediate revocation requires changing the
+credential at the monitored target.
+
+### Diagnose failures
+
+| Symptom | Meaning / action |
+| --- | --- |
+| `CerbixCredentialDispatchUnavailable` or rising `cerbix_secret_resolution_failed_total{reason="no_capable_executor"}` | The scheduler withheld a credentialed job because its authoritative region has no credential-ready executor for the carrier generation core would emit. Check region routing, consumer counts on that region's `checks.jobs.v2`/`v3` queues, pull-agent heartbeat `credential_envelope` capability, and keyring presence. Capability is GENERATIONAL: an executor that only opens envelope v1 is not evidence of readiness for a region core is about to emit envelope v2 into. This is not DOWN. |
+| `CerbixCredentialEnvelopeFailures`, executor `/readyz` 503 | A job could not be opened. Readiness degrades on a PERSISTENT mismatch, so a 503 means repeated failures; a single mismatch does not by itself degrade readiness but is still actionable, never expected. During a CORRECT rotation the old key is still in `previous`, so its envelopes open normally and produce no error at all — an `unknown_key_id` means the key was removed too early or a payload was left undrained, which is a real fault. Compare region and key ids across core/executor configs; retain both rotation keys. Values and ciphertext must never be copied into tickets or logs. A successful decrypt restores readiness. |
+| Monitor detail shows `last_probe_error` | Typed execution diagnostic only: no heartbeat/status/SLA mutation occurred. A revision-valid live UP or DOWN result clears it; stale or SLA-only results do not. |
+| Secret ref bundle is rejected/frozen | Create the named secret in the bundle's project, or correct `password_ref`. The file provider preserves last-known-good and never resolves across projects. |
+| PostgreSQL `sslmode=require` | Transport is encrypted but server identity is not verified. Use `verify-ca`/`verify-full` for identity verification. MySQL/Redis ref monitors default to verified TLS; disabling TLS or `tls_skip_verify` is an explicit audited posture. |
+
+Prometheus rules are in `docker/alerts/secret-inventory.rules.yml`. The live smoke
+`e2e/secret-inventory-smoke.sh` covers inventory → MaC ref → wrong-key pull-agent degradation
+→ correctly keyed recovery/JIT decrypt → real PostgreSQL UP → rotation fence and guards.

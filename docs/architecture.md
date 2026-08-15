@@ -58,7 +58,7 @@ flowchart TB
     end
 
     subgraph InfraTier["Storage & Bus Infrastructure"]
-        MQ[("RabbitMQ 3.12 Cluster<br/>(Exchanges & Queues)")]
+        MQ[("RabbitMQ 4.3 Cluster<br/>(Exchanges & Queues)")]
         PG[("PostgreSQL 16<br/>(Heartbeats, Rollups, Outbox, Settings)")]
     end
 

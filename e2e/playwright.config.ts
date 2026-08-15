@@ -1,8 +1,8 @@
 import { defineConfig } from "@playwright/test";
 
-// The suite runs against a LIVE cerbix stack (docker compose --profile single;
-// add --profile sso for the OIDC spec). It creates its own entities (prefixed
-// e2e-) and cleans them up, but point it at a dev instance, never production.
+// The suite runs against a LIVE local Cerbix stack. The canonical single gate
+// is `make dev-up && make dev-test`; it requires the SSO and mail profiles.
+// Tests create their own e2e-prefixed entities, but never point this at prod.
 //
 // Sessions: the setup project signs in ONCE and every spec reuses the stored
 // state — local logins are rate-limited (login_rate_limit_per_minute), so
@@ -24,7 +24,9 @@ export default defineConfig({
       name: "chromium",
       dependencies: ["setup"],
       use: { storageState: ".auth/admin.json" },
-      testIgnore: /auth\.setup\.ts/,
+      testIgnore: process.env.CERBIX_TOPOLOGY === "geo"
+        ? /auth\.setup\.ts/
+        : /auth\.setup\.ts|topology-geo\.spec\.ts/,
     },
   ],
 });

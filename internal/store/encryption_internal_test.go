@@ -95,9 +95,10 @@ func TestMonitorConfigPasswordEncrypted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create monitor: %v", err)
 	}
-	// Returned to the caller as plaintext (the prober needs it).
-	if m.Config["password"] != "topsecret" {
-		t.Fatalf("create returned password %q, want plaintext", m.Config["password"])
+	// Store responses are decrypt-free by construction: even the create RETURNING path
+	// omits the write-only credential. The prober receives it only via the materializer.
+	if _, ok := m.Config["password"]; ok {
+		t.Fatalf("create returned write-only password: %#v", m.Config)
 	}
 	// Encrypted in the column; username stays plaintext (not a secret key).
 	var raw string
@@ -112,9 +113,22 @@ func TestMonitorConfigPasswordEncrypted(t *testing.T) {
 	if user != "cerbix" {
 		t.Fatalf("username should be plaintext, got %q", user)
 	}
-	// GetMonitor round-trips to plaintext.
+	// Display/detail reads never decrypt and omit the key entirely (not blank redaction).
 	got, _ := st.GetMonitor(ctx, m.ID)
-	if got.Config["password"] != "topsecret" {
-		t.Fatalf("get returned %q, want decrypted", got.Config["password"])
+	if _, ok := got.Config["password"]; ok {
+		t.Fatalf("get returned write-only password: %#v", got.Config)
+	}
+	// An unrelated safe-read update preserves the exact ciphertext without decrypting or
+	// re-encrypting it.
+	got.Name = "db-renamed"
+	if _, err := st.UpdateMonitor(ctx, got); err != nil {
+		t.Fatalf("safe update preserving password: %v", err)
+	}
+	var after string
+	if err := st.pool.QueryRow(ctx, `SELECT config->>'password' FROM monitors WHERE id=$1`, m.ID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != raw {
+		t.Fatalf("write-only password ciphertext changed on unrelated update")
 	}
 }

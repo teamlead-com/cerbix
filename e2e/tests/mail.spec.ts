@@ -1,9 +1,9 @@
 import { test, expect } from "@playwright/test";
 import { ADMIN, apiGet, apiSend, firstProject } from "./helpers";
 
-// Mail flows through the Mailpit sidecar (compose profile `mail`). Skips
-// cleanly when Mailpit is unreachable. The SMTP settings are switched to the
-// sidecar for the duration and restored afterwards.
+// Mail flows through the Mailpit sidecar (compose profile `mail`). The Make
+// single-stack contract requires it; optional direct runs may skip it. SMTP
+// settings are switched to the sidecar for the duration and restored afterwards.
 const MAILPIT = process.env.MAILPIT_URL || "http://localhost:8025";
 
 // The settings PUT is strict — send only real fields, never the GET view's
@@ -45,7 +45,12 @@ const firstUrl = (body: string) => body.match(/https?:\/\/[^\s"'<>]+/)?.[0];
 
 test.describe("mail flows (mailpit profile)", () => {
   test.beforeEach(async ({ page }) => {
-    test.skip(!(await mailpitUp(page)), "mailpit is not running (--profile mail)");
+    const available = await mailpitUp(page);
+    if ((process.env.CERBIX_TOPOLOGY ?? "single") === "single") {
+      expect(available, "single-stack E2E requires the Mailpit profile").toBeTruthy();
+    } else {
+      test.skip(!available, "mailpit is not running (--profile mail)");
+    }
   });
 
   test("password reset: request → letter → confirm → sign in → restore", async ({ page }) => {

@@ -111,6 +111,28 @@ security:
   # Rotation: set a new encryption_key, move the old key here so existing data
   # stays readable, run `cerbix reencrypt`, then drop the old key from this list.
   previous_keys: []
+  # Per-region DISPATCH keyrings for the secret inventory (FR-020). Separate from
+  # encryption_key on purpose: executors (workers/agents) get ONLY their region's
+  # dispatch keys, never the at-rest master — a leaked executor exposes at most its
+  # own region's retained payloads. Each entry: a stable slug id + base64 32-byte key.
+  # dispatch:
+  #   regions:
+  #     geo2:
+  #       primary: {id: "geo2-2026a", key: "<base64 32B>"}
+  #       previous: []          # keep during a dispatch-key rotation until queues drain
+  #   # default:                # single-trust-domain fallback; combining it with
+  #   #   primary: {...}        # per-region keys requires shared_trust_acknowledged: true
+  #   # shared_trust_acknowledged: false
+
+# Project secret inventory (FR-020): named credentials referenced by monitors
+# (password_ref) instead of inline values. DISABLED by default — enabling requires
+# security.encryption_key AND a security.dispatch keyring (fail-fast at startup).
+# dispatch_envelope: "" (legacy) | "enforced" (credentials ride only encrypted
+# envelopes). enabled: true REQUIRES "enforced" — during an expand rollout ship the
+# keys first (enforced, enabled: false), flip enabled only after executors are v2.
+secrets:
+  enabled: false
+  dispatch_envelope: ""
 
 # Outbound email for status-page subscribers (confirmation + incident emails) and
 # self-service password reset for local accounts (the reset link uses

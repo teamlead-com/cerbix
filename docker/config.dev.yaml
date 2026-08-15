@@ -52,5 +52,27 @@ providers:
         type: instance
 
 security:
+  # Fixed, public DEVELOPMENT-ONLY key: keeps the persistent dev volume readable
+  # across E2E runs that create encrypted push tokens. Never reuse outside this
+  # disposable local stack; production must inject its own random key.
+  encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
   admin_email: "admin@cerbix.local"
   admin_password: "devpassword123"
+  # Fixed, public DEVELOPMENT-ONLY per-region dispatch keyring, same disposable-stack
+  # caveat as the master above. It is separate from the master by design: an executor
+  # holds only this, so a leaked executor exposes at most its own region's payloads.
+  dispatch:
+    regions:
+      # Keyed by the region monitors actually live in (domain.DefaultRegion), not by the
+      # word "default": a keyring under a name no monitor uses looks configured and
+      # rejects every dispatch with no_dispatch_key.
+      core:
+        primary: {id: "dev-2026a", key: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="}
+        previous: []
+
+# FR-020 is ON in the dev stack so the browser suite can exercise the Secrets panel and
+# credentialed dispatch (§9). Enabling it here is also the point: a feature that only ever
+# runs in a bespoke smoke is a feature nobody exercises by accident.
+secrets:
+  enabled: true
+  dispatch_envelope: "enforced"

@@ -32,7 +32,7 @@ func (p grpcProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{Service: ""})
 	lat := elapsedMS(start)
 	if err != nil {

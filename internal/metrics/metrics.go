@@ -16,31 +16,37 @@ import (
 
 // Registry holds process-level metrics and readiness state.
 type Registry struct {
-	mu              sync.RWMutex
-	info            buildinfo.Info
-	role            string
-	startTime       time.Time
-	ready           bool
-	lastError       string
-	dbEnabled       bool
-	dbUp            bool
-	checksUp        uint64
-	checksDown      uint64
-	incidentsOpened uint64
-	outboxDelivered uint64
-	outboxDead      uint64
-	pullStats       []PullStat
-	leaderTracked   bool
-	leader          bool
-	brokerTracked   bool
-	brokerUp        bool
+	mu                  sync.RWMutex
+	info                buildinfo.Info
+	role                string
+	startTime           time.Time
+	ready               bool
+	lastError           string
+	credentialTracked   bool
+	credentialReady     bool
+	dispatchSharedTrust bool
+	dbEnabled           bool
+	dbUp                bool
+	checksUp            uint64
+	checksDown          uint64
+	incidentsOpened     uint64
+	outboxDelivered     uint64
+	outboxDead          uint64
+	pullStats           []PullStat
+	leaderTracked       bool
+	leader              bool
+	brokerTracked       bool
+	brokerUp            bool
 	// Result-ingest outcome counters (spec func-result-protocol). Low-cardinality: keyed by
 	// a fixed reason/origin set, never by monitor_id/job_id (those go to logs).
-	resultQuarantined map[string]uint64            // reason → count (future_timestamp)
-	resultIgnored     map[string]uint64            // reason → count (out_of_order, outside_retention)
-	resultRejected    map[string]uint64            // reason → count (missing_timestamp, stale_revision, missing_revision)
-	resultClockSkew   map[string]map[string]uint64 // origin → reason → count (push future|past)
-	resultMissingRev  uint64                       // observe-mode: scheduled result with no revision
+	resultQuarantined         map[string]uint64            // reason → count (future_timestamp)
+	resultIgnored             map[string]uint64            // reason → count (out_of_order, outside_retention)
+	resultRejected            map[string]uint64            // reason → count (missing_timestamp, stale_revision, missing_revision)
+	resultClockSkew           map[string]map[string]uint64 // origin → reason → count (push future|past)
+	resultMissingRev          uint64                       // observe-mode: scheduled result with no revision
+	executorProbeErrors       map[string]uint64            // bounded reason → count
+	secretResolutionFailures  map[string]uint64            // bounded reason → count
+	dispatchTransportFailures map[string]uint64            // bounded reason → count
 	// File-provider metrics (spec func-monitoring-as-code §16). Keyed by the bounded provider
 	// name only — never by file/project/monitor id.
 	fileProviders map[string]*fileProviderStat
@@ -140,6 +146,27 @@ func (r *Registry) SetReady(ready bool, reason string) {
 	r.lastError = reason
 }
 
+// SetCredentialReady tracks the executor's dispatch-key health independently from base
+// process/database readiness. A persistent envelope authentication failure makes /readyz
+// fail without letting a later generic SetReady(true) erase the component failure.
+func (r *Registry) SetCredentialReady(ready bool, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.credentialTracked = true
+	r.credentialReady = ready
+	if !ready {
+		r.lastError = reason
+	}
+}
+
+// SetDispatchSharedTrust surfaces the explicitly acknowledged wider dispatch-key trust
+// domain from static config (func-secret-inventory §4.7 / D-0155).
+func (r *Registry) SetDispatchSharedTrust(shared bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dispatchSharedTrust = shared
+}
+
 // SetDatabaseUp records database connectivity. Calling it marks the database as
 // enabled, so cerbix_database_up is only exported when a database is configured.
 func (r *Registry) SetDatabaseUp(up bool) {
@@ -215,6 +242,39 @@ func (r *Registry) RecordResultMissingRevision() {
 	r.resultMissingRev++
 }
 
+// RecordExecutorProbeError counts a typed executor diagnostic. Reasons are validated at
+// ingest/store before this boundary and never include monitor/job/key identifiers.
+func (r *Registry) RecordExecutorProbeError(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.executorProbeErrors == nil {
+		r.executorProbeErrors = map[string]uint64{}
+	}
+	r.executorProbeErrors[reason]++
+}
+
+// RecordDispatchTransportFailure counts a failure to hand a materialized job to its
+// transport. It is a SEPARATE family from secret resolution on purpose (§4.4.5): a broker
+// that will not take a publish and a credential that will not resolve need different
+// responses from an operator, and folding them together hides whichever is rarer.
+func (r *Registry) RecordDispatchTransportFailure(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dispatchTransportFailures == nil {
+		r.dispatchTransportFailures = map[string]uint64{}
+	}
+	r.dispatchTransportFailures[reason]++
+}
+
+func (r *Registry) RecordSecretResolutionFailure(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.secretResolutionFailures == nil {
+		r.secretResolutionFailures = map[string]uint64{}
+	}
+	r.secretResolutionFailures[reason]++
+}
+
 // RecordResultOutcome routes a store result-outcome reason to its metric family (the
 // single entry point callers use, so the reason→family mapping lives in one place). An
 // empty reason (applied) or an unmapped one (e.g. "duplicate") is a no-op.
@@ -282,20 +342,23 @@ func (r *Registry) SetBrokerUp(up bool) {
 func (r *Registry) Ready() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.ready
+	return r.ready && (!r.credentialTracked || r.credentialReady)
 }
 
 // LastError returns the last recorded not-ready reason.
 func (r *Registry) LastError() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.credentialTracked && !r.credentialReady {
+		return "credential envelope decrypt unavailable"
+	}
 	return r.lastError
 }
 
 // WritePrometheus emits the current metrics in Prometheus text exposition format.
 func (r *Registry) WritePrometheus(w io.Writer) {
 	r.mu.RLock()
-	ready := r.ready
+	ready := r.ready && (!r.credentialTracked || r.credentialReady)
 	dbEnabled := r.dbEnabled
 	dbUp := r.dbUp
 	checksUp := r.checksUp
@@ -316,6 +379,10 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		clockSkew[origin] = copyCounts(byReason)
 	}
 	missingRev := r.resultMissingRev
+	executorProbeErrors := copyCounts(r.executorProbeErrors)
+	secretResolutionFailures := copyCounts(r.secretResolutionFailures)
+	dispatchTransportFailures := copyCounts(r.dispatchTransportFailures)
+	dispatchSharedTrust := r.dispatchSharedTrust
 	fileProviders := map[string]fileProviderStat{}
 	for name, s := range r.fileProviders {
 		cp := fileProviderStat{leader: s.leader, reconciles: copyCounts(s.reconciles), lastDuration: s.lastDuration, lastSuccessUnix: s.lastSuccessUnix, managed: s.managed, orphaned: s.orphaned, bundleErrors: s.bundleErrors}
@@ -323,119 +390,150 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	}
 	uptime := r.now().Sub(r.startTime).Seconds()
 	r.mu.RUnlock()
+	out := prometheusWriter{w: w}
 
-	fmt.Fprintln(w, "# HELP cerbix_build_info Build metadata for the running binary.")
-	fmt.Fprintln(w, "# TYPE cerbix_build_info gauge")
-	fmt.Fprintf(w, "cerbix_build_info{version=%q,commit=%q,go_version=%q,role=%q} 1\n",
+	out.println("# HELP cerbix_build_info Build metadata for the running binary.")
+	out.println("# TYPE cerbix_build_info gauge")
+	out.printf("cerbix_build_info{version=%q,commit=%q,go_version=%q,role=%q} 1\n",
 		r.info.Version, r.info.Commit, r.info.GoVersion, r.role)
 
-	fmt.Fprintln(w, "# HELP cerbix_up Always 1 while the process is serving.")
-	fmt.Fprintln(w, "# TYPE cerbix_up gauge")
-	fmt.Fprintln(w, "cerbix_up 1")
+	out.println("# HELP cerbix_up Always 1 while the process is serving.")
+	out.println("# TYPE cerbix_up gauge")
+	out.println("cerbix_up 1")
 
-	fmt.Fprintln(w, "# HELP cerbix_ready Whether the service reports ready (1) or not (0).")
-	fmt.Fprintln(w, "# TYPE cerbix_ready gauge")
-	fmt.Fprintf(w, "cerbix_ready %d\n", b2i(ready))
+	out.println("# HELP cerbix_ready Whether the service reports ready (1) or not (0).")
+	out.println("# TYPE cerbix_ready gauge")
+	out.printf("cerbix_ready %d\n", b2i(ready))
 
-	fmt.Fprintln(w, "# HELP cerbix_uptime_seconds Seconds since process start.")
-	fmt.Fprintln(w, "# TYPE cerbix_uptime_seconds gauge")
-	fmt.Fprintf(w, "cerbix_uptime_seconds %.3f\n", uptime)
+	out.println("# HELP cerbix_dispatch_shared_trust Whether one acknowledged fallback dispatch key can open more than one region's retained credential payloads.")
+	out.println("# TYPE cerbix_dispatch_shared_trust gauge")
+	out.printf("cerbix_dispatch_shared_trust %d\n", b2i(dispatchSharedTrust))
+
+	out.println("# HELP cerbix_uptime_seconds Seconds since process start.")
+	out.println("# TYPE cerbix_uptime_seconds gauge")
+	out.printf("cerbix_uptime_seconds %.3f\n", uptime)
 
 	if dbEnabled {
-		fmt.Fprintln(w, "# HELP cerbix_database_up Whether the database is reachable (1) or not (0).")
-		fmt.Fprintln(w, "# TYPE cerbix_database_up gauge")
-		fmt.Fprintf(w, "cerbix_database_up %d\n", b2i(dbUp))
+		out.println("# HELP cerbix_database_up Whether the database is reachable (1) or not (0).")
+		out.println("# TYPE cerbix_database_up gauge")
+		out.printf("cerbix_database_up %d\n", b2i(dbUp))
 	}
 
-	fmt.Fprintln(w, "# HELP cerbix_checks_total Total monitor checks recorded, by result.")
-	fmt.Fprintln(w, "# TYPE cerbix_checks_total counter")
-	fmt.Fprintf(w, "cerbix_checks_total{result=\"up\"} %d\n", checksUp)
-	fmt.Fprintf(w, "cerbix_checks_total{result=\"down\"} %d\n", checksDown)
+	out.println("# HELP cerbix_checks_total Total monitor checks recorded, by result.")
+	out.println("# TYPE cerbix_checks_total counter")
+	out.printf("cerbix_checks_total{result=\"up\"} %d\n", checksUp)
+	out.printf("cerbix_checks_total{result=\"down\"} %d\n", checksDown)
 
 	// Result-ingest outcomes (spec func-result-protocol). Only non-empty series are emitted.
-	writeReasonCounter(w, "cerbix_result_quarantined_total",
+	writeReasonCounter(&out, "cerbix_result_quarantined_total",
 		"Results set aside without touching state (by reason).", quarantined)
-	writeReasonCounter(w, "cerbix_result_ignored_total",
+	writeReasonCounter(&out, "cerbix_result_ignored_total",
 		"Results not applied to live state (by reason).", ignored)
-	writeReasonCounter(w, "cerbix_result_rejected_total",
+	writeReasonCounter(&out, "cerbix_result_rejected_total",
 		"Results fail-closed rejected with no insert (by reason).", rejected)
+	writeReasonCounter(&out, "cerbix_executor_probe_error_total",
+		"Typed credential-envelope execution errors that did not mutate monitor liveness.", executorProbeErrors)
+	writeReasonCounter(&out, "cerbix_secret_resolution_failed_total",
+		"Credential materialization or capability rejections before dispatch.", secretResolutionFailures)
+	writeReasonCounter(&out, "cerbix_dispatch_transport_failed_total",
+		"Materialized jobs that could not be handed to their transport (by reason).", dispatchTransportFailures)
 	if len(clockSkew) > 0 {
-		fmt.Fprintln(w, "# HELP cerbix_result_clock_skew_total Accepted results with an anomalous client clock (by origin, reason).")
-		fmt.Fprintln(w, "# TYPE cerbix_result_clock_skew_total counter")
+		out.println("# HELP cerbix_result_clock_skew_total Accepted results with an anomalous client clock (by origin, reason).")
+		out.println("# TYPE cerbix_result_clock_skew_total counter")
 		for _, origin := range sortedKeys(clockSkew) {
 			for _, reason := range sortedKeys(clockSkew[origin]) {
-				fmt.Fprintf(w, "cerbix_result_clock_skew_total{origin=%q,reason=%q} %d\n", origin, reason, clockSkew[origin][reason])
+				out.printf("cerbix_result_clock_skew_total{origin=%q,reason=%q} %d\n", origin, reason, clockSkew[origin][reason])
 			}
 		}
 	}
 	if missingRev > 0 {
-		fmt.Fprintln(w, "# HELP cerbix_result_missing_revision_total Scheduled results with no revision applied under observe mode.")
-		fmt.Fprintln(w, "# TYPE cerbix_result_missing_revision_total counter")
-		fmt.Fprintf(w, "cerbix_result_missing_revision_total %d\n", missingRev)
+		out.println("# HELP cerbix_result_missing_revision_total Scheduled results with no revision applied under observe mode.")
+		out.println("# TYPE cerbix_result_missing_revision_total counter")
+		out.printf("cerbix_result_missing_revision_total %d\n", missingRev)
 	}
 
-	fmt.Fprintln(w, "# HELP cerbix_incidents_opened_total Total incidents opened through the API.")
-	fmt.Fprintln(w, "# TYPE cerbix_incidents_opened_total counter")
-	fmt.Fprintf(w, "cerbix_incidents_opened_total %d\n", incidentsOpened)
+	out.println("# HELP cerbix_incidents_opened_total Total incidents opened through the API.")
+	out.println("# TYPE cerbix_incidents_opened_total counter")
+	out.printf("cerbix_incidents_opened_total %d\n", incidentsOpened)
 
-	fmt.Fprintln(w, "# HELP cerbix_outbox_delivered_total Total outbox events delivered.")
-	fmt.Fprintln(w, "# TYPE cerbix_outbox_delivered_total counter")
-	fmt.Fprintf(w, "cerbix_outbox_delivered_total %d\n", outboxDelivered)
+	out.println("# HELP cerbix_outbox_delivered_total Total outbox events delivered.")
+	out.println("# TYPE cerbix_outbox_delivered_total counter")
+	out.printf("cerbix_outbox_delivered_total %d\n", outboxDelivered)
 
-	fmt.Fprintln(w, "# HELP cerbix_outbox_dead_total Total outbox events parked as dead after exhausting retries.")
-	fmt.Fprintln(w, "# TYPE cerbix_outbox_dead_total counter")
-	fmt.Fprintf(w, "cerbix_outbox_dead_total %d\n", outboxDead)
+	out.println("# HELP cerbix_outbox_dead_total Total outbox events parked as dead after exhausting retries.")
+	out.println("# TYPE cerbix_outbox_dead_total counter")
+	out.printf("cerbix_outbox_dead_total %d\n", outboxDead)
 
 	if leaderTracked {
-		fmt.Fprintln(w, "# HELP cerbix_scheduler_leader Whether this process currently holds scheduler leadership (1) or is on standby (0).")
-		fmt.Fprintln(w, "# TYPE cerbix_scheduler_leader gauge")
-		fmt.Fprintf(w, "cerbix_scheduler_leader %d\n", b2i(leader))
+		out.println("# HELP cerbix_scheduler_leader Whether this process currently holds scheduler leadership (1) or is on standby (0).")
+		out.println("# TYPE cerbix_scheduler_leader gauge")
+		out.printf("cerbix_scheduler_leader %d\n", b2i(leader))
 	}
 
 	if brokerTracked {
-		fmt.Fprintln(w, "# HELP cerbix_broker_up Whether the AMQP broker is currently reachable (1) or not (0).")
-		fmt.Fprintln(w, "# TYPE cerbix_broker_up gauge")
-		fmt.Fprintf(w, "cerbix_broker_up %d\n", b2i(brokerUp))
+		out.println("# HELP cerbix_broker_up Whether the AMQP broker is currently reachable (1) or not (0).")
+		out.println("# TYPE cerbix_broker_up gauge")
+		out.printf("cerbix_broker_up %d\n", b2i(brokerUp))
 	}
 
 	if pullStats != nil {
-		fmt.Fprintln(w, "# HELP cerbix_pull_jobs_pending Unclaimed pull jobs per region (HTTP-pull transport).")
-		fmt.Fprintln(w, "# TYPE cerbix_pull_jobs_pending gauge")
-		fmt.Fprintln(w, "# HELP cerbix_pull_agent_lag_seconds Age of the oldest unclaimed pull job per region.")
-		fmt.Fprintln(w, "# TYPE cerbix_pull_agent_lag_seconds gauge")
+		out.println("# HELP cerbix_pull_jobs_pending Unclaimed pull jobs per region (HTTP-pull transport).")
+		out.println("# TYPE cerbix_pull_jobs_pending gauge")
+		out.println("# HELP cerbix_pull_agent_lag_seconds Age of the oldest unclaimed pull job per region.")
+		out.println("# TYPE cerbix_pull_agent_lag_seconds gauge")
 		for _, s := range pullStats {
-			fmt.Fprintf(w, "cerbix_pull_jobs_pending{region=%q} %d\n", s.Region, s.Pending)
-			fmt.Fprintf(w, "cerbix_pull_agent_lag_seconds{region=%q} %.3f\n", s.Region, s.LagSeconds)
+			out.printf("cerbix_pull_jobs_pending{region=%q} %d\n", s.Region, s.Pending)
+			out.printf("cerbix_pull_agent_lag_seconds{region=%q} %.3f\n", s.Region, s.LagSeconds)
 		}
 	}
 
 	if len(fileProviders) > 0 {
-		fmt.Fprintln(w, "# HELP cerbix_file_provider_leader Whether this process holds a file provider's reconcile leadership.")
-		fmt.Fprintln(w, "# TYPE cerbix_file_provider_leader gauge")
-		fmt.Fprintln(w, "# HELP cerbix_file_provider_reconcile_total File-provider reconciles by outcome.")
-		fmt.Fprintln(w, "# TYPE cerbix_file_provider_reconcile_total counter")
-		fmt.Fprintln(w, "# HELP cerbix_file_provider_reconcile_duration_seconds Duration of the last reconcile.")
-		fmt.Fprintln(w, "# TYPE cerbix_file_provider_reconcile_duration_seconds gauge")
-		fmt.Fprintln(w, "# HELP cerbix_file_provider_last_success_timestamp_seconds Unix time of the last successful reconcile.")
-		fmt.Fprintln(w, "# TYPE cerbix_file_provider_last_success_timestamp_seconds gauge")
-		fmt.Fprintln(w, "# HELP cerbix_file_provider_managed_monitors Monitors currently owned by the provider.")
-		fmt.Fprintln(w, "# TYPE cerbix_file_provider_managed_monitors gauge")
-		fmt.Fprintln(w, "# HELP cerbix_file_provider_orphaned_monitors Owned monitors currently orphaned.")
-		fmt.Fprintln(w, "# TYPE cerbix_file_provider_orphaned_monitors gauge")
-		fmt.Fprintln(w, "# HELP cerbix_file_provider_bundle_errors Bundles/files rejected in the last scan.")
-		fmt.Fprintln(w, "# TYPE cerbix_file_provider_bundle_errors gauge")
+		out.println("# HELP cerbix_file_provider_leader Whether this process holds a file provider's reconcile leadership.")
+		out.println("# TYPE cerbix_file_provider_leader gauge")
+		out.println("# HELP cerbix_file_provider_reconcile_total File-provider reconciles by outcome.")
+		out.println("# TYPE cerbix_file_provider_reconcile_total counter")
+		out.println("# HELP cerbix_file_provider_reconcile_duration_seconds Duration of the last reconcile.")
+		out.println("# TYPE cerbix_file_provider_reconcile_duration_seconds gauge")
+		out.println("# HELP cerbix_file_provider_last_success_timestamp_seconds Unix time of the last successful reconcile.")
+		out.println("# TYPE cerbix_file_provider_last_success_timestamp_seconds gauge")
+		out.println("# HELP cerbix_file_provider_managed_monitors Monitors currently owned by the provider.")
+		out.println("# TYPE cerbix_file_provider_managed_monitors gauge")
+		out.println("# HELP cerbix_file_provider_orphaned_monitors Owned monitors currently orphaned.")
+		out.println("# TYPE cerbix_file_provider_orphaned_monitors gauge")
+		out.println("# HELP cerbix_file_provider_bundle_errors Bundles/files rejected in the last scan.")
+		out.println("# TYPE cerbix_file_provider_bundle_errors gauge")
 		for _, name := range sortedKeys(fileProviders) {
 			s := fileProviders[name]
-			fmt.Fprintf(w, "cerbix_file_provider_leader{provider=%q} %d\n", name, b2i(s.leader))
+			out.printf("cerbix_file_provider_leader{provider=%q} %d\n", name, b2i(s.leader))
 			for _, outcome := range sortedKeys(s.reconciles) {
-				fmt.Fprintf(w, "cerbix_file_provider_reconcile_total{provider=%q,outcome=%q} %d\n", name, outcome, s.reconciles[outcome])
+				out.printf("cerbix_file_provider_reconcile_total{provider=%q,outcome=%q} %d\n", name, outcome, s.reconciles[outcome])
 			}
-			fmt.Fprintf(w, "cerbix_file_provider_reconcile_duration_seconds{provider=%q} %.3f\n", name, s.lastDuration)
-			fmt.Fprintf(w, "cerbix_file_provider_last_success_timestamp_seconds{provider=%q} %d\n", name, s.lastSuccessUnix)
-			fmt.Fprintf(w, "cerbix_file_provider_managed_monitors{provider=%q} %d\n", name, s.managed)
-			fmt.Fprintf(w, "cerbix_file_provider_orphaned_monitors{provider=%q} %d\n", name, s.orphaned)
-			fmt.Fprintf(w, "cerbix_file_provider_bundle_errors{provider=%q} %d\n", name, s.bundleErrors)
+			out.printf("cerbix_file_provider_reconcile_duration_seconds{provider=%q} %.3f\n", name, s.lastDuration)
+			out.printf("cerbix_file_provider_last_success_timestamp_seconds{provider=%q} %d\n", name, s.lastSuccessUnix)
+			out.printf("cerbix_file_provider_managed_monitors{provider=%q} %d\n", name, s.managed)
+			out.printf("cerbix_file_provider_orphaned_monitors{provider=%q} %d\n", name, s.orphaned)
+			out.printf("cerbix_file_provider_bundle_errors{provider=%q} %d\n", name, s.bundleErrors)
 		}
+	}
+}
+
+// prometheusWriter stops emitting after the first client/write failure. Metrics
+// collection is best-effort for a single scrape, but write errors are never
+// accidentally discarded by individual format calls.
+type prometheusWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (w *prometheusWriter) println(args ...any) {
+	if w.err == nil {
+		_, w.err = fmt.Fprintln(w.w, args...)
+	}
+}
+
+func (w *prometheusWriter) printf(format string, args ...any) {
+	if w.err == nil {
+		_, w.err = fmt.Fprintf(w.w, format, args...)
 	}
 }
 
@@ -469,13 +567,13 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 // writeReasonCounter emits a {reason="…"} counter family, skipping it entirely when empty.
-func writeReasonCounter(w io.Writer, name, help string, counts map[string]uint64) {
+func writeReasonCounter(w *prometheusWriter, name, help string, counts map[string]uint64) {
 	if len(counts) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "# HELP %s %s\n", name, help)
-	fmt.Fprintf(w, "# TYPE %s counter\n", name)
+	w.printf("# HELP %s %s\n", name, help)
+	w.printf("# TYPE %s counter\n", name)
 	for _, reason := range sortedKeys(counts) {
-		fmt.Fprintf(w, "%s{reason=%q} %d\n", name, reason, counts[reason])
+		w.printf("%s{reason=%q} %d\n", name, reason, counts[reason])
 	}
 }

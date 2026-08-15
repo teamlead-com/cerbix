@@ -296,7 +296,7 @@ func TestReEnableSupersedesQueuedDown(t *testing.T) {
 
 	// Re-enable bumped state_sequence beyond the queued DOWN's Seq → the outbox worker's
 	// gate (event.Seq > 0 && monitor.state_sequence > event.Seq) now drops it as superseded.
-	if !(eventSeq > 0 && reUpd.StateSequence > eventSeq) {
+	if eventSeq <= 0 || reUpd.StateSequence <= eventSeq {
 		t.Fatalf("re-enable did not supersede queued DOWN: state_sequence=%d, event seq=%d", reUpd.StateSequence, eventSeq)
 	}
 	// The bump is silent: neither disable nor re-enable enqueued a new transition event.

@@ -273,7 +273,7 @@ func TestMonitorRegionNormalizeAndValidate(t *testing.T) {
 	if m.Region != "geo1" {
 		t.Fatalf("normalize region = %q, want geo1", m.Region)
 	}
-	var empty Monitor = Monitor{Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5}
+	empty := Monitor{Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5}
 	empty.Normalize()
 	if empty.Region != DefaultRegion {
 		t.Fatalf("empty region default = %q, want %q", empty.Region, DefaultRegion)

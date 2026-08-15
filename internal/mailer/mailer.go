@@ -89,7 +89,7 @@ func sendMailTimeout(addr string, auth smtp.Auth, from string, to []string, msg 
 		_ = conn.Close()
 		return err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	if err := c.Hello("localhost"); err != nil {
 		return err

@@ -14,7 +14,7 @@ func (h *Handler) audit(r *http.Request, orgID, action, target string) {
 	p, _ := h.principal(r)
 	err := h.store.RecordAudit(r.Context(), domain.AuditEntry{
 		OrgID:       orgID,
-		ActorUserID: p.UserID,
+		ActorUserID: p.AuditUserID(),
 		ViaToken:    p.ViaToken,
 		Action:      action,
 		Target:      target,

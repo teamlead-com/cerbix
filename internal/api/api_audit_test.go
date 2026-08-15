@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
@@ -25,6 +26,26 @@ func TestAuditRecordedAndListed(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &entries)
 	if len(entries) == 0 || entries[0].Action != "member.add" {
 		t.Fatalf("audit entries = %+v, want a member.add first", entries)
+	}
+}
+
+func TestGenericAuditUsesSyntheticTokenIdentityContract(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+	p := authz.Principal{
+		UserID:      authz.SyntheticTokenActorPrefix + "org-admin-token",
+		ViaToken:    true,
+		Memberships: []domain.Membership{{OrgID: "o1", Role: domain.RoleOrgAdmin}},
+	}
+	if rec := do(h, p, http.MethodPost, "/api/v1/organizations/o1/members", `{"user_id":"u1","role":"viewer"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("token add member = %d (%s), want 201", rec.Code, rec.Body.String())
+	}
+	if len(fs.audit) == 0 {
+		t.Fatal("token mutation wrote no audit row")
+	}
+	got := fs.audit[0]
+	if got.Action != "member.add" || got.ActorUserID != "" || !got.ViaToken {
+		t.Fatalf("generic token audit = %+v, want NULL actor + via_token", got)
 	}
 }
 

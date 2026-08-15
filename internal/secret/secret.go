@@ -76,6 +76,12 @@ func IsEncrypted(s string) bool { return strings.HasPrefix(s, prefix) }
 // returned as-is (legacy plaintext). An encrypted value presented to a nil Cipher,
 // or that no key can open, is an error — never silently returned as ciphertext.
 func (c *Cipher) Decrypt(s string) (string, error) {
+	// The AAD-bound format is reserved: silently returning an enc:v2a: token as
+	// "plaintext" would hand ciphertext to a caller expecting a credential. Callers
+	// holding AAD-bound values must use DecryptBytes with the binding context.
+	if strings.HasPrefix(s, aadPrefix) {
+		return "", errors.New("secret: value is AAD-bound (enc:v2a); use DecryptBytes with its context")
+	}
 	if !strings.HasPrefix(s, prefix) {
 		return s, nil
 	}

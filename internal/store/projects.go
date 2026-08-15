@@ -60,7 +60,7 @@ func (s *Store) DeleteProject(ctx context.Context, orgID, projectID string) erro
 	if err != nil {
 		return fmt.Errorf("store: delete project: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var one int
 	err = tx.QueryRow(ctx,

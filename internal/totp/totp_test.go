@@ -38,9 +38,6 @@ func TestValidateSkewAndGenerate(t *testing.T) {
 	if old != cur && ValidateAt(secret, old, now) {
 		t.Fatal("code two steps away should not validate")
 	}
-	if ValidateAt(secret, "000000", now.Add(1_000_000*time.Second)) {
-		// almost certainly wrong; just a sanity guard on length/format handling
-	}
 	if ValidateAt(secret, "12345", now) {
 		t.Fatal("short input should not validate")
 	}

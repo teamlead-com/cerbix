@@ -117,9 +117,12 @@ cerbix is structured as a Go + Vue 3 monorepo:
 
 2. **Start the local dev infrastructure**:
    ```bash
-   docker compose -f docker/docker-compose.yml up --build
+   make dev-init  # only for a fresh broker volume
+   make dev-up
    ```
-   This spins up PostgreSQL, RabbitMQ, Keycloak, and the cerbix monolith (`--role all`) on `http://localhost:8080`.
+   This spins up PostgreSQL, RabbitMQ, Keycloak, Mailpit, and the cerbix monolith
+   (`--role all`) on `http://localhost:8080`. Use `make dev-test`; `make dev-down`
+   stops containers without deleting named volumes.
 
 3. **Frontend Development with Hot-Reload**:
    ```bash

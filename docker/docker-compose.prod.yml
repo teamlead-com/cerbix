@@ -50,7 +50,7 @@ services:
           memory: 1g
 
   rabbitmq:
-    image: rabbitmq:3.12-management
+    image: ${CERBIX_RABBITMQ_IMAGE:?set CERBIX_RABBITMQ_IMAGE to the broker image matching the persisted volume}
     restart: unless-stopped
     <<: [*netCaps, *logging, *dataCaps]
     hostname: cerbix-rabbit

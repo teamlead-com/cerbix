@@ -56,13 +56,14 @@ func (mysqlProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	cfg.Passwd = m.Config["password"]
 	cfg.DBName = m.Config["database"]
 	cfg.Timeout = m.Timeout()
+	cfg.TLSConfig = mysqlTLSConfig(m.Config)
 
 	connector, err := mysql.NewConnector(cfg)
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
 	db := sql.OpenDB(connector)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	query := m.Config["query"]
 	if strings.TrimSpace(query) == "" {
@@ -72,4 +73,14 @@ func (mysqlProber) Probe(ctx context.Context, m domain.Monitor) Result {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
 	return Result{Connected: true, LatencyMS: elapsedMS(start)}
+}
+
+func mysqlTLSConfig(config map[string]string) string {
+	if config["tls"] != "true" {
+		return ""
+	}
+	if config["tls_skip_verify"] == "true" {
+		return "skip-verify"
+	}
+	return "true"
 }

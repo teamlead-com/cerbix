@@ -23,6 +23,7 @@ type Store interface {
 	// live state was applied, whether a heartbeat was inserted (SLA), the prev/new status,
 	// maintenance suppression, and — when not applied — the outcome reason for metrics.
 	RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) (store.ResultOutcome, error)
+	RecordProbeError(ctx context.Context, monitorID string, revision int64, probeErr domain.ProbeError) (store.ProbeErrorOutcome, error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	FindOpenAutoIncidentByMonitor(ctx context.Context, monitorID string) (domain.Incident, error)
 	CreateIncident(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
@@ -39,6 +40,7 @@ type Recorder interface {
 	// RecordResultMissingRevision counts a scheduled result accepted with no revision under
 	// observe mode (the migration signal watched before switching to enforce).
 	RecordResultMissingRevision()
+	RecordExecutorProbeError(reason string)
 }
 
 // autoIncidentAuthor labels timeline entries the pipeline writes.
@@ -116,6 +118,10 @@ func (c *Consumer) Run(ctx context.Context) {
 }
 
 func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
+	if hb.ProbeError != nil {
+		c.handleProbeError(ctx, hb)
+		return
+	}
 	// One transaction runs the ordered pipeline (missing → lock → revision gate → bounds →
 	// insert/dedup → watermark): a duplicate re-delivery is deduped, a stale/out-of-order
 	// probe is kept for SLA only, a future/out-of-window one is quarantined without an
@@ -150,6 +156,30 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 	if o.Applied && o.Prev != o.Cur {
 		c.logger.Info("monitor_status_changed", "monitor_id", hb.MonitorID, "prev", string(o.Prev), "cur", string(o.Cur), "suppressed", o.Suppressed)
 		c.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed)
+	}
+}
+
+func (c *Consumer) handleProbeError(ctx context.Context, hb domain.Heartbeat) {
+	o, err := c.store.RecordProbeError(ctx, hb.MonitorID, hb.ExecutionRevision, *hb.ProbeError)
+	if errors.Is(err, store.ErrNotFound) {
+		c.logger.Info("probe_error_for_deleted_monitor", "monitor_id", hb.MonitorID)
+		return
+	}
+	if err != nil {
+		c.logger.Error("record_probe_error_failed", "monitor_id", hb.MonitorID, "error", err.Error())
+		return
+	}
+	if o.Reason != "" {
+		if c.recorder != nil {
+			c.recorder.RecordResultOutcome(o.Reason)
+		}
+		return
+	}
+	if o.Recorded {
+		if c.recorder != nil {
+			c.recorder.RecordExecutorProbeError(hb.ProbeError.Reason)
+		}
+		c.logger.Warn("executor_probe_error", "monitor_id", hb.MonitorID, "reason", hb.ProbeError.Reason)
 	}
 }
 

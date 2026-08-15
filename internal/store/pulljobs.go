@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -12,12 +13,26 @@ import (
 // (ttlSeconds), so an agent can claim it over HTTP. A non-positive TTL falls back to
 // 60s. The payload is an opaque JSON snapshot (a dispatch.CheckJob).
 func (s *Store) EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds int) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 1)
+}
+
+func (s *Store) EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds int) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 2)
+}
+
+// EnqueuePullJobV3 enqueues on the carrier generation that carries envelope v2. It is used
+// only for a region whose executors have declared capability 2 (§4.7, D-0160).
+func (s *Store) EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds int) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 3)
+}
+
+func (s *Store) enqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, protocolVersion int) error {
 	if ttlSeconds <= 0 {
 		ttlSeconds = 60
 	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO pull_jobs (region, payload, expires_at) VALUES ($1, $2, now() + make_interval(secs => $3))`,
-		region, payload, ttlSeconds)
+		`INSERT INTO pull_jobs (region, payload, expires_at, protocol_version) VALUES ($1, $2, now() + make_interval(secs => $3), $4)`,
+		region, payload, ttlSeconds, protocolVersion)
 	if err != nil {
 		return fmt.Errorf("store: enqueue pull job: %w", err)
 	}
@@ -33,20 +48,52 @@ const PullChannel = "pull_jobs"
 
 // PullJob is a leased check job: an opaque payload (a dispatch.CheckJob snapshot)
 // plus the claim Token the agent echoes back to ack (delete) it once reported.
+// ProtocolVersion is the row's carrier generation, stamped by the server: the agent must
+// never infer it from the payload, which is the part an attacker can edit
+// (func-secret-inventory §4.7, D-0160).
 type PullJob struct {
-	Token   string
-	Payload []byte
+	Token           string
+	Payload         []byte
+	ProtocolVersion int
 }
 
-// ClaimPullJobs atomically LEASES up to max claimable jobs for a region: it stamps
-// each with a fresh claim_token and a lease_expires_at (now + leaseSeconds) and
-// returns them. A job is claimable when it is unexpired (expires_at > now) AND
-// currently unleased or its lease has lapsed (lease_expires_at IS NULL OR <= now) —
-// so a crashed agent's jobs become claimable again after the lease, rather than being
-// lost as they were under the old DELETE-on-claim. FOR UPDATE SKIP LOCKED keeps
-// concurrent agents safe. Jobs are removed only by AckPullJobs (on report) or the TTL
-// purge. A non-positive leaseSeconds falls back to 30s.
+// ClaimPullJobs serves the generation-1 endpoint: generation-1 rows only.
 func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 1)
+}
+
+// ClaimPullJobsV2 serves the capability-2 endpoint and leases EVERY generation at or below
+// 2 in ONE atomic claim, under the caller's single max and one lease.
+//
+// The barrier is one-directional (func-secret-inventory §4.7, D-0160): it stops an
+// incapable executor from receiving a newer generation, and must never stop a capable one
+// from receiving an older. Non-credentialed monitors are enqueued as generation-1 rows and
+// an `enforced` region's agent is necessarily capable, so a capable claim that returned
+// only its own generation left every ordinary monitor's row to expire by TTL — no probe, no
+// heartbeat, no DOWN, no alert. Two sequential single-generation claims are NOT an
+// equivalent fix: the long poll sleeps out its window on whichever generation is empty, and
+// two independent claims each honour `max` separately and over-lease.
+func (s *Store) ClaimPullJobsV2(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 2)
+}
+
+// ClaimPullJobsV3 serves the capability-2 endpoint: every generation up to 3.
+func (s *Store) ClaimPullJobsV3(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 3)
+}
+
+// claimPullJobs atomically LEASES up to max claimable jobs for a region, of any generation
+// up to maxProtocolVersion inclusive: it stamps each with a fresh claim_token and a
+// lease_expires_at (now + leaseSeconds) and returns them. A job is claimable when it is
+// unexpired (expires_at > now) AND currently unleased or its lease has lapsed
+// (lease_expires_at IS NULL OR <= now) — so a crashed agent's jobs become claimable again
+// after the lease, rather than being lost as they were under the old DELETE-on-claim.
+// FOR UPDATE SKIP LOCKED keeps concurrent agents safe. Jobs are removed only by AckPullJobs
+// (on report) or the TTL purge. A non-positive leaseSeconds falls back to 30s.
+//
+// Ordering by created_at across the whole set is what keeps generations from starving each
+// other: rows compete on age, not on which generation they belong to.
+func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeconds, maxProtocolVersion int) ([]PullJob, error) {
 	if max <= 0 {
 		max = 16
 	}
@@ -58,14 +105,14 @@ func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeco
 		        lease_expires_at = now() + make_interval(secs => $3)
 		  WHERE id IN (
 		     SELECT id FROM pull_jobs
-		      WHERE region = $1 AND expires_at > now()
+		      WHERE region = $1 AND protocol_version <= $4 AND expires_at > now()
 		        AND (lease_expires_at IS NULL OR lease_expires_at <= now())
 		      ORDER BY created_at
 		      LIMIT $2
 		      FOR UPDATE SKIP LOCKED
 		  )
-		  RETURNING claim_token::text, payload`,
-		region, max, leaseSeconds)
+		  RETURNING claim_token::text, payload, protocol_version`,
+		region, max, leaseSeconds, maxProtocolVersion)
 	if err != nil {
 		return nil, fmt.Errorf("store: claim pull jobs: %w", err)
 	}
@@ -73,7 +120,7 @@ func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeco
 	var out []PullJob
 	for rows.Next() {
 		var job PullJob
-		if err := rows.Scan(&job.Token, &job.Payload); err != nil {
+		if err := rows.Scan(&job.Token, &job.Payload, &job.ProtocolVersion); err != nil {
 			return nil, fmt.Errorf("store: scan pull job: %w", err)
 		}
 		out = append(out, job)
@@ -130,14 +177,58 @@ func (s *Store) PullQueueStats(ctx context.Context) ([]metrics.PullStat, error) 
 
 // RecordAgentHeartbeat upserts a pull agent's last-seen time for its region.
 func (s *Store) RecordAgentHeartbeat(ctx context.Context, region, agentID string) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO agent_heartbeats (region, agent_id, seen_at) VALUES ($1, $2, now())
-		 ON CONFLICT (region, agent_id) DO UPDATE SET seen_at = now()`,
-		region, agentID)
+	return s.RecordAgentCapabilities(ctx, region, agentID, 0, false)
+}
+
+func (s *Store) RecordAgentCapabilities(ctx context.Context, region, agentID string, credentialEnvelope int, credentialReady bool) error {
+	capabilities, err := json.Marshal(map[string]int{"credential_envelope": credentialEnvelope})
+	if err != nil {
+		return fmt.Errorf("store: encode agent capabilities: %w", err)
+	}
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO agent_heartbeats (region, agent_id, seen_at, capabilities, credential_ready)
+		 VALUES ($1, $2, now(), $3, $4)
+		 ON CONFLICT (region, agent_id) DO UPDATE
+		 SET seen_at = now(), capabilities = EXCLUDED.capabilities,
+		     credential_ready = EXCLUDED.credential_ready`,
+		region, agentID, capabilities, credentialReady)
 	if err != nil {
 		return fmt.Errorf("store: record agent heartbeat: %w", err)
 	}
 	return nil
+}
+
+// LiveCredentialReadyAgentRegions is existential and never vacuous: a region appears only
+// when at least one recent agent reasserted key readiness AND a credential-envelope
+// capability of at least minCapability. The floor is a parameter because capability is
+// GENERATIONAL: an executor that can only open envelope v1 is not evidence of readiness
+// for a region core is about to emit envelope v2 into (§4.7, D-0160).
+func (s *Store) LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error) {
+	secs := int(within.Seconds())
+	if secs <= 0 {
+		secs = 60
+	}
+	if minCapability < 1 {
+		minCapability = 1
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT region FROM agent_heartbeats
+		  WHERE seen_at > now() - make_interval(secs => $1)
+		    AND credential_ready
+		    AND COALESCE((capabilities->>'credential_envelope')::int, 0) >= $2`, secs, minCapability)
+	if err != nil {
+		return nil, fmt.Errorf("store: live credential-ready agent regions: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var region string
+		if err := rows.Scan(&region); err != nil {
+			return nil, fmt.Errorf("store: scan credential-ready agent region: %w", err)
+		}
+		out[region] = true
+	}
+	return out, rows.Err()
 }
 
 // PurgeStaleAgentHeartbeats deletes heartbeat rows older than the given age. Each agent

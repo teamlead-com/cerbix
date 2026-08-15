@@ -2,11 +2,25 @@ package metrics
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/buildinfo"
 )
+
+type failAfterWriter struct {
+	calls  int
+	failAt int
+}
+
+func (w *failAfterWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.calls >= w.failAt {
+		return 0, errors.New("injected writer failure")
+	}
+	return len(p), nil
+}
 
 func TestWritePrometheusEmitsCoreSeries(t *testing.T) {
 	reg := New(buildinfo.Info{Version: "v1", Commit: "abc", GoVersion: "go1.24"}, "api")
@@ -25,6 +39,15 @@ func TestWritePrometheusEmitsCoreSeries(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("metrics missing %q in:\n%s", want, got)
 		}
+	}
+}
+
+func TestWritePrometheusStopsAfterWriterFailure(t *testing.T) {
+	reg := New(buildinfo.Info{Version: "v1", Commit: "abc", GoVersion: "go1.24"}, "api")
+	w := &failAfterWriter{failAt: 3}
+	reg.WritePrometheus(w)
+	if w.calls != w.failAt {
+		t.Fatalf("writer called %d times after failure, want exactly %d", w.calls, w.failAt)
 	}
 }
 
@@ -125,6 +148,29 @@ func TestReadinessTransitions(t *testing.T) {
 	reg.SetReady(true, "")
 	if !reg.Ready() {
 		t.Fatal("registry should be ready")
+	}
+	reg.SetCredentialReady(false, "decrypt_auth_failed")
+	if reg.Ready() || !strings.Contains(reg.LastError(), "credential envelope") {
+		t.Fatalf("credential failure did not degrade readiness: ready=%v err=%q", reg.Ready(), reg.LastError())
+	}
+	// A generic health transition must not erase the component failure.
+	reg.SetReady(true, "")
+	if reg.Ready() {
+		t.Fatal("generic SetReady(true) erased credential degradation")
+	}
+	reg.SetCredentialReady(true, "")
+	if !reg.Ready() {
+		t.Fatal("successful envelope decrypt did not restore readiness")
+	}
+}
+
+func TestDispatchSharedTrustMetric(t *testing.T) {
+	reg := New(buildinfo.Info{}, "scheduler")
+	reg.SetDispatchSharedTrust(true)
+	var out strings.Builder
+	reg.WritePrometheus(&out)
+	if !strings.Contains(out.String(), "cerbix_dispatch_shared_trust 1") {
+		t.Fatalf("shared-trust posture metric missing: %s", out.String())
 	}
 }
 

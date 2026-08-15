@@ -172,7 +172,7 @@ func (p httpProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	return Result{
 		Connected: true,

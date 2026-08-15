@@ -154,7 +154,7 @@ The reference point is company conventions (Go services `example-svc`), plus les
 | **Postgres + `pgx/v5`** | Reliable relational database; pgx is a fast native driver with pooling. | State, heartbeats, settings, sessions. |
 | **TimescaleDB (adaptive)** | Hypertable+compression "for growth" without a hard dependency: RDS/plain PG work without the extension. | Extension present → `heartbeats` = **hypertable** (daily chunks on-demand, native compression segmentby=monitor: ~10–20× disk, retention via `drop_chunks`); absent → **regular RANGE partitions** (daily) with manual maintenance. The mode is detected at startup (migration 00043 guarded); the `heartbeats_daily` rollup is identical in both. Revisit trigger for a dedicated TSDB: >100k monitors / intervals <10s / raw retention >1 year. |
 | **goose (embedded)** | Versioned SQL migrations inside the binary; `cerbix migrate` and auto-apply at startup. | DB schema. |
-| **RabbitMQ (`amqp091-go`)** | Existing cluster in the company infrastructure; durable queues, prefetch = backpressure; horizontal worker scaling. | `checks.jobs`/`checks.results` transport between scheduler↔worker↔api. |
+| **RabbitMQ (`amqp091-go`)** | Existing cluster in the company infrastructure; durable queues, prefetch = backpressure; horizontal worker scaling. | Regional/versioned `checks.jobs.*` plus shared `checks.results` transport between scheduler↔worker↔api. |
 | **`Dispatcher` (inproc\|amqp)** | An abstraction so that dev/tests don't require a broker. | Dev — `inproc`; prod — RabbitMQ. |
 | **Postgres advisory lock (leader election)** | No etcd in the stack; cheap, no new dependencies; survives leader failure. | The single active scheduler. |
 | **OIDC: `coreos/go-oidc` + `x/oauth2`** | Keycloak already exists; standard OIDC (Authorization Code + PKCE), ID-token/JWKS validation. | AuthN; authorization lives in the DB (own role model Global/Org/Project). |
@@ -177,14 +177,16 @@ One `--role=all` process + infrastructure:
 | Service | Image | Port | Role |
 |---|---|---|---|
 | `postgres` | `timescale/timescaledb:2.17.2-pg16` | 5432 | DB + TimescaleDB |
-| `rabbitmq` | `rabbitmq:3.12-management` | 5672 / 15672 | Broker (not used in dev with `all`) |
-| `keycloak` | `quay.io/keycloak/keycloak:26.0` (`start-dev`) | 8081 | OIDC IdP |
-| `cerbix` | build `../backend` | 8080 | `serve --role all` (API + SPA embed) |
+| `rabbitmq` | `${CERBIX_RABBITMQ_IMAGE:?...}` (fresh env template pins `rabbitmq:4.3-management`) | 5672 / 15672 | Broker (not used in dev with `all`) |
+| `keycloak` | `quay.io/keycloak/keycloak:18.0.0` (`start-dev`) | 8081 | OIDC IdP |
+| `cerbix` | build from the repository root | 8080 | `serve --role all` (API + SPA embed) |
 
 The SPA is served by the binary itself from `embed.FS` on :8080 — no separate nginx layer is needed. **The image
 is self-contained:** `docker/Dockerfile` is a root-context multi-stage build (node builds the SPA → the Go stage
-embeds `dist` into the binary → distroless), so `docker compose -f docker/docker-compose.yml build
-cerbix` builds both the frontend and the backend into one image. For local development with hot-reload —
+embeds `dist` into the binary → distroless), so `make dev-build` builds both the frontend and the backend into
+one image. `make dev-up`, `make dev-up-distributed`, and `make geo-up-all` are the fixed non-production topology
+entrypoints; base and geo retain separate RabbitMQ image pins and cannot run concurrently on their fixed ports.
+For local development with hot-reload —
 `make -C frontend dev` (Vite server on :5173).
 
 ## 2.2 Preferred production (distributed)
@@ -215,7 +217,7 @@ flowchart TB
     W3[cerbix --role worker]
   end
 
-  API1 & API2 & S1 & W1 & W2 & W3 --- MQ[(RabbitMQ 3.12<br/>cluster)]
+  API1 & API2 & S1 & W1 & W2 & W3 --- MQ[(RabbitMQ 4.3<br/>cluster)]
   API1 & API2 & S1 & S2 --- PG[(Postgres 16 + TimescaleDB<br/>primary + replica)]
   API1 & API2 -. OIDC .- KC[(Keycloak)]
   S1 <-. advisory-lock<br/>leader election .-> S2
@@ -234,7 +236,9 @@ flowchart TB
   provides backpressure and even distribution. No DB required.
 - **Postgres 16 (TimescaleDB image)** — primary + streaming replica; time series on regular
   RANGE partitions + the `heartbeats_daily` rollup, retention drops old partitions (leader).
-- **RabbitMQ 3.12** — cluster; durable queues `checks.jobs`/`checks.results`.
+- **RabbitMQ 4.3** — preferred cluster after the staged upgrade; durable regional
+  `checks.jobs.<region>` / `checks.jobs.v2.<region>` queues plus shared
+  `checks.results` / `checks.dead` and auto-delete regional test queues.
 - **Keycloak** — OIDC IdP (realm/client `cerbix`). Local login remains as a lockout fallback.
 - **Secrets** — `security.encryption_key` from a secret manager/environment variable; rotation via
   `cerbix reencrypt`.

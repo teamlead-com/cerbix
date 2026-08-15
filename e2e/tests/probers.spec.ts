@@ -61,12 +61,12 @@ test.describe("probers against the stack itself", () => {
     expect((await tcp.json()).up).toBeTruthy();
 
     // Region affinity is a transport property: over AMQP/pull a region without
-    // workers answers 502; the in-process dispatcher (--role all, this dev
-    // stack) probes everything locally, so a ghost region still succeeds.
+    // workers answers 502; the in-process dispatcher probes everything locally.
     const nowhere = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors/test`, {
       type: "tcp", target: "rabbitmq:5672", region: "e2e-ghost-region", timeout_seconds: 5, interval_seconds: 30,
     });
-    expect([200, 502]).toContain(nowhere.status());
+    const expected = (process.env.CERBIX_TOPOLOGY ?? "single") === "single" ? 200 : 502;
+    expect(nowhere.status()).toBe(expected);
   });
 
   test("composite quorum flips with M", async ({ page }) => {

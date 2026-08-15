@@ -2,14 +2,12 @@
 #
 # Infra (postgres, rabbitmq) always starts; pick HOW cerbix runs via profiles:
 #
-#   docker compose -f docker/docker-compose.yml --profile single up -d --build
+#   make dev-up
 #       one process, --role all, UI/API on :8080
 #
-#   docker compose -f docker/docker-compose.yml --profile distributed up -d --build
+#   make dev-up-distributed
 #       scheduler + api (:8082) + worker as separate processes over RabbitMQ;
-#       apply migrations ONCE first (roles racing a new migration fail):
-#       docker compose -f docker/docker-compose.yml --profile distributed \
-#         run --rm api migrate --config /etc/cerbix/config.yaml
+#       the Make target applies migrations ONCE before starting the roles.
 #
 #   add --profile sso to either to also start Keycloak (:8081) + MariaDB;
 #   add --profile mail for Mailpit (:8025 UI/API, :1025 SMTP) — mail-flow E2E/dev.
@@ -75,7 +73,9 @@ services:
       retries: 10
 
   rabbitmq:
-    image: rabbitmq:3.12-management
+    # Explicit on every invocation: no static default is safe for both a retained
+    # 3.12 volume and a volume already upgraded to 4.3 (runbook / D-0157).
+    image: ${CERBIX_RABBITMQ_IMAGE:?set CERBIX_RABBITMQ_IMAGE to the broker image matching the persisted volume}
     <<: [*netCaps, *logging, *dataCaps]
     hostname: cerbix-rabbit
     environment:
@@ -149,6 +149,10 @@ services:
       - "8082:8080"
     volumes:
       - ./config.dev.yaml:/etc/cerbix/config.yaml:ro
+      # The api role owns Monitoring as Code just like --role all. Keep the
+      # provider root identical across profiles so the strict startup probe can
+      # never see a configured-but-unmounted directory.
+      - ./monitoring.d:/etc/cerbix/monitoring.d:ro
 
   worker:
     <<: [*cerbixBuild, *netCaps, *logging]

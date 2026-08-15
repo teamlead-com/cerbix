@@ -55,6 +55,62 @@ var validRoles = map[string]bool{
 	"agent":     true,
 }
 
+// roleServices is the single owner map for role-specific runtime components.
+// Executors intentionally have no core control-plane services: in particular a
+// master-less worker must never claim the generic outbox or mount the user API.
+// API/scheduler/all are the master-key trust domain and own delivery today; the
+// same materializing bit is reserved for the authoritative secret materializer.
+type roleServices struct {
+	api           bool
+	coreDelivery  bool
+	materializing bool
+}
+
+func servicesForRole(role string) roleServices {
+	switch role {
+	case "all", "api":
+		return roleServices{api: true, coreDelivery: true, materializing: true}
+	case "scheduler":
+		return roleServices{coreDelivery: true, materializing: true}
+	default: // worker/agent (unknown roles are rejected before this is called)
+		return roleServices{}
+	}
+}
+
+func buildCredentialKeyrings(cfg config.DispatchConfig) (dispatch.CredentialKeyrings, error) {
+	build := func(path string, kr config.DispatchRegionKeys) (*dispatch.CredentialKeyring, error) {
+		primary, err := kr.Primary.Bytes(path + ".primary.key")
+		if err != nil {
+			return nil, err
+		}
+		previous := make([]dispatch.CredentialKeyMaterial, 0, len(kr.Previous))
+		for i, entry := range kr.Previous {
+			key, err := entry.Bytes(fmt.Sprintf("%s.previous[%d].key", path, i))
+			if err != nil {
+				return nil, err
+			}
+			previous = append(previous, dispatch.CredentialKeyMaterial{ID: entry.ID, Key: key})
+		}
+		return dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: kr.Primary.ID, Key: primary}, previous)
+	}
+	out := dispatch.CredentialKeyrings{Regions: make(map[string]*dispatch.CredentialKeyring, len(cfg.Regions))}
+	for region, configured := range cfg.Regions {
+		ring, err := build("security.dispatch.regions["+region+"]", configured)
+		if err != nil {
+			return dispatch.CredentialKeyrings{}, err
+		}
+		out.Regions[region] = ring
+	}
+	if cfg.Default != nil {
+		ring, err := build("security.dispatch.default", *cfg.Default)
+		if err != nil {
+			return dispatch.CredentialKeyrings{}, err
+		}
+		out.Default = ring
+	}
+	return out, nil
+}
+
 const (
 	dbPingInterval = 10 * time.Second
 	workerPoolSize = 4
@@ -81,19 +137,25 @@ func Main(args []string) int {
 		usage(os.Stdout)
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
+		_, _ = fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
 		usage(os.Stderr)
 		return 2
 	}
 }
 
-func usage(w *os.File) {
-	fmt.Fprintln(w, "cerbix — internal uptime & SLA monitoring")
-	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]")
-	fmt.Fprintln(w, "  cerbix migrate --config <path>")
-	fmt.Fprintln(w, "  cerbix reencrypt --config <path>")
-	fmt.Fprintln(w, "  cerbix version")
+func usage(w io.Writer) {
+	for _, line := range []string{
+		"cerbix — internal uptime & SLA monitoring",
+		"usage:",
+		"  cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]",
+		"  cerbix migrate --config <path>",
+		"  cerbix reencrypt --config <path>",
+		"  cerbix version",
+	} {
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return
+		}
+	}
 }
 
 func runVersion() int {
@@ -165,11 +227,26 @@ func (u liveRegionsUnion) LiveJobRegions(ctx context.Context) (map[string]bool, 
 // localTester adapts a local prober to api.RegionTester for the inproc (--role=all)
 // build, where region is cosmetic and the probe runs in-process.
 type localTester struct {
-	run func(ctx context.Context, m domain.Monitor) domain.Heartbeat
+	run         func(ctx context.Context, m domain.Monitor) domain.Heartbeat
+	credentials *dispatch.CredentialKeyring
 }
 
 func (l localTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
 	return l.run(ctx, m), nil
+}
+
+func (l localTester) RunJobTest(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
+	// In-process: no wire between the materializer and this runner, so the job's own
+	// protocol version IS the carrier generation. The gate still runs — every executor
+	// path crosses it, including the ones that cannot be attacked from outside.
+	materialized, err := dispatch.ValidateAndMaterialize(l.credentials,
+		dispatch.DeliveredJob{Job: job, CarrierGeneration: job.ProtocolVersion})
+	if err != nil {
+		return domain.Heartbeat{}, domain.ProbeError{Reason: dispatch.CredentialProbeErrorReason(err)}
+	}
+	hb := l.run(ctx, materialized.Monitor)
+	materialized.Cleanup()
+	return hb, nil
 }
 
 // pullTester runs "Test connection" for a pull-served region: it enqueues a one-off
@@ -178,7 +255,12 @@ func (l localTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Hear
 type pullTester struct{ store *store.Store }
 
 func (p pullTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
-	payload, err := json.Marshal(dispatch.CheckJob{Monitor: m})
+	return p.RunJobTest(ctx, dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1})
+}
+
+func (p pullTester) RunJobTest(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
+	m := job.Monitor
+	payload, err := json.Marshal(job)
 	if err != nil {
 		return domain.Heartbeat{}, err
 	}
@@ -186,7 +268,21 @@ func (p pullTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heart
 	if ttl <= 0 {
 		ttl = 26
 	}
-	id, err := p.store.EnqueuePullTest(ctx, m.Region, payload, ttl)
+	// EXACT routing: the row's generation is the job's. Falling back to the legacy queue
+	// for "anything that is not exactly 2" silently downgraded a generation-3 test onto a
+	// generation-1 row, where the executor's structural gate correctly refuses it as a
+	// carrier/payload mismatch — a self-inflicted failure that looked like an attack.
+	var id string
+	switch job.ProtocolVersion {
+	case dispatch.ProtocolV3:
+		id, err = p.store.EnqueuePullTestV3(ctx, m.Region, payload, ttl)
+	case dispatch.ProtocolV2:
+		id, err = p.store.EnqueuePullTestV2(ctx, m.Region, payload, ttl)
+	case dispatch.ProtocolV1, 0:
+		id, err = p.store.EnqueuePullTest(ctx, m.Region, payload, ttl)
+	default:
+		return domain.Heartbeat{}, fmt.Errorf("no pull tests carrier for generation %d", job.ProtocolVersion)
+	}
 	if err != nil {
 		return domain.Heartbeat{}, err
 	}
@@ -210,6 +306,9 @@ func (p pullTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heart
 				if err := json.Unmarshal(raw, &hb); err != nil {
 					return domain.Heartbeat{}, err
 				}
+				if hb.ProbeError != nil {
+					return domain.Heartbeat{}, *hb.ProbeError
+				}
 				return hb, nil
 			}
 		}
@@ -220,19 +319,54 @@ func (p pullTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heart
 // pull tester (HTTP → agent), everything else to the AMQP fallback tester.
 type regionRoutedTester struct {
 	pullRegions map[string]bool
-	pull        api.RegionTester
-	fallback    api.RegionTester
+	pull        jobRegionTester
+	fallback    jobRegionTester
+}
+
+type jobRegionTester interface {
+	RunJobTest(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error)
 }
 
 func (t regionRoutedTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
-	region := m.Region
+	return t.RunJobTest(ctx, dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1})
+}
+
+func (t regionRoutedTester) RunJobTest(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
+	region := job.Monitor.Region
 	if region == "" {
 		region = domain.DefaultRegion
 	}
 	if t.pullRegions[region] {
-		return t.pull.RunTest(ctx, m)
+		return t.pull.RunJobTest(ctx, job)
 	}
-	return t.fallback.RunTest(ctx, m)
+	return t.fallback.RunJobTest(ctx, job)
+}
+
+type materializingTester struct {
+	store  *store.Store
+	routes jobRegionTester
+	// carrierFor resolves the carrier generation this monitor's region has PROVEN it can
+	// consume, from the same sources the scheduler uses. Test Connection has to answer the
+	// question too: sealing a one-off probe at a fixed generation is how the execution
+	// binding ended up missing from exactly the path an operator triggers by hand.
+	carrierFor func(ctx context.Context, region string) int
+}
+
+func (t materializingTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
+	carrier := dispatch.ProtocolV2
+	if t.carrierFor != nil {
+		if g := t.carrierFor(ctx, m.Region); g > 0 {
+			carrier = g
+		}
+	}
+	item, err := t.store.MaterializeTestExecutionConfig(ctx, m, carrier)
+	if err != nil {
+		return domain.Heartbeat{}, err
+	}
+	if item.Reason != "" {
+		return domain.Heartbeat{}, fmt.Errorf("credential test rejected: %s", item.Reason)
+	}
+	return t.routes.RunJobTest(ctx, item.Job)
 }
 
 func loadConfig(path string) *config.Config {
@@ -252,7 +386,7 @@ func runMigrate(args []string) int {
 		return 2
 	}
 	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "migrate: --config is required")
+		_, _ = fmt.Fprintln(os.Stderr, "migrate: --config is required")
 		return 2
 	}
 	cfg := loadConfig(*configPath)
@@ -285,7 +419,7 @@ func runReencrypt(args []string) int {
 		return 2
 	}
 	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "reencrypt: --config is required")
+		_, _ = fmt.Fprintln(os.Stderr, "reencrypt: --config is required")
 		return 2
 	}
 	cfg := loadConfig(*configPath)
@@ -347,11 +481,11 @@ func runServe(args []string) int {
 		return 2
 	}
 	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "serve: --config is required")
+		_, _ = fmt.Fprintln(os.Stderr, "serve: --config is required")
 		return 2
 	}
 	if !validRoles[*role] {
-		fmt.Fprintf(os.Stderr, "serve: invalid --role %q\n", *role)
+		_, _ = fmt.Fprintf(os.Stderr, "serve: invalid --role %q\n", *role)
 		return 2
 	}
 
@@ -361,8 +495,22 @@ func runServe(args []string) int {
 	}
 
 	logger := logging.New(cfg.Log, os.Stdout)
+	// Role-dependent secret-inventory key presence/absence (spec func-secret-inventory
+	// §4.1/§4.7): structural keyring validity is checked in config.Validate; which keys
+	// this role must (or must NOT) hold is a pure config-owned rule — fail-fast here,
+	// before any runtime wiring, for every role including the DB-less agent.
+	if err := cfg.ValidateSecretsForRole(*role, *region); err != nil {
+		logging.Critical(logger, "secrets_role_config_invalid", "role", *role, "error", err.Error())
+		return 1
+	}
+	credentialRings, err := buildCredentialKeyrings(cfg.Security.Dispatch)
+	if err != nil {
+		logging.Critical(logger, "dispatch_keyring_init_failed", "error", err.Error())
+		return 1
+	}
 	info := buildinfo.Current()
 	registry := metrics.New(info, *role)
+	registry.SetDispatchSharedTrust(cfg.Security.Dispatch.SharedTrustAcknowledged)
 	// In-process realtime bus: ingest publishes status changes, the SSE handler
 	// streams them. Single-process (front with Redis pub/sub for multi-replica).
 	broker := events.NewBroker()
@@ -374,7 +522,6 @@ func runServe(args []string) int {
 		"listen", cfg.Server.Listen)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	// bg tracks the long-lived background goroutines (outbox, ingest, scheduler,
 	// worker, LISTEN notifiers) so shutdown DRAINS them — waits for each Run(ctx) to
@@ -384,17 +531,38 @@ func runServe(args []string) int {
 		bg.Add(1)
 		go func() { defer bg.Done(); f() }()
 	}
+	var st *store.Store
+	var disp dispatch.Dispatcher
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			cleanupServeResources(stop, &bg, func() error {
+				if disp == nil {
+					return nil
+				}
+				return disp.Close()
+			}, func() {
+				if st != nil {
+					st.Close()
+				}
+			}, 10*time.Second, logger)
+		})
+	}
+	// This defer covers every startup return as well as the normal serving path. In
+	// particular, cancel and drain users of the DB before closing its pool: reversing
+	// that order leaves background services retrying forever against a closed pool.
+	defer cleanup()
 
 	// The HTTP-pull agent is DB-less and broker-less: it only needs the prober and
 	// outbound HTTPS to the central API. Handle it before any DB/auth/dispatcher setup.
 	if *role == "agent" {
-		return runAgent(ctx, cfg, *region, registry, logger)
+		return runAgent(ctx, cfg, *region, credentialRings, registry, logger)
 	}
+	owned := servicesForRole(*role)
 
 	// Database wiring. Configured DB → migrate + connect (fail-fast, no
 	// self-healing); readiness then tracks live connectivity. No DB → scaffold
 	// mode, ready immediately.
-	var st *store.Store
 	if cfg.Database.DSN != "" {
 		if err := store.Migrate(ctx, cfg.Database.DSN); err != nil {
 			logging.Critical(logger, "db_migrate_failed", "error", err.Error())
@@ -418,7 +586,6 @@ func runServe(args []string) int {
 			"actual", st.PoolMaxConns(),
 			"required_min", store.RequiredMaxConns(fpCount, maxConcurrentReconciles),
 			"file_providers", fpCount)
-		defer st.Close()
 		// Result-ingest timestamp policy (spec func-result-protocol): skew bound + the
 		// retention floor below which a result is ignored (= the raw heartbeat window).
 		st.WithResultPolicy(cfg.Result.AllowedSkew.Std(), time.Duration(cfg.Heartbeats.RetentionDays)*24*time.Hour)
@@ -445,9 +612,13 @@ func runServe(args []string) int {
 				logger.Info("push_token_backfill_complete", "converted", n)
 			}
 		}
+		st.WithSecretsEnabled(cfg.Secrets.Enabled)
+		if owned.materializing && cfg.Secrets.EnvelopeEnforced() {
+			st.WithCredentialKeyrings(credentialRings)
+		}
 		registry.SetDatabaseUp(true)
 		logger.Info("database_connected")
-		go pingDatabase(ctx, st, registry, logger)
+		spawn(func() { pingDatabase(ctx, st, registry, logger) })
 	} else {
 		logger.Info("database_disabled", "mode", "scaffold")
 	}
@@ -462,7 +633,7 @@ func runServe(args []string) int {
 	// resolves its SMTP endpoint per send from these settings (live-reconfigurable).
 	var settingsSvc *settings.Service
 	var mail *mailer.Mailer
-	if st != nil {
+	if st != nil && owned.coreDelivery {
 		settingsSvc = settings.New(st, settings.Bootstrap{
 			MinPasswordLen:    cfg.Local.MinPasswordLength,
 			SessionTTLSeconds: int(cfg.Session.TTL.Std().Seconds()),
@@ -472,7 +643,10 @@ func runServe(args []string) int {
 				From: cfg.Mail.From, PublicBaseURL: cfg.Mail.PublicBaseURL,
 			},
 		}, logger)
-		settingsSvc.Start(ctx)
+		if err := settingsSvc.Load(ctx); err != nil {
+			logger.Warn("instance_settings_load_failed", "error", err.Error())
+		}
+		spawn(func() { settingsSvc.Run(ctx) })
 		mail = mailer.NewLive(func() mailer.Settings {
 			m := settingsSvc.Mail()
 			return mailer.Settings{
@@ -502,18 +676,22 @@ func runServe(args []string) int {
 	// RabbitMQ management lookup (which worker pools have a live consumer): used by the
 	// region picker (API) and region-worker alerting (scheduler). Best-effort — derived
 	// from the AMQP URL unless overridden; nil when no broker is configured.
-	mgmt, merr := rabbitManagementClient(cfg.RabbitMQ)
-	if merr != nil {
-		logger.Warn("mqadmin_init_failed", "error", merr.Error())
+	var mgmt *mqadmin.Client
+	if owned.api || owned.materializing {
+		var merr error
+		mgmt, merr = rabbitManagementClient(cfg.RabbitMQ)
+		if merr != nil {
+			logger.Warn("mqadmin_init_failed", "error", merr.Error())
+		}
 	}
 
 	// Auth + API wiring. Requires a database (sessions, JIT users, and the OIDC
-	// override all live in Postgres). OIDC is built asynchronously by StartOIDC —
+	// override all live in Postgres). OIDC is built asynchronously by RunOIDC —
 	// discovery is a network call that must not block or crash startup — and can be
 	// (re)configured at runtime from the Settings UI.
 	var app http.Handler
 	var apiHandler *api.Handler
-	if st != nil {
+	if st != nil && owned.api {
 		authn, err := auth.New(ctx, cfg, st, logger)
 		if err != nil {
 			logging.Critical(logger, "auth_init_failed", "error", err.Error())
@@ -526,11 +704,12 @@ func runServe(args []string) int {
 			logging.Critical(logger, "bootstrap_admin_failed", "error", err.Error())
 			return 1
 		}
-		authn.StartOIDC(ctx) // first sync + background reloader (non-fatal, retrying)
+		spawn(func() { authn.RunOIDC(ctx) }) // first sync + reloader (non-fatal, retrying)
 		authn.WithSettings(settingsSvc)
 		appMux := http.NewServeMux()
 		authn.Routes(appMux)
-		apiHandler = api.New(st, logger, cfg.Local.MinPasswordLength).WithMetrics(registry).WithEvents(broker).WithOIDC(authn).WithSettings(settingsSvc)
+		apiHandler = api.New(st, logger, cfg.Local.MinPasswordLength).WithMetrics(registry).WithEvents(broker).WithOIDC(authn).WithSettings(settingsSvc).
+			WithSecretsEnabled(cfg.Secrets.Enabled)
 		if mail != nil {
 			apiHandler.WithMailer(mail)
 		}
@@ -557,7 +736,7 @@ func runServe(args []string) int {
 			}
 			// Long-poll wake source: LISTEN pull_jobs, fan out to held /agent/jobs requests.
 			notifier := st.NewPullNotifier(logger)
-			go notifier.Run(ctx)
+			spawn(func() { notifier.Run(ctx) })
 			apiHandler.WithAgentToken(cfg.Pull.Token).WithAgentRegionTokens(regionTokens).
 				WithAgentDBTokens().WithPullWaiter(notifier)
 			appMux.Handle("/api/v1/agent/", apiHandler.AgentRouter())
@@ -587,7 +766,6 @@ func runServe(args []string) int {
 	// Checking pipeline. --role=all runs every role in one process over the
 	// in-process dispatcher; distributed roles (api|scheduler|worker) use the
 	// RabbitMQ dispatcher and each run only their part.
-	var disp dispatch.Dispatcher
 	switch {
 	case *role == "all" && st != nil:
 		disp = dispatch.NewInProc(0)
@@ -604,12 +782,18 @@ func runServe(args []string) int {
 		}
 		// A worker consumes only its region's jobs queue (checks.jobs.<region>);
 		// harmless no-op for scheduler/api (they don't consume jobs).
-		amqpd.WithJobRegion(*region)
+		// The capability an executor declares is the highest ENVELOPE generation it can
+		// open, and it decides which carrier queues it consumes. Emission of the newer
+		// carrier is gated separately, on the region's existential readiness.
+		capability := 0
+		if *role == "worker" && cfg.Secrets.EnvelopeEnforced() {
+			capability = dispatch.EnvelopeV2
+		}
+		amqpd.WithJobRegion(*region).WithCredentialCapability(capability)
 		amqpd.WithBrokerState(registry.SetBrokerUp) // cerbix_broker_up gauge
 		disp = amqpd
 	}
 	if disp != nil {
-		defer disp.Close()
 		// The push endpoint publishes heartbeats into the same pipeline.
 		if apiHandler != nil {
 			apiHandler.WithResultSink(disp)
@@ -625,11 +809,15 @@ func runServe(args []string) int {
 			// pull routing wraps EITHER base so pull-region tests reach the agent even in
 			// --role=all (matching how pull jobs are routed) — strict region affinity, no
 			// silent fallback to the local prober.
-			var base api.RegionTester
+			var base jobRegionTester
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
 				base = amqpd
 			} else {
-				base = localTester{run: runner.Run}
+				local := localTester{run: runner.Run}
+				if ring, ok := credentialRings.ForRegion(domain.DefaultRegion); ok && cfg.Secrets.EnvelopeEnforced() {
+					local.credentials = ring
+				}
+				base = local
 			}
 			pullSet := make(map[string]bool, len(cfg.Pull.Regions))
 			for _, r := range cfg.Pull.Regions {
@@ -637,10 +825,35 @@ func runServe(args []string) int {
 					pullSet[r] = true
 				}
 			}
-			if len(pullSet) > 0 && st != nil {
-				apiHandler.WithTester(regionRoutedTester{pullRegions: pullSet, pull: pullTester{store: st}, fallback: base})
+			routes := regionRoutedTester{pullRegions: pullSet, pull: pullTester{store: st}, fallback: base}
+			if cfg.Secrets.EnvelopeEnforced() {
+				_, sameProcessWorker := disp.(*dispatch.InProc)
+				carrierFor := func(ctx context.Context, region string) int {
+					if region == "" {
+						region = domain.DefaultRegion
+					}
+					// A same-process executor is this binary: its capability is ours, with no
+					// wire and no skew to discover.
+					if sameProcessWorker && !pullSet[region] {
+						return dispatch.ProtocolV3
+					}
+					if pullSet[region] {
+						ready, err := st.LiveCredentialReadyAgentRegions(ctx, 45*time.Second, dispatch.EnvelopeV2)
+						if err == nil && ready[region] {
+							return dispatch.ProtocolV3
+						}
+						return dispatch.ProtocolV2
+					}
+					if mgmt != nil {
+						if ready, err := mgmt.LiveCredentialV3JobRegions(ctx); err == nil && ready[region] {
+							return dispatch.ProtocolV3
+						}
+					}
+					return dispatch.ProtocolV2
+				}
+				apiHandler.WithTester(materializingTester{store: st, routes: routes, carrierFor: carrierFor})
 			} else {
-				apiHandler.WithTester(base)
+				apiHandler.WithTester(routes)
 			}
 		}
 		startIngest := func() {
@@ -668,6 +881,9 @@ func runServe(args []string) int {
 		switch *role {
 		case "all":
 			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
+				WithSecretResolutionMetrics(registry).
+				WithLocalCredentialRegions(domain.DefaultRegion).
 				WithPullRegions(cfg.Pull.Regions).                                  // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
 				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
@@ -676,6 +892,9 @@ func runServe(args []string) int {
 				WithConfigSignals(configSignals()) // file-apply config changes wake the leader
 			spawn(func() { sch.Run(ctx) })
 			wk := worker.New(disp, runner, workerPoolSize, logger)
+			if ring, ok := credentialRings.ForRegion(domain.DefaultRegion); ok && cfg.Secrets.EnvelopeEnforced() {
+				wk.WithCredentialKeyring(ring).WithCredentialReadiness(registry)
+			}
 			spawn(func() { wk.Run(ctx) })
 			startIngest()
 		case "scheduler":
@@ -684,6 +903,8 @@ func runServe(args []string) int {
 				return 1
 			}
 			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
+				WithSecretResolutionMetrics(registry).
 				WithPullRegions(cfg.Pull.Regions).                                  // pull-served regions get jobs via pull_jobs, not AMQP
 				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
@@ -693,13 +914,77 @@ func runServe(args []string) int {
 			// Alert when a region with enabled monitors loses its worker/agent. Liveness
 			// unions RabbitMQ consumers with recent pull-agent heartbeats.
 			sch.WithLiveRegions(newLiveRegions(mgmt, st))
+			if mgmt != nil {
+				sch.WithCredentialLiveRegions(mgmt)
+			}
 			spawn(func() { sch.Run(ctx) })
 		case "worker":
+			// One failure streak for this whole executor process: the job loop and the
+			// test-RPC callback both report into it, so a test and a scheduled job failing
+			// for the same reason are one unhealthy executor rather than two signals.
+			workerCredentialHealth := &dispatch.CredentialHealth{}
 			// Answer region-scoped "Test connection" RPCs for this worker's region.
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
-				amqpd.ServeTests(runner.Run)
+				workerRegion := *region
+				if workerRegion == "" {
+					workerRegion = domain.DefaultRegion
+				}
+				// role validation guarantees keyring coverage in enforced mode; with the
+				// feature off this is nil and the gate takes the legacy inline path.
+				ring, _ := credentialRings.ForRegion(workerRegion)
+				// ONE callback for both test carriers. The generation is stamped by the
+				// consumer that received the message, and every delivery crosses the same
+				// gate — the legacy consumer used to call the prober directly, which made
+				// it the only executor path with no gate at all.
+				// The test path shares the worker pool's failure streak: a test and a
+				// scheduled job that fail for the same reason are the same executor being
+				// unhealthy, not two independent signals.
+				credentialHealth := workerCredentialHealth
+				serveTest := func(ctx context.Context, delivered dispatch.DeliveredJob) (domain.Heartbeat, error) {
+					materialized, err := dispatch.ValidateAndMaterialize(ring, delivered)
+					if err != nil {
+						reason := dispatch.CredentialProbeErrorReason(err)
+						registry.RecordExecutorProbeError(reason)
+						if credentialHealth.Failure(reason) {
+							registry.SetCredentialReady(false, reason)
+						}
+						return dispatch.ProbeErrorHeartbeat(delivered.Job, reason), nil
+					}
+					defer materialized.Cleanup()
+					if materialized.UsedCredential {
+						credentialHealth.Success()
+						registry.SetCredentialReady(true, "")
+					}
+					return runner.Run(ctx, materialized.Monitor), nil
+				}
+				if err := amqpd.ServeTests(serveTest); err != nil {
+					logging.Critical(logger, "dispatch_test_consumer_start_failed", "error", err.Error())
+					return 1
+				}
+				if cfg.Secrets.EnvelopeEnforced() {
+					// One consumer per test carrier this worker can open — the same rule the
+					// jobs consumers follow. A published generation with no consumer is a
+					// queue that fills until TTL, which is how "generation 3 for jobs only"
+					// would have silently broken Test Connection.
+					if err := amqpd.ServeTestsV2(serveTest); err != nil {
+						logging.Critical(logger, "dispatch_test_v2_consumer_start_failed", "error", err.Error())
+						return 1
+					}
+					if err := amqpd.ServeTestsV3(serveTest); err != nil {
+						logging.Critical(logger, "dispatch_test_v3_consumer_start_failed", "error", err.Error())
+						return 1
+					}
+				}
 			}
 			wk := worker.New(disp, runner, workerPoolSize, logger)
+			workerRegion := *region
+			if workerRegion == "" {
+				workerRegion = domain.DefaultRegion
+			}
+			if ring, ok := credentialRings.ForRegion(workerRegion); ok && cfg.Secrets.EnvelopeEnforced() {
+				wk.WithCredentialKeyring(ring).WithCredentialReadiness(registry).
+					WithCredentialHealthTracker(workerCredentialHealth)
+			}
 			spawn(func() { wk.Run(ctx) })
 		case "api":
 			if st == nil {
@@ -738,17 +1023,7 @@ func runServe(args []string) int {
 	if httpErr != nil {
 		logger.Error("graceful_shutdown_failed", "error", httpErr.Error())
 	}
-	// Drain background goroutines so none is left mid-write. ctx is cancelled by the
-	// signal (NotifyContext); stop() also covers the errCh exit path. Bounded so a
-	// wedged goroutine can't hang the process forever.
-	stop()
-	drained := make(chan struct{})
-	go func() { bg.Wait(); close(drained) }()
-	select {
-	case <-drained:
-	case <-time.After(10 * time.Second):
-		logger.Warn("background_drain_timeout")
-	}
+	cleanup()
 	if httpErr != nil {
 		return 1
 	}
@@ -756,10 +1031,29 @@ func runServe(args []string) int {
 	return 0
 }
 
+// cleanupServeResources is the single shutdown order for normal exit and every
+// fail-fast startup return: cancel producers, drain them, then close dispatcher and
+// database infrastructure. Keeping it independent of concrete services makes the
+// ordering deterministic under test.
+func cleanupServeResources(stop func(), bg *sync.WaitGroup, closeDispatcher func() error, closeStore func(), drainTimeout time.Duration, logger *slog.Logger) {
+	stop()
+	drained := make(chan struct{})
+	go func() { bg.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(drainTimeout):
+		logger.Warn("background_drain_timeout")
+	}
+	if err := closeDispatcher(); err != nil {
+		logger.Warn("dispatcher_close_failed", "error", err.Error())
+	}
+	closeStore()
+}
+
 // runAgent runs the HTTP-pull prober role: claim jobs for --region from the central
 // API, probe them, post results, heartbeat. It serves only the ops endpoints
 // (health/readyz/metrics) and blocks until ctx is cancelled.
-func runAgent(ctx context.Context, cfg *config.Config, region string, registry *metrics.Registry, logger *slog.Logger) int {
+func runAgent(ctx context.Context, cfg *config.Config, region string, credentialRings dispatch.CredentialKeyrings, registry *metrics.Registry, logger *slog.Logger) int {
 	if cfg.Pull.ServerURL == "" || cfg.Pull.Token == "" {
 		logging.Critical(logger, "agent_requires_pull_config", "hint", "set pull.server_url and pull.token for --role agent")
 		return 1
@@ -768,7 +1062,24 @@ func runAgent(ctx context.Context, cfg *config.Config, region string, registry *
 		region = domain.DefaultRegion
 	}
 	runner := prober.NewRunnerWithGuard(prober.NewGuard(cfg.Prober.AllowPrivateIPs, cfg.Prober.AllowMetadataIPs))
-	go agent.New(cfg.Pull.ServerURL, cfg.Pull.Token, region, runner, logger).Run(ctx)
+	a := agent.New(cfg.Pull.ServerURL, cfg.Pull.Token, region, runner, logger)
+	if ring, ok := credentialRings.ForRegion(region); ok && cfg.Secrets.EnvelopeEnforced() {
+		a.WithCredentialKeyring(ring).WithCredentialHealth(registry)
+	}
+	agentCtx, stopAgent := context.WithCancel(ctx)
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		a.Run(agentCtx)
+	}()
+	defer func() {
+		stopAgent()
+		select {
+		case <-agentDone:
+		case <-time.After(10 * time.Second):
+			logger.Warn("agent_drain_timeout")
+		}
+	}()
 	logger.Info("agent_role_started", "region", region, "server", cfg.Pull.ServerURL)
 
 	srv := httpsrv.New(cfg.Server, registry, nil)

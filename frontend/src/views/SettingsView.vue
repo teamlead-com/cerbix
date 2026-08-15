@@ -8,6 +8,7 @@ import AgentTokensPanel from "@/components/settings/AgentTokensPanel.vue";
 import DangerZonePanel from "@/components/settings/DangerZonePanel.vue";
 import MembersPanel from "@/components/settings/MembersPanel.vue";
 import OrgDangerZonePanel from "@/components/settings/OrgDangerZonePanel.vue";
+import SecretsPanel from "@/components/settings/SecretsPanel.vue";
 import UsersPanel from "@/components/settings/UsersPanel.vue";
 import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
@@ -28,6 +29,7 @@ const canManageOrg = computed(() => session.isOrgAdmin(ws.orgId));
 type Tab =
   | "channels"
   | "incoming"
+  | "secrets"
   | "authentication"
   | "branding"
   | "alerting"
@@ -53,6 +55,7 @@ const instanceTabs: { key: Tab; label: string; scope: string }[] = [
 const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
   { key: "channels", label: "Notification channels", scope: "project" },
   { key: "incoming", label: "Incoming alerts", scope: "project" },
+  { key: "secrets", label: "Secrets", scope: "project" },
   // Deleting a project is an org-manage action, so only org admins see it.
   ...(canManageOrg.value
     ? ([{ key: "danger", label: "Danger zone", scope: "project" }] as { key: Tab; label: string; scope: string }[])
@@ -1170,6 +1173,9 @@ watch(tab, loadActive);
 
       <!-- ── Agent tokens (instance-wide, global admin, self-loading panel) ── -->
       <AgentTokensPanel v-else-if="tab === 'agenttokens'" />
+
+      <!-- ── Secrets (project-scoped, self-loading panel) ── -->
+      <SecretsPanel v-else-if="tab === 'secrets'" />
 
       <!-- ── Danger zone (project-scoped, org admin) ── -->
       <DangerZonePanel v-else-if="tab === 'danger'" />

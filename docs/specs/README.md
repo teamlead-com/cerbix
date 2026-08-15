@@ -39,6 +39,7 @@ part of the system. Unlike `docs/checks/` (immutable snapshots) and `docs/iterat
 | `func-multi-region-quorum.md` | Multi-region quorum via composite, variant B (iter-0041) | implemented |
 | `func-result-protocol.md` | Result ingest: typed origins, timestamp hygiene, `execution_revision` (P0a/P0b, D-0142) | spec |
 | `func-monitoring-as-code.md` | Hot-reconciled, tenant-scoped Monitoring as Code file provider (FR-017, D-0145) | spec |
+| `func-secret-inventory.md` | Project-scoped write-only secrets, typed refs and encrypted dispatch (FR-020/NFR-015, D-0155) | implemented |
 | `sec-authn-authz.md` | OIDC (any issuer), local login, sessions, API tokens, client-credentials | implemented |
 | `ops-keycloak-oidc.md` | Setup and integration guide for Keycloak and any OIDC providers | implemented |
 | `ops-logging.md` | slog, levels, format, ban on logging secrets | skeleton |

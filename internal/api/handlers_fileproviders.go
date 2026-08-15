@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // FileProviderRuntimeStatus is this process's live view of one configured provider (§15):
@@ -51,7 +52,13 @@ func (h *Handler) listFileProvidersAdmin(w http.ResponseWriter, r *http.Request)
 		}
 		diags = filtered
 	}
-	body := map[string]any{"bundles": diags}
+	if diags == nil {
+		diags = []store.FileProviderDiagnostic{}
+	}
+	body := map[string]any{
+		"bundles":   diags,
+		"providers": []FileProviderRuntimeStatus{},
+	}
 	if h.fpStatus != nil {
 		runtime := h.fpStatus.FileProviderRuntimeStatuses()
 		if name := r.URL.Query().Get("provider"); name != "" {
@@ -62,6 +69,9 @@ func (h *Handler) listFileProvidersAdmin(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			runtime = out
+		}
+		if runtime == nil {
+			runtime = []FileProviderRuntimeStatus{}
 		}
 		body["providers"] = runtime
 	}
@@ -89,6 +99,9 @@ func (h *Handler) listOrgFileProviders(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.serverError(w, "file_provider_diagnostics", err)
 		return
+	}
+	if diags == nil {
+		diags = []store.FileProviderDiagnostic{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"bundles": diags})
 }

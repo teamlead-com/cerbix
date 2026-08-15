@@ -7,7 +7,11 @@
 // membership in (global admins excepted).
 package authz
 
-import "github.com/teamlead-com/cerbix/internal/domain"
+import (
+	"strings"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
+)
 
 // Action is a permission checked by handlers.
 type Action string
@@ -63,6 +67,22 @@ type Principal struct {
 	IsGlobalAdmin bool
 	Memberships   []domain.Membership
 	ViaToken      bool
+}
+
+// SyntheticTokenActorPrefix marks a Principal.UserID that is NOT a real user uuid but a
+// machine identity derived from a Cerbix API token ("apitoken:<token-id>"). The auth layer
+// constructs it; audit writers must map such an id to a NULL actor (via_token already
+// attributes the action to the machine). OIDC client-credentials principals carry a REAL
+// JIT-provisioned user uuid and keep their attribution.
+const SyntheticTokenActorPrefix = "apitoken:"
+
+// AuditUserID returns the value an audit row's actor_user_id (uuid, nullable) may carry for
+// this principal: the user uuid, or "" (NULL) for a synthetic token identity.
+func (p Principal) AuditUserID() string {
+	if p.ViaToken && strings.HasPrefix(p.UserID, SyntheticTokenActorPrefix) {
+		return ""
+	}
+	return p.UserID
 }
 
 // Can reports whether the principal may perform action on the target identified

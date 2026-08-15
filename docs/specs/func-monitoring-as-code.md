@@ -61,10 +61,14 @@ Version 1 manages:
 - read-only source metadata in the API/UI;
 - operational diagnostics, audit, and scheduler wake-up.
 
-All existing monitor types MAY be represented only when every required type-specific field
-has a strict non-secret schema. A type that needs credentials is unavailable through the
-file provider until the referenced secret-inventory contract exists. Unsupported types or
-fields reject the bundle; there is no generic `config: map[string]string` escape hatch.
+The common-field types are `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `websocket`, `ssh`
+and `push`. FR-020 adds strict typed `settings` for `postgres`, `mysql`, `redis` and
+`rabbitmq`: their credential slots accept inventory references such as `password_ref`, never
+inline values. The schema, TLS defaults and reference lifecycle are normative in
+[`func-secret-inventory.md`](func-secret-inventory.md) §§4.2–4.8. `composite`, `synthetic`,
+`promql` and any future type without a strict file schema remain unavailable. Unsupported
+types or fields reject the bundle; there is no generic `config: map[string]string` escape
+hatch.
 
 ### 3.2 Explicitly outside version 1
 
@@ -581,6 +585,12 @@ last successful generation(s), bounded errors, counts, and relative paths. Organ
 admins may see only diagnostics wholly inside their organization; project members see
 only per-monitor provenance already visible through normal project RBAC. No tenant can
 observe another tenant's bundle/error/path.
+
+The global response is always `{ "bundles": [], "providers": [] }` shaped and the
+organization response is always `{ "bundles": [] }` shaped: these collection fields are
+required JSON arrays and encode an empty result as `[]`, never `null` or an omitted key.
+This applies even when the process has no runtime status source and after a named-provider
+filter matches no rows.
 
 Version 1 has no endpoint that edits YAML, forces adoption, or performs hard prune.
 

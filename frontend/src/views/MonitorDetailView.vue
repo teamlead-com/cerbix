@@ -267,6 +267,11 @@ watch(
         </div>
       </div>
 
+      <div v-if="monitor?.last_probe_error_reason" data-testid="monitor-probe-error" class="mb-4 rounded border border-degraded/50 bg-degraded-weak px-4 py-3 text-[13px] text-ink-2">
+        <div class="font-semibold text-degraded">Executor could not run the latest credentialed probe</div>
+        <div class="mt-1">Reason <code class="font-mono">{{ monitor.last_probe_error_reason }}</code><span v-if="monitor.last_probe_error_at"> · {{ relTime(monitor.last_probe_error_at) }} ago</span>. Monitor liveness was not changed by this error.</div>
+      </div>
+
       <!-- SLA windows -->
       <div class="mb-4 grid grid-cols-4 gap-3 max-[900px]:grid-cols-2">
         <div
@@ -360,6 +365,10 @@ watch(
 
         <!-- right rail -->
         <div class="flex flex-col gap-4">
+          <section v-if="monitor?.config?.password_ref" class="rounded border border-border bg-surface shadow-card">
+            <div class="border-b border-border px-4 py-[13px]"><h3 class="text-[13px] font-semibold">Credential source</h3></div>
+            <div class="px-4 py-3"><span class="rounded bg-inset px-2 py-1 font-mono text-[12px]">password_ref: {{ monitor.config.password_ref }}</span></div>
+          </section>
           <section v-if="monitor && monitor.conditions && monitor.conditions.length" class="rounded border border-border bg-surface shadow-card">
             <div class="border-b border-border px-4 py-[13px]"><h3 class="text-[13px] font-semibold">Conditions</h3></div>
             <div v-for="(c, i) in monitor.conditions" :key="i" class="border-b border-border px-4 py-[11px] font-mono text-[13px] last:border-b-0">{{ c }}</div>

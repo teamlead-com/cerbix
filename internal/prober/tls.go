@@ -29,7 +29,7 @@ func (p tlsProber) Probe(ctx context.Context, m domain.Monitor) Result {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
 	tconn := tls.Client(conn, &tls.Config{ServerName: host, InsecureSkipVerify: true}) //nolint:gosec // cert-expiry monitor: inspect the leaf cert without chain verification
-	defer tconn.Close()
+	defer func() { _ = tconn.Close() }()
 	if d, ok := ctx.Deadline(); ok {
 		_ = tconn.SetDeadline(d)
 	}

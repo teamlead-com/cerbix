@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/teamlead-com/cerbix/internal/api"
 	"github.com/teamlead-com/cerbix/internal/auth"
@@ -21,11 +22,18 @@ import (
 )
 
 // fakeStore implements api.Store in memory for hermetic handler tests.
+// fakePullRow is a queued pull job with the carrier generation it was enqueued under.
+type fakePullRow struct {
+	payload    []byte
+	generation int
+}
+
 type fakePullTest struct {
-	region  string
-	payload []byte
-	result  []byte
-	claimed bool
+	region          string
+	payload         []byte
+	result          []byte
+	claimed         bool
+	protocolVersion int
 }
 
 type fakeStore struct {
@@ -51,7 +59,7 @@ type fakeStore struct {
 	escPolicies        map[string]domain.EscalationPolicy
 	oncall             map[string]domain.OnCallSchedule
 	overrides          map[string]domain.OnCallOverride
-	pullJobs           map[string][][]byte
+	pullJobs           map[string][]fakePullRow
 	pullSeq            int
 	acked              []string
 	pullTests          map[string]fakePullTest
@@ -79,6 +87,20 @@ type fakeStore struct {
 		enabled bool
 	}
 	recovery map[string]bool // userID|hash -> available
+
+	secrets        map[string]map[string]*fakeSecret // project id → name → secret
+	secretRefs     map[string]int                    // "projectID/name" → UI-managed ref count
+	secretFileRefs map[string]int                    // "projectID/name" → file-managed ref count
+	secretSeq      int
+}
+
+// fakeSecret backs the project secret inventory in memory. The value is kept
+// only so tests can assert it never appears in any response body.
+type fakeSecret struct {
+	id        string
+	value     string
+	createdAt time.Time
+	rotatedAt *time.Time
 }
 
 func seededStore() *fakeStore {
@@ -583,17 +605,47 @@ func (f *fakeStore) AcknowledgeIncident(_ context.Context, id, by string) (domai
 	return inc, nil
 }
 
-func (f *fakeStore) ClaimPullJobs(_ context.Context, region string, _, _ int) ([]store.PullJob, error) {
+// The fake models real generations rather than delegating: a fake that always returns
+// generation 0 cannot catch a handler that forgets to stamp, which is the whole point of
+// the response field.
+func (f *fakeStore) ClaimPullJobs(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 1)
+}
+func (f *fakeStore) ClaimPullJobsV2(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 2)
+}
+
+func (f *fakeStore) ClaimPullJobsV3(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 3)
+}
+
+func (f *fakeStore) ClaimPullTestV3(ctx context.Context, region string) (string, []byte, int, bool, error) {
+	return f.claimPullTestUpTo(ctx, region, 3)
+}
+
+func (f *fakeStore) claimPullJobsUpTo(_ context.Context, region string, maxGeneration int) ([]store.PullJob, error) {
 	if f.pullJobs == nil {
 		return nil, nil
 	}
-	payloads := f.pullJobs[region]
-	f.pullJobs[region] = nil
-	out := make([]store.PullJob, 0, len(payloads))
-	for _, p := range payloads {
+	kept := f.pullJobs[region][:0:0]
+	out := make([]store.PullJob, 0, len(f.pullJobs[region]))
+	for _, row := range f.pullJobs[region] {
+		generation := row.generation
+		if generation == 0 {
+			generation = 1
+		}
+		if generation > maxGeneration {
+			kept = append(kept, row)
+			continue
+		}
 		f.pullSeq++
-		out = append(out, store.PullJob{Token: fmt.Sprintf("tok-%s-%d", region, f.pullSeq), Payload: p})
+		out = append(out, store.PullJob{
+			Token:           fmt.Sprintf("tok-%s-%d", region, f.pullSeq),
+			Payload:         row.payload,
+			ProtocolVersion: generation,
+		})
 	}
+	f.pullJobs[region] = kept
 	return out, nil
 }
 
@@ -601,18 +653,40 @@ func (f *fakeStore) AckPullJobs(_ context.Context, tokens []string) error {
 	f.acked = append(f.acked, tokens...)
 	return nil
 }
-func (f *fakeStore) ClaimPullTest(_ context.Context, region string) (string, []byte, bool, error) {
+
+// Like the jobs fake, the tests fake models the capability boundary: delegating v2 to v1
+// would let a handler call the wrong claim and still look correct.
+func (f *fakeStore) ClaimPullTest(ctx context.Context, region string) (string, []byte, int, bool, error) {
+	return f.claimPullTestUpTo(ctx, region, 1)
+}
+func (f *fakeStore) ClaimPullTestV2(ctx context.Context, region string) (string, []byte, int, bool, error) {
+	return f.claimPullTestUpTo(ctx, region, 2)
+}
+
+func (f *fakeStore) claimPullTestUpTo(_ context.Context, region string, maxGeneration int) (string, []byte, int, bool, error) {
 	if f.pullTests == nil {
-		return "", nil, false, nil
+		return "", nil, 0, false, nil
 	}
-	for id, pt := range f.pullTests {
-		if pt.region == region && !pt.claimed {
-			pt.claimed = true
-			f.pullTests[id] = pt
-			return id, pt.payload, true, nil
+	// Deterministic order so a two-row fixture cannot pass by map-iteration luck.
+	ids := make([]string, 0, len(f.pullTests))
+	for id := range f.pullTests {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		pt := f.pullTests[id]
+		generation := pt.protocolVersion
+		if generation == 0 {
+			generation = 1
 		}
+		if pt.region != region || pt.claimed || generation > maxGeneration {
+			continue
+		}
+		pt.claimed = true
+		f.pullTests[id] = pt
+		return id, pt.payload, generation, true, nil
 	}
-	return "", nil, false, nil
+	return "", nil, 0, false, nil
 }
 func (f *fakeStore) SavePullTestResult(_ context.Context, id, region string, result []byte) error {
 	if pt, ok := f.pullTests[id]; ok && pt.region == region {
@@ -628,6 +702,9 @@ func (f *fakeStore) RecordAgentHeartbeat(_ context.Context, region, agentID stri
 	}
 	f.agentHeartbeats[region] = agentID
 	return nil
+}
+func (f *fakeStore) RecordAgentCapabilities(ctx context.Context, region, agentID string, _ int, _ bool) error {
+	return f.RecordAgentHeartbeat(ctx, region, agentID)
 }
 func (f *fakeStore) RecordHistoricalResults(_ context.Context, hbs []domain.Heartbeat) (int, int, error) {
 	f.backfilled = append(f.backfilled, hbs...)
@@ -1735,4 +1812,167 @@ func (f *fakeStore) ReplaceRecoveryCodes(_ context.Context, userID string, hashe
 		f.recovery[userID+"|"+h] = true
 	}
 	return nil
+}
+
+// Project secret inventory (map-backed, honoring the store's typed errors).
+// Mutations record their audit entry themselves, mirroring the real store's
+// audit-in-tx behavior (spec §5): the handler no longer writes secret audit rows.
+
+func fakeSecretValueInvalid(value string) bool {
+	return len(value) == 0 || len(value) > 4096 || !utf8.ValidString(value)
+}
+
+// fakeActorRe mirrors Postgres's uuid column strictness: the real audit insert casts
+// actor_user_id to uuid and ABORTS the whole tx on a non-uuid (fail-closed). The fake
+// enforces the same contract so a synthetic "apitoken:*" id can never slip through
+// silently in api tests. Fixture ids like "pe"/"u1" are accepted as test uuids stand-ins
+// only when they carry no colon (the synthetic marker).
+func fakeActorValid(id string) bool { return !strings.Contains(id, ":") }
+
+// recordSecretAudit is the fake's stand-in for the store-level in-tx audit row. It
+// returns an error exactly where Postgres would (non-uuid actor → 22P02 → tx rollback).
+func (f *fakeStore) recordSecretAudit(projectID string, actor store.SecretActor, action, target string) error {
+	if !fakeActorValid(actor.ActorUserID) {
+		return fmt.Errorf("store: audit %s: invalid input syntax for type uuid (fake 22P02): %q", action, actor.ActorUserID)
+	}
+	org := ""
+	if p, ok := f.projects[projectID]; ok {
+		org = p.OrgID
+	}
+	f.audit = append([]domain.AuditEntry{{
+		ID: "au-new", OrgID: org, ActorUserID: actor.ActorUserID, ViaToken: actor.ViaToken,
+		Action: action, Target: target,
+	}}, f.audit...)
+	return nil
+}
+
+func (f *fakeStore) projectSecrets(projectID string) map[string]*fakeSecret {
+	if f.secrets == nil {
+		f.secrets = map[string]map[string]*fakeSecret{}
+	}
+	if f.secrets[projectID] == nil {
+		f.secrets[projectID] = map[string]*fakeSecret{}
+	}
+	return f.secrets[projectID]
+}
+
+func (f *fakeStore) secretRefCounts(projectID, name string) (ui, file int) {
+	key := projectID + "/" + name
+	return f.secretRefs[key], f.secretFileRefs[key]
+}
+
+func (f *fakeStore) CreateProjectSecret(_ context.Context, actor store.SecretActor, projectID, name, value string) (store.ProjectSecret, error) {
+	if !domain.ValidSecretName(name) {
+		return store.ProjectSecret{}, store.ErrSecretNameInvalid
+	}
+	if fakeSecretValueInvalid(value) {
+		return store.ProjectSecret{}, store.ErrSecretValueInvalid
+	}
+	if _, ok := f.projects[projectID]; !ok {
+		return store.ProjectSecret{}, store.ErrNotFound
+	}
+	ps := f.projectSecrets(projectID)
+	if _, ok := ps[name]; ok {
+		return store.ProjectSecret{}, store.ErrSecretExists
+	}
+	if len(ps) >= 100 {
+		return store.ProjectSecret{}, store.ErrSecretQuota
+	}
+	f.secretSeq++
+	s := &fakeSecret{id: fmt.Sprintf("sec-%d", f.secretSeq), value: value, createdAt: time.Unix(1700000000, 0)}
+	ps[name] = s
+	if err := f.recordSecretAudit(projectID, actor, "secret.create", name); err != nil {
+		delete(f.projectSecrets(projectID), name) // tx rollback
+		return store.ProjectSecret{}, err
+	}
+	return store.ProjectSecret{ID: s.id, Name: name, CreatedAt: s.createdAt}, nil
+}
+
+func (f *fakeStore) UpdateProjectSecret(_ context.Context, actor store.SecretActor, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error) {
+	ps := f.projectSecrets(projectID)
+	s, ok := ps[name]
+	if !ok {
+		return false, false, 0, store.ErrNotFound
+	}
+	if newValue != nil && fakeSecretValueInvalid(*newValue) {
+		return false, false, 0, store.ErrSecretValueInvalid
+	}
+	if newName != nil && !domain.ValidSecretName(*newName) {
+		return false, false, 0, store.ErrSecretNameInvalid
+	}
+	if newName != nil && *newName != name {
+		if _, file := f.secretRefCounts(projectID, name); file > 0 {
+			return false, false, 0, store.SecretRenamedInUseError{Count: file}
+		}
+		if _, exists := ps[*newName]; exists {
+			return false, false, 0, store.ErrSecretExists
+		}
+	}
+	rotated = newValue != nil
+	renamed = newName != nil && *newName != name
+	if renamed {
+		ui, _ := f.secretRefCounts(projectID, name)
+		repointed = ui
+	}
+	if renamed || rotated {
+		target := name
+		if renamed {
+			target = name + " → " + *newName
+		}
+		// Validate and append the fake audit BEFORE mutating any map/value. The real
+		// store does both inside one transaction; ordering this way gives the fake
+		// the same rollback outcome when the audit insert fails.
+		if err := f.recordSecretAudit(projectID, actor, "secret.update",
+			fmt.Sprintf("%s · renamed=%t rotated=%t repointed=%d", target, renamed, rotated, repointed)); err != nil {
+			return false, false, 0, err
+		}
+	}
+	if newValue != nil {
+		s.value = *newValue
+		now := time.Unix(1700000100, 0)
+		s.rotatedAt = &now
+	}
+	if newName != nil && *newName != name {
+		delete(ps, name)
+		ps[*newName] = s
+		if f.secretRefs != nil {
+			delete(f.secretRefs, projectID+"/"+name)
+			f.secretRefs[projectID+"/"+*newName] = repointed
+		}
+	}
+	return renamed, rotated, repointed, nil
+}
+
+func (f *fakeStore) DeleteProjectSecret(_ context.Context, actor store.SecretActor, projectID, name string) error {
+	ps := f.projectSecrets(projectID)
+	if _, ok := ps[name]; !ok {
+		return store.ErrNotFound
+	}
+	if ui, file := f.secretRefCounts(projectID, name); ui+file > 0 {
+		return store.SecretInUseError{Count: ui + file}
+	}
+	if err := f.recordSecretAudit(projectID, actor, "secret.delete", name); err != nil {
+		return err // real tx: audit failure rolls back the delete
+	}
+	delete(ps, name)
+	return nil
+}
+
+func (f *fakeStore) ListProjectSecrets(_ context.Context, projectID string) ([]store.ProjectSecret, error) {
+	ps := f.projectSecrets(projectID)
+	names := make([]string, 0, len(ps))
+	for n := range ps {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]store.ProjectSecret, 0, len(names))
+	for _, n := range names {
+		s := ps[n]
+		ui, file := f.secretRefCounts(projectID, n)
+		out = append(out, store.ProjectSecret{
+			ID: s.id, Name: n, CreatedAt: s.createdAt, RotatedAt: s.rotatedAt,
+			UsedByTotal: ui + file, UsedByFileManaged: file,
+		})
+	}
+	return out, nil
 }

@@ -756,6 +756,15 @@ return plaintext; a legacy plaintext row still reads), a config test (key valida
 e2e (encryption on → a webhook created via the API stores `enc:v1:…` in the column while the API
 round-trips the plaintext secret). No schema change; config addition only.
 
+**Persistent dev-stack clarification (iter-0117):** `docker/config.dev.yaml` opts in with one fixed,
+public, development-only key so its persistent Postgres volume remains readable across E2E runs that
+create encrypted push tokens. It is deliberately not a production secret and must never be reused;
+`config.example.yaml` keeps encryption empty/opt-in and production injects a random key. Distributed
+workers continue using `config.worker-core.yaml` with no at-rest key, as required by D-0155. A wiring
+test validates both sides. This avoids a dev-only split-brain state where the server reports ready but
+every monitor-list read fails on ciphertext left by an earlier security test; it does not add a
+decrypt fallback or weaken the hard error for a genuinely missing key.
+
 ## D-0041 — Encryption key rotation: keyring (try-all decrypt) + `cerbix reencrypt`
 
 **Context:** iter-0033 encrypted secrets under a single key with no rotation path — a compromised or
@@ -2802,3 +2811,250 @@ the 42 findings is tracked as a **separate, dedicated cleanup MR** — consisten
 `.golangci.yml` note that style-heavy linters are "intentionally deferred to a dedicated cleanup MR".
 No monitoring/reliability contract changes; nothing is silently marked green — the repo-wide RED is
 recorded (iter-0114 §4) and explicitly waived here.
+
+**Close-out (iter-0117):** the owner subsequently made the dedicated cleanup explicit with
+“fix everything”, so the waiver no longer applies to the current branch state. All 42 findings
+were fixed without disabling or weakening a linter; `golangci-lint v2.12.2 run ./...` is the
+repo-wide gate. Intentional reads of the `client_secret` column remain two narrow, inline
+`forbidigo` suppressions at the database encryption boundary; neither value is logged. Output,
+close, rollback, and stream errors are now handled or explicitly discarded where no recovery is
+possible, and Prometheus rendering stops after the first writer error. This is cleanup of the
+recorded debt, not a change to monitoring, tenant, or reliability semantics.
+
+## D-0155 — Secret inventory (FR-020): two keyrings, AAD context binding, verifiable wire barrier, linearization-point dispatch (design contract)
+Design decisions behind spec `func-secret-inventory` (r6, independently design-approved after six
+review passes). (1) **Two keyrings, never shared:** the at-rest master (`security.encryption_key`)
+encrypts the inventory and NEVER leaves core; per-region **dispatch keyrings**
+(`security.dispatch`, `{primary{id,key}, previous[]}` per region) seal credential envelopes —
+an executor holds only its region's keys, so a compromised worker/agent exposes at most **all
+retained payloads of its region until TTL/DLQ purge** (the recorded exposure statement), never
+the database. Executor profiles carrying the master key are REJECTED at startup, not ignored. A
+`default` keyring is single-trust-domain only; combining it with per-region keys requires
+`shared_trust_acknowledged: true`, which widens the exposure statement explicitly. (2) **AAD
+context binding, canonical length-prefixed encoding (`enc:v2a`)**: at rest AAD =
+`(project_id, secret_id)` (stable ids — rename stays metadata-only; cross-tenant ciphertext
+transplant fails authentication); in dispatch AAD = `(v, region, key_id, monitor_id,
+execution_revision, field_name, job_id)` (no cross-context transplant; exact same-job replay is
+transport behavior, fenced at ingest). Auth failure NEVER falls back to a legacy AAD-less
+decrypt, and the legacy string API rejects `enc:v2a` tokens instead of passing ciphertext
+through. (3) **Verifiable wire barrier:** envelope payloads ride versioned queues
+(`checks.jobs.v2.<region>`, `checks.tests.v2.<region>`) and version-predicated pull claims
+(`protocol_version` in the claim query); `secrets.enabled` REQUIRES
+`dispatch_envelope: enforced` — keys can ship ahead (enforced + enabled:false, the expand
+phase), but the inventory can never dispatch over legacy plaintext. Executor config/decrypt
+failures are a typed `probe_error` outcome (no heartbeat, no status flip — operational, never a
+false DOWN). (4) **Linearization point:** the authoritative per-dispatch DB read (config +
+eligibility + routing + cadence from ONE read) is the dispatch-authorization boundary — changes
+committed before the read are honored; a change committed after cannot recall the enqueued job:
+it remains in-flight exposure until ACK/TTL/DLQ purge, its result rejected by the D-0142 fence.
+Immediate revocation = rotate the credential at the target; hard recall is a non-goal.
+(5) **Target transport is honest egress:** ref-based monitors default to encrypted transport
+(postgres `sslmode: require` — stated as encrypted-NOT-verified; mysql/redis `tls: true`
+verified per Go defaults; rabbitmq management https); insecure/skip-verify is an explicit,
+visible opt-in in the monitor definition. (6) **Tenant invariant at the store surface:** every
+secret query takes and predicates `project_id`; the materializer resolves via
+`monitors JOIN monitor_secret_refs JOIN project_secrets` with equality on all project ids;
+referential integrity is a normalized ref table whose secret FK is
+`ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED` (commit-time delete guard mapped to
+`409 secret_in_use`; project-delete cascade stays order-independent). Delivery is iterative:
+iteration 1 = inventory + config + API/UI (this decision's contract), iterations 2–3 wire refs,
+materialization, envelope, fencing and prober TLS per the spec's §10 plan. Runtime ownership is
+part of the trust boundary, not deployment convention: `worker` mounts ops HTTP and regional
+consumers only; generic outbox/settings/mailer/user API and the future authoritative materializer
+are owned by `api`/`scheduler`/`all`, which are the roles permitted to hold the at-rest master.
+Implementation closed in iter-0116: the wire barrier covers AMQP jobs/tests and physically
+version-predicated pull jobs/tests; the authoritative read supplies routing and cadence as well
+as config/revision; executor key failures are diagnostic-only and readiness-visible; at-rest
+reencryption uses exact-ciphertext CAS plus a bounded zero-old-key convergence proof. The
+dispatch-key and at-rest-key rotation procedures are deliberately separate in `runbook.md`.
+
+## D-0156 — Startup failure uses cancel/drain-before-close; deployment wiring mirrors role ownership (iter-0117)
+
+The `serve` lifecycle has one idempotent cleanup order for both normal shutdown and every
+fail-fast startup return: **cancel the root context → wait a bounded interval for background
+users → close the dispatcher → close the database**. Closing shared infrastructure first lets
+already-started goroutines repeatedly hit a closed pool and can leave an HTTP-less process alive;
+defer order is therefore part of the application reliability contract, not an implementation
+detail. Settings and OIDC refresh loops are caller-owned and join the same tracked group. Cleanup
+waits for that group up to its explicit bound, warns on timeout, and only then closes dependencies;
+tests cover both cooperative drain and the bounded non-cooperative case. A live missing-file-
+provider-root start must exit promptly without `closed pool` churn.
+
+Static role ownership also applies to deployment manifests. Every shipped `api`/`all` service
+must mount its configured Monitoring-as-Code root read-only at the exact configured path; the
+single and distributed Compose profiles are checked from parsed Compose YAML. Missing or
+unreadable roots remain strict fail-fast errors — runtime directory creation or silent provider
+downgrade is forbidden. Finally, the diagnostics transport contract is stable for empty state:
+global responses always contain array-valued `bundles` and `providers`, and organization
+responses always contain array-valued `bundles`; empty means `[]`, never `null` or omission.
+
+## D-0157 — RabbitMQ 4.3 compatibility is verified; retained data upgrades stay explicit and staged (iter-0117)
+
+The shipped Compose files require an explicit, persisted `CERBIX_RABBITMQ_IMAGE`: no static
+default is safe for both a retained 3.12 volume and a volume already upgraded to 4.3. The fresh
+production, base-dev, and geo-dev env templates select 4.3, while an existing installation must
+first pin its current image and then follow `3.12 → 3.13 → 4.2 → 4.3`, or a reviewed blue/green
+migration. Each env file maps one-to-one to its named RabbitMQ volume. The operator procedure and
+rollback rules live in `docs/runbook.md`.
+
+Queue names, routing, and the physical v1/v2 credential wire separation are unchanged and both
+protocol paths are exercised live against 4.3. The shared regional test-RPC queues
+(`checks.tests[.v2].<region>`) do change from transient+auto-delete to durable+auto-delete:
+RabbitMQ 4.3 rejects transient non-exclusive queues, while exclusive queues cannot be shared by
+multiple workers. The durable queue *definition* survives broker restart; individual test requests
+remain transient, time-bounded RPCs and may be lost during a restart. Auto-delete removes the
+queue after its last consumer leaves. Per-request reply queues remain server-named transient
+exclusive. Worker startup synchronously establishes both enabled test consumers before readiness,
+and RPC publishes are mandatory so a nonexistent regional queue fails promptly. If an auto-delete
+queue still exists briefly with zero consumers, the routed request remains bounded by the normal
+RPC timeout; mandatory publish cannot detect that consumer gap.
+
+Changing durability under the same queue name is not rolling-compatible. The application queue
+shape must therefore be migrated on the old broker with test traffic stopped and old workers fully
+drained before any broker hop; rollback across that boundary likewise requires stopping workers
+and deleting only empty test queues. No procedure may delete heartbeat, incident, audit, or
+non-empty broker data.
+
+## D-0158 — Make orchestrates only fixed non-production topologies and never guesses persisted state (iter-0118)
+
+The repository exposes a small Make facade for repeatable local verification of the shipped
+single-process, distributed-role, and geo Compose topologies. Existing `build`, `test`, `race`,
+and `lint` retain their native Go meanings. Dev-stack goals use only the fixed
+`docker/docker-compose.yml`, `docker/docker-compose.geo.yml`, `docker/.env.dev`, and
+`docker/.env.geo` paths; they cannot be redirected to the production manifest. Base and geo use
+separate env files because they own separate RabbitMQ volumes that can legitimately be at different
+upgrade checkpoints. Each env file is mandatory and pins its own broker volume. Make never invents
+a broker default and never rewrites an existing pin. Compose execution discards a same-named shell
+image override and pins the project name, so neither `CERBIX_RABBITMQ_IMAGE` nor
+`COMPOSE_PROJECT_NAME` can bypass the file/volume binding. Initializing either file from its
+fresh-install template is a separate, explicit operation and is refused when the corresponding
+dev broker volume already exists.
+
+Topology changes are explicit. An `up` goal fails when a mutually exclusive base/geo or
+single/distributed topology is already running instead of silently stopping it. Distributed and
+geo startup order is build, healthy infrastructure, one explicit migration, role processes, then
+per-role `/readyz`; unpublished role endpoints are checked from a short-lived container on the
+internal Compose network. `down` removes containers and networks only: no goal passes `-v`, prunes
+volumes, or deletes application data. E2E goals target hard-coded loopback URLs and run only after
+the corresponding readiness contract; they never point the state-mutating browser suite at an
+arbitrary host.
+
+These goals are development/test conveniences, not RabbitMQ migration tooling. D-0157 and the raw,
+per-hop runbook commands remain authoritative for retained-volume upgrade and rollback.
+
+## D-0160 — Credential dispatch r7: trusted carrier, execution binding, structural gate, carrier generations (FR-020)
+
+A conformance audit of the shipped FR-020 implementation against its own spec found three
+blockers and one P1, each independently confirmed. Two of the three were holes in the
+specification, faithfully implemented — the r6 §9 matrix never asked for the tests that would
+have caught them, which is why a green suite and a closed acceptance report coexisted with
+them. This record fixes the amended contract; the spec carries the prose, D-0155 keeps the
+two-keyring model and the exposure statements, and the AAD clause of D-0155 is superseded
+here.
+
+**Threat model — option A, chosen by the owner.** The carrier's own routing metadata is
+**trusted**. A party able to author it — writing an arbitrary `pull_jobs` row, or publishing
+into a legacy-generation queue — is permanently outside the model. The cost is recorded
+without softening, because a future reader must not rediscover it as a surprise: someone
+holding broker write, a credential typically distributed more widely than the core database's,
+can emit a legacy-generation job for a credentialed monitor and obtain an anonymous probe that
+reports Up. Monitoring can be made to lie by anyone who can write to the queue. The rejected
+alternative, **option B**, was a root `job_auth` MAC over the canonical execution DTO, carrier
+generation, monitor id, execution revision and job id, carried by **every** job in `enforced`
+mode including credential-free ones — the only construction that actually closes the downgrade
+path, since a credential-free job has zero ciphertexts and therefore no GCM tag and no MAC of
+any kind for a per-field binding to work with. B was declined for now as full-job integrity:
+it changes the non-credentialed dispatch path and requires a fully capable fleet, which makes
+it materially larger than FR-020 and wrong to smuggle in under a credential-dispatch clause.
+If B is later adopted it gets its own spec section and decision record; note that the
+tri-state rule below forbids a *credential envelope* on a credential-free schema and does not
+forbid a `job_auth` tag there.
+
+**Execution binding.** The dispatch AAD binds the credential to its identity context *and* to
+the execution the job describes: `body_digest`, a SHA-256 over a versioned canonical encoding
+of a dedicated credential-execution DTO — deliberately not `domain.Monitor` and not raw
+payload bytes. Without it, anyone able to write to the carrier keeps a valid envelope, edits
+the target, and receives the plaintext credential at an endpoint of their choosing while the
+executor's authentication passes, because nothing it verified had changed. The DTO covers what
+decides where the credential goes, over what transport, and how many times it is transmitted:
+`type`, `target`, `timeout`, `retries`, the `conditions` values, and every normalized
+non-secret execution setting of the type. Identity parts already in the AAD are not
+duplicated; state, display, cadence, delivery fields and the `*_ref` NAME are excluded because
+the executor never reads them. The guarantee is therefore credential use and the remote side
+effects of a credentialed probe — **not** a general signature of the job, and it must not be
+widened into one silently.
+
+**Canonical encoding, normative here so it survives independent of prose.** It reuses
+`secret.CanonicalAAD` framing — a uvarint part count followed by uvarint-length-prefixed parts
+— rather than introducing a second format. DTO version `1`, emitted first as the decimal ASCII
+string `"1"`, numbered independently of the envelope version and the carrier generation. Fixed
+field order, never map iteration order. Integers as decimal ASCII without padding, which
+removes width and endianness as questions instead of answering them. Strings as raw UTF-8
+under the length prefix. `conditions` as a count part followed by each condition's parts in
+array order — order is fixed for determinism, not because reordering an all-must-pass set
+changes the retry count. Config keys in byte-wise sorted order, key part then value part.
+Absent and explicitly-set-to-default **encode identically**, since normalization runs before
+sealing and either form may legitimately arrive. Both digests enter the outer AAD as raw
+32-byte SHA-256 output, never hex and never base64. Golden vectors pin all of it, because two
+implementations can each be self-consistent and mutually incompatible.
+
+**Structural gate — the check does not live behind the branch it protects.** The severe defect
+was not which fields an envelope carries but who decides whether one is required: an executor
+that opens an envelope only when present executes a job whose envelope was removed entirely as
+an ordinary job, so a `redis` monitor skips `AUTH`, PINGs, and an auth-less target answers Up.
+Deleting one JSON member turned an authenticated check into an anonymous one, with no key and
+no forgery. Therefore: one mandatory `Validate/Materialize` entrypoint that every executor
+path reaches the prober through, so a new call site that forgets the check cannot be written;
+the credential requirement resolved **tri-state** from the effective schema — required (exact
+non-empty field set), forbidden (an envelope present at all is a failure, which is the correct
+handling of `rabbitmq mode: amqp`), invalid (anything else); and every failure typed
+`probe_error` raised before any connection to the target. A credential that decrypts to a
+zero-length value counts as missing, or the rule is bypassable by content instead of by shape.
+`field_set_digest` binds the canonical sorted field-name set into each field's AAD; with
+today's single-field schemas the exact policy is the operative protection and the digest is a
+primitive so that a future multi-field envelope cannot be partially truncated without a second
+security review — stated plainly rather than as defence-in-depth. Verification order is fixed:
+structural gate, then field-set policy, then AEAD.
+
+**Carrier generations, named rather than delegated.** Changing what the AAD binds is a wire
+change, so it ships as envelope `v: 2` and never as a redefinition of `v: 1`; a silent
+redefinition breaks a rolling upgrade in both directions. Today's `protocol_version = 2` /
+`checks.{jobs,tests}.v2.<region>` / `/v2/{jobs,tests}` carrier already *means* envelope `v: 1`
+and every capability-1 executor consumes it, so **carrier generation 3** (`protocol_version =
+3`, `.v3` queues, `/v3` endpoints) carries envelope `v: 2`, and a capability-1 executor
+neither consumes nor claims it — asserted as physical isolation, not as a capability
+predicate, since a predicate does not stop a consumer already sitting on a shared queue.
+Capability is generational (`credential_envelope: 2`), and the existential readiness check
+counts executors capable of the generation core is about to emit. Decisively, the carrier
+generation is **trusted metadata delivered out of band** — stamped by the transport adapter
+from the queue a message was consumed from, or the generation the server selected for a claimed
+row — and is never read from `job.ProtocolVersion`, which is body content an attacker edits;
+sourcing it from the payload would make the whole gate self-referential.
+
+**The wire barrier is one-directional.** It exists to stop an incapable executor from
+receiving a newer generation and must never stop a capable one from receiving an older. The
+AMQP half was already specified ("capable workers consume v1 and v2 during the transition");
+its pull mirror was missing, and that omission is the availability blocker: non-credentialed
+monitors are enqueued as legacy rows, an `enforced` region's agent is necessarily capable, and
+an agent claiming only the newest generation leaves every ordinary monitor's row to expire by
+TTL — no probe, no heartbeat, no DOWN, no alert. Enabling a security feature must never
+silently disable monitoring. A capable agent therefore claims through one capability-scoped
+operation that atomically leases every generation at or below its declared capability under a
+single shared `max` and one lease, with the generation stamped by the server; sequential
+long-polls are insufficient because an empty first class sleeps out the window, and
+independent per-class claims over-lease. The same applies to `pull_tests`, not jobs alone.
+
+**Backoff.** The floor covers every path that ends without a dispatched job, publish/enqueue
+failure included, not materialization alone — a broker outage is the one fault guaranteed to
+hit every credentialed monitor at once, and leaving that path uncovered turns each tick into a
+full read-decrypt-seal storm. Semantics are state, not rate: failure increments the
+consecutive-failure counter, sets next-eligible to `now + backoff` and does not mark the probe
+sent; success resets the counter, marks it sent and restores ordinary cadence. "Not marked as
+sent" and "eligible again next tick" are different statements.
+
+**Acceptance.** FR-020/NFR-015 return to `IN_PROGRESS` and the iter-0116 acceptance is
+withdrawn. That report stands as written and is superseded, not corrected — its matrix could
+not have caught these defects. Re-acceptance requires a fresh iteration report against the
+amended §9, with each regression **verified to fail when its fix is reverted**: all three
+blockers passed a green suite, so "the tests are green" is not evidence here. Until the claim
+fix ships, the feature must not be enabled in a region served by an HTTP-pull agent.

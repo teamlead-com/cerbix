@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -42,7 +43,7 @@ func TestTOTPEnrollEnableDisable(t *testing.T) {
 	if enroll.Secret == "" || enroll.URI == "" {
 		t.Fatalf("enroll returned empty secret/uri: %+v", enroll)
 	}
-	if _, enabled, _ := fs.GetTOTP(nil, "u1"); enabled {
+	if _, enabled, _ := fs.GetTOTP(context.Background(), "u1"); enabled {
 		t.Fatal("2FA should not be enabled right after enroll")
 	}
 
@@ -69,7 +70,7 @@ func TestTOTPEnrollEnableDisable(t *testing.T) {
 	if len(en.RecoveryCodes) != 8 {
 		t.Fatalf("expected 8 recovery codes, got %d", len(en.RecoveryCodes))
 	}
-	if _, enabled, _ := fs.GetTOTP(nil, "u1"); !enabled {
+	if _, enabled, _ := fs.GetTOTP(context.Background(), "u1"); !enabled {
 		t.Fatal("2FA should be enabled after a valid enable")
 	}
 
@@ -91,7 +92,7 @@ func TestTOTPEnrollEnableDisable(t *testing.T) {
 	if rec := do(h, u1, http.MethodPost, "/api/v1/me/totp/disable", `{"password":"pw12345678"}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("disable code=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if _, enabled, _ := fs.GetTOTP(nil, "u1"); enabled {
+	if _, enabled, _ := fs.GetTOTP(context.Background(), "u1"); enabled {
 		t.Fatal("2FA should be off after disable")
 	}
 }

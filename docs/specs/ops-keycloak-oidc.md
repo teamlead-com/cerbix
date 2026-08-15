@@ -328,7 +328,8 @@ The repository provides a pre-configured Keycloak container in `docker/docker-co
 
 ```bash
 # Start the full dev stack (PostgreSQL, RabbitMQ, Keycloak, cerbix)
-docker compose -f docker/docker-compose.yml up -d
+make dev-init  # only for a fresh broker volume
+make dev-up
 ```
 
 ### Dev Environment Pre-sets:

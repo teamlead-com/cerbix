@@ -108,6 +108,38 @@ func TestRecordScheduledResultPipeline(t *testing.T) {
 	}
 }
 
+func TestRecordScheduledResultRefusesDisabledMonitor(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "disabled-result-org", "Disabled result org")
+	proj, _ := st.CreateProject(ctx, org.ID, "app", "App")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "disabled-result", Type: domain.MonitorTCP,
+		Target: "10.0.0.1:80", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET enabled=false WHERE id=$1`, mon.ID); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := st.RecordScheduledResult(ctx, domain.Heartbeat{
+		MonitorID: mon.ID, ExecutionRevision: mon.ExecutionRevision, Ts: time.Now().UTC(), Up: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Applied || outcome.Inserted || outcome.Reason != MaterializeSkippedCurrentState {
+		t.Fatalf("disabled result outcome = %+v", outcome)
+	}
+	var heartbeats int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM heartbeats WHERE monitor_id=$1`, mon.ID).Scan(&heartbeats); err != nil {
+		t.Fatal(err)
+	}
+	if heartbeats != 0 {
+		t.Fatalf("disabled in-flight result inserted %d heartbeat(s)", heartbeats)
+	}
+}
+
 // TestRecordPushResult proves the push entrypoint (spec §4): ordering by the ingress
 // received_at, observed_at NULL (no client ts), last_result_ts advanced, and the
 // current-state re-check dropping a ping to a now-disabled monitor.

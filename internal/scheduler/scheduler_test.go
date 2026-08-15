@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,12 +30,70 @@ type fakeStore struct {
 	listCalls     int32 // ListEnabledMonitors invocations (snapshot reloads)
 	// checkHeld, when set, is what the leadership watchdog check() returns; nil
 	// means "still leader" (true, nil).
-	checkHeld func() (bool, error)
+	checkHeld   func() (bool, error)
+	materialize func([]string) ([]store.MaterializedExecution, error)
+}
+
+type staticCredentialRegions map[string]bool
+
+func (s staticCredentialRegions) LiveCredentialV3JobRegions(context.Context) (map[string]bool, error) {
+	// No generation-3 consumers by default: the emitter must stay on generation 2 unless a
+	// test says otherwise.
+	return map[string]bool{}, nil
+}
+
+func (s staticCredentialRegions) LiveCredentialJobRegions(context.Context) (map[string]bool, error) {
+	return s, nil
 }
 
 func (f *fakeStore) ListEnabledMonitors(context.Context) ([]domain.Monitor, error) {
 	atomic.AddInt32(&f.listCalls, 1)
 	return f.monitors, nil
+}
+
+func (f *fakeStore) ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error) {
+	return f.ListEnabledMonitors(ctx)
+}
+
+func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string, _ map[string]int) ([]store.MaterializedExecution, error) {
+	if f.materialize != nil {
+		return f.materialize(ids)
+	}
+	byID := make(map[string]domain.Monitor, len(f.monitors))
+	for _, m := range f.monitors {
+		byID[m.ID] = m
+	}
+	out := make([]store.MaterializedExecution, 0, len(ids))
+	for _, id := range ids {
+		m, ok := byID[id]
+		if !ok || !m.Enabled {
+			out = append(out, store.MaterializedExecution{MonitorID: id, Reason: store.MaterializeSkippedCurrentState})
+			continue
+		}
+		out = append(out, store.MaterializedExecution{MonitorID: id, Job: dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV2}})
+	}
+	return out, nil
+}
+
+func TestCredentialFailureRetryHasIntervalFloorAndResyncCap(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval time.Duration
+		failures int
+		want     time.Duration
+	}{
+		{name: "floor", interval: 2 * time.Second, failures: 1, want: 2 * time.Second},
+		{name: "exponential", interval: 2 * time.Second, failures: 3, want: 8 * time.Second},
+		{name: "resync cap", interval: 2 * time.Second, failures: 8, want: refreshEvery},
+		{name: "slow monitor remains floor", interval: time.Minute, failures: 8, want: time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := credentialFailureRetry(tt.interval, tt.failures); got != tt.want {
+				t.Fatalf("retry = %s, want %s", got, tt.want)
+			}
+		})
+	}
 }
 
 func (f *fakeStore) StalePushMonitors(context.Context) ([]domain.Monitor, error) {
@@ -82,9 +141,14 @@ func (f *fakeStore) EnqueueDueSLAReports(context.Context) (int, error)     { ret
 func (f *fakeStore) EvaluateRegionWorkerAlerts(context.Context, map[string]bool, int) (int, int, error) {
 	return 0, 0, nil
 }
-func (f *fakeStore) AdvanceEscalations(context.Context) (int, error)           { return 0, nil }
-func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error { return nil }
-func (f *fakeStore) PurgeExpiredPullJobs(context.Context) (int, error)         { return 0, nil }
+func (f *fakeStore) AdvanceEscalations(context.Context) (int, error)             { return 0, nil }
+func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error   { return nil }
+func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int) error { return nil }
+func (f *fakeStore) EnqueuePullJobV3(context.Context, string, []byte, int) error { return nil }
+func (f *fakeStore) LiveCredentialReadyAgentRegions(context.Context, time.Duration, int) (map[string]bool, error) {
+	return map[string]bool{}, nil
+}
+func (f *fakeStore) PurgeExpiredPullJobs(context.Context) (int, error) { return 0, nil }
 func (f *fakeStore) PurgeDeliveredOutbox(context.Context, time.Duration) (int, error) {
 	return 0, nil
 }
@@ -123,9 +187,9 @@ func TestSchedulerLeaderPublishesDueJobs(t *testing.T) {
 	go s.Run(ctx)
 
 	select {
-	case job := <-disp.Jobs():
-		if job.Monitor.ID != "m1" {
-			t.Fatalf("expected active monitor m1, got %q", job.Monitor.ID)
+	case delivered := <-disp.Jobs():
+		if delivered.Job.Monitor.ID != "m1" {
+			t.Fatalf("expected active monitor m1, got %q", delivered.Job.Monitor.ID)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("scheduler did not publish a job in time")
@@ -220,9 +284,9 @@ func TestConfirmSignalAcceleratesProbe(t *testing.T) {
 	// pull it in to ~1s (the confirm interval).
 	ch <- "m1"
 	select {
-	case job := <-disp.Jobs():
-		if job.Monitor.ID != "m1" {
-			t.Fatalf("unexpected job %q", job.Monitor.ID)
+	case delivered := <-disp.Jobs():
+		if delivered.Job.Monitor.ID != "m1" {
+			t.Fatalf("unexpected job %q", delivered.Job.Monitor.ID)
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("confirm signal did not accelerate the next probe")
@@ -252,6 +316,80 @@ func TestConfigSignalForcesSnapshotReload(t *testing.T) {
 	waitUntil(t, 4*time.Second, "config-signal-forced reload", func() bool {
 		return atomic.LoadInt32(&fs.listCalls) > n0
 	})
+}
+
+func TestCredentialDispatchRequiresV2AMQPConsumer(t *testing.T) {
+	monitor := domain.Monitor{
+		ID: "credential-monitor", Type: domain.MonitorPostgres, Target: "db:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
+	}
+	for _, tc := range []struct {
+		name    string
+		ready   staticCredentialRegions
+		wantJob bool
+	}{
+		{name: "legacy-or-absent-consumer-does-not-authorize", ready: staticCredentialRegions{}, wantJob: false},
+		{name: "v2-consumer-authorizes", ready: staticCredentialRegions{"secure": true}, wantJob: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor}}
+			disp := dispatch.NewInProc(2)
+			s := New(fs, disp, testLogger()).WithCredentialEnvelopes(true).WithCredentialLiveRegions(tc.ready)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go s.Run(ctx)
+			select {
+			case delivered := <-disp.Jobs():
+				if !tc.wantJob {
+					t.Fatalf("credential job reached transport without v2 consumer: %+v", delivered.Job)
+				}
+				if delivered.Job.ProtocolVersion != dispatch.ProtocolV2 {
+					t.Fatalf("protocol=%d, want v2", delivered.Job.ProtocolVersion)
+				}
+				// In-process the carrier generation is the publisher's own version;
+				// on a wire it comes from the queue the message was consumed from.
+				if delivered.CarrierGeneration != dispatch.ProtocolV2 {
+					t.Fatalf("carrier generation=%d, want v2", delivered.CarrierGeneration)
+				}
+			case <-time.After(1500 * time.Millisecond):
+				if tc.wantJob {
+					t.Fatal("credential job was not published to capable region")
+				}
+			}
+		})
+	}
+}
+
+func TestCredentialCadenceUsesAuthoritativeMaterializedInterval(t *testing.T) {
+	snapshot := domain.Monitor{
+		ID: "credential-monitor", Type: domain.MonitorPostgres, Target: "old:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 1, TimeoutSeconds: 5,
+	}
+	authoritative := snapshot
+	authoritative.Target = "new:5432"
+	authoritative.IntervalSeconds = 60
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{snapshot}}
+	fs.materialize = func(ids []string) ([]store.MaterializedExecution, error) {
+		return []store.MaterializedExecution{{MonitorID: ids[0], Job: dispatch.CheckJob{Monitor: authoritative, ProtocolVersion: dispatch.ProtocolV2}}}, nil
+	}
+	disp := dispatch.NewInProc(4)
+	s := New(fs, disp, testLogger()).WithCredentialEnvelopes(true).WithCredentialLiveRegions(staticCredentialRegions{"secure": true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+	select {
+	case delivered := <-disp.Jobs():
+		if delivered.Job.Monitor.Target != authoritative.Target || delivered.Job.Monitor.IntervalSeconds != authoritative.IntervalSeconds {
+			t.Fatalf("published stale snapshot instead of authoritative row: %+v", delivered.Job.Monitor)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("credential job was not published")
+	}
+	select {
+	case delivered := <-disp.Jobs():
+		t.Fatalf("cadence advanced from stale 1s snapshot; unexpected second job: %+v", delivered.Job)
+	case <-time.After(2500 * time.Millisecond):
+	}
 }
 
 // waitUntil polls cond until true or the deadline elapses (then fails with msg).
@@ -340,10 +478,7 @@ func TestLeadershipWatchdogStepsDown(t *testing.T) {
 	// The lost lock makes it flap: acquire → first tick detects loss → step down →
 	// re-contend. Expect several elections and a leader-gauge that went true then false.
 	deadline := time.After(2 * time.Second)
-	for {
-		if atomic.LoadInt32(&fs.elections) >= 2 {
-			break
-		}
+	for atomic.LoadInt32(&fs.elections) < 2 {
 		select {
 		case <-deadline:
 			t.Fatalf("watchdog did not re-contend after losing the lock (elections=%d)", atomic.LoadInt32(&fs.elections))
@@ -385,5 +520,179 @@ func TestSchedulerStandbyStopsOnCancel(t *testing.T) {
 	}
 	if atomic.LoadInt32(&fs.elections) < 1 {
 		t.Fatal("scheduler should have attempted election at least once")
+	}
+}
+
+// failingDispatcher refuses every publish until healAfter attempts have been made,
+// standing in for a broker outage and its recovery.
+type failingDispatcher struct {
+	mu        sync.Mutex
+	attempts  int
+	healAfter int // 0 = never heal
+	published []string
+}
+
+func (d *failingDispatcher) PublishJob(_ context.Context, job dispatch.CheckJob) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.attempts++
+	if d.healAfter > 0 && d.attempts > d.healAfter {
+		d.published = append(d.published, job.Monitor.ID)
+		return nil
+	}
+	return errors.New("broker unreachable")
+}
+
+func (d *failingDispatcher) publishedIDs() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.published...)
+}
+func (d *failingDispatcher) Jobs() <-chan dispatch.DeliveredJob                    { return nil }
+func (d *failingDispatcher) PublishResult(context.Context, domain.Heartbeat) error { return nil }
+func (d *failingDispatcher) Results() <-chan domain.Heartbeat                      { return nil }
+func (d *failingDispatcher) Close() error                                          { return nil }
+
+func (d *failingDispatcher) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.attempts
+}
+
+// TestPublishFailureHonoursTheBackoffFloor is the regression for the audit's remaining P1
+// (§4.4.5, D-0160). "Not marked as sent" and "eligible again on the next tick" are
+// different statements, and the publish path conflated them: it left nextRun untouched, so
+// the monitor came due on the very next tick. A broker outage — the one fault guaranteed to
+// hit every credentialed monitor at once — therefore turned each tick into a full
+// authoritative-read + decrypt + seal storm.
+//
+// The assertion is on STATE, not on a wall-clock rate: with a 60s interval the backoff is
+// at least one interval, so over a couple of seconds of ticking a monitor must be attempted
+// exactly once, not once per tick.
+func TestPublishFailureHonoursTheBackoffFloor(t *testing.T) {
+	// A CREDENTIALED monitor: this clause governs the materialize→publish path, where a
+	// retry costs an authoritative read, a decrypt and a seal. The plain snapshot path is
+	// deliberately left as it is — a failed publish there costs a marshal and an enqueue
+	// attempt, so retrying it promptly is cheap and helps recovery.
+	monitor := domain.Monitor{
+		ID: "publish-fails", Type: domain.MonitorPostgres, Target: "db:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
+	}
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor}}
+	disp := &failingDispatcher{}
+	s := New(fs, disp, testLogger()).WithCredentialEnvelopes(true).
+		WithCredentialLiveRegions(staticCredentialRegions{"secure": true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	waitUntil(t, 3*time.Second, "first publish attempt", func() bool { return disp.count() >= 1 })
+	time.Sleep(2500 * time.Millisecond) // several scheduler ticks
+	if got := disp.count(); got != 1 {
+		t.Fatalf("publish attempted %d times while the broker was down; the backoff floor bounds it to one per window", got)
+	}
+}
+
+// countingSecretSink records which metric FAMILY each rejection lands in.
+type countingSecretSink struct {
+	mu        sync.Mutex
+	secret    []string
+	transport []string
+}
+
+func (s *countingSecretSink) RecordSecretResolutionFailure(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secret = append(s.secret, reason)
+}
+
+func (s *countingSecretSink) RecordDispatchTransportFailure(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.transport = append(s.transport, reason)
+}
+
+func (s *countingSecretSink) snapshot() (secret, transport []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.secret...), append([]string(nil), s.transport...)
+}
+
+// TestPublishFailureRecoversAndIsCountedSeparately completes the §4.4.5 acceptance the
+// first regression left implicit: it is not enough that a failing publish backs off — the
+// counter must RESET on success and ordinary cadence must resume, and a transport fault
+// must not be counted as a secret-resolution fault. An operator seeing "secret resolution
+// failed" during a broker outage would look in entirely the wrong place.
+func TestPublishFailureRecoversAndIsCountedSeparately(t *testing.T) {
+	monitor := domain.Monitor{
+		ID: "publish-recovers", Type: domain.MonitorPostgres, Target: "db:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 1, TimeoutSeconds: 5,
+	}
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor}}
+	disp := &failingDispatcher{healAfter: 1}
+	sink := &countingSecretSink{}
+	s := New(fs, disp, testLogger()).WithCredentialEnvelopes(true).
+		WithCredentialLiveRegions(staticCredentialRegions{"secure": true}).
+		WithSecretResolutionMetrics(sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	// The first attempt fails and backs off; the second succeeds once the backoff elapses.
+	waitUntil(t, 6*time.Second, "publish recovery after the transport heals", func() bool {
+		return len(disp.publishedIDs()) >= 1
+	})
+	// After a success the counter is reset, so ordinary cadence resumes rather than the
+	// monitor staying on an ever-growing backoff.
+	waitUntil(t, 6*time.Second, "ordinary cadence resumes after recovery", func() bool {
+		return len(disp.publishedIDs()) >= 2
+	})
+
+	secret, transport := sink.snapshot()
+	if len(transport) == 0 || transport[0] != "publish_failed" {
+		t.Fatalf("transport failures = %v, want at least one publish_failed", transport)
+	}
+	for _, reason := range secret {
+		if reason == "publish_failed" {
+			t.Fatal("a transport fault was counted as a secret-resolution failure")
+		}
+	}
+}
+
+// TestSkippedMonitorIsNotAFailure closes the audit P2 the first pass only half-fixed: the
+// metric stopped counting a skip, but the WARN, the failure counter and the backoff still
+// treated it as one. A snapshot nominating a row the authoritative read finds disabled is
+// ordinary reconcile churn (§4.4.3) — calling it an operational error is how a metric and a
+// log both learn to cry wolf.
+func TestSkippedMonitorIsNotAFailure(t *testing.T) {
+	monitor := domain.Monitor{
+		ID: "skipped-monitor", Type: domain.MonitorPostgres, Target: "db:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 1, TimeoutSeconds: 5,
+	}
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor}}
+	// The authoritative read reports the row as no longer dispatchable.
+	fs.materialize = func(ids []string) ([]store.MaterializedExecution, error) {
+		out := make([]store.MaterializedExecution, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, store.MaterializedExecution{MonitorID: id, Reason: store.MaterializeSkippedCurrentState})
+		}
+		return out, nil
+	}
+	sink := &countingSecretSink{}
+	s := New(fs, dispatch.NewInProc(4), testLogger()).WithCredentialEnvelopes(true).
+		WithCredentialLiveRegions(staticCredentialRegions{"secure": true}).
+		WithSecretResolutionMetrics(sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	time.Sleep(2500 * time.Millisecond) // several ticks, each nominating the same row
+
+	secret, transport := sink.snapshot()
+	if len(secret) != 0 {
+		t.Fatalf("a skipped monitor was counted as a secret-resolution failure: %v", secret)
+	}
+	if len(transport) != 0 {
+		t.Fatalf("a skipped monitor was counted as a transport failure: %v", transport)
 	}
 }

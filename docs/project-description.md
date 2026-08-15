@@ -109,6 +109,21 @@ a tenant-safe diagnostics API (`GET /api/v1/admin/file-providers` → `{bundles,
 Full contract: [`docs/specs/func-monitoring-as-code.md`](specs/func-monitoring-as-code.md)
 (FR-017, NFR-014, D-0145/0146/0147/0148) — **DONE**.
 
+## Project secret inventory
+
+Projects have a write-only named secret inventory for credentialed PostgreSQL, MySQL,
+Redis and RabbitMQ monitors. UI/API monitors and Monitoring-as-Code bundles store only a
+`password_ref`; normalized tenant-safe reference rows prevent cross-project resolution and
+guard rename/delete. Values are AAD-bound under the core-only at-rest master, then read at
+the dispatch linearization point and immediately re-wrapped under a per-region dispatch
+key. Workers and pull agents never receive the master and v1 consumers can never claim an
+envelope job. Wrong/missing keys produce a typed diagnostic without heartbeat/status/SLA
+mutation and degrade executor readiness. Ref-based target transport is encrypted by default,
+with insecure or skip-verify modes explicit. The Secrets panel, monitor reference selector,
+rotation runbook, metrics and alerts ship in the single binary. Full contract:
+[`docs/specs/func-secret-inventory.md`](specs/func-secret-inventory.md) (FR-020, NFR-015,
+D-0155) — **DONE**.
+
 ## Delivery Method
 
 Iteration-based per `AGENTS.md`. The full phased roadmap and rationale live in the

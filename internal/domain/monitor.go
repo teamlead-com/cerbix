@@ -103,6 +103,13 @@ type Monitor struct {
 	// snapshots it into each job; the prober echoes it into the result so RecordScheduledResult
 	// can reject a result produced under a stale configuration. Read-only to clients.
 	ExecutionRevision int64 `json:"execution_revision,omitempty"`
+	// LastProbeError is executor/dispatch diagnostics only. It never represents target
+	// liveness and is never exposed by public status pages.
+	LastProbeErrorReason string     `json:"last_probe_error_reason,omitempty"`
+	LastProbeErrorAt     *time.Time `json:"last_probe_error_at,omitempty"`
+	// JobID is retained only for internal correlation and structured logs. The monitor API
+	// exposes the bounded reason/time pair from the FR-020 contract, not queue identifiers.
+	LastProbeErrorJobID string `json:"-"`
 	// StateSequence is a per-monitor monotonic counter bumped on every applied
 	// status transition. It rides along in the transition outbox event and is
 	// checked at delivery so a stale DOWN (or reminder) can't fire after a newer
@@ -395,6 +402,11 @@ const DefaultRegion = "core"
 // regionSlug bounds region names (worker-pool labels).
 var regionSlug = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 
+// ValidRegion reports whether s is a well-formed region name. The domain owns this
+// rule (single owner); config/cli validation reuses it rather than duplicating the
+// pattern.
+func ValidRegion(s string) bool { return regionSlug.MatchString(s) }
+
 // maxTags / maxTagLen bound label sprawl.
 const (
 	maxTags   = 20
@@ -439,6 +451,35 @@ type Heartbeat struct {
 	// the prober from the job's monitor). RecordScheduledResult rejects a result whose
 	// revision no longer matches the monitor's current one. 0 = not carried (push/legacy).
 	ExecutionRevision int64 `json:"execution_revision,omitempty"`
+	// ProbeError is the typed non-liveness result member used when an executor cannot
+	// authenticate/materialize a credential envelope. When set, the ingest path records
+	// diagnostics only: no heartbeat, status, SLA, incident, or transition mutation.
+	ProbeError *ProbeError `json:"probe_error,omitempty"`
+}
+
+const (
+	ProbeErrorNoDispatchKey      = "no_dispatch_key"
+	ProbeErrorUnknownKeyID       = "unknown_key_id"
+	ProbeErrorDecryptAuthFailed  = "decrypt_auth_failed"
+	ProbeErrorUnsupportedVersion = "unsupported_version"
+)
+
+// ProbeError is a bounded wire-safe execution diagnostic. It intentionally omits key ids,
+// ciphertext and detailed crypto errors so it cannot become a diagnostic oracle.
+type ProbeError struct {
+	Reason string `json:"reason"`
+	JobID  string `json:"job_id,omitempty"`
+}
+
+func (e ProbeError) Error() string { return "probe_error: " + e.Reason }
+
+func ValidProbeErrorReason(reason string) bool {
+	switch reason {
+	case ProbeErrorNoDispatchKey, ProbeErrorUnknownKeyID, ProbeErrorDecryptAuthFailed, ProbeErrorUnsupportedVersion:
+		return true
+	default:
+		return false
+	}
 }
 
 // StatusFor maps an up/down boolean to a MonitorStatus.

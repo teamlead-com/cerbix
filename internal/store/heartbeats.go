@@ -120,13 +120,16 @@ func (s *Store) RecordHistoricalResults(ctx context.Context, hbs []domain.Heartb
 		return 0, skipped, nil
 	}
 	br := s.pool.SendBatch(ctx, batch)
-	defer br.Close()
 	for i := 0; i < queued; i++ {
 		ct, err := br.Exec()
 		if err != nil {
+			_ = br.Close()
 			return inserted, skipped, fmt.Errorf("store: backfill insert: %w", err)
 		}
 		inserted += int(ct.RowsAffected())
+	}
+	if err := br.Close(); err != nil {
+		return inserted, skipped, fmt.Errorf("store: close backfill batch: %w", err)
 	}
 	return inserted, skipped, nil
 }

@@ -118,3 +118,23 @@ func TestNoMembershipNoAccess(t *testing.T) {
 		t.Error("empty org target must be denied")
 	}
 }
+
+func TestAuditUserID(t *testing.T) {
+	cases := []struct {
+		name string
+		p    Principal
+		want string
+	}{
+		{"human uuid", Principal{UserID: "user-uuid"}, "user-uuid"},
+		{"oidc client credentials keeps jit user", Principal{UserID: "cc-user-uuid", ViaToken: true}, "cc-user-uuid"},
+		{"cerbix api token is null actor", Principal{UserID: SyntheticTokenActorPrefix + "token-id", ViaToken: true}, ""},
+		{"prefix alone is not trusted", Principal{UserID: SyntheticTokenActorPrefix + "not-a-token", ViaToken: false}, SyntheticTokenActorPrefix + "not-a-token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.p.AuditUserID(); got != tc.want {
+				t.Fatalf("AuditUserID() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

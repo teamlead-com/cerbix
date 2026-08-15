@@ -1193,6 +1193,202 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/secrets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List the project's secret inventory (names and metadata; never values)
+         * @description Names, dates, and used-by reference counts only — secret values are write-only and never returned by any endpoint. Served with `Cache-Control: no-store`. Returns 404 `feature_disabled` when the instance-wide secret inventory feature is off (`secrets.enabled: false`).
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProjectSecret"][];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a project secret (editor+)
+         * @description Adds a named secret to the project inventory. The value is encrypted at rest and never echoed back. Returns 404 `feature_disabled` when the feature is off.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateSecretRequest"];
+                };
+            };
+            responses: {
+                /** @description Created (the value is not echoed). */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: uuid */
+                            id: string;
+                            name: string;
+                            /** Format: date-time */
+                            created_at: string;
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Duplicate name (`secret_exists`) or per-project quota exceeded (`secret_quota`). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/secrets/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                /** @description Secret name (slug) within the project inventory. */
+                name: components["parameters"]["SecretName"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a project secret (editor+)
+         * @description Refused while monitor settings still reference the secret — there is no force-delete. Returns 404 `feature_disabled` when the feature is off.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    /** @description Secret name (slug) within the project inventory. */
+                    name: components["parameters"]["SecretName"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Still referenced by monitor settings (`secret_in_use`, with `count`). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error?: string;
+                            /** @description References that still point at the secret. */
+                            count?: number;
+                        };
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Rename and/or rotate a project secret (editor+)
+         * @description One PATCH = rename and/or rotate, in one transaction; at least one of `name`/`value` is required. A rename re-points UI-managed monitor references atomically; file-managed references block it (`409 secret_renamed_in_use` with the count — rename in the file source). Returns 404 `feature_disabled` when the feature is off.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    /** @description Secret name (slug) within the project inventory. */
+                    name: components["parameters"]["SecretName"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateSecretRequest"];
+                };
+            };
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Rename blocked by file-managed references (`secret_renamed_in_use`, with `count`) or the new name is taken (`secret_exists`). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error?: string;
+                            /** @description File-managed references blocking the rename (secret_renamed_in_use only). */
+                            count?: number;
+                        };
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/sla": {
         parameters: {
             query?: never;
@@ -4539,8 +4735,8 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            bundles?: components["schemas"]["FileProviderDiagnostic"][];
-                            providers?: components["schemas"]["FileProviderRuntimeStatus"][];
+                            bundles: components["schemas"]["FileProviderDiagnostic"][];
+                            providers: components["schemas"]["FileProviderRuntimeStatus"][];
                         };
                     };
                 };
@@ -4584,7 +4780,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            bundles?: components["schemas"]["FileProviderDiagnostic"][];
+                            bundles: components["schemas"]["FileProviderDiagnostic"][];
                         };
                     };
                 };
@@ -4727,6 +4923,45 @@ export interface components {
     schemas: {
         Error: {
             error?: string;
+        };
+        /** @description One project-inventory secret: names and metadata only. Values are write-only and never appear in any API response. */
+        ProjectSecret: {
+            /** Format: uuid */
+            id: string;
+            /** @description Slug */
+            name: string;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: date-time
+             * @description Last time the value was rotated; null if never.
+             */
+            rotated_at: string | null;
+            /** @description Monitor-setting references pointing at this secret. */
+            used_by: {
+                total: number;
+                /** @description References owned by a Monitoring-as-Code file provider. */
+                file_managed: number;
+            };
+        };
+        CreateSecretRequest: {
+            /** @description Slug */
+            name: string;
+            /**
+             * Format: password
+             * @description Secret value, ≤ 4096 UTF-8 bytes; never returned.
+             */
+            value: string;
+        };
+        /** @description At least one of `name` (rename) or `value` (rotate) is required. */
+        UpdateSecretRequest: {
+            /** @description New slug (rename). */
+            name?: string;
+            /**
+             * Format: password
+             * @description New value (rotate), ≤ 4096 UTF-8 bytes; never returned.
+             */
+            value?: string;
         };
         LoginRequest: {
             /** @description Email of the local account. */
@@ -4965,6 +5200,16 @@ export interface components {
             status?: "pending" | "up" | "down";
             /** @description Set for push monitors; the secret in their heartbeat URL. */
             push_token?: string;
+            /**
+             * @description Latest executor credential-envelope failure. Diagnostic only; never changes target liveness.
+             * @enum {string}
+             */
+            readonly last_probe_error_reason?: "no_dispatch_key" | "unknown_key_id" | "decrypt_auth_failed" | "unsupported_version";
+            /**
+             * Format: date-time
+             * @description Server time of the latest credential-envelope diagnostic.
+             */
+            readonly last_probe_error_at?: string;
             management?: components["schemas"]["MonitorManagement"];
             /** Format: date-time */
             created_at?: string;
@@ -5845,6 +6090,8 @@ export interface components {
         MonitorID: string;
         IncidentID: string;
         PageID: string;
+        /** @description Secret name (slug) within the project inventory. */
+        SecretName: string;
         /** @description Feed serialization; defaults to RSS 2.0. */
         FeedFormat: "rss" | "atom" | "json";
         /** @description Number of trailing days of availability to return. */

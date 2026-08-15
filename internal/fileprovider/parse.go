@@ -382,9 +382,19 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 	if !fileSupportedTypes[typ] {
 		return DesiredMonitor{}, rejectf(ReasonUnsupportedType, uid, "monitor type %q is not yet available via the file provider (needs a strict non-secret settings/secret_ref contract)", rm.Type)
 	}
-	// The supported v1 types have no typed `settings` object; any settings key is unsupported.
-	for k := range rm.Settings {
-		return DesiredMonitor{}, rejectf(ReasonUnsupportedField, uid, "type %q has no file-provider setting %q", rm.Type, k)
+	settings := map[string]string(nil)
+	if domain.CredentialedType(typ) {
+		var err error
+		settings, err = domain.PrepareCredentialSettings(typ, rm.Settings, domain.SurfaceFile)
+		if err != nil {
+			return DesiredMonitor{}, rejectf(ReasonDomainInvalid, uid, "%s", err.Error())
+		}
+	} else {
+		// Common-field types have no typed `settings` object. Credentialed types above
+		// are the only format-1 extension; there is still no generic config escape hatch.
+		for k := range rm.Settings {
+			return DesiredMonitor{}, rejectf(ReasonUnsupportedField, uid, "type %q has no file-provider setting %q", rm.Type, k)
+		}
 	}
 
 	m := domain.Monitor{
@@ -398,6 +408,7 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 		Enabled:      boolOr(rm.Enabled, true),
 		AutoIncident: boolOr(rm.AutoIncident, true),
 		DependsOn:    normStringSet(rm.DependsOn),
+		Config:       settings,
 	}
 	if m.Name == "" {
 		return DesiredMonitor{}, rejectf(ReasonDomainInvalid, uid, "monitor `name` is required")

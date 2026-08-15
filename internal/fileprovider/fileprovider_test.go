@@ -81,7 +81,7 @@ func TestDecodeStrictRejections(t *testing.T) {
 		{"bad uid", "format: 1\norganization: acme\nproject: p\nmonitors:\n  Bad_UID:\n    name: A\n    type: http\n    target: https://x\n", ReasonInvalidUID},
 		{"fractional duration", base + "    interval: 1500ms\n", ReasonInvalidDuration},
 		{"unknown type", "format: 1\norganization: acme\nproject: p\nmonitors:\n  x:\n    name: A\n    type: bogus\n    target: t\n", ReasonUnsupportedType},
-		{"unsupported type (credentialed)", "format: 1\norganization: acme\nproject: p\nmonitors:\n  db:\n    name: DB\n    type: postgres\n    target: pg:5432\n", ReasonUnsupportedType},
+		{"credentialed type missing settings", "format: 1\norganization: acme\nproject: p\nmonitors:\n  db:\n    name: DB\n    type: postgres\n    target: pg:5432\n", ReasonDomainInvalid},
 		{"unsupported settings on http", base + "    settings:\n      foo: bar\n", ReasonUnsupportedField},
 		{"inline secret", base + "    settings:\n      password: hunter2\n", ReasonInlineSecret},
 		{"target userinfo user:pass", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://u:pw@h/\n", ReasonInlineSecret},

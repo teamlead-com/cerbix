@@ -8,12 +8,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
@@ -38,6 +41,11 @@ type Runner interface {
 	Run(ctx context.Context, m domain.Monitor) domain.Heartbeat
 }
 
+type CredentialHealth interface {
+	SetCredentialReady(ready bool, reason string)
+	RecordExecutorProbeError(reason string)
+}
+
 // Agent polls the central API for its region's jobs and posts back results.
 type Agent struct {
 	serverURL      string
@@ -52,8 +60,12 @@ type Agent struct {
 
 	// Edge buffer (accessed only from the single Run loop, so no locking): results held
 	// while the API is unreachable, flushed as HISTORICAL backfill on reconnect.
-	buf     []domain.Heartbeat
-	dropped int
+	buf               []domain.Heartbeat
+	dropped           int
+	credentials       *dispatch.CredentialKeyring
+	credentialReady   atomic.Bool
+	credentialTracker dispatch.CredentialHealth
+	credentialHealth  CredentialHealth
 }
 
 // New builds an agent. serverURL is the central base URL (e.g. https://cerbix.core);
@@ -73,6 +85,45 @@ func New(serverURL, token, region string, runner Runner, logger *slog.Logger) *A
 		logger:         logger,
 		pollEvery:      defaultPollEvery,
 		heartbeatEvery: defaultHeartbeatEvery,
+	}
+}
+
+func (a *Agent) WithCredentialKeyring(ring *dispatch.CredentialKeyring) *Agent {
+	a.credentials = ring
+	a.credentialReady.Store(ring != nil)
+	return a
+}
+
+func (a *Agent) WithCredentialHealth(health CredentialHealth) *Agent {
+	a.credentialHealth = health
+	if health != nil {
+		reason := ""
+		if a.credentials == nil {
+			reason = domain.ProbeErrorNoDispatchKey
+		}
+		health.SetCredentialReady(a.credentials != nil, reason)
+	}
+	return a
+}
+
+func (a *Agent) recordCredentialFailure(reason string) {
+	// One rule for every executor and every path (dispatch.CredentialHealth).
+	if a.credentialTracker.Failure(reason) {
+		a.credentialReady.Store(false)
+		if a.credentialHealth != nil {
+			a.credentialHealth.SetCredentialReady(false, reason)
+		}
+	}
+	if a.credentialHealth != nil {
+		a.credentialHealth.RecordExecutorProbeError(reason)
+	}
+}
+
+func (a *Agent) recordCredentialSuccess() {
+	a.credentialTracker.Success()
+	a.credentialReady.Store(true)
+	if a.credentialHealth != nil {
+		a.credentialHealth.SetCredentialReady(true, "")
 	}
 }
 
@@ -105,7 +156,7 @@ func (a *Agent) testLoop(ctx context.Context) {
 }
 
 func (a *Agent) pollTest(ctx context.Context) {
-	id, raw, ok := a.claimTest(ctx)
+	id, raw, carrierGen, ok := a.claimTest(ctx)
 	if !ok {
 		return
 	}
@@ -114,36 +165,62 @@ func (a *Agent) pollTest(ctx context.Context) {
 		a.logger.Error("agent_bad_test", "error", err.Error())
 		return
 	}
-	hb := a.runner.Run(ctx, job.Monitor)
+	// The test-RPC path crosses the SAME gate as scheduled jobs — a per-path variant is
+	// how one of them ends up missing a rule.
+	delivered := dispatch.DeliveredJob{Job: job, CarrierGeneration: carrierGen}
+	materialized, err := dispatch.ValidateAndMaterialize(a.credentials, delivered)
+	if err != nil {
+		reason := dispatch.CredentialProbeErrorReason(err)
+		a.recordCredentialFailure(reason)
+		a.logger.Error("agent_credential_test_rejected", "reason", reason,
+			"carrier_generation", delivered.CarrierGeneration)
+		_ = a.postTestResult(ctx, id, dispatch.ProbeErrorHeartbeat(job, reason))
+		return
+	}
+	if materialized.UsedCredential {
+		a.recordCredentialSuccess()
+	}
+	hb := a.runner.Run(ctx, materialized.Monitor)
+	materialized.Cleanup()
 	if err := a.postTestResult(ctx, id, hb); err != nil {
 		a.logger.Warn("agent_test_result_failed", "error", err.Error())
 	}
 }
 
-func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, ok bool) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.serverURL+"/api/v1/agent/tests?region="+a.region, nil)
+func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, protocolVersion int, ok bool) {
+	path := a.claimPath("tests")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.serverURL+path+"?region="+a.region, nil)
 	if err != nil {
-		return "", nil, false
+		return "", nil, 0, false
 	}
 	a.auth(req)
+	if capability := a.envelopeCapability(); capability > 0 {
+		req.Header.Set("X-Cerbix-Credential-Envelope", strconv.Itoa(capability))
+	}
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return "", nil, false
+		return "", nil, 0, false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, false
+		return "", nil, 0, false
 	}
 	var out struct {
 		Test *struct {
-			ID  string          `json:"id"`
-			Job json.RawMessage `json:"job"`
+			ID              string          `json:"id"`
+			Job             json.RawMessage `json:"job"`
+			ProtocolVersion json.RawMessage `json:"protocol_version"`
 		} `json:"test"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Test == nil {
-		return "", nil, false
+		return "", nil, 0, false
 	}
-	return out.Test.ID, out.Test.Job, true
+	generation, err := a.resolveTestGeneration(out.Test.ProtocolVersion)
+	if err != nil {
+		a.logger.Error("agent_bad_test_claim", "error", err.Error())
+		return "", nil, 0, false
+	}
+	return out.Test.ID, out.Test.Job, generation, true
 }
 
 func (a *Agent) postTestResult(ctx context.Context, id string, hb domain.Heartbeat) error {
@@ -161,7 +238,7 @@ func (a *Agent) postTestResult(ctx context.Context, id string, hb domain.Heartbe
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("test-results status %d", resp.StatusCode)
 	}
@@ -198,7 +275,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 }
 
 func (a *Agent) poll(ctx context.Context) {
-	jobs, tokens, err := a.claim(ctx)
+	jobs, tokens, protocolVersions, err := a.claim(ctx)
 	if err != nil {
 		a.logger.Warn("agent_claim_failed", "error", err.Error())
 		return
@@ -218,7 +295,27 @@ func (a *Agent) poll(ctx context.Context) {
 			a.logger.Error("agent_bad_job", "error", err.Error())
 			continue
 		}
-		results = append(results, a.runner.Run(ctx, job.Monitor))
+		// Every job crosses the same gate the AMQP worker uses, unconditionally: the
+		// schema decides whether a credential is required, and the carrier generation is
+		// the server's stamp rather than anything the payload says (§4.7, D-0160).
+		delivered := dispatch.DeliveredJob{Job: job, CarrierGeneration: protocolVersions[i]}
+		materialized, err := dispatch.ValidateAndMaterialize(a.credentials, delivered)
+		if err != nil {
+			reason := dispatch.CredentialProbeErrorReason(err)
+			a.recordCredentialFailure(reason)
+			results = append(results, dispatch.ProbeErrorHeartbeat(job, reason))
+			a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID,
+				"reason", reason, "carrier_generation", delivered.CarrierGeneration)
+			if i < len(tokens) {
+				ackTokens = append(ackTokens, tokens[i])
+			}
+			continue
+		}
+		if materialized.UsedCredential {
+			a.recordCredentialSuccess()
+		}
+		results = append(results, a.runner.Run(ctx, materialized.Monitor))
+		materialized.Cleanup()
 		if i < len(tokens) {
 			ackTokens = append(ackTokens, tokens[i])
 		}
@@ -238,7 +335,13 @@ func (a *Agent) poll(ctx context.Context) {
 
 // bufferResults appends to the edge buffer, dropping the oldest past the cap (a ring).
 func (a *Agent) bufferResults(hbs []domain.Heartbeat) {
-	a.buf = append(a.buf, hbs...)
+	// probe_error is a current execution diagnostic, never historical/SLA data. A failed
+	// live POST leaves its job unacked for redelivery; do not replay it through backfill.
+	for _, hb := range hbs {
+		if hb.ProbeError == nil {
+			a.buf = append(a.buf, hb)
+		}
+	}
 	if over := len(a.buf) - bufferCap; over > 0 {
 		a.buf = a.buf[over:]
 		a.dropped += over
@@ -259,30 +362,146 @@ func (a *Agent) flushBuffer(ctx context.Context) {
 	a.buf = nil
 }
 
-func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []string, err error) {
-	url := fmt.Sprintf("%s/api/v1/agent/jobs?region=%s&max=%d", a.serverURL, a.region, claimBatch)
+func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []string, protocolVersions []int, err error) {
+	path := a.claimPath("jobs")
+	url := fmt.Sprintf("%s%s?region=%s&max=%d", a.serverURL, path, a.region, claimBatch)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	a.auth(req)
+	if capability := a.envelopeCapability(); capability > 0 {
+		req.Header.Set("X-Cerbix-Credential-Envelope", strconv.Itoa(capability))
+	}
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
+		return nil, nil, nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
 	}
 	var out struct {
 		Jobs   []json.RawMessage `json:"jobs"`
 		Tokens []string          `json:"tokens"`
+		// RAW so "absent" (an older core) is distinguishable from "present but malformed"
+		// — including an explicit null, which a *[]int cannot tell from absence. Those are
+		// different situations and only the first has a safe fallback.
+		ProtocolVersions json.RawMessage `json:"protocol_versions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return out.Jobs, out.Tokens, nil
+	generations, err := a.resolveStampedGenerations(len(out.Jobs), len(out.Tokens), out.ProtocolVersions)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return out.Jobs, out.Tokens, generations, nil
+}
+
+// resolveStampedGenerations turns the claim response's parallel arrays into one generation
+// per job, or refuses the whole batch.
+//
+// Two situations must NOT be conflated, and conflating them is fail-open: a stamp field
+// that is ABSENT means an older core that predates stamping, where the endpoint this agent
+// chose to poll is a legitimate out-of-band fallback; a stamp field that is PRESENT but
+// malformed — null, short, long, zero, or above this agent's capability — means the
+// response and the agent disagree about the wire, and a disagreement about which carrier a
+// credential arrived on is exactly the thing that must not be guessed. Filling a missing
+// element with the endpoint default would silently promote a truncated array to
+// "generation 2", which is permission to open an envelope.
+//
+// Presence is decided on the RAW bytes, not on a nil pointer: encoding/json leaves a
+// *[]int nil both for an absent key and for an explicit `null`, so a pointer cannot tell
+// the two apart and `"protocol_versions": null` would take the legacy fallback — the same
+// bypass through a different door.
+func (a *Agent) resolveStampedGenerations(jobs, tokens int, stamped json.RawMessage) ([]int, error) {
+	if jobs != tokens {
+		return nil, fmt.Errorf("claim response desync: %d jobs but %d tokens", jobs, tokens)
+	}
+	endpoint := a.claimGeneration()
+	if len(stamped) == 0 { // key absent: an older core that predates stamping
+		out := make([]int, jobs)
+		for i := range out {
+			out[i] = endpoint
+		}
+		return out, nil
+	}
+	var versions []int
+	if err := json.Unmarshal(stamped, &versions); err != nil {
+		return nil, fmt.Errorf("claim response carries a malformed protocol_versions field: %w", err)
+	}
+	if versions == nil { // present as JSON null
+		return nil, errors.New("claim response carries protocol_versions: null")
+	}
+	if len(versions) != jobs {
+		return nil, fmt.Errorf("claim response desync: %d jobs but %d stamped generations", jobs, len(versions))
+	}
+	for i, v := range versions {
+		if v < dispatch.ProtocolV1 || v > endpoint {
+			return nil, fmt.Errorf("claim response stamped generation %d for job %d, outside 1..%d", v, i, endpoint)
+		}
+	}
+	return versions, nil
+}
+
+// resolveTestGeneration is the same contract for the single-row test claim, including the
+// null-versus-absent distinction.
+func (a *Agent) resolveTestGeneration(stamped json.RawMessage) (int, error) {
+	endpoint := a.claimGeneration()
+	if len(stamped) == 0 {
+		return endpoint, nil
+	}
+	var generation *int
+	if err := json.Unmarshal(stamped, &generation); err != nil {
+		return 0, fmt.Errorf("test claim carries a malformed protocol_version field: %w", err)
+	}
+	if generation == nil {
+		return 0, errors.New("test claim carries protocol_version: null")
+	}
+	if *generation < dispatch.ProtocolV1 || *generation > endpoint {
+		return 0, fmt.Errorf("test claim stamped generation %d, outside 1..%d", *generation, endpoint)
+	}
+	return *generation, nil
+}
+
+// envelopeCapability is the highest envelope generation this agent can open.
+func (a *Agent) envelopeCapability() int {
+	if a.credentials == nil {
+		return 0
+	}
+	return dispatch.EnvelopeV2
+}
+
+// claimGeneration is the carrier generation of the claim endpoint this agent polls, which
+// follows from its own capability — not from anything a server or a payload asserts. A
+// capability-2 agent polls the generation-3 endpoint, whose claim also returns every older
+// generation: the barrier stops an incapable executor from receiving a NEWER carrier, and
+// must never stop a capable one from receiving an older.
+func (a *Agent) claimGeneration() int {
+	switch a.envelopeCapability() {
+	case dispatch.EnvelopeV2:
+		return dispatch.ProtocolV3
+	case dispatch.EnvelopeV1:
+		return dispatch.ProtocolV2
+	default:
+		return dispatch.ProtocolV1
+	}
+}
+
+// claimPath and capabilityHeader keep the endpoint and the declared capability in step:
+// they are derived from the same capability, so a future generation cannot update one and
+// forget the other.
+func (a *Agent) claimPath(kind string) string {
+	switch a.claimGeneration() {
+	case dispatch.ProtocolV3:
+		return "/api/v1/agent/v3/" + kind
+	case dispatch.ProtocolV2:
+		return "/api/v1/agent/v2/" + kind
+	default:
+		return "/api/v1/agent/" + kind
+	}
 }
 
 // postResults reports live results and acks (via ack tokens) the claimed jobs they
@@ -316,7 +535,7 @@ func (a *Agent) postHeartbeats(ctx context.Context, path string, results []domai
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("%s status %d: %s", path, resp.StatusCode, string(b))
@@ -326,11 +545,24 @@ func (a *Agent) postHeartbeats(ctx context.Context, path string, results []domai
 
 func (a *Agent) heartbeat(ctx context.Context) {
 	url := fmt.Sprintf("%s/api/v1/agent/heartbeat?region=%s&agent_id=%s", a.serverURL, a.region, a.agentID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	// The declared capability is the highest ENVELOPE generation this agent can open, and
+	// core uses it to decide which carrier generation it may emit into this region.
+	// Declaring it generationally rather than as a boolean is what keeps a rollout from
+	// handing an agent a payload it cannot open (§4.7, D-0160).
+	capability := a.envelopeCapability()
+	body, err := json.Marshal(map[string]any{
+		"capabilities":     map[string]int{"credential_envelope": capability},
+		"credential_ready": capability > 0 && a.credentialReady.Load(),
+	})
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return
 	}
 	a.auth(req)
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.http.Do(req)
 	if err != nil {
 		a.logger.Warn("agent_heartbeat_failed", "error", err.Error())

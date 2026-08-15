@@ -1,15 +1,38 @@
 # func-secret-inventory — Project secret inventory & `*_ref` for the file provider (FR-020)
 
-Status: **APPROVED (design r6 + linearization-point wording, 2026-08-14).** UI mock approved
-by the owner; six independent design passes (r1–r6) by the `cerbix-reviewer` agent; the r6
-verdict is APPROVED with one mandatory wording fixation (applied below, §4.4.3/§4.7/§9):
-the authoritative read is the dispatch-authorization **linearization point**. This approves
-the SPEC, not the future implementation — code is accepted only against the §9 test matrix
-plus D-0155/traceability/runbook/iteration evidence.
+Status: **APPROVED (design r7 amendment, 2026-08-15).** UI mock approved by the owner; six
+independent design passes (r1–r6) approved the original design, whose r6 fixation — the
+authoritative read is the dispatch-authorization **linearization point** — stands unchanged.
+**r7 is a post-implementation amendment** (§2, §4.4.5, §4.7, §9, §10) closing **three
+confirmed audit blockers** — pull-claim blindness, missing execution binding, envelope
+field-set/whole-envelope stripping — **plus one P1** (publish-failure backoff, §4.4.5). Two of
+the blockers are holes in THIS DOCUMENT, faithfully implemented; one is a defect the document
+never required a test for. Both review rounds returned CHANGES REQUIRED; every technical
+finding from them is applied in this text, and by the two-round contract there was no third
+round. The one item that was not a review finding — the §2 A/B fork on whether carrier routing
+metadata stays outside the threat model — was **decided by the owner on 2026-08-15 as option
+A**, which closes the amendment. Approval covers the SPEC, never its implementation — code is
+accepted only against the §9 matrix plus
+D-0155/**D-0160**/traceability/runbook/iteration evidence.
 
-Implementation acceptance: **DONE in iter-0116**. This does not retroactively conflate the
-design approval with implementation approval; the latter is evidenced in
-[`iter-0116`](../iterations/iter-0116.md), `status.md` and `traceability.md` against §9.
+Implementation acceptance: **withdrawn pending the r7 amendment.** `iter-0116` accepted the
+implementation against the r6 matrix and that report stands as written — it is superseded
+here, not corrected: the r6 matrix could not have caught these three defects because it never
+asked for the tests §9 now requires. Re-acceptance needs a fresh iteration report against the
+amended matrix; `status.md`/`traceability.md` follow that report, not this line.
+
+**Gates until the amendment ships — two, with different scopes:**
+
+- **Availability gate (pull only).** Do not switch the feature on in a region served by an
+  HTTP-pull agent: the claim barrier there is two-directional and blackholes every
+  non-credentialed monitor in that region (§4.7, "one-directional" clause). AMQP regions do
+  not have this failure.
+- **Security statement (both transports).** Execution binding and the structural
+  envelope/field-set gates are absent from the shipped code, so on AMQP **and** pull a party
+  able to write to the job carrier can retarget a credentialed probe or strip its credential
+  and obtain an unauthenticated probe that still reports liveness. This is not a
+  pull-specific defect and is not fixed by holding the pull rollout; it is the reason the
+  cryptographic slice (§10, slice 4) gates re-acceptance for every transport.
 
 ## 1. Context & motivation
 
@@ -38,7 +61,51 @@ schemas whose credential fields are **references** (`password_ref: <name>`) — 
   at-rest master (never leaves core) and per-region dispatch keyrings (§4.7). Values are
   never returned by any API, never in logs/audit/metrics/diagnostics/hashes, never
   resolvable across a project boundary. The feature is unavailable without its keys — no
-  plaintext fallback, enforced at config load (§4.1).
+  plaintext fallback, enforced at config load (§4.1). **And no credential-LESS fallback:** a
+  monitor whose definition carries a credential never executes without it. A credential that
+  is missing, empty, or not openable is a typed failure (`probe_error`, §4.7) raised *before*
+  any connection to the target — never a silently downgraded unauthenticated probe, and never
+  a result recorded as liveness. **"Missing or empty" includes a credential that decrypts to a
+  zero-length value:** an envelope carrying the exact expected field name with empty plaintext
+  must fail identically, otherwise the field-set rule is bypassable by content instead of by
+  shape.
+- **Threat scope of that guarantee, stated precisely (r7) — it is narrower than "nobody can
+  strip a credential".** It holds against a party who can modify the execution **body** inside
+  an authenticated v2 carrier. It does **not** hold against a party who can author the
+  carrier's own routing metadata: writing an arbitrary `pull_jobs` row or publishing to a v1
+  queue, where they may set `protocol_version`, omit the envelope entirely, or change the
+  monitor `type` to a non-credentialed one. A DB-less executor cannot distinguish a
+  legitimately credential-free legacy job from a downgraded one, because nothing it holds is
+  authenticated — no per-field AAD can fix that, since the attack is to have no fields at all.
+  The structural gate (§4.7) closes every shape reachable inside a trusted-generation carrier,
+  and that is the whole guarantee this spec makes — **option A below, chosen deliberately.**
+  It would be false to claim the contract specified here *grows into* "every job is
+  authenticated": a credential-free job carries zero ciphertexts, therefore no GCM tag and no
+  MAC of any kind, so per-field AAD has nothing to authenticate with. Promising that end state
+  while also forbidding an envelope on credential-free schemas would be two contracts at once,
+  and r7 round 1 did exactly that.
+- **DECIDED by the owner, 2026-08-15: option A. Recorded in D-0160**, together with B's
+  rejection and its cost, so the trade-off is not rediscovered as a surprise later. This was a
+  product-risk call, not a technical preference:
+  - **A — chosen; specified here.** The carrier generation is trusted metadata, and a party
+    who can author carrier routing (an arbitrary `pull_jobs` row, or a publish into a legacy
+    queue) is **permanently** outside the threat model. Cost, stated without softening:
+    someone holding broker write — a credential typically distributed more widely than the
+    core database's — can emit a legacy-generation job for a credentialed monitor and obtain
+    an anonymous probe that reports Up. Monitoring can be made to lie by anyone who can write
+    to the queue.
+  - **B — declined for now; its own spec section and D-record if ever revisited.** A root
+    `job_auth` tag (MAC over the canonical execution DTO + carrier generation + monitor id +
+    execution revision + job id) on **every** job in `enforced` mode, credential-free ones
+    included, verified before any prober runs. This is what actually closes the downgrade
+    path — and note the tri-state rule forbids a *credential envelope* on a credential-free
+    schema, which does not forbid a `job_auth` tag there. Cost: it changes the
+    non-credentialed dispatch path, requires a fully capable fleet, and is full-job
+    integrity — materially larger than FR-020, which is precisely why it must not be smuggled
+    in under this clause.
+  Under A, the residual for legacy-generation traffic is exactly today's pre-FR-020
+  property — not a new exposure introduced by this feature, but stated here rather than left
+  to be inferred.
 
 ## 3. Scope & non-goals
 
@@ -177,6 +244,28 @@ a composite tenant-safe FK. Maintained atomically by every monitor write.
    retried with a **backoff floor** (never faster than its own interval, with exponential
    backoff up to the resync period) so "no cadence advance" cannot degenerate into a
    per-tick DB/decrypt hammer.
+   **The floor covers every path that ends without a dispatched job, not only materialization
+   (r7).** Materialization failure and **publish/enqueue failure** (broker unreachable, queue
+   refused, pull-row insert failed) are distinguishable in cause but identical in this
+   respect: both must leave the monitor on the backoff schedule rather than eligible again on
+   the next tick. Otherwise the one case that is *guaranteed* to hit every credentialed
+   monitor at once — a broker outage — turns each 1s tick into a full authoritative-read +
+   decrypt + seal storm across the whole due set, i.e. the failure mode this floor exists to
+   prevent, reached through the door it did not cover. The two causes keep separate metric
+   reasons (a publish failure is an operational transport fault, not a secret-resolution
+   fault) and neither marks a probe as sent.
+   **Retry eligibility is defined as state, not as a rate** — so it is verifiable without
+   depending on a clock. **On failure:** the consecutive-failure counter increments, the
+   next-eligible time becomes `now + backoff`, and the cadence/"sent" marker is **not** set.
+   **On success:** the counter resets, the "sent" marker **is** set, and next-eligible returns
+   to ordinary cadence (`now + authoritative interval`) — an r7-round-1 wording said the marker
+   was set in neither case, which read literally would re-dispatch a successfully published
+   monitor on the very next tick. "Not marked as sent" and "eligible again on the next tick"
+   are different statements, and treating them as one is precisely how the storm arose. §9
+   therefore asserts **at most one attempt per backoff window** with the window fixed by the
+   test, rather than a count of reads over a count of ticks. **Scope:** this governs the
+   credentialed materialize→publish path that this spec owns; the general non-credentialed
+   publish path keeps today's behaviour and is not silently changed here.
 
 ### 4.5 Rotation fencing
 
@@ -216,15 +305,195 @@ inventory + refs.
   to payloads.
 
 **Envelope.** A **typed transport DTO** (never written into persisted `Monitor.Config`,
-never passing domain/API redaction surfaces): `credential_envelope: {v: 1, region, key_id,
+never passing domain/API redaction surfaces): `credential_envelope: {v, region, key_id,
 job_id, fields: {password: <AES-256-GCM ciphertext>}}`. `job_id` is **always
-core-generated before encryption** (no transport-dependent context). The AEAD **AAD** is a
+core-generated before encryption** (no transport-dependent context).
+
+**Envelope version and rollout barrier (r7 — the binding change is a WIRE change).** The r7
+AAD is not compatible with the r6 AAD, so it ships as `v: 2`, never as a redefinition of
+`v: 1`. Silently changing what `v: 1` binds would break a rolling upgrade in both directions:
+a new sealer and an old executor derive different AAD for the same declared version, so an
+old executor fails every new job with `decrypt_auth_failed`, and a new executor cannot open
+old envelopes still queued. Normative:
+
+- Executors advertise `capabilities: {credential_envelope: 2}`; the existing `1` keeps its
+  meaning, so capability is generational, not boolean, and the §4.4.4 existential readiness
+  check counts executors capable of the **binding generation core is about to emit** — a
+  `credential_envelope: 1` executor is not evidence of readiness for a `v: 2` region.
+- Core emits `v: 2` into a region only once that region's existential check passes for
+  generation 2; until then it keeps emitting `v: 1` (or refuses, per §4.4.4) — mixed
+  generations are resolved by capability, never by hope.
+- **The carrier generation is named, not delegated (r7 round 2).** "Reuse the existing v1/v2
+  split" would be wrong: today's `protocol_version = 2` / `checks.jobs.v2.<region>` /
+  `/v2/jobs` carrier already *means* envelope `v: 1`, and every capability-1 executor consumes
+  it — so putting `v: 2` envelopes on that carrier hands them straight to executors that
+  cannot open them, and a capability check does not stop a consumer from taking a message.
+  The mapping is therefore explicit and physical: **carrier generation 2** (`protocol_version
+  = 2`, `checks.{jobs,tests}.v2.<region>`, `/v2/{jobs,tests}`) keeps envelope `v: 1`;
+  **carrier generation 3** (`protocol_version = 3`, `checks.{jobs,tests}.v3.<region>`,
+  `/v3/{jobs,tests}`) carries envelope `v: 2`. A capability-1 executor neither consumes nor
+  claims generation 3; a capability-2 executor handles legacy v1, generation 2 and generation
+  3. Jobs **and** tests, AMQP **and** pull — a generation introduced on one of the four paths
+  and not the others reproduces exactly the asymmetry that caused the pull blackhole.
+- **The carrier generation is TRUSTED metadata and must arrive out of band.** The mandatory
+  entrypoint receives it as a separate argument stamped by the transport adapter — for AMQP,
+  the queue the message was consumed from; for pull, the generation the server selected when
+  it chose the row — and **never** reads it from `job.ProtocolVersion`, which is body content
+  an attacker edits. Treating the carrier as normative while sourcing it from the untrusted
+  payload would make the whole structural gate self-referential.
+- A generation-2 executor opens a queued `v: 1` envelope with the r6 binding for as long as
+  `v: 1` emission is permitted, so drain is not a flag day. Retiring a generation follows the
+  dispatch-key rotation runbook's shape: stop emission, wait out max job TTL, purge or write
+  off the DLQ, then drop support.
+
+The AEAD **AAD** (generation 2) is a
 **canonical length-prefixed binary encoding** of `(v, region, key_id, monitor_id,
-execution_revision, field_name, job_id)` — unambiguous by construction. This prevents
-**cross-context transplant** (between monitors, fields, revisions, jobs); exact replay of
-the same job payload to its own execution is expected transport behavior and is fenced by
-revision/ingest, not by the AAD. Envelope size counts toward existing payload/body bounds
-post-base64. Exposure statement (honest): a leaked region key opens **all retained
+execution_revision, field_name, job_id, field_set_digest, body_digest)` — unambiguous by
+construction. This prevents **cross-context transplant** (between monitors, fields,
+revisions, jobs) and, via the last two parts (r7), **within-context tampering** — swapping
+the execution the credential is used for, or removing the credential from the job. Exact
+replay of the same job payload to its own execution is expected transport behavior and is
+fenced by revision/ingest, not by the AAD. Envelope size counts toward existing payload/body
+bounds post-base64.
+
+**Execution binding — `body_digest` (r7, closes an r1–r6 hole).** The identity parts above
+bind a credential to *whose* it is and *when* it was issued, but not to *what the job asks it
+to do*. Without this part, anyone able to WRITE to a v2 queue or a `pull_jobs` row keeps a
+valid envelope, edits the job's target, and receives the plaintext credential at an endpoint
+of their choosing — the executor's GCM check passes because nothing it verifies has changed.
+A transport that is not trusted to READ payloads cannot simultaneously be trusted to write
+them; r1–r6 treated the queue as untrusted for confidentiality only, and that asymmetry is
+the defect.
+
+Normative: `body_digest` is a SHA-256 over a **versioned canonical encoding of a dedicated
+credential-execution DTO** — not over `domain.Monitor`, and not over raw payload bytes
+(JSON round-trips are not byte-stable; a whole-struct hash also breaks on fields that carry
+no execution meaning). Both sides compute it from the body they hold: core at seal time, the
+executor from the body it received. **The computation is not caller-optional:** it happens
+inside the single mandatory entrypoint described below, never as a step a call site is
+expected to remember — a security check that each new caller must opt into is a check that
+will eventually be skipped.
+
+- **In the DTO** — the fields that decide where the credential goes, over what transport, and
+  how many times it is transmitted: `type` (selects the prober); `target` (the remote
+  endpoint); `timeout`; `retries` (each retry re-transmits the credential); the `conditions`
+  **values** — a failed condition re-runs the whole probe when `retries > 0`, so editing them
+  changes how many times the credential is sent (their ORDER is fixed in the encoding for
+  determinism, not because reordering an all-must-pass set changes the retry count — it
+  changes which failure is reported first, and overstating that was an r7-round-1 error);
+  plus **every normalized non-secret execution setting of that
+  type** as owned by the domain schema (§4.2) — e.g. `username`/`database`/`sslmode`/`query`
+  for postgres, `mode`/`username`/`path`/`tls`/`tls_skip_verify` for rabbitmq management,
+  where `mode` alone decides credentialed HTTP versus unauthenticated AMQP.
+- **Not in the DTO, because already bound elsewhere:** `monitor_id`, `execution_revision`,
+  `region` (direct AAD parts — no duplication); `protocol_version` (`Open` accepts one exact
+  value); the ciphertexts (their bytes are what GCM covers).
+- **Not in the DTO, because safe to change:** everything the executor never reads —
+  `project_id`, `name`, `tags`, cadence/threshold inputs, `enabled`/`status`/state counters,
+  renotify/grace/escalation/dependency/push fields, timestamps — and the `*_ref` NAME, which
+  is materialization metadata: the executor reads only the injected value, and renaming a ref
+  in an already-sealed job selects no different ciphertext and changes no remote behavior.
+
+**Guarantee boundary, stated so it is not quietly widened later:** this binds *credential use
+and the remote side effects of a credentialed probe*. It is deliberately **not** a general
+signature of the job — the excluded state/display fields stay mutable in transit, and a
+full-job integrity contract (protecting liveness/result semantics of the whole snapshot) is a
+separate decision if it is ever wanted, never an unannounced extension of this clause.
+
+**Canonical encoding — specified to the byte, because "canonical" is otherwise an intention.**
+Two independent implementations (core sealer, executor verifier) must agree exactly, and
+"canonical" without concrete values is an intention, not a format. It **reuses the existing
+`secret.CanonicalAAD` framing** rather than inventing a second one: a uvarint part count
+followed by uvarint-length-prefixed parts, which already makes `["ab","c"]` and `["a","bc"]`
+distinct by construction. On top of that:
+
+- **DTO version = 1**, emitted as the first part, as the decimal ASCII string `"1"` — numbered
+  independently of the envelope `v` and of the carrier generation, so the three can move apart
+  without aliasing.
+- **Fixed field order**, listed in this spec's DTO bullets, never map iteration order.
+- **Integers** (`timeout`, `retries`) as their decimal ASCII representation, no padding, no
+  sign for non-negative values — the same textual discipline the rest of the AAD uses, which
+  removes width and endianness as questions rather than answering them.
+- **Strings** as raw UTF-8 bytes under the uvarint length prefix; never null-terminated,
+  never padded.
+- **`conditions`** as a count part followed by each condition's parts in array order.
+- **Config keys** emitted in byte-wise **sorted** key order, each as a key part then a value
+  part.
+- **Absent and explicitly-set-to-default encode identically** — normalization runs before
+  sealing, and a job may legitimately carry either form; this is the rule most likely to be
+  broken by a well-meaning encoder.
+- `body_digest` and `field_set_digest` enter the outer AAD as **raw 32-byte SHA-256 output**,
+  not hex and not base64 — one encoding, chosen here, so the two sides cannot each be
+  self-consistent and mutually incompatible.
+
+§9 pins all of it with **golden vectors** — including shuffled map insertion order, nil versus
+empty collections, implicit versus explicit defaults, and a condition reorder — because only a
+fixed expected byte string catches an encoder that drifts. D-0160 carries the same values, so
+the normative form survives independent of this document's prose.
+
+**Growth guard — via a declarative registry, not a test that reads Go code.** The r7 round-1
+wording ("derived from the domain schema, not a hand-kept allowlist") was not implementable
+as written: `internal/domain` validates through imperative `allowKeys` calls, and no test can
+discover which `m.Config` keys an arbitrary prober happens to read. What is required instead
+is **one declarative per-type schema registry** that is the single source for all four
+consumers — validation, normalization, the expected secret field set, and the non-secret
+binding keys — so that adding a setting to the registry adds it to the digest by
+construction. Top-level `domain.Monitor` fields, which are not registry entries, get a
+**reflection-based guard**: a new field must be explicitly classified execution-affecting or
+not, or the test fails (§9). A digest that silently lags one new setting reopens the hole it
+exists to close, and would do so invisibly.
+
+**Structural gate — the check must not live behind the branch it protects (r7).** The
+fail-open defect is not primarily about which fields an envelope carries; it is about *who
+decides whether an envelope is required at all*. Today the executor opens an envelope only
+when one is present, and a job whose `credential_envelope` was **removed entirely** therefore
+never reaches any credential code path: it is executed as an ordinary job, so a `redis`
+monitor skips `AUTH`, PINGs, and a target that does not demand auth answers Up. Deleting one
+JSON member turns an authenticated check into an anonymous one. No key and no forgery needed.
+A rule placed inside `Open` cannot catch this, because `Open` is what gets skipped.
+
+Normative:
+
+- **One mandatory entrypoint.** Every executor path — AMQP jobs, AMQP test-RPC, pull jobs,
+  pull tests — reaches the prober only through a single `Validate/Materialize` call that
+  performs the structural decision itself. It is never the caller's job to notice that a
+  credential was expected; a new call site that forgets the check must be impossible to write,
+  not merely discouraged. The digest and field-set verification below happen INSIDE that
+  entrypoint (see also "computation is not caller-optional" under the canonical encoding).
+- **Carrier consistency.** A job delivered by a v2 carrier (v2 queue or v2 claim) must declare
+  the exact expected `protocol_version` and carry an envelope; a job that arrives on a v2
+  carrier without one is a typed failure, not a legacy job. The carrier is the executor's only
+  authenticated signal about which contract applies, so it is treated as normative rather than
+  advisory.
+- **Tri-state credential requirement, resolved from the effective schema** (§4.2), never from
+  what the payload happens to contain:
+  - **required** — the type/mode takes a credential (`postgres`, `mysql`, `redis`, `rabbitmq`
+    `mode: management`): the envelope must be present and carry **exactly** the expected
+    non-empty field set;
+  - **forbidden** — the type/mode takes none (`rabbitmq` `mode: amqp`, and every
+    non-credentialed monitor type): an envelope present at all is a typed failure. Note this
+    corrects an r7-round-1 wording that had `mode: amqp` "expect none" and succeed on an empty
+    set — that path must reject the envelope, not open it vacuously;
+  - **invalid** — any other combination (unknown type, missing mode, credential-required
+    schema with an absent envelope, envelope on a forbidden schema) is a typed failure.
+- Every failure above is `probe_error` (`decrypt_auth_failed` — the taxonomy stays
+  non-oracular) raised **before any connection to the target**, never a heartbeat, never a
+  status flip.
+
+**Field-set binding — `field_set_digest` (r7, scope stated honestly).** With the tri-state
+policy above, an exact expected set is known before authentication, so for **today's
+schemas — all single-field — the policy is the operative protection** and the digest adds no
+detection the policy does not already provide. It is specified now for one reason, stated
+plainly rather than dressed up as defence-in-depth: the canonical sorted field-NAME set is
+bound into every field's AAD so that a future multi-field envelope (a second credential slot,
+a client certificate) cannot be *partially* truncated into a still-valid job without a second
+security review. Verification order is fixed — structural gate, then field-set policy, then
+AEAD — so behaviour is deterministic and testable rather than dependent on which check happens
+to fire first. §9 covers it with a **synthetic multi-field vector**, since §4.2 defines no
+real multi-field schema yet; that test is a contract for the primitive, not a claim about
+current schemas.
+
+**Exposure statement (honest).** A leaked region key opens **all retained
 payloads of that region until TTL/DLQ purge**, not merely instantaneous in-flight traffic;
 and a config/secret change committed after a job's authoritative read does not recall that
 job — it remains in-flight exposure until ACK/TTL/DLQ purge, its result fenced at ingest
@@ -266,6 +535,40 @@ must never receive an envelope it would misread as a credential-less job:
   check — never vacuously true on an empty set). Same contract for pull tests. An
   envelope-capable agent that receives an unsupported FUTURE version returns typed
   `probe_error` — the only direction that test is possible in.
+- **The barrier is ONE-directional (r7, closes an r1–r6 hole).** It exists to stop an
+  INCAPABLE executor from receiving v2; it must never stop a CAPABLE one from receiving v1.
+  A capable agent therefore claims **both classes** for the whole transition — the AMQP half
+  of this rule was already stated above ("consumed only by envelope-capable workers, which
+  consume v1 and v2 during the transition"), and its pull mirror was missing, which is
+  precisely how the defect entered.
+  **Mechanism, specified — "polls both" is not enough (r7 round 1).** Two sequential
+  long-polls reproduce the same blackhole with a delay: the endpoint holds an empty request
+  for the long-poll window, so an agent that polls the empty class first sleeps through
+  already-waiting rows of the other class whenever no fresh `NOTIFY` arrives — and two
+  independent polls each claiming up to `max` can lease more work than the agent finishes
+  before the lease expires. Normative: a capable agent claims through **one capability-scoped
+  claim that leases, in a single atomic operation, every generation at or below its declared
+  capability**, under one shared `max` and one lease, with the **generation stamped by the
+  server** on each returned row so the agent never infers it from the row's own content.
+  Fairness must not starve any generation. The count is not two: during the generation-3
+  transition there are **three** classes — legacy v1, generation 2 (envelope `v: 1`) and
+  generation 3 (envelope `v: 2`) — and a capability-1 agent must never be handed a
+  generation-3 row, which is why the lease is bounded by declared capability rather than by
+  "whatever is available". "The v2/v3 endpoints serve their rows only to capable clients" and
+  "a capable client's claim also returns older-generation rows" are therefore distinct
+  statements, and only the first is a restriction. The same
+  applies to **`pull_tests`**, where the agent likewise selects a single endpoint today — a
+  jobs-only fix leaves test-connection broken the same way for ordinary monitors.
+  The asymmetry matters because **non-credentialed
+  monitors are enqueued as v1 rows**: an agent that polls only the v2 endpoint claims none of
+  them, and since a region under `enforced` requires its agent to hold a dispatch keyring,
+  "capable" is the only kind of agent such a region has. The whole region then goes dark in
+  the worst possible way — rows expire by TTL, no probe runs, so there is no heartbeat, no
+  DOWN, and no alert: monitoring stops without saying so. Enabling a security feature must
+  never silently disable monitoring; a region that cannot execute credentialed jobs degrades
+  to the §4.4.4 operational rejection for THOSE monitors only, and never affects the rest.
+  Dual-claim must not weaken the other direction: capability is still re-asserted per claim,
+  and the v2 endpoint still serves v2 rows exclusively to declared-capable clients.
 - `secrets.enabled` requires the barrier to be effective (config `secrets.dispatch_envelope:
   enforced` + runtime refusal to dispatch credentialed monitors into a region without
   capable executors — surfacing as the §4.4.4 operational rejection, not DOWN).
@@ -391,15 +694,74 @@ missing-ref shows the frozen-bundle diagnostic; monitor detail surfaces `last_pr
   old region's key nor published to the old region's queue (routing regrouped by the
   authoritative row); cadence/nextRun advances from authoritative interval inputs;
   materialization failure → rejection + metric, no cadence advance as "sent", persistent
-  failure honors the backoff floor (no per-tick hammer).
+  failure honors the backoff floor (no per-tick hammer); **publish/enqueue failure (r7)** —
+  with the broker refusing every publish, the due credentialed set is attempted **at most once
+  per backoff window** (window fixed by the test), not once per tick — asserted through the
+  monitor's next-eligible state and failure counter rather than a wall-clock rate: failure
+  increments the counter, sets `now + backoff` and does NOT mark sent; **success resets the
+  counter, marks sent and restores ordinary cadence** (asserted explicitly — a monitor that
+  publishes successfully must not be re-dispatched on the next tick); separate metric reason
+  from secret-resolution failure; the non-credentialed publish path asserted unchanged.
 - Dispatch/executor: payload plaintext-absence (pull_jobs, AMQP body, DLQ body); envelope
   round-trip; **AAD transplant tests** (cross-monitor, cross-field, cross-revision,
   cross-job → decrypt fails → probe_error; exact same-job replay decrypts and is fenced by
-  revision at ingest); **cross-project at-rest ciphertext swap** between `project_secrets`
+  revision at ingest); **body-tamper matrix (r7)** — a job whose envelope and identity parts
+  are untouched but whose execution body is edited fails to open, one case per DTO member:
+  `target`, `type`, `timeout`, `retries`, `conditions` (including reorder-only), and at least
+  one normalized non-secret setting per credentialed type (`sslmode`, `mode`,
+  `tls_skip_verify`, `query`); mirrored by a **negative control** — editing an EXCLUDED field
+  (`name`, `tags`, cadence/threshold inputs, the `*_ref` name) still opens, proving the
+  boundary is the stated one and not an accidental whole-job signature; **DTO coverage guard
+  (r7)** — a test that fails when `domain.Monitor` grows a field, or a per-type schema grows a
+  setting, that is not explicitly classified execution-affecting or not, so the digest cannot
+  silently lag a new prober option; **canonical-encoding golden vectors (r7)** — fixed
+  expected byte strings covering shuffled map insertion order, nil vs empty collections,
+  implicit vs explicit normalized defaults, and a condition reorder, so an encoder that drifts
+  is caught rather than merely disagreeing with itself; **structural gate (r7)** — the
+  regression the field-set rule alone does NOT cover: from a valid credentialed job on a v2
+  carrier, remove the `credential_envelope` **entirely** → `probe_error` **before any target
+  dial**, asserted separately for AMQP jobs, AMQP test-RPC, pull jobs and pull tests (the
+  fail-open case, pinned against a live auth-less redis target that would otherwise answer
+  PING and report Up); envelope present on a **forbidden** schema (`rabbitmq` `mode: amqp`,
+  any non-credentialed type) → typed failure, never a vacuous empty-set open; credential-
+  required schema with no envelope → typed failure; **field-set (r7)** — exact expected set
+  enforced from type/mode and never from the payload: missing field, unknown extra field, and
+  a credential whose ciphertext decrypts to a **zero-length value** each → `probe_error` before
+  dial; **synthetic multi-field vector (r7)** — with a test-only two-field expected set,
+  removing one field fails via `field_set_digest` authentication, fixing the primitive's
+  contract ahead of any real multi-field schema; verification ORDER asserted (structural gate →
+  field-set policy → AEAD) so failures are deterministic;
+  **carrier/envelope generation rollout (r7)** — asserted as **physical isolation, not only as
+  a capability predicate** (the round-1 matrix checked the predicate alone, which is what a
+  capability-1 consumer sitting on a shared queue defeats): a capability-1 executor never
+  consumes or claims a generation-3 carrier on any of the four paths (AMQP jobs, AMQP tests,
+  pull jobs, pull tests); a capability-2 executor opens a queued generation-2 (`v: 1`) envelope
+  under the r6 binding; core emits generation 3 into a region only when the existential
+  readiness check passes **for capability 2**, and a `credential_envelope: 1` executor does not
+  satisfy it; the entrypoint takes the carrier generation from the transport adapter and a job
+  whose body claims a different `protocol_version` than its carrier is rejected (proving the
+  generation is not read from attacker-controlled content);
+  **cross-project at-rest ciphertext swap** between `project_secrets`
   rows → decrypt/auth failure, no dispatch; **wire barrier**: v1-only worker never receives
   envelope jobs OR tests (v2 jobs+tests queue isolation; TTL-expiry feeds the
   credential-capability alert; v1 consumer present + v2 absent → alert fires); **stale
   old pull agent that keeps polling** the v1 claim endpoint never receives a v2 payload;
+  **one-directional barrier (r7)** — a CAPABLE agent, sole agent of an `enforced` region,
+  facing a mixed due set claims **both** the v1 rows (ordinary monitors) and the v2 rows
+  (credentialed ones); the regression asserted the way the defect showed up in production
+  terms, i.e. no v1 row is left to expire by TTL and every ordinary monitor still produces a
+  heartbeat once the feature is enabled — a queue-isolation assertion alone does NOT cover
+  this and is what let it through; capability still re-asserted per claim in the dual-claim
+  path, and v2 rows still never reachable from the v1 endpoint; **dual-claim mechanics (r7)** —
+  rows of EVERY claimable generation already present **before** the agent's wait begins and
+  **no new `NOTIFY`** arriving (the sequential-long-poll trap: the agent must not sleep out the
+  window on an empty first class); no starvation of any generation across repeated claims; one
+  shared `max` and one lease across all of them (independent per-class claims must not
+  over-lease beyond what the agent completes before expiry); server-stamped generation on every
+  returned row; **the lease bounded by declared capability** — with legacy v1, generation-2 and
+  generation-3 rows all waiting, a capability-1 agent receives the first two and never the
+  third, while a capability-2 agent receives all three; and the whole set mirrored for
+  **`pull_tests`**, not jobs only;
   v2 claim endpoint re-asserts capability per claim; pull gating requires ≥1 live
   `credential_ready` v2 agent (never vacuous); capable-agent + future-version envelope →
   probe_error; dispatch-keyring rotation (primary/previous) with a queued old-key job;
@@ -423,3 +785,29 @@ the two-keyring model, AAD contract, wire barrier, trust + exposure statements, 
 iteration reports; status (`FR-020`, `NFR-015`); traceability; func-monitoring-as-code §3.1
 cross-reference update. Slice 1 closed in iter-0115; slices 2–3 and acceptance closed
 together in iter-0116, with the per-contract evidence table in that report.
+
+**Slice 4 — r7 amendment (open).** In this order, because two of the blockers are design
+defects and §4.7 is the contract the code is written against: (1) this spec + **D-0160**
+recording the execution-binding contract, the structural gate and tri-state credential
+requirement, the carrier/envelope generation mapping, the one-directional barrier, the
+narrowed threat scope of NFR-015 **and the owner's A/B decision from §2**, and the
+withdrawn-then-restored acceptance; (2) the **one-directional pull claim** with the single
+atomic capability-bounded lease (jobs **and** tests) — the only defect that breaks monitoring
+outright, the one gating any pull-region rollout, and dependent on nothing else here;
+(3) the **declarative per-type schema registry**, which both of the next two steps build on —
+r7 round 2 correctly caught an earlier ordering that put the structural gate first and the
+registry after it, which would have meant duplicating type/mode policy and breaking the
+single-owner rule the registry exists to establish; (4) the **structural gate** — single
+mandatory `Validate/Materialize` entrypoint, out-of-band carrier generation, tri-state
+requirement; (5) `body_digest` + `field_set_digest` on **carrier generation 3 / envelope
+`v: 2`** with capability `credential_envelope: 2`, golden vectors and the §9 matrices;
+(6) the §4.4.5 publish-failure floor. Steps (4)–(5) are settled by the owner's choice of
+option A (D-0160); had B been chosen they would have been re-planned around a root `job_auth`
+tag instead.
+
+Each lands with its regression **verified to
+fail when the fix is reverted** — the three defects here all passed a green suite, so "the
+tests are green" is not evidence for this slice. `-race` in both storage modes throughout;
+a new iteration report re-establishes acceptance, and `status.md`/`traceability.md` move only
+with it. §9 gets a repeatable E2E gate (Make target, wired into `make dev-test`) rather than
+the standalone smoke script the audit found — an unrunnable check is not a check.

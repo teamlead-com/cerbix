@@ -4,6 +4,7 @@ import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
+import { describeSecretError } from "@/lib/secretErrors";
 
 type ProjectSecret = components["schemas"]["ProjectSecret"];
 
@@ -140,13 +141,7 @@ async function add() {
     });
     if (!requestIsCurrent(req)) return;
     if (res.error) {
-      const code = (res.error as { error?: string })?.error;
-      actionError.value =
-        code === "secret_exists"
-          ? `A secret named "${submittedName}" already exists in this project (secret_exists).`
-          : code === "feature_disabled"
-            ? "The secret inventory is disabled on this instance (secrets.enabled)."
-            : code || "Could not add the secret.";
+      actionError.value = describeSecretError("add", res.error as { error?: string }, submittedName);
       return;
     }
     form.name = "";
@@ -194,15 +189,7 @@ async function saveEdit(s: ProjectSecret) {
     });
     if (!requestIsCurrent(req)) return;
     if (res.error) {
-      const e = res.error as { error?: string; count?: number };
-      actionError.value =
-        e.error === "secret_renamed_in_use"
-          ? `Cannot rename "${s.name}": ${monitors(e.count ?? 0)} reference it from file-managed bundles (secret_renamed_in_use). Rename it in the file source instead.`
-          : e.error === "secret_exists"
-            ? `A secret named "${newName}" already exists in this project (secret_exists).`
-            : e.error === "feature_disabled"
-              ? "The secret inventory is disabled on this instance (secrets.enabled)."
-              : e.error || "Could not update the secret.";
+      actionError.value = describeSecretError("update", res.error as { error?: string; count?: number }, s.name ?? "", newName);
       return;
     }
     editValue.value = ""; // write-only: drop the plaintext once stored
@@ -231,11 +218,7 @@ async function remove(s: ProjectSecret) {
     if (res.error) {
       const e = res.error as { error?: string; count?: number };
       actionError.value =
-        e.error === "secret_in_use"
-          ? `Cannot delete "${s.name}": it is referenced by ${monitors(e.count ?? 0)} (secret_in_use). Re-point or remove those monitors first.`
-          : e.error === "feature_disabled"
-            ? "The secret inventory is disabled on this instance (secrets.enabled)."
-            : e.error || "Could not delete the secret.";
+        describeSecretError("delete", e, s.name ?? "");
       return;
     }
     await load();

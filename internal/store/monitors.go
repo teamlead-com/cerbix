@@ -29,6 +29,15 @@ func (e SecretRefNotFoundError) Error() string {
 	return fmt.Sprintf("store: secret reference %q for setting %q was not found in the project", e.Name, e.Setting)
 }
 
+// revisionFenceSetSQL is the D-0142 fence: bump the config generation and reset the
+// freshness watermark, preserving it for push monitors (a push monitor has no scheduled
+// out-of-order compare, so nulling it would fall back to created_at and fire a FALSE
+// dead-man DOWN). UpdateMonitor and the secret-rotation fence MUST apply it identically —
+// a review specifically required the rotation fence to match character for character — so
+// it is one constant rather than two copies that can drift.
+const revisionFenceSetSQL = `execution_revision = execution_revision + 1,
+		        last_result_ts = CASE WHEN type = 'push' THEN last_result_ts ELSE NULL END`
+
 // monitorSecretBindings resolves every prepared *_ref setting under FOR KEY SHARE.
 // Callers MUST invoke it before locking/writing monitor rows: secret rows by id, then
 // monitor rows is the fixed §4.3 lock order shared with rename/rotation. The query carries
@@ -572,16 +581,12 @@ func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.
 		`UPDATE monitors
 		    SET name = $2, target = $3, interval_seconds = $4, timeout_seconds = $5,
 		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = $11, auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, updated_at = now(),
-		        -- Config generation: bump on ANY UpdateMonitor (fail-safe — a missed bump would
-		        -- reopen the stale-config vulnerability; an extra bump costs one re-probe).
-		        -- Status/counter/reencrypt writes do NOT touch this — different statements.
-		        execution_revision = execution_revision + 1,
-		        -- Freshness watermark. SCHEDULED monitors reset it to NULL so the first result of
-		        -- the new generation is not rejected against the old one (spec §3). PUSH monitors
-		        -- PRESERVE it — it is the real-ping liveness watermark and push has no scheduled
-		        -- out-of-order compare, so nulling it would fall back to created_at and fire a
-		        -- FALSE dead-man DOWN on any edit of a live push monitor.
-		        last_result_ts = CASE WHEN type = 'push' THEN last_result_ts ELSE NULL END,
+		        -- Config generation + freshness watermark, shared verbatim with the rotation
+		        -- fence (see revisionFenceSetSQL): bump on ANY UpdateMonitor, because a missed
+		        -- bump reopens the stale-config vulnerability while an extra one costs a single
+		        -- re-probe. Status/counter/reencrypt writes use different statements and do not
+		        -- touch either column.
+		        `+revisionFenceSetSQL+`,
 		        -- Re-arm: a disabled→enabled transition (RHS sees the pre-update row) starts a new
 		        -- liveness epoch. For push the dead-man window restarts from the enable moment via
 		        -- push_armed_at; the pre-disable ping is not proof of liveness after re-enable, and

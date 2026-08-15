@@ -87,7 +87,16 @@ Dev login: `admin@cerbix.local` / `devpassword123` (local auth; Keycloak on :808
 
 **Settings resolve DB → config → defaults** (`internal/settings`, singleton `instance_settings`): OIDC, SMTP, branding, auth policy, alerting silence, monitor defaults are all live-reconfigurable from the UI and **override** the YAML after first save. The YAML is a bootstrap seed; `config.Load` expands `${ENV_VARS}` (prod secrets come from compose `.env`).
 
-**Secrets at rest**: monitor config keys in `domain.SecretMonitorConfigKeys`, channel credentials, SMTP password are AES-256-GCM encrypted via `internal/secret` keyring; API responses go through `Redacted()`.
+**Secrets at rest and in dispatch** (FR-020, D-0155/D-0160): project secrets live in
+`project_secrets`, AEAD-bound to `(project_id, secret_id)`; monitors reference them by NAME
+via `*_ref`, normalized into `monitor_secret_refs`. **Two keyrings, never shared**:
+`security.encryption_key` is the at-rest master and never leaves core; `security.dispatch`
+holds per-region keys that executors use to open a `credential_envelope`. Reads are
+decrypt-free by SCHEMA (`scanMonitorNoSecrets`), not by post-hoc redaction. Every executor
+path crosses ONE gate, `dispatch.ValidateAndMaterialize`, which takes the carrier generation
+out of band and refuses a missing, stripped, empty or schema-forbidden credential before any
+connection to the target. Legacy inline credentials still ride generation-1 carriers
+unchanged, which is what keeps `secrets.enabled: false` meaning "nothing else changes".
 
 ### Change-pattern gotchas
 

@@ -678,7 +678,12 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 								credentialLastLog[item.MonitorID] = now
 								s.logger.Warn("credential_materialization_rejected", "monitor_id", item.MonitorID, "reason", item.Reason)
 							}
-							if s.secretResolution != nil {
+							// A monitor the authoritative read found disabled, deleted or of a
+							// non-dispatchable type is SKIPPED, not failed (§4.4.3): counting it
+							// in a failure metric makes ordinary reconcile churn look like broken
+							// credentials, and an alert that fires on normal operation is an
+							// alert people mute.
+							if s.secretResolution != nil && item.Reason != store.MaterializeSkippedCurrentState {
 								s.secretResolution.RecordSecretResolutionFailure(item.Reason)
 							}
 							if snap, ok := byID[item.MonitorID]; ok {

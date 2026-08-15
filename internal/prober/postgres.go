@@ -15,7 +15,14 @@ import (
 // pgProber checks a PostgreSQL server: it connects (through the SSRF guard) and
 // runs a query, default "SELECT 1". Success (no conditions) = connect + query
 // succeed. Config keys: database, username, password (encrypted at rest),
-// sslmode (default "prefer"), query. The check latency is [RESPONSE_TIME].
+// sslmode, query. The check latency is [RESPONSE_TIME].
+//
+// sslmode: reference-based monitors are normalized to `require` by the domain before they
+// ever reach here (§4.2/§4.8), so this fallback applies only to rows written before that
+// contract existed. It stays "prefer" ON PURPOSE: raising it would silently flip existing
+// monitors from opportunistic to mandatory TLS and start failing every plaintext server
+// they were pointed at. Changing the transport posture of already-running checks is a
+// migration decision, not a prober default.
 type pgProber struct {
 	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
@@ -26,7 +33,7 @@ func (p pgProber) Probe(ctx context.Context, m domain.Monitor) Result {
 
 	sslmode := m.Config["sslmode"]
 	if sslmode == "" {
-		sslmode = "prefer"
+		sslmode = "prefer" // legacy rows only; see the type comment
 	}
 	cfg, err := pgx.ParseConfig("sslmode=" + sslmode)
 	if err != nil {

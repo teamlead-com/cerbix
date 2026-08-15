@@ -60,11 +60,12 @@ type Agent struct {
 
 	// Edge buffer (accessed only from the single Run loop, so no locking): results held
 	// while the API is unreachable, flushed as HISTORICAL backfill on reconnect.
-	buf              []domain.Heartbeat
-	dropped          int
-	credentials      *dispatch.CredentialKeyring
-	credentialReady  atomic.Bool
-	credentialHealth CredentialHealth
+	buf                []domain.Heartbeat
+	dropped            int
+	credentials        *dispatch.CredentialKeyring
+	credentialReady    atomic.Bool
+	credentialFailures atomic.Int32
+	credentialHealth   CredentialHealth
 }
 
 // New builds an agent. serverURL is the central base URL (e.g. https://cerbix.core);
@@ -105,11 +106,31 @@ func (a *Agent) WithCredentialHealth(health CredentialHealth) *Agent {
 	return a
 }
 
+// credentialFailuresBeforeUnready is how many CONSECUTIVE authentication failures mark the
+// agent credential-unready. The spec degrades readiness on a PERSISTENT failure, not on the
+// first one: a single corrupt or transplanted payload is a per-job diagnostic, and pulling a
+// whole agent out of a region's readiness for it turns one bad message into a regional
+// outage. Failures that are unambiguous statements about THIS executor's configuration —
+// it holds no key, or none matching the id it was sent — are immediate, because repeating
+// them tells us nothing new.
+const credentialFailuresBeforeUnready = 2
+
 func (a *Agent) recordCredentialFailure(reason string) {
-	if reason != domain.ProbeErrorUnsupportedVersion {
+	switch reason {
+	case domain.ProbeErrorUnsupportedVersion:
+		// A future generation says nothing about our keys; readiness is untouched.
+	case domain.ProbeErrorNoDispatchKey, domain.ProbeErrorUnknownKeyID:
+		a.credentialFailures.Store(credentialFailuresBeforeUnready)
 		a.credentialReady.Store(false)
 		if a.credentialHealth != nil {
 			a.credentialHealth.SetCredentialReady(false, reason)
+		}
+	default:
+		if a.credentialFailures.Add(1) >= credentialFailuresBeforeUnready {
+			a.credentialReady.Store(false)
+			if a.credentialHealth != nil {
+				a.credentialHealth.SetCredentialReady(false, reason)
+			}
 		}
 	}
 	if a.credentialHealth != nil {
@@ -118,6 +139,7 @@ func (a *Agent) recordCredentialFailure(reason string) {
 }
 
 func (a *Agent) recordCredentialSuccess() {
+	a.credentialFailures.Store(0)
 	a.credentialReady.Store(true)
 	if a.credentialHealth != nil {
 		a.credentialHealth.SetCredentialReady(true, "")

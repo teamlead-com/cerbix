@@ -815,3 +815,39 @@ func TestProjectSecretNullActorCommits(t *testing.T) {
 		t.Fatalf("want 3 NULL-actor via_token secret audit rows, got %d", n)
 	}
 }
+
+// resolveProjectSecret decrypts one inventory value by name. It is a TEST-ONLY helper and
+// lives here for that reason: production resolves credentials exclusively through the
+// authoritative materializer, and leaving a second decrypt path in the production file
+// invited the assumption that it was one of them. The assertions it supports — whitespace
+// and byte fidelity of a stored value, and that a rotation is visible to the next read —
+// are properties of the stored row, which is exactly what this reads.
+// resolveProjectSecret returns the secret's id and decrypted value, tenant-predicated by
+// projectID (canonicalized first — the AAD binds the canonical form). This is a decrypt
+// path, unexported by design: its ONLY intended callers are in-package — the authoritative
+// materializer (spec §4.4.3, which will own a joined batch read) and rotation/reencrypt
+// internals — never a display/list path.
+func (s *Store) resolveProjectSecret(ctx context.Context, projectID, name string) (string, []byte, error) {
+	if s.cipher == nil {
+		return "", nil, ErrSecretsUnavailable
+	}
+	projID, _, err := canonicalProject(ctx, s.pool, projectID)
+	if err != nil {
+		return "", nil, err
+	}
+	var id, enc string
+	err = s.pool.QueryRow(ctx,
+		`SELECT id::text, value_encrypted FROM project_secrets WHERE project_id = $1 AND name = $2`,
+		projID, name).Scan(&id, &enc)
+	if noRows(err) {
+		return "", nil, ErrNotFound
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("store: resolve secret: %w", err)
+	}
+	pt, err := s.cipher.DecryptBytes(enc, secret.CanonicalAAD(projID, id))
+	if err != nil {
+		return "", nil, fmt.Errorf("store: resolve secret %q: %w", name, err)
+	}
+	return id, pt, nil
+}

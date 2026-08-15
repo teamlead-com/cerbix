@@ -163,7 +163,14 @@ MONITOR_ID="$(PSQL "SELECT id FROM monitors WHERE name='Database'")"
 for _ in $(seq 1 120); do [ "$(PSQL "SELECT COALESCE(last_probe_error_reason,'') FROM monitors WHERE id='$MONITOR_ID'")" = decrypt_auth_failed ] && break; sleep 0.25; done
 [ "$(PSQL "SELECT COALESCE(last_probe_error_reason,'') FROM monitors WHERE id='$MONITOR_ID'")" = decrypt_auth_failed ] || { echo "FAIL: wrong-key agent did not report decrypt_auth_failed"; cat "$TMP/agent-bad.log" "$TMP/serve.log"; exit 1; }
 [ "$(PSQL "SELECT count(*) FROM heartbeats WHERE monitor_id='$MONITOR_ID'")" = 0 ] || { echo "FAIL: probe_error was stored as a heartbeat"; exit 1; }
-[ "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18083/readyz)" = 503 ] || { echo "FAIL: wrong-key agent readiness did not degrade"; exit 1; }
+# Readiness degrades on a PERSISTENT failure, not the first one (§4.7): a single corrupt
+# payload is a per-job diagnostic, so this polls for the transition instead of assuming it
+# has already happened the instant the first probe_error is recorded.
+for _ in $(seq 1 160); do
+  [ "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18083/readyz)" = 503 ] && break
+  sleep 0.25
+done
+[ "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18083/readyz)" = 503 ] || { echo "FAIL: wrong-key agent readiness did not degrade"; cat "$TMP/agent-bad.log"; exit 1; }
 for _ in $(seq 1 80); do [ "$(PSQL "SELECT count(*) FROM agent_heartbeats WHERE region='edge' AND NOT credential_ready")" -gt 0 ] && break; sleep 0.25; done
 [ "$(PSQL "SELECT count(*) FROM agent_heartbeats WHERE region='edge' AND NOT credential_ready")" -gt 0 ] || { echo "FAIL: central capability did not record degraded agent"; exit 1; }
 kill "$AGENT_PID"; wait "$AGENT_PID" 2>/dev/null || true; unset AGENT_PID

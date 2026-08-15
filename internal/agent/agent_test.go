@@ -666,3 +666,58 @@ func TestFeatureOffCredentialJobReachesThePullProber(t *testing.T) {
 		t.Fatalf("legacy credentialed pull job did not reach the prober: %v", runner.ran)
 	}
 }
+
+// TestReadinessDegradesOnPersistentFailureNotTheFirst covers the audit P2: the spec degrades
+// readiness on a PERSISTENT authentication failure, the code did it on the first one. A
+// single corrupt or transplanted payload is a per-job diagnostic; pulling a whole agent out
+// of its region's readiness for it turns one bad message into a regional outage. Failures
+// that are statements about THIS executor's configuration stay immediate — repeating them
+// tells nobody anything new.
+func TestReadinessDegradesOnPersistentFailureNotTheFirst(t *testing.T) {
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "agent", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := &fakeCredentialHealth{}
+	a := New("http://unused", "tok", "pull1", &recordingRunner{}, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithCredentialKeyring(ring).WithCredentialHealth(health)
+
+	ready := func() bool {
+		health.mu.Lock()
+		defer health.mu.Unlock()
+		return health.ready
+	}
+
+	a.recordCredentialFailure(domain.ProbeErrorDecryptAuthFailed)
+	if !ready() {
+		t.Fatal("one authentication failure took the agent out of readiness")
+	}
+	a.recordCredentialFailure(domain.ProbeErrorDecryptAuthFailed)
+	if ready() {
+		t.Fatal("a persistent authentication failure did not degrade readiness")
+	}
+
+	// A success clears the streak, so an isolated failure later starts from scratch.
+	a.recordCredentialSuccess()
+	if !ready() {
+		t.Fatal("readiness did not recover after a successful open")
+	}
+	a.recordCredentialFailure(domain.ProbeErrorDecryptAuthFailed)
+	if !ready() {
+		t.Fatal("the failure counter was not reset by the intervening success")
+	}
+
+	// Holding no key at all is a configuration fact, not a flake: immediate.
+	a.recordCredentialSuccess()
+	a.recordCredentialFailure(domain.ProbeErrorNoDispatchKey)
+	if ready() {
+		t.Fatal("a missing dispatch key must degrade readiness immediately")
+	}
+
+	// A future envelope generation says nothing about our keys.
+	a.recordCredentialSuccess()
+	a.recordCredentialFailure(domain.ProbeErrorUnsupportedVersion)
+	if !ready() {
+		t.Fatal("an unsupported future version must not claim our keyring is broken")
+	}
+}

@@ -196,9 +196,21 @@ watch(() => ws.projectId, load);
       <div class="w-full max-w-[420px] rounded border border-border-strong bg-surface p-5 shadow-lg">
         <h2 class="text-[15px] font-semibold">New service</h2>
         <p class="mt-1 text-[12.5px] text-ink-3">
-          The slug is project-unique and immutable — it is what a bundle and a dashboard both reference.
+          Declaring what it measures comes next — a service with no reliability inputs is a valid state.
         </p>
         <form class="mt-4 flex flex-col gap-3" @submit.prevent="create">
+          <!-- Name first: it is what the operator already has in mind. The slug follows,
+               because it is the consequence of the name, not the thing being named. -->
+          <label class="flex flex-col gap-[5px]">
+            <span class="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">Name</span>
+            <input
+              v-model="newName"
+              class="h-[34px] rounded-sm border border-border bg-surface-2 px-[10px] text-[13px] outline-none focus:border-accent"
+              placeholder="Checkout"
+              data-testid="service-create-name"
+              autofocus
+            />
+          </label>
           <label class="flex flex-col gap-[5px]">
             <span class="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">Slug</span>
             <input
@@ -208,17 +220,10 @@ watch(() => ws.projectId, load);
               data-testid="service-create-slug"
               pattern="[a-z][a-z0-9-]{0,62}"
               required
-              autofocus
             />
-          </label>
-          <label class="flex flex-col gap-[5px]">
-            <span class="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">Name</span>
-            <input
-              v-model="newName"
-              class="h-[34px] rounded-sm border border-border bg-surface-2 px-[10px] text-[13px] outline-none focus:border-accent"
-              placeholder="Checkout"
-              data-testid="service-create-name"
-            />
+            <span class="text-[11.5px] text-ink-3">
+              Project-unique and immutable — it is what a bundle and a dashboard both reference.
+            </span>
           </label>
           <p v-if="createError" class="text-[12.5px] text-down">{{ createError }}</p>
           <div class="mt-1 flex justify-end gap-2">

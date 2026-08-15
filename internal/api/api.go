@@ -73,10 +73,12 @@ type Store interface {
 	ProjectSLAReportEnabled(ctx context.Context, projectID string) (bool, error)
 	GetOIDCSettings(ctx context.Context) (domain.OIDCSettings, error)
 	UpsertOIDCSettings(ctx context.Context, s domain.OIDCSettings) error
-	CreateMaintenanceWindow(ctx context.Context, mw domain.MaintenanceWindow) (domain.MaintenanceWindow, error)
+	CreateMaintenanceWindowChecked(ctx context.Context, mw domain.MaintenanceWindow, previewID string, rawFloor time.Time) (domain.MaintenanceWindow, error)
+	PreviewMutation(ctx context.Context, projectID, monitorID string, mutation store.MaintenanceMutation, from, to, rawFloor time.Time, createdBy string) (store.MaintenancePreview, error)
+	ArchiveMaintenanceWindow(ctx context.Context, projectID, id string) error
+	AnnulMaintenanceWindow(ctx context.Context, projectID, id, previewID string, rawFloor time.Time) error
 	ListMaintenanceWindowsByProject(ctx context.Context, projectID string) ([]domain.MaintenanceWindow, error)
 	GetMaintenanceWindow(ctx context.Context, id string) (domain.MaintenanceWindow, error)
-	DeleteMaintenanceWindow(ctx context.Context, id string) error
 	CreateIncident(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
 	GetIncident(ctx context.Context, id string) (domain.Incident, error)
 	AcknowledgeIncident(ctx context.Context, id, by string) (domain.Incident, error)
@@ -218,6 +220,10 @@ type Handler struct {
 	pullWaiter        PullWaiter               // long-poll wake source (LISTEN/NOTIFY); nil = no long-poll
 	fpStatus          FileProviderStatusSource // process-local file-provider runtime status; nil = none
 	secretsEnabled    bool                     // project secret inventory feature switch (cfg.Secrets.Enabled)
+	// heartbeatRetentionDays bounds how far back a retroactive maintenance mutation can be
+	// repaired. It is a settings question, so the store does not answer it: the store takes
+	// the resolved floor as an argument and refuses anything older.
+	heartbeatRetentionDays int
 }
 
 // PullWaiter blocks until a pull job is enqueued for a region (or the max hold / request
@@ -339,6 +345,24 @@ func (h *Handler) WithFileProviderStatus(src FileProviderStatusSource) *Handler 
 	return h
 }
 
+// WithHeartbeatRetention sets how many days of raw heartbeats are kept, which is what makes
+// a retroactive maintenance mutation repairable or not.
+func (h *Handler) WithHeartbeatRetention(days int) *Handler {
+	h.heartbeatRetentionDays = days
+	return h
+}
+
+// rawFloor is the earliest instant still recomputable: outside it the raw evidence a repair
+// would read is gone, so a retroactive mutation must fail closed rather than silently
+// producing a window computed from nothing.
+func (h *Handler) rawFloor() time.Time {
+	days := h.heartbeatRetentionDays
+	if days <= 0 {
+		days = 90
+	}
+	return time.Now().UTC().AddDate(0, 0, -days)
+}
+
 // WithSecretsEnabled sets the project-secret-inventory feature switch
 // (cfg.Secrets.Enabled). Off (the default), every secrets endpoint answers
 // 404 feature_disabled (spec func-secret-inventory §4.1).
@@ -429,7 +453,9 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/secrets/{name}", h.deleteSecret)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/maintenance", h.listMaintenance)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/maintenance", h.createMaintenance)
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/maintenance/preview", h.previewMaintenance)
 	mux.HandleFunc("DELETE /api/v1/maintenance/{maintenanceID}", h.deleteMaintenance)
+	mux.HandleFunc("POST /api/v1/maintenance/{maintenanceID}/annul", h.annulMaintenance)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/incidents", h.listIncidents)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/incidents", h.createIncident)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/alerts/alertmanager", h.alertmanagerWebhook)

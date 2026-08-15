@@ -59,15 +59,28 @@ func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.S
 	if !domain.ValidServiceSlug(svc.Slug) {
 		return domain.Service{}, fmt.Errorf("store: service slug must match %s", domain.MonitorSlugPattern())
 	}
+	// The membership advisory lock is OUTERMOST (§15.4), and creating a service is a change
+	// to the set a preview's staleness check compares against. Without it the cap is a
+	// check-then-act, and a concurrent create can slip inside a confirm's predicate window —
+	// row locks cannot help, because a service that does not exist yet has no row to lock.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Service{}, fmt.Errorf("store: begin create service: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	if err := lockServiceMembership(ctx, tx, svc.ProjectID); err != nil {
+		return domain.Service{}, err
+	}
+
 	var existing int
-	if err := s.pool.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FROM services WHERE project_id = $1`, svc.ProjectID).Scan(&existing); err != nil {
 		return domain.Service{}, fmt.Errorf("store: count services: %w", err)
 	}
 	if existing >= MaxServicesPerProject {
 		return domain.Service{}, fmt.Errorf("%w: %d, cap %d", ErrTooManyServices, existing, MaxServicesPerProject)
 	}
-	row := s.pool.QueryRow(ctx,
+	row := tx.QueryRow(ctx,
 		`INSERT INTO services (project_id, slug, name, description, escalation_policy_id, oncall_schedule_id)
 		 VALUES ($1,$2,$3,$4,$5,$6)
 		 RETURNING id, project_id, slug, name, description,
@@ -82,7 +95,13 @@ func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.S
 		// and the 500 it would otherwise become would hide that.
 		return domain.Service{}, ErrConflict
 	}
-	return out, err
+	if err != nil {
+		return domain.Service{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Service{}, fmt.Errorf("store: commit create service: %w", err)
+	}
+	return out, nil
 }
 
 // GetService reads one service by id, scoped to its project.
@@ -127,8 +146,15 @@ func (s *Store) DeleteService(ctx context.Context, projectID, id string) error {
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-	// Take the row first, so a file apply claiming ownership serializes behind this check
-	// rather than racing it. Absence of the row is ErrNotFound before ownership is consulted.
+	// §15.4 lock order: the membership advisory lock is OUTERMOST and has to be taken before
+	// the service row, not after it. Deleting a service changes the very set a maintenance
+	// preview's staleness check compares against.
+	if err := lockServiceMembership(ctx, tx, projectID); err != nil {
+		return err
+	}
+
+	// Then the row, so a file apply claiming ownership serializes behind this check rather
+	// than racing it. Absence of the row is ErrNotFound before ownership is consulted.
 	var one int
 	err = tx.QueryRow(ctx,
 		`SELECT 1 FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`, id, projectID).Scan(&one)
@@ -141,6 +167,9 @@ func (s *Store) DeleteService(ctx context.Context, projectID, id string) error {
 	if err := assertServiceNotFileManagedTx(ctx, tx, id); err != nil {
 		return err
 	}
+	// A preview whose affected set included this service goes stale on its own: the stored
+	// set is a snapshot the deletion cannot edit (00068 dropped that cascade), so the set
+	// comparison in confirmPreviewTx sees a member the current set no longer has.
 	if _, err := tx.Exec(ctx, `DELETE FROM services WHERE id = $1 AND project_id = $2`, id, projectID); err != nil {
 		return fmt.Errorf("store: delete service: %w", err)
 	}

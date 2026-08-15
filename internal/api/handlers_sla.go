@@ -187,6 +187,10 @@ func (h *Handler) createMaintenance(w http.ResponseWriter, r *http.Request) {
 		StartsAt  time.Time `json:"starts_at"`
 		EndsAt    time.Time `json:"ends_at"`
 		Reason    string    `json:"reason"`
+		// PreviewID confirms a token issued for THIS mutation. Required only when the
+		// window reaches back over sealed reliability facts — a prospective window changes
+		// no settled number and needs no ceremony.
+		PreviewID string `json:"preview_id"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -211,12 +215,117 @@ func (h *Handler) createMaintenance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	created, err := h.store.CreateMaintenanceWindow(r.Context(), mw)
-	if err != nil {
-		h.serverError(w, "create_maintenance", err)
+	created, err := h.store.CreateMaintenanceWindowChecked(r.Context(), mw, body.PreviewID, h.rawFloor())
+	if h.writeMaintenanceError(w, "create_maintenance", err) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
+}
+
+// writeMaintenanceError maps the retroactive-mutation contract to HTTP. Reported honestly
+// rather than as a 500: every one of these is something the operator can act on.
+func (h *Handler) writeMaintenanceError(w http.ResponseWriter, op string, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, store.ErrRetroactiveNeedsPreview):
+		writeError(w, http.StatusConflict, "preview_required")
+	case errors.Is(err, store.ErrPreviewStale):
+		writeError(w, http.StatusConflict, "preview_stale")
+	case errors.Is(err, store.ErrPreviewApproximate):
+		writeError(w, http.StatusConflict, "preview_approximate")
+	case errors.Is(err, store.ErrUnrecomputableRange):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not found")
+	default:
+		h.serverError(w, op, err)
+	}
+	return true
+}
+
+// previewMaintenance issues a token BOUND to one mutation: this monitor, this exact range,
+// this kind of change. It is also the only place an operator is told, before committing,
+// which services a retroactive change would restate.
+func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectWrite)
+	if !ok {
+		return
+	}
+	var body struct {
+		MonitorID string    `json:"monitor_id"`
+		Mutation  string    `json:"mutation"`
+		StartsAt  time.Time `json:"starts_at"`
+		EndsAt    time.Time `json:"ends_at"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	mutation := store.MutationCreate
+	switch body.Mutation {
+	case "", string(store.MutationCreate):
+	case string(store.MutationAnnul):
+		mutation = store.MutationAnnul
+	default:
+		writeError(w, http.StatusBadRequest, "mutation must be create or annul")
+		return
+	}
+	if !body.EndsAt.After(body.StartsAt) {
+		writeError(w, http.StatusBadRequest, "ends_at must be after starts_at")
+		return
+	}
+	p, err := h.store.PreviewMutation(r.Context(), proj.ID, body.MonitorID, mutation,
+		body.StartsAt, body.EndsAt, h.rawFloor(), h.actorLabel(r))
+	if h.writeMaintenanceError(w, "preview_maintenance", err) {
+		return
+	}
+	type affected struct {
+		ServiceID  string `json:"service_id"`
+		BeforeGood int64  `json:"before_good_us"`
+		BeforeBad  int64  `json:"before_bad_us"`
+	}
+	out := struct {
+		PreviewID string     `json:"preview_id"`
+		ExpiresAt time.Time  `json:"expires_at"`
+		Coverage  string     `json:"coverage"`
+		Services  []affected `json:"services"`
+	}{PreviewID: p.ID, ExpiresAt: p.ExpiresAt, Coverage: p.Coverage, Services: []affected{}}
+	for _, svc := range p.Services {
+		out.Services = append(out.Services, affected{
+			ServiceID: svc.ServiceID, BeforeGood: svc.BeforeGood, BeforeBad: svc.BeforeBad,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// annulMaintenance says a window NEVER applied and repairs the facts computed under it.
+// Distinct from archiving on purpose: archiving retires a window from active inventory and
+// leaves the time it already covered excluded; annulling rewrites history and therefore needs
+// a preview.
+func (h *Handler) annulMaintenance(w http.ResponseWriter, r *http.Request) {
+	mw, err := h.store.GetMaintenanceWindow(r.Context(), r.PathValue("maintenanceID"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		h.serverError(w, "get_maintenance", err)
+		return
+	}
+	if _, ok := h.projectAccess(w, r, mw.ProjectID, authz.ActionProjectWrite); !ok {
+		return
+	}
+	var body struct {
+		PreviewID string `json:"preview_id"`
+	}
+	if r.ContentLength > 0 && !decodeJSON(w, r, &body) {
+		return
+	}
+	if h.writeMaintenanceError(w, "annul_maintenance",
+		h.store.AnnulMaintenanceWindow(r.Context(), mw.ProjectID, mw.ID, body.PreviewID, h.rawFloor())) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // deleteMaintenance removes a maintenance window (project-write on its project).
@@ -233,8 +342,12 @@ func (h *Handler) deleteMaintenance(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.projectAccess(w, r, mw.ProjectID, authz.ActionProjectWrite); !ok {
 		return
 	}
-	if err := h.store.DeleteMaintenanceWindow(r.Context(), mw.ID); err != nil {
-		h.serverError(w, "delete_maintenance", err)
+	// ARCHIVE, not delete. A hard delete destroys the retained exclusion row, and with it the
+	// only evidence of why a sealed window excluded the time it did — a recompute would then
+	// silently restate settled numbers with no preview, no audit and no way back. Removing a
+	// window's past effect is a different operation, and it is called annul.
+	if h.writeMaintenanceError(w, "archive_maintenance",
+		h.store.ArchiveMaintenanceWindow(r.Context(), mw.ProjectID, mw.ID)) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

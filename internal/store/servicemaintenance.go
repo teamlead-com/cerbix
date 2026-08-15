@@ -47,6 +47,13 @@ var (
 // PreviewExpiry bounds how long a preview token stays confirmable.
 const PreviewExpiry = 10 * time.Minute
 
+// previewBinding is the mutation a confirm claims the token authorizes.
+type previewBinding struct {
+	monitorID string
+	mutation  MaintenanceMutation
+	from, to  time.Time
+}
+
 // PreviewService is one affected service and the generation the preview saw it at.
 type PreviewService struct {
 	ServiceID            string
@@ -57,8 +64,12 @@ type PreviewService struct {
 
 // MaintenancePreview is the token a retroactive mutation must carry.
 type MaintenancePreview struct {
-	ID                    string
-	ProjectID             string
+	ID        string
+	ProjectID string
+	// MonitorID and Mutation are what the token AUTHORIZES. A confirm that does not check
+	// them is a token for "some change somewhere", which is not a gate.
+	MonitorID             string
+	Mutation              MaintenanceMutation
 	From, To              time.Time
 	MaintenanceGeneration int64
 	RawFloor              time.Time
@@ -75,8 +86,26 @@ type MaintenancePreview struct {
 // rawFloor is the earliest instant still recomputable — the caller resolves it from
 // heartbeat retention, because that is a settings question and this package does no
 // settings I/O.
+// MaintenanceMutation names WHICH change a preview authorizes. A token has to carry it: a
+// preview of "annul this window" must not confirm "create a window here".
+type MaintenanceMutation string
+
+const (
+	MutationCreate MaintenanceMutation = "create"
+	MutationAnnul  MaintenanceMutation = "annul"
+)
+
 func (s *Store) PreviewMaintenanceMutation(
 	ctx context.Context, projectID, monitorID string, from, to, rawFloor time.Time, createdBy string,
+) (MaintenancePreview, error) {
+	return s.PreviewMutation(ctx, projectID, monitorID, MutationCreate, from, to, rawFloor, createdBy)
+}
+
+// PreviewMutation computes what a retroactive mutation would change and issues a token BOUND
+// to it: the monitor, the exact range and the kind of change.
+func (s *Store) PreviewMutation(
+	ctx context.Context, projectID, monitorID string, mutation MaintenanceMutation,
+	from, to, rawFloor time.Time, createdBy string,
 ) (MaintenancePreview, error) {
 	if !to.After(from) {
 		return MaintenancePreview{}, fmt.Errorf("store: preview range end %s is not after start %s", to, from)
@@ -103,16 +132,18 @@ func (s *Store) PreviewMaintenanceMutation(
 	}
 
 	p := MaintenancePreview{
-		ProjectID: projectID, From: from, To: to,
+		ProjectID: projectID, MonitorID: monitorID, Mutation: mutation, From: from, To: to,
 		MaintenanceGeneration: generation, RawFloor: rawFloor,
 		Coverage: "complete", Services: services,
 	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO maintenance_previews
-		   (project_id, requested_start, requested_end, maintenance_generation, raw_floor, coverage, expires_at, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6, now() + $7::interval, $8)
+		   (project_id, monitor_id, mutation, requested_start, requested_end,
+		    maintenance_generation, raw_floor, coverage, expires_at, created_by)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now() + $9::interval, $10)
 		 RETURNING id, expires_at`,
-		projectID, from, to, generation, rawFloor, p.Coverage, PreviewExpiry.String(), createdBy).
+		projectID, nullableID(monitorID), string(mutation), from, to,
+		generation, rawFloor, p.Coverage, PreviewExpiry.String(), createdBy).
 		Scan(&p.ID, &p.ExpiresAt); err != nil {
 		return MaintenancePreview{}, fmt.Errorf("store: insert preview: %w", err)
 	}
@@ -242,7 +273,8 @@ func (s *Store) CreateMaintenanceWindowChecked(
 		if previewID == "" {
 			return domain.MaintenanceWindow{}, ErrRetroactiveNeedsPreview
 		}
-		if err := confirmPreviewTx(ctx, tx, w.ProjectID, previewID, services, w.StartsAt, rawFloor); err != nil {
+		binding := previewBinding{monitorID: w.MonitorID, mutation: MutationCreate, from: w.StartsAt, to: w.EndsAt}
+		if err := confirmPreviewTx(ctx, tx, w.ProjectID, previewID, services, binding, w.StartsAt, rawFloor); err != nil {
 			return domain.MaintenanceWindow{}, err
 		}
 	}
@@ -331,7 +363,8 @@ func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previ
 		if previewID == "" {
 			return ErrRetroactiveNeedsPreview
 		}
-		if err := confirmPreviewTx(ctx, tx, projectID, previewID, services, from, rawFloor); err != nil {
+		binding := previewBinding{monitorID: monitorID, mutation: MutationAnnul, from: from, to: to}
+		if err := confirmPreviewTx(ctx, tx, projectID, previewID, services, binding, from, rawFloor); err != nil {
 			return err
 		}
 	}
@@ -354,14 +387,22 @@ func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previ
 // lock is held — the same lock every set-changing path takes. Re-resolving the set before
 // the lock would be a check-then-act one level down, and row locks cannot help: they protect
 // rows that exist, and a service created concurrently is exactly what has no row yet.
-func confirmPreviewTx(ctx context.Context, tx pgx.Tx, projectID, previewID string, current []PreviewService, sealedStart, rawFloor time.Time) error {
+func confirmPreviewTx(
+	ctx context.Context, tx pgx.Tx, projectID, previewID string, current []PreviewService,
+	want previewBinding, sealedStart, rawFloor time.Time,
+) error {
 	var storedGeneration int64
 	var storedRawFloor, expiresAt time.Time
 	var coverage string
+	var storedMonitor *string
+	var storedMutation string
+	var storedFrom, storedTo time.Time
 	if err := tx.QueryRow(ctx,
-		`SELECT maintenance_generation, raw_floor, coverage, expires_at
+		`SELECT maintenance_generation, raw_floor, coverage, expires_at,
+		        monitor_id::text, mutation, requested_start, requested_end
 		   FROM maintenance_previews WHERE id=$1 AND project_id=$2 FOR UPDATE`,
-		previewID, projectID).Scan(&storedGeneration, &storedRawFloor, &coverage, &expiresAt); err != nil {
+		previewID, projectID).Scan(&storedGeneration, &storedRawFloor, &coverage, &expiresAt,
+		&storedMonitor, &storedMutation, &storedFrom, &storedTo); err != nil {
 		if noRows(err) {
 			return ErrPreviewStale
 		}
@@ -372,6 +413,26 @@ func confirmPreviewTx(ctx context.Context, tx pgx.Tx, projectID, previewID strin
 	}
 	if time.Now().After(expiresAt) {
 		return ErrPreviewStale
+	}
+
+	// The token authorizes ONE mutation. Without this the confirm checked that the world had
+	// not moved and never checked what it was being asked to do, so a token issued for a
+	// two-minute window on one monitor authorized a twelve-hour window on another as long as
+	// both touched the same services.
+	storedMonitorID := ""
+	if storedMonitor != nil {
+		storedMonitorID = *storedMonitor
+	}
+	if storedMutation != string(want.mutation) ||
+		storedMonitorID != want.monitorID ||
+		!storedFrom.Equal(want.from) || !storedTo.Equal(want.to) {
+		return ErrPreviewStale
+	}
+	// The floor recorded WHEN THE PREVIEW RAN also has to still hold: retention only moves
+	// forward, so a token issued against an older floor cannot authorize a range that has
+	// since fallen out of raw.
+	if sealedStart.Before(storedRawFloor) {
+		return fmt.Errorf("%w: earliest repairable is %s", ErrUnrecomputableRange, storedRawFloor.UTC().Format(time.RFC3339))
 	}
 
 	var generation int64

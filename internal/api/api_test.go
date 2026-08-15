@@ -37,6 +37,9 @@ type fakePullTest struct {
 }
 
 type fakeStore struct {
+	// previews and sealedThrough model the retroactive-maintenance gate.
+	previews           map[string]store.MaintenancePreview
+	sealedThrough      time.Time
 	services           map[string]*fakeService
 	orgs               map[string]domain.Organization
 	projects           map[string]domain.Project
@@ -548,10 +551,75 @@ func (f *fakeStore) UpsertOIDCSettings(_ context.Context, s domain.OIDCSettings)
 	f.oidcSettings = &cp
 	return nil
 }
-func (f *fakeStore) CreateMaintenanceWindow(_ context.Context, mw domain.MaintenanceWindow) (domain.MaintenanceWindow, error) {
+
+// The fake models the retroactive contract, not just the row write: a window reaching back
+// over sealed facts demands a token bound to THIS mutation. A fake that accepted anything
+// would let the handler ship with the gate removed and the tests still green.
+func (f *fakeStore) CreateMaintenanceWindowChecked(
+	_ context.Context, mw domain.MaintenanceWindow, previewID string, rawFloor time.Time,
+) (domain.MaintenanceWindow, error) {
+	if mw.StartsAt.Before(f.sealedThrough) {
+		if mw.StartsAt.Before(rawFloor) {
+			return domain.MaintenanceWindow{}, store.ErrUnrecomputableRange
+		}
+		p, ok := f.previews[previewID]
+		if !ok {
+			return domain.MaintenanceWindow{}, store.ErrRetroactiveNeedsPreview
+		}
+		if p.Mutation != store.MutationCreate || p.MonitorID != mw.MonitorID ||
+			!p.From.Equal(mw.StartsAt) || !p.To.Equal(mw.EndsAt) {
+			return domain.MaintenanceWindow{}, store.ErrPreviewStale
+		}
+	}
 	mw.ID = "mw-new"
 	f.maintenance[mw.ID] = mw
 	return mw, nil
+}
+
+func (f *fakeStore) PreviewMutation(
+	_ context.Context, projectID, monitorID string, mutation store.MaintenanceMutation,
+	from, to, rawFloor time.Time, createdBy string,
+) (store.MaintenancePreview, error) {
+	if f.previews == nil {
+		f.previews = map[string]store.MaintenancePreview{}
+	}
+	p := store.MaintenancePreview{
+		ID: fmt.Sprintf("prev-%d", len(f.previews)+1), ProjectID: projectID,
+		MonitorID: monitorID, Mutation: mutation, From: from, To: to,
+		Coverage: "complete", ExpiresAt: time.Now().Add(10 * time.Minute),
+	}
+	f.previews[p.ID] = p
+	return p, nil
+}
+
+func (f *fakeStore) ArchiveMaintenanceWindow(_ context.Context, projectID, id string) error {
+	mw, ok := f.maintenance[id]
+	if !ok || mw.ProjectID != projectID {
+		return store.ErrNotFound
+	}
+	// Archiving retires the window; it does NOT destroy the row, which is the whole
+	// difference from the delete this endpoint used to perform.
+	mw.Reason = mw.Reason + " (archived)"
+	f.maintenance[id] = mw
+	return nil
+}
+
+func (f *fakeStore) AnnulMaintenanceWindow(_ context.Context, projectID, id, previewID string, rawFloor time.Time) error {
+	mw, ok := f.maintenance[id]
+	if !ok || mw.ProjectID != projectID {
+		return store.ErrNotFound
+	}
+	if mw.StartsAt.Before(f.sealedThrough) {
+		p, ok := f.previews[previewID]
+		if !ok {
+			return store.ErrRetroactiveNeedsPreview
+		}
+		if p.Mutation != store.MutationAnnul || p.MonitorID != mw.MonitorID {
+			return store.ErrPreviewStale
+		}
+	}
+	delete(f.maintenance, id)
+	return nil
 }
 func (f *fakeStore) ListMaintenanceWindowsByProject(_ context.Context, projectID string) ([]domain.MaintenanceWindow, error) {
 	var out []domain.MaintenanceWindow
@@ -568,13 +636,6 @@ func (f *fakeStore) GetMaintenanceWindow(_ context.Context, id string) (domain.M
 		return domain.MaintenanceWindow{}, store.ErrNotFound
 	}
 	return mw, nil
-}
-func (f *fakeStore) DeleteMaintenanceWindow(_ context.Context, id string) error {
-	if _, ok := f.maintenance[id]; !ok {
-		return store.ErrNotFound
-	}
-	delete(f.maintenance, id)
-	return nil
 }
 
 func (f *fakeStore) CreateIncident(_ context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error) {

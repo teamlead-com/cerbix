@@ -709,7 +709,8 @@ func runServe(args []string) int {
 		appMux := http.NewServeMux()
 		authn.Routes(appMux)
 		apiHandler = api.New(st, logger, cfg.Local.MinPasswordLength).WithMetrics(registry).WithEvents(broker).WithOIDC(authn).WithSettings(settingsSvc).
-			WithSecretsEnabled(cfg.Secrets.Enabled)
+			WithSecretsEnabled(cfg.Secrets.Enabled).
+			WithHeartbeatRetention(cfg.Heartbeats.RetentionDays)
 		if mail != nil {
 			apiHandler.WithMailer(mail)
 		}

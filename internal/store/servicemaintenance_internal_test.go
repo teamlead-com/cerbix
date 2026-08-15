@@ -290,7 +290,9 @@ func TestAnnulRequiresAPreviewAndRepairsTheRange(t *testing.T) {
 		t.Fatalf("annul without a preview returned %v, want ErrRetroactiveNeedsPreview", err)
 	}
 
-	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(2*time.Minute), rawFloor, "op")
+	// The token has to be issued FOR AN ANNUL. A create-kind preview authorizing an annul is
+	// the binding hole this contract closes.
+	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationAnnul, base, base.Add(2*time.Minute), rawFloor, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -353,7 +355,9 @@ func TestConfirmedAnnulActuallyRewritesTheSealedFacts(t *testing.T) {
 	}
 
 	// …then annul the window, which says it never applied, and require the facts to come back.
-	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(2*time.Minute), rawFloor, "op")
+	// The token has to be issued FOR AN ANNUL. A create-kind preview authorizing an annul is
+	// the binding hole this contract closes.
+	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationAnnul, base, base.Add(2*time.Minute), rawFloor, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -401,4 +405,141 @@ func drainRepair(t *testing.T, st *Store, ctx context.Context) {
 		}
 	}
 	t.Fatal("repair queue never drained")
+}
+
+// A preview token authorizes ONE mutation. The shipped confirm checked that the world had not
+// moved and never checked what it was being asked to do, so a token issued for a small window
+// on one monitor authorized a different, larger change — the exact retroactive rewrite the
+// preview exists to gate.
+func TestAPreviewTokenOnlyAuthorizesTheMutationItWasIssuedFor(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	small := func() (string, error) {
+		p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+			base, base.Add(2*time.Minute), rawFloor, "op")
+		return p.ID, err
+	}
+
+	// (a) A different RANGE.
+	id, err := small()
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(9 * time.Minute), Reason: "widened",
+	}, id, rawFloor)
+	if !errors.Is(err, ErrPreviewStale) {
+		t.Errorf("a token for a 2-minute window authorized a 9-minute one: %v", err)
+	}
+
+	// (b) A different MONITOR. Both mutations must resolve to the SAME affected set, or a set
+	// difference would reject it for the wrong reason and prove nothing about the monitor
+	// binding. Widening this service's SLI to both monitors gives exactly that: each window
+	// then affects {this service} and nothing else.
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http, f.redis}, SLI: []string{f.http, f.redis},
+	}, 1, DeclarationOptions{CreatedBy: "op"}); err != nil {
+		t.Fatalf("widen sli: %v", err)
+	}
+	id, err = small()
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.redis,
+		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "wrong monitor",
+	}, id, rawFloor)
+	if !errors.Is(err, ErrPreviewStale) {
+		t.Errorf("a token for one monitor authorized a window on another with the same affected set: %v", err)
+	}
+
+	// (c) A different KIND. A preview of "create this window" must not confirm an annul.
+	w, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "seed",
+	})
+	if err != nil {
+		t.Fatalf("seed window: %v", err)
+	}
+	id, err = small()
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, id, rawFloor); !errors.Is(err, ErrPreviewStale) {
+		t.Errorf("a create-kind token authorized an annul: %v", err)
+	}
+
+	// …and the matching mutation still works, so the binding is a gate and not a wall.
+	id, err = small()
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if _, err := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "exact",
+	}, id, rawFloor); err != nil {
+		t.Errorf("the mutation the token was issued for was refused: %v", err)
+	}
+}
+
+// Deleting a service is a change to the affected SET, and the comparison alone cannot see it:
+// the row is missing from the current set for the same reason a cascade had removed it from
+// the stored one. The shipped schema cascaded, so the two agreed and the confirm PASSED.
+func TestDeletingAnAffectedServiceInvalidatesThePreview(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	// A SECOND service on the same monitor, so the affected set has two members. With only
+	// one, deleting it leaves nothing for the mutation to touch and no preview is required —
+	// correct behaviour, and it would hide the defect rather than expose it.
+	second, err := st.CreateService(ctx, domain.Service{
+		ProjectID: f.projectID, Slug: "second", Name: "Second",
+	})
+	if err != nil {
+		t.Fatalf("second service: %v", err)
+	}
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, second.ID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: base}); err != nil {
+		t.Fatalf("declare second: %v", err)
+	}
+	if _, err := st.MaterializeServiceRange(ctx, f.projectID, second.ID, base, base.Add(3*time.Minute)); err != nil {
+		t.Fatalf("materialize second: %v", err)
+	}
+
+	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+		base, base.Add(2*time.Minute), rawFloor, "op")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if len(p.Services) < 2 {
+		t.Fatalf("the preview saw %d affected services, want 2", len(p.Services))
+	}
+
+	if err := st.DeleteService(ctx, f.projectID, second.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// The snapshot survives the deletion — it records what was true when the preview ran.
+	var kept int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM maintenance_preview_services WHERE preview_id=$1 AND service_id=$2`,
+		p.ID, second.ID).Scan(&kept); err != nil {
+		t.Fatalf("count snapshot: %v", err)
+	}
+	if kept != 1 {
+		t.Error("the deletion edited the preview's snapshot; a record of what was true cannot be rewritten by later events")
+	}
+
+	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "after the delete",
+	}, p.ID, rawFloor)
+	if !errors.Is(err, ErrPreviewStale) && !errors.Is(err, ErrRetroactiveNeedsPreview) {
+		t.Errorf("a preview survived the deletion of a service it covered: %v", err)
+	}
 }

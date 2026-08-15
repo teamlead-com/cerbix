@@ -236,20 +236,16 @@ func (l localTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Hear
 }
 
 func (l localTester) RunJobTest(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
-	m := job.Monitor
-	cleanup := func() {}
-	if job.CredentialEnvelope != nil {
-		if l.credentials == nil {
-			return domain.Heartbeat{}, domain.ProbeError{Reason: domain.ProbeErrorNoDispatchKey}
-		}
-		var err error
-		m, cleanup, err = l.credentials.MaterializeForProbe(job)
-		if err != nil {
-			return domain.Heartbeat{}, domain.ProbeError{Reason: dispatch.CredentialProbeErrorReason(err)}
-		}
+	// In-process: no wire between the materializer and this runner, so the job's own
+	// protocol version IS the carrier generation. The gate still runs — every executor
+	// path crosses it, including the ones that cannot be attacked from outside.
+	materialized, err := dispatch.ValidateAndMaterialize(l.credentials,
+		dispatch.DeliveredJob{Job: job, CarrierGeneration: job.ProtocolVersion})
+	if err != nil {
+		return domain.Heartbeat{}, domain.ProbeError{Reason: dispatch.CredentialProbeErrorReason(err)}
 	}
-	hb := l.run(ctx, m)
-	cleanup()
+	hb := l.run(ctx, materialized.Monitor)
+	materialized.Cleanup()
 	return hb, nil
 }
 
@@ -885,7 +881,10 @@ func runServe(args []string) int {
 					}
 					ring, _ := credentialRings.ForRegion(workerRegion) // role validation guarantees coverage
 					if err := amqpd.ServeTestsV2(func(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
-						m, cleanup, err := ring.MaterializeForProbe(job)
+						// This consumer IS the generation-2 test carrier, so the generation
+						// comes from which consumer received the message, never from the body.
+						materialized, err := dispatch.ValidateAndMaterialize(ring,
+							dispatch.DeliveredJob{Job: job, CarrierGeneration: dispatch.ProtocolV2})
 						if err != nil {
 							reason := dispatch.CredentialProbeErrorReason(err)
 							registry.RecordExecutorProbeError(reason)
@@ -894,9 +893,11 @@ func runServe(args []string) int {
 							}
 							return dispatch.ProbeErrorHeartbeat(job, reason), nil
 						}
-						defer cleanup()
-						registry.SetCredentialReady(true, "")
-						return runner.Run(ctx, m), nil
+						defer materialized.Cleanup()
+						if materialized.UsedCredential {
+							registry.SetCredentialReady(true, "")
+						}
+						return runner.Run(ctx, materialized.Monitor), nil
 					}); err != nil {
 						logging.Critical(logger, "dispatch_test_v2_consumer_start_failed", "error", err.Error())
 						return 1

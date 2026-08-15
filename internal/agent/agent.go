@@ -160,39 +160,23 @@ func (a *Agent) pollTest(ctx context.Context) {
 		a.logger.Error("agent_bad_test", "error", err.Error())
 		return
 	}
-	monitor := job.Monitor
-	cleanup := func() {}
-	if job.CredentialEnvelope != nil {
-		// Same carrier/payload consistency rule as the jobs path: a generation-1 row must
-		// not carry an envelope, and the generation comes from the server's stamp.
-		if carrierGen == 1 {
-			hb := dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorDecryptAuthFailed)
-			a.recordCredentialFailure(hb.ProbeError.Reason)
-			a.logger.Error("agent_credential_test_rejected", "reason", hb.ProbeError.Reason,
-				"carrier_generation", carrierGen)
-			_ = a.postTestResult(ctx, id, hb)
-			return
-		}
-		if a.credentials == nil {
-			hb := dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorNoDispatchKey)
-			a.recordCredentialFailure(hb.ProbeError.Reason)
-			a.logger.Error("agent_credential_test_rejected", "reason", hb.ProbeError.Reason)
-			_ = a.postTestResult(ctx, id, hb)
-			return
-		}
-		var err error
-		monitor, cleanup, err = a.credentials.MaterializeForProbe(job)
-		if err != nil {
-			reason := dispatch.CredentialProbeErrorReason(err)
-			a.recordCredentialFailure(reason)
-			a.logger.Error("agent_credential_test_rejected", "reason", reason)
-			_ = a.postTestResult(ctx, id, dispatch.ProbeErrorHeartbeat(job, reason))
-			return
-		}
+	// The test-RPC path crosses the SAME gate as scheduled jobs — a per-path variant is
+	// how one of them ends up missing a rule.
+	delivered := dispatch.DeliveredJob{Job: job, CarrierGeneration: a.testCarrierGeneration(carrierGen)}
+	materialized, err := dispatch.ValidateAndMaterialize(a.credentials, delivered)
+	if err != nil {
+		reason := dispatch.CredentialProbeErrorReason(err)
+		a.recordCredentialFailure(reason)
+		a.logger.Error("agent_credential_test_rejected", "reason", reason,
+			"carrier_generation", delivered.CarrierGeneration)
+		_ = a.postTestResult(ctx, id, dispatch.ProbeErrorHeartbeat(job, reason))
+		return
+	}
+	if materialized.UsedCredential {
 		a.recordCredentialSuccess()
 	}
-	hb := a.runner.Run(ctx, monitor)
-	cleanup()
+	hb := a.runner.Run(ctx, materialized.Monitor)
+	materialized.Cleanup()
 	if err := a.postTestResult(ctx, id, hb); err != nil {
 		a.logger.Warn("agent_test_result_failed", "error", err.Error())
 	}
@@ -304,47 +288,27 @@ func (a *Agent) poll(ctx context.Context) {
 			a.logger.Error("agent_bad_job", "error", err.Error())
 			continue
 		}
-		monitor := job.Monitor
-		cleanup := func() {}
-		if job.CredentialEnvelope != nil {
-			// A capable claim mixes generations, so an envelope has to be consistent with
-			// the carrier the row actually arrived on — and the carrier is the server's
-			// stamp, not the payload's self-description. A generation-1 row carrying an
-			// envelope is a payload/carrier mismatch, never a job to execute.
-			if gen := carrierGeneration(protocolVersions, i); gen == 1 {
-				a.recordCredentialFailure(domain.ProbeErrorDecryptAuthFailed)
-				results = append(results, dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorDecryptAuthFailed))
-				a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID,
-					"reason", domain.ProbeErrorDecryptAuthFailed, "carrier_generation", gen)
-				if i < len(tokens) {
-					ackTokens = append(ackTokens, tokens[i])
-				}
-				continue
+		// Every job crosses the same gate the AMQP worker uses, unconditionally: the
+		// schema decides whether a credential is required, and the carrier generation is
+		// the server's stamp rather than anything the payload says (§4.7, D-0160).
+		delivered := dispatch.DeliveredJob{Job: job, CarrierGeneration: a.deliveredGeneration(protocolVersions, i)}
+		materialized, err := dispatch.ValidateAndMaterialize(a.credentials, delivered)
+		if err != nil {
+			reason := dispatch.CredentialProbeErrorReason(err)
+			a.recordCredentialFailure(reason)
+			results = append(results, dispatch.ProbeErrorHeartbeat(job, reason))
+			a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID,
+				"reason", reason, "carrier_generation", delivered.CarrierGeneration)
+			if i < len(tokens) {
+				ackTokens = append(ackTokens, tokens[i])
 			}
-			if a.credentials == nil {
-				a.recordCredentialFailure(domain.ProbeErrorNoDispatchKey)
-				results = append(results, dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorNoDispatchKey))
-				a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", domain.ProbeErrorNoDispatchKey)
-				if i < len(tokens) {
-					ackTokens = append(ackTokens, tokens[i])
-				}
-				continue
-			}
-			monitor, cleanup, err = a.credentials.MaterializeForProbe(job)
-			if err != nil {
-				reason := dispatch.CredentialProbeErrorReason(err)
-				a.recordCredentialFailure(reason)
-				results = append(results, dispatch.ProbeErrorHeartbeat(job, reason))
-				a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", reason)
-				if i < len(tokens) {
-					ackTokens = append(ackTokens, tokens[i])
-				}
-				continue
-			}
+			continue
+		}
+		if materialized.UsedCredential {
 			a.recordCredentialSuccess()
 		}
-		results = append(results, a.runner.Run(ctx, monitor))
-		cleanup()
+		results = append(results, a.runner.Run(ctx, materialized.Monitor))
+		materialized.Cleanup()
 		if i < len(tokens) {
 			ackTokens = append(ackTokens, tokens[i])
 		}
@@ -435,6 +399,33 @@ func carrierGeneration(versions []int, i int) int {
 		return 0
 	}
 	return versions[i]
+}
+
+// deliveredGeneration resolves the carrier generation for the i-th claimed job. The
+// server's stamp wins; when it is absent (a core that predates stamping) the ENDPOINT the
+// agent itself chose to poll is the fallback — that is still out-of-band knowledge the
+// agent holds, and it is never the payload.
+func (a *Agent) deliveredGeneration(versions []int, i int) int {
+	if gen := carrierGeneration(versions, i); gen > 0 {
+		return gen
+	}
+	return a.claimGeneration()
+}
+
+func (a *Agent) testCarrierGeneration(stamped int) int {
+	if stamped > 0 {
+		return stamped
+	}
+	return a.claimGeneration()
+}
+
+// claimGeneration is the generation of the claim endpoint this agent polls, which follows
+// from its own capability — not from anything a server or a payload asserts.
+func (a *Agent) claimGeneration() int {
+	if a.credentials != nil {
+		return dispatch.ProtocolV2
+	}
+	return dispatch.ProtocolV1
 }
 
 // postResults reports live results and acks (via ack tokens) the claimed jobs they

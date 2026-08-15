@@ -11,7 +11,7 @@ import (
 // context-driven; Close is a no-op so concurrent producers never send on a
 // closed channel.
 type InProc struct {
-	jobs    chan CheckJob
+	jobs    chan DeliveredJob
 	results chan domain.Heartbeat
 }
 
@@ -21,21 +21,24 @@ func NewInProc(buffer int) *InProc {
 		buffer = 256
 	}
 	return &InProc{
-		jobs:    make(chan CheckJob, buffer),
+		jobs:    make(chan DeliveredJob, buffer),
 		results: make(chan domain.Heartbeat, buffer),
 	}
 }
 
 func (d *InProc) PublishJob(ctx context.Context, job CheckJob) error {
+	// In-process there is no wire between publisher and consumer, so the publisher's own
+	// protocol version IS the carrier generation: there is no untrusted hop that could
+	// have rewritten it.
 	select {
-	case d.jobs <- job:
+	case d.jobs <- DeliveredJob{Job: job, CarrierGeneration: job.ProtocolVersion}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-func (d *InProc) Jobs() <-chan CheckJob { return d.jobs }
+func (d *InProc) Jobs() <-chan DeliveredJob { return d.jobs }
 
 func (d *InProc) PublishResult(ctx context.Context, hb domain.Heartbeat) error {
 	select {

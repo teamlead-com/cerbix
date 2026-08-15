@@ -76,34 +76,29 @@ func (p *Pool) loop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case job, ok := <-jobs:
+		case delivered, ok := <-jobs:
 			if !ok {
 				return
 			}
-			monitor := job.Monitor
-			cleanup := func() {}
-			if job.CredentialEnvelope != nil {
-				if p.credentials == nil {
-					p.logger.Error("credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", "no_dispatch_key")
-					p.publishProbeError(ctx, job, domain.ProbeErrorNoDispatchKey)
-					p.setCredentialReady(false, domain.ProbeErrorNoDispatchKey)
-					continue
+			// Every job crosses the gate, unconditionally: whether a credential is
+			// REQUIRED is decided by the schema, never by whether the payload happens to
+			// carry an envelope (dispatch.ValidateAndMaterialize, §4.7/D-0160).
+			job := delivered.Job
+			materialized, err := dispatch.ValidateAndMaterialize(p.credentials, delivered)
+			if err != nil {
+				reason := dispatch.CredentialProbeErrorReason(err)
+				p.logger.Error("credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", reason)
+				p.publishProbeError(ctx, job, reason)
+				if reason != domain.ProbeErrorUnsupportedVersion {
+					p.setCredentialReady(false, reason)
 				}
-				var err error
-				monitor, cleanup, err = p.credentials.MaterializeForProbe(job)
-				if err != nil {
-					reason := dispatch.CredentialProbeErrorReason(err)
-					p.logger.Error("credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", reason)
-					p.publishProbeError(ctx, job, reason)
-					if reason != domain.ProbeErrorUnsupportedVersion {
-						p.setCredentialReady(false, reason)
-					}
-					continue
-				}
+				continue
+			}
+			if materialized.UsedCredential {
 				p.setCredentialReady(true, "")
 			}
-			hb := p.runner.Run(ctx, monitor)
-			cleanup()
+			hb := p.runner.Run(ctx, materialized.Monitor)
+			materialized.Cleanup()
 			if err := p.dispatcher.PublishResult(ctx, hb); err != nil {
 				if ctx.Err() != nil {
 					return

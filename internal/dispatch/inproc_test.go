@@ -19,9 +19,9 @@ func TestInProcJobsAndResults(t *testing.T) {
 	if err := d.PublishJob(ctx, CheckJob{Monitor: domain.Monitor{ID: "m1"}}); err != nil {
 		t.Fatalf("publish job: %v", err)
 	}
-	job := <-d.Jobs()
-	if job.Monitor.ID != "m1" {
-		t.Fatalf("job monitor = %q", job.Monitor.ID)
+	delivered := <-d.Jobs()
+	if delivered.Job.Monitor.ID != "m1" {
+		t.Fatalf("job monitor = %q", delivered.Job.Monitor.ID)
 	}
 
 	if err := d.PublishResult(ctx, domain.Heartbeat{MonitorID: "m1", Up: true}); err != nil {

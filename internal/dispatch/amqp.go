@@ -123,7 +123,7 @@ type AMQP struct {
 	declared   map[string]bool // idempotent-declare cache for per-region job queues
 
 	jobsOnce    sync.Once
-	jobsCh      chan CheckJob
+	jobsCh      chan DeliveredJob
 	resultsOnce sync.Once
 	resultsCh   chan domain.Heartbeat
 	testsOnce   sync.Once // guards the per-region test-RPC server (worker side)
@@ -193,7 +193,7 @@ func NewAMQP(url string, logger *slog.Logger) (*AMQP, error) {
 		cancel:        cancel,
 		jobRegion:     domain.DefaultRegion,
 		declared:      map[string]bool{},
-		jobsCh:        make(chan CheckJob, forwardBuffer),
+		jobsCh:        make(chan DeliveredJob, forwardBuffer),
 		resultsCh:     make(chan domain.Heartbeat, forwardBuffer),
 	}
 	go d.supervise()
@@ -435,9 +435,13 @@ func (d *AMQP) PublishResult(_ context.Context, hb domain.Heartbeat) error {
 
 // Jobs starts (once) a consumer of the jobs queue and returns the forwarding
 // channel. Only call it in a role that executes jobs (worker).
-func (d *AMQP) Jobs() <-chan CheckJob {
+func (d *AMQP) Jobs() <-chan DeliveredJob {
 	d.jobsOnce.Do(func() {
-		consumeQueue := func(queue, source string) {
+		// The QUEUE a message was consumed from is the carrier generation, and it is the
+		// only trustworthy source for it: the body's own ProtocolVersion is attacker-
+		// editable (§4.7, D-0160). Each consumer therefore stamps its own generation and
+		// the payload's claim is never consulted here.
+		consumeQueue := func(queue, source string, generation int) {
 			go consume(d, queue, true, func(body []byte) bool {
 				var job CheckJob
 				if err := json.Unmarshal(body, &job); err != nil {
@@ -446,16 +450,16 @@ func (d *AMQP) Jobs() <-chan CheckJob {
 					return false
 				}
 				select {
-				case d.jobsCh <- job:
+				case d.jobsCh <- DeliveredJob{Job: job, CarrierGeneration: generation}:
 					return true
 				case <-d.ctx.Done():
 					return false
 				}
 			})
 		}
-		consumeQueue(jobsQueueForRegion(d.jobRegion), "jobs")
+		consumeQueue(jobsQueueForRegion(d.jobRegion), "jobs", ProtocolV1)
 		if d.protocolV2 {
-			consumeQueue(jobsV2QueueForRegion(d.jobRegion), "jobs.v2")
+			consumeQueue(jobsV2QueueForRegion(d.jobRegion), "jobs.v2", ProtocolV2)
 		}
 	})
 	return d.jobsCh

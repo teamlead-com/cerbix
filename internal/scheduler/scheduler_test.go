@@ -179,9 +179,9 @@ func TestSchedulerLeaderPublishesDueJobs(t *testing.T) {
 	go s.Run(ctx)
 
 	select {
-	case job := <-disp.Jobs():
-		if job.Monitor.ID != "m1" {
-			t.Fatalf("expected active monitor m1, got %q", job.Monitor.ID)
+	case delivered := <-disp.Jobs():
+		if delivered.Job.Monitor.ID != "m1" {
+			t.Fatalf("expected active monitor m1, got %q", delivered.Job.Monitor.ID)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("scheduler did not publish a job in time")
@@ -276,9 +276,9 @@ func TestConfirmSignalAcceleratesProbe(t *testing.T) {
 	// pull it in to ~1s (the confirm interval).
 	ch <- "m1"
 	select {
-	case job := <-disp.Jobs():
-		if job.Monitor.ID != "m1" {
-			t.Fatalf("unexpected job %q", job.Monitor.ID)
+	case delivered := <-disp.Jobs():
+		if delivered.Job.Monitor.ID != "m1" {
+			t.Fatalf("unexpected job %q", delivered.Job.Monitor.ID)
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("confirm signal did not accelerate the next probe")
@@ -331,12 +331,17 @@ func TestCredentialDispatchRequiresV2AMQPConsumer(t *testing.T) {
 			defer cancel()
 			go s.Run(ctx)
 			select {
-			case job := <-disp.Jobs():
+			case delivered := <-disp.Jobs():
 				if !tc.wantJob {
-					t.Fatalf("credential job reached transport without v2 consumer: %+v", job)
+					t.Fatalf("credential job reached transport without v2 consumer: %+v", delivered.Job)
 				}
-				if job.ProtocolVersion != dispatch.ProtocolV2 {
-					t.Fatalf("protocol=%d, want v2", job.ProtocolVersion)
+				if delivered.Job.ProtocolVersion != dispatch.ProtocolV2 {
+					t.Fatalf("protocol=%d, want v2", delivered.Job.ProtocolVersion)
+				}
+				// In-process the carrier generation is the publisher's own version;
+				// on a wire it comes from the queue the message was consumed from.
+				if delivered.CarrierGeneration != dispatch.ProtocolV2 {
+					t.Fatalf("carrier generation=%d, want v2", delivered.CarrierGeneration)
 				}
 			case <-time.After(1500 * time.Millisecond):
 				if tc.wantJob {
@@ -365,16 +370,16 @@ func TestCredentialCadenceUsesAuthoritativeMaterializedInterval(t *testing.T) {
 	defer cancel()
 	go s.Run(ctx)
 	select {
-	case job := <-disp.Jobs():
-		if job.Monitor.Target != authoritative.Target || job.Monitor.IntervalSeconds != authoritative.IntervalSeconds {
-			t.Fatalf("published stale snapshot instead of authoritative row: %+v", job.Monitor)
+	case delivered := <-disp.Jobs():
+		if delivered.Job.Monitor.Target != authoritative.Target || delivered.Job.Monitor.IntervalSeconds != authoritative.IntervalSeconds {
+			t.Fatalf("published stale snapshot instead of authoritative row: %+v", delivered.Job.Monitor)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("credential job was not published")
 	}
 	select {
-	case job := <-disp.Jobs():
-		t.Fatalf("cadence advanced from stale 1s snapshot; unexpected second job: %+v", job)
+	case delivered := <-disp.Jobs():
+		t.Fatalf("cadence advanced from stale 1s snapshot; unexpected second job: %+v", delivered.Job)
 	case <-time.After(2500 * time.Millisecond):
 	}
 }

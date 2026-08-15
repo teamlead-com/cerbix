@@ -82,10 +82,12 @@ func TestMaterializerSnapshotAndPayloadPlaintextAbsence(t *testing.T) {
 		if err := st.EnqueuePullJobV2(ctx, item.Job.Monitor.Region, body, item.Job.Monitor.IntervalSeconds); err != nil {
 			t.Fatalf("persist v2 pull payload: %v", err)
 		}
-		probeMonitor, cleanup, err := ring.MaterializeForProbe(item.Job)
+		materialized, err := dispatch.ValidateAndMaterialize(ring,
+			dispatch.DeliveredJob{Job: item.Job, CarrierGeneration: dispatch.ProtocolV2})
 		if err != nil {
 			t.Fatalf("executor open %s: %v", item.MonitorID, err)
 		}
+		probeMonitor, cleanup := materialized.Monitor, materialized.Cleanup
 		if probeMonitor.Config["password"] != want[item.MonitorID] {
 			t.Fatalf("executor password %q, want %q", probeMonitor.Config["password"], want[item.MonitorID])
 		}
@@ -197,15 +199,18 @@ func TestMaterializerAuthoritativeReadBoundaries(t *testing.T) {
 	if item.Job.Monitor.Target != updated.Target || item.Job.Monitor.Region != "geo" || item.Job.Monitor.IntervalSeconds != 123 || item.Job.Monitor.ExecutionRevision != updated.ExecutionRevision {
 		t.Fatalf("job is not the authoritative row: %+v, update=%+v", item.Job.Monitor, updated)
 	}
-	probeMonitor, cleanup, err := geoRing.MaterializeForProbe(item.Job)
+	materialized, err := dispatch.ValidateAndMaterialize(geoRing,
+		dispatch.DeliveredJob{Job: item.Job, CarrierGeneration: dispatch.ProtocolV2})
 	if err != nil {
 		t.Fatalf("geo decrypt: %v", err)
 	}
+	probeMonitor, cleanup := materialized.Monitor, materialized.Cleanup
 	if probeMonitor.Config["password"] != newValue {
 		t.Fatalf("materialized password = %q, want rotated value", probeMonitor.Config["password"])
 	}
 	cleanup()
-	if _, _, err := coreRing.MaterializeForProbe(item.Job); err == nil {
+	if _, err := dispatch.ValidateAndMaterialize(coreRing,
+		dispatch.DeliveredJob{Job: item.Job, CarrierGeneration: dispatch.ProtocolV2}); err == nil {
 		t.Fatal("old-region keyring opened a job routed to the new region")
 	}
 

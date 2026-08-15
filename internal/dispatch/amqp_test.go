@@ -216,22 +216,28 @@ func deleteTestQueue(t *testing.T, url, name string) {
 	}
 }
 
-func awaitJob(t *testing.T, jobs <-chan dispatch.CheckJob, want string) string {
+func awaitJob(t *testing.T, jobs <-chan dispatch.DeliveredJob, want string) string {
 	return awaitJobPayload(t, jobs, want).Monitor.ID
 }
 
-func awaitJobPayload(t *testing.T, jobs <-chan dispatch.CheckJob, want string) dispatch.CheckJob {
+func awaitJobPayload(t *testing.T, jobs <-chan dispatch.DeliveredJob, want string) dispatch.CheckJob {
+	return awaitDelivered(t, jobs, want).Job
+}
+
+// awaitDelivered keeps the carrier generation the adapter stamped, so a test can assert
+// which QUEUE a job actually arrived on rather than what its body claims.
+func awaitDelivered(t *testing.T, jobs <-chan dispatch.DeliveredJob, want string) dispatch.DeliveredJob {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
 	for {
 		select {
 		case j := <-jobs:
-			if j.Monitor.ID == want {
+			if j.Job.Monitor.ID == want {
 				return j
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for job")
-			return dispatch.CheckJob{}
+			return dispatch.DeliveredJob{}
 		}
 	}
 }

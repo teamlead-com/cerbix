@@ -638,6 +638,88 @@ func resolveMonitorSlugTx(ctx context.Context, tx pgx.Tx, m domain.Monitor) (str
 	}
 }
 
+// ServiceSummary is one row of the services list.
+//
+// It carries `SealedThrough` and the two member counts because the LIST is where an operator
+// decides which service to look at, and a list that omitted the watermark would let a stalled
+// service look identical to a healthy one. Both counts are here for the same reason they are
+// declared separately: a service whose context and SLI counts are equal is legitimate, and
+// the reader has to be able to see which is which.
+type ServiceSummary struct {
+	Service   domain.Service
+	ManagedBy string
+
+	// Revision is 0 when nothing has been declared — a valid state, not a missing row.
+	Revision       int64
+	EffectiveAt    *time.Time
+	ContextMembers int
+	SLIMembers     int
+	EpochSeq       int64
+
+	SealedThrough  *time.Time
+	RepairingCount int
+}
+
+// ListServiceSummaries reads the list rows in ONE query. The obvious alternative — list the
+// services and fetch each detail — is an N+1 on the first screen of the feature.
+func (s *Store) ListServiceSummaries(ctx context.Context, projectID string) ([]ServiceSummary, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT s.id, s.project_id, s.slug, s.name, s.description,
+		        COALESCE(s.escalation_policy_id::text,''), COALESCE(s.oncall_schedule_id::text,''),
+		        s.created_at, s.updated_at,
+		        COALESCE(ms.provider_id, ''),
+		        COALESCE(r.revision, 0), r.effective_at,
+		        COALESCE(cnt.ctx, 0), COALESCE(cnt.sli, 0),
+		        COALESCE(e.epoch_seq, 0),
+		        m.sealed_through,
+		        COALESCE(rp.n, 0)
+		   FROM services s
+		   LEFT JOIN managed_services ms ON ms.service_id = s.id
+		   LEFT JOIN LATERAL (
+		       SELECT id, revision, effective_at
+		         FROM service_definition_revisions
+		        WHERE service_id = s.id AND state = 'effective'
+		        ORDER BY effective_at DESC, revision DESC LIMIT 1) r ON true
+		   LEFT JOIN LATERAL (
+		       SELECT count(*) FILTER (WHERE role = 'context') AS ctx,
+		              count(*) FILTER (WHERE role = 'sli')     AS sli
+		         FROM service_definition_members WHERE revision_id = r.id) cnt ON true
+		   LEFT JOIN LATERAL (
+		       SELECT epoch_seq FROM service_evaluation_epochs
+		        WHERE service_id = s.id AND state = 'effective'
+		        ORDER BY effective_at DESC, epoch_seq DESC LIMIT 1) e ON true
+		   LEFT JOIN service_materialization m ON m.service_id = s.id
+		   LEFT JOIN LATERAL (
+		       SELECT count(*) AS n FROM service_repair_ranges
+		        WHERE service_id = s.id AND state IN ('pending','running','error')) rp ON true
+		  WHERE s.project_id = $1
+		  ORDER BY s.slug`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list service summaries: %w", err)
+	}
+	defer rows.Close()
+
+	out := []ServiceSummary{}
+	for rows.Next() {
+		var v ServiceSummary
+		if err := rows.Scan(
+			&v.Service.ID, &v.Service.ProjectID, &v.Service.Slug, &v.Service.Name, &v.Service.Description,
+			&v.Service.EscalationPolicyID, &v.Service.OncallScheduleID,
+			&v.Service.CreatedAt, &v.Service.UpdatedAt,
+			&v.ManagedBy,
+			&v.Revision, &v.EffectiveAt,
+			&v.ContextMembers, &v.SLIMembers,
+			&v.EpochSeq,
+			&v.SealedThrough,
+			&v.RepairingCount,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan service summary: %w", err)
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // ServiceDetail is everything the read API needs about one service: what was declared, what
 // is being measured, and how far materialization has actually got.
 type ServiceDetail struct {

@@ -119,22 +119,49 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-// listServices returns a project's services.
+// serviceSummaryView is one row of the services list.
+//
+// The list is where an operator decides which service to open, so it carries the watermark:
+// omitting it would let a service that stopped materializing an hour ago look exactly like a
+// healthy one. `revision: 0` means nothing has been declared — a valid state.
+type serviceSummaryView struct {
+	Service serviceView `json:"service"`
+
+	Revision       int64      `json:"revision"`
+	EffectiveAt    *time.Time `json:"effective_at,omitempty"`
+	ContextMembers int        `json:"context_members"`
+	SLIMembers     int        `json:"sli_members"`
+	EpochSeq       int64      `json:"epoch_seq"`
+
+	SealedThrough  *time.Time `json:"sealed_through,omitempty"`
+	RepairingCount int        `json:"repairing_count"`
+}
+
+// listServices returns a project's services with the state a reader needs to choose one.
 func (h *Handler) listServices(w http.ResponseWriter, r *http.Request) {
 	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectRead)
 	if !ok {
 		return
 	}
-	services, err := h.store.ListServices(r.Context(), proj.ID)
+	services, err := h.store.ListServiceSummaries(r.Context(), proj.ID)
 	if h.writeServiceError(w, err) {
 		return
 	}
-	out := make([]serviceView, 0, len(services))
-	for _, s := range services {
-		out = append(out, serviceView{
-			ID: s.ID, Slug: s.Slug, Name: s.Name, Description: s.Description,
-			EscalationPolicyID: s.EscalationPolicyID, OncallScheduleID: s.OncallScheduleID,
-			CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt,
+	out := make([]serviceSummaryView, 0, len(services))
+	for _, v := range services {
+		out = append(out, serviceSummaryView{
+			Service: serviceView{
+				ID: v.Service.ID, Slug: v.Service.Slug, Name: v.Service.Name,
+				Description:        v.Service.Description,
+				EscalationPolicyID: v.Service.EscalationPolicyID,
+				OncallScheduleID:   v.Service.OncallScheduleID,
+				CreatedAt:          v.Service.CreatedAt, UpdatedAt: v.Service.UpdatedAt,
+				Managed: v.ManagedBy,
+			},
+			Revision: v.Revision, EffectiveAt: v.EffectiveAt,
+			ContextMembers: v.ContextMembers, SLIMembers: v.SLIMembers,
+			EpochSeq:      v.EpochSeq,
+			SealedThrough: v.SealedThrough, RepairingCount: v.RepairingCount,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

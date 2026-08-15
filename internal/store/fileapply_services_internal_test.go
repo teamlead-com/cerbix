@@ -410,3 +410,76 @@ func TestStoreRefusesAMalformedServiceSlug(t *testing.T) {
 		t.Errorf("a well-formed slug was refused: %v", err)
 	}
 }
+
+// The list query answers in ONE round trip and reports the two counts separately, the file
+// provenance, and the watermark. The obvious alternative — list, then fetch each detail — is
+// an N+1 on the first screen of the feature.
+func TestListServiceSummariesIsOneQueryAndKeepsBothCounts(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	applyServiceBundle(t, st, ctx, svcBundle)
+	if _, err := st.CreateService(ctx, domain.Service{ProjectID: projID, Slug: "aaa-undeclared", Name: "Undeclared"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	rows, err := st.ListServiceSummaries(ctx, projID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("%d rows, want 2", len(rows))
+	}
+	if rows[0].Service.Slug != "aaa-undeclared" {
+		t.Fatalf("rows are not slug-ordered: %q first", rows[0].Service.Slug)
+	}
+
+	// An undeclared service is a row with revision 0 — a state, not a gap, and certainly not
+	// an omission from the list.
+	if rows[0].Revision != 0 || rows[0].ContextMembers != 0 || rows[0].SLIMembers != 0 {
+		t.Errorf("undeclared row = %+v, want revision 0 and no members", rows[0])
+	}
+	if rows[0].ManagedBy != "" {
+		t.Errorf("a UI-created service reported provider %q", rows[0].ManagedBy)
+	}
+	if rows[0].EffectiveAt != nil {
+		t.Errorf("undeclared row has effective_at %v", rows[0].EffectiveAt)
+	}
+
+	// The bundle declares two monitors of which one is an SLI. Both counts must survive, or
+	// the list hides the distinction the declaration model rests on.
+	d := rows[1]
+	if d.Service.Slug != "checkout" {
+		t.Fatalf("second row = %q", d.Service.Slug)
+	}
+	if d.ContextMembers != 2 || d.SLIMembers != 1 {
+		t.Errorf("counts = %d context / %d sli, want 2 / 1", d.ContextMembers, d.SLIMembers)
+	}
+	if d.Revision != 1 || d.EpochSeq != 1 {
+		t.Errorf("revision=%d epoch=%d, want 1/1", d.Revision, d.EpochSeq)
+	}
+	if d.ManagedBy != "payments-bundle" {
+		t.Errorf("managed_by = %q, want the owning provider", d.ManagedBy)
+	}
+	if d.SealedThrough != nil {
+		t.Errorf("sealed_through = %v before anything was materialized", d.SealedThrough)
+	}
+	if d.EffectiveAt == nil {
+		t.Error("a declared service has no effective_at")
+	}
+
+	// A second revision must not ACCUMULATE members — the row reads the revision in force,
+	// not every member row the service has ever had.
+	changed := strings.Replace(svcBundle, "sli: [checkout-http]", "sli: [checkout-http, checkout-db]", 1)
+	applyServiceBundle(t, st, ctx, changed)
+	rows2, err := st.ListServiceSummaries(ctx, projID)
+	if err != nil {
+		t.Fatalf("relist: %v", err)
+	}
+	if rows2[1].ContextMembers != 2 || rows2[1].SLIMembers != 2 {
+		t.Errorf("counts = %d / %d after the second revision, want 2 / 2 (not the sum of both revisions)",
+			rows2[1].ContextMembers, rows2[1].SLIMembers)
+	}
+	if rows2[1].Revision != 2 {
+		t.Errorf("revision = %d, want 2", rows2[1].Revision)
+	}
+}

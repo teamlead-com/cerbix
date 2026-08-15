@@ -640,12 +640,17 @@ paths:
         A Service is where it is explicitly declared what reliability MEANS for one
         operational unit. Services sit BESIDE monitors, not above them: a monitor may
         contribute to several services or to none.
+
+
+        Each row carries `sealed_through` and BOTH member counts. The list is where an
+        operator picks which service to open, and one that omitted the watermark would let a
+        service that stopped materializing an hour ago look exactly like a healthy one.
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema: { type: array, items: { $ref: '#/components/schemas/Service' } }
+              schema: { type: array, items: { $ref: '#/components/schemas/ServiceSummary' } }
         '404': { $ref: '#/components/responses/NotFound' }
     post:
       tags: [services]
@@ -2287,6 +2292,35 @@ components:
             The file provider that owns this service; empty when it is UI-owned. Present so
             the UI can disable the controls rather than discover the 409.
 
+    ServiceSummary:
+      type: object
+      required: [service, revision, context_members, sli_members, epoch_seq, repairing_count]
+      additionalProperties: false
+      properties:
+        service: { $ref: '#/components/schemas/Service' }
+        revision:
+          type: integer
+          format: int64
+          description: 0 when nothing has been declared — a valid state, not a missing row.
+        effective_at: { type: string, format: date-time }
+        context_members:
+          type: integer
+          description: Monitors in the operational context.
+        sli_members:
+          type: integer
+          description: >
+            Of those, how many were explicitly declared as reliability inputs. The two counts
+            are separate because the two lists are separately declared; equal counts are
+            legitimate.
+        epoch_seq: { type: integer, format: int64 }
+        sealed_through:
+          type: string
+          format: date-time
+          description: Contiguity-defined watermark; absent when nothing has been sealed.
+        repairing_count:
+          type: integer
+          description: Ranges whose numbers are not currently trustworthy.
+
     CreateServiceRequest:
       type: object
       required: [slug]
@@ -2708,6 +2742,12 @@ components:
         id: { type: string, format: uuid }
         project_id: { type: string, format: uuid }
         name: { type: string }
+        slug:
+          type: string
+          pattern: '^[a-z][a-z0-9-]{0,62}$'
+          description: >
+            Project-unique and immutable. This is the name a bundle and a service declaration
+            reference, so it stays stable while `name` is free to change.
         type: { type: string, enum: [http, tcp, icmp, dns, tls, grpc, composite, postgres, mysql, redis, promql, rabbitmq, websocket, ssh, synthetic, push] }
         target: { type: string }
         method: { type: string, enum: [GET, POST, HEAD, PUT, DELETE], description: 'HTTP request method (http monitors).' }

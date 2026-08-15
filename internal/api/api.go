@@ -160,7 +160,7 @@ type Store interface {
 	UpdateProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error)
 	DeleteProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string) error
 	// Service reliability (FR-021 phase 1).
-	ListServices(ctx context.Context, projectID string) ([]domain.Service, error)
+	ListServiceSummaries(ctx context.Context, projectID string) ([]store.ServiceSummary, error)
 	CreateService(ctx context.Context, svc domain.Service) (domain.Service, error)
 	ServiceDetail(ctx context.Context, projectID, serviceID string) (store.ServiceDetail, error)
 	PutServiceDeclaration(ctx context.Context, projectID, serviceID string, decl domain.ServiceDeclaration, expectedRevision int64, opts store.DeclarationOptions) (domain.DefinitionRevision, domain.EvaluationEpoch, error)

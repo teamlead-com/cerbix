@@ -1999,14 +1999,24 @@ func (f *fakeStore) serviceStore() map[string]*fakeService {
 	return f.services
 }
 
-func (f *fakeStore) ListServices(_ context.Context, projectID string) ([]domain.Service, error) {
-	var out []domain.Service
+func (f *fakeStore) ListServiceSummaries(_ context.Context, projectID string) ([]store.ServiceSummary, error) {
+	out := []store.ServiceSummary{}
 	for _, fs := range f.serviceStore() {
-		if fs.svc.ProjectID == projectID {
-			out = append(out, fs.svc)
+		if fs.svc.ProjectID != projectID {
+			continue
 		}
+		v := store.ServiceSummary{Service: fs.svc, SealedThrough: fs.detail.SealedThrough}
+		if fs.rev != nil {
+			v.Revision = fs.rev.Revision
+			v.EffectiveAt = &fs.rev.EffectiveAt
+			v.ContextMembers, v.SLIMembers = len(fs.rev.Monitors), len(fs.rev.SLI)
+		}
+		if fs.epoch != nil {
+			v.EpochSeq = fs.epoch.Seq
+		}
+		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	sort.Slice(out, func(i, j int) bool { return out[i].Service.Slug < out[j].Service.Slug })
 	return out, nil
 }
 

@@ -1401,6 +1401,8 @@ export interface paths {
         /**
          * List the project's services
          * @description A Service is where it is explicitly declared what reliability MEANS for one operational unit. Services sit BESIDE monitors, not above them: a monitor may contribute to several services or to none.
+         *
+         *     Each row carries `sealed_through` and BOTH member counts. The list is where an operator picks which service to open, and one that omitted the watermark would let a service that stopped materializing an hour ago look exactly like a healthy one.
          */
         get: {
             parameters: {
@@ -1419,7 +1421,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Service"][];
+                        "application/json": components["schemas"]["ServiceSummary"][];
                     };
                 };
                 404: components["responses"]["NotFound"];
@@ -5183,6 +5185,29 @@ export interface components {
             /** @description The file provider that owns this service; empty when it is UI-owned. Present so the UI can disable the controls rather than discover the 409. */
             managed_by?: string;
         };
+        ServiceSummary: {
+            service: components["schemas"]["Service"];
+            /**
+             * Format: int64
+             * @description 0 when nothing has been declared — a valid state, not a missing row.
+             */
+            revision: number;
+            /** Format: date-time */
+            effective_at?: string;
+            /** @description Monitors in the operational context. */
+            context_members: number;
+            /** @description Of those, how many were explicitly declared as reliability inputs. The two counts are separate because the two lists are separately declared; equal counts are legitimate. */
+            sli_members: number;
+            /** Format: int64 */
+            epoch_seq: number;
+            /**
+             * Format: date-time
+             * @description Contiguity-defined watermark; absent when nothing has been sealed.
+             */
+            sealed_through?: string;
+            /** @description Ranges whose numbers are not currently trustworthy. */
+            repairing_count: number;
+        };
         CreateServiceRequest: {
             slug: string;
             /** @description Defaults to the slug when omitted. */
@@ -5555,6 +5580,8 @@ export interface components {
             /** Format: uuid */
             project_id?: string;
             name?: string;
+            /** @description Project-unique and immutable. This is the name a bundle and a service declaration reference, so it stays stable while `name` is free to change. */
+            slug?: string;
             /** @enum {string} */
             type?: "http" | "tcp" | "icmp" | "dns" | "tls" | "grpc" | "composite" | "postgres" | "mysql" | "redis" | "promql" | "rabbitmq" | "websocket" | "ssh" | "synthetic" | "push";
             target?: string;

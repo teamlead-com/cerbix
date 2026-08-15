@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { RouterLink, useRouter } from "vue-router";
 import BrandMark from "@/components/BrandMark.vue";
 import CreateDialog from "@/components/CreateDialog.vue";
@@ -31,6 +31,13 @@ const announceCls: Record<string, string> = {
 };
 const initials = computed(() => session.initials || "··");
 onMounted(() => session.fetchVersion()); // cached in the store — one request per session
+
+// The Services badge is a temporary adoption affordance: it points at a screen the operator
+// has not met yet, and it must disappear the moment the project HAS a service — including one
+// a bundle created, which is why the nav probes rather than waiting for a visit.
+onMounted(() => ws.ensureServiceCount());
+watch(() => ws.projectId, () => ws.ensureServiceCount());
+const showServicesBadge = computed(() => ws.serviceCounts[ws.projectId] === 0);
 const canManageOrg = computed(() => !!ws.orgId && session.isOrgAdmin(ws.orgId));
 
 function openCreate(kind: "org" | "project") {
@@ -69,6 +76,12 @@ const sections: { label: string; items: NavItem[] }[] = [
       { key: "dashboard", label: "Dashboard", to: { name: "dashboard" }, icon: [
         { t: "rect", x: 3, y: 3, w: 7, h: 9, rx: 1.5 }, { t: "rect", x: 14, y: 3, w: 7, h: 5, rx: 1.5 },
         { t: "rect", x: 14, y: 12, w: 7, h: 9, rx: 1.5 }, { t: "rect", x: 3, y: 16, w: 7, h: 5, rx: 1.5 },
+      ] },
+      // Order is level of abstraction: the unit of reliability, then what measures it.
+      // Nesting Monitors under Services would assert containment, which the model rejects.
+      { key: "services", label: "Services", to: { name: "services" }, icon: [
+        { t: "rect", x: 3, y: 4, w: 18, h: 6, rx: 1.6 }, { t: "rect", x: 3, y: 14, w: 18, h: 6, rx: 1.6 },
+        { t: "path", d: "M7 7h.01M7 17h.01" },
       ] },
       { key: "monitors", label: "Monitors", to: { name: "monitors" }, icon: [{ t: "path", d: "M3 12h4l2 6 4-14 2 8h6" }] },
       { key: "sla", label: "SLA & SLO", to: { name: "sla" }, icon: [{ t: "path", d: "M3 3v18h18" }, { t: "path", d: "M7 14l3-4 3 3 5-7" }] },
@@ -187,6 +200,10 @@ const settingsIcon: Shape[] = [
             </template>
           </svg>
           {{ item.label }}
+          <span
+            v-if="item.key === 'services' && showServicesBadge"
+            class="ml-auto rounded-full bg-accent-weak px-[6px] py-px text-[9.5px] font-semibold uppercase tracking-[0.06em] text-accent"
+          >new</span>
         </RouterLink>
       </template>
 

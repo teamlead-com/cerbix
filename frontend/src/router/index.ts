@@ -27,6 +27,23 @@ const routes: RouteRecordRaw[] = [
     component: () => import("@/views/DashboardView.vue"),
   },
   {
+    // Services sits ABOVE Monitors in the nav as a PEER, never nested: a monitor may be in
+    // the SLI of several services, or of none.
+    path: "/services",
+    name: "services",
+    component: () => import("@/views/ServicesView.vue"),
+  },
+  {
+    path: "/services/:id",
+    name: "service",
+    component: () => import("@/views/ServiceDetailView.vue"),
+  },
+  {
+    path: "/services/:id/declaration",
+    name: "service-declaration",
+    component: () => import("@/views/ServiceDeclarationView.vue"),
+  },
+  {
     path: "/monitors",
     name: "monitors",
     component: () => import("@/views/MonitorsView.vue"),

@@ -233,3 +233,70 @@ func TestDuplicateServiceSlugIs409(t *testing.T) {
 		t.Fatalf("= %d, want 409: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// The LIST is where an operator picks which service to open, so it carries the watermark and
+// the two member counts. A list that omitted `sealed_through` would let a service that
+// stopped materializing an hour ago look exactly like a healthy one.
+func TestServicesListCarriesTheWatermarkAndBothCounts(t *testing.T) {
+	h := newHandler(seededStore())
+	id := createSvc(t, h, "checkout")
+	if rec := do(h, p1Editor, http.MethodPut, "/api/v1/projects/p1/services/"+id+"/declaration",
+		`{"expected_revision":0,"monitors":["m1","m2"],"sli":["m1"]}`); rec.Code != http.StatusOK {
+		t.Fatalf("declare = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec := do(h, p1Viewer, http.MethodGet, "/api/v1/projects/p1/services", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list = %d: %s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		Service        map[string]any `json:"service"`
+		Revision       int64          `json:"revision"`
+		ContextMembers int            `json:"context_members"`
+		SLIMembers     int            `json:"sli_members"`
+		EpochSeq       int64          `json:"epoch_seq"`
+		SealedThrough  *string        `json:"sealed_through"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if len(rows) != 1 {
+		t.Fatalf("%d rows, want 1", len(rows))
+	}
+	// Two INDEPENDENT counts. A row that reported only one would hide the distinction the
+	// whole declaration model rests on.
+	if rows[0].ContextMembers != 2 || rows[0].SLIMembers != 1 {
+		t.Errorf("counts = %d context / %d sli, want 2 / 1", rows[0].ContextMembers, rows[0].SLIMembers)
+	}
+	if rows[0].Revision != 1 || rows[0].EpochSeq != 1 {
+		t.Errorf("revision=%d epoch=%d, want 1/1", rows[0].Revision, rows[0].EpochSeq)
+	}
+	// Nothing has been materialized, so the watermark is absent rather than a stand-in date.
+	if rows[0].SealedThrough != nil {
+		t.Errorf("sealed_through = %v before anything was sealed", *rows[0].SealedThrough)
+	}
+
+	// An undeclared service still lists — with revision 0, which is a state, not a gap.
+	createSvc(t, h, "cart")
+	rec = do(h, p1Viewer, http.MethodGet, "/api/v1/projects/p1/services", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("%d rows, want 2", len(rows))
+	}
+	if rows[0].Service["slug"] != "cart" {
+		t.Errorf("rows are not slug-ordered: %v first", rows[0].Service["slug"])
+	}
+	if rows[0].Revision != 0 || rows[0].ContextMembers != 0 {
+		t.Errorf("undeclared service row = %+v, want revision 0 and no members", rows[0])
+	}
+}
+
+// An empty project lists as `[]`, never `null` — a client must not have to branch.
+func TestServicesListIsAnArrayWhenEmpty(t *testing.T) {
+	h := newHandler(seededStore())
+	if got := strings.TrimSpace(do(h, p1Viewer, http.MethodGet, "/api/v1/projects/p1/services", "").Body.String()); got != "[]" {
+		t.Fatalf("body = %q, want []", got)
+	}
+}

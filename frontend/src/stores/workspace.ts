@@ -13,6 +13,9 @@ interface State {
   projectId: string;
   loaded: boolean;
   loading: boolean;
+  // serviceCounts is how the nav knows whether to show the Services adoption badge. It is a
+  // per-project cache rather than a flag, so switching projects cannot leave a stale answer.
+  serviceCounts: Record<string, number>;
 }
 
 const LAST_ORG = "cerbix.org";
@@ -31,6 +34,7 @@ export const useWorkspace = defineStore("workspace", {
     projectId: "",
     loaded: false,
     loading: false,
+    serviceCounts: {},
   }),
   getters: {
     currentOrg: (s) => s.orgs.find((o) => o.id === s.orgId) ?? null,
@@ -76,6 +80,25 @@ export const useWorkspace = defineStore("workspace", {
         this.projects.find((p) => p.id === remembered) ??
         this.projects[0];
       this.selectProject(pick?.id ?? "");
+    },
+    // noteServiceCount records what a view already loaded, so the nav does not re-fetch it.
+    noteServiceCount(projectId: string, n: number) {
+      if (projectId) this.serviceCounts[projectId] = n;
+    },
+    // ensureServiceCount probes once per project. The Services badge is an adoption
+    // affordance that has to disappear once a project HAS services — including services a
+    // bundle created, which the operator may never have opened the screen to see.
+    async ensureServiceCount() {
+      const id = this.projectId;
+      if (!id || this.serviceCounts[id] !== undefined) return;
+      try {
+        const res = await api.GET("/api/v1/projects/{projectID}/services", {
+          params: { path: { projectID: id } },
+        });
+        if (res.data) this.serviceCounts[id] = res.data.length;
+      } catch {
+        // A failed probe just leaves the badge undecided; it is not worth an error surface.
+      }
     },
     async selectOrg(id: string) {
       if (id === this.orgId) return;

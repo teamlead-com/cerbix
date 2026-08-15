@@ -15,14 +15,15 @@ A**, which closes the amendment. Approval covers the SPEC, never its implementat
 accepted only against the §9 matrix plus
 D-0155/**D-0160**/traceability/runbook/iteration evidence.
 
-Implementation acceptance: **still withdrawn after iter-0119.** `iter-0116` accepted the
+Implementation acceptance: **RESTORED in iter-0120.** `iter-0116` accepted the
 implementation against the r6 matrix and that report stands as written — it is superseded,
 not corrected: the r6 matrix could not have caught these defects because it never asked for
-the tests §9 now requires. iter-0119 fixed all four audit findings with regressions verified
-to fail when reverted, and closed §10 slice 4, but deliberately does NOT re-declare
-acceptance: three §9 items remain unevidenced (see that report's §8). Declaring DONE on the
-strength of the blockers being fixed would repeat the mistake this amendment exists to
-correct. `status.md`/`traceability.md` follow the report, not this line.
+the tests §9 now requires. iter-0119 fixed all four audit findings with regressions verified to
+fail when reverted and closed §10 slice 4, but deliberately withheld acceptance while three
+§9 items were unevidenced. iter-0120 closes them — a live auth-less-target fail-open pin
+(mutation-proven), live generation-3 emission with a mixed-capability barrier, and a browser
+gate — and additionally fixes three P0s the gen3 review found inside slice 4 itself. The
+amended matrix is fully evidenced and acceptance is restored there, not here.
 
 **Gates — two, with different scopes; both updated by iter-0119:**
 
@@ -30,7 +31,7 @@ correct. `status.md`/`traceability.md` follow the report, not this line.
   two-directional and blackholed every non-credentialed monitor in a pull region. It is
   fixed (one atomic capability-bounded lease for jobs and tests), the regression is verified
   to fail when the fix is reverted, and `make secret-smoke` exercises a live pull agent.
-- **Security statement (both transports) — ADDRESSED in iter-0119, acceptance still open.**
+- **Security statement (both transports) — CLOSED in iter-0120.**
   Execution binding, the structural gate and the field-set rules have shipped, so retargeting
   a credentialed probe or stripping its credential now fails closed before any connection to
   the target. Acceptance is not re-declared: three items of the §9 matrix remain unevidenced

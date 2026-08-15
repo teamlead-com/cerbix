@@ -66,7 +66,7 @@ func TestMaterializerSnapshotAndPayloadPlaintextAbsence(t *testing.T) {
 		}
 	}
 
-	items, err := st.MaterializeExecutionConfigs(ctx, []string{ref.ID, inline.ID})
+	items, err := st.MaterializeExecutionConfigs(ctx, []string{ref.ID, inline.ID}, dispatch.ProtocolV2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,5 +233,29 @@ func TestMaterializerAuthoritativeReadBoundaries(t *testing.T) {
 	}
 	if outcome.Reason != ReasonStaleRevision || outcome.Applied || outcome.Inserted {
 		t.Fatalf("post-read old result = %+v", outcome)
+	}
+}
+
+// TestMaterializeSealsTheEnvelopeItsCarrierCarries pins the generation mapping at the point
+// where it matters: the envelope version is derived from the carrier the caller has
+// ESTABLISHED the region can consume, never chosen independently. Emitting envelope v2 into
+// a region whose executors only understand v1 is the rolling-upgrade break the whole
+// generational design exists to prevent (§4.7, D-0160).
+func TestMaterializeSealsTheEnvelopeItsCarrierCarries(t *testing.T) {
+	if envelopeForCarrier(dispatch.ProtocolV1) != dispatch.EnvelopeV1 {
+		t.Fatal("generation 1 must map to the oldest envelope")
+	}
+	if envelopeForCarrier(dispatch.ProtocolV2) != dispatch.EnvelopeV1 {
+		t.Fatal("generation 2 carries envelope v1 — it already means that to every deployed executor")
+	}
+	if envelopeForCarrier(dispatch.ProtocolV3) != dispatch.EnvelopeV2 {
+		t.Fatal("generation 3 must carry envelope v2")
+	}
+	// An unknown carrier degrades to what everyone can open, not to what nobody can.
+	if envelopeForCarrier(99) != dispatch.EnvelopeV2 {
+		t.Fatal("a carrier newer than we know should still map to our newest envelope")
+	}
+	if envelopeForCarrier(0) != dispatch.EnvelopeV1 {
+		t.Fatal("an unset carrier must degrade to the oldest envelope")
 	}
 }

@@ -39,7 +39,22 @@ type materializedRef struct {
 // It reads every execution field plus tenant-safe refs/ciphertexts in ONE statement, then
 // immediately decrypts and re-wraps credentials. Plaintext never enters a returned DTO,
 // scheduler snapshot, cache, database queue, or broker payload.
-func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string) ([]MaterializedExecution, error) {
+// envelopeForCarrier maps a carrier generation to the envelope generation it carries. The
+// mapping is total and explicit: an unknown carrier falls back to the OLDEST envelope, so a
+// wiring mistake degrades to something every executor can open rather than to a payload
+// nobody can.
+func envelopeForCarrier(carrierGeneration int) int {
+	if carrierGeneration >= dispatch.ProtocolV3 {
+		return dispatch.EnvelopeV2
+	}
+	return dispatch.EnvelopeV1
+}
+
+// MaterializeExecutionConfigs builds dispatch-ready jobs for the given monitors.
+// carrierGeneration is the carrier the caller has ESTABLISHED the region can consume; the
+// envelope generation follows from it (generation 3 carries envelope v2), so a job can
+// never be sealed under a binding its executors cannot open.
+func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string, carrierGeneration int) ([]MaterializedExecution, error) {
 	if len(monitorIDs) == 0 {
 		return nil, nil
 	}
@@ -137,10 +152,8 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 				byID[m.ID] = entry
 				continue
 			}
-			// Generation 1 for now: the emitter moves to generation 2 with the carrier-3
-			// rollout, and until then a v2 envelope would reach executors that cannot open it.
 			envelope, err := ring.Seal(dispatch.SealContext{
-				EnvelopeVersion: dispatch.EnvelopeV1,
+				EnvelopeVersion: envelopeForCarrier(carrierGeneration),
 				Region:          m.Region,
 				JobID:           jobID,
 				MonitorID:       m.ID,
@@ -153,7 +166,7 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 				byID[m.ID] = entry
 				continue
 			}
-			job.ProtocolVersion = dispatch.ProtocolV2
+			job.ProtocolVersion = carrierGeneration
 			job.CredentialEnvelope = envelope
 			body, err := json.Marshal(job)
 			if err != nil || len(body) > maxMaterializedJobBytes {
@@ -184,7 +197,7 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 // MaterializeExecutionConfig is the singular test/manual convenience over the same
 // authoritative batch implementation.
 func (s *Store) MaterializeExecutionConfig(ctx context.Context, monitorID string) (MaterializedExecution, error) {
-	items, err := s.MaterializeExecutionConfigs(ctx, []string{monitorID})
+	items, err := s.MaterializeExecutionConfigs(ctx, []string{monitorID}, dispatch.ProtocolV2)
 	if err != nil {
 		return MaterializedExecution{}, err
 	}

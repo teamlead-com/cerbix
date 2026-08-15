@@ -25,7 +25,7 @@ const advisoryLockKey int64 = 0x6365726269780001 // "cerbix" + slot 1
 type Store interface {
 	ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, error)
 	ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error)
-	MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string) ([]store.MaterializedExecution, error)
+	MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string, carrierGeneration int) ([]store.MaterializedExecution, error)
 	StalePushMonitors(ctx context.Context) ([]domain.Monitor, error)
 	RecordDeadmanResult(ctx context.Context, monitorID string, revision int64, cutoff time.Time) (store.ResultOutcome, error)
 	TryBecomeLeader(ctx context.Context, key int64) (release func(), check func(context.Context) (bool, error), ok bool, err error)
@@ -39,6 +39,7 @@ type Store interface {
 	AdvanceEscalations(ctx context.Context) (fired int, err error)
 	EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds int) error
 	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds int) error
+	EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds int) error
 	LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error)
 	PurgeExpiredPullJobs(ctx context.Context) (int, error)
 	PurgeExpiredPullTests(ctx context.Context) (int, error)
@@ -77,6 +78,7 @@ type LiveRegionSource interface {
 // queues. Legacy worker liveness is intentionally insufficient for envelope dispatch.
 type CredentialLiveRegionSource interface {
 	LiveCredentialJobRegions(ctx context.Context) (map[string]bool, error)
+	LiveCredentialV3JobRegions(ctx context.Context) (map[string]bool, error)
 }
 
 const (
@@ -589,19 +591,42 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 			sort.Strings(regions)
 			credentialReadyPull := map[string]bool{}
 			credentialReadyAMQP := map[string]bool{}
+			// carrierGeneration is the HIGHEST carrier a region may be emitted into: 3 once
+			// something there can open envelope v2, otherwise 2. It is derived from the same
+			// existential checks as readiness, never assumed, so core cannot emit a payload
+			// the region's executors are unable to open (§4.7, D-0160).
+			carrierGeneration := map[string]int{}
 			if len(regions) > 0 {
-				// Capability 1 is the floor for the generation-2 carrier core emits today; the
-				// floor rises with the emitted generation, never independently of it.
+				// Capability 1 is the floor for the generation-2 carrier; the floor rises with
+				// the emitted generation, never independently of it.
 				if ready, err := s.store.LiveCredentialReadyAgentRegions(ctx, 45*time.Second, dispatch.EnvelopeV1); err != nil {
 					s.logger.Warn("credential_agent_capability_lookup_failed", "error", err.Error())
 				} else {
 					credentialReadyPull = ready
+				}
+				if ready, err := s.store.LiveCredentialReadyAgentRegions(ctx, 45*time.Second, dispatch.EnvelopeV2); err != nil {
+					s.logger.Warn("credential_agent_capability_lookup_failed", "error", err.Error())
+				} else {
+					for region := range ready {
+						if s.pullRegions[region] {
+							carrierGeneration[region] = dispatch.ProtocolV3
+						}
+					}
 				}
 				if s.credentialLiveRegions != nil {
 					if ready, err := s.credentialLiveRegions.LiveCredentialJobRegions(ctx); err != nil {
 						s.logger.Warn("credential_worker_capability_lookup_failed", "error", err.Error())
 					} else {
 						credentialReadyAMQP = ready
+					}
+					if ready, err := s.credentialLiveRegions.LiveCredentialV3JobRegions(ctx); err != nil {
+						s.logger.Warn("credential_worker_capability_lookup_failed", "error", err.Error())
+					} else {
+						for region := range ready {
+							if !s.pullRegions[region] {
+								carrierGeneration[region] = dispatch.ProtocolV3
+							}
+						}
 					}
 				}
 				for region := range s.localCredentialRegions {
@@ -615,7 +640,11 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 					if end > len(ids) {
 						end = len(ids)
 					}
-					items, err := s.store.MaterializeExecutionConfigs(ctx, ids[start:end])
+					generation := carrierGeneration[snapshotRegion]
+					if generation == 0 {
+						generation = dispatch.ProtocolV2
+					}
+					items, err := s.store.MaterializeExecutionConfigs(ctx, ids[start:end], generation)
 					if err != nil {
 						if ctx.Err() != nil {
 							return false
@@ -648,7 +677,7 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 							continue
 						}
 						m := item.Job.Monitor // authoritative row: region + cadence inputs
-						if item.Job.ProtocolVersion == dispatch.ProtocolV2 {
+						if item.Job.ProtocolVersion >= dispatch.ProtocolV2 {
 							ready := credentialReadyAMQP[m.Region]
 							if s.pullRegions[m.Region] {
 								ready = credentialReadyPull[m.Region]
@@ -723,10 +752,16 @@ func (s *Scheduler) publishScheduledJob(ctx context.Context, job dispatch.CheckJ
 		if err != nil {
 			return fmt.Errorf("marshal pull job: %w", err)
 		}
-		if job.ProtocolVersion == dispatch.ProtocolV2 {
+		// The row's carrier generation IS the job's, so a claim predicate can never hand a
+		// payload to an executor that did not declare the capability to open it.
+		switch {
+		case job.ProtocolVersion >= dispatch.ProtocolV3:
+			return s.store.EnqueuePullJobV3(ctx, region, payload, int(interval/time.Second))
+		case job.ProtocolVersion == dispatch.ProtocolV2:
 			return s.store.EnqueuePullJobV2(ctx, region, payload, int(interval/time.Second))
+		default:
+			return s.store.EnqueuePullJob(ctx, region, payload, int(interval/time.Second))
 		}
-		return s.store.EnqueuePullJob(ctx, region, payload, int(interval/time.Second))
 	}
 	return s.dispatcher.PublishJob(ctx, job)
 }

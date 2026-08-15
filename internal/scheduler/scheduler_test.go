@@ -35,6 +35,12 @@ type fakeStore struct {
 
 type staticCredentialRegions map[string]bool
 
+func (s staticCredentialRegions) LiveCredentialV3JobRegions(context.Context) (map[string]bool, error) {
+	// No generation-3 consumers by default: the emitter must stay on generation 2 unless a
+	// test says otherwise.
+	return map[string]bool{}, nil
+}
+
 func (s staticCredentialRegions) LiveCredentialJobRegions(context.Context) (map[string]bool, error) {
 	return s, nil
 }
@@ -48,7 +54,7 @@ func (f *fakeStore) ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.M
 	return f.ListEnabledMonitors(ctx)
 }
 
-func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string) ([]store.MaterializedExecution, error) {
+func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string, _ int) ([]store.MaterializedExecution, error) {
 	if f.materialize != nil {
 		return f.materialize(ids)
 	}
@@ -137,6 +143,7 @@ func (f *fakeStore) EvaluateRegionWorkerAlerts(context.Context, map[string]bool,
 func (f *fakeStore) AdvanceEscalations(context.Context) (int, error)             { return 0, nil }
 func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error   { return nil }
 func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int) error { return nil }
+func (f *fakeStore) EnqueuePullJobV3(context.Context, string, []byte, int) error { return nil }
 func (f *fakeStore) LiveCredentialReadyAgentRegions(context.Context, time.Duration, int) (map[string]bool, error) {
 	return map[string]bool{}, nil
 }

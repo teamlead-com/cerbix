@@ -16,6 +16,7 @@ import (
 const (
 	jobsQueuePrefix   = "checks.jobs."
 	jobsV2QueuePrefix = "checks.jobs.v2."
+	jobsV3QueuePrefix = "checks.jobs.v3."
 )
 
 // Client queries the RabbitMQ management API.
@@ -76,7 +77,8 @@ func (c *Client) LiveJobRegions(ctx context.Context) (map[string]bool, error) {
 	}
 	live := map[string]bool{}
 	for _, q := range queues {
-		if q.Consumers > 0 && strings.HasPrefix(q.Name, jobsQueuePrefix) && !strings.HasPrefix(q.Name, jobsV2QueuePrefix) {
+		if q.Consumers > 0 && strings.HasPrefix(q.Name, jobsQueuePrefix) &&
+			!strings.HasPrefix(q.Name, jobsV2QueuePrefix) && !strings.HasPrefix(q.Name, jobsV3QueuePrefix) {
 			live[strings.TrimPrefix(q.Name, jobsQueuePrefix)] = true
 		}
 	}
@@ -95,6 +97,24 @@ func (c *Client) LiveCredentialJobRegions(ctx context.Context) (map[string]bool,
 	for _, q := range queues {
 		if q.Consumers > 0 && strings.HasPrefix(q.Name, jobsV2QueuePrefix) {
 			live[strings.TrimPrefix(q.Name, jobsV2QueuePrefix)] = true
+		}
+	}
+	return live, nil
+}
+
+// LiveCredentialV3JobRegions is the same existential check one generation further on: a
+// region qualifies only when something is consuming the generation-3 carrier. A consumer
+// on the older envelope queue is not evidence of readiness for the newer one — that is the
+// whole reason capability is generational rather than boolean (§4.7, D-0160).
+func (c *Client) LiveCredentialV3JobRegions(ctx context.Context) (map[string]bool, error) {
+	queues, err := c.liveQueues(ctx)
+	if err != nil {
+		return nil, err
+	}
+	live := map[string]bool{}
+	for _, q := range queues {
+		if q.Consumers > 0 && strings.HasPrefix(q.Name, jobsV3QueuePrefix) {
+			live[strings.TrimPrefix(q.Name, jobsV3QueuePrefix)] = true
 		}
 	}
 	return live, nil

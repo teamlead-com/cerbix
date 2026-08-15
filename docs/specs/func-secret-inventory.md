@@ -15,24 +15,28 @@ A**, which closes the amendment. Approval covers the SPEC, never its implementat
 accepted only against the §9 matrix plus
 D-0155/**D-0160**/traceability/runbook/iteration evidence.
 
-Implementation acceptance: **withdrawn pending the r7 amendment.** `iter-0116` accepted the
-implementation against the r6 matrix and that report stands as written — it is superseded
-here, not corrected: the r6 matrix could not have caught these three defects because it never
-asked for the tests §9 now requires. Re-acceptance needs a fresh iteration report against the
-amended matrix; `status.md`/`traceability.md` follow that report, not this line.
+Implementation acceptance: **still withdrawn after iter-0119.** `iter-0116` accepted the
+implementation against the r6 matrix and that report stands as written — it is superseded,
+not corrected: the r6 matrix could not have caught these defects because it never asked for
+the tests §9 now requires. iter-0119 fixed all four audit findings with regressions verified
+to fail when reverted, and closed §10 slice 4, but deliberately does NOT re-declare
+acceptance: three §9 items remain unevidenced (see that report's §8). Declaring DONE on the
+strength of the blockers being fixed would repeat the mistake this amendment exists to
+correct. `status.md`/`traceability.md` follow the report, not this line.
 
-**Gates until the amendment ships — two, with different scopes:**
+**Gates — two, with different scopes; both updated by iter-0119:**
 
-- **Availability gate (pull only).** Do not switch the feature on in a region served by an
-  HTTP-pull agent: the claim barrier there is two-directional and blackholes every
-  non-credentialed monitor in that region (§4.7, "one-directional" clause). AMQP regions do
-  not have this failure.
-- **Security statement (both transports).** Execution binding and the structural
-  envelope/field-set gates are absent from the shipped code, so on AMQP **and** pull a party
-  able to write to the job carrier can retarget a credentialed probe or strip its credential
-  and obtain an unauthenticated probe that still reports liveness. This is not a
-  pull-specific defect and is not fixed by holding the pull rollout; it is the reason the
-  cryptographic slice (§10, slice 4) gates re-acceptance for every transport.
+- **Availability gate (pull only) — LIFTED in iter-0119.** The claim barrier was
+  two-directional and blackholed every non-credentialed monitor in a pull region. It is
+  fixed (one atomic capability-bounded lease for jobs and tests), the regression is verified
+  to fail when the fix is reverted, and `make secret-smoke` exercises a live pull agent.
+- **Security statement (both transports) — ADDRESSED in iter-0119, acceptance still open.**
+  Execution binding, the structural gate and the field-set rules have shipped, so retargeting
+  a credentialed probe or stripping its credential now fails closed before any connection to
+  the target. Acceptance is not re-declared: three items of the §9 matrix remain unevidenced
+  (the fail-open case pinned against a live auth-less target, a browser E2E for the Secrets
+  panel lifecycle, and generation 3 exercised in a live mixed-capability fleet). See
+  [`iter-0119`](../iterations/iter-0119.md) §8.
 
 ## 1. Context & motivation
 
@@ -809,5 +813,9 @@ Each lands with its regression **verified to
 fail when the fix is reverted** — the three defects here all passed a green suite, so "the
 tests are green" is not evidence for this slice. `-race` in both storage modes throughout;
 a new iteration report re-establishes acceptance, and `status.md`/`traceability.md` move only
-with it. §9 gets a repeatable E2E gate (Make target, wired into `make dev-test`) rather than
-the standalone smoke script the audit found — an unrunnable check is not a check.
+with it. §9 gets a repeatable E2E gate rather than the standalone smoke script the audit found — an
+unrunnable check is not a check. It ships as its own Make target (`make secret-smoke`) and
+NOT inside `make dev-test`: D-0158 fixes that an E2E goal never starts, stops or redirects a
+stack, and this smoke owns its whole world (it builds the binary and provisions its own
+throwaway database). The requirement is that it be runnable on a clean checkout, which is
+what it now is.

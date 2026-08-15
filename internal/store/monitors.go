@@ -313,6 +313,24 @@ func prepareCredentialUpdate(typ domain.MonitorType, input map[string]string) (m
 	return prepared, preserve, nil
 }
 
+// storedCredentialTx reports which KIND of credential the stored row carries: a reference
+// name, or an inline write-only value. A safe reader sees neither, so a partial update has
+// to ask the row rather than the request.
+func (s *Store) storedCredentialTx(ctx context.Context, tx pgx.Tx, m domain.Monitor) (ref string, inline bool, err error) {
+	var raw []byte
+	if err := tx.QueryRow(ctx, `SELECT config FROM monitors WHERE id=$1 AND project_id=$2`, m.ID, m.ProjectID).Scan(&raw); err != nil {
+		if noRows(err) {
+			return "", false, ErrNotFound
+		}
+		return "", false, fmt.Errorf("store: read stored monitor credential: %w", err)
+	}
+	stored := map[string]string{}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return "", false, fmt.Errorf("store: decode stored monitor config: %w", err)
+	}
+	return stored["password_ref"], stored["password"] != "", nil
+}
+
 // marshalConfigForUpdateTx preserves the exact old ciphertext for a write-only inline
 // password omitted by a safe reader. It never decrypts that value. An explicit password
 // or password_ref replaces the old credential normally.
@@ -516,6 +534,27 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 		return domain.Monitor{}, fmt.Errorf("store: begin update monitor: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	// A partial update that omitted the credential slot keeps whatever the row already has,
+	// and that may be a REFERENCE rather than an inline value. The reference has to be
+	// restored HERE — before the bindings are resolved — or the stored config would keep a
+	// ref the normalized `monitor_secret_refs` table no longer has, which is the divergence
+	// §4.3 exists to prevent. Reading the old config takes no row lock, so the fixed order
+	// (secret rows, then the monitor row) is unaffected.
+	if preserveInline {
+		storedRef, storedInline, rerr := s.storedCredentialTx(ctx, tx, m)
+		if rerr != nil {
+			return domain.Monitor{}, rerr
+		}
+		switch {
+		case storedRef != "":
+			m.Config["password_ref"] = storedRef
+			preserveInline = false // the credential is a reference; nothing inline to carry
+		case storedInline:
+			// keep preserveInline: marshalConfigForUpdateTx carries the ciphertext forward
+		default:
+			return domain.Monitor{}, fmt.Errorf("store: credential settings require an existing credential to preserve")
+		}
+	}
 	// Fixed §4.3 order: referenced secret rows first, monitor row second.
 	bindings, err := s.monitorSecretBindings(ctx, tx, m.ProjectID, m)
 	if err != nil {

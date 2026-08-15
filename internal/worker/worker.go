@@ -24,6 +24,9 @@ type CredentialReadiness interface {
 
 // Pool is a fixed-size worker pool.
 type Pool struct {
+	// credentialTracker is shared with this process's test-RPC callback so both paths
+	// answer "is this executor credential-ready" with one streak, not two.
+	credentialTracker   *dispatch.CredentialHealth
 	dispatcher          dispatch.Dispatcher
 	runner              Runner
 	logger              *slog.Logger
@@ -54,7 +57,17 @@ func New(dispatcher dispatch.Dispatcher, runner Runner, size int, logger *slog.L
 	if size < 1 {
 		size = 1
 	}
-	return &Pool{dispatcher: dispatcher, runner: runner, logger: logger, size: size}
+	return &Pool{dispatcher: dispatcher, runner: runner, logger: logger, size: size, credentialTracker: &dispatch.CredentialHealth{}}
+}
+
+// WithCredentialHealthTracker shares one failure streak with this process's test-RPC
+// callback: a test and a scheduled job failing for the same reason are one executor being
+// unhealthy, not two independent signals.
+func (p *Pool) WithCredentialHealthTracker(t *dispatch.CredentialHealth) *Pool {
+	if t != nil {
+		p.credentialTracker = t
+	}
+	return p
 }
 
 // Run starts the workers and blocks until ctx is cancelled.
@@ -89,12 +102,16 @@ func (p *Pool) loop(ctx context.Context) {
 				reason := dispatch.CredentialProbeErrorReason(err)
 				p.logger.Error("credential_job_rejected", "monitor_id", job.Monitor.ID, "reason", reason)
 				p.publishProbeError(ctx, job, reason)
-				if reason != domain.ProbeErrorUnsupportedVersion {
+				// Persistent, not first (dispatch.CredentialHealth): a single corrupt or
+				// retired-key payload is a per-job diagnostic, and readiness routes work to
+				// the whole worker.
+				if p.credentialTracker.Failure(reason) {
 					p.setCredentialReady(false, reason)
 				}
 				continue
 			}
 			if materialized.UsedCredential {
+				p.credentialTracker.Success()
 				p.setCredentialReady(true, "")
 			}
 			hb := p.runner.Run(ctx, materialized.Monitor)

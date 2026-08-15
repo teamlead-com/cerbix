@@ -50,7 +50,11 @@ func TestCredentialHealthDegradesAndRecovers(t *testing.T) {
 	monitor := domain.Monitor{ID: "m1", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
 	badEnvelope, _ := otherRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-bad", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	goodEnvelope, _ := workerRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-good", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
+	// TWO mismatched envelopes before the good one: readiness degrades on a PERSISTENT key
+	// mismatch (§4.7), so a single retired-key or corrupt payload — ordinary traffic during
+	// a dispatch-key rotation — must not take the agent out of its region.
 	jobs := []dispatch.CheckJob{
+		{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: badEnvelope},
 		{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: badEnvelope},
 		{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: goodEnvelope},
 	}
@@ -75,15 +79,22 @@ func TestCredentialHealthDegradesAndRecovers(t *testing.T) {
 		WithCredentialHealth(health)
 	a.poll(context.Background())
 	health.mu.Lock()
-	if health.ready || health.reason != domain.ProbeErrorUnknownKeyID || len(health.errors) != 1 {
-		t.Fatalf("health after mismatch: ready=%v reason=%q errors=%v", health.ready, health.reason, health.errors)
+	if !health.ready || len(health.errors) != 1 || health.errors[0] != domain.ProbeErrorUnknownKeyID {
+		t.Fatalf("one mismatch degraded readiness: ready=%v errors=%v", health.ready, health.errors)
+	}
+	health.mu.Unlock()
+
+	a.poll(context.Background())
+	health.mu.Lock()
+	if health.ready || health.reason != domain.ProbeErrorUnknownKeyID || len(health.errors) != 2 {
+		t.Fatalf("health after a persistent mismatch: ready=%v reason=%q errors=%v", health.ready, health.reason, health.errors)
 	}
 	health.mu.Unlock()
 
 	a.poll(context.Background())
 	health.mu.Lock()
 	defer health.mu.Unlock()
-	if !health.ready || health.reason != "" || len(health.errors) != 1 {
+	if !health.ready || health.reason != "" || len(health.errors) != 2 {
 		t.Fatalf("health after recovery: ready=%v reason=%q errors=%v", health.ready, health.reason, health.errors)
 	}
 }

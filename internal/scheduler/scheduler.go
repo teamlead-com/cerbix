@@ -673,17 +673,24 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 						continue
 					}
 					for _, item := range items {
+						// A monitor the authoritative read found disabled, deleted or of a
+						// non-dispatchable type is SKIPPED, not failed (§4.4.3). It leaves the
+						// failure path entirely — no warning, no failure counter, no backoff —
+						// because the snapshot nominating a row the row itself has since
+						// disabled is ordinary reconcile churn, and dressing it as an
+						// operational error is how a metric and a log both learn to cry wolf.
+						// Cadence is not advanced either: the monitor simply is not due.
+						if item.Reason == store.MaterializeSkippedCurrentState {
+							delete(credentialFailures, item.MonitorID)
+							delete(credentialLastLog, item.MonitorID)
+							continue
+						}
 						if item.Reason != "" {
 							if last := credentialLastLog[item.MonitorID]; last.IsZero() || now.Sub(last) >= credentialFailureLogEvery {
 								credentialLastLog[item.MonitorID] = now
 								s.logger.Warn("credential_materialization_rejected", "monitor_id", item.MonitorID, "reason", item.Reason)
 							}
-							// A monitor the authoritative read found disabled, deleted or of a
-							// non-dispatchable type is SKIPPED, not failed (§4.4.3): counting it
-							// in a failure metric makes ordinary reconcile churn look like broken
-							// credentials, and an alert that fires on normal operation is an
-							// alert people mute.
-							if s.secretResolution != nil && item.Reason != store.MaterializeSkippedCurrentState {
+							if s.secretResolution != nil {
 								s.secretResolution.RecordSecretResolutionFailure(item.Reason)
 							}
 							if snap, ok := byID[item.MonitorID]; ok {

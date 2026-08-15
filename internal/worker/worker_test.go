@@ -107,8 +107,11 @@ func TestCredentialFailurePublishesTypedProbeError(t *testing.T) {
 		if !hb.Ts.IsZero() {
 			t.Fatalf("probe_error must not masquerade as heartbeat: ts=%v", hb.Ts)
 		}
-		if got := readiness.last(); got.ready || got.reason != domain.ProbeErrorUnknownKeyID {
-			t.Fatalf("readiness after key mismatch = %+v", got)
+		// One mismatch is a per-job diagnostic, not an unhealthy executor: readiness
+		// degrades on a PERSISTENT key mismatch (§4.7), and during a dispatch-key rotation
+		// an envelope under a retired key id is expected traffic.
+		if got := readiness.last(); !got.ready {
+			t.Fatalf("a single key mismatch degraded worker readiness: %+v", got)
 		}
 		readiness.mu.Lock()
 		if len(readiness.probeErrors) != 1 || readiness.probeErrors[0] != domain.ProbeErrorUnknownKeyID {
@@ -117,6 +120,19 @@ func TestCredentialFailurePublishesTypedProbeError(t *testing.T) {
 		readiness.mu.Unlock()
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker did not publish probe_error")
+	}
+
+	// A second mismatch makes it persistent, and the worker goes unready.
+	if err := disp.PublishJob(ctx, dispatch.CheckJob{Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: envelope}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-disp.Results():
+		if got := readiness.last(); got.ready || got.reason != domain.ProbeErrorUnknownKeyID {
+			t.Fatalf("readiness after a persistent key mismatch = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not publish the second probe_error")
 	}
 }
 

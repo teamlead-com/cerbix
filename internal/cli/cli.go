@@ -919,6 +919,10 @@ func runServe(args []string) int {
 			}
 			spawn(func() { sch.Run(ctx) })
 		case "worker":
+			// One failure streak for this whole executor process: the job loop and the
+			// test-RPC callback both report into it, so a test and a scheduled job failing
+			// for the same reason are one unhealthy executor rather than two signals.
+			workerCredentialHealth := &dispatch.CredentialHealth{}
 			// Answer region-scoped "Test connection" RPCs for this worker's region.
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
 				workerRegion := *region
@@ -932,18 +936,23 @@ func runServe(args []string) int {
 				// consumer that received the message, and every delivery crosses the same
 				// gate — the legacy consumer used to call the prober directly, which made
 				// it the only executor path with no gate at all.
+				// The test path shares the worker pool's failure streak: a test and a
+				// scheduled job that fail for the same reason are the same executor being
+				// unhealthy, not two independent signals.
+				credentialHealth := workerCredentialHealth
 				serveTest := func(ctx context.Context, delivered dispatch.DeliveredJob) (domain.Heartbeat, error) {
 					materialized, err := dispatch.ValidateAndMaterialize(ring, delivered)
 					if err != nil {
 						reason := dispatch.CredentialProbeErrorReason(err)
 						registry.RecordExecutorProbeError(reason)
-						if reason != domain.ProbeErrorUnsupportedVersion {
+						if credentialHealth.Failure(reason) {
 							registry.SetCredentialReady(false, reason)
 						}
 						return dispatch.ProbeErrorHeartbeat(delivered.Job, reason), nil
 					}
 					defer materialized.Cleanup()
 					if materialized.UsedCredential {
+						credentialHealth.Success()
 						registry.SetCredentialReady(true, "")
 					}
 					return runner.Run(ctx, materialized.Monitor), nil
@@ -973,7 +982,8 @@ func runServe(args []string) int {
 				workerRegion = domain.DefaultRegion
 			}
 			if ring, ok := credentialRings.ForRegion(workerRegion); ok && cfg.Secrets.EnvelopeEnforced() {
-				wk.WithCredentialKeyring(ring).WithCredentialReadiness(registry)
+				wk.WithCredentialKeyring(ring).WithCredentialReadiness(registry).
+					WithCredentialHealthTracker(workerCredentialHealth)
 			}
 			spawn(func() { wk.Run(ctx) })
 		case "api":

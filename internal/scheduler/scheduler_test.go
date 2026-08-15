@@ -658,3 +658,41 @@ func TestPublishFailureRecoversAndIsCountedSeparately(t *testing.T) {
 		}
 	}
 }
+
+// TestSkippedMonitorIsNotAFailure closes the audit P2 the first pass only half-fixed: the
+// metric stopped counting a skip, but the WARN, the failure counter and the backoff still
+// treated it as one. A snapshot nominating a row the authoritative read finds disabled is
+// ordinary reconcile churn (§4.4.3) — calling it an operational error is how a metric and a
+// log both learn to cry wolf.
+func TestSkippedMonitorIsNotAFailure(t *testing.T) {
+	monitor := domain.Monitor{
+		ID: "skipped-monitor", Type: domain.MonitorPostgres, Target: "db:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 1, TimeoutSeconds: 5,
+	}
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor}}
+	// The authoritative read reports the row as no longer dispatchable.
+	fs.materialize = func(ids []string) ([]store.MaterializedExecution, error) {
+		out := make([]store.MaterializedExecution, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, store.MaterializedExecution{MonitorID: id, Reason: store.MaterializeSkippedCurrentState})
+		}
+		return out, nil
+	}
+	sink := &countingSecretSink{}
+	s := New(fs, dispatch.NewInProc(4), testLogger()).WithCredentialEnvelopes(true).
+		WithCredentialLiveRegions(staticCredentialRegions{"secure": true}).
+		WithSecretResolutionMetrics(sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	time.Sleep(2500 * time.Millisecond) // several ticks, each nominating the same row
+
+	secret, transport := sink.snapshot()
+	if len(secret) != 0 {
+		t.Fatalf("a skipped monitor was counted as a secret-resolution failure: %v", secret)
+	}
+	if len(transport) != 0 {
+		t.Fatalf("a skipped monitor was counted as a transport failure: %v", transport)
+	}
+}

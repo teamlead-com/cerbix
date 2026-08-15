@@ -175,6 +175,7 @@ watch(() => [route.params.id, ws.projectId], load);
               type="button"
               :disabled="saving || !!policyError"
               class="flex h-[34px] items-center rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50"
+              data-testid="service-declaration-save"
               @click="save"
             >
               {{ saving ? "Saving…" : `Save as revision ${nextRevision}` }}
@@ -182,7 +183,7 @@ watch(() => [route.params.id, ws.projectId], load);
           </div>
         </div>
 
-        <p v-if="saveError" class="mb-4 rounded border border-down/40 bg-down-weak p-3 text-[13px] text-down">{{ saveError }}</p>
+        <p v-if="saveError" data-testid="service-save-error" class="mb-4 rounded border border-down/40 bg-down-weak p-3 text-[13px] text-down">{{ saveError }}</p>
 
         <!-- The vertical rule between the columns is the load-bearing element: without it,
              "let me add a Redis check for diagnostics" silently redefines availability. -->
@@ -208,7 +209,13 @@ watch(() => [route.params.id, ws.projectId], load);
                   class="flex cursor-pointer items-center gap-[9px] rounded-sm px-2 py-[6px] text-[13px] hover:bg-surface-2"
                   :class="{ 'opacity-55': m.enabled === false }"
                 >
-                  <input type="checkbox" class="accent-accent" :checked="context.has(m.id!)" @change="toggleContext(m.id!)" />
+                  <input
+                    type="checkbox"
+                    class="accent-accent"
+                    :data-testid="'service-context-' + slugOf(m)"
+                    :checked="context.has(m.id!)"
+                    @change="toggleContext(m.id!)"
+                  />
                   <span class="font-mono">{{ slugOf(m) }}</span>
                   <span class="ml-auto text-[11.5px] text-ink-3">{{ m.type }} · {{ m.region || "core" }}</span>
                   <span v-if="m.enabled === false" class="rounded-xs border border-border px-[5px] text-[10.5px] text-ink-3">disabled</span>
@@ -232,6 +239,7 @@ watch(() => [route.params.id, ws.projectId], load);
                   <input
                     type="checkbox"
                     class="accent-accent"
+                    :data-testid="'service-sli-' + slugOf(m)"
                     :checked="sli.has(m.id!)"
                     :disabled="!context.has(m.id!)"
                     @change="toggleSli(m.id!)"
@@ -316,7 +324,7 @@ watch(() => [route.params.id, ws.projectId], load);
             </div>
           </div>
 
-          <div v-if="policyError" class="mx-4 mb-4 flex items-start gap-2 rounded border border-down/40 bg-down-weak p-3 text-[12.5px] text-down">
+          <div v-if="policyError" data-testid="service-policy-error" class="mx-4 mb-4 flex items-start gap-2 rounded border border-down/40 bg-down-weak p-3 text-[12.5px] text-down">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="mt-px shrink-0"><circle cx="12" cy="12" r="9"/><path d="M12 7v6"/><path d="M12 16.5h.01"/></svg>
             <span>{{ policyError }}</span>
           </div>

@@ -103,6 +103,7 @@ watch(() => [route.params.id, ws.projectId], load);
         v-if="canWrite"
         :to="{ name: 'service-declaration', params: { id: serviceId } }"
         class="flex h-[34px] items-center rounded-sm border border-border px-[13px] text-[13px] text-ink-2 hover:border-border-strong hover:text-ink"
+        data-testid="service-edit-declaration"
       >
         Edit declaration
       </RouterLink>
@@ -155,7 +156,7 @@ watch(() => [route.params.id, ws.projectId], load);
             </span>
           </header>
 
-          <div v-if="!detail.declaration" class="px-4 py-8 text-center text-[13px] text-ink-3">
+          <div v-if="!detail.declaration" class="px-4 py-8 text-center text-[13px] text-ink-3" data-testid="service-no-declaration">
             Nothing declared yet. This service reports <b>no availability</b> — not 100%.
             <RouterLink v-if="canWrite" :to="{ name: 'service-declaration', params: { id: serviceId } }" class="text-accent hover:underline">
               Declare its reliability inputs.
@@ -183,11 +184,11 @@ watch(() => [route.params.id, ws.projectId], load);
                 <span class="font-normal normal-case tracking-normal text-ink-3"> — what counts toward availability</span>
               </div>
               <ul class="mt-3 flex flex-col gap-[6px]">
-                <li v-for="id in detail.declaration.sli" :key="id" class="flex items-center gap-2 text-[13px]">
+                <li v-for="id in detail.declaration.sli" :key="id" class="flex items-center gap-2 text-[13px]" data-testid="service-sli-member">
                   <span class="font-mono">{{ label(id) }}</span>
                   <span class="ml-auto rounded-full bg-accent-weak px-[8px] py-px text-[11px] font-medium text-accent">counts</span>
                 </li>
-                <li v-for="id in contextOnly" :key="'d-' + id" class="flex items-center gap-2 text-[13px] opacity-55">
+                <li v-for="id in contextOnly" :key="'d-' + id" class="flex items-center gap-2 text-[13px] opacity-55" data-testid="service-diagnostic-member">
                   <span class="font-mono">{{ label(id) }}</span>
                   <span class="ml-auto text-[11.5px] text-ink-3">diagnostic only</span>
                 </li>

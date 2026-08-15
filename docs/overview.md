@@ -120,7 +120,8 @@ flowchart LR
 | `worker` | Goroutine pool, probe execution with `context.WithTimeout`. |
 | `prober` | `Prober` registry by monitor type + conditions engine; SSRF guard. |
 | `ingest` | Result consumer: heartbeats, status flip (atomic), auto-incidents, transitions into the outbox. |
-| `sla` | SLI/SLO/error-budget/burn-rate (pure computations). |
+| `sla` | SLI/SLO/error-budget/burn-rate for a MONITOR (pure computations). |
+| `reliability` | Reliability of a **service** (FR-021): a piecewise reducer over breakpoints producing duration-weighted facts on two conserved axes. Pure — no I/O, no clock. |
 | `incidents`↔`api`/`store` | Incidents, timeline updates, postmortems, external-key correlation (Alertmanager). |
 | `statuspage`/`feed`/`subscribe` | Public status pages, RSS/Atom/JSON feeds, subscribers. |
 | `notify` | Delivery of transitions/alerts to channels (webhook/Slack/Telegram/email). |
@@ -133,6 +134,16 @@ flowchart LR
 | `totp` | RFC 6238 (2FA). |
 | `metrics`/`logging`/`buildinfo` | Prometheus (`cerbix_*`), slog JSON, build info. |
 | `web` | `embed.FS` with the built SPA. |
+
+**Services (FR-021, phase 1).** A `Service` is the unit whose reliability is *explicitly
+declared*, and it sits BESIDE monitors rather than above them: a monitor may contribute to
+several services' reliability inputs, or to none. Two axes are stored separately — a
+`definition_revision` is what a human declared availability to MEAN, an `evaluation_epoch` is
+what the system was MEASURING — and a fact references the epoch alone. Facts are sealed
+bucket by bucket, and the watermark `sealed_through` is defined by **contiguity**, so a gap
+holds it back instead of being jumped over. Phase 1 ships the declaration, the epoch, the seal
+and the file-provider format-2 surface; availability over a window, the error budget and the
+burn rate are phase 2 and are **absent** from the API rather than returned as zeros.
 
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
 `mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `push` (dead-man's-switch).

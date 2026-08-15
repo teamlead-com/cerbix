@@ -85,6 +85,7 @@ watch(() => ws.projectId, load);
         v-if="canWrite"
         type="button"
         class="flex h-[34px] items-center gap-[7px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2"
+        data-testid="service-create-open"
         @click="openCreate"
       >
         <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14" /></svg>
@@ -118,7 +119,7 @@ watch(() => ws.projectId, load);
               </tr>
             </thead>
             <tbody>
-              <tr v-for="r in rows" :key="r.service.id" class="group hover:bg-surface-2">
+              <tr v-for="r in rows" :key="r.service.id" class="group hover:bg-surface-2" data-testid="service-row" :data-slug="r.service.slug">
                 <td class="border-b border-border px-4 py-[11px]">
                   <RouterLink :to="{ name: 'service', params: { id: r.service.id } }" class="font-medium text-ink hover:text-accent">
                     {{ r.service.name }}
@@ -146,9 +147,9 @@ watch(() => ws.projectId, load);
                      the reader can see they were declared separately. -->
                 <td class="border-b border-border px-4 py-[11px]">
                   <template v-if="r.revision">
-                    <span class="font-mono text-[12.5px]">{{ r.sli_members }}</span>
+                    <span class="font-mono text-[12.5px]" data-testid="service-sli-count">{{ r.sli_members }}</span>
                     <span class="text-ink-3"> SLI of </span>
-                    <span class="font-mono text-[12.5px]">{{ r.context_members }}</span>
+                    <span class="font-mono text-[12.5px]" data-testid="service-context-count">{{ r.context_members }}</span>
                     <span class="text-ink-3"> monitors</span>
                     <div v-if="!r.sli_members" class="mt-[2px] text-[11.5px] text-ink-3">
                       operational context only — reports no availability
@@ -161,12 +162,12 @@ watch(() => ws.projectId, load);
                      fell behind shows a lagging timestamp instead of a plausible picture. -->
                 <td class="border-b border-border px-4 py-[11px]">
                   <template v-if="r.sealed_through">
-                    <div class="font-mono text-[12.5px]">{{ sealedLabel(r.sealed_through) }}</div>
+                    <div class="font-mono text-[12.5px]" data-testid="service-sealed">{{ sealedLabel(r.sealed_through) }}</div>
                     <div v-if="lagLabel(r.sealed_through)" class="mt-[2px] text-[11.5px] text-degraded">
                       {{ lagLabel(r.sealed_through) }} behind
                     </div>
                   </template>
-                  <span v-else class="text-[12.5px] text-ink-3">not materialized yet</span>
+                  <span v-else class="text-[12.5px] text-ink-3" data-testid="service-unsealed">not materialized yet</span>
                   <div v-if="r.repairing_count" class="mt-[3px] text-[11.5px] text-degraded">
                     {{ r.repairing_count }} range{{ r.repairing_count === 1 ? "" : "s" }} repairing
                   </div>
@@ -204,6 +205,7 @@ watch(() => ws.projectId, load);
               v-model="newSlug"
               class="h-[34px] rounded-sm border border-border bg-surface-2 px-[10px] font-mono text-[13px] outline-none focus:border-accent"
               placeholder="checkout"
+              data-testid="service-create-slug"
               pattern="[a-z][a-z0-9-]{0,62}"
               required
               autofocus
@@ -215,12 +217,13 @@ watch(() => ws.projectId, load);
               v-model="newName"
               class="h-[34px] rounded-sm border border-border bg-surface-2 px-[10px] text-[13px] outline-none focus:border-accent"
               placeholder="Checkout"
+              data-testid="service-create-name"
             />
           </label>
           <p v-if="createError" class="text-[12.5px] text-down">{{ createError }}</p>
           <div class="mt-1 flex justify-end gap-2">
             <button type="button" class="h-[32px] rounded-sm border border-border px-3 text-[13px] text-ink-2 hover:border-border-strong" @click="creating = false">Cancel</button>
-            <button type="submit" :disabled="saving" class="h-[32px] rounded-sm bg-accent px-3 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-60">
+            <button type="submit" :disabled="saving" data-testid="service-create-submit" class="h-[32px] rounded-sm bg-accent px-3 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-60">
               {{ saving ? "Creating…" : "Create service" }}
             </button>
           </div>

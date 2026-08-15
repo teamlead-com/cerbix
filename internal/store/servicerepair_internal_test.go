@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func rangeRows(t *testing.T, st *Store, ctx context.Context, serviceID string) []RepairRange {
@@ -378,5 +380,47 @@ func TestACrashedLeadersClaimIsReclaimedAfterItsLease(t *testing.T) {
 	// It resumes from the durable cursor rather than restarting.
 	if !reclaimed.Cursor.Equal(claimed.Cursor) {
 		t.Errorf("resumed at %s, want the durable cursor %s", reclaimed.Cursor, claimed.Cursor)
+	}
+}
+
+// A same-boundary declaration race must displace only ITS OWN work.
+//
+// The first implementation cancelled every pending range starting at or after the boundary,
+// which meant an operator's admin recompute, a confirmed maintenance repair or an adoption
+// backfill was silently discarded by an unrelated declaration write — and left no complaint,
+// because a superseded range says nothing to anyone.
+func TestASameBoundaryDeclarationDoesNotDiscardUnrelatedWork(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	// Work owned by nobody in the declaration axis, starting in the future so any boundary
+	// this test writes lands at or before it.
+	from := domain.CeilToBucket(time.Now().UTC().Add(2 * time.Minute))
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, from, from.Add(time.Hour), ReasonAdmin); err != nil {
+		t.Fatalf("enqueue admin range: %v", err)
+	}
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, from.Add(2*time.Hour), from.Add(3*time.Hour), ReasonMaintenance); err != nil {
+		t.Fatalf("enqueue maintenance range: %v", err)
+	}
+
+	// Two declarations in quick succession: the second claims the same boundary and
+	// supersedes the first.
+	for rev := int64(1); rev <= 2; rev++ {
+		if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+			Monitors: []string{f.http, f.redis}, SLI: []string{f.http},
+		}, rev, DeclarationOptions{CreatedBy: "op"}); err != nil {
+			t.Fatalf("declaration %d: %v", rev, err)
+		}
+	}
+
+	var alive int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_repair_ranges
+		  WHERE service_id=$1 AND reason IN ('admin','maintenance') AND state='pending'`,
+		f.serviceID).Scan(&alive); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if alive != 2 {
+		t.Fatalf("%d of 2 unrelated ranges survived a declaration write; the rest were discarded with no record", alive)
 	}
 }

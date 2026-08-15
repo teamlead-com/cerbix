@@ -314,3 +314,91 @@ func TestAnnulRequiresAPreviewAndRepairsTheRange(t *testing.T) {
 		t.Error("annul enqueued no repair; the past it claims was wrong would never be recomputed")
 	}
 }
+
+// The regression the shipped suite was missing entirely: a confirmed retroactive mutation
+// must CHANGE THE NUMBERS.
+//
+// Every existing test stopped at "a repair range was enqueued", and that was satisfied by
+// code in which the repair walked the range, hit `state='sealed'`, returned, and left every
+// stale fact exactly where it was. The watermark then advanced over them again. Asserting on
+// the queue instead of the result is how a repair path that repairs nothing passes review.
+func TestConfirmedAnnulActuallyRewritesTheSealedFacts(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	// A window covering the first two buckets, applied while they were already sealed GOOD.
+	w, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "planned",
+	})
+	if err != nil {
+		t.Fatalf("seed window: %v", err)
+	}
+	// Recompute under the window so the sealed facts carry the exclusion…
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(2*time.Minute), ReasonMaintenance); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	drainRepair(t, st, ctx)
+
+	excluded, ok := readFact(t, st, ctx, f.serviceID, base)
+	if !ok {
+		t.Fatal("no fact for the first bucket")
+	}
+	if excluded.excluded == 0 {
+		t.Fatalf("the sealed bucket was never recomputed under the window: %+v — repair is a no-op over sealed facts", excluded)
+	}
+	if excluded.state != "sealed" {
+		t.Errorf("a recomputed bucket became %q; correcting a final number must not un-seal it", excluded.state)
+	}
+
+	// …then annul the window, which says it never applied, and require the facts to come back.
+	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(2*time.Minute), rawFloor, "op")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, p.ID, rawFloor); err != nil {
+		t.Fatalf("annul: %v", err)
+	}
+	drainRepair(t, st, ctx)
+
+	restored, _ := readFact(t, st, ctx, f.serviceID, base)
+	if restored.excluded != 0 {
+		t.Errorf("after annul the bucket still excludes %d us; the annul repaired nothing", restored.excluded)
+	}
+	if restored.good == 0 {
+		t.Error("after annul the bucket records no good time; the recompute did not restore the observation")
+	}
+
+	// And the restatement of a sealed number is on the record, with both sides.
+	var audits int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_logs WHERE action='service.bucket_recomputed' AND target LIKE '%'||$1||'%'`,
+		f.serviceID).Scan(&audits); err != nil {
+		t.Fatalf("count audits: %v", err)
+	}
+	if audits == 0 {
+		t.Error("a sealed number changed with no audit row; a silent restatement is indistinguishable from rot")
+	}
+}
+
+// drainRepair runs the leader's service slice until the queue empties, exactly as the
+// scheduler sub-tick does.
+func drainRepair(t *testing.T, st *Store, ctx context.Context) {
+	t.Helper()
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader session: %v ok=%v", err, ok)
+	}
+	defer ls.Release()
+	for i := 0; i < 50; i++ {
+		worked, err := ls.RunServiceRepairSlice(ctx, time.Now().Add(2*time.Second))
+		if err != nil {
+			t.Fatalf("repair slice: %v", err)
+		}
+		if !worked {
+			return
+		}
+	}
+	t.Fatal("repair queue never drained")
+}

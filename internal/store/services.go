@@ -419,11 +419,51 @@ func ensureMaterializationRowTx(ctx context.Context, tx pgx.Tx, projectID, servi
 // nothing. An execution change must never mutate a declaration; that is the point of
 // splitting the two axes.
 func supersedeEpochsAtBoundary(ctx context.Context, tx pgx.Tx, serviceID string, effectiveAt time.Time) error {
-	if _, err := tx.Exec(ctx,
+	rows, err := tx.Query(ctx,
 		`UPDATE service_evaluation_epochs SET state = 'superseded_before_effect'
-		  WHERE service_id = $1 AND effective_at = $2 AND state = 'effective'`,
-		serviceID, effectiveAt); err != nil {
+		  WHERE service_id = $1 AND effective_at = $2 AND state = 'effective'
+		  RETURNING id`,
+		serviceID, effectiveAt)
+	if err != nil {
 		return fmt.Errorf("store: supersede epoch at boundary: %w", err)
+	}
+	ids, err := collectIDs(rows)
+	if err != nil {
+		return err
+	}
+	return cancelRangesOfOrigin(ctx, tx, serviceID, ids)
+}
+
+func collectIDs(rows pgx.Rows) ([]string, error) {
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: scan superseded id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// cancelRangesOfOrigin cancels durable work that belonged to rows which never took effect.
+//
+// Scoping this to the ORIGIN is the whole point. The first implementation cancelled every
+// pending or running range starting at or after the boundary, so writing a declaration
+// silently discarded an operator's admin recompute, a confirmed maintenance repair and an
+// adoption backfill that happened to start there — the exact opposite of the union
+// preservation coalescing exists to guarantee, and invisible, because a superseded range
+// leaves no complaint behind.
+func cancelRangesOfOrigin(ctx context.Context, tx pgx.Tx, serviceID string, originIDs []string) error {
+	if len(originIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE service_repair_ranges SET state = 'superseded', updated_at = now()
+		  WHERE service_id = $1 AND origin_id = ANY($2) AND state IN ('pending','running')`,
+		serviceID, originIDs); err != nil {
+		return fmt.Errorf("store: cancel superseded ranges: %w", err)
 	}
 	return nil
 }
@@ -432,23 +472,23 @@ func supersedeEpochsAtBoundary(ctx context.Context, tx pgx.Tx, serviceID string,
 // revision and any epoch already claiming it yield, and the durable ranges scoped to them
 // are cancelled.
 func supersedeAtBoundary(ctx context.Context, tx pgx.Tx, serviceID string, effectiveAt time.Time) error {
-	if _, err := tx.Exec(ctx,
+	rows, err := tx.Query(ctx,
 		`UPDATE service_definition_revisions SET state = 'superseded_before_effect'
-		  WHERE service_id = $1 AND effective_at = $2 AND state = 'effective'`,
-		serviceID, effectiveAt); err != nil {
+		  WHERE service_id = $1 AND effective_at = $2 AND state = 'effective'
+		  RETURNING id`,
+		serviceID, effectiveAt)
+	if err != nil {
 		return fmt.Errorf("store: supersede revision at boundary: %w", err)
+	}
+	revisionIDs, err := collectIDs(rows)
+	if err != nil {
+		return err
+	}
+	if err := cancelRangesOfOrigin(ctx, tx, serviceID, revisionIDs); err != nil {
+		return err
 	}
 	if err := supersedeEpochsAtBoundary(ctx, tx, serviceID, effectiveAt); err != nil {
 		return err
-	}
-	// A row that never took effect governs no bucket, so work scoped to it is work with no
-	// target. Cancelling it here — in the same transaction — is what stops a job from
-	// outliving the row that asked for it.
-	if _, err := tx.Exec(ctx,
-		`UPDATE service_repair_ranges SET state = 'superseded', updated_at = now()
-		  WHERE service_id = $1 AND range_start >= $2 AND state IN ('pending','running')`,
-		serviceID, effectiveAt); err != nil {
-		return fmt.Errorf("store: cancel superseded ranges: %w", err)
 	}
 	return nil
 }

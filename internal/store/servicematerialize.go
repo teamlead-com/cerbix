@@ -38,7 +38,7 @@ func (s *Store) MaterializeServiceRange(ctx context.Context, projectID, serviceI
 		return 0, fmt.Errorf("store: begin materialize: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	n, err := s.materializeRangeTx(ctx, tx, projectID, serviceID, from, to)
+	n, err := s.materializeRangeTx(ctx, tx, projectID, serviceID, from, to, modeOrdinary)
 	if err != nil {
 		return 0, err
 	}
@@ -52,13 +52,13 @@ func (s *Store) MaterializeServiceRange(ctx context.Context, projectID, serviceI
 // connection — the repair path, which sets server-side timeouts on its own session, and
 // later the leader running on its lock-owning connection — can supply its own transaction
 // rather than taking a fresh one from the pool.
-func (s *Store) materializeRangeTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to time.Time) (int, error) {
+func (s *Store) materializeRangeTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to time.Time, mode materializeMode) (int, error) {
 	if !to.After(from) {
 		return 0, fmt.Errorf("store: materialize range end %s is not after start %s", to, from)
 	}
 	buckets := 0
 	for start := from; start.Before(to); start = start.Add(domain.CanonicalBucket) {
-		done, err := s.materializeBucketTx(ctx, tx, projectID, serviceID, start)
+		done, err := s.materializeBucketTx(ctx, tx, projectID, serviceID, start, mode)
 		if err != nil {
 			return 0, err
 		}
@@ -72,8 +72,26 @@ func (s *Store) materializeRangeTx(ctx context.Context, tx pgx.Tx, projectID, se
 	return buckets, nil
 }
 
+// materializeMode says whether a caller is allowed to rewrite finality.
+type materializeMode int
+
+const (
+	// modeOrdinary keeps a sealed bucket immutable. This is the forward driver: it is
+	// keeping up with the clock and has no authority to restate a settled number.
+	modeOrdinary materializeMode = iota
+	// modeRecompute rewrites a sealed bucket. Only durable repair runs in this mode, and
+	// only because something already audited — a confirmed retroactive maintenance
+	// mutation, a re-declaration, an admin recompute — established that the sealed number
+	// was computed from inputs that have since been corrected.
+	//
+	// Without this mode the whole repair path was a no-op over exactly the buckets it
+	// existed to fix: it walked the range, hit `state='sealed'`, returned, and left the
+	// stale facts in place while the watermark happily advanced over them again.
+	modeRecompute
+)
+
 // materializeBucketTx computes one bucket. It reports whether a fact was written.
-func (s *Store) materializeBucketTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, start time.Time) (bool, error) {
+func (s *Store) materializeBucketTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, start time.Time, mode materializeMode) (bool, error) {
 	end := start.Add(domain.CanonicalBucket)
 
 	// The seal is a compare-and-swap, and this is where it starts: MATERIALIZE the ingest
@@ -95,13 +113,16 @@ func (s *Store) materializeBucketTx(ctx context.Context, tx pgx.Tx, projectID, s
 	// A sealed bucket is immutable to ordinary materialization. Rewriting it is an audited
 	// recompute or repair, and neither of those comes through here.
 	var existingState string
+	var existingGood, existingBad int64
 	err := tx.QueryRow(ctx,
-		`SELECT state FROM service_reliability_buckets WHERE service_id=$1 AND bucket_start=$2`,
-		serviceID, start).Scan(&existingState)
+		`SELECT state, good_us, bad_us FROM service_reliability_buckets
+		  WHERE service_id=$1 AND bucket_start=$2`,
+		serviceID, start).Scan(&existingState, &existingGood, &existingBad)
 	if err != nil && !noRows(err) {
 		return false, fmt.Errorf("store: read bucket state: %w", err)
 	}
-	if existingState == "sealed" {
+	wasSealed := existingState == "sealed"
+	if wasSealed && mode == modeOrdinary {
 		return false, nil
 	}
 
@@ -157,7 +178,10 @@ func (s *Store) materializeBucketTx(ctx context.Context, tx pgx.Tx, projectID, s
 	state := "provisional"
 	var sealedAt *time.Time
 	var sealedGeneration *int64
-	if seal {
+	// A recompute of an already-sealed bucket stays SEALED. Correcting a final number does
+	// not make it provisional again: the evidence window closed long ago, and un-sealing it
+	// would let the contiguity watermark rewind for a bucket that is now MORE correct.
+	if seal || wasSealed {
 		state = "sealed"
 		sealedAt = &now
 		sealedGeneration = &generation
@@ -187,7 +211,35 @@ func (s *Store) materializeBucketTx(ctx context.Context, tx pgx.Tx, projectID, s
 		state, sealedAt, sealedGeneration, maintenanceGeneration, provenance); err != nil {
 		return false, fmt.Errorf("store: write bucket %s: %w", start, err)
 	}
+
+	// Restating a SEALED number is an audited act. Someone quoted that figure; if it changed,
+	// the record has to say so, with both sides of the change — a recompute that leaves no
+	// trace is indistinguishable from data quietly rotting.
+	if wasSealed && (existingGood != d.Good.Microseconds() || existingBad != d.Bad.Microseconds()) {
+		if err := recordRecomputeAuditTx(ctx, tx, projectID, serviceID, start,
+			existingGood, existingBad, d.Good.Microseconds(), d.Bad.Microseconds()); err != nil {
+			return false, err
+		}
+	}
 	return true, nil
+}
+
+// recordRecomputeAuditTx writes the before/after of a sealed bucket that changed, in the same
+// transaction as the change itself.
+func recordRecomputeAuditTx(
+	ctx context.Context, tx pgx.Tx, projectID, serviceID string, bucket time.Time,
+	beforeGood, beforeBad, afterGood, afterBad int64,
+) error {
+	target := fmt.Sprintf("service=%s bucket=%s good_us %d->%d bad_us %d->%d",
+		serviceID, bucket.UTC().Format(time.RFC3339), beforeGood, afterGood, beforeBad, afterBad)
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
+		 SELECT p.org_id, NULL, false, 'service.bucket_recomputed', $2
+		   FROM projects p WHERE p.id = $1`,
+		projectID, target); err != nil {
+		return fmt.Errorf("store: audit recompute: %w", err)
+	}
+	return nil
 }
 
 // epochAt returns the epoch governing an instant, its snapshotted members translated into
@@ -438,7 +490,7 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 		if !time.Now().Before(deadline) {
 			break
 		}
-		if _, err := s.materializeBucketTx(ctx, tx, projectID, serviceID, at); err != nil {
+		if _, err := s.materializeBucketTx(ctx, tx, projectID, serviceID, at, modeOrdinary); err != nil {
 			return true, err
 		}
 		reached = at.Add(domain.CanonicalBucket)

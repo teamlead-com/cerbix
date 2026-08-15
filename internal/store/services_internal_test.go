@@ -206,11 +206,15 @@ func TestSupersededRevisionCancelsItsRanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
+	// The range carries the ORIGIN that asked for it. That is what makes it this revision's
+	// work rather than everyone's: supersession displaces the origin's own queue and leaves
+	// unrelated admin/maintenance/backfill work alone (see
+	// TestASameBoundaryDeclarationDoesNotDiscardUnrelatedWork).
 	var rangeID string
 	if err := st.pool.QueryRow(ctx,
-		`INSERT INTO service_repair_ranges (service_id, project_id, range_start, range_end, reason)
-		 VALUES ($1,$2,$3,$4,'declaration') RETURNING id`,
-		f.serviceID, f.projectID, first.EffectiveAt, first.EffectiveAt.Add(time.Hour)).Scan(&rangeID); err != nil {
+		`INSERT INTO service_repair_ranges (service_id, project_id, range_start, range_end, reason, origin_id)
+		 VALUES ($1,$2,$3,$4,'declaration',$5) RETURNING id`,
+		f.serviceID, f.projectID, first.EffectiveAt, first.EffectiveAt.Add(time.Hour), first.ID).Scan(&rangeID); err != nil {
 		t.Fatalf("range: %v", err)
 	}
 

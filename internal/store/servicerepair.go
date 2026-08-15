@@ -300,7 +300,7 @@ func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, fr
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-	if _, err := s.materializeRangeTx(ctx, tx, r.ProjectID, r.ServiceID, from, to); err != nil {
+	if _, err := s.materializeRangeTx(ctx, tx, r.ProjectID, r.ServiceID, from, to, modeRecompute); err != nil {
 		return err
 	}
 

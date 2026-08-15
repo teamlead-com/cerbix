@@ -37,6 +37,7 @@ type fakePullTest struct {
 }
 
 type fakeStore struct {
+	services           map[string]*fakeService
 	orgs               map[string]domain.Organization
 	projects           map[string]domain.Project
 	users              map[string]domain.User
@@ -1975,4 +1976,111 @@ func (f *fakeStore) ListProjectSecrets(_ context.Context, projectID string) ([]s
 		})
 	}
 	return out, nil
+}
+
+// ── Service reliability (FR-021 phase 1) ────────────────────────────────────────────────
+//
+// The fake keeps just enough state to exercise the handlers: the resource, the declaration
+// last written and the epoch that came with it. The store's own tests cover the transactional
+// contract; these exist so the HTTP surface is not tested against a mock that agrees with
+// whatever it is told.
+
+type fakeService struct {
+	svc    domain.Service
+	rev    *domain.DefinitionRevision
+	epoch  *domain.EvaluationEpoch
+	detail store.ServiceDetail
+}
+
+func (f *fakeStore) serviceStore() map[string]*fakeService {
+	if f.services == nil {
+		f.services = map[string]*fakeService{}
+	}
+	return f.services
+}
+
+func (f *fakeStore) ListServices(_ context.Context, projectID string) ([]domain.Service, error) {
+	var out []domain.Service
+	for _, fs := range f.serviceStore() {
+		if fs.svc.ProjectID == projectID {
+			out = append(out, fs.svc)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	return out, nil
+}
+
+func (f *fakeStore) CreateService(_ context.Context, svc domain.Service) (domain.Service, error) {
+	for _, fs := range f.serviceStore() {
+		if fs.svc.ProjectID == svc.ProjectID && fs.svc.Slug == svc.Slug {
+			// The real store maps the unique violation to ErrConflict; a fake that
+			// returned a bare error would let a 500 pass for a 409.
+			return domain.Service{}, store.ErrConflict
+		}
+	}
+	svc.ID = "svc-" + svc.Slug
+	svc.CreatedAt, svc.UpdatedAt = time.Now().UTC(), time.Now().UTC()
+	f.serviceStore()[svc.ID] = &fakeService{svc: svc}
+	return svc, nil
+}
+
+func (f *fakeStore) ServiceDetail(_ context.Context, projectID, serviceID string) (store.ServiceDetail, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return store.ServiceDetail{}, store.ErrNotFound
+	}
+	d := store.ServiceDetail{Service: fs.svc, Declaration: fs.rev, Epoch: fs.epoch}
+	d.SealedThrough = fs.detail.SealedThrough
+	d.Repairing = fs.detail.Repairing
+	return d, nil
+}
+
+func (f *fakeStore) PutServiceDeclaration(
+	_ context.Context, projectID, serviceID string,
+	decl domain.ServiceDeclaration, expectedRevision int64, opts store.DeclarationOptions,
+) (domain.DefinitionRevision, domain.EvaluationEpoch, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, store.ErrNotFound
+	}
+	inContext := map[string]bool{}
+	for _, m := range decl.Monitors {
+		inContext[m] = true
+	}
+	for _, m := range decl.SLI {
+		if !inContext[m] {
+			return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, store.ErrSLINotInContext
+		}
+	}
+	var current int64
+	if fs.rev != nil {
+		current = fs.rev.Revision
+	}
+	if current != expectedRevision {
+		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, store.ErrRevisionConflict
+	}
+	now := time.Now().UTC()
+	rev := domain.DefinitionRevision{
+		ID: "rev", ServiceID: serviceID, ProjectID: projectID, Revision: current + 1,
+		CreatedAt: now, EffectiveAt: domain.CeilToBucket(now), State: domain.RevisionEffective,
+		Monitors: decl.Monitors, SLI: decl.SLI, Policies: decl.Policies, CreatedBy: opts.CreatedBy,
+	}
+	// Every revision gets a matching epoch, unconditionally — the fake mirrors that, so a
+	// handler test cannot pass against a store that forgot it.
+	epoch := domain.EvaluationEpoch{
+		ID: "epoch", ServiceID: serviceID, ProjectID: projectID, Seq: rev.Revision,
+		RevisionID: rev.ID, CreatedAt: now, EffectiveAt: rev.EffectiveAt,
+		State: domain.RevisionEffective, SnapshotHash: "hash",
+	}
+	fs.rev, fs.epoch = &rev, &epoch
+	return rev, epoch, nil
+}
+
+func (f *fakeStore) DeleteService(_ context.Context, projectID, serviceID string) error {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return store.ErrNotFound
+	}
+	delete(f.serviceStore(), serviceID)
+	return nil
 }

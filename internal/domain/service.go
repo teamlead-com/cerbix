@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -115,12 +116,73 @@ type RegionAggregationPolicy struct {
 	HealthyMinRegions  int        `json:"healthy_min_regions,omitempty"`
 }
 
+// ValidServiceSlug reports whether s is a well-formed service slug, and SlugPattern is that
+// rule spelled for an error message.
+//
+// A service slug and a monitor slug are the same rule — both get typed into a bundle by hand
+// and both become a URL segment — so this delegates instead of restating it. Two spellings of
+// one rule is exactly how two surfaces drift apart.
+func ValidServiceSlug(s string) bool { return ValidMonitorSlug(s) }
+
 // FreshnessPolicy resolves how long a member's last observation stays effective. It is
 // applied once, when the evaluation epoch snapshots the member, so a recompute of an old
 // range uses the deadline in force then rather than today's.
 type FreshnessPolicy struct {
 	ActiveMultiplier int           `json:"active_multiplier,omitempty"`
 	ActiveFloor      time.Duration `json:"active_floor,omitempty"`
+}
+
+// The file surface spells this field `90s` and a bare time.Duration would spell the same
+// value `90000000000` over JSON. One policy field with two spellings is the same defect as
+// two validators: an operator reading the API and an operator reading the bundle would
+// disagree about what they had declared. So JSON uses the duration string too.
+//
+// Reads accept BOTH: rows written before this codec existed hold the integer.
+func (f FreshnessPolicy) MarshalJSON() ([]byte, error) {
+	out := struct {
+		ActiveMultiplier int    `json:"active_multiplier,omitempty"`
+		ActiveFloor      string `json:"active_floor,omitempty"`
+	}{ActiveMultiplier: f.ActiveMultiplier}
+	if f.ActiveFloor != 0 {
+		out.ActiveFloor = f.ActiveFloor.String()
+	}
+	return json.Marshal(out)
+}
+
+func (f *FreshnessPolicy) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		ActiveMultiplier int             `json:"active_multiplier"`
+		ActiveFloor      json.RawMessage `json:"active_floor"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	f.ActiveMultiplier = raw.ActiveMultiplier
+	f.ActiveFloor = 0
+	if len(raw.ActiveFloor) == 0 || string(raw.ActiveFloor) == "null" {
+		return nil
+	}
+	if raw.ActiveFloor[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw.ActiveFloor, &s); err != nil {
+			return err
+		}
+		if s == "" {
+			return nil
+		}
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("freshness.active_floor: %w", err)
+		}
+		f.ActiveFloor = d
+		return nil
+	}
+	var ns int64
+	if err := json.Unmarshal(raw.ActiveFloor, &ns); err != nil {
+		return fmt.Errorf("freshness.active_floor must be a duration string: %w", err)
+	}
+	f.ActiveFloor = time.Duration(ns)
+	return nil
 }
 
 // ServicePolicies is the part of a definition revision the evaluator reads. It is stored

@@ -159,6 +159,13 @@ type Store interface {
 	CreateProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name, value string) (store.ProjectSecret, error)
 	UpdateProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error)
 	DeleteProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string) error
+	// Service reliability (FR-021 phase 1).
+	ListServices(ctx context.Context, projectID string) ([]domain.Service, error)
+	CreateService(ctx context.Context, svc domain.Service) (domain.Service, error)
+	ServiceDetail(ctx context.Context, projectID, serviceID string) (store.ServiceDetail, error)
+	PutServiceDeclaration(ctx context.Context, projectID, serviceID string, decl domain.ServiceDeclaration, expectedRevision int64, opts store.DeclarationOptions) (domain.DefinitionRevision, domain.EvaluationEpoch, error)
+	DeleteService(ctx context.Context, projectID, serviceID string) error
+
 	ListProjectSecrets(ctx context.Context, projectID string) ([]store.ProjectSecret, error)
 }
 
@@ -407,6 +414,15 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/availability", h.projectAvailability)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla", h.projectSLA)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-report", h.setProjectSLAReport)
+	// Service reliability (FR-021 phase 1): the resource, its declaration and the state of
+	// materialization. SLO/budget/burn are phase 2 and have no endpoint yet — an endpoint
+	// that answered with zeros would be worse than one that does not exist.
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services", h.listServices)
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/services", h.createService)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}", h.getService)
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/declaration", h.putServiceDeclaration)
+	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/services/{serviceID}", h.deleteService)
+
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/secrets", h.listSecrets)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/secrets", h.createSecret)
 	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/secrets/{name}", h.updateSecret)

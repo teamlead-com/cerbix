@@ -109,7 +109,7 @@ func decodeServices(raw map[string]rawService) (map[string]DesiredService, error
 }
 
 func decodeService(slug string, rs rawService) (DesiredService, error) {
-	if !domain.ValidMonitorSlug(slug) {
+	if !domain.ValidServiceSlug(slug) {
 		return DesiredService{}, rejectf(ReasonDomainInvalid, slug,
 			"service key %q must match %s", slug, domain.MonitorSlugPattern())
 	}

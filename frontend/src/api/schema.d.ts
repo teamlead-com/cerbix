@@ -1389,6 +1389,247 @@ export interface paths {
         };
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/services": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List the project's services
+         * @description A Service is where it is explicitly declared what reliability MEANS for one operational unit. Services sit BESIDE monitors, not above them: a monitor may contribute to several services or to none.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Service"][];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a service (editor+)
+         * @description Creates the resource with NO declaration. That is a complete state, not a half-finished one: a service with no reliability inputs reports availability as unavailable rather than as 100%.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateServiceRequest"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Service"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description The slug is already in use in this project. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * One service with its declaration, evaluation epoch and materialization state
+         * @description Two axes, deliberately separate: `declaration` is what a human declared availability to MEAN, `epoch` is what the system was MEASURING. A fact references the epoch alone.
+         *
+         *     `materialization.sealed_through` is defined by CONTIGUITY, so a gap holds it back rather than being jumped over — a lagging timestamp is the honest answer, and any range listed under `repairing` must be rendered as work in progress, never as data.
+         *
+         *     `reliability` is always `null` in this release: SLO, error budget and burn rate are phase 2. The field is present-and-null rather than absent so a client can tell "no answer yet" from "the field moved", and no zero is ever shipped that a UI could render as a number.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ServiceDetail"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /** Delete a service and everything derived from it (editor+) */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description The service is owned by a file provider (`managed_by_file`) — ownership persists while orphaned, so absence from a bundle is not a release. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/declaration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Declare what availability means for this service (editor+)
+         * @description Writes a new definition revision AND the evaluation epoch that makes it evaluable, in one transaction — a revision with no epoch would be a reference no fact could point at. The write is prospective: `effective_at` is the next bucket boundary, so history already sealed under the previous revision is never restated.
+         *
+         *     `expected_revision` is required (0 means "no declaration yet"). A mismatch is a 409, never a merge: two operators editing an SLI have made two different statements about what availability means.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PutDeclarationRequest"];
+                };
+            };
+            responses: {
+                /** @description The new revision and its epoch. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            declaration: components["schemas"]["ServiceDeclaration"];
+                            epoch: components["schemas"]["EvaluationEpoch"];
+                        };
+                    };
+                };
+                /** @description `sli_not_in_monitors` (an SLI member outside the evaluation context would be a number with no visible source), `retroactive_not_first_revision`, or a malformed body. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description `revision_conflict` (stale `expected_revision`) or `managed_by_file` (the file source, not the UI, is where this service's meaning is edited). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/sla": {
         parameters: {
             query?: never;
@@ -4924,6 +5165,161 @@ export interface components {
         Error: {
             error?: string;
         };
+        Service: {
+            /** Format: uuid */
+            id: string;
+            /** @description Project-unique and IMMUTABLE — it is what a bundle and a dashboard both reference. */
+            slug: string;
+            name: string;
+            description?: string;
+            /** Format: uuid */
+            escalation_policy_id?: string;
+            /** Format: uuid */
+            oncall_schedule_id?: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description The file provider that owns this service; empty when it is UI-owned. Present so the UI can disable the controls rather than discover the 409. */
+            managed_by?: string;
+        };
+        CreateServiceRequest: {
+            slug: string;
+            /** @description Defaults to the slug when omitted. */
+            name?: string;
+            description?: string;
+            /** Format: uuid */
+            escalation_policy_id?: string;
+            /** Format: uuid */
+            oncall_schedule_id?: string;
+        };
+        AggregationPolicy: {
+            /** @enum {string} */
+            mode?: "all" | "any" | "quorum";
+            /** @description The AVAILABILITY threshold: at least this many good members means the service was serving. Declared against the declared member cardinality and clamped to the eligible one at evaluation time. */
+            degraded_min?: number;
+            /** @description Splits GOOD into healthy and degraded only. degraded_min <= healthy_min, so availability has exactly one good branch. */
+            healthy_min?: number;
+        };
+        RegionAggregationPolicy: {
+            /**
+             * @description `any_region` and `all_regions` are sugar; both normalize to per_region thresholds.
+             * @enum {string}
+             */
+            mode?: "per_region" | "any_region" | "all_regions";
+            degraded_min_regions?: number;
+            healthy_min_regions?: number;
+        };
+        /** @description How long a member's last observation stays effective. Resolved ONCE, when the epoch snapshots the member, so recomputing an old range uses the deadline in force then. Push monitors instead mirror the product's own dead-man cutoff (interval + grace). */
+        FreshnessPolicy: {
+            active_multiplier?: number;
+            /**
+             * @description Go duration string — the same spelling the file bundle uses.
+             * @example 1m30s
+             */
+            active_floor?: string;
+        };
+        /** @description The part of a definition revision the evaluator reads. Validated by ONE validator, shared with the file provider — a second validator would be a second answer. */
+        ServicePolicies: {
+            aggregation?: components["schemas"]["AggregationPolicy"];
+            region?: components["schemas"]["RegionAggregationPolicy"];
+            /**
+             * @description What an UNKNOWN member contributes. `ignore` drops it only while other KNOWN members keep the interval decidable — otherwise it is a one-line change that buys 100% coverage on a service which measured nothing.
+             * @enum {string}
+             */
+            missing_data?: "unknown" | "bad" | "ignore";
+            /**
+             * @description A member inside a window leaves both numerator and denominator.
+             * @enum {string}
+             */
+            maintenance?: "exclude";
+            freshness?: components["schemas"]["FreshnessPolicy"];
+        };
+        /** @description What a human declared availability to MEAN, as of `effective_at`. */
+        ServiceDeclaration: {
+            /** Format: int64 */
+            revision: number;
+            /**
+             * Format: date-time
+             * @description The bucket boundary from which this revision applies. Always in the future at write time (first-adoption backfill excepted), so sealed history is never restated under a definition it was not measured with.
+             */
+            effective_at: string;
+            /** Format: date-time */
+            created_at: string;
+            created_by?: string;
+            /** @description The evaluation CONTEXT — what this service is made of. Separate from `sli` on purpose: collapsing them would invite a client to keep two lists in sync. */
+            monitors: string[];
+            /** @description The reliability inputs. A strict subset of `monitors`. */
+            sli: string[];
+            policies: components["schemas"]["ServicePolicies"];
+        };
+        /** @description What the system was MEASURING. A fact references the epoch only, and an epoch resolves to exactly one definition revision. */
+        EvaluationEpoch: {
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            seq: number;
+            /** Format: date-time */
+            effective_at: string;
+            /** @description Canonical hash of the members' evaluation semantics. An edit that cannot change how a member is evaluated leaves it unchanged, so renaming a monitor does not open an epoch. */
+            snapshot_hash: string;
+            /** @description Snapshotted member count. */
+            members: number;
+        };
+        RepairRange: {
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            reason: string;
+            state: string;
+            /**
+             * Format: date-time
+             * @description How far the repair has progressed.
+             */
+            cursor?: string;
+            attempts: number;
+            last_error?: string;
+        };
+        ServiceMaterialization: {
+            /** Format: date-time */
+            materialization_start?: string;
+            /**
+             * Format: date-time
+             * @description Defined by CONTIGUITY: a hole holds it back rather than being jumped over. Null means nothing has been sealed yet. Facts after this point are not final.
+             */
+            sealed_through?: string;
+            /** Format: date-time */
+            retracted_at?: string;
+            /** Format: date-time */
+            retracted_to?: string;
+            /** @description Ranges whose numbers are not currently trustworthy. Always present (empty, never null) so a client need not branch. Render as repairing, never as data. */
+            repairing: components["schemas"]["RepairRange"][];
+        };
+        ServiceDetail: {
+            service: components["schemas"]["Service"];
+            /** @description Null when nothing has been declared — the service then reports no availability, not 100%. */
+            declaration: components["schemas"]["ServiceDeclaration"] | null;
+            epoch: components["schemas"]["EvaluationEpoch"] | null;
+            materialization: components["schemas"]["ServiceMaterialization"];
+            /** @description Always null in this release. SLO, error budget and burn rate are phase 2; a zero a client could render as a number would be exactly the confident falsehood this feature exists to prevent. */
+            reliability: unknown;
+        };
+        PutDeclarationRequest: {
+            /**
+             * Format: int64
+             * @description The revision the caller observed; 0 means "no declaration yet". A mismatch is 409.
+             */
+            expected_revision: number;
+            monitors: string[];
+            sli: string[];
+            policies?: components["schemas"]["ServicePolicies"];
+            /**
+             * Format: date-time
+             * @description Makes the FIRST declaration retroactive, adopting existing history. What it produces is a DECLARED RECONSTRUCTION evaluated with today's members — not evidence about how they were configured then — and the UI must label it as such. Allowed on the first revision only.
+             */
+            backfill_from?: string;
+        };
         /** @description One project-inventory secret: names and metadata only. Values are write-only and never appear in any API response. */
         ProjectSecret: {
             /** Format: uuid */
@@ -6090,6 +6486,7 @@ export interface components {
         MonitorID: string;
         IncidentID: string;
         PageID: string;
+        ServiceID: string;
         /** @description Secret name (slug) within the project inventory. */
         SecretName: string;
         /** @description Feed serialization; defaults to RSS 2.0. */

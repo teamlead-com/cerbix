@@ -50,8 +50,14 @@ func lockServiceMembership(ctx context.Context, tx pgx.Tx, projectID string) err
 // a valid state — operational context and no SLO — and it reports availability as
 // unavailable rather than as 100%.
 func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.Service, error) {
-	if svc.ProjectID == "" || svc.Slug == "" || svc.Name == "" {
-		return domain.Service{}, fmt.Errorf("store: service requires project_id, slug and name")
+	if svc.ProjectID == "" || svc.Name == "" {
+		return domain.Service{}, fmt.Errorf("store: service requires project_id and name")
+	}
+	// The slug is the URL segment AND the bundle's reference key, so a malformed one is a
+	// broken reference in two places. Both callers already check; the store checks too,
+	// because it is the one place every future caller has to come through.
+	if !domain.ValidServiceSlug(svc.Slug) {
+		return domain.Service{}, fmt.Errorf("store: service slug must match %s", domain.MonitorSlugPattern())
 	}
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO services (project_id, slug, name, description, escalation_policy_id, oncall_schedule_id)
@@ -61,7 +67,14 @@ func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.S
 		           created_at, updated_at`,
 		svc.ProjectID, svc.Slug, svc.Name, svc.Description,
 		nullableID(svc.EscalationPolicyID), nullableID(svc.OncallScheduleID))
-	return scanService(row)
+	out, err := scanService(row)
+	if isUniqueViolation(err) {
+		// The slug is project-unique and IMMUTABLE, so a collision is not something the
+		// caller can be helped past by retrying with the same input — it is a conflict,
+		// and the 500 it would otherwise become would hide that.
+		return domain.Service{}, ErrConflict
+	}
+	return out, err
 }
 
 // GetService reads one service by id, scoped to its project.
@@ -100,14 +113,57 @@ func (s *Store) ListServices(ctx context.Context, projectID string) ([]domain.Se
 // rows, late arrivals and repair ranges — in one transaction, so nothing is left pointing
 // at a service that no longer exists.
 func (s *Store) DeleteService(ctx context.Context, projectID, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM services WHERE id = $1 AND project_id = $2`, id, projectID)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("store: delete service: %w", err)
+		return fmt.Errorf("store: begin delete service: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	// Take the row first, so a file apply claiming ownership serializes behind this check
+	// rather than racing it. Absence of the row is ErrNotFound before ownership is consulted.
+	var one int
+	err = tx.QueryRow(ctx,
+		`SELECT 1 FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`, id, projectID).Scan(&one)
+	if noRows(err) {
 		return ErrNotFound
 	}
+	if err != nil {
+		return fmt.Errorf("store: lock service: %w", err)
+	}
+	if err := assertServiceNotFileManagedTx(ctx, tx, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM services WHERE id = $1 AND project_id = $2`, id, projectID); err != nil {
+		return fmt.Errorf("store: delete service: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit delete service: %w", err)
+	}
 	return nil
+}
+
+// ErrServiceManagedByFile is returned by the UI/API write paths when the target service is
+// owned by a file provider. A declaration written here would be silently restated by the very
+// next reconcile — the file, not the UI, is where that service's meaning is edited. Ownership
+// blocks regardless of orphan state: there is no automatic release.
+//
+// It is distinct from ErrManagedByFile (monitors) only so the message stays true; both map to
+// the same 409.
+var ErrServiceManagedByFile = errors.New("store: service is managed by a file provider")
+
+// assertServiceNotFileManagedTx rejects a UI write to a file-owned service. The caller holds
+// the service row (or the membership lock), so the check is atomic against a concurrent apply.
+func assertServiceNotFileManagedTx(ctx context.Context, tx pgx.Tx, serviceID string) error {
+	var one int
+	err := tx.QueryRow(ctx,
+		`SELECT 1 FROM managed_services WHERE service_id = $1`, serviceID).Scan(&one)
+	if noRows(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("store: service ownership check: %w", err)
+	}
+	return ErrServiceManagedByFile
 }
 
 type scannable interface {
@@ -180,6 +236,11 @@ func (s *Store) PutServiceDeclaration(
 
 	// §15.4 lock order, outermost first. Nothing below may be taken before these.
 	if err := lockServiceMembership(ctx, tx, projectID); err != nil {
+		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
+	}
+	// Only the UI path guards ownership: the file apply reaches putServiceDeclarationTx
+	// directly, which is exactly the write this refuses to let a human make behind its back.
+	if err := assertServiceNotFileManagedTx(ctx, tx, serviceID); err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
 	}
 	rev, epoch, err := s.putServiceDeclarationTx(ctx, tx, projectID, serviceID, monitors, sli, decl.Policies, expectedRevision, opts)
@@ -575,4 +636,144 @@ func resolveMonitorSlugTx(ctx context.Context, tx pgx.Tx, m domain.Monitor) (str
 		}
 		candidate = fmt.Sprintf("%s-%d", base, n)
 	}
+}
+
+// ServiceDetail is everything the read API needs about one service: what was declared, what
+// is being measured, and how far materialization has actually got.
+type ServiceDetail struct {
+	Service     domain.Service
+	Declaration *domain.DefinitionRevision
+	Epoch       *domain.EvaluationEpoch
+	ManagedBy   string
+
+	MaterializationStart *time.Time
+	SealedThrough        *time.Time
+	RetractedAt          *time.Time
+	RetractedTo          *time.Time
+	// Repairing are the ranges whose numbers are not currently trustworthy. They are part of
+	// the read surface rather than an internal detail: a range still being computed must
+	// read as work in progress, not as missing data.
+	Repairing []RepairRange
+}
+
+// ServiceDetail reads one service with its declaration, the epoch in force, and the state of
+// materialization.
+func (s *Store) ServiceDetail(ctx context.Context, projectID, serviceID string) (ServiceDetail, error) {
+	var out ServiceDetail
+	svc, err := s.GetService(ctx, projectID, serviceID)
+	if err != nil {
+		return ServiceDetail{}, err
+	}
+	out.Service = svc
+
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE((SELECT provider_id FROM managed_services WHERE service_id = $1), '')`,
+		serviceID).Scan(&out.ManagedBy); err != nil {
+		return ServiceDetail{}, fmt.Errorf("store: read service ownership: %w", err)
+	}
+
+	rev := domain.DefinitionRevision{ServiceID: serviceID, ProjectID: projectID}
+	var policyJSON []byte
+	err = s.pool.QueryRow(ctx,
+		`SELECT id, revision, created_at, effective_at, policies, created_by
+		   FROM service_definition_revisions
+		  WHERE service_id = $1 AND state = 'effective'
+		  ORDER BY effective_at DESC, revision DESC LIMIT 1`, serviceID).
+		Scan(&rev.ID, &rev.Revision, &rev.CreatedAt, &rev.EffectiveAt, &policyJSON, &rev.CreatedBy)
+	switch {
+	case noRows(err):
+		// A service with no declaration is a valid state, not an error.
+	case err != nil:
+		return ServiceDetail{}, fmt.Errorf("store: read declaration: %w", err)
+	default:
+		if err := json.Unmarshal(policyJSON, &rev.Policies); err != nil {
+			return ServiceDetail{}, fmt.Errorf("store: decode policies: %w", err)
+		}
+		rev.State = domain.RevisionEffective
+		if rev.Monitors, rev.SLI, err = revisionMembers(ctx, s.pool, rev.ID); err != nil {
+			return ServiceDetail{}, err
+		}
+		out.Declaration = &rev
+	}
+
+	epoch := domain.EvaluationEpoch{ServiceID: serviceID, ProjectID: projectID}
+	var snapshot []byte
+	err = s.pool.QueryRow(ctx,
+		`SELECT id, epoch_seq, revision_id, created_at, effective_at, snapshot, snapshot_hash
+		   FROM service_evaluation_epochs
+		  WHERE service_id = $1 AND state = 'effective'
+		  ORDER BY effective_at DESC, epoch_seq DESC LIMIT 1`, serviceID).
+		Scan(&epoch.ID, &epoch.Seq, &epoch.RevisionID, &epoch.CreatedAt, &epoch.EffectiveAt, &snapshot, &epoch.SnapshotHash)
+	switch {
+	case noRows(err):
+	case err != nil:
+		return ServiceDetail{}, fmt.Errorf("store: read epoch: %w", err)
+	default:
+		if err := json.Unmarshal(snapshot, &epoch.Members); err != nil {
+			return ServiceDetail{}, fmt.Errorf("store: decode epoch snapshot: %w", err)
+		}
+		epoch.State = domain.RevisionEffective
+		out.Epoch = &epoch
+	}
+
+	err = s.pool.QueryRow(ctx,
+		`SELECT materialization_start, sealed_through, retracted_at, retracted_to
+		   FROM service_materialization WHERE service_id = $1`, serviceID).
+		Scan(&out.MaterializationStart, &out.SealedThrough, &out.RetractedAt, &out.RetractedTo)
+	if err != nil && !noRows(err) {
+		return ServiceDetail{}, fmt.Errorf("store: read materialization: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT range_start, range_end, reason, state, cursor_at, attempts, last_error
+		   FROM service_repair_ranges
+		  WHERE service_id = $1 AND state IN ('pending','running','error')
+		  ORDER BY range_start`, serviceID)
+	if err != nil {
+		return ServiceDetail{}, fmt.Errorf("store: read repair ranges: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rr RepairRange
+		var reason string
+		var cursor *time.Time
+		if err := rows.Scan(&rr.From, &rr.To, &reason, &rr.State, &cursor, &rr.Attempts, &rr.LastError); err != nil {
+			return ServiceDetail{}, fmt.Errorf("store: scan repair range: %w", err)
+		}
+		rr.Reason = RepairReason(reason)
+		if cursor != nil {
+			rr.Cursor = *cursor
+		}
+		out.Repairing = append(out.Repairing, rr)
+	}
+	return out, rows.Err()
+}
+
+// revisionMembers reads a revision's two member lists, which are stored separately because
+// they are separately declared.
+func revisionMembers(ctx context.Context, q queryRower2, revisionID string) (monitors, sli []string, err error) {
+	rows, err := q.Query(ctx,
+		`SELECT monitor_id, role FROM service_definition_members WHERE revision_id = $1 ORDER BY monitor_id`,
+		revisionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: read revision members: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, role string
+		if err := rows.Scan(&id, &role); err != nil {
+			return nil, nil, fmt.Errorf("store: scan revision member: %w", err)
+		}
+		switch domain.MemberRole(role) {
+		case domain.RoleContext:
+			monitors = append(monitors, id)
+		case domain.RoleSLI:
+			sli = append(sli, id)
+		}
+	}
+	return monitors, sli, rows.Err()
+}
+
+type queryRower2 interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }

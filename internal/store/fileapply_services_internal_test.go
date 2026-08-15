@@ -296,3 +296,117 @@ func TestFormat1BundleDoesNotOrphanServices(t *testing.T) {
 		t.Error("the service was marked orphaned by a bundle that cannot express services")
 	}
 }
+
+// A file-owned service is READ-ONLY through the UI path. Letting the declaration through
+// would be worse than a 409: the very next reconcile restates it from the file, so the
+// operator's edit to what availability MEANS would vanish with nothing to show for it.
+func TestUIDeclarationOnAFileOwnedServiceIsRefused(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	applyServiceBundle(t, st, ctx, svcBundle)
+
+	var svcID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM services WHERE project_id=$1 AND slug='checkout'`, projID).Scan(&svcID); err != nil {
+		t.Fatalf("service row: %v", err)
+	}
+	var monID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM monitors WHERE project_id=$1 AND slug='checkout-http'`, projID).Scan(&monID); err != nil {
+		t.Fatalf("monitor row: %v", err)
+	}
+
+	_, _, err := st.PutServiceDeclaration(ctx, projID, svcID, domain.ServiceDeclaration{
+		Monitors: []string{monID}, SLI: []string{monID},
+	}, 1, DeclarationOptions{CreatedBy: "operator"})
+	if !errors.Is(err, ErrServiceManagedByFile) {
+		t.Fatalf("got %v, want ErrServiceManagedByFile", err)
+	}
+
+	// ...and the file's own declaration is the one still in force.
+	var revisions int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_definition_revisions WHERE service_id=$1`, svcID).Scan(&revisions); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if revisions != 1 {
+		t.Errorf("%d revisions, want the file's one", revisions)
+	}
+}
+
+// Deleting a file-owned service through the UI is refused for the same reason, and the
+// refusal survives ORPHANING: absence from a bundle never releases ownership, so an orphaned
+// service is still the file's to delete.
+func TestDeletingAFileOwnedServiceIsRefusedEvenWhenOrphaned(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	applyServiceBundle(t, st, ctx, svcBundle)
+
+	var svcID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM services WHERE project_id=$1 AND slug='checkout'`, projID).Scan(&svcID); err != nil {
+		t.Fatalf("service row: %v", err)
+	}
+	if err := st.DeleteService(ctx, projID, svcID); !errors.Is(err, ErrServiceManagedByFile) {
+		t.Fatalf("got %v, want ErrServiceManagedByFile", err)
+	}
+
+	withoutServices := strings.Split(svcBundle, "services:")[0] + "services: {}\n"
+	applyServiceBundle(t, st, ctx, withoutServices)
+	if err := st.DeleteService(ctx, projID, svcID); !errors.Is(err, ErrServiceManagedByFile) {
+		t.Fatalf("orphaned: got %v, want ErrServiceManagedByFile — orphaning is not a release", err)
+	}
+	var rows int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM services WHERE id=$1`, svcID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Error("the refused delete removed the service anyway")
+	}
+}
+
+// A UI-owned service is deletable, so the guard above is about OWNERSHIP and not about
+// services in general.
+func TestDeletingAUIOwnedServiceSucceeds(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	svc, err := st.CreateService(ctx, domain.Service{ProjectID: projID, Slug: "cart", Name: "Cart"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := st.DeleteService(ctx, projID, svc.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := st.DeleteService(ctx, projID, svc.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second delete = %v, want ErrNotFound", err)
+	}
+}
+
+// A slug collision is a conflict the caller can act on, not an internal error.
+func TestDuplicateServiceSlugIsAConflict(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	if _, err := st.CreateService(ctx, domain.Service{ProjectID: projID, Slug: "cart", Name: "Cart"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, err := st.CreateService(ctx, domain.Service{ProjectID: projID, Slug: "cart", Name: "Cart again"})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("got %v, want ErrConflict", err)
+	}
+}
+
+// The slug is the URL segment and the bundle's reference key. The store refuses a malformed
+// one even though both of today's callers check first — it is the choke point every future
+// caller has to come through.
+func TestStoreRefusesAMalformedServiceSlug(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	for _, slug := range []string{"", "Checkout", "check out", "check/out", "1checkout", strings.Repeat("a", 64)} {
+		if _, err := st.CreateService(ctx, domain.Service{ProjectID: projID, Slug: slug, Name: "n"}); err == nil {
+			t.Errorf("slug %q was accepted", slug)
+		}
+	}
+	if _, err := st.CreateService(ctx, domain.Service{ProjectID: projID, Slug: "check-out-2", Name: "n"}); err != nil {
+		t.Errorf("a well-formed slug was refused: %v", err)
+	}
+}

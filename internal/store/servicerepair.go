@@ -48,6 +48,10 @@ type RepairRange struct {
 	Cursor     time.Time
 	Generation int64
 	Attempts   int
+	// State and LastError are read-surface fields: a range still being computed must show as
+	// work in progress rather than as missing data.
+	State     string
+	LastError string
 }
 
 // ErrRangeSuperseded is returned when a batch finds the world moved under it.

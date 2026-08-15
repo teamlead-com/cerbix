@@ -192,3 +192,180 @@ func TestPrepareCredentialSettings(t *testing.T) {
 		t.Fatalf("blank rabbitmq path = %q, err %v", rmBlank["path"], err)
 	}
 }
+
+// TestCredentialRegistryClassifiesEveryField is the growth guard required by D-0160: the
+// registry is the single source for validation, normalization, the expected credential
+// field set and the execution-binding keys, so a key added without a binding class would
+// silently land outside `body_digest` — the exact way a digest lags a new prober setting
+// and reopens the hole it exists to close. The zero value is unclassified and fails here.
+func TestCredentialRegistryClassifiesEveryField(t *testing.T) {
+	for typ, schema := range credentialSchemas {
+		for variantKey, variant := range schema.variants {
+			if len(variant.fields) == 0 {
+				t.Errorf("%s/%q: variant declares no fields", typ, variantKey)
+			}
+			if variant.requirement == CredentialInvalid {
+				t.Errorf("%s/%q: variant declares no credential requirement", typ, variantKey)
+			}
+			seen := map[string]bool{}
+			for _, f := range variant.fields {
+				if f.binding == bindingUnclassified {
+					t.Errorf("%s/%q: field %q has no binding class — classify it as execution, secret value or secret ref", typ, variantKey, f.key)
+				}
+				if f.key == "" {
+					t.Errorf("%s/%q: field with an empty key", typ, variantKey)
+				}
+				if seen[f.key] {
+					t.Errorf("%s/%q: field %q declared twice", typ, variantKey, f.key)
+				}
+				seen[f.key] = true
+				if f.enum != nil && f.enumMsg == "" {
+					t.Errorf("%s/%q: field %q has an enum but no error message", typ, variantKey, f.key)
+				}
+			}
+			// A schema that requires a credential must declare exactly where it goes.
+			hasSecret := false
+			for _, f := range variant.fields {
+				if f.binding == bindingSecretValue {
+					hasSecret = true
+				}
+			}
+			if variant.requirement == CredentialRequired && !hasSecret {
+				t.Errorf("%s/%q: requires a credential but declares no secret value slot", typ, variantKey)
+			}
+			if variant.requirement == CredentialForbidden && hasSecret {
+				t.Errorf("%s/%q: forbids credentials but declares a secret value slot", typ, variantKey)
+			}
+		}
+	}
+}
+
+// The tri-state of §4.7 is resolved from the EFFECTIVE schema, never from a payload.
+func TestResolveCredentialRequirement(t *testing.T) {
+	cases := []struct {
+		name string
+		typ  MonitorType
+		s    map[string]string
+		want CredentialRequirement
+	}{
+		{"postgres requires", MonitorPostgres, nil, CredentialRequired},
+		{"mysql requires", MonitorMySQL, nil, CredentialRequired},
+		{"redis requires", MonitorRedis, nil, CredentialRequired},
+		{"rabbit management requires", MonitorRabbitMQ, map[string]string{"mode": "management"}, CredentialRequired},
+		{"rabbit amqp forbids", MonitorRabbitMQ, map[string]string{"mode": "amqp"}, CredentialForbidden},
+		{"rabbit without mode is invalid", MonitorRabbitMQ, nil, CredentialInvalid},
+		{"rabbit with bogus mode is invalid", MonitorRabbitMQ, map[string]string{"mode": "http"}, CredentialInvalid},
+		{"non-credentialed type is invalid", MonitorHTTP, nil, CredentialInvalid},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveCredentialRequirement(tc.typ, tc.s)
+			if got != tc.want {
+				t.Fatalf("requirement = %v, want %v (err=%v)", got, tc.want, err)
+			}
+			if tc.want == CredentialInvalid && err == nil {
+				t.Fatal("invalid requirement returned without a reason")
+			}
+			if tc.want != CredentialInvalid && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// The expected envelope field set is exact, and empty where credentials are forbidden.
+func TestExpectedCredentialFields(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  MonitorType
+		s    map[string]string
+		want []string
+	}{
+		{"postgres", MonitorPostgres, nil, []string{"password"}},
+		{"mysql", MonitorMySQL, nil, []string{"password"}},
+		{"redis", MonitorRedis, nil, []string{"password"}},
+		{"rabbit management", MonitorRabbitMQ, map[string]string{"mode": "management"}, []string{"password"}},
+		{"rabbit amqp", MonitorRabbitMQ, map[string]string{"mode": "amqp"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ExpectedCredentialFields(tc.typ, tc.s)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("expected fields = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if _, err := ExpectedCredentialFields(MonitorHTTP, nil); err == nil {
+		t.Fatal("non-credentialed type returned a field set without an error")
+	}
+}
+
+// The execution-binding keys are the non-secret half of the schema: they carry the
+// credential's destination and transport, and they exclude both the value slot and the
+// ref NAME (renaming a ref in an already-sealed job changes no remote behaviour).
+func TestExecutionBindingKeysCoverNonSecretsOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  MonitorType
+		s    map[string]string
+		want []string
+	}{
+		{"postgres", MonitorPostgres, nil, []string{"database", "query", "sslmode", "username"}},
+		{"mysql", MonitorMySQL, nil, []string{"database", "query", "tls", "tls_skip_verify", "username"}},
+		{"redis", MonitorRedis, nil, []string{"tls", "tls_skip_verify", "username"}},
+		{"rabbit management", MonitorRabbitMQ, map[string]string{"mode": "management"},
+			[]string{"mode", "path", "tls", "tls_skip_verify", "username"}},
+		{"rabbit amqp", MonitorRabbitMQ, map[string]string{"mode": "amqp"}, []string{"mode"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ExecutionBindingKeys(tc.typ, tc.s)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("binding keys = %v, want %v", got, tc.want)
+			}
+			for _, k := range got {
+				if k == "password" || k == "password_ref" {
+					t.Fatalf("binding keys must exclude the credential slot, got %v", got)
+				}
+			}
+		})
+	}
+}
+
+// Every key a type's validator accepts is classified by exactly one of the three roles,
+// so the union of "expected credential fields" and "execution binding keys" plus the ref
+// name accounts for the whole allowlist — no key can be validated yet unbound.
+func TestEveryAllowedKeyIsAccountedForByABinding(t *testing.T) {
+	for typ, schema := range credentialSchemas {
+		for variantKey, variant := range schema.variants {
+			settings := map[string]string{}
+			if schema.discriminator != "" {
+				settings[schema.discriminator] = variantKey
+			}
+			binding, err := ExecutionBindingKeys(typ, settings)
+			if err != nil {
+				t.Fatalf("%s/%q: %v", typ, variantKey, err)
+			}
+			secrets, err := ExpectedCredentialFields(typ, settings)
+			if err != nil {
+				t.Fatalf("%s/%q: %v", typ, variantKey, err)
+			}
+			accounted := map[string]bool{}
+			for _, k := range append(append([]string{}, binding...), secrets...) {
+				accounted[k] = true
+			}
+			for _, f := range variant.fields {
+				if f.binding == bindingSecretRef {
+					accounted[f.key] = true // deliberately excluded from the digest
+				}
+				if !accounted[f.key] {
+					t.Errorf("%s/%q: key %q is validated but reachable through no binding", typ, variantKey, f.key)
+				}
+			}
+		}
+	}
+}

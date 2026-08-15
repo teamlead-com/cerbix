@@ -162,7 +162,7 @@ func Decode(data []byte, scope config.ProviderScopeConfig) (*DesiredProject, err
 		return nil, bind(rejectf(ReasonEmptyBundle, "", "root `monitors` map is required (empty map is allowed, but the key must be present)"))
 	}
 
-	dp := &DesiredProject{Organization: org, Project: project, Monitors: make(map[string]DesiredMonitor, len(raw.Monitors))}
+	dp := &DesiredProject{Format: *raw.Format, Organization: org, Project: project, Monitors: make(map[string]DesiredMonitor, len(raw.Monitors))}
 	for uid, rm := range raw.Monitors {
 		dm, err := buildMonitor(uid, rm)
 		if err != nil {

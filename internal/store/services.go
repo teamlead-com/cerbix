@@ -160,7 +160,6 @@ func (s *Store) PutServiceDeclaration(
 	ctx context.Context, projectID, serviceID string,
 	decl domain.ServiceDeclaration, expectedRevision int64, opts DeclarationOptions,
 ) (domain.DefinitionRevision, domain.EvaluationEpoch, error) {
-	createdBy := opts.CreatedBy
 	monitors := dedupeIDs(decl.Monitors)
 	sli := dedupeIDs(decl.SLI)
 	inContext := map[string]bool{}
@@ -183,6 +182,26 @@ func (s *Store) PutServiceDeclaration(
 	if err := lockServiceMembership(ctx, tx, projectID); err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
 	}
+	rev, epoch, err := s.putServiceDeclarationTx(ctx, tx, projectID, serviceID, monitors, sli, decl.Policies, expectedRevision, opts)
+	if err != nil {
+		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: commit declaration: %w", err)
+	}
+	return rev, epoch, nil
+}
+
+// putServiceDeclarationTx is the body, separated so the file-provider apply can write a
+// declaration inside the transaction that is already applying the bundle's monitors — the
+// service and the monitors it names have to become visible together.
+//
+// The caller is responsible for having taken the §15.4 locks, membership first.
+func (s *Store) putServiceDeclarationTx(
+	ctx context.Context, tx pgx.Tx, projectID, serviceID string,
+	monitors, sli []string, rawPolicies domain.ServicePolicies, expectedRevision int64, opts DeclarationOptions,
+) (domain.DefinitionRevision, domain.EvaluationEpoch, error) {
+	createdBy := opts.CreatedBy
 	// Referenced monitors, id ascending and FOR KEY SHARE: the declaration names them, so
 	// they must not vanish under the write, and ascending order is what keeps this path out
 	// of a cycle with every other path that touches monitors.
@@ -194,7 +213,7 @@ func (s *Store) PutServiceDeclaration(
 		}
 	}
 	var lockedService string
-	err = tx.QueryRow(ctx, `SELECT id FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`,
+	err := tx.QueryRow(ctx, `SELECT id FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`,
 		serviceID, projectID).Scan(&lockedService)
 	if noRows(err) {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, ErrNotFound
@@ -214,7 +233,7 @@ func (s *Store) PutServiceDeclaration(
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, ErrRevisionConflict
 	}
 
-	members, err := s.loadEpochMembers(ctx, tx, projectID, sli, decl.Policies)
+	members, err := s.loadEpochMembers(ctx, tx, projectID, sli, rawPolicies)
 	if err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
 	}
@@ -225,7 +244,7 @@ func (s *Store) PutServiceDeclaration(
 	for _, m := range members {
 		declaredPerRegion[m.Semantics.Region]++
 	}
-	policies := decl.Policies
+	policies := rawPolicies
 	if len(members) > 0 {
 		policies = domain.ApplyServicePolicyDefaults(policies, declaredPerRegion, len(declaredPerRegion))
 		if err := domain.ValidateServicePolicies(policies, declaredPerRegion, len(declaredPerRegion)); err != nil {
@@ -294,10 +313,6 @@ func (s *Store) PutServiceDeclaration(
 	epoch, err := insertEpoch(ctx, tx, rev, members)
 	if err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: commit declaration: %w", err)
 	}
 	return rev, epoch, nil
 }

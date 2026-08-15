@@ -85,6 +85,11 @@ type DesiredMonitor struct {
 
 // DesiredProject is a fully parsed, validated bundle for one resolved tenant.
 type DesiredProject struct {
+	// Format is the bundle format this project was declared in. It is carried because
+	// ABSENCE means different things per format: a format-1 bundle cannot express services
+	// at all, so its silence about them is not a statement, and downgrading a file must not
+	// silently orphan every service it used to declare.
+	Format       int
 	Organization string
 	Project      string
 	Monitors     map[string]DesiredMonitor // by source UID

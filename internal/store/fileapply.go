@@ -40,6 +40,11 @@ type ApplyResult struct {
 	Counts       map[fileprovider.Action]int
 	Changed      bool // execution config changed → scheduler NOTIFY emitted
 	NoChange     bool // nothing changed at all → NO DB write, generation NOT advanced (§7/§17)
+	// Services is what the bundle's format-2 service map did. It is reported separately from
+	// the monitor counts because a service change advances the bundle generation but is NOT
+	// an execution-config change: it must never wake the scheduler for a dispatch it does
+	// not affect.
+	Services ServiceApplyCounts
 }
 
 // ApplyFileManagedBundle reconciles one desired project bundle into PostgreSQL in ONE
@@ -128,6 +133,18 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 	}
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("store: resolve bundle tenant: %w", err)
+	}
+
+	// Service membership, BEFORE any monitor row is touched (FR-021 §15.4). It is the
+	// outermost project-scoped lock, because this apply can both change which services exist
+	// and write declarations, and a path that discovered it needed this lock while already
+	// holding a finer one would invert the order.
+	//
+	// The provider-quota lock above is provider-scoped and taken by this path alone, so it
+	// cannot participate in a cycle with membership; the tenant has to be resolved before a
+	// project-scoped lock can be named at all, which is why it comes first.
+	if err := lockServiceMembership(ctx, tx, projID); err != nil {
+		return ApplyResult{}, err
 	}
 
 	// Serialize dependency-graph mutations for this project (same lock the API path uses).
@@ -411,6 +428,20 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 		}
 	}
 
+	// Services (bundle format 2). They come AFTER the monitors, in the same transaction,
+	// because a declaration names monitor slugs and those rows must already exist — and
+	// because the service and the monitors it names have to become visible together.
+	svcCounts, err := s.applyBundleServicesTx(ctx, tx, providerID, orgID, projID, sourcePath, desired, newGen, dbNow)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if svcCounts.Created+svcCounts.Updated+svcCounts.Orphaned+svcCounts.Restored > 0 {
+		// A service change is a real state change for the bundle row's generation — but it
+		// is NOT an execution-config change, so it must not set `Changed` and wake the
+		// scheduler for a dispatch it does not affect.
+		stateChanged = true
+	}
+
 	// Bundle-row axis (independent of monitor state, §15): advance generation only on a real
 	// state change; otherwise write the row iff it is missing, its recorded path drifted, or a
 	// stale rejected/error status must be cleared after a now-clean scan. The first (even empty)
@@ -469,6 +500,7 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 		Organization: desired.Organization, Project: desired.Project,
 		Generation: effGen, Counts: plan.Counts(),
 		Changed: execChanged, NoChange: !stateChanged,
+		Services: svcCounts,
 	}, nil
 }
 

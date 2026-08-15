@@ -4,10 +4,26 @@
 # regional dispatch key. No source/dev database is touched.
 set -euo pipefail
 
-PG_CONTAINER="${PG_CONTAINER:-cerbix-it1-pg}"
-PG_PORT="${PG_PORT:-55442}"
+# The smoke provisions its OWN throwaway Postgres when the named container is absent, so
+# `make secret-smoke` works on a clean checkout. Previously it depended on a container that
+# nothing in the repository created, which made the only live proof of FR-020 unrunnable
+# for anyone but the machine it was written on — an unrunnable check is not a check.
+PG_CONTAINER="${PG_CONTAINER:-cerbix-secret-smoke-pg}"
+PG_PORT="${PG_PORT:-55452}"
 PG_USER="${PG_USER:-postgres}"
 PG_PASSWORD="${PG_PASSWORD:-pass}"
+OWN_CONTAINER=""
+
+if ! docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
+  OWN_CONTAINER="$PG_CONTAINER"
+  docker run -d --name "$PG_CONTAINER" \
+    -e POSTGRES_USER="$PG_USER" -e POSTGRES_PASSWORD="$PG_PASSWORD" \
+    -p "$PG_PORT":5432 postgres:16-alpine >/dev/null
+  for _ in $(seq 1 60); do
+    if docker exec "$PG_CONTAINER" pg_isready -U "$PG_USER" >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+fi
 DB_NAME="cerbix_secret_inventory_smoke"
 BASE_URL="http://127.0.0.1:18082"
 TOKEN="cbx_secret_inventory_smoke"
@@ -21,6 +37,8 @@ cleanup() {
   if [ -n "${CERBIX_PID:-}" ]; then kill "$CERBIX_PID" 2>/dev/null || true; wait "$CERBIX_PID" 2>/dev/null || true; fi
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d postgres -c "DROP DATABASE IF EXISTS $DB_NAME WITH (FORCE)" >/dev/null 2>&1 || true
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d postgres -c "DROP ROLE IF EXISTS $TARGET_USER" >/dev/null 2>&1 || true
+  # Only remove a container this run created: a pre-existing one may belong to someone else.
+  if [ -n "$OWN_CONTAINER" ]; then docker rm -f "$OWN_CONTAINER" >/dev/null 2>&1 || true; fi
 }
 trap cleanup EXIT
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/dispatch"
 )
 
 func agentReq(h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
@@ -406,7 +407,7 @@ func TestAgentTestClaimRespectsCapabilityBoundary(t *testing.T) {
 	newStore := func() *fakeStore {
 		fs := seededStore()
 		fs.pullTests = map[string]fakePullTest{
-			"a-legacy": {region: "secure", payload: []byte(`{"Monitor":{"id":"legacy"}}`), protocolVersion: 1},
+			"a-legacy":  {region: "secure", payload: []byte(`{"Monitor":{"id":"legacy"}}`), protocolVersion: 1},
 			"b-capable": {region: "secure", payload: []byte(`{"Monitor":{"id":"capable"}}`), protocolVersion: 2},
 		}
 		return fs
@@ -516,5 +517,46 @@ func TestAgentClaimCapabilityIsGenerational(t *testing.T) {
 		map[string]string{"X-Cerbix-Credential-Envelope": "1"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("understated capability accepted on the generation-3 endpoint: %d", rec.Code)
+	}
+}
+
+// TestAgentHeartbeatAcceptsTheNewestCapability is the unit-level guard for a bug the live
+// smoke caught and no unit test did: the heartbeat's capability CEILING lived in the API
+// package while the generation it bounds lives in dispatch, so introducing envelope v2 left
+// the ceiling at 1 and every capability-2 agent's heartbeat was rejected with 400. The
+// region then looked dead to the readiness check, and core would never have emitted the
+// very generation those agents exist to consume — a security rollout that silently disables
+// itself. The ceiling must track the newest generation, so it is asserted against the
+// constant rather than a literal.
+func TestAgentHeartbeatAcceptsTheNewestCapability(t *testing.T) {
+	fs := seededStore()
+	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentToken("s3cr3t").AgentRouter()
+
+	body := func(capability int, ready bool) string {
+		payload, _ := json.Marshal(map[string]any{
+			"capabilities":     map[string]int{"credential_envelope": capability},
+			"credential_ready": ready,
+		})
+		return string(payload)
+	}
+	path := "/api/v1/agent/heartbeat?region=secure&agent_id=a1"
+
+	for capability := 0; capability <= dispatch.EnvelopeV2; capability++ {
+		rec := agentReq(h, http.MethodPost, path, "s3cr3t", body(capability, false))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("capability %d heartbeat rejected: %d %s", capability, rec.Code, rec.Body.String())
+		}
+	}
+	// Ready is meaningful at every capability that can open an envelope, not only at 1.
+	if rec := agentReq(h, http.MethodPost, path, "s3cr3t", body(dispatch.EnvelopeV2, true)); rec.Code != http.StatusNoContent {
+		t.Fatalf("credential_ready at the newest capability rejected: %d %s", rec.Code, rec.Body.String())
+	}
+	// A capability core does not understand is still refused.
+	if rec := agentReq(h, http.MethodPost, path, "s3cr3t", body(dispatch.EnvelopeV2+1, false)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown capability accepted: %d", rec.Code)
+	}
+	// And readiness without any envelope capability remains a contradiction.
+	if rec := agentReq(h, http.MethodPost, path, "s3cr3t", body(0, true)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("credential_ready without a capability accepted: %d", rec.Code)
 	}
 }

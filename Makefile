@@ -34,6 +34,7 @@ GEO_E2E_ARGS ?= tests/topology-geo.spec.ts tests/monitors.spec.ts tests/probers.
 	dev-up dev-up-single dev-up-distributed geo-up geo-up-all \
 	dev-ready dev-ready-single dev-ready-distributed geo-ready geo-ready-all \
 	dev-test dev-test-single dev-test-distributed geo-test \
+	secret-smoke mac-smoke \
 	dev-down geo-down
 
 .NOTPARALLEL: dev-up dev-up-single dev-up-distributed geo-up geo-up-all dev-down geo-down
@@ -260,6 +261,16 @@ dev-test-distributed: dev-ready-distributed
 
 geo-test: geo-ready-all
 	CERBIX_TOPOLOGY=geo CERBIX_URL=http://localhost:8082 ./e2e/run.sh $(GEO_E2E_ARGS)
+
+# Self-contained live smokes. Unlike the dev-test goals these own their whole world — they
+# build the binary, provision a throwaway database and tear both down again — so they never
+# touch a dev stack and are not wired into dev-test, whose contract (D-0158) is that an E2E
+# goal never starts, stops or redirects a stack.
+secret-smoke:
+	./e2e/secret-inventory-smoke.sh
+
+mac-smoke:
+	./e2e/mac-smoke.sh
 
 # Teardown is intentionally narrow and non-destructive: only services declared
 # by the fixed manifests, with no orphan or named-volume removal.

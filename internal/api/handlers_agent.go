@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
@@ -393,12 +394,17 @@ func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if body.Capabilities.CredentialEnvelope < 0 || body.Capabilities.CredentialEnvelope > 1 {
+	// The ceiling is the newest envelope generation core understands. It has to move with
+	// that generation: leaving it at 1 rejected the heartbeat of every capability-2 agent,
+	// so the region looked dead to the readiness check and core would never have emitted
+	// the generation those agents exist to consume. Caught by the live smoke, not by a
+	// unit test — the ceiling and the generation live in different packages.
+	if body.Capabilities.CredentialEnvelope < 0 || body.Capabilities.CredentialEnvelope > dispatch.EnvelopeV2 {
 		writeError(w, http.StatusBadRequest, "unsupported credential_envelope capability")
 		return
 	}
-	if body.CredentialReady && body.Capabilities.CredentialEnvelope != 1 {
-		writeError(w, http.StatusBadRequest, "credential_ready requires credential_envelope capability 1")
+	if body.CredentialReady && body.Capabilities.CredentialEnvelope < dispatch.EnvelopeV1 {
+		writeError(w, http.StatusBadRequest, "credential_ready requires a credential_envelope capability")
 		return
 	}
 	if err := h.store.RecordAgentCapabilities(r.Context(), region, agentID, body.Capabilities.CredentialEnvelope, body.CredentialReady); err != nil {

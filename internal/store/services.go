@@ -72,6 +72,15 @@ func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.S
 		return domain.Service{}, err
 	}
 
+	// The owner is a REFERENCE to this project's routing primitives. The composite FK added
+	// in 00069 makes a cross-tenant owner impossible in the schema; this turns the resulting
+	// constraint violation into an answer the caller can act on, and takes the rows in the
+	// §15.4 order (routing before services) with KEY SHARE so they cannot vanish under the
+	// insert.
+	if err := assertOwnerInProjectTx(ctx, tx, svc.ProjectID, svc.EscalationPolicyID, svc.OncallScheduleID); err != nil {
+		return domain.Service{}, err
+	}
+
 	var existing int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FROM services WHERE project_id = $1`, svc.ProjectID).Scan(&existing); err != nil {
@@ -491,6 +500,39 @@ func enforceDeclarationBoundsTx(
 		}
 	}
 	return rows.Err()
+}
+
+// ErrOwnerNotInProject is returned when a service names routing that belongs to some other
+// project. Routing decides who gets paged, so pointing it across a tenant boundary is the one
+// mistake in this feature that wakes the wrong humans.
+var ErrOwnerNotInProject = errors.New("store: owner does not belong to this project")
+
+func assertOwnerInProjectTx(ctx context.Context, tx pgx.Tx, projectID, escalationID, oncallID string) error {
+	if escalationID != "" {
+		var one int
+		err := tx.QueryRow(ctx,
+			`SELECT 1 FROM escalation_policies WHERE id = $1 AND project_id = $2 FOR KEY SHARE`,
+			escalationID, projectID).Scan(&one)
+		if noRows(err) {
+			return fmt.Errorf("%w: escalation policy", ErrOwnerNotInProject)
+		}
+		if err != nil {
+			return fmt.Errorf("store: check escalation policy tenancy: %w", err)
+		}
+	}
+	if oncallID != "" {
+		var one int
+		err := tx.QueryRow(ctx,
+			`SELECT 1 FROM oncall_schedules WHERE id = $1 AND project_id = $2 FOR KEY SHARE`,
+			oncallID, projectID).Scan(&one)
+		if noRows(err) {
+			return fmt.Errorf("%w: on-call schedule", ErrOwnerNotInProject)
+		}
+		if err != nil {
+			return fmt.Errorf("store: check on-call schedule tenancy: %w", err)
+		}
+	}
+	return nil
 }
 
 // ensureMaterializationRowTx puts the service on the driver's list, once.

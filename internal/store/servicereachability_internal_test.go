@@ -362,3 +362,94 @@ func TestAnOversizedDeclarationIsRefused(t *testing.T) {
 		t.Fatalf("got %v, want ErrTooManyMembers", err)
 	}
 }
+
+// Deleting a monitor a service declares must REMOVE ITS REACH, as a declaration in its own
+// right — not fail, and not silently drop the reference.
+//
+// The deferred FK on service_member_refs fired at COMMIT and rejected the delete outright,
+// including the ordinary case of an operator removing a UI monitor from a UI service. §19.30
+// requires the §15.1 matrix, and none of it existed.
+func TestDeletingADeclaredMonitorRetiresItAsASystemRevision(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	before, _, _, revBefore, err := currentDeclarationTx2(t, st, ctx, f.serviceID)
+	if err != nil {
+		t.Fatalf("read declaration: %v", err)
+	}
+	if len(before) != 2 {
+		t.Fatalf("fixture declares %d monitors, want 2", len(before))
+	}
+
+	// The redis monitor is in the CONTEXT but not the SLI; deleting it must still work and
+	// must still be recorded.
+	if err := st.DeleteMonitor(ctx, f.redis); err != nil {
+		t.Fatalf("deleting a declared monitor was refused: %v", err)
+	}
+
+	monitors, sli, _, revAfter, err := currentDeclarationTx2(t, st, ctx, f.serviceID)
+	if err != nil {
+		t.Fatalf("reread declaration: %v", err)
+	}
+	if revAfter != revBefore+1 {
+		t.Errorf("revision %d -> %d; the change to what the service measures was not declared", revBefore, revAfter)
+	}
+	for _, id := range append(append([]string{}, monitors...), sli...) {
+		if id == f.redis {
+			t.Fatal("the deleted monitor is still declared")
+		}
+	}
+	if len(monitors) != 1 || len(sli) != 1 {
+		t.Errorf("monitors=%v sli=%v — the rewrite changed more than the one member it had to", monitors, sli)
+	}
+
+	// The consequence is on the record, and says it was a consequence.
+	var author string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT created_by FROM service_definition_revisions
+		  WHERE service_id=$1 ORDER BY revision DESC LIMIT 1`, f.serviceID).Scan(&author); err != nil {
+		t.Fatalf("read author: %v", err)
+	}
+	if author != "system:monitor-deleted" {
+		t.Errorf("author = %q, want the system attribution", author)
+	}
+	var audits int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_logs WHERE action='service.member_retired' AND target LIKE '%'||$1||'%'`,
+		f.redis).Scan(&audits); err != nil {
+		t.Fatalf("count audits: %v", err)
+	}
+	if audits == 0 {
+		t.Error("a service's declared inputs shrank with no audit row")
+	}
+}
+
+// A monitor no service declares deletes exactly as before: zero services costs nothing.
+func TestDeletingAnUndeclaredMonitorIsUnaffected(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	if err := st.DeleteMonitor(ctx, f.synthetic); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	var revisions int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_definition_revisions WHERE service_id=$1`, f.serviceID).Scan(&revisions); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if revisions != 1 {
+		t.Errorf("%d revisions after deleting a monitor no service declares, want 1", revisions)
+	}
+}
+
+// currentDeclarationTx2 reads the declaration in force through the pool, for assertions.
+func currentDeclarationTx2(t *testing.T, st *Store, ctx context.Context, serviceID string) (
+	monitors, sli []string, policies domain.ServicePolicies, revision int64, err error,
+) {
+	t.Helper()
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, policies, 0, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only
+	return currentDeclarationTx(ctx, tx, serviceID)
+}

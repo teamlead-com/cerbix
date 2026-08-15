@@ -140,7 +140,7 @@ func (s *Store) applyBundleServicesTx(
 				monitorIDs, sliIDs, svc.Policies, currentRevision, DeclarationOptions{CreatedBy: "file:" + providerID}); err != nil {
 				return counts, err
 			}
-			if err := updateServiceRowTx(ctx, tx, existing, svc); err != nil {
+			if err := updateServiceRowTx(ctx, tx, projID, existing, svc); err != nil {
 				return counts, err
 			}
 			if err := upsertManagedService(ctx, tx, providerID, orgID, projID, existing, slug, svc.Hash, sourcePath, generation); err != nil {
@@ -254,23 +254,78 @@ func lookupServiceBySlug(ctx context.Context, tx pgx.Tx, projID, slug string) (s
 }
 
 func insertServiceTx(ctx context.Context, tx pgx.Tx, projID string, svc fileprovider.DesiredService) (string, error) {
+	escalation, oncall, err := resolveServiceOwnerTx(ctx, tx, projID, svc)
+	if err != nil {
+		return "", err
+	}
 	var id string
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO services (project_id, slug, name, description) VALUES ($1,$2,$3,$4) RETURNING id`,
-		projID, svc.Slug, svc.Name, svc.Description).Scan(&id); err != nil {
+		`INSERT INTO services (project_id, slug, name, description, escalation_policy_id, oncall_schedule_id)
+		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+		projID, svc.Slug, svc.Name, svc.Description, escalation, oncall).Scan(&id); err != nil {
 		return "", fmt.Errorf("store: insert file-managed service: %w", err)
 	}
 	return id, nil
 }
 
-func updateServiceRowTx(ctx context.Context, tx pgx.Tx, id string, svc fileprovider.DesiredService) error {
+func updateServiceRowTx(ctx context.Context, tx pgx.Tx, projID, id string, svc fileprovider.DesiredService) error {
+	escalation, oncall, err := resolveServiceOwnerTx(ctx, tx, projID, svc)
+	if err != nil {
+		return err
+	}
 	// The slug is the identity this row was found by and is never rewritten here.
 	if _, err := tx.Exec(ctx,
-		`UPDATE services SET name = $2, description = $3, updated_at = now() WHERE id = $1`,
-		id, svc.Name, svc.Description); err != nil {
+		`UPDATE services
+		    SET name = $2, description = $3,
+		        escalation_policy_id = $4, oncall_schedule_id = $5, updated_at = now()
+		  WHERE id = $1`,
+		id, svc.Name, svc.Description, escalation, oncall); err != nil {
 		return fmt.Errorf("store: update file-managed service: %w", err)
 	}
 	return nil
+}
+
+// ErrServiceOwnerUnknown is returned when a bundle names an escalation policy or on-call
+// schedule this project does not have.
+var ErrServiceOwnerUnknown = errors.New("store: service owner references an unknown routing target")
+
+// resolveServiceOwnerTx turns the bundle's owner NAMES into ids in this project.
+//
+// The owner was parsed, validated and folded into the canonical hash — and then dropped on
+// the floor: only name and description were persisted. So a bundle declaring who is
+// responsible applied "successfully", changed nothing about routing, and its hash asserted
+// the declaration was in force. An unresolvable name is refused rather than nulled, because
+// silently having no owner is exactly the outcome the declaration was written to prevent.
+func resolveServiceOwnerTx(
+	ctx context.Context, tx pgx.Tx, projID string, svc fileprovider.DesiredService,
+) (escalation, oncall *string, err error) {
+	if name := svc.EscalationPolicy; name != "" {
+		var id string
+		err := tx.QueryRow(ctx,
+			`SELECT id::text FROM escalation_policies WHERE project_id = $1 AND name = $2`,
+			projID, name).Scan(&id)
+		if noRows(err) {
+			return nil, nil, fmt.Errorf("%w: escalation policy %q", ErrServiceOwnerUnknown, name)
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("store: resolve escalation policy: %w", err)
+		}
+		escalation = &id
+	}
+	if name := svc.OncallSchedule; name != "" {
+		var id string
+		err := tx.QueryRow(ctx,
+			`SELECT id::text FROM oncall_schedules WHERE project_id = $1 AND name = $2`,
+			projID, name).Scan(&id)
+		if noRows(err) {
+			return nil, nil, fmt.Errorf("%w: on-call schedule %q", ErrServiceOwnerUnknown, name)
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("store: resolve on-call schedule: %w", err)
+		}
+		oncall = &id
+	}
+	return escalation, oncall, nil
 }
 
 func currentServiceRevision(ctx context.Context, tx pgx.Tx, serviceID string) (int64, error) {

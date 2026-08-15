@@ -1270,6 +1270,20 @@ func (s *Store) DeleteMonitor(ctx context.Context, id string) error {
 		return fmt.Errorf("store: begin delete monitor: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	// The monitor's project has to be known BEFORE the membership lock, because the lock is
+	// per project — and the lock has to come before the monitor row, per §15.4.
+	var projectID string
+	if err := tx.QueryRow(ctx, `SELECT project_id::text FROM monitors WHERE id = $1`, id).Scan(&projectID); err != nil {
+		if noRows(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("store: read monitor project: %w", err)
+	}
+	if err := lockServiceMembership(ctx, tx, projectID); err != nil {
+		return err
+	}
+
 	var exists int
 	if err := tx.QueryRow(ctx, `SELECT 1 FROM monitors WHERE id = $1 FOR UPDATE`, id).Scan(&exists); noRows(err) {
 		return ErrNotFound
@@ -1279,6 +1293,19 @@ func (s *Store) DeleteMonitor(ctx context.Context, id string) error {
 	if err := assertNotFileManagedTx(ctx, tx, id); err != nil {
 		return err
 	}
+
+	// Deleting a monitor that a service still declares has to REMOVE ITS REACH, in this
+	// transaction, as a declaration in its own right (§15.1).
+	//
+	// The deferred FK on service_member_refs otherwise fired at COMMIT and rejected the
+	// delete outright — including the ordinary UI-monitor-in-a-UI-service case, which is not
+	// a conflict at all, just an operator removing a check. Nor may the reference simply be
+	// dropped: what a service measures is a DECLARED thing, and changing it silently would
+	// move the meaning of that service's availability with nobody having said so.
+	if err := s.retireMonitorFromServicesTx(ctx, tx, projectID, id); err != nil {
+		return err
+	}
+
 	if _, err := tx.Exec(ctx, `DELETE FROM monitors WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("store: delete monitor: %w", err)
 	}
@@ -1286,6 +1313,83 @@ func (s *Store) DeleteMonitor(ctx context.Context, id string) error {
 		return fmt.Errorf("store: commit delete monitor: %w", err)
 	}
 	return nil
+}
+
+// retireMonitorFromServicesTx writes a SYSTEM definition revision for every service that
+// declares the monitor, with that monitor removed from both lists.
+//
+// It is a revision rather than a quiet DELETE of the refs because the two lists are the
+// declaration: a service whose SLI shrank has had the meaning of its availability changed,
+// and that belongs on the record with an author, an effective boundary and an epoch — the
+// same treatment a human making the same change would get. The author says `system:` so a
+// reader can tell it was a consequence rather than an intent.
+func (s *Store) retireMonitorFromServicesTx(ctx context.Context, tx pgx.Tx, projectID, monitorID string) error {
+	rows, err := tx.Query(ctx,
+		`SELECT DISTINCT service_id::text FROM service_member_refs
+		  WHERE project_id = $1 AND monitor_id = $2 ORDER BY 1`,
+		projectID, monitorID)
+	if err != nil {
+		return fmt.Errorf("store: find services declaring monitor: %w", err)
+	}
+	serviceIDs, err := collectIDs(rows)
+	if err != nil {
+		return err
+	}
+
+	for _, serviceID := range serviceIDs {
+		monitors, sli, policies, revision, err := currentDeclarationTx(ctx, tx, serviceID)
+		if err != nil {
+			return err
+		}
+		if _, _, err := s.putServiceDeclarationTx(ctx, tx, projectID, serviceID,
+			without(monitors, monitorID), without(sli, monitorID), policies, revision,
+			DeclarationOptions{CreatedBy: "system:monitor-deleted"}); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
+			 SELECT p.org_id, NULL, false, 'service.member_retired', $2
+			   FROM projects p WHERE p.id = $1`,
+			projectID, fmt.Sprintf("service=%s monitor=%s", serviceID, monitorID)); err != nil {
+			return fmt.Errorf("store: audit member retirement: %w", err)
+		}
+	}
+	return nil
+}
+
+func without(ids []string, drop string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != drop {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// currentDeclarationTx reads the revision in force, so a system rewrite changes exactly one
+// thing and carries everything else forward untouched.
+func currentDeclarationTx(ctx context.Context, tx pgx.Tx, serviceID string) (
+	monitors, sli []string, policies domain.ServicePolicies, revision int64, err error,
+) {
+	var revisionID string
+	var policyJSON []byte
+	err = tx.QueryRow(ctx,
+		`SELECT id, revision, policies FROM service_definition_revisions
+		  WHERE service_id = $1 AND state = 'effective'
+		  ORDER BY effective_at DESC, revision DESC LIMIT 1`, serviceID).
+		Scan(&revisionID, &revision, &policyJSON)
+	if noRows(err) {
+		return nil, nil, domain.ServicePolicies{}, 0, nil
+	}
+	if err != nil {
+		return nil, nil, domain.ServicePolicies{}, 0, fmt.Errorf("store: read current declaration: %w", err)
+	}
+	if err := json.Unmarshal(policyJSON, &policies); err != nil {
+		return nil, nil, domain.ServicePolicies{}, 0, fmt.Errorf("store: decode policies: %w", err)
+	}
+	monitors, sli, err = revisionMembers(ctx, tx, revisionID)
+	return monitors, sli, policies, revision, err
 }
 
 func (s *Store) collectMonitors(rows pgx.Rows) ([]domain.Monitor, error) {

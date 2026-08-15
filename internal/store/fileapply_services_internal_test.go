@@ -483,3 +483,83 @@ func TestListServiceSummariesIsOneQueryAndKeepsBothCounts(t *testing.T) {
 		t.Errorf("revision = %d, want 2", rows2[1].Revision)
 	}
 }
+
+// Routing decides who gets paged. The FKs referenced the routing tables by ID ALONE, so the
+// database had no opinion about tenancy and the create path passed whatever id it was handed:
+// an editor in one project could attach another project's escalation policy, and operational
+// response would then point across a tenant boundary.
+func TestAServiceCannotBorrowAnotherProjectsOwner(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	org, projID := seedTenant(t, st, ctx)
+	other, err := st.CreateProject(ctx, org, "other", "Other")
+	if err != nil {
+		t.Fatalf("second project: %v", err)
+	}
+	// The row is seeded directly: this test is about FK tenancy, and a valid ladder of
+	// steps and targets would be fixture noise around the thing under test.
+	foreignID := seedPolicy(t, st, ctx, other.ID, "их политика")
+
+	_, err = st.CreateService(ctx, domain.Service{
+		ProjectID: projID, Slug: "borrowed", Name: "Borrowed",
+		EscalationPolicyID: foreignID,
+	})
+	if !errors.Is(err, ErrOwnerNotInProject) {
+		t.Fatalf("got %v, want ErrOwnerNotInProject", err)
+	}
+
+	// …and the same policy inside the right project is accepted, so this is a tenancy check
+	// and not a ban on owners.
+	mineID := seedPolicy(t, st, ctx, projID, "наша политика")
+	if _, err := st.CreateService(ctx, domain.Service{
+		ProjectID: projID, Slug: "owned", Name: "Owned", EscalationPolicyID: mineID,
+	}); err != nil {
+		t.Fatalf("a same-project owner was refused: %v", err)
+	}
+}
+
+// seedPolicy inserts a bare escalation-policy row for tenancy fixtures.
+func seedPolicy(t *testing.T, st *Store, ctx context.Context, projectID, name string) string {
+	t.Helper()
+	var id string
+	if err := st.pool.QueryRow(ctx,
+		`INSERT INTO escalation_policies (project_id, name, steps) VALUES ($1,$2,'[]'::jsonb) RETURNING id::text`,
+		projectID, name).Scan(&id); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+	return id
+}
+
+// The bundle parses the owner, validates it and folds it into the canonical hash — and the
+// apply persisted only name and description. So a declaration of who is responsible applied
+// "successfully", changed nothing, and its hash asserted it was in force.
+func TestBundleOwnerIsActuallyPersisted(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	policyID := seedPolicy(t, st, ctx, projID, "payments-oncall")
+
+	owned := strings.Replace(svcBundle, "  checkout:\n    name: Checkout",
+		"  checkout:\n    name: Checkout\n    owner:\n      escalation_policy: payments-oncall", 1)
+	applyServiceBundle(t, st, ctx, owned)
+
+	var got *string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT escalation_policy_id::text FROM services WHERE project_id=$1 AND slug='checkout'`,
+		projID).Scan(&got); err != nil {
+		t.Fatalf("read service: %v", err)
+	}
+	if got == nil || *got != policyID {
+		t.Fatalf("escalation_policy_id = %v, want the declared %s", got, policyID)
+	}
+}
+
+// A name the project does not have is REFUSED rather than nulled: silently having no owner is
+// exactly the outcome the declaration was written to prevent.
+func TestBundleRefusesAnUnknownOwner(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	seedTenant(t, st, ctx)
+	ghost := strings.Replace(svcBundle, "  checkout:\n    name: Checkout",
+		"  checkout:\n    name: Checkout\n    owner:\n      escalation_policy: nobody", 1)
+	if err := applyServiceBundleErr(t, st, ctx, ghost); !errors.Is(err, ErrServiceOwnerUnknown) {
+		t.Fatalf("got %v, want ErrServiceOwnerUnknown", err)
+	}
+}

@@ -68,7 +68,7 @@ func TestEveryRevisionGetsAMatchingEpoch(t *testing.T) {
 	rev, epoch, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.synthetic, f.redis},
 		SLI:      []string{f.http, f.synthetic},
-	}, 0, "seymur@teamlead.com")
+	}, 0, DeclarationOptions{CreatedBy: "seymur@teamlead.com"})
 	if err != nil {
 		t.Fatalf("put declaration: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestEveryRevisionGetsAMatchingEpoch(t *testing.T) {
 	rev2, epoch2, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.synthetic, f.redis},
 		SLI:      []string{f.http},
-	}, 1, "seymur@teamlead.com")
+	}, 1, DeclarationOptions{CreatedBy: "seymur@teamlead.com"})
 	if err != nil {
 		t.Fatalf("second declaration: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestEffectiveAtIsCeiledToTheNextBoundary(t *testing.T) {
 
 	rev, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http}, SLI: []string{f.http},
-	}, 0, "op")
+	}, 0, DeclarationOptions{CreatedBy: "op"})
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -144,13 +144,13 @@ func TestSameBoundaryWritesLeaveExactlyOneWinner(t *testing.T) {
 
 	first, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.synthetic}, SLI: []string{f.http},
-	}, 0, "op")
+	}, 0, DeclarationOptions{CreatedBy: "op"})
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	second, secondEpoch, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.synthetic}, SLI: []string{f.http, f.synthetic},
-	}, 1, "op")
+	}, 1, DeclarationOptions{CreatedBy: "op"})
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestSupersededRevisionCancelsItsRanges(t *testing.T) {
 
 	first, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http}, SLI: []string{f.http},
-	}, 0, "op")
+	}, 0, DeclarationOptions{CreatedBy: "op"})
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestSupersededRevisionCancelsItsRanges(t *testing.T) {
 
 	second, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.synthetic}, SLI: []string{f.http},
-	}, 1, "op")
+	}, 1, DeclarationOptions{CreatedBy: "op"})
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -240,12 +240,12 @@ func TestStaleRevisionIsRejected(t *testing.T) {
 
 	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http}, SLI: []string{f.http},
-	}, 0, "first"); err != nil {
+	}, 0, DeclarationOptions{CreatedBy: "first"}); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	_, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.redis}, SLI: []string{f.redis},
-	}, 0, "second")
+	}, 0, DeclarationOptions{CreatedBy: "second"})
 	if !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("a write against a stale revision returned %v, want ErrRevisionConflict", err)
 	}
@@ -258,7 +258,7 @@ func TestSLIMustBeWithinTheOperationalContext(t *testing.T) {
 
 	_, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http}, SLI: []string{f.http, f.redis},
-	}, 0, "op")
+	}, 0, DeclarationOptions{CreatedBy: "op"})
 	if !errors.Is(err, ErrSLINotInContext) {
 		t.Fatalf("got %v, want ErrSLINotInContext", err)
 	}
@@ -272,13 +272,13 @@ func TestAddingToContextDoesNotChangeTheSLI(t *testing.T) {
 
 	_, epoch1, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http}, SLI: []string{f.http},
-	}, 0, "op")
+	}, 0, DeclarationOptions{CreatedBy: "op"})
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	_, epoch2, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.redis}, SLI: []string{f.http},
-	}, 1, "op")
+	}, 1, DeclarationOptions{CreatedBy: "op"})
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestMemberRefsTrackTheDeclaration(t *testing.T) {
 
 	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.redis}, SLI: []string{f.http},
-	}, 0, "op"); err != nil {
+	}, 0, DeclarationOptions{CreatedBy: "op"}); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	// The in-force SLI names checkout-http, so deleting it must fail at commit.
@@ -332,7 +332,7 @@ func TestMemberRefsTrackTheDeclaration(t *testing.T) {
 	// Drop redis from the declaration; the reference goes with it and the delete is free.
 	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http}, SLI: []string{f.http},
-	}, 1, "op"); err != nil {
+	}, 1, DeclarationOptions{CreatedBy: "op"}); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	if _, err := st.pool.Exec(ctx, `DELETE FROM monitors WHERE id=$1`, f.redis); err != nil {
@@ -349,7 +349,7 @@ func TestEmptySLIIsValidAndStillGetsAnEpoch(t *testing.T) {
 
 	rev, epoch, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.redis}, SLI: nil,
-	}, 0, "op")
+	}, 0, DeclarationOptions{CreatedBy: "op"})
 	if err != nil {
 		t.Fatalf("an empty sli[] was rejected: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestEpochSnapshotCarriesNoSecretMaterial(t *testing.T) {
 	}
 	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{redisMon.ID}, SLI: []string{redisMon.ID},
-	}, 0, "op"); err != nil {
+	}, 0, DeclarationOptions{CreatedBy: "op"}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	var snapshot string
@@ -404,5 +404,34 @@ func TestCeilToBucketEqualityCase(t *testing.T) {
 	}
 	if got := domain.FloorToBucket(inside); !got.Equal(time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)) {
 		t.Errorf("floor of 12:00:30 is 12:00:00, got %s", got)
+	}
+}
+
+// Only the FIRST revision may reach backwards. A later revision doing so would rewrite
+// facts another declaration already produced, which is an audited administrative repair
+// rather than an ordinary edit.
+func TestOnlyTheFirstRevisionMayBeRetroactive(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+
+	rev1, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: time.Now().UTC().Add(-90 * time.Minute)})
+	if err != nil {
+		t.Fatalf("first adoption: %v", err)
+	}
+	if !rev1.EffectiveAt.Before(rev1.CreatedAt) {
+		t.Errorf("a backfilled first revision must already be in force over the range it adopts: effective %s, created %s",
+			rev1.EffectiveAt, rev1.CreatedAt)
+	}
+	if !rev1.EffectiveAt.Equal(rev1.EffectiveAt.Truncate(time.Minute)) {
+		t.Errorf("a retroactive effective_at is FLOORED to a boundary, got %s", rev1.EffectiveAt)
+	}
+
+	_, _, err = st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http, f.redis}, SLI: []string{f.http},
+	}, 1, DeclarationOptions{CreatedBy: "op", BackfillFrom: time.Now().UTC().Add(-30 * time.Minute)})
+	if !errors.Is(err, ErrRetroactiveNotFirstRevision) {
+		t.Fatalf("a later retroactive revision returned %v, want ErrRetroactiveNotFirstRevision", err)
 	}
 }

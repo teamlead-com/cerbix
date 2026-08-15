@@ -490,11 +490,20 @@ func (s *Store) RecordPushResult(ctx context.Context, monitorID string, up bool,
 	if !observedAt.IsZero() {
 		obs = &observedAt
 	}
-	if _, err := tx.Exec(ctx,
+	pushInsert, err := tx.Exec(ctx,
 		`INSERT INTO heartbeats (monitor_id, ts, up, msg, observed_at)
 		 VALUES ($1,$2,$3,$4,$5) ON CONFLICT (monitor_id, ts) DO NOTHING`,
-		monitorID, receivedAt, up, msg, obs); err != nil {
+		monitorID, receivedAt, up, msg, obs)
+	if err != nil {
 		return ResultOutcome{}, fmt.Errorf("store: push result insert: %w", err)
+	}
+	// Service reliability marks the bucket only for a row that was ACTUALLY inserted. Two
+	// pings at the same instant are one observation, and treating the second as arriving
+	// data would let a duplicate be filed as evidence the seal excluded.
+	if pushInsert.RowsAffected() > 0 {
+		if err := s.noteHeartbeatForServices(ctx, tx, monitorID, receivedAt); err != nil {
+			return ResultOutcome{}, err
+		}
 	}
 	prev, cur, suppressed, err := recordCheckStatusTx(ctx, tx, monitorID, up)
 	if err != nil {
@@ -1064,6 +1073,11 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	if ct.RowsAffected() == 0 {
 		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonDuplicate}.withMissing(missingObserved))
 	}
+	// Step 6a — service reliability: mark the bucket this heartbeat belongs to. Reached only
+	// past the duplicate short-circuit above, so a redelivery never marks anything.
+	if err := s.noteHeartbeatForServices(ctx, tx, hb.MonitorID, ts); err != nil {
+		return ResultOutcome{}, err
+	}
 
 	// Step 7 — watermark compare.
 	if lastTs != nil && !ts.After(*lastTs) {
@@ -1128,11 +1142,22 @@ func (s *Store) RecordDeadmanResult(ctx context.Context, monitorID string, revis
 
 	// DOWN heartbeat for SLA continuity (statement_timestamp() → distinct ts per tick). Does
 	// NOT touch last_result_ts (that watermark tracks real observations, driving this CAS).
-	if _, err := tx.Exec(ctx,
+	var deadmanTs *time.Time
+	err = tx.QueryRow(ctx,
 		`INSERT INTO heartbeats (monitor_id, ts, up, msg, observed_at)
-		 VALUES ($1, statement_timestamp(), false, $2, NULL) ON CONFLICT (monitor_id, ts) DO NOTHING`,
-		monitorID, "push timeout: no heartbeat within interval"); err != nil {
+		 VALUES ($1, statement_timestamp(), false, $2, NULL) ON CONFLICT (monitor_id, ts) DO NOTHING
+		 RETURNING ts`,
+		monitorID, "push timeout: no heartbeat within interval").Scan(&deadmanTs)
+	if err != nil && !noRows(err) {
 		return ResultOutcome{}, fmt.Errorf("store: deadman insert: %w", err)
+	}
+	// noRows means ON CONFLICT swallowed it — a synthetic DOWN already exists for this
+	// instant. Rare, but gated for the same reason as every other path: only a row that was
+	// really inserted is arriving data.
+	if deadmanTs != nil {
+		if err := s.noteHeartbeatForServices(ctx, tx, monitorID, *deadmanTs); err != nil {
+			return ResultOutcome{}, err
+		}
 	}
 	prev, cur, suppressed, err := recordCheckStatusTx(ctx, tx, monitorID, false)
 	if err != nil {

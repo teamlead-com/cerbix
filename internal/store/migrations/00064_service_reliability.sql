@@ -118,6 +118,13 @@ CREATE TABLE service_member_refs (
 -- every inserted heartbeat, so that lookup gets its own index.
 CREATE INDEX service_member_refs_monitor_idx ON service_member_refs (monitor_id, role);
 
+-- ...but the handshake asks that question AS OF the heartbeat's own bucket, which means
+-- reading HISTORICAL membership rather than the current refs. Most monitors have never been
+-- a reliability input for anything, and this index is what turns that overwhelmingly common
+-- case into one probe instead of a scan over the project's revision history.
+CREATE INDEX service_definition_members_monitor_idx
+    ON service_definition_members (monitor_id, role);
+
 -- ── Axis 2: the observed execution semantics ────────────────────────────────────────────
 --
 -- An epoch is a system-authored immutable projection of what the evaluator READS. It never

@@ -36,7 +36,7 @@ func declaredService(t *testing.T, st *Store, ctx context.Context) (f declFixtur
 	f = seedDeclaration(t, st, ctx)
 	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.redis}, SLI: []string{f.http},
-	}, 0, "op"); err != nil {
+	}, 0, DeclarationOptions{CreatedBy: "op"}); err != nil {
 		t.Fatalf("declaration: %v", err)
 	}
 	m, err := st.GetMonitor(ctx, f.http)
@@ -210,7 +210,7 @@ func TestExecutionEpochResolvesThePendingDeclarationAtItsOwnBoundary(t *testing.
 	// Revision 2, effective at the next boundary.
 	rev2, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.redis, f.synthetic}, SLI: []string{f.http, f.synthetic},
-	}, 1, "op")
+	}, 1, DeclarationOptions{CreatedBy: "op"})
 	if err != nil {
 		t.Fatalf("revision 2: %v", err)
 	}

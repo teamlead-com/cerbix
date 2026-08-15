@@ -127,6 +127,28 @@ func scanService(row scannable) (domain.Service, error) {
 	return svc, nil
 }
 
+// DeclarationOptions carries the parts of a declaration write that are not the declaration.
+type DeclarationOptions struct {
+	CreatedBy string
+	// BackfillFrom makes the FIRST revision retroactive, so that a service adopted over
+	// existing history has a producing definition for the facts that history will yield —
+	// §6.6, the one retroactive case. It is floored to a bucket boundary.
+	//
+	// What it produces is a DECLARED RECONSTRUCTION, not a measurement claim: the range is
+	// evaluated with today's members as declared today, because no history of what each
+	// monitor's interval, region or target used to be exists to read instead. Callers must
+	// label it as such wherever they show it.
+	//
+	// It is rejected on any revision but the first. A later revision reaching backwards would
+	// rewrite facts another declaration already produced, which is an audited administrative
+	// repair and not an ordinary edit.
+	BackfillFrom time.Time
+}
+
+// ErrRetroactiveNotFirstRevision is returned when a write after the first asks to reach
+// backwards.
+var ErrRetroactiveNotFirstRevision = errors.New("store: only the first revision may be retroactive")
+
 // PutServiceDeclaration commits a new definition revision AND its matching evaluation
 // epoch, atomically.
 //
@@ -136,8 +158,9 @@ func scanService(row scannable) (domain.Service, error) {
 // is the worst of the three options.
 func (s *Store) PutServiceDeclaration(
 	ctx context.Context, projectID, serviceID string,
-	decl domain.ServiceDeclaration, expectedRevision int64, createdBy string,
+	decl domain.ServiceDeclaration, expectedRevision int64, opts DeclarationOptions,
 ) (domain.DefinitionRevision, domain.EvaluationEpoch, error) {
+	createdBy := opts.CreatedBy
 	monitors := dedupeIDs(decl.Monitors)
 	sli := dedupeIDs(decl.SLI)
 	inContext := map[string]bool{}
@@ -223,6 +246,18 @@ func (s *Store) PutServiceDeclaration(
 		             ELSE date_bin('1 minute', at, 'epoch'::timestamptz) + interval '1 minute' END
 		   FROM t`).Scan(&createdAt, &effectiveAt); err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: resolve effective_at: %w", err)
+	}
+	if !opts.BackfillFrom.IsZero() {
+		if currentRevision != 0 {
+			return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, ErrRetroactiveNotFirstRevision
+		}
+		// The one retroactive case, and it FLOORS rather than ceils: the first revision must
+		// already be in force over the range it is about to backfill, or the facts it produces
+		// would predate the definition that produced them.
+		if err := tx.QueryRow(ctx,
+			`SELECT date_bin('1 minute', $1::timestamptz, 'epoch'::timestamptz)`, opts.BackfillFrom).Scan(&effectiveAt); err != nil {
+			return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: resolve backfill boundary: %w", err)
+		}
 	}
 
 	// Same-boundary resolution. Two writes seconds apart target the same next boundary; the

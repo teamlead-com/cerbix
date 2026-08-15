@@ -549,7 +549,11 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "feature_disabled")
 			return
 		}
-		prepared, err := domain.PrepareCredentialSettings(mon.Type, mon.Config, domain.SurfaceAPI)
+		// A PATCH may legitimately omit the credential slot: the value is write-only, so a
+		// client that read this monitor back never had it to resend. The store preserves
+		// the stored ciphertext in that case; rejecting here made every other setting
+		// unreachable without sending `"password": ""` as a placeholder.
+		prepared, err := domain.PrepareCredentialSettings(mon.Type, mon.Config, domain.SurfaceAPIUpdate)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return

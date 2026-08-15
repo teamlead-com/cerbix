@@ -84,6 +84,91 @@ func (s *Store) monitorSecretBindings(ctx context.Context, tx pgx.Tx, projectID 
 	return bindings, nil
 }
 
+// planSecretBindings resolves the *_ref settings of MANY monitors in ONE id-ordered lock
+// step, and is what an APPLY must use instead of calling monitorSecretBindings per entry.
+//
+// The fixed §4.3 order is "secret rows by id asc, then monitor rows". Resolving per entry
+// satisfies that order within one entry and violates it across a bundle: the transaction
+// takes S1, M1, S2, M2 …, so a concurrent rotate or rename — which takes ALL its secret
+// rows in id order first — can hold S2 while waiting for M1, and deadlock. The outcome is
+// fail-safe (both sides abort, the bundle keeps its last-known-good, `lock_timeout`
+// bounds the wait), but a deadlock under normal operation is not a design, and a bundle
+// large enough makes it likely rather than theoretical.
+//
+// It returns the UID that failed alongside the error so the caller can still attribute a
+// missing reference to the entry that declared it.
+func (s *Store) planSecretBindings(ctx context.Context, tx pgx.Tx, projectID string, byUID map[string]domain.Monitor) (map[string]map[string]string, string, error) {
+	refsByUID := make(map[string]map[string]string, len(byUID))
+	uids := make([]string, 0, len(byUID))
+	names := map[string]bool{}
+	for uid, m := range byUID {
+		if !domain.CredentialedType(m.Type) {
+			continue
+		}
+		refs := map[string]string{}
+		for _, setting := range []string{"password_ref"} {
+			if name := m.Config[setting]; name != "" {
+				refs[setting] = name
+				names[name] = true
+			}
+		}
+		if len(refs) > 0 {
+			refsByUID[uid] = refs
+			uids = append(uids, uid)
+		}
+	}
+	if len(refsByUID) == 0 {
+		return map[string]map[string]string{}, "", nil
+	}
+	sort.Strings(uids) // deterministic attribution when several entries are affected
+	if !s.secretsEnabled {
+		return nil, uids[0], ErrSecretsFeatureDisabled
+	}
+	wanted := make([]string, 0, len(names))
+	for name := range names {
+		wanted = append(wanted, name)
+	}
+	sort.Strings(wanted)
+	rows, err := tx.Query(ctx,
+		`SELECT id::text, name FROM project_secrets
+		  WHERE project_id = $1 AND name = ANY($2::text[])
+		  ORDER BY id FOR KEY SHARE`, projectID, wanted)
+	if err != nil {
+		return nil, "", fmt.Errorf("store: resolve plan secret refs: %w", err)
+	}
+	defer rows.Close()
+	idByName := make(map[string]string, len(wanted))
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, "", fmt.Errorf("store: scan plan secret ref: %w", err)
+		}
+		idByName[name] = id
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("store: iterate plan secret refs: %w", err)
+	}
+	out := make(map[string]map[string]string, len(refsByUID))
+	for _, uid := range uids {
+		bindings := make(map[string]string, len(refsByUID[uid]))
+		settings := make([]string, 0, len(refsByUID[uid]))
+		for setting := range refsByUID[uid] {
+			settings = append(settings, setting)
+		}
+		sort.Strings(settings)
+		for _, setting := range settings {
+			name := refsByUID[uid][setting]
+			id, ok := idByName[name]
+			if !ok {
+				return nil, uid, SecretRefNotFoundError{Setting: setting, Name: name}
+			}
+			bindings[setting] = id
+		}
+		out[uid] = bindings
+	}
+	return out, "", nil
+}
+
 // replaceMonitorSecretRefsTx makes the normalized ref table exactly match the
 // already-prepared config. The referenced secret rows remain key-share locked until commit.
 func replaceMonitorSecretRefsTx(ctx context.Context, tx pgx.Tx, monitorID, projectID string, bindings map[string]string) error {
@@ -207,21 +292,16 @@ func (s *Store) scanMonitorMode(row pgx.Row, decryptConfigSecrets bool, extra ..
 // exists only to traverse the single domain validator; it is removed before persistence.
 // A password_ref is never implicit and therefore never uses this path.
 func prepareCredentialUpdate(typ domain.MonitorType, input map[string]string) (map[string]string, bool, error) {
-	if input["password"] != "" || input["password_ref"] != "" || (typ == domain.MonitorRabbitMQ && input["mode"] == "amqp") {
-		prepared, err := domain.PrepareCredentialSettings(typ, input, domain.SurfaceAPI)
-		return prepared, false, err
-	}
-	tmp := make(map[string]string, len(input)+1)
-	for k, v := range input {
-		tmp[k] = v
-	}
-	tmp["password"] = "preserved-write-only-value"
-	prepared, err := domain.PrepareCredentialSettings(typ, tmp, domain.SurfaceAPI)
+	// One rule, owned by the domain. This used to validate through SurfaceAPI with a
+	// placeholder password stuffed in and stripped out again — a workaround for a rule the
+	// domain did not express, which meant the API and the store could (and did) disagree
+	// about whether an omitted slot was legal.
+	preserve := domain.CredentialUpdateOmitsSlot(typ, input)
+	prepared, err := domain.PrepareCredentialSettings(typ, input, domain.SurfaceAPIUpdate)
 	if err != nil {
 		return nil, false, err
 	}
-	delete(prepared, "password")
-	return prepared, true, nil
+	return prepared, preserve, nil
 }
 
 // marshalConfigForUpdateTx preserves the exact old ciphertext for a write-only inline

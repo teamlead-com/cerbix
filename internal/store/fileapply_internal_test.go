@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -626,5 +627,108 @@ func TestApplyBundleAbsenceGuard(t *testing.T) {
 	}
 	if en, orph := uidState(t, st, ctx, "b"); en || !orph {
 		t.Fatalf("second trusted scan (grace=0) must disable orphaned B (en=%v orph=%v)", en, orph)
+	}
+}
+
+// TestApplyLocksEverySecretBeforeAnyMonitorRow is the regression for the §4.3 lock-order
+// P1. The fixed order is "secret rows by id asc, THEN monitor rows". Resolving references
+// inside the per-entry loop honoured that within one entry and broke it across a bundle —
+// the transaction took S1, M1, S2, M2 …, so a concurrent rotate or rename (which takes all
+// its secret rows first) could hold S2 while waiting for M1, and deadlock.
+//
+// The invariant is asserted directly rather than by racing for a deadlock: while the apply
+// is blocked on a secret it does not yet hold, NO monitor row may be locked. `FOR UPDATE
+// NOWAIT` from another session turns that into a deterministic yes/no — it succeeds under
+// the fixed order and fails with lock_not_available under the interleaved one.
+func TestApplyLocksEverySecretBeforeAnyMonitorRow(t *testing.T) {
+	st, ctx := secretsTestStore(t)
+	orgID, projectID := secretsFixture(t, st, ctx, "lockorder-org", "payments")
+	_ = orgID
+	for _, name := range []string{"alpha-secret", "beta-secret"} {
+		if _, err := st.CreateProjectSecret(ctx, testSecretActor, projectID, name, "value-"+name); err != nil {
+			t.Fatalf("seed secret %s: %v", name, err)
+		}
+	}
+
+	bundle := `
+format: 1
+organization: lockorder-org
+project: payments
+monitors:
+  alpha:
+    name: Alpha
+    type: postgres
+    target: a.internal:5432
+    interval: 60s
+    timeout: 5s
+    settings: {username: u, database: d, password_ref: alpha-secret, sslmode: disable}
+  beta:
+    name: Beta
+    type: postgres
+    target: b.internal:5432
+    interval: 60s
+    timeout: 5s
+    settings: {username: u, database: d, password_ref: beta-secret, sslmode: disable}
+`
+	applyBundle(t, st, ctx, bundle, time.Hour)
+	alphaID, _, _, _, _ := monRow(t, st, ctx, "alpha")
+
+	// plan.Entries is sorted by UID (fileprovider/plan.go), so "alpha" is applied before
+	// "beta". The blocker therefore holds BETA's secret: under the interleaved order the
+	// apply would already have written and locked alpha's monitor row by the time it
+	// blocks here, which is exactly what the probe below detects. Blocking alpha's secret
+	// instead would stall the apply before it touched anything and prove nothing.
+	lastSecretName := "beta-secret"
+
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blocker.Rollback(ctx) }()
+	if _, err := blocker.Exec(ctx,
+		`SELECT id FROM project_secrets WHERE project_id = $1 AND name = $2 FOR UPDATE`,
+		projectID, lastSecretName); err != nil {
+		t.Fatalf("blocker lock: %v", err)
+	}
+
+	// A semantic change to BOTH monitors, so the apply must write both rows.
+	changed := strings.ReplaceAll(bundle, "timeout: 5s", "timeout: 7s")
+	applyDone := make(chan error, 1)
+	go func() {
+		dp, derr := fileprovider.Decode([]byte(changed), config.ProviderScopeConfig{Type: config.ProviderScopeInstance})
+		if derr != nil {
+			applyDone <- derr
+			return
+		}
+		_, aerr := st.ApplyFileManagedBundle(ctx, "platform", dp, "acme-payments.yaml", time.Hour, 0, true)
+		applyDone <- aerr
+	}()
+
+	// Give the apply time to reach — and block on — the secret lock step.
+	time.Sleep(750 * time.Millisecond)
+
+	// THE ASSERTION: no monitor row is locked while the apply waits for a secret.
+	probe, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, probeErr := probe.Exec(ctx, `SELECT id FROM monitors WHERE id = $1 FOR UPDATE NOWAIT`, alphaID)
+	_ = probe.Rollback(ctx)
+	if probeErr != nil {
+		t.Fatalf("a monitor row was already locked while the apply still waited for a secret — "+
+			"the bundle takes S1,M1,S2,M2 instead of every secret first (§4.3): %v", probeErr)
+	}
+
+	// Release the secret; the apply must then complete normally.
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case aerr := <-applyDone:
+		if aerr != nil {
+			t.Fatalf("apply after the blocker released: %v", aerr)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("apply did not finish after the secret lock was released")
 	}
 }

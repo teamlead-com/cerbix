@@ -38,6 +38,13 @@ type CredentialSurface int
 const (
 	SurfaceFile CredentialSurface = iota
 	SurfaceAPI
+	// SurfaceAPIUpdate is a PARTIAL update, where omitting the credential slot entirely
+	// means "keep what is stored". A write-only value is invisible to the client that
+	// reads a monitor back, so demanding exactly-one-of on every PATCH made it impossible
+	// to change any other setting without inventing a placeholder — callers were pushed
+	// into sending `"password": ""`, which is worse than the rule it works around. A slot
+	// that IS present still obeys exactly-one-of.
+	SurfaceAPIUpdate
 )
 
 // bindingClass records what a settings key means for the CREDENTIAL EXECUTION binding.
@@ -326,6 +333,20 @@ func CanonicalSettingValue(typ MonitorType, settings map[string]string, key stri
 	return "", fmt.Errorf("settings: key %q is not part of this schema", key)
 }
 
+// CredentialUpdateOmitsSlot reports whether a prepared PARTIAL update left the credential
+// slot out, i.e. the stored credential must be preserved rather than replaced. It is the
+// one place that question is answered, so the API and the store cannot disagree about what
+// an omitted slot means.
+func CredentialUpdateOmitsSlot(typ MonitorType, settings map[string]string) bool {
+	requirement, err := ResolveCredentialRequirement(typ, settings)
+	if err != nil || requirement != CredentialRequired {
+		return false
+	}
+	_, hasValue := settings["password"]
+	_, hasRef := settings["password_ref"]
+	return !hasValue && !hasRef
+}
+
 // PrepareCredentialSettings is the ONLY exported settings entrypoint. It returns
 // a NEW, normalized map after validating it for the requested write surface.
 // Keeping normalization and validation inseparable makes omission fail-closed:
@@ -438,6 +459,13 @@ func credentialSlot(settings map[string]string, surface CredentialSurface) error
 	case SurfaceAPI:
 		if hasValue == hasRef { // both or neither
 			return fmt.Errorf("settings: exactly one of `password` or `password_ref` is required")
+		}
+	case SurfaceAPIUpdate:
+		if hasValue && hasRef {
+			return fmt.Errorf("settings: exactly one of `password` or `password_ref` is required")
+		}
+		if !hasValue && !hasRef {
+			return nil // omitted: the stored credential is kept (store preserves the ciphertext)
 		}
 	default:
 		return fmt.Errorf("settings: unknown credential surface")

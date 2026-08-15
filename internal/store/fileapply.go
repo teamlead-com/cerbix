@@ -211,16 +211,30 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 	}
 	var execChanged, stateChanged bool
 
+	// Every secret this apply touches is locked HERE, in one id-ordered step, before any
+	// monitor row is written — the fixed §4.3 order. Resolving per entry inside the loop
+	// below satisfied that order within an entry and violated it across the bundle
+	// (S1→M1→S2→M2), which deadlocks against a rotate or rename that takes all its secret
+	// rows first.
+	needBindings := map[string]domain.Monitor{}
+	for _, e := range plan.Entries {
+		switch e.Action {
+		case fileprovider.ActionCreate, fileprovider.ActionUpdate, fileprovider.ActionRestore:
+			needBindings[e.UID] = desired.Monitors[e.UID].Monitor
+		}
+	}
+	bindingsByUID, failedUID, berr := s.planSecretBindings(ctx, tx, projID, needBindings)
+	if berr != nil {
+		return ApplyResult{}, bindFileSecretRefError(berr, failedUID, desired)
+	}
+
 	// Phase 1 — monitors + provenance.
 	for _, e := range plan.Entries {
 		switch e.Action {
 		case fileprovider.ActionCreate:
 			m := desired.Monitors[e.UID].Monitor
 			m.ProjectID = projID
-			bindings, berr := s.monitorSecretBindings(ctx, tx, projID, m)
-			if berr != nil {
-				return ApplyResult{}, bindFileSecretRefError(berr, e.UID, desired)
-			}
+			bindings := bindingsByUID[e.UID]
 			if m.Type == domain.MonitorPush {
 				tok, terr := generatePushTokenStore()
 				if terr != nil {
@@ -248,10 +262,7 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			id := idByUID[e.UID]
 			m := desired.Monitors[e.UID].Monitor
 			m.ID, m.ProjectID = id, projID
-			bindings, berr := s.monitorSecretBindings(ctx, tx, projID, m)
-			if berr != nil {
-				return ApplyResult{}, bindFileSecretRefError(berr, e.UID, desired)
-			}
+			bindings := bindingsByUID[e.UID]
 			if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
 				return ApplyResult{}, uerr
 			}
@@ -277,10 +288,7 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			if enabledByUID[e.UID] != desired.Monitors[e.UID].Monitor.Enabled || desired.Monitors[e.UID].Hash != curHash[e.UID] {
 				m := desired.Monitors[e.UID].Monitor
 				m.ID, m.ProjectID = id, projID
-				bindings, berr := s.monitorSecretBindings(ctx, tx, projID, m)
-				if berr != nil {
-					return ApplyResult{}, bindFileSecretRefError(berr, e.UID, desired)
-				}
+				bindings := bindingsByUID[e.UID]
 				if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
 					return ApplyResult{}, uerr
 				}

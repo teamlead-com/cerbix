@@ -1,0 +1,70 @@
+package store
+
+import (
+	"testing"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
+)
+
+// TestPartialUpdateKeepsTheStoredCredential is the regression for the audit P1 where the
+// API and the store disagreed about an omitted credential slot. The value is write-only, so
+// a client that reads a monitor back never had it to resend; demanding exactly-one-of on
+// every PATCH made changing any OTHER setting impossible without sending `"password": ""`
+// as a placeholder — a workaround worse than the rule it worked around.
+func TestPartialUpdateKeepsTheStoredCredential(t *testing.T) {
+	st, ctx := secretsTestStore(t)
+	_, projectID := secretsFixture(t, st, ctx, "partial-org", "payments")
+
+	inline, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: projectID, Name: "inline-db", Type: domain.MonitorPostgres,
+		Target: "db.internal:5432", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+		Config: map[string]string{"username": "u", "database": "d", "password": "original-value", "sslmode": "require"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A safe reader never sees the credential, so this is exactly what a client can send.
+	safe, err := st.GetMonitor(ctx, inline.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := safe.Config["password"]; present {
+		t.Fatal("the read surface exposed the credential; the rest of this test is meaningless")
+	}
+	safe.Config["sslmode"] = "verify-full" // change something else entirely
+	if _, err := st.UpdateMonitor(ctx, safe); err != nil {
+		t.Fatalf("partial update without the credential slot was rejected: %v", err)
+	}
+
+	// The other setting changed and the stored credential survived, byte for byte.
+	var stored string
+	if err := st.pool.QueryRow(ctx, `SELECT config->>'password' FROM monitors WHERE id = $1`, inline.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	var originalCiphertext string
+	if err := st.pool.QueryRow(ctx, `SELECT config->>'sslmode' FROM monitors WHERE id = $1`, inline.ID).Scan(&originalCiphertext); err != nil {
+		t.Fatal(err)
+	}
+	if originalCiphertext != "verify-full" {
+		t.Fatalf("the non-credential setting did not change: %q", originalCiphertext)
+	}
+	plain, err := st.cipher.Decrypt(stored)
+	if err != nil {
+		t.Fatalf("stored credential is no longer decryptable: %v", err)
+	}
+	if plain != "original-value" {
+		t.Fatalf("stored credential = %q, want the original preserved", plain)
+	}
+
+	// Sending BOTH forms is still exactly-one-of: preservation is about omission, not about
+	// relaxing the rule.
+	both := safe
+	both.Config = map[string]string{
+		"username": "u", "database": "d", "sslmode": "require",
+		"password": "x", "password_ref": "y",
+	}
+	if _, err := st.UpdateMonitor(ctx, both); err == nil {
+		t.Fatal("an update carrying both a value and a ref was accepted")
+	}
+}

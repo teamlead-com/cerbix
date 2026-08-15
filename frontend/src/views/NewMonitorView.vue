@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
-import { applyCredentialSelection } from "@/lib/monitorCredentials";
+import { applyCredentialSelection, isDanglingSecretRef } from "@/lib/monitorCredentials";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -151,6 +151,15 @@ const credentialMode = ref<"value" | "ref">("value");
 const initialCredentialMode = ref<"value" | "ref">("value");
 const secretRef = ref("");
 const projectSecrets = ref<ProjectSecret[]>([]);
+const projectSecretsLoaded = ref(false);
+// A monitor can outlive the secret it points at: the reference is a NAME, and the guards
+// only refuse a delete while a reference exists — a bundle-managed rename, a restore from
+// an older file, or a project moved between environments can all leave one dangling. The
+// <select> below binds a value that is then absent from its options, so without this the
+// field renders blank and the operator is told nothing at all.
+const danglingSecretRef = computed(() =>
+  isDanglingSecretRef(credentialMode.value, secretRef.value, projectSecrets.value, projectSecretsLoaded.value),
+);
 const secretFeatureDisabled = ref(false);
 const tlsSettings = reactive({ enabled: true, skipVerify: false });
 
@@ -717,6 +726,7 @@ async function loadProjectSecrets() {
   const code = (res.error as { error?: string } | undefined)?.error;
   secretFeatureDisabled.value = code === "feature_disabled";
   projectSecrets.value = res.data ?? [];
+  projectSecretsLoaded.value = !res.error;
 }
 
 type Region = { name: string; live: boolean };
@@ -990,6 +1000,7 @@ const selectCls =
                   <span class="text-[12px] font-semibold text-ink-2">Credential</span>
                   <div class="flex gap-3 text-[12px]"><label><input v-model="credentialMode" type="radio" value="value" /> Value</label><label :class="secretFeatureDisabled && 'opacity-50'"><input v-model="credentialMode" type="radio" value="ref" :disabled="secretFeatureDisabled" /> Secret reference</label></div>
                   <select v-if="credentialMode === 'ref'" v-model="secretRef" data-testid="monitor-secret-ref" :class="[selectCls, 'h-[38px]']"><option value="" disabled>Select a project secret</option><option v-for="s in projectSecrets" :key="s.id" :value="s.name">{{ s.name }}</option></select>
+                  <p v-if="danglingSecretRef" data-testid="monitor-secret-ref-missing" class="mt-1 text-[12px] text-down">Secret <span class="font-mono">{{ secretRef }}</span> no longer exists in this project. This monitor cannot dispatch until you pick an existing secret.</p>
                   <input v-else v-model="pg.password" type="password" :placeholder="isEdit && initialCredentialMode === 'value' ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
                 </div>
               </div>
@@ -1015,6 +1026,7 @@ const selectCls =
                 <span class="text-[12px] font-semibold text-ink-2">Credential</span>
                 <div class="flex gap-3 text-[12px]"><label><input v-model="credentialMode" type="radio" value="value" /> Value</label><label :class="secretFeatureDisabled && 'opacity-50'"><input v-model="credentialMode" type="radio" value="ref" :disabled="secretFeatureDisabled" /> Secret reference</label></div>
                 <select v-if="credentialMode === 'ref'" v-model="secretRef" data-testid="monitor-secret-ref" :class="[selectCls, 'h-[38px]']"><option value="" disabled>Select a project secret</option><option v-for="s in projectSecrets" :key="s.id" :value="s.name">{{ s.name }}</option></select>
+                  <p v-if="danglingSecretRef" data-testid="monitor-secret-ref-missing" class="mt-1 text-[12px] text-down">Secret <span class="font-mono">{{ secretRef }}</span> no longer exists in this project. This monitor cannot dispatch until you pick an existing secret.</p>
                 <input v-else v-model="pg.password" type="password" :placeholder="isEdit && initialCredentialMode === 'value' ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
               </div>
               <div class="col-span-2 flex items-center gap-4 text-[12.5px] max-[560px]:col-span-1">
@@ -1058,6 +1070,7 @@ const selectCls =
                   <span class="text-[12px] font-semibold text-ink-2">Credential</span>
                   <div class="flex gap-3 text-[12px]"><label><input v-model="credentialMode" type="radio" value="value" /> Value</label><label :class="secretFeatureDisabled && 'opacity-50'"><input v-model="credentialMode" type="radio" value="ref" :disabled="secretFeatureDisabled" /> Secret reference</label></div>
                   <select v-if="credentialMode === 'ref'" v-model="secretRef" data-testid="monitor-secret-ref" :class="[selectCls, 'h-[38px]']"><option value="" disabled>Select a project secret</option><option v-for="s in projectSecrets" :key="s.id" :value="s.name">{{ s.name }}</option></select>
+                  <p v-if="danglingSecretRef" data-testid="monitor-secret-ref-missing" class="mt-1 text-[12px] text-down">Secret <span class="font-mono">{{ secretRef }}</span> no longer exists in this project. This monitor cannot dispatch until you pick an existing secret.</p>
                   <input v-else v-model="pg.password" type="password" :placeholder="isEdit && initialCredentialMode === 'value' ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
                 </div>
                 <div class="col-span-2 flex items-center gap-4 text-[12.5px] max-[560px]:col-span-1">

@@ -572,7 +572,6 @@ func TestTestClaimStampOutsideRangeIsRefused(t *testing.T) {
 	}
 }
 
-
 // The test claim's presence contract, including the null case a pointer cannot express.
 func TestTestClaimStampPresenceContract(t *testing.T) {
 	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "agent", Key: bytes.Repeat([]byte{1}, 32)}, nil)

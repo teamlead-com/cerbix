@@ -173,10 +173,10 @@ type AMQP struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	jobRegion  string          // region this dispatcher's Jobs() consumes (worker); default core
-	credentialCapability int   // highest envelope generation this worker can open (0 = none)
-	declaredMu sync.Mutex      // guards declared
-	declared   map[string]bool // idempotent-declare cache for per-region job queues
+	jobRegion            string          // region this dispatcher's Jobs() consumes (worker); default core
+	credentialCapability int             // highest envelope generation this worker can open (0 = none)
+	declaredMu           sync.Mutex      // guards declared
+	declared             map[string]bool // idempotent-declare cache for per-region job queues
 
 	jobsOnce    sync.Once
 	jobsCh      chan DeliveredJob

@@ -653,6 +653,7 @@ func (f *fakeStore) AckPullJobs(_ context.Context, tokens []string) error {
 	f.acked = append(f.acked, tokens...)
 	return nil
 }
+
 // Like the jobs fake, the tests fake models the capability boundary: delegating v2 to v1
 // would let a handler call the wrong claim and still look correct.
 func (f *fakeStore) ClaimPullTest(ctx context.Context, region string) (string, []byte, int, bool, error) {

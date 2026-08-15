@@ -645,21 +645,39 @@ func (f *fakeStore) AckPullJobs(_ context.Context, tokens []string) error {
 	f.acked = append(f.acked, tokens...)
 	return nil
 }
-func (f *fakeStore) ClaimPullTest(_ context.Context, region string) (string, []byte, int, bool, error) {
+// Like the jobs fake, the tests fake models the capability boundary: delegating v2 to v1
+// would let a handler call the wrong claim and still look correct.
+func (f *fakeStore) ClaimPullTest(ctx context.Context, region string) (string, []byte, int, bool, error) {
+	return f.claimPullTestUpTo(ctx, region, 1)
+}
+func (f *fakeStore) ClaimPullTestV2(ctx context.Context, region string) (string, []byte, int, bool, error) {
+	return f.claimPullTestUpTo(ctx, region, 2)
+}
+
+func (f *fakeStore) claimPullTestUpTo(_ context.Context, region string, maxGeneration int) (string, []byte, int, bool, error) {
 	if f.pullTests == nil {
 		return "", nil, 0, false, nil
 	}
-	for id, pt := range f.pullTests {
-		if pt.region == region && !pt.claimed {
-			pt.claimed = true
-			f.pullTests[id] = pt
-			return id, pt.payload, pt.protocolVersion, true, nil
+	// Deterministic order so a two-row fixture cannot pass by map-iteration luck.
+	ids := make([]string, 0, len(f.pullTests))
+	for id := range f.pullTests {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		pt := f.pullTests[id]
+		generation := pt.protocolVersion
+		if generation == 0 {
+			generation = 1
 		}
+		if pt.region != region || pt.claimed || generation > maxGeneration {
+			continue
+		}
+		pt.claimed = true
+		f.pullTests[id] = pt
+		return id, pt.payload, generation, true, nil
 	}
 	return "", nil, 0, false, nil
-}
-func (f *fakeStore) ClaimPullTestV2(ctx context.Context, region string) (string, []byte, int, bool, error) {
-	return f.ClaimPullTest(ctx, region)
 }
 func (f *fakeStore) SavePullTestResult(_ context.Context, id, region string, result []byte) error {
 	if pt, ok := f.pullTests[id]; ok && pt.region == region {

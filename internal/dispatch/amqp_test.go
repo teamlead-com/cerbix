@@ -35,7 +35,7 @@ func TestAMQPRoundTrip(t *testing.T) {
 		deleteTestQueue(t, url, "checks.jobs.wirebarrier")
 		deleteTestQueue(t, url, "checks.jobs.v2.wirebarrier")
 	})
-	d.WithJobRegion("roundtrip").WithProtocolV2(true)
+	d.WithJobRegion("roundtrip").WithCredentialCapability(dispatch.EnvelopeV2)
 	ctx := context.Background()
 
 	jobs := d.Jobs()

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -207,7 +208,7 @@ func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, 
 		Test *struct {
 			ID              string          `json:"id"`
 			Job             json.RawMessage `json:"job"`
-			ProtocolVersion *int            `json:"protocol_version"`
+			ProtocolVersion json.RawMessage `json:"protocol_version"`
 		} `json:"test"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Test == nil {
@@ -386,10 +387,10 @@ func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []str
 	var out struct {
 		Jobs   []json.RawMessage `json:"jobs"`
 		Tokens []string          `json:"tokens"`
-		// A POINTER so "absent" (an older core) is distinguishable from "present but
-		// malformed" (a wire disagreement). Those are different situations and only the
-		// first has a safe fallback.
-		ProtocolVersions *[]int `json:"protocol_versions"`
+		// RAW so "absent" (an older core) is distinguishable from "present but malformed"
+		// — including an explicit null, which a *[]int cannot tell from absence. Those are
+		// different situations and only the first has a safe fallback.
+		ProtocolVersions json.RawMessage `json:"protocol_versions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, nil, nil, err
@@ -407,24 +408,35 @@ func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []str
 // Two situations must NOT be conflated, and conflating them is fail-open: a stamp field
 // that is ABSENT means an older core that predates stamping, where the endpoint this agent
 // chose to poll is a legitimate out-of-band fallback; a stamp field that is PRESENT but
-// malformed — short, long, zero, or above this agent's capability — means the response and
-// the agent disagree about the wire, and a disagreement about which carrier a credential
-// arrived on is exactly the thing that must not be guessed. Filling a missing element with
-// the endpoint default would silently promote a truncated array to "generation 2", which
-// is permission to open an envelope.
-func (a *Agent) resolveStampedGenerations(jobs, tokens int, stamped *[]int) ([]int, error) {
+// malformed — null, short, long, zero, or above this agent's capability — means the
+// response and the agent disagree about the wire, and a disagreement about which carrier a
+// credential arrived on is exactly the thing that must not be guessed. Filling a missing
+// element with the endpoint default would silently promote a truncated array to
+// "generation 2", which is permission to open an envelope.
+//
+// Presence is decided on the RAW bytes, not on a nil pointer: encoding/json leaves a
+// *[]int nil both for an absent key and for an explicit `null`, so a pointer cannot tell
+// the two apart and `"protocol_versions": null` would take the legacy fallback — the same
+// bypass through a different door.
+func (a *Agent) resolveStampedGenerations(jobs, tokens int, stamped json.RawMessage) ([]int, error) {
 	if jobs != tokens {
 		return nil, fmt.Errorf("claim response desync: %d jobs but %d tokens", jobs, tokens)
 	}
 	endpoint := a.claimGeneration()
-	if stamped == nil {
+	if len(stamped) == 0 { // key absent: an older core that predates stamping
 		out := make([]int, jobs)
 		for i := range out {
 			out[i] = endpoint
 		}
 		return out, nil
 	}
-	versions := *stamped
+	var versions []int
+	if err := json.Unmarshal(stamped, &versions); err != nil {
+		return nil, fmt.Errorf("claim response carries a malformed protocol_versions field: %w", err)
+	}
+	if versions == nil { // present as JSON null
+		return nil, errors.New("claim response carries protocol_versions: null")
+	}
 	if len(versions) != jobs {
 		return nil, fmt.Errorf("claim response desync: %d jobs but %d stamped generations", jobs, len(versions))
 	}
@@ -436,16 +448,24 @@ func (a *Agent) resolveStampedGenerations(jobs, tokens int, stamped *[]int) ([]i
 	return versions, nil
 }
 
-// resolveTestGeneration is the same contract for the single-row test claim.
-func (a *Agent) resolveTestGeneration(stamped *int) (int, error) {
+// resolveTestGeneration is the same contract for the single-row test claim, including the
+// null-versus-absent distinction.
+func (a *Agent) resolveTestGeneration(stamped json.RawMessage) (int, error) {
 	endpoint := a.claimGeneration()
-	if stamped == nil {
+	if len(stamped) == 0 {
 		return endpoint, nil
 	}
-	if *stamped < dispatch.ProtocolV1 || *stamped > endpoint {
-		return 0, fmt.Errorf("test claim stamped generation %d, outside 1..%d", *stamped, endpoint)
+	var generation *int
+	if err := json.Unmarshal(stamped, &generation); err != nil {
+		return 0, fmt.Errorf("test claim carries a malformed protocol_version field: %w", err)
 	}
-	return *stamped, nil
+	if generation == nil {
+		return 0, errors.New("test claim carries protocol_version: null")
+	}
+	if *generation < dispatch.ProtocolV1 || *generation > endpoint {
+		return 0, fmt.Errorf("test claim stamped generation %d, outside 1..%d", *generation, endpoint)
+	}
+	return *generation, nil
 }
 
 // claimGeneration is the generation of the claim endpoint this agent polls, which follows

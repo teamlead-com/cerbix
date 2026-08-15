@@ -28,6 +28,11 @@ const (
 	// region's queue; the scheduler publishes to the queue of each monitor's region.
 	jobsQueuePrefix   = "checks.jobs."
 	jobsV2QueuePrefix = "checks.jobs.v2."
+	// Carrier generation 3 carries envelope v2 (the execution-bound AAD). It is a
+	// physically separate queue, not a flag on the v2 one: a capability-1 consumer sitting
+	// on a shared queue would take a message it cannot open, and a capability check does
+	// not stop a consumer from consuming (func-secret-inventory §4.7, D-0160).
+	jobsV3QueuePrefix = "checks.jobs.v3."
 	// Test probes ("Test connection") are RPCs per region: the API publishes to
 	// checks.tests.<region> with a reply queue; a worker in that region runs the
 	// probe and replies. The queue is durable+auto-delete: it can be shared by N
@@ -37,6 +42,7 @@ const (
 	// are rejected by RabbitMQ 4.3.
 	testsQueuePrefix   = "checks.tests."
 	testsV2QueuePrefix = "checks.tests.v2."
+	testsV3QueuePrefix = "checks.tests.v3."
 	resultsQueue       = "checks.results"
 	// deadQueue holds poison messages (unparseable job/result bodies) that a consumer
 	// would otherwise Nack-drop and lose. Forwarding them here preserves the raw body
@@ -88,6 +94,49 @@ func testsV2QueueForRegion(region string) string {
 	return testsV2QueuePrefix + region
 }
 
+func jobsV3QueueForRegion(region string) string {
+	if region == "" {
+		region = domain.DefaultRegion
+	}
+	return jobsV3QueuePrefix + region
+}
+
+func testsV3QueueForRegion(region string) string {
+	if region == "" {
+		region = domain.DefaultRegion
+	}
+	return testsV3QueuePrefix + region
+}
+
+// jobsQueueForGeneration maps a carrier generation to its physical queue. The mapping is
+// explicit and total: a generation with no queue is a programming error, never a silent
+// fallback onto an older carrier that its consumers could misread.
+func jobsQueueForGeneration(region string, generation int) (string, bool) {
+	switch generation {
+	case ProtocolV1:
+		return jobsQueueForRegion(region), true
+	case ProtocolV2:
+		return jobsV2QueueForRegion(region), true
+	case ProtocolV3:
+		return jobsV3QueueForRegion(region), true
+	default:
+		return "", false
+	}
+}
+
+func testsQueueForGeneration(region string, generation int) (string, bool) {
+	switch generation {
+	case ProtocolV1:
+		return testsQueueForRegion(region), true
+	case ProtocolV2:
+		return testsV2QueueForRegion(region), true
+	case ProtocolV3:
+		return testsV3QueueForRegion(region), true
+	default:
+		return "", false
+	}
+}
+
 // AMQP is a RabbitMQ-backed Dispatcher for cross-process roles. Publishing is
 // serialized on a dedicated channel; Jobs()/Results() lazily start a manual-ack
 // consumer that forwards deliveries onto a buffered Go channel, so a process only
@@ -118,7 +167,7 @@ type AMQP struct {
 	cancel context.CancelFunc
 
 	jobRegion  string          // region this dispatcher's Jobs() consumes (worker); default core
-	protocolV2 bool            // worker consumes versioned envelope jobs/tests too
+	credentialCapability int   // highest envelope generation this worker can open (0 = none)
 	declaredMu sync.Mutex      // guards declared
 	declared   map[string]bool // idempotent-declare cache for per-region job queues
 
@@ -309,11 +358,14 @@ func (d *AMQP) WithJobRegion(region string) *AMQP {
 	return d
 }
 
-// WithProtocolV2 enables consumption of the physically separate v2 jobs/tests queues.
+// WithCredentialCapability declares the highest ENVELOPE generation this executor can
+// open, which decides which carrier queues it consumes. It is a level, not a boolean: a
+// capability-1 executor must be physically unable to receive a generation-3 carrier, and
+// widening the set it consumes is the only safe direction to move.
 // Publishers route from CheckJob.ProtocolVersion; an old worker never calls this and
 // therefore can never receive an envelope-bearing payload.
-func (d *AMQP) WithProtocolV2(enabled bool) *AMQP {
-	d.protocolV2 = enabled
+func (d *AMQP) WithCredentialCapability(capability int) *AMQP {
+	d.credentialCapability = capability
 	return d
 }
 
@@ -409,13 +461,18 @@ func (d *AMQP) PublishJob(_ context.Context, job CheckJob) error {
 	if job.Monitor.Type == domain.MonitorComposite {
 		region = domain.DefaultRegion
 	}
-	queue := jobsQueueForRegion(region)
-	if job.ProtocolVersion == ProtocolV2 {
-		if job.CredentialEnvelope == nil {
-			return errors.New("dispatch: protocol v2 job is missing credential envelope")
-		}
-		queue = jobsV2QueueForRegion(region)
-	} else if job.CredentialEnvelope != nil {
+	generation := job.ProtocolVersion
+	if generation == 0 {
+		generation = ProtocolV1
+	}
+	queue, ok := jobsQueueForGeneration(region, generation)
+	if !ok {
+		return fmt.Errorf("dispatch: no jobs carrier for generation %d", generation)
+	}
+	if generation >= ProtocolV2 && job.CredentialEnvelope == nil {
+		return fmt.Errorf("dispatch: generation %d job is missing credential envelope", generation)
+	}
+	if generation == ProtocolV1 && job.CredentialEnvelope != nil {
 		return errors.New("dispatch: credential envelope cannot be published to a v1 queue")
 	}
 	if err := d.declareJobQueue(queue); err != nil {
@@ -458,8 +515,12 @@ func (d *AMQP) Jobs() <-chan DeliveredJob {
 			})
 		}
 		consumeQueue(jobsQueueForRegion(d.jobRegion), "jobs", ProtocolV1)
-		if d.protocolV2 {
+		// One carrier per envelope generation this executor can open, and no others.
+		if d.credentialCapability >= EnvelopeV1 {
 			consumeQueue(jobsV2QueueForRegion(d.jobRegion), "jobs.v2", ProtocolV2)
+		}
+		if d.credentialCapability >= EnvelopeV2 {
+			consumeQueue(jobsV3QueueForRegion(d.jobRegion), "jobs.v3", ProtocolV3)
 		}
 	})
 	return d.jobsCh
@@ -503,12 +564,18 @@ func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, 
 	if region == "" {
 		region = domain.DefaultRegion
 	}
-	queue := testsQueueForRegion(region)
-	if job.ProtocolVersion == ProtocolV2 {
+	generation := job.ProtocolVersion
+	if generation == 0 {
+		generation = ProtocolV1
+	}
+	queue, okQueue := testsQueueForGeneration(region, generation)
+	if !okQueue {
+		return domain.Heartbeat{}, fmt.Errorf("dispatch: no tests carrier for generation %d", generation)
+	}
+	if generation >= ProtocolV2 {
 		if job.CredentialEnvelope == nil {
-			return domain.Heartbeat{}, errors.New("dispatch: protocol v2 test is missing credential envelope")
+			return domain.Heartbeat{}, fmt.Errorf("dispatch: generation %d test is missing credential envelope", generation)
 		}
-		queue = testsV2QueueForRegion(region)
 	} else if job.CredentialEnvelope != nil {
 		return domain.Heartbeat{}, errors.New("dispatch: credential test cannot use a v1 queue")
 	}

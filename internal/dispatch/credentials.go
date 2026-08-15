@@ -14,6 +14,10 @@ import (
 const (
 	ProtocolV1 = 1
 	ProtocolV2 = 2
+	// ProtocolV3 is the carrier generation that carries EnvelopeV2. Envelope and carrier
+	// are numbered separately on purpose: generation 2 already means envelope v1 to every
+	// deployed executor, so binding the execution body had to arrive on a new carrier.
+	ProtocolV3 = 3
 	EnvelopeV1 = 1
 	// EnvelopeV2 binds the execution body and the field set in addition to identity (r7).
 	// It is a NEW generation rather than a redefinition of v1: silently changing what v1

@@ -443,6 +443,15 @@ func TestClaimResponseDesyncIsRefusedNotGuessed(t *testing.T) {
 		{"tokens desynced from jobs", map[string]any{
 			"jobs": []json.RawMessage{job, job}, "tokens": []string{"a"}, "protocol_versions": []int{2, 2},
 		}, 0},
+		// An explicit JSON null is PRESENT, not absent: a *[]int cannot tell the two
+		// apart, so decoding presence off a pointer would let null take the legacy
+		// fallback — the same pad-and-guess bypass through a different door.
+		{"stamps present as JSON null", map[string]any{
+			"jobs": []json.RawMessage{job}, "tokens": []string{"a"}, "protocol_versions": nil,
+		}, 0},
+		{"stamps present but not an array", map[string]any{
+			"jobs": []json.RawMessage{job}, "tokens": []string{"a"}, "protocol_versions": "2",
+		}, 0},
 		// The one legitimate fallback: an older core that does not stamp at all. The
 		// endpoint this agent chose to poll is out-of-band knowledge it already holds.
 		{"field absent entirely (older core)", map[string]any{
@@ -532,7 +541,8 @@ func TestEnvelopeOnGeneration1TestCarrierIsRejectedBeforeProbing(t *testing.T) {
 	}
 }
 
-// A malformed stamp on the test claim is refused rather than guessed, same contract as jobs.
+// A malformed stamp on the test claim is refused rather than guessed, same contract as
+// jobs — including an explicit null, which must not read as "absent".
 func TestTestClaimStampOutsideRangeIsRefused(t *testing.T) {
 	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "agent", Key: bytes.Repeat([]byte{1}, 32)}, nil)
 	if err != nil {
@@ -559,5 +569,66 @@ func TestTestClaimStampOutsideRangeIsRefused(t *testing.T) {
 	defer runner.mu.Unlock()
 	if len(runner.ran) != 0 {
 		t.Fatalf("test with an out-of-range stamp reached a prober: %v", runner.ran)
+	}
+}
+
+
+// The test claim's presence contract, including the null case a pointer cannot express.
+func TestTestClaimStampPresenceContract(t *testing.T) {
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "agent", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := domain.Monitor{ID: "m-null", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	envelope, err := ring.Seal(dispatch.SealContext{
+		EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-null",
+		MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor,
+	}, map[string][]byte{"password": []byte("secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _ := json.Marshal(dispatch.CheckJob{
+		Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: envelope,
+	})
+
+	for _, tc := range []struct {
+		name     string
+		test     map[string]any
+		wantRuns int
+	}{
+		{"protocol_version present as null", map[string]any{
+			"id": "t1", "job": json.RawMessage(job), "protocol_version": nil,
+		}, 0},
+		{"protocol_version present but not a number", map[string]any{
+			"id": "t1", "job": json.RawMessage(job), "protocol_version": "2",
+		}, 0},
+		{"protocol_version absent (older core)", map[string]any{
+			"id": "t1", "job": json.RawMessage(job),
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/agent/v2/tests":
+					_ = json.NewEncoder(w).Encode(map[string]any{"test": tc.test})
+				case "/api/v1/agent/test-results":
+					w.WriteHeader(http.StatusOK)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			runner := &recordingRunner{}
+			a := New(srv.URL, "tok", "pull1", runner, slog.New(slog.NewTextHandler(io.Discard, nil))).
+				WithCredentialKeyring(ring)
+			a.pollTest(context.Background())
+
+			runner.mu.Lock()
+			defer runner.mu.Unlock()
+			if len(runner.ran) != tc.wantRuns {
+				t.Fatalf("probed %v, want %d execution(s)", runner.ran, tc.wantRuns)
+			}
+		})
 	}
 }

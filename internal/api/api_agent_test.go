@@ -398,3 +398,64 @@ func TestAgentTestClaimStampsGeneration(t *testing.T) {
 		t.Fatalf("test stamped generation = %v, want 1", out.Test.ProtocolVersion)
 	}
 }
+
+// TestAgentTestClaimRespectsCapabilityBoundary proves HANDLER SELECTION, not just the
+// stamp: the legacy endpoint must not reach a generation-2 row, and the capable endpoint
+// must reach both — which a fake that delegates v2 to v1 could never show.
+func TestAgentTestClaimRespectsCapabilityBoundary(t *testing.T) {
+	newStore := func() *fakeStore {
+		fs := seededStore()
+		fs.pullTests = map[string]fakePullTest{
+			"a-legacy": {region: "secure", payload: []byte(`{"Monitor":{"id":"legacy"}}`), protocolVersion: 1},
+			"b-capable": {region: "secure", payload: []byte(`{"Monitor":{"id":"capable"}}`), protocolVersion: 2},
+		}
+		return fs
+	}
+	claim := func(fs *fakeStore, path string, headers map[string]string) *struct {
+		ID              string `json:"id"`
+		ProtocolVersion *int   `json:"protocol_version"`
+	} {
+		t.Helper()
+		h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentToken("s3cr3t").AgentRouter()
+		rec := agentReqWithHeaders(h, http.MethodGet, path, "s3cr3t", "", headers)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status %d: %s", path, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Test *struct {
+				ID              string `json:"id"`
+				ProtocolVersion *int   `json:"protocol_version"`
+			} `json:"test"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		return out.Test
+	}
+
+	// Legacy endpoint: takes the generation-1 row, and after that sees nothing — the
+	// generation-2 row must remain invisible to it.
+	fs := newStore()
+	first := claim(fs, "/api/v1/agent/tests?region=secure", nil)
+	if first == nil || first.ID != "a-legacy" {
+		t.Fatalf("legacy endpoint claimed %+v, want the generation-1 row", first)
+	}
+	if again := claim(fs, "/api/v1/agent/tests?region=secure", nil); again != nil {
+		t.Fatalf("legacy endpoint reached a generation-2 row: %+v", again)
+	}
+
+	// Capable endpoint: reaches both, oldest id first, each stamped with its own generation.
+	fs = newStore()
+	capableHeaders := map[string]string{"X-Cerbix-Credential-Envelope": "1"}
+	got := []int{}
+	for i := 0; i < 2; i++ {
+		test := claim(fs, "/api/v1/agent/v2/tests?region=secure", capableHeaders)
+		if test == nil || test.ProtocolVersion == nil {
+			t.Fatalf("capable endpoint claim %d returned %+v", i, test)
+		}
+		got = append(got, *test.ProtocolVersion)
+	}
+	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("capable endpoint claimed generations %v, want [1 2]", got)
+	}
+}

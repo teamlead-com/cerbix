@@ -762,7 +762,14 @@ func runServe(args []string) int {
 		}
 		// A worker consumes only its region's jobs queue (checks.jobs.<region>);
 		// harmless no-op for scheduler/api (they don't consume jobs).
-		amqpd.WithJobRegion(*region).WithProtocolV2(*role == "worker" && cfg.Secrets.EnvelopeEnforced())
+		// The capability an executor declares is the highest ENVELOPE generation it can
+		// open, and it decides which carrier queues it consumes. Emission of the newer
+		// carrier is gated separately, on the region's existential readiness.
+		capability := 0
+		if *role == "worker" && cfg.Secrets.EnvelopeEnforced() {
+			capability = dispatch.EnvelopeV2
+		}
+		amqpd.WithJobRegion(*region).WithCredentialCapability(capability)
 		amqpd.WithBrokerState(registry.SetBrokerUp) // cerbix_broker_up gauge
 		disp = amqpd
 	}

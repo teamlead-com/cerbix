@@ -141,16 +141,25 @@ func (s *Store) claimRepairRangeOn(ctx context.Context, db dbConn) (RepairRange,
 
 	var r RepairRange
 	var reason string
+	// A claim takes a LEASE, and an expired lease is claimable by anyone.
+	//
+	// Without this, `state='running'` was a one-way door: the claim committed it, the claim
+	// query looked only at `pending`, and a leader that lost its backend between claim and
+	// release stranded the range forever — with it, the watermark hole it existed to fill.
+	// The lease is what makes durable work actually durable rather than merely persisted.
 	err = tx.QueryRow(ctx,
-		`UPDATE service_repair_ranges SET state = 'running', updated_at = now()
+		`UPDATE service_repair_ranges
+		    SET state = 'running', updated_at = now(), lease_expires_at = now() + $1::interval
 		  WHERE id = (
 		      SELECT id FROM service_repair_ranges
-		       WHERE state = 'pending' AND next_attempt_at <= now()
+		       WHERE (state = 'pending' AND next_attempt_at <= now())
+		          OR (state = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now())
 		       ORDER BY next_attempt_at, service_id
 		       FOR UPDATE SKIP LOCKED
 		       LIMIT 1)
 		  RETURNING id, service_id, project_id, range_start, range_end, reason,
-		            COALESCE(cursor_at, range_start), maintenance_generation, attempts`).
+		            COALESCE(cursor_at, range_start), maintenance_generation, attempts`,
+		repairLease.String()).
 		Scan(&r.ID, &r.ServiceID, &r.ProjectID, &r.From, &r.To, &reason, &r.Cursor, &r.Generation, &r.Attempts)
 	if noRows(err) {
 		return RepairRange{}, false, tx.Commit(ctx)
@@ -309,9 +318,14 @@ func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, fr
 		return ErrRangeSuperseded
 	}
 
+	// The lease is extended in the SAME transaction as the cursor. A separate heartbeat
+	// could renew a lease for work that then rolled back, which is a lease outliving the
+	// progress it claims to protect.
 	if _, err := tx.Exec(ctx,
-		`UPDATE service_repair_ranges SET cursor_at = $2, updated_at = now() WHERE id = $1`,
-		r.ID, to); err != nil {
+		`UPDATE service_repair_ranges
+		    SET cursor_at = $2, updated_at = now(), lease_expires_at = now() + $3::interval
+		  WHERE id = $1`,
+		r.ID, to, repairLease.String()); err != nil {
 		return fmt.Errorf("store: advance cursor: %w", err)
 	}
 	return tx.Commit(ctx)
@@ -319,6 +333,12 @@ func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, fr
 
 // repairLockTimeout caps a single lock wait inside a batch, on top of the slice remainder.
 const repairLockTimeout = 3 * time.Second
+
+// repairLease is how long a claim stays exclusive without progress. It has to exceed the
+// longest a single batch can legitimately take — the slice budget plus one lock wait — or a
+// live worker would have its own range stolen mid-batch; and it has to be short enough that
+// a crashed leader's work resumes within a sub-tick or two rather than a maintenance window.
+const repairLease = 60 * time.Second
 
 func min64(a, b int64) int64 {
 	if a < b {

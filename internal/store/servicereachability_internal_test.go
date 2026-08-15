@@ -1,0 +1,207 @@
+package store
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
+)
+
+// PRODUCT-PATH reachability (func-service-reliability §10.5).
+//
+// Every other test in this subsystem calls MaterializeServiceRange, or inserts the
+// service_materialization row itself, and they all passed while the feature produced nothing
+// in production: no code path outside a test ever created that row or asked for a bucket to
+// be computed. The whole subsystem was correct and unreachable.
+//
+// These tests are therefore forbidden from calling any materialization entry point directly.
+// They may use ONLY what the product uses: the declaration write the HTTP handler calls, the
+// result-recording the ingest pipeline calls, and the leader slice the scheduler calls.
+
+// leaderSliceFor drives the service queue exactly as the scheduler's sub-tick does — on a
+// real lock-owning session, not through the pool.
+func leaderSliceFor(t *testing.T, st *Store, ctx context.Context, rounds int) {
+	t.Helper()
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil {
+		t.Fatalf("leader session: %v", err)
+	}
+	if !ok {
+		t.Fatal("could not take leadership in a test that owns the database")
+	}
+	defer ls.Release()
+	for i := 0; i < rounds; i++ {
+		worked, err := ls.RunServiceSlice(ctx, time.Now().Add(2*time.Second))
+		if err != nil {
+			t.Fatalf("service slice %d: %v", i, err)
+		}
+		if !worked {
+			return
+		}
+	}
+}
+
+// The one that would have caught the whole defect: declare a service through the ordinary
+// write path, record ordinary heartbeats, run the ordinary leader slice, and require FACTS
+// and a MOVING WATERMARK. Nothing here touches materialization by name.
+func TestDeclaringAServiceMakesItMaterializeWithoutAnyoneAskingTwice(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+
+	// Adopt a short stretch of history so the buckets under test are already past their
+	// accounting grace when the driver reaches them.
+	from := time.Now().UTC().Add(-30 * time.Minute)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http, f.redis}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: from}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+
+	// A declaration ALONE must put the service on the driver's list. If this row is missing,
+	// nothing downstream can ever run.
+	var start time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT materialization_start FROM service_materialization WHERE service_id=$1`,
+		f.serviceID).Scan(&start); err != nil {
+		t.Fatalf("the declaration did not start materialization: %v", err)
+	}
+
+	// Ordinary heartbeats over the adopted stretch, through the ingest path a prober uses.
+	base := domain.FloorToBucket(time.Now().UTC().Add(-20 * time.Minute))
+	for i := 0; i < 10; i++ {
+		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+15*time.Second), true)
+	}
+
+	leaderSliceFor(t, st, ctx, 40)
+
+	// Facts exist for the observed buckets…
+	for i := 0; i < 10; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		fact, ok := readFact(t, st, ctx, f.serviceID, at)
+		if !ok {
+			t.Fatalf("no fact for bucket %s — the scheduler slice produced nothing", at)
+		}
+		if fact.state != "sealed" {
+			t.Errorf("bucket %s is %q, want sealed (it is well past the grace)", at, fact.state)
+		}
+		if fact.good == 0 {
+			t.Errorf("bucket %s recorded no good time from an UP observation", at)
+		}
+	}
+
+	// …and the watermark moved past them. This is the assertion the shipped E2E inverted:
+	// it accepted "not materialized yet" as a legitimate resting state when it was in fact
+	// the only state the system could reach.
+	through := sealedThrough(t, st, ctx, f.serviceID)
+	if through == nil {
+		t.Fatal("sealed_through is still NULL after the leader ran; the watermark never advances in production")
+	}
+	if !through.After(base.Add(9 * time.Minute)) {
+		t.Errorf("sealed_through = %s, want past the last observed bucket %s", *through, base.Add(9*time.Minute))
+	}
+}
+
+// The driver's cursor is PROGRESS and the watermark is EVIDENCE. A service that declared no
+// reliability inputs for a stretch produces no facts there, and the two must disagree: the
+// watermark stops at the gap, the cursor walks on. Conflating them either invents a sealed
+// window over unmeasured time or wedges the driver on the same bucket forever.
+func TestProgressWalksPastAGapTheWatermarkRefusesToCross(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+
+	from := time.Now().UTC().Add(-30 * time.Minute)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http, f.redis}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: from}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+
+	// Observations only in a LATER window, so the earlier adopted stretch has no evidence.
+	base := domain.FloorToBucket(time.Now().UTC().Add(-10 * time.Minute))
+	for i := 0; i < 5; i++ {
+		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+10*time.Second), true)
+	}
+
+	leaderSliceFor(t, st, ctx, 60)
+
+	var cursor time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT materialized_through FROM service_materialization WHERE service_id=$1`,
+		f.serviceID).Scan(&cursor); err != nil {
+		t.Fatalf("read cursor: %v", err)
+	}
+	if !cursor.After(base) {
+		t.Errorf("materialized_through = %s, want past %s — the driver wedged on the empty stretch", cursor, base)
+	}
+}
+
+// A service with no reliability inputs is never put on the driver's list at all. It produces
+// no facts by design, so queuing it would mean a driver walking forever over nothing.
+func TestAServiceWithNoInputsIsNotOnTheDriversList(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http, f.redis}, SLI: nil,
+	}, 0, DeclarationOptions{CreatedBy: "op"}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	var rows int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_materialization WHERE service_id=$1`, f.serviceID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 0 {
+		t.Error("a service with an empty SLI was queued for materialization")
+	}
+
+	// …and declaring inputs later DOES put it on the list.
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http, f.redis}, SLI: []string{f.http},
+	}, 1, DeclarationOptions{CreatedBy: "op"}); err != nil {
+		t.Fatalf("second declaration: %v", err)
+	}
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_materialization WHERE service_id=$1`, f.serviceID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Error("declaring reliability inputs did not start materialization")
+	}
+}
+
+// materialization_start never moves. A later revision cannot make history begin somewhere
+// else, and letting it would silently redefine what a complete window covers.
+func TestMaterializationStartIsFixedByTheFirstDeclarationThatHasInputs(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+
+	from := time.Now().UTC().Add(-2 * time.Hour)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http, f.redis}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: from}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	var first time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT materialization_start FROM service_materialization WHERE service_id=$1`,
+		f.serviceID).Scan(&first); err != nil {
+		t.Fatalf("read start: %v", err)
+	}
+
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http, f.redis}, SLI: []string{f.http, f.redis},
+	}, 1, DeclarationOptions{CreatedBy: "op"}); err != nil {
+		t.Fatalf("second declaration: %v", err)
+	}
+	var second time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT materialization_start FROM service_materialization WHERE service_id=$1`,
+		f.serviceID).Scan(&second); err != nil {
+		t.Fatalf("reread start: %v", err)
+	}
+	if !second.Equal(first) {
+		t.Errorf("materialization_start moved %s -> %s on a later revision", first, second)
+	}
+}

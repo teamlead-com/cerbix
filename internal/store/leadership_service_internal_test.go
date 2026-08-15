@@ -18,7 +18,7 @@ func TestFencedRepairSliceCannotCommitAfterLosingTheLock(t *testing.T) {
 	// Inside the adopted window: the retroactive first revision reaches back two hours, so a
 	// range older than that is governed by no epoch and would correctly produce nothing.
 	base := time.Now().UTC().Add(-40 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(10*time.Minute), ReasonBackfill); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}

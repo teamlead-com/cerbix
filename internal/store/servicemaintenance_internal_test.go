@@ -14,7 +14,7 @@ func sealedService(t *testing.T, st *Store, ctx context.Context) (declFixture, t
 	t.Helper()
 	f := adoptedService(t, st, ctx)
 	base := time.Now().UTC().Add(-40 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	for i := 0; i < 10; i++ {
 		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+10*time.Second), true)
 	}

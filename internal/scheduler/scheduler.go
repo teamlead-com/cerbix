@@ -28,9 +28,9 @@ const advisoryLockKey int64 = 0x6365726269780001 // "cerbix" + slot 1
 type LeaderSession interface {
 	Check(ctx context.Context) (bool, error)
 	Release()
-	// RunServiceRepairSlice works one durable repair range until the deadline, on the
+	// RunServiceSlice works the service-reliability queue until the deadline, on the
 	// lock-owning connection. It reports whether it found anything to do.
-	RunServiceRepairSlice(ctx context.Context, deadline time.Time) (bool, error)
+	RunServiceSlice(ctx context.Context, deadline time.Time) (bool, error)
 }
 
 // StoreAdapter widens *store.Store to the Store interface.
@@ -449,8 +449,9 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					return true
 				}
 			}
-			// Service reliability: work durable repair ranges on the LOCK-OWNING
-			// connection, in slices short enough that dispatch is serviced between them.
+			// Service reliability: durable repair ranges FIRST, then forward
+			// materialization, on the LOCK-OWNING connection, in slices short enough
+			// that dispatch is serviced between them.
 			// An empty queue costs one claim query and backs off to the next sub-tick, so
 			// an installation with no services pays effectively nothing.
 			if session != nil && now.Sub(lastServiceSlice) >= serviceSliceEvery {
@@ -462,10 +463,10 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						slice = left
 					}
 					started := time.Now()
-					worked, err := session.RunServiceRepairSlice(ctx, started.Add(slice))
+					worked, err := session.RunServiceSlice(ctx, started.Add(slice))
 					spent += time.Since(started)
 					if err != nil {
-						s.logger.Error("service_repair_slice_failed", "error", err.Error())
+						s.logger.Error("service_slice_failed", "error", err.Error())
 						break
 					}
 					if !worked {

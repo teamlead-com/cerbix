@@ -375,7 +375,39 @@ func (s *Store) putServiceDeclarationTx(
 	if err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
 	}
+
+	// The declaration is what puts the service on the materialization path. Without this the
+	// whole subsystem was inert in production: rows existed, the evaluator was correct, and
+	// nothing ever asked it to run — every seal in the test suite came from a test calling
+	// the store directly.
+	//
+	// Only a declaration that actually has reliability inputs starts materialization. A
+	// service with an empty SLI produces no facts by design, and giving it a start would
+	// queue a driver that can only ever walk over nothing.
+	if len(sli) > 0 {
+		if err := ensureMaterializationRowTx(ctx, tx, projectID, serviceID, effectiveAt); err != nil {
+			return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
+		}
+	}
 	return rev, epoch, nil
+}
+
+// ensureMaterializationRowTx puts the service on the driver's list, once.
+//
+// `materialization_start` is the earliest instant this service will ever have facts for, and
+// it NEVER moves: a later revision cannot make history start earlier or later than it did,
+// and moving it would silently redefine what a complete window means. ON CONFLICT DO NOTHING
+// is therefore the whole update policy.
+func ensureMaterializationRowTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, start time.Time) error {
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO service_materialization
+		   (service_id, project_id, materialization_start, materialized_through)
+		 VALUES ($1,$2,$3,$3)
+		 ON CONFLICT (service_id) DO NOTHING`,
+		serviceID, projectID, start); err != nil {
+		return fmt.Errorf("store: start materialization: %w", err)
+	}
+	return nil
 }
 
 // supersedeEpochsAtBoundary yields the EPOCH axis at one boundary, and touches nothing else.

@@ -34,10 +34,20 @@ func readFact(t *testing.T, st *Store, ctx context.Context, serviceID string, bu
 	return f, true
 }
 
-func startMaterialization(t *testing.T, st *Store, ctx context.Context, f declFixture, from time.Time) {
+// materializeFrom PINS where the driver starts for a fixture that needs a specific instant.
+//
+// It no longer creates the row: the DECLARATION does that now, in production. This helper
+// used to be the only thing that ever created it, which is exactly how a subsystem that
+// produced nothing outside tests passed its whole suite.
+func materializeFrom(t *testing.T, st *Store, ctx context.Context, f declFixture, from time.Time) {
 	t.Helper()
 	if _, err := st.pool.Exec(ctx,
-		`INSERT INTO service_materialization (service_id, project_id, materialization_start) VALUES ($1,$2,$3)`,
+		`INSERT INTO service_materialization
+		   (service_id, project_id, materialization_start, materialized_through)
+		 VALUES ($1,$2,$3,$3)
+		 ON CONFLICT (service_id) DO UPDATE
+		    SET materialization_start = EXCLUDED.materialization_start,
+		        materialized_through  = EXCLUDED.materialized_through`,
 		f.serviceID, f.projectID, from); err != nil {
 		t.Fatalf("materialization row: %v", err)
 	}
@@ -60,7 +70,7 @@ func TestMaterializeWritesAConservingFact(t *testing.T) {
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	beat(t, st, ctx, f.http, base.Add(-5*time.Second), true)
 
 	n, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base, base.Add(time.Minute))
@@ -92,7 +102,7 @@ func TestMaterializeSplitsAPartiallyStaleBucket(t *testing.T) {
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	// The default freshness floor is 90s, so an observation 70s before the bucket opens
 	// decays 20s into it.
 	beat(t, st, ctx, f.http, base.Add(-70*time.Second), true)
@@ -117,7 +127,7 @@ func TestMaturedBucketIsSealedWithItsGeneration(t *testing.T) {
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	beat(t, st, ctx, f.http, base.Add(10*time.Second), true)
 
 	if _, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base, base.Add(time.Minute)); err != nil {
@@ -143,7 +153,7 @@ func TestRecentBucketStaysProvisional(t *testing.T) {
 
 	now := time.Now().UTC()
 	base := now.Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	beat(t, st, ctx, f.http, base.Add(time.Second), true)
 
 	if _, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base, base.Add(time.Minute)); err != nil {
@@ -168,7 +178,7 @@ func TestSealedFactIsNotRewrittenByOrdinaryMaterialization(t *testing.T) {
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	beat(t, st, ctx, f.http, base.Add(10*time.Second), true)
 	if _, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base, base.Add(time.Minute)); err != nil {
 		t.Fatalf("first: %v", err)
@@ -193,7 +203,7 @@ func TestSealedThroughStopsAtAHole(t *testing.T) {
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	for i := 0; i < 5; i++ {
 		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+10*time.Second), true)
 	}
@@ -229,7 +239,7 @@ func TestArchivedMaintenanceKeepsItsEffectiveSpan(t *testing.T) {
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	beat(t, st, ctx, f.http, base.Add(-5*time.Second), false) // would be BAD without the window
 
 	mw, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
@@ -267,7 +277,7 @@ func TestCancelledWindowTruncatesAtItsExactInstant(t *testing.T) {
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	beat(t, st, ctx, f.http, base.Add(-5*time.Second), true)
 
 	mw, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
@@ -306,7 +316,7 @@ func TestServiceWithoutSLIProducesNoFacts(t *testing.T) {
 		t.Fatalf("declaration: %v", err)
 	}
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 
 	n, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base, base.Add(5*time.Minute))
 	if err != nil {
@@ -324,7 +334,7 @@ func TestEachBucketResolvesItsOwnEpoch(t *testing.T) {
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	for i := 0; i < 3; i++ {
 		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+time.Second), true)
 	}
@@ -366,7 +376,7 @@ func TestSealMaterializesTheIngestRowForAnEmptyBucket(t *testing.T) {
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	// Deliberately no heartbeat anywhere near this bucket.
 
 	if _, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base, base.Add(time.Minute)); err != nil {

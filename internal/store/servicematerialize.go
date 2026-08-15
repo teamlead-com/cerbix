@@ -365,3 +365,100 @@ func advanceSealedThrough(ctx context.Context, tx pgx.Tx, serviceID string) erro
 	}
 	return nil
 }
+
+// ── The forward driver ──────────────────────────────────────────────────────────────────
+//
+// Everything above computes buckets when someone asks. This is what asks, continuously, and
+// its absence is why phase 1 as first written produced no facts in production at all.
+//
+// It is deliberately NOT a repair range. Repair ranges are for work whose extent is known
+// and must survive a crash — a retroactive maintenance mutation, a re-declaration, an
+// admin recompute. Forward materialization has no extent: it is "keep up with the clock",
+// its cursor IS its state, and enqueuing it as ranges would mean writing a durable row every
+// minute for every service forever.
+
+// maxBucketsPerAdvance bounds one service's share of a slice. A service adopting 90 days of
+// history has 129 600 buckets to walk; without a bound it would hold the slice for minutes
+// and starve both dispatch and every other service.
+const maxBucketsPerAdvance = 240
+
+// AdvanceServiceMaterializationOn walks ONE due service forward on the given connection and
+// reports whether it found anything to do.
+//
+// One service per call, not all of them: the caller owns the leadership connection and its
+// deadline, and a loop that drained every service inside a single call could not be
+// interrupted when leadership moved.
+func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, deadline time.Time) (bool, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("store: begin advance: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	// `now` comes from the DB, like every other instant in this subsystem: the seal decision
+	// downstream compares against it, and two clocks would let a fast node seal a bucket a
+	// slow one still considers open.
+	var now time.Time
+	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&now); err != nil {
+		return false, fmt.Errorf("store: read clock: %w", err)
+	}
+	// Only buckets whose accounting window has closed are worth walking: an earlier one
+	// would be written provisional and rewritten on the next pass, for every service, every
+	// minute.
+	horizon := domain.FloorToBucket(now.Add(-LateArrivalGrace))
+
+	var (
+		serviceID, projectID string
+		cursor               time.Time
+	)
+	err = tx.QueryRow(ctx,
+		`SELECT service_id, project_id, COALESCE(materialized_through, materialization_start)
+		   FROM service_materialization
+		  WHERE COALESCE(materialized_through, materialization_start) < $1
+		  ORDER BY COALESCE(materialized_through, materialization_start)
+		  FOR UPDATE SKIP LOCKED
+		  LIMIT 1`, horizon).Scan(&serviceID, &projectID, &cursor)
+	if noRows(err) {
+		return false, tx.Commit(ctx)
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: claim service for advance: %w", err)
+	}
+
+	end := cursor.Add(time.Duration(maxBucketsPerAdvance) * domain.CanonicalBucket)
+	if end.After(horizon) {
+		end = horizon
+	}
+
+	// Bucket at a time so the deadline is honoured mid-range rather than after it. A partial
+	// pass is not a failure: the cursor is committed at whatever point it reached and the
+	// next slice resumes there.
+	reached := cursor
+	for at := cursor; at.Before(end); at = at.Add(domain.CanonicalBucket) {
+		if !time.Now().Before(deadline) {
+			break
+		}
+		if _, err := s.materializeBucketTx(ctx, tx, projectID, serviceID, at); err != nil {
+			return true, err
+		}
+		reached = at.Add(domain.CanonicalBucket)
+	}
+	if reached.Equal(cursor) {
+		// The deadline landed before the first bucket. Commit nothing and report work
+		// remaining, so the caller backs off to the next sub-tick instead of spinning.
+		return true, tx.Commit(ctx)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE service_materialization SET materialized_through = $2 WHERE service_id = $1`,
+		serviceID, reached); err != nil {
+		return true, fmt.Errorf("store: advance materialized_through: %w", err)
+	}
+	// The watermark is recomputed from the FACTS, never set to the cursor: progress and
+	// evidence are different claims, and a hole must hold the watermark while the driver
+	// walks past it.
+	if err := advanceSealedThrough(ctx, tx, serviceID); err != nil {
+		return true, err
+	}
+	return true, tx.Commit(ctx)
+}

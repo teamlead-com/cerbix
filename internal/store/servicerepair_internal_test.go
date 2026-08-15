@@ -121,7 +121,7 @@ func TestRunRepairRangeMaterializesAndCompletes(t *testing.T) {
 	st, ctx := declStore(t)
 	f := adoptedService(t, st, ctx)
 	base := time.Now().UTC().Add(-40 * time.Minute).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 	for i := 0; i < 5; i++ {
 		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+10*time.Second), true)
 	}
@@ -159,7 +159,7 @@ func TestRangeOutOfSliceResumesFromItsCursor(t *testing.T) {
 	st, ctx := declStore(t)
 	f := adoptedService(t, st, ctx)
 	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 
 	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(2*time.Hour), ReasonBackfill); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -203,7 +203,7 @@ func TestMaintenanceMutationSupersedesARunningBatch(t *testing.T) {
 	st, ctx := declStore(t)
 	f := adoptedService(t, st, ctx)
 	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
-	startMaterialization(t, st, ctx, f, base)
+	materializeFrom(t, st, ctx, f, base)
 
 	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(2*time.Hour), ReasonBackfill); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -307,5 +307,76 @@ func TestRepairBackoffIsBounded(t *testing.T) {
 	}
 	if repairBackoff(3) <= repairBackoff(1) {
 		t.Error("backoff does not grow with attempts")
+	}
+}
+
+// A leader that dies holding a claim must not take the work with it.
+//
+// This is the failure the shipped code could not recover from: the claim committed
+// `state='running'`, the claim query looked only at `pending`, and nothing ever reset it. The
+// range — and the watermark hole it existed to fill — stayed there forever, silently, because
+// nothing counts or alerts on running work.
+func TestACrashedLeadersClaimIsReclaimedAfterItsLease(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(time.Hour), ReasonBackfill); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Claim on a dedicated connection, then destroy that backend — a leader losing its node.
+	conn, err := st.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	var pid int32
+	if err := conn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatalf("pid: %v", err)
+	}
+	claimed, ok, err := st.claimRepairRangeOn(ctx, conn)
+	if err != nil || !ok {
+		t.Fatalf("claim: %v ok=%v", err, ok)
+	}
+	if _, err := st.pool.Exec(ctx, `SELECT pg_terminate_backend($1)`, pid); err != nil {
+		t.Fatalf("terminate: %v", err)
+	}
+	// Make the dead connection notice before handing it back, so the pool destroys it
+	// instead of lending the corpse to the next caller.
+	_, _ = conn.Exec(ctx, `SELECT 1`)
+	conn.Release()
+
+	if state, _ := rangeState(t, st, ctx, claimed.ID); state != "running" {
+		t.Fatalf("state = %q after the leader died, want running (the claim was committed)", state)
+	}
+
+	// Nobody may steal it while the lease is live — otherwise a slow but healthy leader has
+	// its own range worked concurrently by a second one.
+	if _, ok, err := st.claimRepairRangeOn(ctx, st.pool); err != nil {
+		t.Fatalf("claim during lease: %v", err)
+	} else if ok {
+		t.Fatal("a live lease was stolen; two leaders would work the same range at once")
+	}
+
+	// Let the lease lapse. Moving the expiry into the past stands in for the clock — the
+	// assertion is about what the claim query does with an expired lease, not about waiting.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_repair_ranges SET lease_expires_at = now() - interval '1 second' WHERE id=$1`,
+		claimed.ID); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	reclaimed, ok, err := st.claimRepairRangeOn(ctx, st.pool)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if !ok {
+		t.Fatal("an expired claim was never reclaimed; the range is stranded forever")
+	}
+	if reclaimed.ID != claimed.ID {
+		t.Errorf("reclaimed %s, want the stranded %s", reclaimed.ID, claimed.ID)
+	}
+	// It resumes from the durable cursor rather than restarting.
+	if !reclaimed.Cursor.Equal(claimed.Cursor) {
+		t.Errorf("resumed at %s, want the durable cursor %s", reclaimed.Cursor, claimed.Cursor)
 	}
 }

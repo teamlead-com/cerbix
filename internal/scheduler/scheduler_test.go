@@ -110,7 +110,7 @@ func (f *fakeStore) RecordDeadmanResult(_ context.Context, monitorID string, _ i
 	return store.ResultOutcome{Applied: true, Prev: domain.StatusUp, Cur: domain.StatusDown}, nil
 }
 
-// fakeLeaderSession stands in for the pinned-connection session. Its RunServiceRepairSlice
+// fakeLeaderSession stands in for the pinned-connection session. Its RunServiceSlice
 // reports "nothing to do", which is what an installation with no services looks like — and
 // what the scheduler tests are about.
 type fakeLeaderSession struct{ owner *fakeStore }
@@ -122,7 +122,7 @@ func (s fakeLeaderSession) Check(context.Context) (bool, error) {
 	return true, nil
 }
 func (s fakeLeaderSession) Release() {}
-func (s fakeLeaderSession) RunServiceRepairSlice(context.Context, time.Time) (bool, error) {
+func (s fakeLeaderSession) RunServiceSlice(context.Context, time.Time) (bool, error) {
 	atomic.AddInt32(&s.owner.serviceSlices, 1)
 	return false, nil
 }

@@ -140,3 +140,18 @@ func (ls *LeaderSession) RunServiceRepairSlice(ctx context.Context, deadline tim
 	}
 	return true, nil
 }
+
+// RunServiceSlice is the whole service-reliability share of one leader sub-tick.
+//
+// Durable repair comes FIRST and forward materialization second, deliberately. Repair exists
+// because something already recorded is wrong or missing; keeping up with the clock can
+// wait a slice, a window known to be wrong cannot. The forward pass then runs only when the
+// repair queue is empty, which is also what stops a busy repair backlog from being starved
+// by a service adopting ninety days of history.
+func (ls *LeaderSession) RunServiceSlice(ctx context.Context, deadline time.Time) (bool, error) {
+	worked, err := ls.RunServiceRepairSlice(ctx, deadline)
+	if err != nil || worked {
+		return worked, err
+	}
+	return ls.store.AdvanceServiceMaterializationOn(ctx, ls.conn, deadline)
+}

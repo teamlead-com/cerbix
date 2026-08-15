@@ -603,15 +603,8 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 	if err := replaceMonitorSecretRefsTx(ctx, tx, m.ID, m.ProjectID, bindings); err != nil {
 		return domain.Monitor{}, err
 	}
-	// Evaluation epochs for every service whose SLI declares this monitor, in THIS
-	// transaction. The epoch and the write it describes have to become visible together:
-	// snapshotting later would leave an interval in which concurrent ingest is attributed to
-	// an epoch that does not yet describe the monitor it measured. Services that read the
-	// same inputs as before get nothing — the snapshot-hash no-op rule lives here, and only
-	// here (FR-021 §6.2).
-	if err := s.BumpEpochsForMonitor(ctx, tx, m.ProjectID, m.ID); err != nil {
-		return domain.Monitor{}, err
-	}
+	// The epoch bump lives inside updateMonitorTxPrepared, so every caller of the shared
+	// write contract gets it — not just this one.
 	if err := tx.Commit(ctx); err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: commit update monitor: %w", err)
 	}
@@ -680,6 +673,20 @@ func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.
 	}
 	if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: update monitor: %w", err)
+	}
+	// Evaluation epochs for every service whose SLI declares this monitor, in THIS
+	// transaction. The epoch and the write it describes have to become visible together:
+	// snapshotting later would leave an interval in which concurrent ingest is attributed to
+	// an epoch that does not yet describe the monitor it measured. Services that read the
+	// same inputs as before get nothing — the snapshot-hash no-op rule lives here, and only
+	// here (FR-021 §6.2).
+	//
+	// It belongs on the SHARED contract, not on the API handler above it. Sitting one level
+	// up, it covered UpdateMonitor alone, so every file-provider apply — target, condition,
+	// region and enabled changes included — advanced execution semantics with no epoch at
+	// all, and the declared linearization point held for exactly one of its callers.
+	if err := s.BumpEpochsForMonitor(ctx, tx, updated.ProjectID, updated.ID); err != nil {
+		return domain.Monitor{}, err
 	}
 	return updated, nil
 }

@@ -323,7 +323,7 @@ func (s *Store) UpdateProjectSecret(ctx context.Context, actor SecretActor, proj
 			encVal, id, projID); err != nil {
 			return false, false, 0, fmt.Errorf("store: update secret: rotate: %w", err)
 		}
-		fenced, err = fenceSecretMonitors(ctx, tx, projID, id)
+		fenced, err = s.fenceSecretMonitors(ctx, tx, projID, id)
 		if err != nil {
 			return false, false, 0, err
 		}
@@ -401,7 +401,7 @@ func (s *Store) UpdateProjectSecret(ctx context.Context, actor SecretActor, proj
 // preserve it — it is their real-ping liveness watermark). Disabled monitors are included:
 // they keep their config current for the moment they are re-enabled. Returns how many
 // monitor rows were fenced.
-func fenceSecretMonitors(ctx context.Context, tx pgx.Tx, projectID, secretID string) (int, error) {
+func (s *Store) fenceSecretMonitors(ctx context.Context, tx pgx.Tx, projectID, secretID string) (int, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT m.id::text FROM monitors m
 		  WHERE m.project_id = $2
@@ -436,6 +436,18 @@ func fenceSecretMonitors(ctx context.Context, tx pgx.Tx, projectID, secretID str
 		ids, projectID)
 	if err != nil {
 		return 0, fmt.Errorf("store: rotation fence: bump revisions: %w", err)
+	}
+	// A rotation changes the referenced secret's generation, and the generation is IN the
+	// epoch snapshot (`CredentialGenerations`) — so it changes evaluation semantics and owes
+	// an epoch, in this same transaction. The shipped code advanced execution_revision here
+	// and consulted nothing, which is a monitor whose semantics moved with no epoch to
+	// describe them.
+	//
+	// Services after monitors, per the §15.4 lock order; the ids are already ascending.
+	for _, id := range ids {
+		if err := s.BumpEpochsForMonitor(ctx, tx, projectID, id); err != nil {
+			return 0, err
+		}
 	}
 	return int(ct.RowsAffected()), nil
 }

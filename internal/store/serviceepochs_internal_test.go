@@ -305,3 +305,39 @@ func TestExecutionChangeLeavesDeclarationsUntouched(t *testing.T) {
 		t.Errorf("the new epoch resolves to %s, but %s governs", epochRevision, governing)
 	}
 }
+
+// The declared linearization point is the MONITOR WRITE, and it has to hold for every caller
+// of the shared write contract — not just the API handler.
+//
+// The bump sat one level up, on UpdateMonitor, so every file-provider apply advanced
+// execution semantics with no epoch at all: target, condition, region and enabled changes
+// arriving from a bundle moved what was being measured while the epoch axis said nothing
+// happened.
+func TestAFileProviderApplyOpensAnEpochJustLikeTheAPIDoes(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	before := epochCount(t, st, ctx, f.serviceID)
+
+	m, err := st.GetMonitor(ctx, f.http)
+	if err != nil {
+		t.Fatalf("get monitor: %v", err)
+	}
+	m.IntervalSeconds = m.IntervalSeconds * 2 // changes the staleness deadline => the snapshot
+
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	if _, err := updateMonitorTx(ctx, tx, st, m); err != nil {
+		t.Fatalf("shared write contract: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if after := epochCount(t, st, ctx, f.serviceID); after == before {
+		t.Fatal("a write through the shared contract created no epoch; the linearization point held for one caller only")
+	}
+}

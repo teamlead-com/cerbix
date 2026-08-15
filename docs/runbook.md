@@ -376,7 +376,7 @@ regional keyrings requires `shared_trust_acknowledged: true`; this deliberately 
 4. Remove the old key only after the command succeeds and every core replica has the new
    config. Run the command again after concurrent rotations if it reports non-convergence.
 
-### Roll out or retire a carrier generation
+### Carrier generations: roll forward, and drain before support is dropped
 
 A carrier generation is the pair of physically separate queues and claim endpoints that
 carries one envelope generation: generation 2 (`checks.{jobs,tests}.v2.<region>`,
@@ -385,33 +385,56 @@ is the one that binds the execution body. Envelope and carrier are numbered sepa
 purpose: to every already-deployed executor, generation 2 already MEANS envelope v1, so a
 new binding has to arrive on a new carrier rather than redefine an old one.
 
-Rolling FORWARD needs no action beyond upgrading executors. Core derives each region's
-carrier from that region's own existential readiness check and starts emitting generation 3
-only once something there consumes it — a worker on `checks.jobs.v3.<region>` or an agent
-declaring `credential_envelope: 2`. A mixed fleet is a supported steady state: a capable
-executor claims every generation at or below its capability, so ordinary and credentialed
-monitors keep running throughout.
+Three separate things, which this runbook previously ran together:
 
-RETIRING a generation is the direction that can strand work, and it is deliberately manual:
+**1. Rolling forward — executors before core, no manual drain.** Upgrade executors first, as
+in "Enable or roll out" above. Nothing else is required: a capable executor consumes and
+claims EVERY generation at or below its capability, so a mixed fleet is a supported steady
+state and ordinary monitors keep running throughout.
 
-1. Confirm every executor in the region declares the NEWER capability —
-   `SELECT region, capabilities FROM agent_heartbeats WHERE seen_at > now() - interval '2 min'`
-   for pull, consumer counts on the v3 queues for AMQP. One straggler is enough to keep the
-   older generation in use.
-2. Verify core has actually moved: no new rows appear at the old generation
-   (`SELECT protocol_version, count(*) FROM pull_jobs GROUP BY 1`), and the old AMQP queues
-   stop growing.
-3. Wait out the maximum job/test TTL so in-flight work at the old generation drains, then
-   inspect and explicitly purge `checks.dead`, or record that any retained old-generation
-   payload is intentionally unrecoverable. This mirrors step 3 of the dispatch-key rotation
-   below, for the same reason: a payload nobody can open is not the same as a payload nobody
-   has.
-4. Only then stop the old consumers. Removing them earlier leaves rows and messages that no
-   live executor claims, and they expire by TTL with no probe, no heartbeat and no DOWN —
-   silence, not an alert.
+**2. Which generation core emits is an EXISTENTIAL check, not a fleet-wide one.** A region
+moves to generation 3 as soon as ONE credential-ready capability-2 executor exists there —
+a capability-1 straggler does not hold it back. The consequence to plan for is therefore the
+opposite of "the rollout stalls": credentialed work in that region concentrates on the
+capable executors, and if the last of them goes away, generation-3 rows sit unclaimed until
+its heartbeat ages out (45s) and core falls back to generation 2. Size the capable set
+accordingly rather than relying on one upgraded replica.
 
-Migration `00063` refuses to roll back while generation-3 rows exist and reports how many;
-that refusal is the same rule as step 3, enforced where a rollback would otherwise discard
+**3. Dropping support for an old generation is a RELEASE, not an operator action.** The
+current binary always consumes every generation it can open; there is no switch that stops
+the old consumer. Support is removed by a future version that no longer declares it. What an
+operator must do is prove the old generation is drained BEFORE deploying such a version:
+
+1. Compare the capable executor count with the inventory you expect, not with itself:
+   `SELECT region, agent_id, capabilities->>'credential_envelope' FROM agent_heartbeats
+   WHERE seen_at > now() - interval '2 min' ORDER BY region, agent_id` for pull, and the
+   consumer count on `checks.jobs.v3.<region>` against the replica count you deployed for
+   AMQP. A consumer count alone says how many are attached, not that every expected worker
+   was upgraded.
+2. Confirm core has stopped emitting the old generation into that region: no NEW rows appear
+   at it over several scheduler ticks —
+   `SELECT protocol_version, count(*) FILTER (WHERE expires_at > now()) AS live,
+           count(*) FILTER (WHERE expires_at <= now()) AS expired
+      FROM pull_jobs GROUP BY 1 ORDER BY 1` — and the same query against `pull_tests`. Both
+   tables matter: a Test Connection leaves a `pull_tests` row exactly like a scheduled probe
+   leaves a `pull_jobs` one.
+3. Wait out the maximum job/test TTL so live rows expire and in-flight AMQP work drains,
+   then inspect and explicitly purge `checks.dead` (for example
+   `rabbitmqctl purge_queue checks.dead`), or record that any retained old-generation payload
+   is intentionally unrecoverable.
+4. Expired rows are removed by the leader's housekeeping tick, which runs **hourly** — so
+   `live = 0` is not the same as "no rows". Either wait for that tick, or remove only rows
+   that have ALREADY expired:
+   `DELETE FROM pull_jobs WHERE protocol_version = 3 AND expires_at <= now();`
+   `DELETE FROM pull_tests WHERE protocol_version = 3 AND expires_at <= now();`
+   Never delete unexpired rows: those are work an executor may still legitimately claim.
+5. Prove zero in BOTH tables before deploying the version that drops support, because the
+   rollback fence counts them together:
+   `SELECT (SELECT count(*) FROM pull_jobs WHERE protocol_version = 3)
+         + (SELECT count(*) FROM pull_tests WHERE protocol_version = 3);`
+
+Migration `00063` refuses to roll back while any generation-3 row exists in either table and
+reports the total. That refusal is step 5 enforced where a rollback would otherwise discard
 pending jobs and in-flight Test Connections.
 
 ### Rotate a regional dispatch key
@@ -439,7 +462,7 @@ credential at the monitored target.
 | Symptom | Meaning / action |
 | --- | --- |
 | `CerbixCredentialDispatchUnavailable` or rising `cerbix_secret_resolution_failed_total{reason="no_capable_executor"}` | The scheduler withheld a credentialed job because its authoritative region has no credential-ready executor for the carrier generation core would emit. Check region routing, consumer counts on that region's `checks.jobs.v2`/`v3` queues, pull-agent heartbeat `credential_envelope` capability, and keyring presence. Capability is GENERATIONAL: an executor that only opens envelope v1 is not evidence of readiness for a region core is about to emit envelope v2 into. This is not DOWN. |
-| `CerbixCredentialEnvelopeFailures`, executor `/readyz` 503 | A job could not be opened. Readiness degrades on a PERSISTENT mismatch, not a single one, so a 503 means repeated failures rather than one odd payload — during a dispatch-key rotation an envelope under a retired key id is expected traffic and does not degrade anything on its own. Compare region and key ids across core/executor configs; retain both rotation keys. Values and ciphertext must never be copied into tickets or logs. A successful decrypt restores readiness. |
+| `CerbixCredentialEnvelopeFailures`, executor `/readyz` 503 | A job could not be opened. Readiness degrades on a PERSISTENT mismatch, so a 503 means repeated failures; a single mismatch does not by itself degrade readiness but is still actionable, never expected. During a CORRECT rotation the old key is still in `previous`, so its envelopes open normally and produce no error at all — an `unknown_key_id` means the key was removed too early or a payload was left undrained, which is a real fault. Compare region and key ids across core/executor configs; retain both rotation keys. Values and ciphertext must never be copied into tickets or logs. A successful decrypt restores readiness. |
 | Monitor detail shows `last_probe_error` | Typed execution diagnostic only: no heartbeat/status/SLA mutation occurred. A revision-valid live UP or DOWN result clears it; stale or SLA-only results do not. |
 | Secret ref bundle is rejected/frozen | Create the named secret in the bundle's project, or correct `password_ref`. The file provider preserves last-known-good and never resolves across projects. |
 | PostgreSQL `sslmode=require` | Transport is encrypted but server identity is not verified. Use `verify-ca`/`verify-full` for identity verification. MySQL/Redis ref monitors default to verified TLS; disabling TLS or `tls_skip_verify` is an explicit audited posture. |

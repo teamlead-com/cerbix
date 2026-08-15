@@ -351,8 +351,12 @@ Use an expand-then-enable rollout; never temporarily send credentialed jobs thro
 1. Configure `security.dispatch` on every process and set
    `secrets.dispatch_envelope: enforced`, while leaving `secrets.enabled: false`. Core roles
    also need `security.encryption_key`; executor configs must not contain it.
-2. Roll all workers/agents. Confirm worker v2 consumers or pull-agent capabilities are live
-   for every credentialed region and `/readyz` is 200 on executors.
+2. Roll all workers/agents. Confirm that every credentialed region has a live consumer for
+   the carrier generation core will emit into it — a worker consuming
+   `checks.jobs.v2.<region>`, or a pull agent whose heartbeat declares
+   `credential_envelope` — and that `/readyz` is 200 on executors. Core will not emit a
+   generation a region has not proven it can open, so a region that stays silent here goes
+   to the §4.4.4 operational rejection rather than to DOWN.
 3. Roll core roles, then set `secrets.enabled: true`. The Secrets API and `*_ref` writes are
    unavailable until this final switch; there is no accepted-but-undispatchable legacy mode.
 
@@ -371,6 +375,44 @@ regional keyrings requires `shared_trust_acknowledged: true`; this deliberately 
    overwritten. The command also re-encrypts the older secret-bearing tables.
 4. Remove the old key only after the command succeeds and every core replica has the new
    config. Run the command again after concurrent rotations if it reports non-convergence.
+
+### Roll out or retire a carrier generation
+
+A carrier generation is the pair of physically separate queues and claim endpoints that
+carries one envelope generation: generation 2 (`checks.{jobs,tests}.v2.<region>`,
+`/api/v1/agent/v2/*`) carries envelope v1, generation 3 (`…v3…`) carries envelope v2, which
+is the one that binds the execution body. Envelope and carrier are numbered separately on
+purpose: to every already-deployed executor, generation 2 already MEANS envelope v1, so a
+new binding has to arrive on a new carrier rather than redefine an old one.
+
+Rolling FORWARD needs no action beyond upgrading executors. Core derives each region's
+carrier from that region's own existential readiness check and starts emitting generation 3
+only once something there consumes it — a worker on `checks.jobs.v3.<region>` or an agent
+declaring `credential_envelope: 2`. A mixed fleet is a supported steady state: a capable
+executor claims every generation at or below its capability, so ordinary and credentialed
+monitors keep running throughout.
+
+RETIRING a generation is the direction that can strand work, and it is deliberately manual:
+
+1. Confirm every executor in the region declares the NEWER capability —
+   `SELECT region, capabilities FROM agent_heartbeats WHERE seen_at > now() - interval '2 min'`
+   for pull, consumer counts on the v3 queues for AMQP. One straggler is enough to keep the
+   older generation in use.
+2. Verify core has actually moved: no new rows appear at the old generation
+   (`SELECT protocol_version, count(*) FROM pull_jobs GROUP BY 1`), and the old AMQP queues
+   stop growing.
+3. Wait out the maximum job/test TTL so in-flight work at the old generation drains, then
+   inspect and explicitly purge `checks.dead`, or record that any retained old-generation
+   payload is intentionally unrecoverable. This mirrors step 3 of the dispatch-key rotation
+   below, for the same reason: a payload nobody can open is not the same as a payload nobody
+   has.
+4. Only then stop the old consumers. Removing them earlier leaves rows and messages that no
+   live executor claims, and they expire by TTL with no probe, no heartbeat and no DOWN —
+   silence, not an alert.
+
+Migration `00063` refuses to roll back while generation-3 rows exist and reports how many;
+that refusal is the same rule as step 3, enforced where a rollback would otherwise discard
+pending jobs and in-flight Test Connections.
 
 ### Rotate a regional dispatch key
 
@@ -396,8 +438,8 @@ credential at the monitored target.
 
 | Symptom | Meaning / action |
 | --- | --- |
-| `CerbixCredentialDispatchUnavailable` or rising `cerbix_secret_resolution_failed_total{reason="no_capable_executor"}` | The scheduler withheld a credentialed job because no v2 credential-ready executor exists in its authoritative region. Check region routing, worker v2 queue consumers, pull-agent heartbeat capability and keyring presence. This is not DOWN. |
-| `CerbixCredentialEnvelopeFailures`, executor `/readyz` 503 | A job could not be opened. Compare region and key ids across core/executor configs; retain both rotation keys. Values and ciphertext must never be copied into tickets or logs. A successful decrypt restores readiness. |
+| `CerbixCredentialDispatchUnavailable` or rising `cerbix_secret_resolution_failed_total{reason="no_capable_executor"}` | The scheduler withheld a credentialed job because its authoritative region has no credential-ready executor for the carrier generation core would emit. Check region routing, consumer counts on that region's `checks.jobs.v2`/`v3` queues, pull-agent heartbeat `credential_envelope` capability, and keyring presence. Capability is GENERATIONAL: an executor that only opens envelope v1 is not evidence of readiness for a region core is about to emit envelope v2 into. This is not DOWN. |
+| `CerbixCredentialEnvelopeFailures`, executor `/readyz` 503 | A job could not be opened. Readiness degrades on a PERSISTENT mismatch, not a single one, so a 503 means repeated failures rather than one odd payload — during a dispatch-key rotation an envelope under a retired key id is expected traffic and does not degrade anything on its own. Compare region and key ids across core/executor configs; retain both rotation keys. Values and ciphertext must never be copied into tickets or logs. A successful decrypt restores readiness. |
 | Monitor detail shows `last_probe_error` | Typed execution diagnostic only: no heartbeat/status/SLA mutation occurred. A revision-valid live UP or DOWN result clears it; stale or SLA-only results do not. |
 | Secret ref bundle is rejected/frozen | Create the named secret in the bundle's project, or correct `password_ref`. The file provider preserves last-known-good and never resolves across projects. |
 | PostgreSQL `sslmode=require` | Transport is encrypted but server identity is not verified. Use `verify-ca`/`verify-full` for identity verification. MySQL/Redis ref monitors default to verified TLS; disabling TLS or `tls_skip_verify` is an explicit audited posture. |

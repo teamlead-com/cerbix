@@ -76,6 +76,10 @@ var monitorFieldClass = map[string]SemanticClass{
 	// Presentation.
 	"Name": SemanticPresentation,
 	"Tags": SemanticPresentation,
+	// Slug is identity, not evaluation: it is the stable key a declaration names this
+	// monitor by, and it is immutable, so it can never move the snapshot. Classifying it as
+	// evaluation would create an epoch for something that cannot change.
+	"Slug": SemanticIdentity,
 
 	// Evaluation semantics.
 	"Type":            SemanticEvaluation,

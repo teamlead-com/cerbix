@@ -29,6 +29,11 @@ func (e SecretRefNotFoundError) Error() string {
 	return fmt.Sprintf("store: secret reference %q for setting %q was not found in the project", e.Name, e.Setting)
 }
 
+// ErrMonitorSlugImmutable is returned when an update submits a slug different from the
+// stored one. The slug is the reference key a service declaration uses; a silently ignored
+// change would leave the caller believing a rename happened.
+var ErrMonitorSlugImmutable = errors.New("store: monitor slug is immutable")
+
 // revisionFenceSetSQL is the D-0142 fence: bump the config generation and reset the
 // freshness watermark, preserving it for push monitors (a push monitor has no scheduled
 // out-of-order compare, so nulling it would fall back to created_at and fire a FALSE
@@ -202,7 +207,7 @@ func replaceMonitorSecretRefsTx(ctx context.Context, tx pgx.Tx, monitorID, proje
 // monitorColumns includes a correlated aggregate for depends_on; the bare `id`
 // inside it resolves to the outer monitors row under any table alias.
 const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, execution_revision, state_sequence, last_probe_error_reason, last_probe_error_at, last_probe_error_job_id, " +
-	"(SELECT COALESCE(array_agg(d.depends_on_id::text ORDER BY d.created_at), '{}') FROM monitor_dependencies d WHERE d.monitor_id = id) AS depends_on"
+	"(SELECT COALESCE(array_agg(d.depends_on_id::text ORDER BY d.created_at), '{}') FROM monitor_dependencies d WHERE d.monitor_id = id) AS depends_on, slug"
 
 // methodOrGet keeps the NOT NULL method column concrete; the prober ignores it
 // for non-HTTP monitors.
@@ -249,7 +254,7 @@ func (s *Store) scanMonitorMode(row pgx.Row, decryptConfigSecrets bool, extra ..
 	var config []byte
 	dests := []any{&m.ID, &m.ProjectID, &m.Name, &typ, &m.Target,
 		&m.IntervalSeconds, &m.TimeoutSeconds, &m.Retries, &m.Conditions,
-		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.StateSequence, &probeReason, &m.LastProbeErrorAt, &probeJobID, &m.DependsOn}
+		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.StateSequence, &probeReason, &m.LastProbeErrorAt, &probeJobID, &m.DependsOn, &m.Slug}
 	dests = append(dests, extra...)
 	err := row.Scan(dests...)
 	if err != nil {
@@ -577,6 +582,19 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 	}
 	if err := assertNotFileManagedTx(ctx, tx, m.ID); err != nil {
 		return domain.Monitor{}, err
+	}
+	// The slug is IMMUTABLE. A caller that submits a different one gets told rather than
+	// silently ignored: it is the key a service declaration names this monitor by, and
+	// letting it move would turn a rename into a guarded declaration mutation across every
+	// referencing service.
+	if m.Slug != "" {
+		var stored string
+		if err := tx.QueryRow(ctx, `SELECT slug FROM monitors WHERE id = $1`, m.ID).Scan(&stored); err != nil {
+			return domain.Monitor{}, fmt.Errorf("store: read monitor slug: %w", err)
+		}
+		if m.Slug != stored {
+			return domain.Monitor{}, fmt.Errorf("%w: %q is stored, %q was submitted", ErrMonitorSlugImmutable, stored, m.Slug)
+		}
 	}
 	updated, err := updateMonitorTxPrepared(ctx, tx, s, m, preserveInline)
 	if err != nil {

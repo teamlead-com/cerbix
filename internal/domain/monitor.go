@@ -80,9 +80,14 @@ const (
 
 // Monitor is a single check belonging to a project (the "service" being watched).
 type Monitor struct {
-	ID               string      `json:"id"`
-	ProjectID        string      `json:"project_id"`
-	Name             string      `json:"name"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	// Slug is project-unique and IMMUTABLE: the MaC reference key a service names a monitor
+	// by, and the one identifier that is stable enough to put in a file. Renaming the
+	// display name never changes it — making it renameable would turn it into a guarded
+	// declaration mutation across every referencing service.
+	Slug             string      `json:"slug"`
 	Type             MonitorType `json:"type"`
 	Target           string      `json:"target"`
 	Method           string      `json:"method,omitempty"` // HTTP method (http monitors); empty = GET
@@ -488,4 +493,46 @@ func StatusFor(up bool) MonitorStatus {
 		return StatusUp
 	}
 	return StatusDown
+}
+
+// MonitorSlugPattern is the shape a monitor slug must have: project-unique, immutable, and
+// readable enough to be typed into a bundle by hand.
+var monitorSlugRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
+// ValidMonitorSlug reports whether s is a well-formed monitor slug.
+func ValidMonitorSlug(s string) bool { return monitorSlugRe.MatchString(s) }
+
+// MonitorSlugPattern exposes the pattern for API schemas and error messages.
+func MonitorSlugPattern() string { return monitorSlugRe.String() }
+
+// NormalizeMonitorSlug derives a candidate slug from a display name or a provider source
+// uid. It is deliberately the SAME derivation the backfill migration performs, so a monitor
+// created today and one adopted from an old row land on the same shape.
+//
+// It does not guarantee uniqueness — that is the store's job, under the project lock, since
+// only the database can answer it.
+func NormalizeMonitorSlug(in string) string {
+	s := strings.ToLower(in)
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash && b.Len() > 0 {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 55 {
+		out = strings.TrimRight(out[:55], "-")
+	}
+	if out == "" || out[0] < 'a' || out[0] > 'z' {
+		out = strings.TrimRight("monitor-"+out, "-")
+	}
+	return out
 }

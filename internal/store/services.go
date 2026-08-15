@@ -528,3 +528,36 @@ func dedupeIDs(in []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// resolveMonitorSlugTx picks the slug a new monitor gets.
+//
+// An explicit slug is honoured and validated; an absent one is derived from the display
+// name by the SAME normalization the backfill migration performs, so a monitor created today
+// and one adopted from an old row land on the same shape. Uniqueness can only be answered by
+// the database, so the collision loop lives here — and its suffix comes from a counter
+// rather than a clock, because two runs of the same input must produce the same slug.
+func resolveMonitorSlugTx(ctx context.Context, tx pgx.Tx, m domain.Monitor) (string, error) {
+	if m.Slug != "" {
+		if !domain.ValidMonitorSlug(m.Slug) {
+			return "", fmt.Errorf("store: monitor slug %q must match %s", m.Slug, domain.MonitorSlugPattern())
+		}
+		return m.Slug, nil
+	}
+	base := domain.NormalizeMonitorSlug(m.Name)
+	candidate := base
+	for n := 1; ; n++ {
+		var taken bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM monitors WHERE project_id = $1 AND slug = $2)`,
+			m.ProjectID, candidate).Scan(&taken); err != nil {
+			return "", fmt.Errorf("store: check monitor slug: %w", err)
+		}
+		if !taken {
+			return candidate, nil
+		}
+		if n > 50 {
+			return "", fmt.Errorf("store: could not derive a free slug from %q", m.Name)
+		}
+		candidate = fmt.Sprintf("%s-%d", base, n)
+	}
+}

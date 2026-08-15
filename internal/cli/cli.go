@@ -877,35 +877,39 @@ func runServe(args []string) int {
 		case "worker":
 			// Answer region-scoped "Test connection" RPCs for this worker's region.
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
-				if err := amqpd.ServeTests(runner.Run); err != nil {
+				workerRegion := *region
+				if workerRegion == "" {
+					workerRegion = domain.DefaultRegion
+				}
+				// role validation guarantees keyring coverage in enforced mode; with the
+				// feature off this is nil and the gate takes the legacy inline path.
+				ring, _ := credentialRings.ForRegion(workerRegion)
+				// ONE callback for both test carriers. The generation is stamped by the
+				// consumer that received the message, and every delivery crosses the same
+				// gate — the legacy consumer used to call the prober directly, which made
+				// it the only executor path with no gate at all.
+				serveTest := func(ctx context.Context, delivered dispatch.DeliveredJob) (domain.Heartbeat, error) {
+					materialized, err := dispatch.ValidateAndMaterialize(ring, delivered)
+					if err != nil {
+						reason := dispatch.CredentialProbeErrorReason(err)
+						registry.RecordExecutorProbeError(reason)
+						if reason != domain.ProbeErrorUnsupportedVersion {
+							registry.SetCredentialReady(false, reason)
+						}
+						return dispatch.ProbeErrorHeartbeat(delivered.Job, reason), nil
+					}
+					defer materialized.Cleanup()
+					if materialized.UsedCredential {
+						registry.SetCredentialReady(true, "")
+					}
+					return runner.Run(ctx, materialized.Monitor), nil
+				}
+				if err := amqpd.ServeTests(serveTest); err != nil {
 					logging.Critical(logger, "dispatch_test_consumer_start_failed", "error", err.Error())
 					return 1
 				}
 				if cfg.Secrets.EnvelopeEnforced() {
-					workerRegion := *region
-					if workerRegion == "" {
-						workerRegion = domain.DefaultRegion
-					}
-					ring, _ := credentialRings.ForRegion(workerRegion) // role validation guarantees coverage
-					if err := amqpd.ServeTestsV2(func(ctx context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
-						// This consumer IS the generation-2 test carrier, so the generation
-						// comes from which consumer received the message, never from the body.
-						materialized, err := dispatch.ValidateAndMaterialize(ring,
-							dispatch.DeliveredJob{Job: job, CarrierGeneration: dispatch.ProtocolV2})
-						if err != nil {
-							reason := dispatch.CredentialProbeErrorReason(err)
-							registry.RecordExecutorProbeError(reason)
-							if reason != domain.ProbeErrorUnsupportedVersion {
-								registry.SetCredentialReady(false, reason)
-							}
-							return dispatch.ProbeErrorHeartbeat(job, reason), nil
-						}
-						defer materialized.Cleanup()
-						if materialized.UsedCredential {
-							registry.SetCredentialReady(true, "")
-						}
-						return runner.Run(ctx, materialized.Monitor), nil
-					}); err != nil {
+					if err := amqpd.ServeTestsV2(serveTest); err != nil {
 						logging.Critical(logger, "dispatch_test_v2_consumer_start_failed", "error", err.Error())
 						return 1
 					}

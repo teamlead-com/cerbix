@@ -154,3 +154,47 @@ func TestCredentialReadinessRecoversAfterSuccessfulDecrypt(t *testing.T) {
 		t.Fatal("worker did not publish successful result")
 	}
 }
+
+// TestFeatureOffCredentialJobReachesTheProber is the executor-level half of the r7-review
+// P0. With `secrets.enabled: false` the scheduler publishes credentialed monitors on the
+// legacy carrier with the credential inline and no envelope, and the worker holds no
+// keyring at all. The gate runs on every job, so it has to let this through — otherwise
+// turning the feature OFF stops every existing postgres/mysql/redis/rabbitmq check.
+func TestFeatureOffCredentialJobReachesTheProber(t *testing.T) {
+	monitor := domain.Monitor{
+		ID: "m-legacy", Type: domain.MonitorPostgres, Region: "core", ExecutionRevision: 3,
+		Target: "db.internal:5432",
+		Config: map[string]string{"username": "ro", "database": "app", "sslmode": "require", "password": "inline"},
+	}
+	disp := dispatch.NewInProc(2)
+	readiness := &fakeCredentialReadiness{}
+	// No keyring: exactly the feature-off worker profile.
+	pool := New(disp, fakeRunner{}, 1, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCredentialReadiness(readiness)
+	readiness.mu.Lock()
+	callsAtStartup := len(readiness.calls) // wiring already reports "no keyring"; that is not the job's doing
+	readiness.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go pool.Run(ctx)
+	if err := disp.PublishJob(ctx, dispatch.CheckJob{Monitor: monitor}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case hb := <-disp.Results():
+		if hb.ProbeError != nil {
+			t.Fatalf("legacy credentialed job rejected with the feature off: %+v", hb.ProbeError)
+		}
+		if hb.MonitorID != "m-legacy" || !hb.Up {
+			t.Fatalf("unexpected result %+v", hb)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy credentialed job never reached the prober")
+	}
+	// Readiness is a dispatch-credential concept: a legacy job must not move it.
+	// Readiness is a dispatch-credential concept: running a legacy job must not move it.
+	readiness.mu.Lock()
+	defer readiness.mu.Unlock()
+	if len(readiness.calls) != callsAtStartup {
+		t.Fatalf("legacy job moved credential readiness: %+v", readiness.calls[callsAtStartup:])
+	}
+}

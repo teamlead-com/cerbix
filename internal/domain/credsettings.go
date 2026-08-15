@@ -106,13 +106,20 @@ type credField struct {
 	key     string
 	binding bindingClass // mandatory; see bindingUnclassified
 
-	required   bool
-	maxLen     int             // 0 = unbounded
-	enum       map[string]bool // nil = free-form
-	enumMsg    string          // error text for an enum miss (never echoes the value)
-	boolean    bool            // "true"/"false" only
-	def        string          // canonical default materialized by normalization
-	defIfBlank bool            // a present-but-blank value is also replaced by def
+	required bool
+	maxLen   int             // 0 = unbounded
+	enum     map[string]bool // nil = free-form
+	enumMsg  string          // error text for an enum miss (never echoes the value)
+	boolean  bool            // "true"/"false" only
+	// def is the field's CANONICAL value when the key is absent. It is used by two
+	// consumers with different needs, which is why writeDefault exists: normalization
+	// materializes only the defaults the stored config should actually carry, while the
+	// execution binding always resolves an absent key through def — otherwise "absent" and
+	// "explicitly set to the default" would produce different digests for the same
+	// effective config, which §4.7 forbids.
+	def          string
+	writeDefault bool // normalization materializes def into the map
+	defIfBlank   bool // a present-but-blank value is also replaced by def
 }
 
 // credVariant is one resolved shape of a type's schema (rabbitmq has two; every other
@@ -138,8 +145,12 @@ type credSchema struct {
 // is never silent (§4.8).
 func tlsFields() []credField {
 	return []credField{
-		{key: "tls", binding: bindingExecution, boolean: true, def: "true"},
-		{key: "tls_skip_verify", binding: bindingExecution, boolean: true},
+		{key: "tls", binding: bindingExecution, boolean: true, def: "true", writeDefault: true},
+		// Absent means "do not skip verification", so its canonical value is "false". It is
+		// NOT materialized into the stored config: writing it would change the canonical
+		// hash of every existing monitor for no behavioural gain. Declaring it here is what
+		// makes absent and an explicit "false" digest identically.
+		{key: "tls_skip_verify", binding: bindingExecution, boolean: true, def: "false"},
 	}
 }
 
@@ -157,9 +168,9 @@ var credentialSchemas = map[MonitorType]credSchema{
 		fields: []credField{
 			{key: "username", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
 			{key: "database", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
-			{key: "sslmode", binding: bindingExecution, enum: sslModes, def: "require",
+			{key: "sslmode", binding: bindingExecution, enum: sslModes, def: "require", writeDefault: true,
 				enumMsg: "settings: sslmode must be one of disable|require|verify-ca|verify-full"},
-			{key: "query", binding: bindingExecution, maxLen: maxQueryLen, def: "SELECT 1", defIfBlank: true},
+			{key: "query", binding: bindingExecution, maxLen: maxQueryLen, def: "SELECT 1", writeDefault: true, defIfBlank: true},
 			{key: "password", binding: bindingSecretValue},
 			{key: "password_ref", binding: bindingSecretRef},
 		},
@@ -171,7 +182,7 @@ var credentialSchemas = map[MonitorType]credSchema{
 			{key: "username", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
 			{key: "database", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
 		}, append(tlsFields(),
-			credField{key: "query", binding: bindingExecution, maxLen: maxQueryLen, def: "SELECT 1", defIfBlank: true},
+			credField{key: "query", binding: bindingExecution, maxLen: maxQueryLen, def: "SELECT 1", writeDefault: true, defIfBlank: true},
 			credField{key: "password", binding: bindingSecretValue},
 			credField{key: "password_ref", binding: bindingSecretRef},
 		)...),
@@ -205,7 +216,7 @@ var credentialSchemas = map[MonitorType]credSchema{
 				fields: append([]credField{
 					{key: "mode", binding: bindingExecution, required: true},
 					{key: "username", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
-					{key: "path", binding: bindingExecution, maxLen: maxPathLen, def: "/api/overview", defIfBlank: true},
+					{key: "path", binding: bindingExecution, maxLen: maxPathLen, def: "/api/overview", writeDefault: true, defIfBlank: true},
 				}, append(tlsFields(),
 					credField{key: "password", binding: bindingSecretValue},
 					credField{key: "password_ref", binding: bindingSecretRef},
@@ -294,6 +305,27 @@ func ExecutionBindingKeys(typ MonitorType, settings map[string]string) ([]string
 	return out, nil
 }
 
+// CanonicalSettingValue resolves one non-secret settings key to the value the EXECUTION
+// sees: what the map carries, or the field's declared canonical value when the key is
+// absent. The execution binding uses it so that a config which omits a key and one that
+// states its default explicitly produce the same digest — they describe the same probe,
+// and a digest that disagreed would reject legitimate jobs at random.
+func CanonicalSettingValue(typ MonitorType, settings map[string]string, key string) (string, error) {
+	variant, err := resolveVariant(typ, settings)
+	if err != nil {
+		return "", err
+	}
+	if v, ok := settings[key]; ok {
+		return v, nil
+	}
+	for _, f := range variant.fields {
+		if f.key == key {
+			return f.def, nil
+		}
+	}
+	return "", fmt.Errorf("settings: key %q is not part of this schema", key)
+}
+
 // PrepareCredentialSettings is the ONLY exported settings entrypoint. It returns
 // a NEW, normalized map after validating it for the requested write surface.
 // Keeping normalization and validation inseparable makes omission fail-closed:
@@ -323,7 +355,7 @@ func normalizeCredentialSettings(typ MonitorType, settings map[string]string) ma
 		return out
 	}
 	for _, f := range variant.fields {
-		if f.def == "" {
+		if f.def == "" || !f.writeDefault {
 			continue
 		}
 		current, present := out[f.key]

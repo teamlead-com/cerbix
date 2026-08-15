@@ -251,3 +251,65 @@ func TestGateChecksFieldSetBeforeAEAD(t *testing.T) {
 		t.Fatalf("field-set rule did not fire first: %v", err)
 	}
 }
+
+// legacyCredentialMonitor is what the scheduler publishes when the feature is OFF: the
+// snapshot decrypts the inline credential and the job goes out on the legacy carrier with
+// no envelope at all.
+func legacyCredentialMonitor() domain.Monitor {
+	return domain.Monitor{
+		ID: "55555555-5555-5555-5555-555555555555", Region: "core", ExecutionRevision: 2,
+		Type: domain.MonitorPostgres, Target: "db.internal:5432",
+		Config: map[string]string{"username": "ro", "database": "app", "sslmode": "require", "password": "inline"},
+	}
+}
+
+// TestFeatureOffLegacyCredentialJobStillRuns is the regression for the r7-review P0: the
+// gate must not break the feature-OFF contract. With `secrets.enabled: false` — the default
+// — the scheduler publishes postgres/mysql/redis/rabbitmq jobs on the legacy carrier with
+// the credential inline and no envelope. Requiring an envelope there stopped every existing
+// credentialed monitor the moment the feature was off, which is the opposite of "nothing
+// else changes".
+func TestFeatureOffLegacyCredentialJobStillRuns(t *testing.T) {
+	job := CheckJob{Monitor: legacyCredentialMonitor()}
+	got, err := ValidateAndMaterialize(nil, DeliveredJob{Job: job, CarrierGeneration: ProtocolV1})
+	if err != nil {
+		t.Fatalf("legacy credentialed job rejected with the feature off: %v", err)
+	}
+	if got.Monitor.Config["password"] != "inline" {
+		t.Fatalf("legacy inline credential lost: %v", got.Monitor.Config)
+	}
+	if got.UsedCredential {
+		t.Fatal("legacy path must not report a materialized dispatch credential (it would move readiness)")
+	}
+}
+
+// But the legacy carrier is still fail-closed on a MISSING credential: an absent or empty
+// inline password must not become an anonymous probe that reports Up (NFR-015).
+func TestLegacyCarrierStillRefusesAMissingCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*domain.Monitor)
+	}{
+		{"password key absent", func(m *domain.Monitor) { delete(m.Config, "password") }},
+		{"password present but empty", func(m *domain.Monitor) { m.Config["password"] = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := legacyCredentialMonitor()
+			tc.mutate(&m)
+			if _, err := ValidateAndMaterialize(nil, DeliveredJob{Job: CheckJob{Monitor: m}, CarrierGeneration: ProtocolV1}); err == nil {
+				t.Fatal("legacy carrier ran a credential-required monitor with no credential")
+			}
+		})
+	}
+}
+
+// And the legacy allowance must not become a way back into the stripping attack: on an
+// envelope-bearing carrier an absent envelope stays fatal, and the inline value is never
+// consulted even when one is present.
+func TestEnvelopeCarrierIgnoresInlineCredential(t *testing.T) {
+	m := legacyCredentialMonitor()
+	job := CheckJob{Monitor: m, ProtocolVersion: ProtocolV2}
+	if _, err := ValidateAndMaterialize(credentialTestRing(t), DeliveredJob{Job: job, CarrierGeneration: ProtocolV2}); err == nil {
+		t.Fatal("generation-2 carrier accepted an inline credential instead of requiring the envelope")
+	}
+}

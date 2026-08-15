@@ -632,3 +632,38 @@ func TestTestClaimStampPresenceContract(t *testing.T) {
 		})
 	}
 }
+
+// The pull half of the feature-off contract: an agent with no keyring, claiming from the
+// legacy endpoint, must still probe a credentialed monitor whose credential is inline.
+func TestFeatureOffCredentialJobReachesThePullProber(t *testing.T) {
+	monitor := domain.Monitor{
+		ID: "m-legacy-pull", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 2,
+		Target: "db.internal:5432",
+		Config: map[string]string{"username": "ro", "database": "app", "sslmode": "require", "password": "inline"},
+	}
+	job, _ := json.Marshal(dispatch.CheckJob{Monitor: monitor})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agent/jobs":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobs": []json.RawMessage{job}, "tokens": []string{"lease"}, "protocol_versions": []int{1},
+			})
+		case "/api/v1/agent/results":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	runner := &recordingRunner{}
+	// No keyring: the feature-off agent profile, which polls the legacy claim endpoint.
+	a := New(srv.URL, "tok", "pull1", runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.poll(context.Background())
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.ran) != 1 || runner.ran[0] != "m-legacy-pull" {
+		t.Fatalf("legacy credentialed pull job did not reach the prober: %v", runner.ran)
+	}
+}

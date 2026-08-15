@@ -83,7 +83,15 @@ func executionDTOParts(m domain.Monitor) ([]string, error) {
 	parts = append(parts, m.Conditions...)
 	parts = append(parts, strconv.Itoa(len(keys)))
 	for _, k := range keys {
-		parts = append(parts, k, m.Config[k])
+		// Through the registry, so an ABSENT key resolves to its declared canonical value
+		// and digests identically to a config that states that default explicitly. Reading
+		// m.Config[k] directly made "absent" encode as "" and broke that equivalence for
+		// every field whose default is not materialized into the stored config.
+		value, err := domain.CanonicalSettingValue(m.Type, m.Config, k)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, k, value)
 	}
 	return parts, nil
 }

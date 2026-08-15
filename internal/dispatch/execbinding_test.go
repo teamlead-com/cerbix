@@ -246,3 +246,70 @@ func TestCanonicalPartsAreLengthPrefixed(t *testing.T) {
 		t.Fatalf("second part = %q, want the monitor type", parts[1])
 	}
 }
+
+// TestAbsentAndExplicitDefaultsDigestIdentically is the equivalence §4.7 requires and the
+// one a naive encoder gets wrong: `tls_skip_verify` has an effective default of false but
+// is deliberately not materialized into the stored config, so reading the map directly made
+// "absent" encode as "" while an explicit "false" encoded as "false". Two configs that
+// describe the same probe would then produce different digests and reject legitimate jobs.
+func TestAbsentAndExplicitDefaultsDigestIdentically(t *testing.T) {
+	cases := []struct {
+		name     string
+		typ      domain.MonitorType
+		absent   map[string]string
+		explicit map[string]string
+	}{
+		{
+			name:     "mysql tls_skip_verify",
+			typ:      domain.MonitorMySQL,
+			absent:   map[string]string{"username": "u", "database": "d", "tls": "true", "query": "SELECT 1"},
+			explicit: map[string]string{"username": "u", "database": "d", "tls": "true", "query": "SELECT 1", "tls_skip_verify": "false"},
+		},
+		{
+			name:     "redis tls_skip_verify",
+			typ:      domain.MonitorRedis,
+			absent:   map[string]string{"tls": "true"},
+			explicit: map[string]string{"tls": "true", "tls_skip_verify": "false"},
+		},
+		{
+			name:     "rabbitmq management tls_skip_verify",
+			typ:      domain.MonitorRabbitMQ,
+			absent:   map[string]string{"mode": "management", "username": "u", "path": "/api/overview", "tls": "true"},
+			explicit: map[string]string{"mode": "management", "username": "u", "path": "/api/overview", "tls": "true", "tls_skip_verify": "false"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := domain.Monitor{Type: tc.typ, Target: "host:1234", TimeoutSeconds: 5, Retries: 1}
+			a := base
+			a.Config = tc.absent
+			b := base
+			b.Config = tc.explicit
+			da, err := ExecutionBodyDigest(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db, err := ExecutionBodyDigest(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if da != db {
+				t.Fatal("absent and explicitly-defaulted configs digested differently")
+			}
+			// And a real difference still moves it.
+			c := base
+			c.Config = map[string]string{}
+			for k, v := range tc.explicit {
+				c.Config[k] = v
+			}
+			c.Config["tls_skip_verify"] = "true"
+			dc, err := ExecutionBodyDigest(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dc == da {
+				t.Fatal("flipping tls_skip_verify to true did not change the digest")
+			}
+		})
+	}
+}

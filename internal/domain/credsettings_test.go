@@ -369,3 +369,45 @@ func TestEveryAllowedKeyIsAccountedForByABinding(t *testing.T) {
 		}
 	}
 }
+
+// TestCredentialSlotContractIsSingleAndPaired makes the registry's actual contract explicit
+// rather than letting the "adding a setting adds it everywhere by construction" claim run
+// ahead of the code. `credentialSlot` validates exactly one slot named password/password_ref,
+// so a future multi-field schema would pass the classification guard while validation and
+// materialization stayed single-slot. This test states the limit and fails the moment a
+// schema outgrows it — at which point the slot policy is what has to change, not this test.
+func TestCredentialSlotContractIsSingleAndPaired(t *testing.T) {
+	for typ, schema := range credentialSchemas {
+		for variantKey, variant := range schema.variants {
+			var values, refs []string
+			for _, f := range variant.fields {
+				switch f.binding {
+				case bindingSecretValue:
+					values = append(values, f.key)
+				case bindingSecretRef:
+					refs = append(refs, f.key)
+				}
+			}
+			if variant.requirement != CredentialRequired {
+				if len(values) != 0 || len(refs) != 0 {
+					t.Errorf("%s/%q: a variant that requires no credential declares slots %v/%v", typ, variantKey, values, refs)
+				}
+				continue
+			}
+			if len(values) != 1 || len(refs) != 1 {
+				t.Fatalf("%s/%q: registry declares %d value and %d ref slots; the credential-slot policy "+
+					"(exactly-one-of, D-0152) is written for exactly one of each — extend that policy first",
+					typ, variantKey, len(values), len(refs))
+			}
+			if refs[0] != values[0]+"_ref" {
+				t.Errorf("%s/%q: slot pair is %q/%q, want %q/%q — the ref name must be derivable from the value name",
+					typ, variantKey, values[0], refs[0], values[0], values[0]+"_ref")
+			}
+			// The slot policy is hard-coded to this pair; keep the two in step.
+			if values[0] != "password" {
+				t.Errorf("%s/%q: credentialSlot validates password/password_ref, but the registry declares %q",
+					typ, variantKey, values[0])
+			}
+		}
+	}
+}

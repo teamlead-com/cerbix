@@ -137,6 +137,13 @@ func testsQueueForGeneration(region string, generation int) (string, bool) {
 	}
 }
 
+// TestRunner answers one test-RPC delivery. Both the legacy and the envelope-bearing test
+// consumers take the SAME callback so neither can quietly grow its own rules: the carrier
+// generation is stamped by whichever consumer received the message, and the callback runs
+// the one executor gate (§4.7, D-0160). The v1 consumer used to call the prober directly
+// with job.Monitor, which is how it became the one executor path with no gate at all.
+type TestRunner func(ctx context.Context, delivered DeliveredJob) (domain.Heartbeat, error)
+
 // AMQP is a RabbitMQ-backed Dispatcher for cross-process roles. Publishing is
 // serialized on a dedicated channel; Jobs()/Results() lazily start a manual-ack
 // consumer that forwards deliveries onto a buffered Go channel, so a process only
@@ -642,7 +649,7 @@ func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, 
 // exclusively by a worker with a validated regional dispatch keyring. It returns only
 // after the initial queue declaration and consumer registration succeed, forming a
 // startup-readiness barrier.
-func (d *AMQP) ServeTestsV2(run func(ctx context.Context, job CheckJob) (domain.Heartbeat, error)) error {
+func (d *AMQP) ServeTestsV2(run TestRunner) error {
 	var initialErr error
 	d.testsV2Once.Do(func() {
 		queue := testsV2QueueForRegion(d.jobRegion)
@@ -650,7 +657,7 @@ func (d *AMQP) ServeTestsV2(run func(ctx context.Context, job CheckJob) (domain.
 		go func() {
 			for {
 				conn, wake := d.current()
-				serveTestsV2Once(d, conn, queue, run, ready)
+				serveTestsV2Once(d, conn, queue, ProtocolV2, run, ready)
 				ready = nil
 				select {
 				case <-d.ctx.Done():
@@ -665,7 +672,7 @@ func (d *AMQP) ServeTestsV2(run func(ctx context.Context, job CheckJob) (domain.
 	return initialErr
 }
 
-func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, run func(context.Context, CheckJob) (domain.Heartbeat, error), ready chan<- error) {
+func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, generation int, run TestRunner, ready chan<- error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		d.logger.Error("dispatch_test_v2_channel", "queue", queue, "error", err.Error())
@@ -699,7 +706,7 @@ func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, run func(con
 				_ = msg.Nack(false, false)
 				continue
 			}
-			hb, runErr := run(d.ctx, job)
+			hb, runErr := run(d.ctx, DeliveredJob{Job: job, CarrierGeneration: generation})
 			if runErr == nil && msg.ReplyTo != "" {
 				if reply, err := json.Marshal(hb); err == nil {
 					_ = ch.PublishWithContext(d.ctx, "", msg.ReplyTo, false, false, amqp.Publishing{ContentType: "application/json", Body: reply})
@@ -717,7 +724,7 @@ func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, run func(con
 // which makes a stale region cleanly unroutable for the API while supporting multiple
 // workers and RabbitMQ 4.3 (which rejects transient non-exclusive queues). It returns
 // only after the initial declaration and consumer registration succeed.
-func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain.Heartbeat) error {
+func (d *AMQP) ServeTests(run TestRunner) error {
 	var initialErr error
 	d.testsOnce.Do(func() {
 		queue := testsQueueForRegion(d.jobRegion)
@@ -725,7 +732,7 @@ func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain
 		go func() {
 			for {
 				conn, wake := d.current()
-				serveTestsOnce(d, conn, queue, run, ready)
+				serveTestsOnce(d, conn, queue, ProtocolV1, run, ready)
 				ready = nil
 				select {
 				case <-d.ctx.Done():
@@ -746,7 +753,7 @@ func (d *AMQP) ServeTests(run func(ctx context.Context, m domain.Monitor) domain
 
 // serveTestsOnce runs one test-RPC consume session on conn; returns on
 // shutdown or when the delivery channel dies.
-func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx context.Context, m domain.Monitor) domain.Heartbeat, ready chan<- error) {
+func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, generation int, run TestRunner, ready chan<- error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		d.logger.Error("dispatch_test_channel", "queue", queue, "error", err.Error())
@@ -780,7 +787,12 @@ func serveTestsOnce(d *AMQP, conn *amqp.Connection, queue string, run func(ctx c
 				_ = m.Nack(false, false)
 				continue
 			}
-			hb := run(d.ctx, job.Monitor)
+			// The QUEUE this consumer is attached to is the carrier generation, exactly as
+			// on the jobs path: the body's own claim is never consulted (§4.7, D-0160).
+			hb, err := run(d.ctx, DeliveredJob{Job: job, CarrierGeneration: generation})
+			if err != nil {
+				d.logger.Error("dispatch_test_rejected", "queue", queue, "error", err.Error())
+			}
 			if m.ReplyTo != "" {
 				if reply, err := json.Marshal(hb); err == nil {
 					_ = ch.PublishWithContext(d.ctx, "", m.ReplyTo, false, false, amqp.Publishing{

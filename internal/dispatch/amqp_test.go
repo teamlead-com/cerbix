@@ -116,8 +116,11 @@ func TestAMQPRoundTrip(t *testing.T) {
 	// Exercise both shared regional test queues without pre-declaring them. The
 	// synchronous Serve calls are the worker-readiness barrier: an immediate RPC
 	// after they return must route on RabbitMQ 4.3 rather than time out silently.
-	if err := d.ServeTests(func(_ context.Context, m domain.Monitor) domain.Heartbeat {
-		return domain.Heartbeat{MonitorID: m.ID, Up: true, Code: 204}
+	if err := d.ServeTests(func(_ context.Context, delivered dispatch.DeliveredJob) (domain.Heartbeat, error) {
+		if delivered.CarrierGeneration != dispatch.ProtocolV1 {
+			t.Errorf("legacy test consumer stamped generation %d, want 1", delivered.CarrierGeneration)
+		}
+		return domain.Heartbeat{MonitorID: delivered.Job.Monitor.ID, Up: true, Code: 204}, nil
 	}); err != nil {
 		t.Fatalf("start v1 test consumer: %v", err)
 	}
@@ -129,7 +132,11 @@ func TestAMQPRoundTrip(t *testing.T) {
 		t.Fatalf("test RPC result = %+v, want up/204", testResult)
 	}
 
-	if err := d.ServeTestsV2(func(_ context.Context, job dispatch.CheckJob) (domain.Heartbeat, error) {
+	if err := d.ServeTestsV2(func(_ context.Context, delivered dispatch.DeliveredJob) (domain.Heartbeat, error) {
+		if delivered.CarrierGeneration != dispatch.ProtocolV2 {
+			t.Errorf("envelope test consumer stamped generation %d, want 2", delivered.CarrierGeneration)
+		}
+		job := delivered.Job
 		fields, openErr := keyring.Open(job)
 		if openErr != nil {
 			return domain.Heartbeat{}, openErr

@@ -175,8 +175,8 @@ func (r *CredentialKeyring) Open(job CheckJob) (map[string][]byte, error) {
 	if e.V != EnvelopeV1 && e.V != EnvelopeV2 {
 		return nil, fmt.Errorf("dispatch: unsupported credential envelope version %d", e.V)
 	}
-	if job.ProtocolVersion != ProtocolV2 {
-		return nil, errors.New("dispatch: credential envelope requires protocol_version 2")
+	if job.ProtocolVersion < ProtocolV2 {
+		return nil, errors.New("dispatch: credential envelope requires an envelope-bearing protocol version")
 	}
 	if e.Region == "" || e.Region != job.Monitor.Region || e.JobID == "" {
 		return nil, errors.New("dispatch: credential envelope context mismatch")
@@ -306,6 +306,22 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 		}
 		return plain, nil
 	}
+
+	// The carrier generation is the POLICY boundary, which is what makes the feature switch
+	// honest in both directions (§4.1: with `secrets.enabled: false`, nothing else changes).
+	// A generation-1 carrier is the pre-FR-020 wire: the credential travels inline in the
+	// monitor config and there is no envelope to require. Demanding one here would stop
+	// every existing postgres/mysql/redis/rabbitmq monitor the moment the feature is OFF —
+	// the exact opposite of the contract. Generation 2 and above never consult the inline
+	// value, so this is not a fallback the stripping attack can reach: on those carriers an
+	// absent envelope stays fatal.
+	if delivered.CarrierGeneration <= ProtocolV1 {
+		if err := checkInlineCredential(job.Monitor); err != nil {
+			return Materialized{}, err
+		}
+		return plain, nil
+	}
+
 	if envelope == nil {
 		return Materialized{}, errors.New("dispatch: credential required by schema but no envelope present")
 	}
@@ -328,6 +344,24 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 		return Materialized{}, err
 	}
 	return Materialized{Monitor: m, Cleanup: cleanup, UsedCredential: true}, nil
+}
+
+// checkInlineCredential is the generation-1 half of NFR-015's fail-closed rule: the legacy
+// carrier honours an inline credential, but a REQUIRED credential that is absent or empty
+// must still refuse rather than run. Without this, a stripped inline password would turn a
+// redis check into an anonymous PING that reports Up — the same lie the envelope rules
+// exist to prevent, reached on the older wire.
+func checkInlineCredential(m domain.Monitor) error {
+	expected, err := domain.ExpectedCredentialFields(m.Type, m.Config)
+	if err != nil {
+		return fmt.Errorf("dispatch: unresolved credential schema: %w", err)
+	}
+	for _, name := range expected {
+		if m.Config[name] == "" {
+			return fmt.Errorf("dispatch: legacy job requires an inline %q credential", name)
+		}
+	}
+	return nil
 }
 
 // checkFieldSet requires EXACTLY the expected field names: a missing one, an unknown extra

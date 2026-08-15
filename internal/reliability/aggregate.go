@@ -3,6 +3,8 @@ package reliability
 import (
 	"sort"
 	"time"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // tally is one region's member census for a single sub-interval, in the variables §9.3
@@ -55,7 +57,7 @@ func aggregateRegion(t tally, p Policies) (Availability, Health, *Weakened) {
 	var weak *Weakened
 
 	switch p.Aggregation.Mode {
-	case AggAll:
+	case domain.AggAll:
 		switch {
 		case b > 0:
 			return AvailBad, HealthDown, nil
@@ -64,7 +66,7 @@ func aggregateRegion(t tally, p Policies) (Availability, Health, *Weakened) {
 		default:
 			return AvailGood, HealthHealthy, nil
 		}
-	case AggAny:
+	case domain.AggAny:
 		switch {
 		case g > 0:
 			return AvailGood, HealthHealthy, nil
@@ -222,13 +224,13 @@ func censusAt(series []memberSeries, spans []MaintenanceSpan, p Policies, t time
 	}
 
 	switch p.MissingData {
-	case MissingBad:
+	case domain.MissingBad:
 		for _, pd := range unknowns {
 			pd.region.unknown--
 			pd.region.bad++
 			pd.region.badCauses = append(pd.region.badCauses, MemberCause{MonitorID: pd.member.MonitorID, Region: pd.member.Region})
 		}
-	case MissingIgnore:
+	case domain.MissingIgnore:
 		for _, pd := range unknowns {
 			pd.region.unknown--
 			pd.region.ignored++

@@ -88,8 +88,8 @@ func randomInput(rng *rand.Rand) Input {
 		})
 	}
 
-	modes := []AggMode{AggAll, AggAny, AggQuorum}
-	missing := []MissingData{MissingUnknown, MissingBad, MissingIgnore}
+	modes := []domain.AggMode{domain.AggAll, domain.AggAny, domain.AggQuorum}
+	missing := []domain.MissingDataPolicy{domain.MissingUnknown, domain.MissingBad, domain.MissingIgnore}
 	maxDeclared := 0
 	for _, n := range declaredPerRegion {
 		if n > maxDeclared {
@@ -97,7 +97,7 @@ func randomInput(rng *rand.Rand) Input {
 		}
 	}
 	p := Policies{
-		Aggregation:         Aggregation{Mode: modes[rng.Intn(len(modes))], DegradedMin: 1 + rng.Intn(maxDeclared), HealthyMin: maxDeclared},
+		Aggregation:         domain.AggregationPolicy{Mode: modes[rng.Intn(len(modes))], DegradedMin: 1 + rng.Intn(maxDeclared), HealthyMin: maxDeclared},
 		MissingData:         missing[rng.Intn(len(missing))],
 		MaintenanceExcludes: true,
 	}
@@ -108,7 +108,7 @@ func randomInput(rng *rand.Rand) Input {
 	return Input{
 		Start: bucketStart, End: bucketEnd,
 		Members: members, Observations: obs, Maintenance: spans,
-		Policies: Defaults(p, declaredPerRegion, nRegions),
+		Policies: domain.ApplyServicePolicyDefaults(p, declaredPerRegion, nRegions),
 	}
 }
 

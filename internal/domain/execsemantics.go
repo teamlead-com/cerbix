@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The evaluation-semantics projection (func-service-reliability.md §6.3).
@@ -257,5 +258,32 @@ func (e EvaluationSemantics) Canonical() []byte {
 // is unchanged creates no epoch (§6.2).
 func (e EvaluationSemantics) Hash() string {
 	sum := sha256.Sum256(e.Canonical())
+	return hex.EncodeToString(sum[:])
+}
+
+// EpochSnapshotHash is the canonical hash of a whole epoch snapshot — the value an
+// execution-driven epoch compares against to decide it is a no-op.
+//
+// It hashes the members IN THE ORDER GIVEN, which callers set from the declaration rather
+// than from however the database returned the rows: an order-dependent hash over an
+// unordered read would create a new epoch at random.
+func EpochSnapshotHash(members []EpochMember) string {
+	var parts [][]byte
+	parts = append(parts, []byte("cerbix.epochsnap.v1"))
+	parts = append(parts, []byte(strconv.Itoa(len(members))))
+	for _, m := range members {
+		parts = append(parts, []byte(m.MonitorID))
+		parts = append(parts, m.Semantics.Canonical())
+		parts = append(parts, []byte(strconv.FormatInt(int64(m.StaleAfter), 10)))
+		parts = append(parts, []byte(m.ArmedAt.UTC().Format(time.RFC3339Nano)))
+	}
+	var buf []byte
+	var n [binary.MaxVarintLen64]byte
+	buf = append(buf, n[:binary.PutUvarint(n[:], uint64(len(parts)))]...)
+	for _, p := range parts {
+		buf = append(buf, n[:binary.PutUvarint(n[:], uint64(len(p)))]...)
+		buf = append(buf, p...)
+	}
+	sum := sha256.Sum256(buf)
 	return hex.EncodeToString(sum[:])
 }

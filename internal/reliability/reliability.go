@@ -20,7 +20,6 @@
 package reliability
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -112,98 +111,11 @@ func (h Health) String() string {
 	}
 }
 
-// AggMode is the within-region aggregation mode (§9.3).
-type AggMode string
-
-const (
-	AggAll    AggMode = "all"
-	AggAny    AggMode = "any"
-	AggQuorum AggMode = "quorum"
-)
-
-// RegionMode is the across-region combination mode (§9.4). `any_region` and `all_regions`
-// are sugar over per_region thresholds and are normalized away by Defaults.
-type RegionMode string
-
-const (
-	RegionPer RegionMode = "per_region"
-	RegionAny RegionMode = "any_region"
-	RegionAll RegionMode = "all_regions"
-)
-
-// MissingData decides what an UNKNOWN member contributes (§8.1).
-type MissingData string
-
-const (
-	// MissingUnknown keeps an undecided member undecided. The default.
-	MissingUnknown MissingData = "unknown"
-	// MissingBad counts an undecided member as failing.
-	MissingBad MissingData = "bad"
-	// MissingIgnore drops an undecided member from the aggregation — but ONLY while other
-	// known members keep the interval decidable, and never by moving its time into the
-	// excluded duration (§8.1).
-	MissingIgnore MissingData = "ignore"
-)
-
-// Aggregation is the within-region policy. Thresholds are declared against the DECLARED
-// member cardinality and clamped to the eligible one at evaluation time (§9.3).
-type Aggregation struct {
-	Mode AggMode
-	// DegradedMin is the availability threshold: at least this many good members means
-	// the service was serving.
-	DegradedMin int
-	// HealthyMin only splits GOOD into HEALTHY and DEGRADED. Since DegradedMin <=
-	// HealthyMin, availability has exactly ONE good branch.
-	HealthyMin int
-}
-
-// RegionPolicy combines per-region results (§9.4).
-type RegionPolicy struct {
-	Mode               RegionMode
-	DegradedMinRegions int
-	HealthyMinRegions  int
-}
-
-// Policies is the part of a definition revision the evaluator reads.
-type Policies struct {
-	Aggregation Aggregation
-	Region      RegionPolicy
-	MissingData MissingData
-	// MaintenanceExcludes mirrors today's rule that maintenance heartbeats leave both the
-	// numerator and the denominator. It is the only maintenance policy in phase 1.
-	MaintenanceExcludes bool
-}
-
-// Freshness resolves a member's staleness deadline from its type and cadence (§7.1). It
-// is applied once, when the evaluation epoch snapshots the member, so a recompute of an
-// old range uses the deadline in force then rather than today's.
-type Freshness struct {
-	// ActiveMultiplier and ActiveFloor bound an active probe's tolerance: a result is
-	// held until max(ActiveMultiplier*interval, ActiveFloor) has passed.
-	ActiveMultiplier int
-	ActiveFloor      time.Duration
-}
-
-// DefaultFreshness matches the mock and §9.5.
-func DefaultFreshness() Freshness {
-	return Freshness{ActiveMultiplier: 3, ActiveFloor: 90 * time.Second}
-}
-
-// ResolveStaleAfter returns how long a member's last observation stays effective.
-//
-// For `push` this deliberately mirrors the product's own dead-man cutoff — the stale-push
-// sweep uses `interval_seconds + grace_seconds` — so a service and the monitor it is built
-// from cannot disagree about when a missing ping became a failure.
-func ResolveStaleAfter(f Freshness, typ domain.MonitorType, interval, grace time.Duration) time.Duration {
-	if typ == domain.MonitorPush {
-		return interval + grace
-	}
-	d := time.Duration(f.ActiveMultiplier) * interval
-	if d < f.ActiveFloor {
-		d = f.ActiveFloor
-	}
-	return d
-}
+// Policies is the evaluator's view of a definition revision. The type itself lives in
+// `domain`, because the same value is stored on the revision, validated at write time by
+// ONE validator shared with the file provider, and read here — three consumers of one
+// declaration, not three declarations.
+type Policies = domain.ServicePolicies
 
 // Member is one declared SLI member, exactly as the evaluation epoch snapshotted it.
 // Nothing here is read from the live monitor row: that is what makes a recompute of an
@@ -213,7 +125,7 @@ type Member struct {
 	Type      domain.MonitorType
 	Region    string
 	Enabled   bool
-	// StaleAfter is the resolved freshness deadline (see ResolveStaleAfter).
+	// StaleAfter is the resolved freshness deadline (domain.ResolveStaleAfter).
 	StaleAfter time.Duration
 	// ArmedAt is the instant a `push` member's dead-man starts counting when it has no
 	// observation yet. The product measures from COALESCE(GREATEST(push_armed_at,
@@ -370,103 +282,4 @@ type Outcome struct {
 	Health       Health
 	// Weakened is set when a threshold was clamped for this sub-interval.
 	Weakened []Weakened
-}
-
-// Defaults fills the policy fields a declaration may omit and normalizes the region-mode
-// sugar, so the evaluator only ever sees per_region thresholds.
-//
-// declaredPerRegion is the declared member count per region, which the region thresholds
-// default against; expectedRegions is the size of the expected region set (§9.4).
-func Defaults(p Policies, declaredPerRegion map[string]int, expectedRegions int) Policies {
-	if p.Aggregation.Mode == "" {
-		// `all` is the conservative reading of "these count": every declared reliability
-		// input must be good.
-		p.Aggregation.Mode = AggAll
-	}
-	if p.MissingData == "" {
-		p.MissingData = MissingUnknown
-	}
-	switch p.Region.Mode {
-	case "", RegionPer:
-		p.Region.Mode = RegionPer
-		if p.Region.DegradedMinRegions == 0 {
-			p.Region.DegradedMinRegions = 1
-		}
-		if p.Region.HealthyMinRegions == 0 {
-			// Every expected region must be healthy — so one dark vantage point makes the
-			// service degraded, not down.
-			p.Region.HealthyMinRegions = expectedRegions
-		}
-	case RegionAny:
-		p.Region = RegionPolicy{Mode: RegionPer, DegradedMinRegions: 1, HealthyMinRegions: 1}
-	case RegionAll:
-		p.Region = RegionPolicy{Mode: RegionPer, DegradedMinRegions: expectedRegions, HealthyMinRegions: expectedRegions}
-	}
-	if p.Aggregation.Mode == AggQuorum {
-		if p.Aggregation.DegradedMin == 0 {
-			p.Aggregation.DegradedMin = 1
-		}
-		if p.Aggregation.HealthyMin == 0 {
-			maxDeclared := 0
-			for _, n := range declaredPerRegion {
-				if n > maxDeclared {
-					maxDeclared = n
-				}
-			}
-			p.Aggregation.HealthyMin = maxDeclared
-		}
-	}
-	return p
-}
-
-// Validate enforces the write-time thresholds of §9.5 against the DECLARED cardinality.
-// A policy momentarily unsatisfiable because members are excluded is NOT an error — that
-// is the clamp of §9.3 — and conflating the two is what makes a planned maintenance window
-// look like a definition error.
-func Validate(p Policies, declaredPerRegion map[string]int, expectedRegions int) error {
-	if len(declaredPerRegion) == 0 {
-		return fmt.Errorf("reliability: a revision with reliability inputs declares at least one member")
-	}
-	for region, declared := range declaredPerRegion {
-		if declared < 1 {
-			return fmt.Errorf("reliability: region %q declares no members", region)
-		}
-	}
-	switch p.Aggregation.Mode {
-	case AggAll, AggAny:
-	case AggQuorum:
-		a := p.Aggregation
-		if a.DegradedMin < 1 {
-			return fmt.Errorf("reliability: degraded_min must be at least 1, got %d", a.DegradedMin)
-		}
-		if a.HealthyMin < a.DegradedMin {
-			return fmt.Errorf("reliability: healthy_min %d is below degraded_min %d", a.HealthyMin, a.DegradedMin)
-		}
-		for region, declared := range declaredPerRegion {
-			if a.HealthyMin > declared {
-				return fmt.Errorf("reliability: healthy_min %d exceeds the %d members declared in region %q", a.HealthyMin, declared, region)
-			}
-		}
-	default:
-		return fmt.Errorf("reliability: unknown aggregation mode %q", p.Aggregation.Mode)
-	}
-	r := p.Region
-	if r.Mode != RegionPer {
-		return fmt.Errorf("reliability: region mode %q must be normalized by Defaults before validation", r.Mode)
-	}
-	if r.DegradedMinRegions < 1 {
-		return fmt.Errorf("reliability: degraded_min_regions must be at least 1, got %d", r.DegradedMinRegions)
-	}
-	if r.HealthyMinRegions < r.DegradedMinRegions {
-		return fmt.Errorf("reliability: healthy_min_regions %d is below degraded_min_regions %d", r.HealthyMinRegions, r.DegradedMinRegions)
-	}
-	if r.HealthyMinRegions > expectedRegions {
-		return fmt.Errorf("reliability: healthy_min_regions %d exceeds the %d expected regions", r.HealthyMinRegions, expectedRegions)
-	}
-	switch p.MissingData {
-	case MissingUnknown, MissingBad, MissingIgnore:
-	default:
-		return fmt.Errorf("reliability: unknown missing_data policy %q", p.MissingData)
-	}
-	return nil
 }

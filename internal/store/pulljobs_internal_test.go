@@ -180,3 +180,109 @@ func TestAgentHeartbeatLiveRegions(t *testing.T) {
 		t.Fatalf("live agent must survive the purge: %#v", live)
 	}
 }
+
+// TestCapableClaimLeasesEveryGenerationAtOrBelowCapability is the regression for the r7
+// availability blocker (D-0160): the pull barrier must be ONE-directional. Non-credentialed
+// monitors are enqueued as generation-1 rows, and an `enforced` region's agent necessarily
+// holds a dispatch keyring — so a capable claim that returned only its own generation left
+// every ordinary monitor's row to expire by TTL: no probe, no heartbeat, no DOWN, no alert.
+// Enabling a security feature must never silently disable monitoring.
+func TestCapableClaimLeasesEveryGenerationAtOrBelowCapability(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 10, 30)
+	if err != nil {
+		t.Fatalf("capable claim: %v", err)
+	}
+	if len(claimed) != 2 {
+		t.Fatalf("capable claim leased %d rows, want both generations (the blackhole regression)", len(claimed))
+	}
+	// The generation is stamped by the SERVER on every row: a capable claim mixes
+	// generations, and the executor must never read the generation out of the payload.
+	gens := map[int]bool{}
+	for _, job := range claimed {
+		gens[job.ProtocolVersion] = true
+	}
+	if !gens[1] || !gens[2] {
+		t.Fatalf("stamped generations = %#v, want both 1 and 2", gens)
+	}
+}
+
+// The other direction of the same barrier: an incapable claim must still never see a newer
+// generation. Widening the capable claim must not widen this one.
+func TestGeneration1ClaimNeverSeesNewerGeneration(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := st.ClaimPullJobs(ctx, "secure", 10, 30)
+	if err != nil {
+		t.Fatalf("legacy claim: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ProtocolVersion != 1 {
+		t.Fatalf("legacy claim leased %d rows (first gen=%d), want exactly the generation-1 row",
+			len(claimed), firstGeneration(claimed))
+	}
+}
+
+// One claim, one max, one lease — across generations, not per generation. Two independent
+// per-generation claims would each honour max separately and over-lease past the window the
+// agent can actually finish in.
+func TestCapableClaimSharesOneMaxAcrossGenerations(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	for i := 0; i < 2; i++ {
+		if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 3, 30)
+	if err != nil {
+		t.Fatalf("capable claim: %v", err)
+	}
+	if len(claimed) != 3 {
+		t.Fatalf("capable claim leased %d rows under max=3: the max must be shared across generations", len(claimed))
+	}
+}
+
+// Fairness: rows compete on age, never on which generation they belong to, so neither
+// generation can starve the other under sustained load.
+func TestCapableClaimOrdersByAgeNotGeneration(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60); err != nil {
+		t.Fatal(err)
+	}
+	// Make the ordering deterministic regardless of insert-timestamp resolution: the
+	// generation-2 row is the older one.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE pull_jobs SET created_at = now() - interval '1 minute' WHERE protocol_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 1, 30)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("capable claim: rows=%d err=%v", len(claimed), err)
+	}
+	if claimed[0].ProtocolVersion != 2 {
+		t.Fatalf("oldest row not served first: got generation %d, want 2", claimed[0].ProtocolVersion)
+	}
+}
+
+func firstGeneration(jobs []PullJob) int {
+	if len(jobs) == 0 {
+		return 0
+	}
+	return jobs[0].ProtocolVersion
+}

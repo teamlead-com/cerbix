@@ -14,14 +14,14 @@ func TestPullTestLifecycle(t *testing.T) {
 		t.Fatal("result should not be ready before the agent posts it")
 	}
 	// Agent claims it (only once) and it's scoped to the region.
-	if _, _, ok, _ := st.ClaimPullTest(ctx, "other"); ok {
+	if _, _, _, ok, _ := st.ClaimPullTest(ctx, "other"); ok {
 		t.Fatal("claim in wrong region returned a job")
 	}
-	gotID, payload, ok, err := st.ClaimPullTest(ctx, "geo2")
+	gotID, payload, _, ok, err := st.ClaimPullTest(ctx, "geo2")
 	if err != nil || !ok || gotID != id || len(payload) == 0 {
 		t.Fatalf("claim: id=%q ok=%v err=%v", gotID, ok, err)
 	}
-	if _, _, ok, _ := st.ClaimPullTest(ctx, "geo2"); ok {
+	if _, _, _, ok, _ := st.ClaimPullTest(ctx, "geo2"); ok {
 		t.Fatal("a claimed test must not be claimed again")
 	}
 	// A result posted for the wrong region is ignored (scoped write).
@@ -48,7 +48,7 @@ func TestPullTestLifecycle(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `UPDATE pull_tests SET expires_at = now() - interval '1 minute' WHERE id=$1`, id2); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
-	if _, _, ok, _ := st.ClaimPullTest(ctx, "geo2"); ok {
+	if _, _, _, ok, _ := st.ClaimPullTest(ctx, "geo2"); ok {
 		t.Fatal("expired test claimed")
 	}
 	if n, err := st.PurgeExpiredPullTests(ctx); err != nil || n != 1 {
@@ -62,11 +62,41 @@ func TestPullTestProtocolClaimsAreSeparated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok, err := st.ClaimPullTest(ctx, "secure"); err != nil || ok {
+	if _, _, _, ok, err := st.ClaimPullTest(ctx, "secure"); err != nil || ok {
 		t.Fatalf("v1 claim saw v2 test: ok=%v err=%v", ok, err)
 	}
-	gotID, _, ok, err := st.ClaimPullTestV2(ctx, "secure")
+	gotID, _, _, ok, err := st.ClaimPullTestV2(ctx, "secure")
 	if err != nil || !ok || gotID != id {
 		t.Fatalf("v2 claim: id=%q ok=%v err=%v", gotID, ok, err)
+	}
+}
+
+// The test-RPC mirror of the jobs barrier (D-0160): a jobs-only fix would leave
+// test-connection broken for ordinary monitors in exactly the same way.
+func TestCapableTestClaimLeasesEveryGenerationAtOrBelowCapability(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if _, err := st.EnqueuePullTest(ctx, "secure", []byte(`{"protocol":1}`), 20); err != nil {
+		t.Fatal(err)
+	}
+	id, payload, generation, ok, err := st.ClaimPullTestV2(ctx, "secure")
+	if err != nil || !ok {
+		t.Fatalf("capable test claim did not see the generation-1 row: ok=%v err=%v", ok, err)
+	}
+	if id == "" || len(payload) == 0 {
+		t.Fatalf("capable test claim returned an empty row: id=%q payload=%q", id, payload)
+	}
+	if generation != 1 {
+		t.Fatalf("server-stamped generation = %d, want 1", generation)
+	}
+}
+
+// And the incapable direction still holds for tests too.
+func TestGeneration1TestClaimNeverSeesNewerGeneration(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if _, err := st.EnqueuePullTestV2(ctx, "secure", []byte(`{"protocol":2}`), 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := st.ClaimPullTest(ctx, "secure"); err != nil || ok {
+		t.Fatalf("legacy test claim saw a newer generation: ok=%v err=%v", ok, err)
 	}
 }

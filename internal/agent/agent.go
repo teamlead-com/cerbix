@@ -151,7 +151,7 @@ func (a *Agent) testLoop(ctx context.Context) {
 }
 
 func (a *Agent) pollTest(ctx context.Context) {
-	id, raw, ok := a.claimTest(ctx)
+	id, raw, carrierGen, ok := a.claimTest(ctx)
 	if !ok {
 		return
 	}
@@ -163,6 +163,16 @@ func (a *Agent) pollTest(ctx context.Context) {
 	monitor := job.Monitor
 	cleanup := func() {}
 	if job.CredentialEnvelope != nil {
+		// Same carrier/payload consistency rule as the jobs path: a generation-1 row must
+		// not carry an envelope, and the generation comes from the server's stamp.
+		if carrierGen == 1 {
+			hb := dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorDecryptAuthFailed)
+			a.recordCredentialFailure(hb.ProbeError.Reason)
+			a.logger.Error("agent_credential_test_rejected", "reason", hb.ProbeError.Reason,
+				"carrier_generation", carrierGen)
+			_ = a.postTestResult(ctx, id, hb)
+			return
+		}
 		if a.credentials == nil {
 			hb := dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorNoDispatchKey)
 			a.recordCredentialFailure(hb.ProbeError.Reason)
@@ -188,14 +198,14 @@ func (a *Agent) pollTest(ctx context.Context) {
 	}
 }
 
-func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, ok bool) {
+func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, protocolVersion int, ok bool) {
 	path := "/api/v1/agent/tests"
 	if a.credentials != nil {
 		path = "/api/v1/agent/v2/tests"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.serverURL+path+"?region="+a.region, nil)
 	if err != nil {
-		return "", nil, false
+		return "", nil, 0, false
 	}
 	a.auth(req)
 	if a.credentials != nil {
@@ -203,22 +213,23 @@ func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, 
 	}
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return "", nil, false
+		return "", nil, 0, false
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, false
+		return "", nil, 0, false
 	}
 	var out struct {
 		Test *struct {
-			ID  string          `json:"id"`
-			Job json.RawMessage `json:"job"`
+			ID              string          `json:"id"`
+			Job             json.RawMessage `json:"job"`
+			ProtocolVersion int             `json:"protocol_version"`
 		} `json:"test"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Test == nil {
-		return "", nil, false
+		return "", nil, 0, false
 	}
-	return out.Test.ID, out.Test.Job, true
+	return out.Test.ID, out.Test.Job, out.Test.ProtocolVersion, true
 }
 
 func (a *Agent) postTestResult(ctx context.Context, id string, hb domain.Heartbeat) error {
@@ -273,7 +284,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 }
 
 func (a *Agent) poll(ctx context.Context) {
-	jobs, tokens, err := a.claim(ctx)
+	jobs, tokens, protocolVersions, err := a.claim(ctx)
 	if err != nil {
 		a.logger.Warn("agent_claim_failed", "error", err.Error())
 		return
@@ -296,6 +307,20 @@ func (a *Agent) poll(ctx context.Context) {
 		monitor := job.Monitor
 		cleanup := func() {}
 		if job.CredentialEnvelope != nil {
+			// A capable claim mixes generations, so an envelope has to be consistent with
+			// the carrier the row actually arrived on — and the carrier is the server's
+			// stamp, not the payload's self-description. A generation-1 row carrying an
+			// envelope is a payload/carrier mismatch, never a job to execute.
+			if gen := carrierGeneration(protocolVersions, i); gen == 1 {
+				a.recordCredentialFailure(domain.ProbeErrorDecryptAuthFailed)
+				results = append(results, dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorDecryptAuthFailed))
+				a.logger.Error("agent_credential_job_rejected", "monitor_id", job.Monitor.ID,
+					"reason", domain.ProbeErrorDecryptAuthFailed, "carrier_generation", gen)
+				if i < len(tokens) {
+					ackTokens = append(ackTokens, tokens[i])
+				}
+				continue
+			}
 			if a.credentials == nil {
 				a.recordCredentialFailure(domain.ProbeErrorNoDispatchKey)
 				results = append(results, dispatch.ProbeErrorHeartbeat(job, domain.ProbeErrorNoDispatchKey))
@@ -366,7 +391,7 @@ func (a *Agent) flushBuffer(ctx context.Context) {
 	a.buf = nil
 }
 
-func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []string, err error) {
+func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []string, protocolVersions []int, err error) {
 	path := "/api/v1/agent/jobs"
 	if a.credentials != nil {
 		path = "/api/v1/agent/v2/jobs"
@@ -374,7 +399,7 @@ func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []str
 	url := fmt.Sprintf("%s%s?region=%s&max=%d", a.serverURL, path, a.region, claimBatch)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	a.auth(req)
 	if a.credentials != nil {
@@ -382,21 +407,34 @@ func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []str
 	}
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
+		return nil, nil, nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
 	}
 	var out struct {
-		Jobs   []json.RawMessage `json:"jobs"`
-		Tokens []string          `json:"tokens"`
+		Jobs             []json.RawMessage `json:"jobs"`
+		Tokens           []string          `json:"tokens"`
+		ProtocolVersions []int             `json:"protocol_versions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return out.Jobs, out.Tokens, nil
+	return out.Jobs, out.Tokens, out.ProtocolVersions, nil
+}
+
+// carrierGeneration returns the SERVER's stamp for the i-th claimed row. A capable claim
+// mixes generations, so the generation is transport metadata, never something to read out
+// of the payload — that part is attacker-editable (func-secret-inventory §4.7, D-0160). A
+// server that did not stamp (older core during a rolling upgrade) yields 0, which callers
+// treat as "unknown, do not use as authority".
+func carrierGeneration(versions []int, i int) int {
+	if i < 0 || i >= len(versions) {
+		return 0
+	}
+	return versions[i]
 }
 
 // postResults reports live results and acks (via ack tokens) the claimed jobs they

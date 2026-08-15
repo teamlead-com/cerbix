@@ -149,15 +149,20 @@ func (h *Handler) agentJobsProtocol(w http.ResponseWriter, r *http.Request, prot
 			return
 		}
 	}
-	// jobs[i] and tokens[i] are parallel: the agent echoes the tokens it finished on its
-	// results POST to ack (delete) those jobs; anything left un-acked re-leases.
+	// jobs[i], tokens[i] and protocolVersions[i] are parallel: the agent echoes the tokens
+	// it finished on its results POST to ack (delete) those jobs; anything left un-acked
+	// re-leases. protocolVersions carries the SERVER's stamp of each row's carrier
+	// generation — a capable claim mixes generations, and the agent must not read the
+	// generation out of the payload, which is the part an attacker can edit (D-0160).
 	jobs := make([]json.RawMessage, 0, len(claimed))
 	tokens := make([]string, 0, len(claimed))
+	protocolVersions := make([]int, 0, len(claimed))
 	for _, c := range claimed {
 		jobs = append(jobs, json.RawMessage(c.Payload))
 		tokens = append(tokens, c.Token)
+		protocolVersions = append(protocolVersions, c.ProtocolVersion)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "tokens": tokens})
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "tokens": tokens, "protocol_versions": protocolVersions})
 }
 
 // enforceRegionScope rejects (403) a result batch that contains a heartbeat for a
@@ -284,7 +289,7 @@ func (h *Handler) agentTestsProtocol(w http.ResponseWriter, r *http.Request, pro
 	if protocolVersion == 2 {
 		claim = h.store.ClaimPullTestV2
 	}
-	id, payload, ok, err := claim(r.Context(), region)
+	id, payload, rowProtocolVersion, ok, err := claim(r.Context(), region)
 	if err != nil {
 		h.serverError(w, "agent_claim_test", err)
 		return
@@ -293,7 +298,12 @@ func (h *Handler) agentTestsProtocol(w http.ResponseWriter, r *http.Request, pro
 		writeJSON(w, http.StatusOK, map[string]any{"test": nil})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"test": map[string]any{"id": id, "job": json.RawMessage(payload)}})
+	// protocol_version is the server's stamp of this row's carrier generation, for the same
+	// reason as on the jobs claim: a capable claim mixes generations and the agent must not
+	// take the generation from the payload (D-0160).
+	writeJSON(w, http.StatusOK, map[string]any{"test": map[string]any{
+		"id": id, "job": json.RawMessage(payload), "protocol_version": rowProtocolVersion,
+	}})
 }
 
 // agentTestResult stores the heartbeat an agent produced for a test, which the waiting

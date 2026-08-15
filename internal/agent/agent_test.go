@@ -278,3 +278,124 @@ func TestPollDoesNotAckMalformedJob(t *testing.T) {
 		t.Fatalf("ack = %v, want only [tok-good] (malformed job's token withheld)", got)
 	}
 }
+
+// recordingRunner captures which monitors actually reached a prober.
+type recordingRunner struct {
+	mu  sync.Mutex
+	ran []string
+}
+
+func (r *recordingRunner) Run(_ context.Context, m domain.Monitor) domain.Heartbeat {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ran = append(r.ran, m.ID)
+	return domain.Heartbeat{MonitorID: m.ID, Up: true}
+}
+
+// TestCapableAgentExecutesMixedGenerationClaim is the agent-side half of the r7
+// availability regression (D-0160). A capable claim now returns both an ordinary
+// generation-1 job and a credentialed generation-2 one; the agent must probe BOTH. Before
+// the fix an `enforced` region's agent never received the generation-1 rows at all, so
+// every ordinary monitor there silently stopped being probed.
+func TestCapableAgentExecutesMixedGenerationClaim(t *testing.T) {
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "agent", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := domain.Monitor{ID: "m-plain", Type: domain.MonitorHTTP, Region: "pull1", ExecutionRevision: 1}
+	credentialed := domain.Monitor{ID: "m-cred", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	envelope, err := ring.Seal("pull1", "job-cred", credentialed.ID, credentialed.ExecutionRevision,
+		map[string][]byte{"password": []byte("secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainJob, _ := json.Marshal(dispatch.CheckJob{Monitor: plain})
+	credJob, _ := json.Marshal(dispatch.CheckJob{
+		Monitor: credentialed, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: envelope,
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agent/v2/jobs":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobs":              []json.RawMessage{plainJob, credJob},
+				"tokens":            []string{"lease-plain", "lease-cred"},
+				"protocol_versions": []int{1, 2},
+			})
+		case "/api/v1/agent/results":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	runner := &recordingRunner{}
+	a := New(srv.URL, "tok", "pull1", runner, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithCredentialKeyring(ring)
+	a.poll(context.Background())
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.ran) != 2 || runner.ran[0] != "m-plain" || runner.ran[1] != "m-cred" {
+		t.Fatalf("capable agent probed %v, want both the ordinary and the credentialed monitor", runner.ran)
+	}
+}
+
+// A credential envelope on a row the SERVER stamped as generation 1 is a carrier/payload
+// mismatch: the generation is transport metadata and the payload is the attacker-editable
+// part, so the job is refused before any probe rather than opened on the payload's word.
+func TestEnvelopeOnGeneration1CarrierIsRejectedBeforeProbing(t *testing.T) {
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "agent", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := domain.Monitor{ID: "m-mismatch", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	envelope, err := ring.Seal("pull1", "job-mismatch", monitor.ID, monitor.ExecutionRevision,
+		map[string][]byte{"password": []byte("secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _ := json.Marshal(dispatch.CheckJob{
+		Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: envelope,
+	})
+
+	var results []domain.Heartbeat
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agent/v2/jobs":
+			// The row is stamped generation 1 by the server while its body claims v2.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobs":              []json.RawMessage{job},
+				"tokens":            []string{"lease"},
+				"protocol_versions": []int{1},
+			})
+		case "/api/v1/agent/results":
+			var request struct {
+				Results []domain.Heartbeat `json:"results"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			results = request.Results
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	runner := &recordingRunner{}
+	a := New(srv.URL, "tok", "pull1", runner, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithCredentialKeyring(ring)
+	a.poll(context.Background())
+
+	runner.mu.Lock()
+	ran := append([]string(nil), runner.ran...)
+	runner.mu.Unlock()
+	if len(ran) != 0 {
+		t.Fatalf("mismatched job reached a prober: %v", ran)
+	}
+	if len(results) != 1 || results[0].ProbeError == nil ||
+		results[0].ProbeError.Reason != domain.ProbeErrorDecryptAuthFailed {
+		t.Fatalf("carrier/payload mismatch result = %+v", results)
+	}
+}

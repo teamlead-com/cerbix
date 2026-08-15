@@ -23,10 +23,11 @@ import (
 
 // fakeStore implements api.Store in memory for hermetic handler tests.
 type fakePullTest struct {
-	region  string
-	payload []byte
-	result  []byte
-	claimed bool
+	region          string
+	payload         []byte
+	result          []byte
+	claimed         bool
+	protocolVersion int
 }
 
 type fakeStore struct {
@@ -619,20 +620,20 @@ func (f *fakeStore) AckPullJobs(_ context.Context, tokens []string) error {
 	f.acked = append(f.acked, tokens...)
 	return nil
 }
-func (f *fakeStore) ClaimPullTest(_ context.Context, region string) (string, []byte, bool, error) {
+func (f *fakeStore) ClaimPullTest(_ context.Context, region string) (string, []byte, int, bool, error) {
 	if f.pullTests == nil {
-		return "", nil, false, nil
+		return "", nil, 0, false, nil
 	}
 	for id, pt := range f.pullTests {
 		if pt.region == region && !pt.claimed {
 			pt.claimed = true
 			f.pullTests[id] = pt
-			return id, pt.payload, true, nil
+			return id, pt.payload, pt.protocolVersion, true, nil
 		}
 	}
-	return "", nil, false, nil
+	return "", nil, 0, false, nil
 }
-func (f *fakeStore) ClaimPullTestV2(ctx context.Context, region string) (string, []byte, bool, error) {
+func (f *fakeStore) ClaimPullTestV2(ctx context.Context, region string) (string, []byte, int, bool, error) {
 	return f.ClaimPullTest(ctx, region)
 }
 func (f *fakeStore) SavePullTestResult(_ context.Context, id, region string, result []byte) error {

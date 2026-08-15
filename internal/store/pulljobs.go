@@ -42,28 +42,47 @@ const PullChannel = "pull_jobs"
 
 // PullJob is a leased check job: an opaque payload (a dispatch.CheckJob snapshot)
 // plus the claim Token the agent echoes back to ack (delete) it once reported.
+// ProtocolVersion is the row's carrier generation, stamped by the server: the agent must
+// never infer it from the payload, which is the part an attacker can edit
+// (func-secret-inventory §4.7, D-0160).
 type PullJob struct {
-	Token   string
-	Payload []byte
+	Token           string
+	Payload         []byte
+	ProtocolVersion int
 }
 
-// ClaimPullJobs atomically LEASES up to max claimable jobs for a region: it stamps
-// each with a fresh claim_token and a lease_expires_at (now + leaseSeconds) and
-// returns them. A job is claimable when it is unexpired (expires_at > now) AND
-// currently unleased or its lease has lapsed (lease_expires_at IS NULL OR <= now) —
-// so a crashed agent's jobs become claimable again after the lease, rather than being
-// lost as they were under the old DELETE-on-claim. FOR UPDATE SKIP LOCKED keeps
-// concurrent agents safe. Jobs are removed only by AckPullJobs (on report) or the TTL
-// purge. A non-positive leaseSeconds falls back to 30s.
+// ClaimPullJobs serves the generation-1 endpoint: generation-1 rows only.
 func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
 	return s.claimPullJobs(ctx, region, max, leaseSeconds, 1)
 }
 
+// ClaimPullJobsV2 serves the capability-2 endpoint and leases EVERY generation at or below
+// 2 in ONE atomic claim, under the caller's single max and one lease.
+//
+// The barrier is one-directional (func-secret-inventory §4.7, D-0160): it stops an
+// incapable executor from receiving a newer generation, and must never stop a capable one
+// from receiving an older. Non-credentialed monitors are enqueued as generation-1 rows and
+// an `enforced` region's agent is necessarily capable, so a capable claim that returned
+// only its own generation left every ordinary monitor's row to expire by TTL — no probe, no
+// heartbeat, no DOWN, no alert. Two sequential single-generation claims are NOT an
+// equivalent fix: the long poll sleeps out its window on whichever generation is empty, and
+// two independent claims each honour `max` separately and over-lease.
 func (s *Store) ClaimPullJobsV2(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
 	return s.claimPullJobs(ctx, region, max, leaseSeconds, 2)
 }
 
-func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeconds, protocolVersion int) ([]PullJob, error) {
+// claimPullJobs atomically LEASES up to max claimable jobs for a region, of any generation
+// up to maxProtocolVersion inclusive: it stamps each with a fresh claim_token and a
+// lease_expires_at (now + leaseSeconds) and returns them. A job is claimable when it is
+// unexpired (expires_at > now) AND currently unleased or its lease has lapsed
+// (lease_expires_at IS NULL OR <= now) — so a crashed agent's jobs become claimable again
+// after the lease, rather than being lost as they were under the old DELETE-on-claim.
+// FOR UPDATE SKIP LOCKED keeps concurrent agents safe. Jobs are removed only by AckPullJobs
+// (on report) or the TTL purge. A non-positive leaseSeconds falls back to 30s.
+//
+// Ordering by created_at across the whole set is what keeps generations from starving each
+// other: rows compete on age, not on which generation they belong to.
+func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeconds, maxProtocolVersion int) ([]PullJob, error) {
 	if max <= 0 {
 		max = 16
 	}
@@ -75,14 +94,14 @@ func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeco
 		        lease_expires_at = now() + make_interval(secs => $3)
 		  WHERE id IN (
 		     SELECT id FROM pull_jobs
-		      WHERE region = $1 AND protocol_version = $4 AND expires_at > now()
+		      WHERE region = $1 AND protocol_version <= $4 AND expires_at > now()
 		        AND (lease_expires_at IS NULL OR lease_expires_at <= now())
 		      ORDER BY created_at
 		      LIMIT $2
 		      FOR UPDATE SKIP LOCKED
 		  )
-		  RETURNING claim_token::text, payload`,
-		region, max, leaseSeconds, protocolVersion)
+		  RETURNING claim_token::text, payload, protocol_version`,
+		region, max, leaseSeconds, maxProtocolVersion)
 	if err != nil {
 		return nil, fmt.Errorf("store: claim pull jobs: %w", err)
 	}
@@ -90,7 +109,7 @@ func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeco
 	var out []PullJob
 	for rows.Next() {
 		var job PullJob
-		if err := rows.Scan(&job.Token, &job.Payload); err != nil {
+		if err := rows.Scan(&job.Token, &job.Payload, &job.ProtocolVersion); err != nil {
 			return nil, fmt.Errorf("store: scan pull job: %w", err)
 		}
 		out = append(out, job)

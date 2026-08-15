@@ -18,6 +18,7 @@ import (
 )
 
 type fakeStore struct {
+	serviceSlices int32
 	monitors      []domain.Monitor
 	stalePush     []domain.Monitor
 	deadmanCh     chan string // receives monitorID on each RecordDeadmanResult call
@@ -109,18 +110,29 @@ func (f *fakeStore) RecordDeadmanResult(_ context.Context, monitorID string, _ i
 	return store.ResultOutcome{Applied: true, Prev: domain.StatusUp, Cur: domain.StatusDown}, nil
 }
 
-func (f *fakeStore) TryBecomeLeader(_ context.Context, _ int64) (func(), func(context.Context) (bool, error), bool, error) {
+// fakeLeaderSession stands in for the pinned-connection session. Its RunServiceRepairSlice
+// reports "nothing to do", which is what an installation with no services looks like — and
+// what the scheduler tests are about.
+type fakeLeaderSession struct{ owner *fakeStore }
+
+func (s fakeLeaderSession) Check(context.Context) (bool, error) {
+	if s.owner.checkHeld != nil {
+		return s.owner.checkHeld()
+	}
+	return true, nil
+}
+func (s fakeLeaderSession) Release() {}
+func (s fakeLeaderSession) RunServiceRepairSlice(context.Context, time.Time) (bool, error) {
+	atomic.AddInt32(&s.owner.serviceSlices, 1)
+	return false, nil
+}
+
+func (f *fakeStore) TryBecomeLeaderSession(_ context.Context, _ int64) (LeaderSession, bool, error) {
 	atomic.AddInt32(&f.elections, 1)
 	if !f.leader {
-		return nil, nil, false, nil
+		return nil, false, nil
 	}
-	check := func(context.Context) (bool, error) {
-		if f.checkHeld != nil {
-			return f.checkHeld()
-		}
-		return true, nil
-	}
-	return func() {}, check, true, nil
+	return fakeLeaderSession{owner: f}, true, nil
 }
 
 func (f *fakeStore) RollupDailyAvailability(_ context.Context, _, _ time.Time) error { return nil }

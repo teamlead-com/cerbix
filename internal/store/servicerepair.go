@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -50,6 +52,19 @@ type RepairRange struct {
 
 // ErrRangeSuperseded is returned when a batch finds the world moved under it.
 var ErrRangeSuperseded = errors.New("store: repair range superseded")
+
+// dbConn is the shape both a pool and a single pinned connection satisfy. Repair work is
+// written against it rather than against the pool, because the leader must run its batches
+// on the connection that OWNS the advisory lock: if that connection dies the lock is
+// released by Postgres and the in-flight transaction is aborted with it, so a deposed leader
+// cannot commit behind its successor. A pooled write has no such property — it would commit
+// happily after another node had already taken over.
+type dbConn interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
 
 // EnqueueRepairRange records work over [from, to), coalescing with pending ranges of the
 // same service and reason.
@@ -110,7 +125,11 @@ func (s *Store) EnqueueRepairRange(ctx context.Context, projectID, serviceID str
 // two leaders overlapping during a handover pick different rows rather than fighting over
 // one — the same pattern the pull-job queue already uses.
 func (s *Store) ClaimRepairRange(ctx context.Context) (RepairRange, bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	return s.claimRepairRangeOn(ctx, s.pool)
+}
+
+func (s *Store) claimRepairRangeOn(ctx context.Context, db dbConn) (RepairRange, bool, error) {
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return RepairRange{}, false, fmt.Errorf("store: begin claim: %w", err)
 	}
@@ -150,6 +169,10 @@ func (s *Store) ClaimRepairRange(ctx context.Context) (RepairRange, bool, error)
 // and commits nothing — a livelock in which every individual bound is respected and progress
 // is zero.
 func (s *Store) RunRepairRange(ctx context.Context, r RepairRange, deadline time.Time) error {
+	return s.runRepairRangeOn(ctx, s.pool, r, deadline)
+}
+
+func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, deadline time.Time) error {
 	batch := initialRepairBatch
 	cursor := r.Cursor
 	if cursor.Before(r.From) {
@@ -161,7 +184,7 @@ func (s *Store) RunRepairRange(ctx context.Context, r RepairRange, deadline time
 		if remaining <= 0 {
 			// Out of slice. The cursor is durable, so the next claim resumes rather than
 			// restarts — that is the whole reason work is a table and not a goroutine.
-			return s.releaseRepairRange(ctx, r.ID, cursor, nil)
+			return s.releaseRepairRange(ctx, db, r.ID, cursor, nil)
 		}
 
 		end := cursor.Add(time.Duration(batch) * domain.CanonicalBucket)
@@ -169,22 +192,22 @@ func (s *Store) RunRepairRange(ctx context.Context, r RepairRange, deadline time
 			end = r.To
 		}
 		started := time.Now()
-		err := s.runRepairBatch(ctx, r, cursor, end, remaining)
+		err := s.runRepairBatch(ctx, db, r, cursor, end, remaining)
 		switch {
 		case errors.Is(err, ErrRangeSuperseded):
 			// The declared inputs moved. Re-enqueue what is left rather than finishing on a
 			// stale reading: two batches of one range must not commit under two different
 			// "current" maintenance declarations.
-			return s.releaseRepairRange(ctx, r.ID, cursor, err)
+			return s.releaseRepairRange(ctx, db, r.ID, cursor, err)
 		case err != nil:
-			return s.failRepairRange(ctx, r, cursor, err)
+			return s.failRepairRange(ctx, db, r, cursor, err)
 		}
 
 		spent := time.Since(started)
 		batch = adaptRepairBatch(batch, spent, remaining)
 		cursor = end
 	}
-	return s.completeRepairRange(ctx, r.ID, cursor)
+	return s.completeRepairRange(ctx, db, r.ID, cursor)
 }
 
 const (
@@ -221,7 +244,7 @@ func adaptRepairBatch(batch int, spent, budget time.Duration) int {
 // lock. Setting `statement_timeout` and `lock_timeout` on this session is what actually
 // stops a wait from outliving the slice — and it is the same shape the leader will need
 // when its batches move onto the lock-owning connection.
-func (s *Store) runRepairBatch(ctx context.Context, r RepairRange, from, to time.Time, budget time.Duration) error {
+func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, from, to time.Time, budget time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
@@ -229,21 +252,28 @@ func (s *Store) runRepairBatch(ctx context.Context, r RepairRange, from, to time
 	if ms < 1 {
 		ms = 1
 	}
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("store: acquire repair connection: %w", err)
+	// When the caller handed us the POOL we take one connection for the batch, because the
+	// timeouts below are session state and must apply to the same session the work runs on.
+	// When the caller handed us a pinned connection — the leader's lock-owning one — we use
+	// it as given: that is the whole point of the fence.
+	if pool, isPool := db.(*pgxpool.Pool); isPool {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			return fmt.Errorf("store: acquire repair connection: %w", err)
+		}
+		defer conn.Release()
+		db = conn
 	}
-	defer conn.Release()
 	for _, stmt := range []string{
 		fmt.Sprintf("SET statement_timeout = %d", ms),
 		fmt.Sprintf("SET lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
 	} {
-		if _, err := conn.Exec(ctx, stmt); err != nil {
+		if _, err := db.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("store: set repair timeouts: %w", err)
 		}
 	}
 
-	current, err := maintenanceGenerationOn(ctx, conn, r.ProjectID)
+	current, err := maintenanceGenerationOn(ctx, db, r.ProjectID)
 	if err != nil {
 		return err
 	}
@@ -251,7 +281,7 @@ func (s *Store) runRepairBatch(ctx context.Context, r RepairRange, from, to time
 		return ErrRangeSuperseded
 	}
 
-	tx, err := conn.Begin(ctx)
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin repair batch: %w", err)
 	}
@@ -309,12 +339,12 @@ func maintenanceGenerationOn(ctx context.Context, q queryRower, projectID string
 
 // releaseRepairRange puts a range back as pending, keeping its cursor so the next claim
 // continues rather than restarts.
-func (s *Store) releaseRepairRange(ctx context.Context, id string, cursor time.Time, cause error) error {
+func (s *Store) releaseRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time, cause error) error {
 	note := ""
 	if cause != nil {
 		note = cause.Error()
 	}
-	if _, err := s.pool.Exec(ctx,
+	if _, err := db.Exec(ctx,
 		`UPDATE service_repair_ranges
 		    SET state = 'pending', cursor_at = $2, last_error = $3,
 		        maintenance_generation = COALESCE(
@@ -326,8 +356,8 @@ func (s *Store) releaseRepairRange(ctx context.Context, id string, cursor time.T
 	return nil
 }
 
-func (s *Store) completeRepairRange(ctx context.Context, id string, cursor time.Time) error {
-	if _, err := s.pool.Exec(ctx,
+func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time) error {
+	if _, err := db.Exec(ctx,
 		`UPDATE service_repair_ranges SET state = 'complete', cursor_at = $2, last_error = '', updated_at = now()
 		  WHERE id = $1`, id, cursor); err != nil {
 		return fmt.Errorf("store: complete repair range: %w", err)
@@ -338,9 +368,9 @@ func (s *Store) completeRepairRange(ctx context.Context, id string, cursor time.
 // failRepairRange records an error and backs off. The backoff has a floor so a persistent
 // fault cannot become a hot loop, and the range stays claimable rather than being dropped —
 // a range nobody retries is a hole in a watermark defined by contiguity.
-func (s *Store) failRepairRange(ctx context.Context, r RepairRange, cursor time.Time, cause error) error {
+func (s *Store) failRepairRange(ctx context.Context, db dbConn, r RepairRange, cursor time.Time, cause error) error {
 	backoff := repairBackoff(r.Attempts + 1)
-	if _, err := s.pool.Exec(ctx,
+	if _, err := db.Exec(ctx,
 		`UPDATE service_repair_ranges
 		    SET state = 'pending', cursor_at = $2, attempts = attempts + 1,
 		        next_attempt_at = now() + $3::interval, last_error = $4, updated_at = now()

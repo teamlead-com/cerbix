@@ -528,7 +528,7 @@ func TestCheckingPipelineEndToEnd(t *testing.T) {
 	disp := dispatch.NewInProc(16)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go scheduler.New(st, disp, logger).Run(ctx)
+	go scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).Run(ctx)
 	go worker.New(disp, prober.NewRunner(), 2, logger).Run(ctx)
 	go ingest.New(st, disp, nil, logger).Run(ctx)
 

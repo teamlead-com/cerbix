@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -114,4 +115,28 @@ func (s *Store) TryBecomeLeader(ctx context.Context, key int64) (release func(),
 		conn.Release()
 	}
 	return release, check, true, nil
+}
+
+// RunServiceRepairSlice claims one repair range and works it until the deadline, entirely on
+// the lock-owning connection.
+//
+// This is the ownership migration §10.7 requires, and the reason it is a method on the
+// session rather than on the Store: a batch that ran through the pool would commit happily
+// after this node had already lost leadership and another had taken over. Here, losing the
+// connection releases the advisory lock and aborts the in-flight transaction together, so a
+// deposed leader cannot write behind its successor. Passing a `check()` callback into the
+// computation would NOT achieve this — it only narrows the window between the check and the
+// commit.
+//
+// It reports whether it found anything to do, so the caller can back off when the queue is
+// empty instead of spinning.
+func (ls *LeaderSession) RunServiceRepairSlice(ctx context.Context, deadline time.Time) (bool, error) {
+	r, ok, err := ls.store.claimRepairRangeOn(ctx, ls.conn)
+	if err != nil || !ok {
+		return false, err
+	}
+	if err := ls.store.runRepairRangeOn(ctx, ls.conn, r, deadline); err != nil {
+		return true, err
+	}
+	return true, nil
 }

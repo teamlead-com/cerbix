@@ -880,7 +880,7 @@ func runServe(args []string) int {
 		}
 		switch *role {
 		case "all":
-			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
 				WithLocalCredentialRegions(domain.DefaultRegion).
@@ -902,7 +902,7 @@ func runServe(args []string) int {
 				logging.Critical(logger, "scheduler_requires_database", "hint", "set database.dsn")
 				return 1
 			}
-			sch := scheduler.New(st, disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
 				WithPullRegions(cfg.Pull.Regions).                                  // pull-served regions get jobs via pull_jobs, not AMQP

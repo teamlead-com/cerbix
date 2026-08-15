@@ -22,13 +22,50 @@ import (
 const advisoryLockKey int64 = 0x6365726269780001 // "cerbix" + slot 1
 
 // Store is the persistence surface the scheduler needs.
+// LeaderSession is a held leadership whose fenced work runs on the lock-owning connection,
+// so losing the lock aborts an in-flight batch instead of letting it commit behind the new
+// leader. Implemented by *store.LeaderSession.
+type LeaderSession interface {
+	Check(ctx context.Context) (bool, error)
+	Release()
+	// RunServiceRepairSlice works one durable repair range until the deadline, on the
+	// lock-owning connection. It reports whether it found anything to do.
+	RunServiceRepairSlice(ctx context.Context, deadline time.Time) (bool, error)
+}
+
+// StoreAdapter widens *store.Store to the Store interface.
+//
+// It exists for one narrow reason: TryBecomeLeaderSession returns the CONCRETE
+// *store.LeaderSession, and Go has no return-type covariance, so the concrete type does not
+// satisfy an interface method returning the LeaderSession interface. Embedding forwards
+// every other method untouched and the explicit one below performs the widening — the same
+// shape the file provider already uses for the same reason.
+type StoreAdapter struct{ *store.Store }
+
+// NewStoreAdapter wraps a *store.Store for the scheduler.
+func NewStoreAdapter(st *store.Store) Store { return StoreAdapter{Store: st} }
+
+// TryBecomeLeaderSession widens the concrete session to the interface.
+func (a StoreAdapter) TryBecomeLeaderSession(ctx context.Context, key int64) (LeaderSession, bool, error) {
+	ls, ok, err := a.Store.TryBecomeLeaderSession(ctx, key)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return ls, true, nil
+}
+
 type Store interface {
 	ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, error)
 	ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error)
 	MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string, carrierByRegion map[string]int) ([]store.MaterializedExecution, error)
 	StalePushMonitors(ctx context.Context) ([]domain.Monitor, error)
 	RecordDeadmanResult(ctx context.Context, monitorID string, revision int64, cutoff time.Time) (store.ResultOutcome, error)
-	TryBecomeLeader(ctx context.Context, key int64) (release func(), check func(context.Context) (bool, error), ok bool, err error)
+	// TryBecomeLeaderSession elects on a PINNED connection and hands back a session whose
+	// fenced work runs on that same connection. It replaced TryBecomeLeader, which let
+	// writes use the pool: a deposed leader could then still commit a pooled transaction
+	// after a successor existed, and the 5s watchdog only narrowed that window rather than
+	// closing it (FR-021 §10.7).
+	TryBecomeLeaderSession(ctx context.Context, key int64) (LeaderSession, bool, error)
 	RollupDailyAvailability(ctx context.Context, from, to time.Time) error
 	EnsureHeartbeatPartitions(ctx context.Context, ahead int) error
 	PurgeOldHeartbeats(ctx context.Context, cutoff time.Time) (int, error)
@@ -131,6 +168,18 @@ const (
 	// leader steps down immediately rather than keep dispatching against a lock another
 	// node may now hold — the anti-split-brain watchdog.
 	leaderCheckEvery = 5 * time.Second
+
+	// Service-reliability work runs as a sub-tick of the leader loop, and the three numbers
+	// below derive from ONE mechanism rather than being independent knobs (FR-021 §10.10).
+	//
+	// serviceSliceEvery is how often a slice is attempted; serviceCycleBudget is the TOTAL
+	// wall clock a cycle may spend on it, spent across slices; and maxDispatchDelay bounds
+	// any SINGLE slice, so dispatch is serviced between them. A slice never exceeds the
+	// dispatch bound, which is what makes "the tick is not delayed beyond it" true by
+	// construction instead of by hope.
+	serviceSliceEvery  = time.Second
+	serviceCycleBudget = 2 * time.Second
+	maxDispatchDelay   = 250 * time.Millisecond
 	// subCadenceTimeout bounds a single periodic leader task (rollup, renotify, burn,
 	// SLA reports, region/escalation, stale-push) so one hung query — a lock wait, a slow
 	// aggregate — can't stall the whole leader tick and freeze dispatch. maintainTimeout
@@ -310,7 +359,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		release, check, ok, err := s.store.TryBecomeLeader(ctx, s.leaderKey)
+		session, ok, err := s.store.TryBecomeLeaderSession(ctx, s.leaderKey)
 		if err != nil {
 			s.logger.Error("leader_election_failed", "error", err.Error())
 			if !sleep(ctx, s.retry) {
@@ -327,8 +376,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 		}
 		s.logger.Info("scheduler_leader_acquired")
 		s.setLeaderState(true)
-		lost := s.lead(ctx, check)
-		release()
+		lost := s.lead(ctx, session)
+		session.Release()
 		s.setLeaderState(false)
 		// A clean context cancellation is shutdown → stop. A lost lock (watchdog
 		// stepped us down) means we must re-contend, not exit: another node may have
@@ -351,7 +400,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 // longer scans the monitors table every second. Push-liveness runs as a single batched
 // query on its own cadence. Returns true if it stepped down because the advisory lock
 // was lost (the caller re-contends), false on a clean context cancellation.
-func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool, error)) bool {
+func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 	nextRun := map[string]time.Time{}
 	credentialFailures := map[string]int{}
 	// Consecutive publish/enqueue failures per monitor, kept apart from credential
@@ -365,7 +414,7 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 	// signal — a recovery stops the signals, so acceleration decays on its own;
 	// the snapshot refresh prunes it authoritatively).
 	confirmFast := map[string]time.Time{}
-	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk time.Time
+	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk, lastServiceSlice time.Time
 	ticker := time.NewTicker(s.tick)
 	defer ticker.Stop()
 	for {
@@ -388,9 +437,9 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 			// any leader work this tick. On loss (connection died, Postgres blip)
 			// step down immediately so we stop dispatching against a lock we no
 			// longer own; the caller re-contends.
-			if check != nil && (lastLeaderChk.IsZero() || now.Sub(lastLeaderChk) >= leaderCheckEvery) {
+			if session != nil && (lastLeaderChk.IsZero() || now.Sub(lastLeaderChk) >= leaderCheckEvery) {
 				lastLeaderChk = now
-				held, err := check(ctx)
+				held, err := session.Check(ctx)
 				if err != nil {
 					s.logger.Error("scheduler_leadership_check_failed", "error", err.Error())
 					return true
@@ -398,6 +447,30 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 				if !held {
 					s.logger.Warn("scheduler_leadership_lost")
 					return true
+				}
+			}
+			// Service reliability: work durable repair ranges on the LOCK-OWNING
+			// connection, in slices short enough that dispatch is serviced between them.
+			// An empty queue costs one claim query and backs off to the next sub-tick, so
+			// an installation with no services pays effectively nothing.
+			if session != nil && now.Sub(lastServiceSlice) >= serviceSliceEvery {
+				lastServiceSlice = now
+				spent := time.Duration(0)
+				for spent < serviceCycleBudget {
+					slice := maxDispatchDelay
+					if left := serviceCycleBudget - spent; left < slice {
+						slice = left
+					}
+					started := time.Now()
+					worked, err := session.RunServiceRepairSlice(ctx, started.Add(slice))
+					spent += time.Since(started)
+					if err != nil {
+						s.logger.Error("service_repair_slice_failed", "error", err.Error())
+						break
+					}
+					if !worked {
+						break
+					}
 				}
 			}
 			if now.Sub(lastRollup) >= rollupEvery {

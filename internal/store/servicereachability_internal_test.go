@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -203,5 +205,160 @@ func TestMaterializationStartIsFixedByTheFirstDeclarationThatHasInputs(t *testin
 	}
 	if !second.Equal(first) {
 		t.Errorf("materialization_start moved %s -> %s on a later revision", first, second)
+	}
+}
+
+// §10.4 covers agent historical backfill by name, and the shipped code went straight to the
+// pool with raw inserts — so a backfilled result was invisible to the seal handshake: no
+// dirty mark, no repair, and a sealed window that silently disagreed with the raw table it
+// was computed from.
+func TestHistoricalBackfillGoesThroughTheSealHandshake(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	ts := time.Now().UTC().Add(-25 * time.Minute)
+	bucket := bucketOf(t, st, ctx, ts)
+	if got := ingestGeneration(t, st, ctx, f.serviceID, bucket); got != 0 {
+		t.Fatalf("bucket already marked: %d", got)
+	}
+
+	inserted, _, err := st.RecordHistoricalResults(ctx, []domain.Heartbeat{
+		{MonitorID: f.http, Ts: ts, Up: true},
+	})
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if inserted != 1 {
+		t.Fatalf("inserted %d, want 1", inserted)
+	}
+	if got := ingestGeneration(t, st, ctx, f.serviceID, bucket); got != 1 {
+		t.Fatalf("ingest generation = %d after a historical insert, want 1", got)
+	}
+
+	// …and a row absorbed by ON CONFLICT DO NOTHING changed nothing, so it must NOT mark the
+	// bucket again. The handshake is gated on actual insertion, not on having been asked.
+	if _, _, err := st.RecordHistoricalResults(ctx, []domain.Heartbeat{
+		{MonitorID: f.http, Ts: ts, Up: true},
+	}); err != nil {
+		t.Fatalf("re-backfill: %v", err)
+	}
+	if got := ingestGeneration(t, st, ctx, f.serviceID, bucket); got != 1 {
+		t.Errorf("ingest generation = %d after a duplicate that inserted nothing, want 1", got)
+	}
+}
+
+// Evidence arriving BEHIND the watermark makes a sealed number wrong. The mark alone cannot
+// fix it — ordinary materialization refuses to touch a sealed bucket and the driver has
+// already walked past — so the correction has to be queued with the heartbeat that caused it.
+func TestLateDataBehindTheWatermarkQueuesItsOwnRepair(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	// Seal a stretch through the product path.
+	base := domain.FloorToBucket(time.Now().UTC().Add(-20 * time.Minute))
+	for i := 0; i < 5; i++ {
+		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+10*time.Second), true)
+	}
+	leaderSliceFor(t, st, ctx, 60)
+	through := sealedThrough(t, st, ctx, f.serviceID)
+	if through == nil {
+		t.Fatal("nothing sealed; the rest of this test would prove nothing")
+	}
+
+	// A result for a bucket well inside the sealed window arrives now.
+	late := base.Add(2*time.Minute + 30*time.Second)
+	if !late.Before(*through) {
+		t.Fatalf("test setup: %s is not behind the watermark %s", late, *through)
+	}
+	if _, _, err := st.RecordHistoricalResults(ctx, []domain.Heartbeat{
+		{MonitorID: f.http, Ts: late, Up: false},
+	}); err != nil {
+		t.Fatalf("late backfill: %v", err)
+	}
+
+	var queued int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_repair_ranges
+		  WHERE service_id=$1 AND reason='late_data' AND state='pending'`,
+		f.serviceID).Scan(&queued); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if queued == 0 {
+		t.Fatal("late data behind the watermark queued no repair; the sealed number stays wrong forever")
+	}
+
+	// And running the queue actually changes it.
+	before, _ := readFact(t, st, ctx, f.serviceID, domain.FloorToBucket(late))
+	drainRepair(t, st, ctx)
+	after, _ := readFact(t, st, ctx, f.serviceID, domain.FloorToBucket(late))
+	if after.bad == before.bad {
+		t.Errorf("the sealed bucket still reports bad_us=%d after a DOWN result arrived late", after.bad)
+	}
+}
+
+// The fan-out cap must be refused where it is EXCEEDED, not enforced later by a kill switch.
+//
+// It lived only inside noteHeartbeatForServices, which runs in the HEARTBEAT's transaction.
+// So the 26th declaration of a monitor was accepted happily and then broke ingest for that
+// monitor: a service-configuration change took down core monitoring, and the error surfaced
+// nowhere near the write that caused it.
+func TestExceedingTheFanOutCapIsRefusedAtTheDeclarationNotAtIngest(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+
+	// Fill the cap with services that all declare the same monitor as their SLI.
+	for i := 0; i < MaxServicesPerMonitor; i++ {
+		svc, err := st.CreateService(ctx, domain.Service{
+			ProjectID: f.projectID, Slug: fmt.Sprintf("fanout-%d", i), Name: "Fan-out",
+		})
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, svc.ID, domain.ServiceDeclaration{
+			Monitors: []string{f.http}, SLI: []string{f.http},
+		}, 0, DeclarationOptions{CreatedBy: "op"}); err != nil {
+			t.Fatalf("declare %d: %v", i, err)
+		}
+	}
+
+	// One more must be REFUSED…
+	over, err := st.CreateService(ctx, domain.Service{ProjectID: f.projectID, Slug: "fanout-over", Name: "Over"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, _, err = st.PutServiceDeclaration(ctx, f.projectID, over.ID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op"})
+	if !errors.Is(err, ErrMonitorInTooManyServices) {
+		t.Fatalf("got %v, want ErrMonitorInTooManyServices", err)
+	}
+
+	// …and, the part that actually mattered: the monitor still ingests.
+	out := beat(t, st, ctx, f.http, time.Now().UTC().Add(-30*time.Second), true)
+	if !out.Inserted {
+		t.Fatal("a heartbeat was lost after the cap was reached; a service edit must never break core monitoring")
+	}
+}
+
+// A declaration cannot name an unbounded evaluation context: the epoch snapshots every member
+// and the reducer's breakpoint set grows with them.
+func TestAnOversizedDeclarationIsRefused(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+
+	huge := make([]string, MaxMembersPerRevision+1)
+	for i := range huge {
+		huge[i] = f.http
+	}
+	// Distinct ids are what the cap counts, so build them from real monitors where possible
+	// and fall back to the same one — dedup happens before the check, so use unique strings.
+	for i := range huge {
+		huge[i] = fmt.Sprintf("00000000-0000-0000-0000-%012d", i)
+	}
+	_, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: huge, SLI: nil,
+	}, 0, DeclarationOptions{CreatedBy: "op"})
+	if !errors.Is(err, ErrTooManyMembers) {
+		t.Fatalf("got %v, want ErrTooManyMembers", err)
 	}
 }

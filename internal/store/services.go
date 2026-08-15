@@ -59,6 +59,14 @@ func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.S
 	if !domain.ValidServiceSlug(svc.Slug) {
 		return domain.Service{}, fmt.Errorf("store: service slug must match %s", domain.MonitorSlugPattern())
 	}
+	var existing int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM services WHERE project_id = $1`, svc.ProjectID).Scan(&existing); err != nil {
+		return domain.Service{}, fmt.Errorf("store: count services: %w", err)
+	}
+	if existing >= MaxServicesPerProject {
+		return domain.Service{}, fmt.Errorf("%w: %d, cap %d", ErrTooManyServices, existing, MaxServicesPerProject)
+	}
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO services (project_id, slug, name, description, escalation_policy_id, oncall_schedule_id)
 		 VALUES ($1,$2,$3,$4,$5,$6)
@@ -294,6 +302,10 @@ func (s *Store) putServiceDeclarationTx(
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, ErrRevisionConflict
 	}
 
+	if err := enforceDeclarationBoundsTx(ctx, tx, projectID, serviceID, monitors, sli); err != nil {
+		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
+	}
+
 	members, err := s.loadEpochMembers(ctx, tx, projectID, sli, rawPolicies)
 	if err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
@@ -390,6 +402,66 @@ func (s *Store) putServiceDeclarationTx(
 		}
 	}
 	return rev, epoch, nil
+}
+
+// MaxMembersPerRevision caps one declaration's evaluation context. The epoch snapshots every
+// member, and the reducer's breakpoint set grows with them; an unbounded list turns one write
+// into an unbounded snapshot and one bucket into an unbounded reduction.
+const MaxMembersPerRevision = 200
+
+// MaxServicesPerProject caps how many services one project may declare.
+const MaxServicesPerProject = 500
+
+var (
+	// ErrTooManyMembers is returned when a declaration's context exceeds the cap.
+	ErrTooManyMembers = errors.New("store: too many members in one declaration")
+	// ErrMonitorInTooManyServices is returned when declaring this SLI would push a monitor
+	// past the per-monitor service cap.
+	ErrMonitorInTooManyServices = errors.New("store: monitor is a reliability input for too many services")
+	// ErrTooManyServices is returned when a project is at its service cap.
+	ErrTooManyServices = errors.New("store: too many services in this project")
+)
+
+// enforceDeclarationBoundsTx applies the fan-out caps ON THE WRITE PATH.
+//
+// They existed before only as a read-time check inside noteHeartbeatForServices — which runs
+// in the HEARTBEAT's transaction. So the 26th declaration of a monitor was accepted happily
+// and then broke ingest for that monitor: a service-configuration change took down core
+// monitoring, and the error surfaced nowhere near the write that caused it. A cap has to be
+// refused where it is exceeded, not enforced later by a kill switch.
+func enforceDeclarationBoundsTx(
+	ctx context.Context, tx pgx.Tx, projectID, serviceID string, monitors, sli []string,
+) error {
+	if len(monitors) > MaxMembersPerRevision {
+		return fmt.Errorf("%w: %d declared, cap %d", ErrTooManyMembers, len(monitors), MaxMembersPerRevision)
+	}
+	if len(sli) == 0 {
+		return nil
+	}
+	// How many OTHER services already declare each of these monitors as a reliability input.
+	// Serialized by the per-service lock this transaction already holds plus the membership
+	// advisory lock its callers take, so two concurrent declarations cannot both squeeze in.
+	rows, err := tx.Query(ctx,
+		`SELECT monitor_id, count(*) FROM service_member_refs
+		  WHERE project_id = $1 AND role = 'sli' AND monitor_id = ANY($2) AND service_id <> $3
+		  GROUP BY monitor_id`,
+		projectID, sli, serviceID)
+	if err != nil {
+		return fmt.Errorf("store: count service fan-out: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var monitorID string
+		var n int
+		if err := rows.Scan(&monitorID, &n); err != nil {
+			return fmt.Errorf("store: scan fan-out: %w", err)
+		}
+		if n+1 > MaxServicesPerMonitor {
+			return fmt.Errorf("%w: %s would be an input for %d services, cap %d",
+				ErrMonitorInTooManyServices, monitorID, n+1, MaxServicesPerMonitor)
+		}
+	}
+	return rows.Err()
 }
 
 // ensureMaterializationRowTx puts the service on the driver's list, once.

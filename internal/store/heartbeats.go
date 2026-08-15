@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -97,7 +98,7 @@ func (s *Store) RecordHistoricalResults(ctx context.Context, hbs []domain.Heartb
 	}
 
 	batch := &pgx.Batch{}
-	queued := 0
+	queued := make([]domain.Heartbeat, 0, len(hbs))
 	for _, hb := range hbs {
 		if !live[hb.MonitorID] {
 			skipped++ // monitor gone
@@ -110,26 +111,64 @@ func (s *Store) RecordHistoricalResults(ctx context.Context, hbs []domain.Heartb
 			skipped++
 			continue
 		}
-		queued++
+		queued = append(queued, domain.Heartbeat{MonitorID: hb.MonitorID, Ts: ts})
 		batch.Queue(
 			`INSERT INTO heartbeats (monitor_id, ts, up, latency_ms, code, msg, observed_at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$2) ON CONFLICT (monitor_id, ts) DO NOTHING`,
 			hb.MonitorID, ts, hb.Up, hb.LatencyMS, hb.Code, hb.Msg)
 	}
-	if queued == 0 {
+	if len(queued) == 0 {
 		return 0, skipped, nil
 	}
-	br := s.pool.SendBatch(ctx, batch)
-	for i := 0; i < queued; i++ {
+
+	// The batch runs inside an EXPLICIT transaction so the service-ingest marks commit with
+	// the rows that caused them. §10.4 covers agent historical backfill by name, and the
+	// first implementation went straight to the pool with raw inserts — so a backfilled
+	// result was invisible to the seal handshake entirely: no dirty mark, no late-data
+	// repair, and a sealed window that silently disagreed with the raw table it was
+	// computed from.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, skipped, fmt.Errorf("store: begin backfill: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	br := tx.SendBatch(ctx, batch)
+	landed := make([]domain.Heartbeat, 0, len(queued))
+	for i := range queued {
 		ct, err := br.Exec()
 		if err != nil {
 			_ = br.Close()
-			return inserted, skipped, fmt.Errorf("store: backfill insert: %w", err)
+			return 0, skipped, fmt.Errorf("store: backfill insert: %w", err)
 		}
-		inserted += int(ct.RowsAffected())
+		if ct.RowsAffected() > 0 {
+			inserted++
+			landed = append(landed, queued[i])
+		}
 	}
 	if err := br.Close(); err != nil {
-		return inserted, skipped, fmt.Errorf("store: close backfill batch: %w", err)
+		return 0, skipped, fmt.Errorf("store: close backfill batch: %w", err)
+	}
+
+	// Gated on ACTUAL insertion, exactly like scheduled ingest: a row absorbed by
+	// ON CONFLICT DO NOTHING changed nothing, and marking its bucket dirty would invite a
+	// recompute that can only produce the number already there.
+	//
+	// Sorted so a batch takes the (service_id, bucket_start) keys in one direction; two
+	// overlapping backfills taking them in opposite orders deadlock.
+	sort.Slice(landed, func(i, j int) bool {
+		if landed[i].MonitorID != landed[j].MonitorID {
+			return landed[i].MonitorID < landed[j].MonitorID
+		}
+		return landed[i].Ts.Before(landed[j].Ts)
+	})
+	for _, hb := range landed {
+		if err := s.noteHeartbeatForServices(ctx, tx, hb.MonitorID, hb.Ts); err != nil {
+			return 0, skipped, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, skipped, fmt.Errorf("store: commit backfill: %w", err)
 	}
 	return inserted, skipped, nil
 }

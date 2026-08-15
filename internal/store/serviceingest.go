@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // The ingest side of the seal/ingest handshake (func-service-reliability §10.4).
@@ -62,8 +64,35 @@ func (s *Store) noteHeartbeatForServices(ctx context.Context, tx pgx.Tx, monitor
 		if err := markBucket(ctx, tx, a.projectID, a.serviceID, monitorID, bucketStart, ts); err != nil {
 			return err
 		}
+		// Evidence that arrives BEHIND the watermark makes a sealed number wrong, and the
+		// mark alone cannot fix it: ordinary materialization will not touch a sealed bucket,
+		// and the forward driver has already walked past. Queue the correction in the SAME
+		// transaction as the heartbeat, or the two can separate — leaving a fact that is
+		// known to be wrong with nothing scheduled to put it right.
+		if err := repairIfBehindWatermark(ctx, tx, a.projectID, a.serviceID, bucketStart); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// repairIfBehindWatermark queues a late-data recompute when the bucket is already sealed.
+func repairIfBehindWatermark(ctx context.Context, tx pgx.Tx, projectID, serviceID string, bucketStart time.Time) error {
+	var sealedThrough *time.Time
+	err := tx.QueryRow(ctx,
+		`SELECT sealed_through FROM service_materialization WHERE service_id = $1`,
+		serviceID).Scan(&sealedThrough)
+	if noRows(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("store: read watermark for late data: %w", err)
+	}
+	if sealedThrough == nil || !bucketStart.Before(*sealedThrough) {
+		return nil
+	}
+	return enqueueRepairRangeTx(ctx, tx, projectID, serviceID,
+		bucketStart, bucketStart.Add(domain.CanonicalBucket), ReasonLateData, "")
 }
 
 // affectedService is one service the heartbeat belongs to, with the tenant key read from the

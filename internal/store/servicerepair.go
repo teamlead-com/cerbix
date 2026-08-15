@@ -77,17 +77,33 @@ type dbConn interface {
 // everything it absorbed. A running range is never absorbed — it carries a cursor, and
 // widening it under a worker would either replay finished buckets or skip unfinished ones.
 func (s *Store) EnqueueRepairRange(ctx context.Context, projectID, serviceID string, from, to time.Time, reason RepairReason) error {
-	if !to.After(from) {
-		return fmt.Errorf("store: repair range end %s is not after start %s", to, from)
-	}
-	from = domain.FloorToBucket(from)
-	to = domain.CeilToBucket(to)
-
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin enqueue range: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	if err := enqueueRepairRangeTx(ctx, tx, projectID, serviceID, from, to, reason, ""); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// enqueueRepairRangeTx is the body, so a caller already inside a transaction — ingest
+// discovering late data behind the watermark — can queue the correction atomically with the
+// write that made it necessary. A late heartbeat committed without its repair is a sealed
+// number that is now wrong and has nothing scheduled to fix it.
+//
+// originID scopes the work to the row that asked for it, and is empty for work nobody in the
+// declaration axis owns.
+func enqueueRepairRangeTx(
+	ctx context.Context, tx pgx.Tx, projectID, serviceID string,
+	from, to time.Time, reason RepairReason, originID string,
+) error {
+	if !to.After(from) {
+		return fmt.Errorf("store: repair range end %s is not after start %s", to, from)
+	}
+	from = domain.FloorToBucket(from)
+	to = domain.CeilToBucket(to)
 
 	// Absorb every pending range of this reason that overlaps or abuts, and take the union.
 	var mergedFrom, mergedTo time.Time
@@ -113,14 +129,18 @@ func (s *Store) EnqueueRepairRange(ctx context.Context, projectID, serviceID str
 		projectID).Scan(&generation); err != nil {
 		return fmt.Errorf("store: read maintenance generation: %w", err)
 	}
+	var origin *string
+	if originID != "" {
+		origin = &originID
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO service_repair_ranges
-		   (service_id, project_id, range_start, range_end, reason, maintenance_generation, cursor_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$3)`,
-		serviceID, projectID, mergedFrom, mergedTo, string(reason), generation); err != nil {
+		   (service_id, project_id, range_start, range_end, reason, maintenance_generation, cursor_at, origin_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$3,$7)`,
+		serviceID, projectID, mergedFrom, mergedTo, string(reason), generation, origin); err != nil {
 		return fmt.Errorf("store: enqueue repair range: %w", err)
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // ClaimRepairRange takes the next runnable range and marks it running.

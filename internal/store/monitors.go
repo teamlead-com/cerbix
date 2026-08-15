@@ -576,6 +576,15 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 	if err := replaceMonitorSecretRefsTx(ctx, tx, m.ID, m.ProjectID, bindings); err != nil {
 		return domain.Monitor{}, err
 	}
+	// Evaluation epochs for every service whose SLI declares this monitor, in THIS
+	// transaction. The epoch and the write it describes have to become visible together:
+	// snapshotting later would leave an interval in which concurrent ingest is attributed to
+	// an epoch that does not yet describe the monitor it measured. Services that read the
+	// same inputs as before get nothing — the snapshot-hash no-op rule lives here, and only
+	// here (FR-021 §6.2).
+	if err := s.BumpEpochsForMonitor(ctx, tx, m.ProjectID, m.ID); err != nil {
+		return domain.Monitor{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: commit update monitor: %w", err)
 	}

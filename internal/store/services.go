@@ -267,8 +267,27 @@ func (s *Store) PutServiceDeclaration(
 	return rev, epoch, nil
 }
 
-// supersedeAtBoundary marks any EFFECTIVE revision or epoch already claiming this boundary
-// as never-effective, and cancels the durable ranges that belonged to them.
+// supersedeEpochsAtBoundary yields the EPOCH axis at one boundary, and touches nothing else.
+//
+// This is the whole operation an execution-driven epoch is allowed to perform. An earlier
+// draft reused the declaration-path helper here, which also superseded the REVISION at that
+// boundary — so an ordinary monitor edit silently marked the service's declaration as never
+// having taken effect, and the next epoch then found no declaration to resolve and created
+// nothing. An execution change must never mutate a declaration; that is the point of
+// splitting the two axes.
+func supersedeEpochsAtBoundary(ctx context.Context, tx pgx.Tx, serviceID string, effectiveAt time.Time) error {
+	if _, err := tx.Exec(ctx,
+		`UPDATE service_evaluation_epochs SET state = 'superseded_before_effect'
+		  WHERE service_id = $1 AND effective_at = $2 AND state = 'effective'`,
+		serviceID, effectiveAt); err != nil {
+		return fmt.Errorf("store: supersede epoch at boundary: %w", err)
+	}
+	return nil
+}
+
+// supersedeAtBoundary is the DECLARATION path: a new revision claims the boundary, so any
+// revision and any epoch already claiming it yield, and the durable ranges scoped to them
+// are cancelled.
 func supersedeAtBoundary(ctx context.Context, tx pgx.Tx, serviceID string, effectiveAt time.Time) error {
 	if _, err := tx.Exec(ctx,
 		`UPDATE service_definition_revisions SET state = 'superseded_before_effect'
@@ -276,11 +295,8 @@ func supersedeAtBoundary(ctx context.Context, tx pgx.Tx, serviceID string, effec
 		serviceID, effectiveAt); err != nil {
 		return fmt.Errorf("store: supersede revision at boundary: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE service_evaluation_epochs SET state = 'superseded_before_effect'
-		  WHERE service_id = $1 AND effective_at = $2 AND state = 'effective'`,
-		serviceID, effectiveAt); err != nil {
-		return fmt.Errorf("store: supersede epoch at boundary: %w", err)
+	if err := supersedeEpochsAtBoundary(ctx, tx, serviceID, effectiveAt); err != nil {
+		return err
 	}
 	// A row that never took effect governs no bucket, so work scoped to it is work with no
 	// target. Cancelling it here — in the same transaction — is what stops a job from

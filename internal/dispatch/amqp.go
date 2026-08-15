@@ -184,6 +184,7 @@ type AMQP struct {
 	resultsCh   chan domain.Heartbeat
 	testsOnce   sync.Once // guards the per-region test-RPC server (worker side)
 	testsV2Once sync.Once
+	testsV3Once sync.Once
 }
 
 // dialAndSetup opens a connection plus the publish channel and declares the
@@ -650,14 +651,25 @@ func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, 
 // after the initial queue declaration and consumer registration succeed, forming a
 // startup-readiness barrier.
 func (d *AMQP) ServeTestsV2(run TestRunner) error {
+	return d.serveTestsGeneration(&d.testsV2Once, testsV2QueueForRegion(d.jobRegion), ProtocolV2, run)
+}
+
+// ServeTestsV3 consumes the generation-3 test carrier — the one that carries envelope v2.
+// It exists for the same reason the v3 JOBS consumer does: a generation with a publisher
+// and no consumer is a queue that fills until TTL, and "jobs AND tests, AMQP AND pull" is
+// the contract, not a slogan. Started only by a worker that declared capability 2.
+func (d *AMQP) ServeTestsV3(run TestRunner) error {
+	return d.serveTestsGeneration(&d.testsV3Once, testsV3QueueForRegion(d.jobRegion), ProtocolV3, run)
+}
+
+func (d *AMQP) serveTestsGeneration(once *sync.Once, queue string, generation int, run TestRunner) error {
 	var initialErr error
-	d.testsV2Once.Do(func() {
-		queue := testsV2QueueForRegion(d.jobRegion)
+	once.Do(func() {
 		ready := make(chan error, 1)
 		go func() {
 			for {
 				conn, wake := d.current()
-				serveTestsV2Once(d, conn, queue, ProtocolV2, run, ready)
+				serveEnvelopeTestsOnce(d, conn, queue, generation, run, ready)
 				ready = nil
 				select {
 				case <-d.ctx.Done():
@@ -672,7 +684,7 @@ func (d *AMQP) ServeTestsV2(run TestRunner) error {
 	return initialErr
 }
 
-func serveTestsV2Once(d *AMQP, conn *amqp.Connection, queue string, generation int, run TestRunner, ready chan<- error) {
+func serveEnvelopeTestsOnce(d *AMQP, conn *amqp.Connection, queue string, generation int, run TestRunner, ready chan<- error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		d.logger.Error("dispatch_test_v2_channel", "queue", queue, "error", err.Error())

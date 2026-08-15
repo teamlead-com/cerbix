@@ -16,11 +16,28 @@ ALTER TABLE pull_tests
     ADD CONSTRAINT pull_tests_protocol_version_check CHECK (protocol_version IN (1, 2, 3));
 
 -- +goose Down
--- Refuse to narrow the CHECK while generation-3 rows exist: dropping to (1,2) with such a
--- row present would fail the constraint validation anyway, and doing it silently would
--- strand work. Drain generation 3 first (stop emission, wait out the TTL) and re-run.
-DELETE FROM pull_jobs WHERE protocol_version = 3;
-DELETE FROM pull_tests WHERE protocol_version = 3;
+-- FAIL CLOSED while generation-3 rows exist. The first draft said "drain first" and then
+-- unconditionally DELETEd them, which is a destructive write-off wearing the words of a
+-- safe rollback: a rollback issued before the TTL would silently discard pending jobs and
+-- in-flight Test Connections. D-0160 makes draining an explicit OPERATOR step — stop
+-- emission, wait out max job TTL, then purge or record the write-off — so this migration
+-- refuses rather than performing it silently.
+-- +goose StatementBegin
+DO $$
+DECLARE
+    pending integer;
+BEGIN
+    SELECT (SELECT count(*) FROM pull_jobs  WHERE protocol_version = 3)
+         + (SELECT count(*) FROM pull_tests WHERE protocol_version = 3)
+      INTO pending;
+    IF pending > 0 THEN
+        RAISE EXCEPTION
+            'refusing to roll back carrier generation 3: % pending row(s). Stop emission, wait out the job TTL, then purge them explicitly (D-0160).',
+            pending;
+    END IF;
+END
+$$;
+-- +goose StatementEnd
 
 ALTER TABLE pull_jobs
     DROP CONSTRAINT IF EXISTS pull_jobs_protocol_version_check,

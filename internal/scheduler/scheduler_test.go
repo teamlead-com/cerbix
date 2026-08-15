@@ -55,7 +55,7 @@ func (f *fakeStore) ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.M
 	return f.ListEnabledMonitors(ctx)
 }
 
-func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string, _ int) ([]store.MaterializedExecution, error) {
+func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string, _ map[string]int) ([]store.MaterializedExecution, error) {
 	if f.materialize != nil {
 		return f.materialize(ids)
 	}
@@ -523,17 +523,30 @@ func TestSchedulerStandbyStopsOnCancel(t *testing.T) {
 	}
 }
 
-// failingDispatcher refuses every publish, standing in for a broker outage.
+// failingDispatcher refuses every publish until healAfter attempts have been made,
+// standing in for a broker outage and its recovery.
 type failingDispatcher struct {
-	mu       sync.Mutex
-	attempts int
+	mu        sync.Mutex
+	attempts  int
+	healAfter int // 0 = never heal
+	published []string
 }
 
-func (d *failingDispatcher) PublishJob(context.Context, dispatch.CheckJob) error {
+func (d *failingDispatcher) PublishJob(_ context.Context, job dispatch.CheckJob) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.attempts++
+	if d.healAfter > 0 && d.attempts > d.healAfter {
+		d.published = append(d.published, job.Monitor.ID)
+		return nil
+	}
 	return errors.New("broker unreachable")
+}
+
+func (d *failingDispatcher) publishedIDs() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.published...)
 }
 func (d *failingDispatcher) Jobs() <-chan dispatch.DeliveredJob                    { return nil }
 func (d *failingDispatcher) PublishResult(context.Context, domain.Heartbeat) error { return nil }
@@ -577,5 +590,71 @@ func TestPublishFailureHonoursTheBackoffFloor(t *testing.T) {
 	time.Sleep(2500 * time.Millisecond) // several scheduler ticks
 	if got := disp.count(); got != 1 {
 		t.Fatalf("publish attempted %d times while the broker was down; the backoff floor bounds it to one per window", got)
+	}
+}
+
+// countingSecretSink records which metric FAMILY each rejection lands in.
+type countingSecretSink struct {
+	mu        sync.Mutex
+	secret    []string
+	transport []string
+}
+
+func (s *countingSecretSink) RecordSecretResolutionFailure(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secret = append(s.secret, reason)
+}
+
+func (s *countingSecretSink) RecordDispatchTransportFailure(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.transport = append(s.transport, reason)
+}
+
+func (s *countingSecretSink) snapshot() (secret, transport []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.secret...), append([]string(nil), s.transport...)
+}
+
+// TestPublishFailureRecoversAndIsCountedSeparately completes the §4.4.5 acceptance the
+// first regression left implicit: it is not enough that a failing publish backs off — the
+// counter must RESET on success and ordinary cadence must resume, and a transport fault
+// must not be counted as a secret-resolution fault. An operator seeing "secret resolution
+// failed" during a broker outage would look in entirely the wrong place.
+func TestPublishFailureRecoversAndIsCountedSeparately(t *testing.T) {
+	monitor := domain.Monitor{
+		ID: "publish-recovers", Type: domain.MonitorPostgres, Target: "db:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 1, TimeoutSeconds: 5,
+	}
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor}}
+	disp := &failingDispatcher{healAfter: 1}
+	sink := &countingSecretSink{}
+	s := New(fs, disp, testLogger()).WithCredentialEnvelopes(true).
+		WithCredentialLiveRegions(staticCredentialRegions{"secure": true}).
+		WithSecretResolutionMetrics(sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	// The first attempt fails and backs off; the second succeeds once the backoff elapses.
+	waitUntil(t, 6*time.Second, "publish recovery after the transport heals", func() bool {
+		return len(disp.publishedIDs()) >= 1
+	})
+	// After a success the counter is reset, so ordinary cadence resumes rather than the
+	// monitor staying on an ever-growing backoff.
+	waitUntil(t, 6*time.Second, "ordinary cadence resumes after recovery", func() bool {
+		return len(disp.publishedIDs()) >= 2
+	})
+
+	secret, transport := sink.snapshot()
+	if len(transport) == 0 || transport[0] != "publish_failed" {
+		t.Fatalf("transport failures = %v, want at least one publish_failed", transport)
+	}
+	for _, reason := range secret {
+		if reason == "publish_failed" {
+			t.Fatal("a transport fault was counted as a secret-resolution failure")
+		}
 	}
 }

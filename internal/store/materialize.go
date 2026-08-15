@@ -40,21 +40,35 @@ type materializedRef struct {
 // immediately decrypts and re-wraps credentials. Plaintext never enters a returned DTO,
 // scheduler snapshot, cache, database queue, or broker payload.
 // envelopeForCarrier maps a carrier generation to the envelope generation it carries. The
-// mapping is total and explicit: an unknown carrier falls back to the OLDEST envelope, so a
-// wiring mistake degrades to something every executor can open rather than to a payload
-// nobody can.
-func envelopeForCarrier(carrierGeneration int) int {
-	if carrierGeneration >= dispatch.ProtocolV3 {
-		return dispatch.EnvelopeV2
+// mapping is EXACT: an unknown carrier is an error, not a guess. The earlier version
+// promised to "degrade to the oldest envelope" and then returned the NEWEST for anything
+// above 3, leaving the job's protocol version at the unknown value — the comment and the
+// code disagreed, and the honest answer is that a carrier we do not know is a wiring bug we
+// must not paper over on either side.
+func envelopeForCarrier(carrierGeneration int) (int, error) {
+	switch carrierGeneration {
+	case dispatch.ProtocolV1, dispatch.ProtocolV2:
+		return dispatch.EnvelopeV1, nil
+	case dispatch.ProtocolV3:
+		return dispatch.EnvelopeV2, nil
+	default:
+		return 0, fmt.Errorf("store: no envelope generation for carrier %d", carrierGeneration)
 	}
-	return dispatch.EnvelopeV1
 }
 
 // MaterializeExecutionConfigs builds dispatch-ready jobs for the given monitors.
-// carrierGeneration is the carrier the caller has ESTABLISHED the region can consume; the
-// envelope generation follows from it (generation 3 carries envelope v2), so a job can
-// never be sealed under a binding its executors cannot open.
-func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string, carrierGeneration int) ([]MaterializedExecution, error) {
+//
+// carrierByRegion is the caller's per-region policy: the carrier it has ESTABLISHED that
+// region can consume. It is a MAP and not a scalar because the region a job belongs to is
+// only known from the authoritative read — the snapshot's region may be stale. Choosing the
+// carrier from the snapshot meant a monitor moved from a capability-2 region to a
+// capability-1 one just before the read got the right row and the right key but the WRONG
+// carrier, and its job then sat on a queue nobody in the new region consumes (§4.4.3:
+// regroup by the authoritative region, and only then select the transport).
+//
+// A region absent from the policy falls back to the generation every capable executor
+// understands.
+func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string, carrierByRegion map[string]int) ([]MaterializedExecution, error) {
 	if len(monitorIDs) == 0 {
 		return nil, nil
 	}
@@ -152,8 +166,21 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 				byID[m.ID] = entry
 				continue
 			}
+			// The AUTHORITATIVE region decides the carrier, exactly as it already decides
+			// the keyring — the two must come from the same row or they can disagree.
+			carrierGeneration := dispatch.ProtocolV2
+			if g, ok := carrierByRegion[m.Region]; ok && g > 0 {
+				carrierGeneration = g
+			}
+			envelopeVersion, err := envelopeForCarrier(carrierGeneration)
+			if err != nil {
+				dispatch.WipeCredentialFields(fields)
+				entry.Reason = MaterializeDecryptFailed
+				byID[m.ID] = entry
+				continue
+			}
 			envelope, err := ring.Seal(dispatch.SealContext{
-				EnvelopeVersion: envelopeForCarrier(carrierGeneration),
+				EnvelopeVersion: envelopeVersion,
 				Region:          m.Region,
 				JobID:           jobID,
 				MonitorID:       m.ID,
@@ -197,7 +224,7 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 // MaterializeExecutionConfig is the singular test/manual convenience over the same
 // authoritative batch implementation.
 func (s *Store) MaterializeExecutionConfig(ctx context.Context, monitorID string) (MaterializedExecution, error) {
-	items, err := s.MaterializeExecutionConfigs(ctx, []string{monitorID}, dispatch.ProtocolV2)
+	items, err := s.MaterializeExecutionConfigs(ctx, []string{monitorID}, nil)
 	if err != nil {
 		return MaterializedExecution{}, err
 	}
@@ -208,7 +235,14 @@ func (s *Store) MaterializeExecutionConfig(ctx context.Context, monitorID string
 // is the authoritative config; inventory resolution, tenant binding and both generated ids
 // happen in one DB statement. A raw password is accepted only on this API surface and is
 // immediately wrapped — never persisted or handed to a transport in plaintext.
-func (s *Store) MaterializeTestExecutionConfig(ctx context.Context, m domain.Monitor) (MaterializedExecution, error) {
+// carrierGeneration is the caller's established carrier for this monitor's region, exactly
+// as on the scheduled path: a Test Connection that stayed pinned to generation 2 never
+// received the execution binding, so the one-off credential probe kept the target-tamper
+// hole the scheduled path had just closed — "jobs AND tests" is a contract, not a slogan.
+func (s *Store) MaterializeTestExecutionConfig(ctx context.Context, m domain.Monitor, carrierGeneration int) (MaterializedExecution, error) {
+	if carrierGeneration <= 0 {
+		carrierGeneration = dispatch.ProtocolV2
+	}
 	if !domain.CredentialedType(m.Type) {
 		return MaterializedExecution{Job: dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1}}, nil
 	}
@@ -267,8 +301,13 @@ func (s *Store) MaterializeTestExecutionConfig(ctx context.Context, m domain.Mon
 		dispatch.WipeCredentialFields(fields)
 		return MaterializedExecution{MonitorID: monitorID, Reason: MaterializeNoDispatchKey}, nil
 	}
+	envelopeVersion, err := envelopeForCarrier(carrierGeneration)
+	if err != nil {
+		dispatch.WipeCredentialFields(fields)
+		return MaterializedExecution{MonitorID: monitorID, Reason: MaterializeDecryptFailed}, nil
+	}
 	envelope, err := ring.Seal(dispatch.SealContext{
-		EnvelopeVersion: dispatch.EnvelopeV1,
+		EnvelopeVersion: envelopeVersion,
 		Region:          m.Region,
 		JobID:           jobID,
 		MonitorID:       monitorID,
@@ -279,7 +318,7 @@ func (s *Store) MaterializeTestExecutionConfig(ctx context.Context, m domain.Mon
 	if err != nil {
 		return MaterializedExecution{MonitorID: monitorID, Reason: MaterializeDecryptFailed}, nil
 	}
-	job.ProtocolVersion = dispatch.ProtocolV2
+	job.ProtocolVersion = carrierGeneration
 	job.CredentialEnvelope = envelope
 	return MaterializedExecution{MonitorID: monitorID, Job: job}, nil
 }

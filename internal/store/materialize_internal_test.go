@@ -66,7 +66,7 @@ func TestMaterializerSnapshotAndPayloadPlaintextAbsence(t *testing.T) {
 		}
 	}
 
-	items, err := st.MaterializeExecutionConfigs(ctx, []string{ref.ID, inline.ID}, dispatch.ProtocolV2)
+	items, err := st.MaterializeExecutionConfigs(ctx, []string{ref.ID, inline.ID}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,20 +242,91 @@ func TestMaterializerAuthoritativeReadBoundaries(t *testing.T) {
 // a region whose executors only understand v1 is the rolling-upgrade break the whole
 // generational design exists to prevent (§4.7, D-0160).
 func TestMaterializeSealsTheEnvelopeItsCarrierCarries(t *testing.T) {
-	if envelopeForCarrier(dispatch.ProtocolV1) != dispatch.EnvelopeV1 {
-		t.Fatal("generation 1 must map to the oldest envelope")
+	for _, tc := range []struct {
+		carrier int
+		want    int
+	}{
+		{dispatch.ProtocolV1, dispatch.EnvelopeV1},
+		// Generation 2 already means envelope v1 to every deployed executor.
+		{dispatch.ProtocolV2, dispatch.EnvelopeV1},
+		{dispatch.ProtocolV3, dispatch.EnvelopeV2},
+	} {
+		got, err := envelopeForCarrier(tc.carrier)
+		if err != nil || got != tc.want {
+			t.Fatalf("carrier %d → envelope %d (err=%v), want %d", tc.carrier, got, err, tc.want)
+		}
 	}
-	if envelopeForCarrier(dispatch.ProtocolV2) != dispatch.EnvelopeV1 {
-		t.Fatal("generation 2 carries envelope v1 — it already means that to every deployed executor")
+	// A carrier we do not know is a wiring bug, not something to guess at: neither the
+	// newest envelope (nobody downstream could open it) nor the oldest (it would ship
+	// under a binding the caller did not ask for).
+	for _, unknown := range []int{0, 4, 99, -1} {
+		if _, err := envelopeForCarrier(unknown); err == nil {
+			t.Fatalf("carrier %d silently mapped to an envelope", unknown)
+		}
 	}
-	if envelopeForCarrier(dispatch.ProtocolV3) != dispatch.EnvelopeV2 {
-		t.Fatal("generation 3 must carry envelope v2")
+}
+
+// TestCarrierComesFromTheAuthoritativeRegion is the regression for a P0 the gen3 review
+// found: the scheduler nominates a batch by SNAPSHOT region, but a monitor may have moved
+// since. Choosing the carrier from the snapshot meant a monitor moved from a capability-2
+// region to a capability-1 one got the right row and the right key but the WRONG carrier,
+// and its job then sat on a queue nobody in the new region consumes until TTL. §4.4.3 says
+// regroup by the authoritative region and only then select the transport — the carrier has
+// to come from the same row as the keyring.
+func TestCarrierComesFromTheAuthoritativeRegion(t *testing.T) {
+	st, ctx := secretsTestStore(t)
+	st.WithCredentialKeyrings(dispatch.CredentialKeyrings{Regions: map[string]*dispatch.CredentialKeyring{
+		"core":    materializerRing(t),
+		"geo-new": materializerRingWithByte(t, "geo-new-key", 9),
+	}})
+	_, projectID := secretsFixture(t, st, ctx, "carrier-org", "app")
+	if _, err := st.CreateProjectSecret(ctx, testSecretActor, projectID, "db-password", "inventory-plaintext"); err != nil {
+		t.Fatal(err)
 	}
-	// An unknown carrier degrades to what everyone can open, not to what nobody can.
-	if envelopeForCarrier(99) != dispatch.EnvelopeV2 {
-		t.Fatal("a carrier newer than we know should still map to our newest envelope")
+	ref, err := st.CreateMonitor(ctx, postgresRefMonitor(projectID, "ref-db", "db-password"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if envelopeForCarrier(0) != dispatch.EnvelopeV1 {
-		t.Fatal("an unset carrier must degrade to the oldest envelope")
+	// The monitor has ALREADY moved to a region that can only take generation 2; the caller
+	// still believes (from its stale snapshot) that it lives in the generation-3 region.
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET region = 'geo-new' WHERE id = $1`, ref.ID); err != nil {
+		t.Fatal(err)
+	}
+	policy := map[string]int{"core": dispatch.ProtocolV3, "geo-new": dispatch.ProtocolV2}
+
+	items, err := st.MaterializeExecutionConfigs(ctx, []string{ref.ID}, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Reason != "" {
+		t.Fatalf("materialize: %+v", items)
+	}
+	job := items[0].Job
+	if job.Monitor.Region != "geo-new" {
+		t.Fatalf("authoritative region = %q, want geo-new", job.Monitor.Region)
+	}
+	if job.ProtocolVersion != dispatch.ProtocolV2 {
+		t.Fatalf("carrier = %d, want 2 — it must follow the authoritative region, not the snapshot's",
+			job.ProtocolVersion)
+	}
+	if job.CredentialEnvelope == nil || job.CredentialEnvelope.V != dispatch.EnvelopeV1 {
+		t.Fatalf("envelope generation must follow the carrier: %+v", job.CredentialEnvelope)
+	}
+
+	// And the other direction: a region established at generation 3 gets the
+	// execution-bound envelope, so the amendment is reachable rather than merely specified.
+	items, err = st.MaterializeExecutionConfigs(ctx, []string{ref.ID},
+		map[string]int{"geo-new": dispatch.ProtocolV3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Reason != "" {
+		t.Fatalf("materialize at generation 3: %+v", items)
+	}
+	if got := items[0].Job.ProtocolVersion; got != dispatch.ProtocolV3 {
+		t.Fatalf("carrier = %d, want 3", got)
+	}
+	if e := items[0].Job.CredentialEnvelope; e == nil || e.V != dispatch.EnvelopeV2 {
+		t.Fatalf("generation-3 carrier must seal envelope v2: %+v", e)
 	}
 }

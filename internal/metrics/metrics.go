@@ -39,13 +39,14 @@ type Registry struct {
 	brokerUp            bool
 	// Result-ingest outcome counters (spec func-result-protocol). Low-cardinality: keyed by
 	// a fixed reason/origin set, never by monitor_id/job_id (those go to logs).
-	resultQuarantined        map[string]uint64            // reason → count (future_timestamp)
-	resultIgnored            map[string]uint64            // reason → count (out_of_order, outside_retention)
-	resultRejected           map[string]uint64            // reason → count (missing_timestamp, stale_revision, missing_revision)
-	resultClockSkew          map[string]map[string]uint64 // origin → reason → count (push future|past)
-	resultMissingRev         uint64                       // observe-mode: scheduled result with no revision
-	executorProbeErrors      map[string]uint64            // bounded reason → count
-	secretResolutionFailures map[string]uint64            // bounded reason → count
+	resultQuarantined         map[string]uint64            // reason → count (future_timestamp)
+	resultIgnored             map[string]uint64            // reason → count (out_of_order, outside_retention)
+	resultRejected            map[string]uint64            // reason → count (missing_timestamp, stale_revision, missing_revision)
+	resultClockSkew           map[string]map[string]uint64 // origin → reason → count (push future|past)
+	resultMissingRev          uint64                       // observe-mode: scheduled result with no revision
+	executorProbeErrors       map[string]uint64            // bounded reason → count
+	secretResolutionFailures  map[string]uint64            // bounded reason → count
+	dispatchTransportFailures map[string]uint64            // bounded reason → count
 	// File-provider metrics (spec func-monitoring-as-code §16). Keyed by the bounded provider
 	// name only — never by file/project/monitor id.
 	fileProviders map[string]*fileProviderStat
@@ -252,6 +253,19 @@ func (r *Registry) RecordExecutorProbeError(reason string) {
 	r.executorProbeErrors[reason]++
 }
 
+// RecordDispatchTransportFailure counts a failure to hand a materialized job to its
+// transport. It is a SEPARATE family from secret resolution on purpose (§4.4.5): a broker
+// that will not take a publish and a credential that will not resolve need different
+// responses from an operator, and folding them together hides whichever is rarer.
+func (r *Registry) RecordDispatchTransportFailure(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dispatchTransportFailures == nil {
+		r.dispatchTransportFailures = map[string]uint64{}
+	}
+	r.dispatchTransportFailures[reason]++
+}
+
 func (r *Registry) RecordSecretResolutionFailure(reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -367,6 +381,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	missingRev := r.resultMissingRev
 	executorProbeErrors := copyCounts(r.executorProbeErrors)
 	secretResolutionFailures := copyCounts(r.secretResolutionFailures)
+	dispatchTransportFailures := copyCounts(r.dispatchTransportFailures)
 	dispatchSharedTrust := r.dispatchSharedTrust
 	fileProviders := map[string]fileProviderStat{}
 	for name, s := range r.fileProviders {
@@ -420,6 +435,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		"Typed credential-envelope execution errors that did not mutate monitor liveness.", executorProbeErrors)
 	writeReasonCounter(&out, "cerbix_secret_resolution_failed_total",
 		"Credential materialization or capability rejections before dispatch.", secretResolutionFailures)
+	writeReasonCounter(&out, "cerbix_dispatch_transport_failed_total",
+		"Materialized jobs that could not be handed to their transport (by reason).", dispatchTransportFailures)
 	if len(clockSkew) > 0 {
 		out.println("# HELP cerbix_result_clock_skew_total Accepted results with an anomalous client clock (by origin, reason).")
 		out.println("# TYPE cerbix_result_clock_skew_total counter")

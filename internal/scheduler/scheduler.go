@@ -25,7 +25,7 @@ const advisoryLockKey int64 = 0x6365726269780001 // "cerbix" + slot 1
 type Store interface {
 	ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, error)
 	ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error)
-	MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string, carrierGeneration int) ([]store.MaterializedExecution, error)
+	MaterializeExecutionConfigs(ctx context.Context, monitorIDs []string, carrierByRegion map[string]int) ([]store.MaterializedExecution, error)
 	StalePushMonitors(ctx context.Context) ([]domain.Monitor, error)
 	RecordDeadmanResult(ctx context.Context, monitorID string, revision int64, cutoff time.Time) (store.ResultOutcome, error)
 	TryBecomeLeader(ctx context.Context, key int64) (release func(), check func(context.Context) (bool, error), ok bool, err error)
@@ -65,6 +65,9 @@ type LeaderStateSink interface {
 
 type SecretResolutionSink interface {
 	RecordSecretResolutionFailure(reason string)
+	// RecordDispatchTransportFailure is a separate family: a transport that will not take
+	// a publish is a different operator problem from a credential that will not resolve.
+	RecordDispatchTransportFailure(reason string)
 }
 
 // LiveRegionSource reports which worker-pool regions currently have a live worker
@@ -634,6 +637,13 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 				}
 				for region := range s.localCredentialRegions {
 					credentialReadyAMQP[region] = true
+					// A same-process executor IS this binary, so its capability is ours by
+					// construction — there is no wire and no version skew to discover. Without
+					// this the default single-binary role=all never moved past generation 2,
+					// which meant the execution binding and field-set rules — the whole point
+					// of the amendment — were inert in the most common deployment while the
+					// worker inside the same process could open them perfectly well.
+					carrierGeneration[region] = dispatch.ProtocolV3
 				}
 			}
 			for _, snapshotRegion := range regions {
@@ -643,11 +653,9 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 					if end > len(ids) {
 						end = len(ids)
 					}
-					generation := carrierGeneration[snapshotRegion]
-					if generation == 0 {
-						generation = dispatch.ProtocolV2
-					}
-					items, err := s.store.MaterializeExecutionConfigs(ctx, ids[start:end], generation)
+					// The whole policy goes in: the batch is nominated by snapshot region,
+					// but each job's carrier is picked from its AUTHORITATIVE region.
+					items, err := s.store.MaterializeExecutionConfigs(ctx, ids[start:end], carrierGeneration)
 					if err != nil {
 						if ctx.Err() != nil {
 							return false
@@ -681,9 +689,17 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 						}
 						m := item.Job.Monitor // authoritative row: region + cadence inputs
 						if item.Job.ProtocolVersion >= dispatch.ProtocolV2 {
+							// Re-checked on the AUTHORITATIVE region, and against the capability
+							// this job's OWN carrier needs — not merely the base one. A job
+							// materialized for generation 3 must not be published into a region
+							// that only proved it can open generation 2, or it lands on a queue
+							// nobody there consumes and expires by TTL.
 							ready := credentialReadyAMQP[m.Region]
 							if s.pullRegions[m.Region] {
 								ready = credentialReadyPull[m.Region]
+							}
+							if ready && item.Job.ProtocolVersion >= dispatch.ProtocolV3 {
+								ready = carrierGeneration[m.Region] >= item.Job.ProtocolVersion
 							}
 							if !ready {
 								if last := credentialLastLog[m.ID]; last.IsZero() || now.Sub(last) >= credentialFailureLogEvery {
@@ -720,6 +736,9 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 							// door it did not cover. The counter is separate from the
 							// credential one so a transport fault and a secret-resolution
 							// fault back off independently and neither masks the other.
+							if s.secretResolution != nil {
+								s.secretResolution.RecordDispatchTransportFailure("publish_failed")
+							}
 							publishFailures[m.ID]++
 							nextRun[m.ID] = now.Add(credentialFailureRetry(iv, publishFailures[m.ID]))
 							continue

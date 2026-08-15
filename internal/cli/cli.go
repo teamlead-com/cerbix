@@ -268,11 +268,20 @@ func (p pullTester) RunJobTest(ctx context.Context, job dispatch.CheckJob) (doma
 	if ttl <= 0 {
 		ttl = 26
 	}
+	// EXACT routing: the row's generation is the job's. Falling back to the legacy queue
+	// for "anything that is not exactly 2" silently downgraded a generation-3 test onto a
+	// generation-1 row, where the executor's structural gate correctly refuses it as a
+	// carrier/payload mismatch — a self-inflicted failure that looked like an attack.
 	var id string
-	if job.ProtocolVersion == dispatch.ProtocolV2 {
+	switch job.ProtocolVersion {
+	case dispatch.ProtocolV3:
+		id, err = p.store.EnqueuePullTestV3(ctx, m.Region, payload, ttl)
+	case dispatch.ProtocolV2:
 		id, err = p.store.EnqueuePullTestV2(ctx, m.Region, payload, ttl)
-	} else {
+	case dispatch.ProtocolV1, 0:
 		id, err = p.store.EnqueuePullTest(ctx, m.Region, payload, ttl)
+	default:
+		return domain.Heartbeat{}, fmt.Errorf("no pull tests carrier for generation %d", job.ProtocolVersion)
 	}
 	if err != nil {
 		return domain.Heartbeat{}, err
@@ -336,10 +345,21 @@ func (t regionRoutedTester) RunJobTest(ctx context.Context, job dispatch.CheckJo
 type materializingTester struct {
 	store  *store.Store
 	routes jobRegionTester
+	// carrierFor resolves the carrier generation this monitor's region has PROVEN it can
+	// consume, from the same sources the scheduler uses. Test Connection has to answer the
+	// question too: sealing a one-off probe at a fixed generation is how the execution
+	// binding ended up missing from exactly the path an operator triggers by hand.
+	carrierFor func(ctx context.Context, region string) int
 }
 
 func (t materializingTester) RunTest(ctx context.Context, m domain.Monitor) (domain.Heartbeat, error) {
-	item, err := t.store.MaterializeTestExecutionConfig(ctx, m)
+	carrier := dispatch.ProtocolV2
+	if t.carrierFor != nil {
+		if g := t.carrierFor(ctx, m.Region); g > 0 {
+			carrier = g
+		}
+	}
+	item, err := t.store.MaterializeTestExecutionConfig(ctx, m, carrier)
 	if err != nil {
 		return domain.Heartbeat{}, err
 	}
@@ -807,7 +827,31 @@ func runServe(args []string) int {
 			}
 			routes := regionRoutedTester{pullRegions: pullSet, pull: pullTester{store: st}, fallback: base}
 			if cfg.Secrets.EnvelopeEnforced() {
-				apiHandler.WithTester(materializingTester{store: st, routes: routes})
+				_, sameProcessWorker := disp.(*dispatch.InProc)
+				carrierFor := func(ctx context.Context, region string) int {
+					if region == "" {
+						region = domain.DefaultRegion
+					}
+					// A same-process executor is this binary: its capability is ours, with no
+					// wire and no skew to discover.
+					if sameProcessWorker && !pullSet[region] {
+						return dispatch.ProtocolV3
+					}
+					if pullSet[region] {
+						ready, err := st.LiveCredentialReadyAgentRegions(ctx, 45*time.Second, dispatch.EnvelopeV2)
+						if err == nil && ready[region] {
+							return dispatch.ProtocolV3
+						}
+						return dispatch.ProtocolV2
+					}
+					if mgmt != nil {
+						if ready, err := mgmt.LiveCredentialV3JobRegions(ctx); err == nil && ready[region] {
+							return dispatch.ProtocolV3
+						}
+					}
+					return dispatch.ProtocolV2
+				}
+				apiHandler.WithTester(materializingTester{store: st, routes: routes, carrierFor: carrierFor})
 			} else {
 				apiHandler.WithTester(routes)
 			}
@@ -909,8 +953,16 @@ func runServe(args []string) int {
 					return 1
 				}
 				if cfg.Secrets.EnvelopeEnforced() {
+					// One consumer per test carrier this worker can open — the same rule the
+					// jobs consumers follow. A published generation with no consumer is a
+					// queue that fills until TTL, which is how "generation 3 for jobs only"
+					// would have silently broken Test Connection.
 					if err := amqpd.ServeTestsV2(serveTest); err != nil {
 						logging.Critical(logger, "dispatch_test_v2_consumer_start_failed", "error", err.Error())
+						return 1
+					}
+					if err := amqpd.ServeTestsV3(serveTest); err != nil {
+						logging.Critical(logger, "dispatch_test_v3_consumer_start_failed", "error", err.Error())
 						return 1
 					}
 				}

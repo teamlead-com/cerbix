@@ -33,15 +33,29 @@ const LateArrivalGrace = 2 * time.Minute
 // from and to must be bucket-aligned; the caller's ranges are, because a sub-bucket
 // partition cannot coexist with a whole-bucket primary key and a conservation CHECK.
 func (s *Store) MaterializeServiceRange(ctx context.Context, projectID, serviceID string, from, to time.Time) (int, error) {
-	if !to.After(from) {
-		return 0, fmt.Errorf("store: materialize range end %s is not after start %s", to, from)
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("store: begin materialize: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	n, err := s.materializeRangeTx(ctx, tx, projectID, serviceID, from, to)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("store: commit materialize: %w", err)
+	}
+	return n, nil
+}
 
+// materializeRangeTx is the body, separated so a caller that must run on a SPECIFIC
+// connection — the repair path, which sets server-side timeouts on its own session, and
+// later the leader running on its lock-owning connection — can supply its own transaction
+// rather than taking a fresh one from the pool.
+func (s *Store) materializeRangeTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to time.Time) (int, error) {
+	if !to.After(from) {
+		return 0, fmt.Errorf("store: materialize range end %s is not after start %s", to, from)
+	}
 	buckets := 0
 	for start := from; start.Before(to); start = start.Add(domain.CanonicalBucket) {
 		done, err := s.materializeBucketTx(ctx, tx, projectID, serviceID, start)
@@ -54,9 +68,6 @@ func (s *Store) MaterializeServiceRange(ctx context.Context, projectID, serviceI
 	}
 	if err := advanceSealedThrough(ctx, tx, serviceID); err != nil {
 		return 0, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("store: commit materialize: %w", err)
 	}
 	return buckets, nil
 }

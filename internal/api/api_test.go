@@ -22,6 +22,12 @@ import (
 )
 
 // fakeStore implements api.Store in memory for hermetic handler tests.
+// fakePullRow is a queued pull job with the carrier generation it was enqueued under.
+type fakePullRow struct {
+	payload    []byte
+	generation int
+}
+
 type fakePullTest struct {
 	region          string
 	payload         []byte
@@ -53,7 +59,7 @@ type fakeStore struct {
 	escPolicies        map[string]domain.EscalationPolicy
 	oncall             map[string]domain.OnCallSchedule
 	overrides          map[string]domain.OnCallOverride
-	pullJobs           map[string][][]byte
+	pullJobs           map[string][]fakePullRow
 	pullSeq            int
 	acked              []string
 	pullTests          map[string]fakePullTest
@@ -599,21 +605,40 @@ func (f *fakeStore) AcknowledgeIncident(_ context.Context, id, by string) (domai
 	return inc, nil
 }
 
-func (f *fakeStore) ClaimPullJobs(_ context.Context, region string, _, _ int) ([]store.PullJob, error) {
+// The fake models real generations rather than delegating: a fake that always returns
+// generation 0 cannot catch a handler that forgets to stamp, which is the whole point of
+// the response field.
+func (f *fakeStore) ClaimPullJobs(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 1)
+}
+func (f *fakeStore) ClaimPullJobsV2(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 2)
+}
+
+func (f *fakeStore) claimPullJobsUpTo(_ context.Context, region string, maxGeneration int) ([]store.PullJob, error) {
 	if f.pullJobs == nil {
 		return nil, nil
 	}
-	payloads := f.pullJobs[region]
-	f.pullJobs[region] = nil
-	out := make([]store.PullJob, 0, len(payloads))
-	for _, p := range payloads {
+	kept := f.pullJobs[region][:0:0]
+	out := make([]store.PullJob, 0, len(f.pullJobs[region]))
+	for _, row := range f.pullJobs[region] {
+		generation := row.generation
+		if generation == 0 {
+			generation = 1
+		}
+		if generation > maxGeneration {
+			kept = append(kept, row)
+			continue
+		}
 		f.pullSeq++
-		out = append(out, store.PullJob{Token: fmt.Sprintf("tok-%s-%d", region, f.pullSeq), Payload: p})
+		out = append(out, store.PullJob{
+			Token:           fmt.Sprintf("tok-%s-%d", region, f.pullSeq),
+			Payload:         row.payload,
+			ProtocolVersion: generation,
+		})
 	}
+	f.pullJobs[region] = kept
 	return out, nil
-}
-func (f *fakeStore) ClaimPullJobsV2(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
-	return f.ClaimPullJobs(ctx, region, max, lease)
 }
 
 func (f *fakeStore) AckPullJobs(_ context.Context, tokens []string) error {

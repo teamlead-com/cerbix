@@ -162,7 +162,7 @@ func (a *Agent) pollTest(ctx context.Context) {
 	}
 	// The test-RPC path crosses the SAME gate as scheduled jobs — a per-path variant is
 	// how one of them ends up missing a rule.
-	delivered := dispatch.DeliveredJob{Job: job, CarrierGeneration: a.testCarrierGeneration(carrierGen)}
+	delivered := dispatch.DeliveredJob{Job: job, CarrierGeneration: carrierGen}
 	materialized, err := dispatch.ValidateAndMaterialize(a.credentials, delivered)
 	if err != nil {
 		reason := dispatch.CredentialProbeErrorReason(err)
@@ -207,13 +207,18 @@ func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, 
 		Test *struct {
 			ID              string          `json:"id"`
 			Job             json.RawMessage `json:"job"`
-			ProtocolVersion int             `json:"protocol_version"`
+			ProtocolVersion *int            `json:"protocol_version"`
 		} `json:"test"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Test == nil {
 		return "", nil, 0, false
 	}
-	return out.Test.ID, out.Test.Job, out.Test.ProtocolVersion, true
+	generation, err := a.resolveTestGeneration(out.Test.ProtocolVersion)
+	if err != nil {
+		a.logger.Error("agent_bad_test_claim", "error", err.Error())
+		return "", nil, 0, false
+	}
+	return out.Test.ID, out.Test.Job, generation, true
 }
 
 func (a *Agent) postTestResult(ctx context.Context, id string, hb domain.Heartbeat) error {
@@ -291,7 +296,7 @@ func (a *Agent) poll(ctx context.Context) {
 		// Every job crosses the same gate the AMQP worker uses, unconditionally: the
 		// schema decides whether a credential is required, and the carrier generation is
 		// the server's stamp rather than anything the payload says (§4.7, D-0160).
-		delivered := dispatch.DeliveredJob{Job: job, CarrierGeneration: a.deliveredGeneration(protocolVersions, i)}
+		delivered := dispatch.DeliveredJob{Job: job, CarrierGeneration: protocolVersions[i]}
 		materialized, err := dispatch.ValidateAndMaterialize(a.credentials, delivered)
 		if err != nil {
 			reason := dispatch.CredentialProbeErrorReason(err)
@@ -379,44 +384,68 @@ func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []str
 		return nil, nil, nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
 	}
 	var out struct {
-		Jobs             []json.RawMessage `json:"jobs"`
-		Tokens           []string          `json:"tokens"`
-		ProtocolVersions []int             `json:"protocol_versions"`
+		Jobs   []json.RawMessage `json:"jobs"`
+		Tokens []string          `json:"tokens"`
+		// A POINTER so "absent" (an older core) is distinguishable from "present but
+		// malformed" (a wire disagreement). Those are different situations and only the
+		// first has a safe fallback.
+		ProtocolVersions *[]int `json:"protocol_versions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, nil, nil, err
 	}
-	return out.Jobs, out.Tokens, out.ProtocolVersions, nil
+	generations, err := a.resolveStampedGenerations(len(out.Jobs), len(out.Tokens), out.ProtocolVersions)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return out.Jobs, out.Tokens, generations, nil
 }
 
-// carrierGeneration returns the SERVER's stamp for the i-th claimed row. A capable claim
-// mixes generations, so the generation is transport metadata, never something to read out
-// of the payload — that part is attacker-editable (func-secret-inventory §4.7, D-0160). A
-// server that did not stamp (older core during a rolling upgrade) yields 0, which callers
-// treat as "unknown, do not use as authority".
-func carrierGeneration(versions []int, i int) int {
-	if i < 0 || i >= len(versions) {
-		return 0
+// resolveStampedGenerations turns the claim response's parallel arrays into one generation
+// per job, or refuses the whole batch.
+//
+// Two situations must NOT be conflated, and conflating them is fail-open: a stamp field
+// that is ABSENT means an older core that predates stamping, where the endpoint this agent
+// chose to poll is a legitimate out-of-band fallback; a stamp field that is PRESENT but
+// malformed — short, long, zero, or above this agent's capability — means the response and
+// the agent disagree about the wire, and a disagreement about which carrier a credential
+// arrived on is exactly the thing that must not be guessed. Filling a missing element with
+// the endpoint default would silently promote a truncated array to "generation 2", which
+// is permission to open an envelope.
+func (a *Agent) resolveStampedGenerations(jobs, tokens int, stamped *[]int) ([]int, error) {
+	if jobs != tokens {
+		return nil, fmt.Errorf("claim response desync: %d jobs but %d tokens", jobs, tokens)
 	}
-	return versions[i]
+	endpoint := a.claimGeneration()
+	if stamped == nil {
+		out := make([]int, jobs)
+		for i := range out {
+			out[i] = endpoint
+		}
+		return out, nil
+	}
+	versions := *stamped
+	if len(versions) != jobs {
+		return nil, fmt.Errorf("claim response desync: %d jobs but %d stamped generations", jobs, len(versions))
+	}
+	for i, v := range versions {
+		if v < dispatch.ProtocolV1 || v > endpoint {
+			return nil, fmt.Errorf("claim response stamped generation %d for job %d, outside 1..%d", v, i, endpoint)
+		}
+	}
+	return versions, nil
 }
 
-// deliveredGeneration resolves the carrier generation for the i-th claimed job. The
-// server's stamp wins; when it is absent (a core that predates stamping) the ENDPOINT the
-// agent itself chose to poll is the fallback — that is still out-of-band knowledge the
-// agent holds, and it is never the payload.
-func (a *Agent) deliveredGeneration(versions []int, i int) int {
-	if gen := carrierGeneration(versions, i); gen > 0 {
-		return gen
+// resolveTestGeneration is the same contract for the single-row test claim.
+func (a *Agent) resolveTestGeneration(stamped *int) (int, error) {
+	endpoint := a.claimGeneration()
+	if stamped == nil {
+		return endpoint, nil
 	}
-	return a.claimGeneration()
-}
-
-func (a *Agent) testCarrierGeneration(stamped int) int {
-	if stamped > 0 {
-		return stamped
+	if *stamped < dispatch.ProtocolV1 || *stamped > endpoint {
+		return 0, fmt.Errorf("test claim stamped generation %d, outside 1..%d", *stamped, endpoint)
 	}
-	return a.claimGeneration()
+	return *stamped, nil
 }
 
 // claimGeneration is the generation of the claim endpoint this agent polls, which follows

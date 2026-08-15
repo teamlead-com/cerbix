@@ -100,3 +100,58 @@ func TestGeneration1TestClaimNeverSeesNewerGeneration(t *testing.T) {
 		t.Fatalf("legacy test claim saw a newer generation: ok=%v err=%v", ok, err)
 	}
 }
+
+// Mixed generations on the test queue behave like the jobs queue: a capability claim takes
+// them oldest-first across generations over repeated claims, and the legacy endpoint never
+// sees the newer one. Claiming twice is the point — a single claim cannot show ordering.
+func TestCapableTestClaimTakesBothGenerationsOldestFirst(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if _, err := st.EnqueuePullTestV2(ctx, "secure", []byte(`{"protocol":2}`), 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnqueuePullTest(ctx, "secure", []byte(`{"protocol":1}`), 20); err != nil {
+		t.Fatal(err)
+	}
+	// Make the order deterministic regardless of insert-timestamp resolution.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE pull_tests SET created_at = now() - interval '1 minute' WHERE protocol_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	var seen []int
+	for i := 0; i < 2; i++ {
+		_, _, generation, ok, err := st.ClaimPullTestV2(ctx, "secure")
+		if err != nil || !ok {
+			t.Fatalf("claim %d: ok=%v err=%v", i, ok, err)
+		}
+		seen = append(seen, generation)
+	}
+	if len(seen) != 2 || seen[0] != 2 || seen[1] != 1 {
+		t.Fatalf("claimed generations = %v, want [2 1] (oldest first, across generations)", seen)
+	}
+	if _, _, _, ok, _ := st.ClaimPullTestV2(ctx, "secure"); ok {
+		t.Fatal("a third claim returned a row that does not exist")
+	}
+}
+
+// The legacy test endpoint never sees a newer generation even when one is older and would
+// otherwise win the FIFO.
+func TestGeneration1TestClaimSkipsOlderNewerGenerationRow(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if _, err := st.EnqueuePullTestV2(ctx, "secure", []byte(`{"protocol":2}`), 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnqueuePullTest(ctx, "secure", []byte(`{"protocol":1}`), 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE pull_tests SET created_at = now() - interval '1 minute' WHERE protocol_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	_, _, generation, ok, err := st.ClaimPullTest(ctx, "secure")
+	if err != nil || !ok {
+		t.Fatalf("legacy claim: ok=%v err=%v", ok, err)
+	}
+	if generation != 1 {
+		t.Fatalf("legacy claim took generation %d", generation)
+	}
+}

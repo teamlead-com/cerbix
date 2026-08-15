@@ -399,3 +399,165 @@ func TestEnvelopeOnGeneration1CarrierIsRejectedBeforeProbing(t *testing.T) {
 		t.Fatalf("carrier/payload mismatch result = %+v", results)
 	}
 }
+
+// TestClaimResponseDesyncIsRefusedNotGuessed covers the fail-open the pull-claim review
+// found. The parallel arrays let a response disagree with itself, and filling a missing
+// element with the endpoint default silently promotes a truncated array to "generation 2"
+// — which is permission to open an envelope. Absent (an older core) and present-but-
+// malformed (a wire disagreement) are different situations and only the first has a safe
+// fallback.
+func TestClaimResponseDesyncIsRefusedNotGuessed(t *testing.T) {
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "agent", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := domain.Monitor{ID: "m-desync", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	envelope, err := ring.Seal(dispatch.SealContext{
+		EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-desync",
+		MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor,
+	}, map[string][]byte{"password": []byte("secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _ := json.Marshal(dispatch.CheckJob{
+		Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: envelope,
+	})
+
+	cases := []struct {
+		name     string
+		body     map[string]any
+		wantRuns int
+	}{
+		{"stamps shorter than jobs", map[string]any{
+			"jobs": []json.RawMessage{job, job}, "tokens": []string{"a", "b"}, "protocol_versions": []int{2},
+		}, 0},
+		{"stamps longer than jobs", map[string]any{
+			"jobs": []json.RawMessage{job}, "tokens": []string{"a"}, "protocol_versions": []int{2, 2},
+		}, 0},
+		{"stamped generation zero", map[string]any{
+			"jobs": []json.RawMessage{job}, "tokens": []string{"a"}, "protocol_versions": []int{0},
+		}, 0},
+		{"stamped generation above capability", map[string]any{
+			"jobs": []json.RawMessage{job}, "tokens": []string{"a"}, "protocol_versions": []int{99},
+		}, 0},
+		{"tokens desynced from jobs", map[string]any{
+			"jobs": []json.RawMessage{job, job}, "tokens": []string{"a"}, "protocol_versions": []int{2, 2},
+		}, 0},
+		// The one legitimate fallback: an older core that does not stamp at all. The
+		// endpoint this agent chose to poll is out-of-band knowledge it already holds.
+		{"field absent entirely (older core)", map[string]any{
+			"jobs": []json.RawMessage{job}, "tokens": []string{"a"},
+		}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/agent/v2/jobs":
+					_ = json.NewEncoder(w).Encode(tc.body)
+				case "/api/v1/agent/results":
+					w.WriteHeader(http.StatusOK)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			runner := &recordingRunner{}
+			a := New(srv.URL, "tok", "pull1", runner, slog.New(slog.NewTextHandler(io.Discard, nil))).
+				WithCredentialKeyring(ring)
+			a.poll(context.Background())
+
+			runner.mu.Lock()
+			defer runner.mu.Unlock()
+			if len(runner.ran) != tc.wantRuns {
+				t.Fatalf("probed %v, want %d execution(s)", runner.ran, tc.wantRuns)
+			}
+		})
+	}
+}
+
+// The test-RPC path gets the executor regression the jobs path already had: a server-
+// stamped legacy generation carrying an envelope is refused before any probe.
+func TestEnvelopeOnGeneration1TestCarrierIsRejectedBeforeProbing(t *testing.T) {
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "agent", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := domain.Monitor{ID: "m-test-mismatch", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	envelope, err := ring.Seal(dispatch.SealContext{
+		EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-test-mismatch",
+		MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor,
+	}, map[string][]byte{"password": []byte("secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _ := json.Marshal(dispatch.CheckJob{
+		Monitor: monitor, ProtocolVersion: dispatch.ProtocolV2, CredentialEnvelope: envelope,
+	})
+
+	var posted domain.Heartbeat
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agent/v2/tests":
+			_ = json.NewEncoder(w).Encode(map[string]any{"test": map[string]any{
+				"id": "t1", "job": json.RawMessage(job), "protocol_version": 1,
+			}})
+		case "/api/v1/agent/test-results":
+			var body struct {
+				Result domain.Heartbeat `json:"result"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			posted = body.Result
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	runner := &recordingRunner{}
+	a := New(srv.URL, "tok", "pull1", runner, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithCredentialKeyring(ring)
+	a.pollTest(context.Background())
+
+	runner.mu.Lock()
+	ran := append([]string(nil), runner.ran...)
+	runner.mu.Unlock()
+	if len(ran) != 0 {
+		t.Fatalf("mismatched test reached a prober: %v", ran)
+	}
+	if posted.ProbeError == nil || posted.ProbeError.Reason != domain.ProbeErrorDecryptAuthFailed {
+		t.Fatalf("test carrier mismatch result = %+v", posted)
+	}
+}
+
+// A malformed stamp on the test claim is refused rather than guessed, same contract as jobs.
+func TestTestClaimStampOutsideRangeIsRefused(t *testing.T) {
+	ring, err := dispatch.NewCredentialKeyring(dispatch.CredentialKeyMaterial{ID: "agent", Key: bytes.Repeat([]byte{1}, 32)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _ := json.Marshal(dispatch.CheckJob{Monitor: domain.Monitor{ID: "m1", Type: domain.MonitorHTTP}})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/agent/v2/tests" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"test": map[string]any{
+				"id": "t1", "job": json.RawMessage(job), "protocol_version": 99,
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	runner := &recordingRunner{}
+	a := New(srv.URL, "tok", "pull1", runner, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithCredentialKeyring(ring)
+	a.pollTest(context.Background())
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.ran) != 0 {
+		t.Fatalf("test with an out-of-range stamp reached a prober: %v", runner.ran)
+	}
+}

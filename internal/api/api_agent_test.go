@@ -15,7 +15,14 @@ import (
 )
 
 func agentReq(h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
+	return agentReqWithHeaders(h, method, path, token, body, nil)
+}
+
+func agentReqWithHeaders(h http.Handler, method, path, token, body string, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -29,8 +36,8 @@ func agentReq(h http.Handler, method, path, token, body string) *httptest.Respon
 
 func TestAgentEndpoints(t *testing.T) {
 	fs := seededStore()
-	fs.pullJobs = map[string][][]byte{
-		"geo3": {[]byte(`{"Monitor":{"id":"m1","type":"http","target":"https://x","region":"geo3"}}`)},
+	fs.pullJobs = map[string][]fakePullRow{
+		"geo3": {{payload: []byte(`{"Monitor":{"id":"m1","type":"http","target":"https://x","region":"geo3"}}`), generation: 1}},
 	}
 	sink := &fakeResultSink{}
 	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).
@@ -94,11 +101,11 @@ func (f fakeWaiter) Wait(_ context.Context, _ string, _ time.Duration) {
 
 func TestAgentJobsLongPoll(t *testing.T) {
 	fs := seededStore()
-	fs.pullJobs = map[string][][]byte{} // empty initially
+	fs.pullJobs = map[string][]fakePullRow{} // empty initially
 	// The waiter simulates a NOTIFY arriving mid-hold: a job appears, then the handler
 	// re-claims and returns it.
 	waiter := fakeWaiter{onWait: func() {
-		fs.pullJobs["geo3"] = [][]byte{[]byte(`{"Monitor":{"id":"m1"}}`)}
+		fs.pullJobs["geo3"] = []fakePullRow{{payload: []byte(`{"Monitor":{"id":"m1"}}`), generation: 1}}
 	}}
 	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).
 		WithAgentToken("s3cr3t").WithPullWaiter(waiter).AgentRouter()
@@ -118,8 +125,8 @@ func TestAgentJobsLongPoll(t *testing.T) {
 
 func TestAgentV2ClaimsRequireCapabilityOnEveryRequest(t *testing.T) {
 	fs := seededStore()
-	fs.pullJobs = map[string][][]byte{"secure": {[]byte(`{"protocol_version":2}`)}}
-	fs.pullTests = map[string]fakePullTest{"v2-test": {region: "secure", payload: []byte(`{"protocol_version":2}`)}}
+	fs.pullJobs = map[string][]fakePullRow{"secure": {{payload: []byte(`{"protocol_version":2}`), generation: 2}}}
+	fs.pullTests = map[string]fakePullTest{"v2-test": {region: "secure", payload: []byte(`{"protocol_version":2}`), protocolVersion: 2}}
 	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentToken("s3cr3t").AgentRouter()
 
 	for _, path := range []string{"/api/v1/agent/v2/jobs?region=secure", "/api/v1/agent/v2/tests?region=secure"} {
@@ -222,7 +229,7 @@ func TestAgentResultsRegionScope(t *testing.T) {
 
 func TestAgentDBTokens(t *testing.T) {
 	fs := seededStore()
-	fs.pullJobs = map[string][][]byte{"geo3": {[]byte(`{"Monitor":{"id":"m1"}}`)}}
+	fs.pullJobs = map[string][]fakePullRow{"geo3": {{payload: []byte(`{"Monitor":{"id":"m1"}}`), generation: 1}}}
 	admin := newHandler(fs) // authed Router for issuing/revoking
 	agentH := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentDBTokens().AgentRouter()
 
@@ -259,7 +266,7 @@ func TestAgentDBTokens(t *testing.T) {
 
 func TestAgentPerRegionTokenScope(t *testing.T) {
 	fs := seededStore()
-	fs.pullJobs = map[string][][]byte{"geo3": {[]byte(`{"Monitor":{"id":"m1"}}`)}}
+	fs.pullJobs = map[string][]fakePullRow{"geo3": {{payload: []byte(`{"Monitor":{"id":"m1"}}`), generation: 1}}}
 	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).
 		WithResultSink(&fakeResultSink{}).
 		WithAgentRegionTokens(map[string]string{"geo3": "tok3", "geo5": "tok5"}).AgentRouter()
@@ -296,5 +303,98 @@ func TestAgentEndpointsDisabledWithoutToken(t *testing.T) {
 	h := api.New(seededStore(), slog.New(slog.NewTextHandler(io.Discard, nil)), 8).AgentRouter()
 	if rec := agentReq(h, http.MethodGet, "/api/v1/agent/jobs?region=geo3", "anything", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("no token configured = %d, want 404", rec.Code)
+	}
+}
+
+// TestAgentClaimStampsGenerationPerRow closes the coverage hole the pull-claim review
+// found: the store test proved the stamp exists on the row and the agent test fed a stamp
+// straight into a fake HTTP body, but nothing exercised the HANDLER between them — so
+// deleting the stamp from the response would have left every claimed regression green.
+// A capable claim mixes generations, so the response must carry one generation per job,
+// in the same order and with the same cardinality as jobs and tokens.
+func TestAgentClaimStampsGenerationPerRow(t *testing.T) {
+	fs := seededStore()
+	fs.pullJobs = map[string][]fakePullRow{"secure": {
+		{payload: []byte(`{"Monitor":{"id":"plain"}}`), generation: 1},
+		{payload: []byte(`{"Monitor":{"id":"credentialed"}}`), generation: 2},
+	}}
+	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentToken("s3cr3t").AgentRouter()
+
+	rec := agentReqWithHeaders(h, http.MethodGet, "/api/v1/agent/v2/jobs?region=secure", "s3cr3t", "",
+		map[string]string{"X-Cerbix-Credential-Envelope": "1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capable claim status %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Jobs             []json.RawMessage `json:"jobs"`
+		Tokens           []string          `json:"tokens"`
+		ProtocolVersions *[]int            `json:"protocol_versions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode claim: %v", err)
+	}
+	if len(out.Jobs) != 2 {
+		t.Fatalf("capable claim returned %d jobs, want both generations", len(out.Jobs))
+	}
+	if out.ProtocolVersions == nil {
+		t.Fatal("response carries no protocol_versions: the agent would have to infer the carrier from the payload")
+	}
+	if len(*out.ProtocolVersions) != len(out.Jobs) || len(out.Tokens) != len(out.Jobs) {
+		t.Fatalf("parallel arrays desynced: %d jobs, %d tokens, %d generations",
+			len(out.Jobs), len(out.Tokens), len(*out.ProtocolVersions))
+	}
+	if got := *out.ProtocolVersions; got[0] != 1 || got[1] != 2 {
+		t.Fatalf("stamped generations = %v, want [1 2] in row order", got)
+	}
+
+	// The legacy endpoint still serves only its own generation, and stamps it.
+	fs.pullJobs = map[string][]fakePullRow{"secure": {
+		{payload: []byte(`{"Monitor":{"id":"plain"}}`), generation: 1},
+		{payload: []byte(`{"Monitor":{"id":"credentialed"}}`), generation: 2},
+	}}
+	rec = agentReq(h, http.MethodGet, "/api/v1/agent/jobs?region=secure", "s3cr3t", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy claim status %d", rec.Code)
+	}
+	out.ProtocolVersions = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode legacy claim: %v", err)
+	}
+	if len(out.Jobs) != 1 {
+		t.Fatalf("legacy claim returned %d jobs, want only its own generation", len(out.Jobs))
+	}
+	if out.ProtocolVersions == nil || (*out.ProtocolVersions)[0] != 1 {
+		t.Fatalf("legacy claim stamped %v, want [1]", out.ProtocolVersions)
+	}
+}
+
+// The test-RPC mirror: a claimed test carries the server's generation too, so the agent
+// never has to read it off the payload.
+func TestAgentTestClaimStampsGeneration(t *testing.T) {
+	fs := seededStore()
+	fs.pullTests = map[string]fakePullTest{
+		"legacy-test": {region: "secure", payload: []byte(`{"Monitor":{"id":"m1"}}`), protocolVersion: 1},
+	}
+	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).WithAgentToken("s3cr3t").AgentRouter()
+
+	rec := agentReqWithHeaders(h, http.MethodGet, "/api/v1/agent/v2/tests?region=secure", "s3cr3t", "",
+		map[string]string{"X-Cerbix-Credential-Envelope": "1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capable test claim status %d", rec.Code)
+	}
+	var out struct {
+		Test *struct {
+			ID              string `json:"id"`
+			ProtocolVersion *int   `json:"protocol_version"`
+		} `json:"test"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode test claim: %v", err)
+	}
+	if out.Test == nil {
+		t.Fatal("capable test claim did not see the legacy-generation row")
+	}
+	if out.Test.ProtocolVersion == nil || *out.Test.ProtocolVersion != 1 {
+		t.Fatalf("test stamped generation = %v, want 1", out.Test.ProtocolVersion)
 	}
 }

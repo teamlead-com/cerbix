@@ -22,3 +22,5 @@ frontend/tsconfig.tsbuildinfo
 
 # never track installed deps anywhere (e.g. a stray docs/ npm install)
 node_modules/
+
+.party-contract.md

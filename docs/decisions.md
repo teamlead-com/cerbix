@@ -2942,6 +2942,152 @@ arbitrary host.
 These goals are development/test conveniences, not RabbitMQ migration tooling. D-0157 and the raw,
 per-hop runbook commands remain authoritative for retained-volume upgrade and rollback.
 
+## D-0159 — Service reliability (FR-021): two axes, duration-weighted facts, sealing with a real ingest handshake, maintenance as a retroactive declaration (design contract)
+
+FR-021 introduces the object the product's five existing capabilities are *about*: an
+operational unit whose reliability is **explicitly declared** rather than inferred from a
+grouping of checks. This record fixes the design contract; `func-service-reliability.md` (r8,
+APPROVED) carries the prose and the 47 acceptance invariants.
+
+The design took **seven adversarial passes** before it was implementable — nine P0s, then
+seven, then seven again, then three, three, one, one. The middle round is the one worth
+recording: **all seven of its findings were defects introduced while closing the previous
+round's**, which is why the practice of reviewing a specification the way code is reviewed is
+recorded here as part of the decision and not as a footnote. Every one of those defects would
+have cost a migration and a storage rewrite had it been found after implementation.
+
+**Two axes, not one revision stream.** A `definition_revision` is what a human declared
+availability to MEAN; an `evaluation_epoch` is what the system was MEASURING. They have
+different owners, different authority rules and different reporting semantics, and one stream
+cannot carry both. A fact references the **epoch only**, which resolves to exactly one
+revision. Every definition-revision transaction creates a matching epoch unconditionally — a
+revision without one is an unsatisfiable foreign key, not a latency problem. Execution-driven
+epochs are created eagerly in the same transaction as the monitor write, are skipped only when
+the canonical **evaluation-semantics** hash is unchanged, and resolve the declaration in force
+at their own `effective_at`, including a pending same-boundary revision.
+
+**The evaluation-semantics projection is exhaustive, not an allowlist.** Every field that can
+bump `execution_revision` is explicitly classified IN or OUT, with no default, beside the field
+set that decides that bump. This is the FR-020 lesson applied before the fact rather than
+after: a rule with a silent default mishandles the next field added. `target` is IN — a
+narrower snapshot would have let a target change produce no epoch while §12.1 correctly says a
+target change makes two numbers incomparable. Secret **material** never enters the row or the
+hash; credential identity and generation do.
+
+**Facts are duration-weighted, in microseconds, on two axes.** `good/bad/unknown/excluded` for
+availability and `healthy/degraded/down/health_unknown` for health, each summing to
+`bucket_size` exactly, with `excluded` shared. The rejected alternative was to quantize the
+whole 60s bucket to one enum. Its error is not random but systematically pessimistic and scales
+with bucket size: under "BAD dominates", one second of downtime costs sixty seconds of budget,
+and for a 99.99% objective over 30 days a single one-second blip consumes 23% of the month.
+Durations also make hour and day rollups exact associative sums instead of a second rounding
+applied on top of the first. Microseconds rather than milliseconds because breakpoints derive
+from `timestamptz`; a millisecond store would need an undocumented rounding rule with a
+conservation correction inside an error budget.
+
+**Coverage is a second, independent axis, and it cannot be bought.** Storage continuity (the
+buckets exist, contiguously, through the watermark) and decidable coverage
+(`(good+bad)/(good+bad+unknown)`) answer different questions and both must pass. Without the
+second, 129,600 materialized buckets of which one is GOOD report `100% / 90d` from sixty
+seconds of measurement. `missing_data_policy: ignore` may never move time into
+`excluded_duration`: it removes an UNKNOWN member only while other known members keep the
+interval decidable, and when it removes the last source the interval is UNKNOWN. Otherwise the
+coverage axis is defeated from the settings page. `min_decidable_coverage` is fixed at 0.95 and
+is **not operator-settable** in phase 1, for the same reason.
+
+**Sealing needs a real handshake, not a visibility claim.** "A heartbeat counts if it is
+visible to the sealing transaction" is not a mechanism: PostgreSQL takes a snapshot per
+statement, and the losing ingest could not discover it had lost. Phase 1 specifies
+`service_bucket_ingest`, upserted in the heartbeat's own transaction; the seal **upserts then
+locks** every bucket's row in its range — locking only rows that happen to exist leaves a
+phantom for a bucket that received no heartbeat — and an ingest that then finds the fact SEALED
+records an aggregated, idempotent late-arrival instead of dirtying the bucket. The handshake
+fires only for a heartbeat that was **actually inserted**: every ingest path is
+`ON CONFLICT DO NOTHING`, so gating on delivery rather than insertion would file an
+already-counted duplicate as data the seal excluded. Membership is resolved **as of the
+heartbeat's own bucket**, from `sli[]`, never as of now. A monitor in no service's SLI at that
+instant writes nothing, which is what makes "zero services costs nothing" true rather than
+rhetorical.
+
+**`sealed_through` is defined by contiguity.** It is the greatest boundary `T` such that every
+bucket before it exists and is sealed, so a materialization hole HOLDS the watermark instead of
+being jumped over. A window therefore ends at `sealed_through`, not at `now` — a window ending
+at `now` always contains an unsealed tail and would be permanently partial — and the live
+signal is a separately named, explicitly unstable `current_health`.
+
+**Maintenance is a retroactive declaration, and its two removal intents are different acts.**
+`archive` says "no longer in active inventory" and never rewrites sealed past; the evaluator
+reads a retained row over `[starts_at, min(ends_at, cancel_effective_at))` **regardless of
+`archived_at`**, so a later recompute cannot silently turn an archive into an annul. `annul`
+says "this exclusion was a mistake" and carries preview, audit and the raw-availability fence.
+Creation has one intent, so it is decided purely by range. Beyond raw retention the mutation
+fails closed with `409 unrecomputable_range` — never partially applied, and never a silent
+no-op, which of the three outcomes is the worst because it looks like a completed command.
+Every mutation invalidates in its own transaction (generation bump, coalesced ranges,
+`repairing` reads, watermark retraction), and every repair batch commits under a
+`maintenance_generation` CAS.
+
+**A retroactive mutation carries a preview token whose confirm is a CAS over the SET.**
+Re-reading the generations of the services already known proves those rows did not move; it
+does not prove the affected set is the same one. The set is therefore re-resolved inside the
+mutating transaction, required to be exactly equal, and — because row locks cannot protect a
+row that does not exist yet — serialized by a project-scoped `service_membership` advisory
+transaction lock that confirm and **every enumerated set-changing path** both take. An
+`approximate` preview cannot be confirmed at all; `raw_floor` is checked as a monotonic
+predicate, since the floor advances continuously and byte equality would make every token stale
+by construction.
+
+**Work is a set of ranges, not a current job.** A newer epoch queues its own disjoint range and
+never cancels unfinished historical work; supersession is legal only by atomically assuming the
+union; the epoch is resolved **per bucket**, not per job. Cancelling an unfinished backfill on
+a newer epoch would strand its buckets and stall `sealed_through` at the hole forever. Work
+partitions are bucket-aligned — a sub-bucket partition cannot coexist with a whole-bucket
+primary key and a conservation CHECK — and the sub-bucket dimension is exercised by the
+property test's oracle instead.
+
+**Ownership is a migration, not a reuse.** `LeaderSession` is the file-provider path; the
+scheduler holds its advisory lock on a pinned connection but writes through the pool, so a
+deposed leader can still commit. Every service-fact batch runs on the **lock-owning
+connection**. The election mechanism stays the existing advisory lock; what changes is that
+lock ownership and the writing connection become the same thing. Cadence derives from ONE
+mechanism — a per-slice deadline of `min(remaining cycle budget, max_dispatch_delay)` enforced
+caller-side over the whole slice, with server timeouts re-derived from the remainder before
+every statement, because `statement_timeout` bounds each statement and not a transaction.
+
+**Storage: native UTC RANGE partitions in BOTH modes**, no hypertable and no compression in
+phase 1. The reason is specific to this table rather than a general preference: it rewrites
+SEALED rows weeks old under an audited recompute, which is exactly the access pattern
+compressed chunks serve badly. One code path and retention by partition drop are worth more
+here than reusing the heartbeat machinery. Revisit after phase 2 with measured workload.
+
+**Bundle format 2, and the monitor slug it requires.** Services are a new top-level resource
+map admitted only in a later format; format 1 stays valid. References are **monitor slugs**,
+because monitors had no project-unique name, UUIDs are unusable as an authoring contract, and
+restricting membership to file-owned monitors would contradict the coexistence matrix. The
+migration is expand → deterministic collision-safe backfill → contract, and a **file-owned row
+takes its provider source UID** so the same Git-tracked bundle yields the same slug on every
+installation. The slug is immutable in phase 1. A bundle declaring a slug already held by a
+UI-owned service is rejected with `service_slug_owned_by_ui` and the bundle keeps its
+last-known-good; adoption never happens by name.
+
+**Lock order extends FR-020's, it does not replace it.** The project `service_membership`
+advisory lock is outermost, then referenced secret rows, then referenced routing rows taken
+`FOR KEY SHARE` explicitly, then monitors by id, then services by id, then their declaration,
+epoch and range rows, then ingest and fact rows by `(service_id, bucket_start)` ascending.
+Routing rows take no *explicit* lock in the product today, but referential integrity takes
+implicit ones in **two opposite directions** — `UpdateMonitor` acquires the monitor before its
+FK reaches the policy, while deleting a policy acquires the policy first. That is a
+pre-existing FR-012 hazard, recorded here rather than asserted away; FR-021's own paths take
+the routing rows explicitly so they cannot join the cycle, and fixing `UpdateMonitor` is
+backlog rather than a change FR-021 makes silently.
+
+**Boundaries.** Service is not a security boundary — authorization stays at the project level.
+It is not a service catalog; repository links, documentation, tech stack and deployment
+metadata are rejected by the field-admission rule. Service SLOs **calculate and display but do
+not alert** in phases 1–2: turning them on without an ownership rule would page twice for one
+failure. Zero services is a valid installation state forever, and at zero services the feature
+writes no rows and schedules no work.
+
 ## D-0160 — Credential dispatch r7: trusted carrier, execution binding, structural gate, carrier generations (FR-020)
 
 A conformance audit of the shipped FR-020 implementation against its own spec found three

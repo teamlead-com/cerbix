@@ -141,3 +141,65 @@ component + active incident → feeds → `/status/:slug` SPA route 200 → inte
 ## Log — what's been tried
 
 - v1 dashboard: iris accent + mono-data + 90-day signal strip. Direction approved ("that's it").
+
+## FR-021 Service Reliability (design track — APPROVED 2026-08-16)
+
+Mock produced **before** any frontend code, per the process gate in CLAUDE.md, and **approved by
+the owner**. Source lives in the repo rather than only as an artifact, because this surface will
+be iterated during implementation: `docs/design/mock-service-reliability.html`
+(artifact `ff3f7e2b-7c12-4d0d-ba32-5b1b38bf3007`). Implement 1:1 from it.
+
+Five screens: Services list · Service detail (two-layer health, timeline, materialization) ·
+Coverage & segments (the honesty states) · Declaration editor (monitors[] vs sli[]) ·
+Revisions & provenance. A **Spec notes** toggle in the topbar overlays the rule each screen
+renders, so the mock can be reviewed against `docs/specs/func-service-reliability.md` or judged
+as plain UI with the annotations off. The toggle is a review affordance and does **not** ship.
+
+Tokens are taken 1:1 from this file; the feature adds **no new colour**.
+
+### Two additions to the design language (approved)
+
+The language had no form for two states this feature must show, and both are expressed as
+**shape and opacity on the existing tick grid** rather than as new hues — which is what makes
+them impossible to misread as a status:
+
+- **UNKNOWN** — a short tick on the same baseline in `--pending`. At a few pixels wide a hatch or
+  a second hue is unreadable, and reusing the empty `--inset` "no data" fill would hide the one
+  state this feature exists to make visible. A deficient tick reads as deficient evidence at any
+  width and in both themes.
+- **PROVISIONAL** — the same tick at reduced opacity: visible on the timeline, excluded from
+  every number.
+
+### Three placement rules learned from review (approved)
+
+- **The uptime-signal strip is a CARD element, not a table cell.** `UptimeBar` appears in exactly
+  one place in the product — `MonitorCard.vue`, height 26 — and `MonitorsView`'s table has no bar
+  at all. A 90-tick strip in a table row reads as a solid striped block and, worse, draws a
+  plausible picture over a stalled service. The Services table is therefore numeric, and its last
+  column is **`sealed_through`** — the watermark itself, with the lag called out when a service
+  falls behind. The signature strip lives on the detail and provenance screens, where a tick is a
+  real rollup whose span is labelled and, on provenance, an actual 60s bucket you can hover.
+- **A tick is a ROLLUP, and every strip says which.** `one tick = 8h rollup of sealed 60s buckets`
+  on the 30-day view, `one tick = one canonical 60s bucket` on provenance. An unlabelled tick
+  invites the reader to think it is a bucket.
+- **Services sits ABOVE Monitors in the project nav, as a peer — never nested.** Order expresses
+  level of abstraction (the unit of reliability, then what measures it); nesting would express
+  containment, which the model rejects: a monitor may be in the SLI of several services, may be
+  in none, and zero services is a valid state forever. Placing Services *below* Monitors asserts
+  the "grouping of monitors" reading that acceptance invariant 42 exists to refute.
+
+The `NEW` badge on the nav entry is a temporary adoption affordance and must disappear once the
+project has its first service; §17 forbids presenting an empty Services screen as the product's
+new front door.
+
+### Fidelity notes for implementation
+
+The org/project switcher in the mock is 1:1 with `AppShell.vue`: gradient org avatar 22×22 at
+radius 6, **organization bold on top, project small below**, chevron right. An earlier draft
+inverted that hierarchy, which told the reader the project is primary when the product says the
+organization is — recorded because it is the kind of error that survives a screenshot review.
+
+Watermark numbers in the mock are coherent on purpose: a healthy service sits at
+`bucket 60s + late_arrival_grace 120s`, roughly three minutes behind `as_of`, and the detail
+screen shows that delta beside `sealed_through`. An operator needs to have seen a healthy lag
+once, or a stalled one carries no information.

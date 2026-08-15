@@ -9,6 +9,11 @@ import (
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
+// The monitor SLUG is deliberately absent from this projection. It is immutable, so it
+// cannot move without the apply first refusing the change outright — and including it would
+// make the first bundle that merely spells out an already-derived `slug:` line look like a
+// semantic update, calling the update path for a file edit that changed nothing.
+//
 // canonicalMonitor is the stable projection hashed for create/update/no-op decisions
 // (spec §7). It excludes YAML comments/order/path/mtime, server-owned runtime fields, push
 // tokens, and generation timestamps. Set-like values (tags, depends_on) are sorted+deduped;

@@ -74,7 +74,8 @@ func TestDecodeStrictRejections(t *testing.T) {
 		r    Reason
 	}{
 		{"missing format", "organization: acme\nproject: payments\nmonitors: {}\n", ReasonInvalidFormat},
-		{"wrong format", "format: 2\norganization: acme\nproject: payments\nmonitors: {}\n", ReasonInvalidFormat},
+		{"unsupported format", "format: 3\norganization: acme\nproject: payments\nmonitors: {}\n", ReasonInvalidFormat},
+		{"services need format 2", "format: 1\norganization: acme\nproject: payments\nmonitors: {}\nservices: {}\n", ReasonInvalidFormat},
 		{"unknown root field", "format: 1\norganization: acme\nproject: payments\nbogus: x\nmonitors: {}\n", ReasonUnknownField},
 		{"server-owned field", base + "    id: 123\n", ReasonUnknownField},
 		{"duplicate key", "format: 1\norganization: acme\norganization: beta\nproject: p\nmonitors: {}\n", ReasonDuplicateKey},

@@ -30,6 +30,10 @@ type rawBundle struct {
 	Organization string                `yaml:"organization"`
 	Project      string                `yaml:"project"`
 	Monitors     map[string]rawMonitor `yaml:"monitors"`
+	// Services arrives with format 2. It is declared here rather than in a separate struct
+	// because KnownFields(true) rejects anything absent from the type — so the format gate
+	// below is what keeps a format-1 bundle from quietly gaining a resource map.
+	Services map[string]rawService `yaml:"services"`
 }
 
 // rawMonitor is the strict wire shape of one monitor. Pointers/strings distinguish "absent"
@@ -55,6 +59,11 @@ type rawMonitor struct {
 	AutoIncident     *bool             `yaml:"auto_incident"`
 	DependsOn        []string          `yaml:"depends_on"`
 	Settings         map[string]string `yaml:"settings"`
+	// Slug is the project-unique, immutable reference key a service names this monitor by.
+	// Format 2 declares it explicitly; omitted, it defaults to the map key, which IS the
+	// provider source uid — so the same Git-tracked bundle resolves to the same slug on
+	// every installation.
+	Slug string `yaml:"slug"`
 }
 
 // Decode strict-parses one bundle's bytes under a resolved provider scope, producing a
@@ -112,8 +121,23 @@ func Decode(data []byte, scope config.ProviderScopeConfig) (*DesiredProject, err
 	if raw.Format == nil {
 		return nil, bind(rejectf(ReasonInvalidFormat, "", "root `format` is required"))
 	}
-	if *raw.Format != 1 {
-		return nil, bind(rejectf(ReasonInvalidFormat, "", "unsupported bundle format %d (want 1)", *raw.Format))
+	switch *raw.Format {
+	case 1, 2:
+	default:
+		return nil, bind(rejectf(ReasonInvalidFormat, "", "unsupported bundle format %d (want 1 or 2)", *raw.Format))
+	}
+	if *raw.Format < 2 {
+		// Format 1 stays exactly what it was. A resource map or a field that arrived with a
+		// later format is refused rather than silently ignored: a bundle whose services were
+		// quietly dropped would look applied and change nothing.
+		if raw.Services != nil {
+			return nil, bind(rejectf(ReasonInvalidFormat, "", "`services` requires bundle format 2"))
+		}
+		for uid, m := range raw.Monitors {
+			if m.Slug != "" {
+				return nil, bind(rejectf(ReasonInvalidFormat, uid, "monitor `slug` requires bundle format 2"))
+			}
+		}
 	}
 
 	// Authoritative scope-contract resolution from the typed header. On success it equals the
@@ -149,6 +173,33 @@ func Decode(data []byte, scope config.ProviderScopeConfig) (*DesiredProject, err
 	if err := checkDependencyDAG(dp); err != nil {
 		return nil, bind(err)
 	}
+
+	// Services (format 2). The map is always present, never nil, so callers need no version
+	// branch: a format-1 bundle simply declares none.
+	slugs := make(map[string]bool, len(dp.Monitors))
+	for uid, dm := range dp.Monitors {
+		slug := raw.Monitors[uid].Slug
+		if slug == "" {
+			// An omitted slug defaults to the map key, which IS the provider source uid —
+			// so the same Git-tracked bundle resolves to the same slug everywhere.
+			slug = uid
+		}
+		if !domain.ValidMonitorSlug(slug) {
+			return nil, bind(rejectf(ReasonDomainInvalid, uid,
+				"monitor slug %q must match %s", slug, domain.MonitorSlugPattern()))
+		}
+		dm.Monitor.Slug = slug
+		dp.Monitors[uid] = dm
+		if slugs[slug] {
+			return nil, bind(rejectf(ReasonDomainInvalid, uid, "duplicate monitor slug %q in this bundle", slug))
+		}
+		slugs[slug] = true
+	}
+	services, err := decodeServices(raw.Services)
+	if err != nil {
+		return nil, bind(err)
+	}
+	dp.Services = services
 	return dp, nil
 }
 

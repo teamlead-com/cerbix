@@ -88,6 +88,9 @@ type DesiredProject struct {
 	Organization string
 	Project      string
 	Monitors     map[string]DesiredMonitor // by source UID
+	// Services is the format-2 resource map, keyed by service slug. A format-1 bundle
+	// always yields an empty map, never nil, so callers need no version branch.
+	Services map[string]DesiredService
 }
 
 // fileSupportedTypes are the monitor types the v1 file provider can express through either

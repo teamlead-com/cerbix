@@ -202,7 +202,7 @@ func censusAt(series []memberSeries, spans []MaintenanceSpan, p Policies, t time
 	for _, s := range series {
 		tl := get(s.Region)
 		tl.declared++
-		st, reason := s.stateAt(t, spans, p.MaintenanceExcludes)
+		st, reason := s.stateAt(t, spans, p.Maintenance == domain.MaintenanceExclude)
 		switch st {
 		case StateExcluded:
 			if !s.Enabled {

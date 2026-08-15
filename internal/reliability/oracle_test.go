@@ -97,9 +97,9 @@ func randomInput(rng *rand.Rand) Input {
 		}
 	}
 	p := Policies{
-		Aggregation:         domain.AggregationPolicy{Mode: modes[rng.Intn(len(modes))], DegradedMin: 1 + rng.Intn(maxDeclared), HealthyMin: maxDeclared},
-		MissingData:         missing[rng.Intn(len(missing))],
-		MaintenanceExcludes: true,
+		Aggregation: domain.AggregationPolicy{Mode: modes[rng.Intn(len(modes))], DegradedMin: 1 + rng.Intn(maxDeclared), HealthyMin: maxDeclared},
+		MissingData: missing[rng.Intn(len(missing))],
+		Maintenance: domain.MaintenanceExclude,
 	}
 	if p.Aggregation.HealthyMin < p.Aggregation.DegradedMin {
 		p.Aggregation.HealthyMin = p.Aggregation.DegradedMin

@@ -82,6 +82,20 @@ const (
 	MissingIgnore MissingDataPolicy = "ignore"
 )
 
+// MaintenancePolicy decides what a maintenance window does to a member inside it.
+//
+// It is an enum rather than a bool because the DEFAULT is "exclude": a bool's zero value
+// would silently mean "maintenance changes nothing", which contradicts both this document
+// and the product's existing rule that maintenance heartbeats leave the numerator and the
+// denominator alike. A type whose zero value is the wrong answer is the wrong type.
+type MaintenancePolicy string
+
+const (
+	// MaintenanceExclude removes a member inside a window from the aggregation, and the
+	// exclusion wins over whatever its type would otherwise normalize to.
+	MaintenanceExclude MaintenancePolicy = "exclude"
+)
+
 // AggregationPolicy is the within-region policy. Thresholds are declared against the
 // DECLARED member cardinality and clamped to the eligible one at evaluation time.
 type AggregationPolicy struct {
@@ -116,10 +130,10 @@ type ServicePolicies struct {
 	Aggregation AggregationPolicy       `json:"aggregation"`
 	Region      RegionAggregationPolicy `json:"region"`
 	MissingData MissingDataPolicy       `json:"missing_data"`
-	// MaintenanceExcludes mirrors today's rule that maintenance heartbeats leave both the
-	// numerator and the denominator. It is the only maintenance policy in phase 1.
-	MaintenanceExcludes bool            `json:"maintenance_excludes"`
-	Freshness           FreshnessPolicy `json:"freshness"`
+	// Maintenance mirrors today's rule that maintenance heartbeats leave both the numerator
+	// and the denominator. `exclude` is the only value in phase 1, and the default.
+	Maintenance MaintenancePolicy `json:"maintenance"`
+	Freshness   FreshnessPolicy   `json:"freshness"`
 }
 
 // DefaultFreshnessPolicy is what an omitted freshness block resolves to.
@@ -156,6 +170,9 @@ func ApplyServicePolicyDefaults(p ServicePolicies, declaredPerRegion map[string]
 	}
 	if p.MissingData == "" {
 		p.MissingData = MissingUnknown
+	}
+	if p.Maintenance == "" {
+		p.Maintenance = MaintenanceExclude
 	}
 	if p.Freshness.ActiveMultiplier == 0 && p.Freshness.ActiveFloor == 0 {
 		p.Freshness = DefaultFreshnessPolicy()
@@ -243,6 +260,11 @@ func ValidateServicePolicies(p ServicePolicies, declaredPerRegion map[string]int
 	case MissingUnknown, MissingBad, MissingIgnore:
 	default:
 		return fmt.Errorf("service policies: unknown missing_data policy %q", p.MissingData)
+	}
+	switch p.Maintenance {
+	case MaintenanceExclude:
+	default:
+		return fmt.Errorf("service policies: unknown maintenance policy %q", p.Maintenance)
 	}
 	return nil
 }

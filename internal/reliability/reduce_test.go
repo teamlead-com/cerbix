@@ -28,7 +28,7 @@ func pushMember(id, region string, armed time.Time) Member {
 }
 
 func allPolicies() Policies {
-	return domain.ApplyServicePolicyDefaults(Policies{MaintenanceExcludes: true}, map[string]int{"core": 1}, 1)
+	return domain.ApplyServicePolicyDefaults(Policies{Maintenance: domain.MaintenanceExclude}, map[string]int{"core": 1}, 1)
 }
 
 func reduce(t *testing.T, in Input) Bucket {
@@ -175,7 +175,7 @@ func TestDisabledMemberIsExcluded(t *testing.T) {
 func TestIgnoreDropsAnUnknownMemberWhileOthersDecide(t *testing.T) {
 	good := httpMember("good", "core")
 	dark := httpMember("dark", "core")
-	p := domain.ApplyServicePolicyDefaults(Policies{MissingData: domain.MissingIgnore, MaintenanceExcludes: true}, map[string]int{"core": 2}, 1)
+	p := domain.ApplyServicePolicyDefaults(Policies{MissingData: domain.MissingIgnore, Maintenance: domain.MaintenanceExclude}, map[string]int{"core": 2}, 1)
 
 	b := reduce(t, Input{
 		Start: bucketStart, End: bucketEnd,
@@ -192,7 +192,7 @@ func TestIgnoreDropsAnUnknownMemberWhileOthersDecide(t *testing.T) {
 // never EXCLUDED. Otherwise one settings change buys 100% coverage on a service that
 // measured nothing.
 func TestIgnoreCannotLaunderTheLastUnknownIntoExcluded(t *testing.T) {
-	p := domain.ApplyServicePolicyDefaults(Policies{MissingData: domain.MissingIgnore, MaintenanceExcludes: true}, map[string]int{"core": 1}, 1)
+	p := domain.ApplyServicePolicyDefaults(Policies{MissingData: domain.MissingIgnore, Maintenance: domain.MaintenanceExclude}, map[string]int{"core": 1}, 1)
 	b := reduce(t, Input{
 		Start: bucketStart, End: bucketEnd,
 		Members: []Member{httpMember("dark", "core")}, Policies: p,
@@ -215,7 +215,7 @@ func TestAllMembersExcludedIsExcludedNeverGood(t *testing.T) {
 	b := reduce(t, Input{
 		Start: bucketStart, End: bucketEnd,
 		Members: []Member{a, bm}, Maintenance: []MaintenanceSpan{span},
-		Policies: domain.ApplyServicePolicyDefaults(Policies{MaintenanceExcludes: true}, map[string]int{"core": 2}, 1),
+		Policies: domain.ApplyServicePolicyDefaults(Policies{Maintenance: domain.MaintenanceExclude}, map[string]int{"core": 2}, 1),
 	})
 	if b.Durations.Excluded != time.Minute {
 		t.Errorf("excluded = %s, want the whole bucket", b.Durations.Excluded)
@@ -236,8 +236,8 @@ func TestQuorumClampsToEligibleAndRecordsIt(t *testing.T) {
 	}
 	span := MaintenanceSpan{ID: "mw", MonitorID: "c", From: bucketStart, To: bucketEnd}
 	p := domain.ApplyServicePolicyDefaults(Policies{
-		Aggregation:         domain.AggregationPolicy{Mode: domain.AggQuorum, DegradedMin: 3, HealthyMin: 3},
-		MaintenanceExcludes: true,
+		Aggregation: domain.AggregationPolicy{Mode: domain.AggQuorum, DegradedMin: 3, HealthyMin: 3},
+		Maintenance: domain.MaintenanceExclude,
 	}, map[string]int{"core": 3}, 1)
 
 	b := reduce(t, Input{
@@ -269,7 +269,7 @@ func TestOneDarkRegionIsDegradedNotDown(t *testing.T) {
 		{MonitorID: "a1", Ts: bucketStart.Add(-1 * time.Second), Up: true},
 		// geo2 never reported: UNKNOWN, not absent.
 	}
-	p := domain.ApplyServicePolicyDefaults(Policies{MaintenanceExcludes: true},
+	p := domain.ApplyServicePolicyDefaults(Policies{Maintenance: domain.MaintenanceExclude},
 		map[string]int{"core": 1, "geo1": 1, "geo2": 1}, 3)
 
 	b := reduce(t, Input{
@@ -317,7 +317,7 @@ func TestReduceIsDeterministic(t *testing.T) {
 			{MonitorID: "a", Ts: bucketStart.Add(25 * time.Second), Up: false},
 		},
 		Maintenance: []MaintenanceSpan{{ID: "mw", From: bucketStart.Add(10 * time.Second), To: bucketStart.Add(20 * time.Second)}},
-		Policies:    domain.ApplyServicePolicyDefaults(Policies{MaintenanceExcludes: true}, map[string]int{"core": 1, "geo1": 1}, 2),
+		Policies:    domain.ApplyServicePolicyDefaults(Policies{Maintenance: domain.MaintenanceExclude}, map[string]int{"core": 1, "geo1": 1}, 2),
 	}
 	first, err := Reduce(in)
 	if err != nil {

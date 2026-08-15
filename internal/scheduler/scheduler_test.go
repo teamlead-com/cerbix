@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -519,5 +520,62 @@ func TestSchedulerStandbyStopsOnCancel(t *testing.T) {
 	}
 	if atomic.LoadInt32(&fs.elections) < 1 {
 		t.Fatal("scheduler should have attempted election at least once")
+	}
+}
+
+// failingDispatcher refuses every publish, standing in for a broker outage.
+type failingDispatcher struct {
+	mu       sync.Mutex
+	attempts int
+}
+
+func (d *failingDispatcher) PublishJob(context.Context, dispatch.CheckJob) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.attempts++
+	return errors.New("broker unreachable")
+}
+func (d *failingDispatcher) Jobs() <-chan dispatch.DeliveredJob                    { return nil }
+func (d *failingDispatcher) PublishResult(context.Context, domain.Heartbeat) error { return nil }
+func (d *failingDispatcher) Results() <-chan domain.Heartbeat                      { return nil }
+func (d *failingDispatcher) Close() error                                          { return nil }
+
+func (d *failingDispatcher) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.attempts
+}
+
+// TestPublishFailureHonoursTheBackoffFloor is the regression for the audit's remaining P1
+// (§4.4.5, D-0160). "Not marked as sent" and "eligible again on the next tick" are
+// different statements, and the publish path conflated them: it left nextRun untouched, so
+// the monitor came due on the very next tick. A broker outage — the one fault guaranteed to
+// hit every credentialed monitor at once — therefore turned each tick into a full
+// authoritative-read + decrypt + seal storm.
+//
+// The assertion is on STATE, not on a wall-clock rate: with a 60s interval the backoff is
+// at least one interval, so over a couple of seconds of ticking a monitor must be attempted
+// exactly once, not once per tick.
+func TestPublishFailureHonoursTheBackoffFloor(t *testing.T) {
+	// A CREDENTIALED monitor: this clause governs the materialize→publish path, where a
+	// retry costs an authoritative read, a decrypt and a seal. The plain snapshot path is
+	// deliberately left as it is — a failed publish there costs a marshal and an enqueue
+	// attempt, so retrying it promptly is cheap and helps recovery.
+	monitor := domain.Monitor{
+		ID: "publish-fails", Type: domain.MonitorPostgres, Target: "db:5432",
+		Region: "secure", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
+	}
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor}}
+	disp := &failingDispatcher{}
+	s := New(fs, disp, testLogger()).WithCredentialEnvelopes(true).
+		WithCredentialLiveRegions(staticCredentialRegions{"secure": true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	waitUntil(t, 3*time.Second, "first publish attempt", func() bool { return disp.count() >= 1 })
+	time.Sleep(2500 * time.Millisecond) // several scheduler ticks
+	if got := disp.count(); got != 1 {
+		t.Fatalf("publish attempted %d times while the broker was down; the backoff floor bounds it to one per window", got)
 	}
 }

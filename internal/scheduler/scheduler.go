@@ -351,6 +351,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool, error)) bool {
 	nextRun := map[string]time.Time{}
 	credentialFailures := map[string]int{}
+	// Consecutive publish/enqueue failures per monitor, kept apart from credential
+	// failures so the two causes back off independently (§4.4.5).
+	publishFailures := map[string]int{}
 	credentialLastLog := map[string]time.Time{}
 	var monitors []domain.Monitor
 	byID := map[string]domain.Monitor{}
@@ -705,10 +708,25 @@ func (s *Scheduler) lead(ctx context.Context, check func(context.Context) (bool,
 							}
 							publishFailed++
 							publishErr = err.Error()
+							// Retry eligibility is STATE, not a rate (§4.4.5, D-0160): the
+							// failure counter grows, next-eligible moves to now+backoff, and
+							// the probe is not marked sent. Leaving nextRun untouched — as
+							// this path did — is not the same as "not sent": it makes the
+							// monitor due again on the very next tick, so the one fault
+							// guaranteed to hit every credentialed monitor at once, a broker
+							// outage, turned each tick into a full authoritative-read +
+							// decrypt + seal storm across the whole due set. That is the
+							// failure mode the floor exists to prevent, reached through the
+							// door it did not cover. The counter is separate from the
+							// credential one so a transport fault and a secret-resolution
+							// fault back off independently and neither masks the other.
+							publishFailures[m.ID]++
+							nextRun[m.ID] = now.Add(credentialFailureRetry(iv, publishFailures[m.ID]))
 							continue
 						}
 						delete(credentialFailures, m.ID)
 						delete(credentialLastLog, m.ID)
+						delete(publishFailures, m.ID)
 						nextRun[m.ID] = now.Add(iv)
 					}
 				}

@@ -277,20 +277,14 @@ func (s *Store) PreviewMutationOf(
 		}
 	}
 
-	// PERSISTENCE runs on the raw transaction under the reserve's own bound — the time the
-	// adapter was holding back. Re-issued explicitly, because whatever SET LOCAL the last
-	// released savepoint leaked into this transaction is both stale and possibly near zero,
-	// and a near-zero inherited bound is exactly how a successfully degraded projection
-	// still died as a 500 at the token insert.
-	reserveMS := previewPersistReserve.Milliseconds()
-	for _, stmt := range []string{
-		fmt.Sprintf("SET LOCAL statement_timeout = %d", reserveMS),
-		fmt.Sprintf("SET LOCAL lock_timeout = %d", reserveMS),
-	} {
-		if _, err := rawTx.Exec(ctx, stmt); err != nil {
-			return MaintenancePreview{}, fmt.Errorf("store: set persistence bounds: %w", err)
-		}
-	}
+	// PERSISTENCE runs through the persist envelope: the reserve drops to zero — this is the
+	// time the work phases were forbidden to touch — but every statement AND the commit stay
+	// behind per-statement, remainder-derived bounds. Two review rounds in a row re-created
+	// accumulation by switching back to the raw transaction here with one fixed SET:
+	// statement_timeout restarts per statement, so a fixed bound across N statements bounds
+	// none of their sum. The N itself is also gone — the affected services land in ONE
+	// unnest insert, so the whole phase is two statements and a commit.
+	persist := tx.persistPhase()
 
 	p := MaintenancePreview{
 		ProjectID: projectID, MonitorID: monitorID, TargetID: targetID,
@@ -299,7 +293,7 @@ func (s *Store) PreviewMutationOf(
 		EarliestRepairable: rawFloor,
 		Coverage:           coverage, Services: services,
 	}
-	if err := rawTx.QueryRow(ctx,
+	if err := persist.QueryRow(ctx,
 		`INSERT INTO maintenance_previews
 		   (project_id, monitor_id, target_id, mutation, requested_start, requested_end,
 		    maintenance_generation, raw_floor, coverage, expires_at, created_by)
@@ -314,9 +308,25 @@ func (s *Store) PreviewMutationOf(
 	// The affected set lives in a COMPLETE relation, never a bounded array. Re-reading the
 	// generations of services already known proves those rows did not move and proves
 	// nothing about the SET: a truncated array would let a confirm pass while a service it
-	// never checked is mutated.
-	for _, svc := range services {
-		if _, err := rawTx.Exec(ctx,
+	// never checked is mutated. One statement for all rows, on purpose — the persistence
+	// phase's cost must not scale with the affected count.
+	n := len(services)
+	ids := make([]string, n)
+	gens := make([]int64, n)
+	bg, bb, bu, bx := make([]int64, n), make([]int64, n), make([]int64, n), make([]int64, n)
+	ag, ab, au, ax := make([]int64, n), make([]int64, n), make([]int64, n), make([]int64, n)
+	bh, bd, bdn, bhu := make([]int64, n), make([]int64, n), make([]int64, n), make([]int64, n)
+	ah, ad, adn, ahu := make([]int64, n), make([]int64, n), make([]int64, n), make([]int64, n)
+	projected := make([]bool, n)
+	for i, svc := range services {
+		ids[i], gens[i], projected[i] = svc.ServiceID, svc.DefinitionGeneration, svc.Projected
+		bg[i], bb[i], bu[i], bx[i] = svc.Before.Good, svc.Before.Bad, svc.Before.Unknown, svc.Before.Excluded
+		ag[i], ab[i], au[i], ax[i] = svc.After.Good, svc.After.Bad, svc.After.Unknown, svc.After.Excluded
+		bh[i], bd[i], bdn[i], bhu[i] = svc.Before.Healthy, svc.Before.Degraded, svc.Before.Down, svc.Before.HealthUnknown
+		ah[i], ad[i], adn[i], ahu[i] = svc.After.Healthy, svc.After.Degraded, svc.After.Down, svc.After.HealthUnknown
+	}
+	if n > 0 {
+		if _, err := persist.Exec(ctx,
 			`INSERT INTO maintenance_preview_services
 			   (preview_id, project_id, service_id, definition_generation,
 			    before_good_us, before_bad_us, before_unknown_us, before_excluded_us,
@@ -324,17 +334,21 @@ func (s *Store) PreviewMutationOf(
 			    before_healthy_us, before_degraded_us, before_down_us, before_health_unknown_us,
 			    after_healthy_us, after_degraded_us, after_down_us, after_health_unknown_us,
 			    projected)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
-			p.ID, projectID, svc.ServiceID, svc.DefinitionGeneration,
-			svc.Before.Good, svc.Before.Bad, svc.Before.Unknown, svc.Before.Excluded,
-			svc.After.Good, svc.After.Bad, svc.After.Unknown, svc.After.Excluded,
-			svc.Before.Healthy, svc.Before.Degraded, svc.Before.Down, svc.Before.HealthUnknown,
-			svc.After.Healthy, svc.After.Degraded, svc.After.Down, svc.After.HealthUnknown,
-			svc.Projected); err != nil {
-			return MaintenancePreview{}, fmt.Errorf("store: insert preview service: %w", err)
+			 SELECT $1, $2, u.*
+			   FROM unnest($3::uuid[], $4::bigint[],
+			               $5::bigint[], $6::bigint[], $7::bigint[], $8::bigint[],
+			               $9::bigint[], $10::bigint[], $11::bigint[], $12::bigint[],
+			               $13::bigint[], $14::bigint[], $15::bigint[], $16::bigint[],
+			               $17::bigint[], $18::bigint[], $19::bigint[], $20::bigint[],
+			               $21::boolean[]) AS u`,
+			p.ID, projectID, ids, gens,
+			bg, bb, bu, bx, ag, ab, au, ax,
+			bh, bd, bdn, bhu, ah, ad, adn, ahu,
+			projected); err != nil {
+			return MaintenancePreview{}, fmt.Errorf("store: insert preview services: %w", err)
 		}
 	}
-	if err := rawTx.Commit(ctx); err != nil {
+	if err := persist.Commit(ctx); err != nil {
 		return MaintenancePreview{}, fmt.Errorf("store: commit preview: %w", err)
 	}
 	return p, nil

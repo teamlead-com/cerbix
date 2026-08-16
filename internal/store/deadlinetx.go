@@ -115,7 +115,16 @@ func (d *deadlineTx) Begin(ctx context.Context) (pgx.Tx, error) {
 	return &deadlineTx{Tx: child, deadline: d.deadline, reserve: d.reserve, parent: d}, nil
 }
 
+// Commit is bounded like any other statement: COMMIT is a statement the server executes, a
+// blocked or slow one holds the connection exactly as a blocked INSERT would, and an earlier
+// revision that committed the raw transaction directly left the very last step of every
+// slice outside the mechanism the slice was built on.
 func (d *deadlineTx) Commit(ctx context.Context) error {
+	if d.parent == nil {
+		if err := d.ensureBounds(ctx); err != nil {
+			return err
+		}
+	}
 	err := d.Tx.Commit(ctx)
 	if d.parent != nil {
 		d.parent.invalidateBounds()
@@ -130,6 +139,51 @@ func (d *deadlineTx) Rollback(ctx context.Context) error {
 	}
 	return err
 }
+
+// persistPhase returns an envelope over the SAME transaction for the persistence phase: the
+// reserve drops to zero, so the time the work phases were forbidden to touch is now spendable
+// — but still through the mechanism, per statement, commit included. Switching back to the
+// raw transaction here is how two consecutive review rounds re-created accumulation:
+// statement_timeout is a duration restarted for EACH statement, so a fixed "reserve" bound
+// across N statements bounds none of their sum.
+func (d *deadlineTx) persistPhase() *deadlineTx {
+	return &deadlineTx{Tx: d.Tx, deadline: d.deadline, reserve: 0}
+}
+
+// boundedLifecycleExec runs ONE statement in its own small transaction under a fixed server
+// bound. It exists for the repair lifecycle writes — claim, release, complete, fail — which
+// run outside any batch envelope: unbounded, a blocked release after the budget would hold
+// the leader connection indefinitely; bounded, a missed release simply falls back to lease
+// expiry, which is what the lease is for.
+func boundedLifecycleExec(ctx context.Context, db dbConn, bound time.Duration, sql string, args ...any) error {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin lifecycle write: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	ms := bound.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	for _, stmt := range []string{
+		fmt.Sprintf("SET LOCAL statement_timeout = %d", ms),
+		fmt.Sprintf("SET LOCAL lock_timeout = %d", ms),
+	} {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("store: bound lifecycle write: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// lifecycleWriteBound is the fixed budget for one repair-lifecycle write. Independent of the
+// slice budget on purpose: a release runs AFTER the budget expired by design, and what
+// protects the scheduler's cadence there is this bound plus the lease — not the slice clock,
+// which has already run out.
+const lifecycleWriteBound = 100 * time.Millisecond
 
 // errRow is the QueryRow shape of a refused statement: the error surfaces at Scan, which is
 // where every caller already looks.

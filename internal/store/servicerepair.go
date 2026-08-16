@@ -152,11 +152,30 @@ func (s *Store) ClaimRepairRange(ctx context.Context) (RepairRange, bool, error)
 }
 
 func (s *Store) claimRepairRangeOn(ctx context.Context, db dbConn) (RepairRange, bool, error) {
-	tx, err := db.Begin(ctx)
+	// No deadline known: bound by the lifecycle cap alone, so a table lock on the queue
+	// cannot hold the caller's connection open-endedly.
+	return s.claimRepairRangeBounded(ctx, db, time.Now().Add(lifecycleWriteBound))
+}
+
+// claimRepairRangeBounded is the claim under a caller deadline. SKIP LOCKED dodges row-lock
+// waits and nothing else: an ACCESS EXCLUSIVE table lock — vacuum full, a migration, an
+// operator's LOCK TABLE — parks the claim itself, and the claim used to run on the root
+// context, before any envelope existed. On the leader path that parked statement sat on the
+// advisory-lock connection while the scheduler's dispatch tick waited behind it.
+func (s *Store) claimRepairRangeBounded(ctx context.Context, db dbConn, deadline time.Time) (RepairRange, bool, error) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return RepairRange{}, false, nil
+	}
+	if remaining > lifecycleWriteBound {
+		remaining = lifecycleWriteBound
+	}
+	rawTx, err := db.Begin(ctx)
 	if err != nil {
 		return RepairRange{}, false, fmt.Errorf("store: begin claim: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	defer rawTx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	tx := newDeadlineTx(rawTx, time.Now().Add(remaining), 0)
 
 	var r RepairRange
 	var reason string
@@ -330,19 +349,12 @@ func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, fr
 	// while this batch ran means the batch read one declaration and the world now has
 	// another — and without this, two batches of one range could commit under two different
 	// "current" maintenance declarations.
-	// Persistence — the CAS re-check, the cursor and the lease — runs on the raw transaction
-	// under the reserve's own bound: this is the time the adapter was holding back.
-	reserveMS := advanceCommitReserve.Milliseconds()
-	for _, stmt := range []string{
-		fmt.Sprintf("SET LOCAL statement_timeout = %d", reserveMS),
-		fmt.Sprintf("SET LOCAL lock_timeout = %d", reserveMS),
-	} {
-		if _, err := rawTx.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("store: set repair persistence bounds: %w", err)
-		}
-	}
+	// Persistence — the CAS re-check, the cursor and the lease — runs through the persist
+	// envelope: reserve zero, per-statement remainder bounds, commit included. A fixed SET
+	// across these statements bounded each one and none of their sum.
+	persist := tx.persistPhase()
 	var after int64
-	if err := rawTx.QueryRow(ctx,
+	if err := persist.QueryRow(ctx,
 		`SELECT COALESCE((SELECT generation FROM project_maintenance_generation WHERE project_id=$1), 0)`,
 		r.ProjectID).Scan(&after); err != nil {
 		return fmt.Errorf("store: re-read maintenance generation: %w", err)
@@ -354,14 +366,14 @@ func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, fr
 	// The lease is extended in the SAME transaction as the cursor. A separate heartbeat
 	// could renew a lease for work that then rolled back, which is a lease outliving the
 	// progress it claims to protect.
-	if _, err := rawTx.Exec(ctx,
+	if _, err := persist.Exec(ctx,
 		`UPDATE service_repair_ranges
 		    SET cursor_at = $2, updated_at = now(), lease_expires_at = now() + $3::interval
 		  WHERE id = $1`,
 		r.ID, to, repairLease.String()); err != nil {
 		return fmt.Errorf("store: advance cursor: %w", err)
 	}
-	return rawTx.Commit(ctx)
+	return persist.Commit(ctx)
 }
 
 // repairLockTimeout caps a single lock wait inside a batch, on top of the slice remainder.
@@ -401,7 +413,12 @@ func (s *Store) releaseRepairRange(ctx context.Context, db dbConn, id string, cu
 	if cause != nil {
 		note = cause.Error()
 	}
-	if _, err := db.Exec(ctx,
+	// Bounded, and SAFE to miss: these writes run outside any batch envelope — a release
+	// happens after the budget expired by design — so what protects the caller's connection
+	// is this fixed bound, and what recovers a write the bound refused is the LEASE: the
+	// range stays `running` until its lease lapses and any claimer resumes it at the durable
+	// cursor. Unbounded, one table lock here held the leader connection open-endedly.
+	if err := boundedLifecycleExec(ctx, db, lifecycleWriteBound,
 		`UPDATE service_repair_ranges
 		    SET state = 'pending', cursor_at = $2, last_error = $3,
 		        maintenance_generation = COALESCE(
@@ -414,7 +431,7 @@ func (s *Store) releaseRepairRange(ctx context.Context, db dbConn, id string, cu
 }
 
 func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time) error {
-	if _, err := db.Exec(ctx,
+	if err := boundedLifecycleExec(ctx, db, lifecycleWriteBound,
 		`UPDATE service_repair_ranges SET state = 'complete', cursor_at = $2, last_error = '', updated_at = now()
 		  WHERE id = $1`, id, cursor); err != nil {
 		return fmt.Errorf("store: complete repair range: %w", err)
@@ -428,7 +445,7 @@ func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, c
 // markRepairRangeUnrecomputable parks a range whose evidence no longer exists. Unlike a
 // failure it does not schedule a retry: retrying cannot bring deleted heartbeats back.
 func (s *Store) markRepairRangeUnrecomputable(ctx context.Context, db dbConn, id string, cursor time.Time, cause error) error {
-	if _, err := db.Exec(ctx,
+	if err := boundedLifecycleExec(ctx, db, lifecycleWriteBound,
 		`UPDATE service_repair_ranges
 		    SET state = 'error', cursor_at = $2, last_error = $3, updated_at = now()
 		  WHERE id = $1`, id, cursor, cause.Error()); err != nil {
@@ -439,7 +456,7 @@ func (s *Store) markRepairRangeUnrecomputable(ctx context.Context, db dbConn, id
 
 func (s *Store) failRepairRange(ctx context.Context, db dbConn, r RepairRange, cursor time.Time, cause error) error {
 	backoff := repairBackoff(r.Attempts + 1)
-	if _, err := db.Exec(ctx,
+	if err := boundedLifecycleExec(ctx, db, lifecycleWriteBound,
 		`UPDATE service_repair_ranges
 		    SET state = 'pending', cursor_at = $2, attempts = attempts + 1,
 		        next_attempt_at = now() + $3::interval, last_error = $4, updated_at = now()

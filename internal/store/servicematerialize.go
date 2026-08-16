@@ -610,22 +610,18 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	if reached.Equal(cursor) {
 		// The deadline landed before the first bucket. Commit nothing and report work
 		// remaining, so the caller backs off to the next sub-tick instead of spinning.
-		return true, rawTx.Commit(ctx)
+		return true, tx.persistPhase().Commit(ctx)
 	}
 
-	// The PERSISTENCE runs on the raw transaction, under the reserve's own bound: the
-	// adapter would refuse it — the reserve exists precisely so this part still has time —
-	// and the last savepoint-less SET LOCAL in force may be stale, so it is re-issued here.
-	reserveMS := advanceCommitReserve.Milliseconds()
-	for _, stmt := range []string{
-		fmt.Sprintf("SET LOCAL statement_timeout = %d", reserveMS),
-		fmt.Sprintf("SET LOCAL lock_timeout = %d", reserveMS),
-	} {
-		if _, err := rawTx.Exec(ctx, stmt); err != nil {
-			return true, fmt.Errorf("store: set persistence bounds: %w", err)
-		}
-	}
-	if _, err := rawTx.Exec(ctx,
+	// The PERSISTENCE runs through the persist envelope: the reserve drops to zero — this is
+	// the time the work loop was forbidden to touch — but every statement, the watermark
+	// recompute's several included, and the COMMIT itself stay behind per-statement,
+	// remainder-derived bounds. An earlier revision switched back to the raw transaction
+	// with one fixed SET here, and statement_timeout restarts per statement: two statements
+	// late in the reserve could carry the slice past the client net, which on this
+	// connection is the advisory lock's life.
+	persist := tx.persistPhase()
+	if _, err := persist.Exec(ctx,
 		`UPDATE service_materialization SET materialized_through = $2 WHERE service_id = $1`,
 		serviceID, reached); err != nil {
 		return true, fmt.Errorf("store: advance materialized_through: %w", err)
@@ -633,8 +629,8 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	// The watermark is recomputed from the FACTS, never set to the cursor: progress and
 	// evidence are different claims, and a hole must hold the watermark while the driver
 	// walks past it.
-	if err := advanceSealedThrough(ctx, rawTx, serviceID); err != nil {
+	if err := advanceSealedThrough(ctx, persist, serviceID); err != nil {
 		return true, err
 	}
-	return true, rawTx.Commit(ctx)
+	return true, persist.Commit(ctx)
 }

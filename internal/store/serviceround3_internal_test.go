@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,20 @@ import (
 // re-applied as a mutant to prove it.
 
 const monthRetention = 30 * 24 * time.Hour
+
+// ciAllowance is the measured test-environment overhead granted ON TOP of the normative
+// bound (budget + schedulingTolerance): fixture reads, connection acquisition, Go scheduling.
+// It is stated separately from the contract on purpose — the assertion is contract plus
+// allowance, never a round number that happens to pass. Local runs measure 40–90ms of
+// overhead; 150ms covers a loaded CI without swallowing a real regression, which would blow
+// past by the whole difference between a bound set once and a bound derived per statement.
+const ciAllowance = 150 * time.Millisecond
+
+// cadenceLimit is the assertion every timing regression uses: the normative budget, the
+// scheduler tolerance the client net grants, and the stated allowance.
+func cadenceLimit(budget time.Duration) time.Duration {
+	return budget + schedulingTolerance + ciAllowance
+}
 
 // P0-1 — a retroactive window ENTIRELY INSIDE one bucket must still hit the preview gate.
 //
@@ -535,9 +550,9 @@ func TestABlockedPreviewDegradesInsteadOfHoldingTheProject(t *testing.T) {
 			t.Errorf("service %s reason = %q, want %q", svc.ServiceID, svc.Reason, ReasonWallBudget)
 		}
 	}
-	// Bounded: one blocked statement bound plus overhead — NOT one bound per service.
-	if elapsed > 3*time.Second {
-		t.Fatalf("the preview took %s against a 400ms budget with 2 services; the budget does not bound the whole operation", elapsed)
+	// The normative bound, not a generous one: contract plus the stated allowance.
+	if limit := cadenceLimit(st.previewBudget); elapsed > limit {
+		t.Fatalf("the preview took %s against the %s contract (budget %s)", elapsed, limit, st.previewBudget)
 	}
 	// …and the project's membership lock is free again: an ordinary write goes straight
 	// through instead of queueing behind a preview that should have let go.
@@ -829,10 +844,8 @@ func TestAPreviewBlockedOnTheMembershipLockIsBounded(t *testing.T) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("the client net fired before the server bound: %v", err)
 	}
-	// 500ms budget − 300ms reserve = a 200ms lock bound, plus overhead. 700ms is far above
-	// the real ceiling and far below the 1-second pre-phase floor this test exists to forbid.
-	if elapsed > 700*time.Millisecond {
-		t.Fatalf("blocked on the membership lock for %s against a 500ms budget", elapsed)
+	if limit := cadenceLimit(st.previewBudget); elapsed > limit {
+		t.Fatalf("blocked on the membership lock for %s against the %s contract", elapsed, limit)
 	}
 }
 
@@ -867,9 +880,9 @@ func TestPreviewPersistsItsTokenInsideTheReserve(t *testing.T) {
 		t.Fatalf("coverage = %q, want approximate", p.Coverage)
 	}
 	// The whole operation — lock, resolve, blocked projection, persist, commit — inside the
-	// budget plus tolerance and overhead.
-	if elapsed > st.previewBudget+700*time.Millisecond {
-		t.Fatalf("the preview took %s against a %s budget", elapsed, st.previewBudget)
+	// normative contract.
+	if limit := cadenceLimit(st.previewBudget); elapsed > limit {
+		t.Fatalf("the preview took %s against the %s contract", elapsed, limit)
 	}
 	// The token is REAL: committed, readable, and honestly unconfirmable.
 	var coverage string
@@ -923,10 +936,8 @@ func TestForwardSliceCadenceHoldsWhileBlocked(t *testing.T) {
 	if serr == nil {
 		t.Log("the blocked slice returned no error; the cadence is what is under test")
 	}
-	// 250ms slice + 25ms tolerance + generous test-environment overhead — nowhere near the
-	// old +2s cushion, and nowhere near unbounded.
-	if elapsed > 800*time.Millisecond {
-		t.Fatalf("BEGIN→return took %s against a 250ms slice; the cadence contract is broken", elapsed)
+	if limit := cadenceLimit(250 * time.Millisecond); elapsed > limit {
+		t.Fatalf("BEGIN→return took %s against the %s contract", elapsed, limit)
 	}
 	// …and the leader's session survived the server-side refusal.
 	var stmtTimeout string
@@ -973,5 +984,195 @@ func TestProjectionBoundCountsTouchedBuckets(t *testing.T) {
 	}
 	if len(p2.Services) > 0 && p2.Services[0].Reason == ReasonRangeTooLong {
 		t.Fatalf("a range of exactly the budget was refused as too long")
+	}
+}
+
+// Round-6 (iter-0130) regressions — the lifecycle phases the previous round left outside the
+// mechanism.
+
+// P0-1 (round 6) — the PERSISTENCE of a forward slice is bounded too. A block on
+// service_materialization lands exactly on the cursor write that runs in the reserve, after
+// the work loop: previously that phase ran on the raw transaction with one fixed SET —
+// restarted per statement — and the client net could win the race and take the leader's
+// connection with it.
+func TestForwardPersistenceIsBoundedAndTheSessionSurvives(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: time.Now().UTC().Add(-30 * time.Minute)}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	base := domain.FloorToBucket(time.Now().UTC().Add(-20 * time.Minute))
+	for i := 0; i < 3; i++ {
+		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+10*time.Second), true)
+	}
+
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := blocker.Exec(ctx, `LOCK TABLE service_materialization IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock materialization: %v", err)
+	}
+
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader: %v ok=%v", err, ok)
+	}
+	defer ls.Release()
+
+	started := time.Now()
+	_, serr := ls.RunServiceSlice(ctx, started.Add(250*time.Millisecond))
+	elapsed := time.Since(started)
+	_ = blocker.Rollback(ctx)
+	if serr == nil {
+		t.Log("the blocked slice returned no error; the cadence and the session are what matter")
+	}
+	if errors.Is(serr, context.DeadlineExceeded) {
+		t.Fatalf("the client net beat the server bound in the persistence phase: %v", serr)
+	}
+	if limit := cadenceLimit(250 * time.Millisecond); elapsed > limit {
+		t.Fatalf("persistence blocked for %s against the %s contract", elapsed, limit)
+	}
+	var stmtTimeout string
+	if err := ls.conn.QueryRow(ctx, `SHOW statement_timeout`).Scan(&stmtTimeout); err != nil {
+		t.Fatalf("the leader connection did not survive the blocked persistence: %v", err)
+	}
+	if stmtTimeout != "0" {
+		t.Fatalf("persistence left statement_timeout=%s on the leader session", stmtTimeout)
+	}
+	if held, err := ls.Check(ctx); err != nil || !held {
+		t.Fatalf("leadership lost to blocked persistence: held=%v err=%v", held, err)
+	}
+}
+
+// P0-2 (round 6) — a blocked CLAIM is bounded. SKIP LOCKED dodges row waits and nothing
+// else: a table lock parked the claim on the leader connection, on the root context, before
+// any envelope existed.
+func TestABlockedClaimIsBoundedOnTheLeaderSession(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(10*time.Minute), ReasonBackfill); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := blocker.Exec(ctx, `LOCK TABLE service_repair_ranges IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock queue: %v", err)
+	}
+
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader: %v ok=%v", err, ok)
+	}
+	defer ls.Release()
+
+	started := time.Now()
+	_, serr := ls.RunServiceSlice(ctx, started.Add(250*time.Millisecond))
+	elapsed := time.Since(started)
+	_ = blocker.Rollback(ctx)
+	if serr == nil {
+		t.Log("the blocked claim surfaced no error; bounded time and a live session are the contract")
+	}
+	if limit := cadenceLimit(250 * time.Millisecond); elapsed > limit {
+		t.Fatalf("the claim blocked for %s against the %s contract", elapsed, limit)
+	}
+	if held, err := ls.Check(ctx); err != nil || !held {
+		t.Fatalf("leadership lost to a blocked claim: held=%v err=%v", held, err)
+	}
+}
+
+// P0-2 (round 6) — a blocked POST-BUDGET RELEASE is bounded, and missing it is SAFE: the
+// range stays `running` under its lease, the lease lapses, and any claimer resumes at the
+// durable cursor. Unbounded, this exact write held the leader connection indefinitely —
+// after the budget had already expired, when no slice clock was left to protect anything.
+func TestABlockedReleaseFallsBackToTheLease(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(30*time.Minute), ReasonBackfill); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Claim first — the queue must be free for that — THEN block the table, so the batch's
+	// budget expires and the release write is what hits the lock.
+	claimed, ok, err := st.claimRepairRangeOn(ctx, st.pool)
+	if err != nil || !ok {
+		t.Fatalf("claim: %v ok=%v", err, ok)
+	}
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := blocker.Exec(ctx, `LOCK TABLE service_repair_ranges IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock queue: %v", err)
+	}
+
+	// Run the claimed range with an already-tiny budget: the batch stops immediately and the
+	// RELEASE is the next thing that touches the locked table.
+	started := time.Now()
+	rerr := st.runRepairRangeOn(ctx, st.pool, claimed, time.Now().Add(10*time.Millisecond))
+	elapsed := time.Since(started)
+	if rerr == nil {
+		t.Fatal("the blocked release reported success; the write cannot have happened")
+	}
+	// Bounded by the lifecycle cap, not by the (already spent) slice budget.
+	if elapsed > lifecycleWriteBound+ciAllowance {
+		t.Fatalf("the release blocked for %s against the %s lifecycle bound", elapsed, lifecycleWriteBound)
+	}
+	_ = blocker.Rollback(ctx)
+
+	// The range is still RUNNING under its lease — nothing was lost, only postponed.
+	state, cursor := rangeState(t, st, ctx, claimed.ID)
+	if state != "running" {
+		t.Fatalf("state = %q after a missed release, want running (the lease owns recovery)", state)
+	}
+	if !cursor.Equal(claimed.Cursor) {
+		t.Fatalf("cursor moved to %s without a committed batch", cursor)
+	}
+
+	// Lapse the lease; the next claim resumes exactly where the durable cursor stood.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_repair_ranges SET lease_expires_at = now() - interval '1 second' WHERE id=$1`,
+		claimed.ID); err != nil {
+		t.Fatalf("lapse lease: %v", err)
+	}
+	reclaimed, ok, err := st.claimRepairRangeOn(ctx, st.pool)
+	if err != nil || !ok {
+		t.Fatalf("reclaim after the missed release: %v ok=%v", err, ok)
+	}
+	if reclaimed.ID != claimed.ID || !reclaimed.Cursor.Equal(claimed.Cursor) {
+		t.Fatalf("resumed %s at %s, want %s at %s", reclaimed.ID, reclaimed.Cursor, claimed.ID, claimed.Cursor)
+	}
+}
+
+// A STRUCTURAL tripwire, stated as exactly that. Two persistence hybrids — a raw-transaction
+// persist with one fixed SET, and a commit outside the adapter — diverge from the mechanism
+// only in a sub-50ms race between a fixed bound's tail and the client net, which no
+// deterministic lock construction can pin without flaking. Their behavioural kills are
+// therefore NOT claimed; what is enforced instead is the structure the mechanism depends on:
+// every slice path persists through persistPhase() and commits through the adapter, never
+// the raw transaction. A source scan is a weak proof and an excellent alarm.
+func TestSlicePathsPersistThroughTheEnvelope(t *testing.T) {
+	for _, file := range []string{"servicematerialize.go", "servicerepair.go", "servicemaintenance.go"} {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		src := string(raw)
+		if strings.Contains(src, "rawTx.Commit(") {
+			t.Errorf("%s commits the raw transaction directly; the commit has left the mechanism", file)
+		}
+		if !strings.Contains(src, ".persistPhase()") {
+			t.Errorf("%s does not persist through the envelope", file)
+		}
 	}
 }

@@ -131,7 +131,7 @@ func (s *Store) TryBecomeLeader(ctx context.Context, key int64) (release func(),
 // It reports whether it found anything to do, so the caller can back off when the queue is
 // empty instead of spinning.
 func (ls *LeaderSession) RunServiceRepairSlice(ctx context.Context, deadline time.Time) (bool, error) {
-	r, ok, err := ls.store.claimRepairRangeOn(ctx, ls.conn)
+	r, ok, err := ls.store.claimRepairRangeBounded(ctx, ls.conn, deadline)
 	if err != nil || !ok {
 		return false, err
 	}

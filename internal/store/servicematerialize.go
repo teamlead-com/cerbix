@@ -361,13 +361,19 @@ func observationsFor(ctx context.Context, tx pgx.Tx, members []reliability.Membe
 	for _, m := range members {
 		ids = append(ids, m.MonitorID)
 	}
+	// The carry-in branch is PARENTHESIZED so its ORDER BY belongs to the DISTINCT ON
+	// (iter-0139): a trailing ORDER BY after a UNION binds to the WHOLE union, which left
+	// DISTINCT ON with no defined order — an ARBITRARY prior observation became the
+	// carry-in state whenever a member had more than one row before the bucket. Every
+	// phase-1 fixture happened to plant exactly one prior observation, which is how a
+	// sample-and-hold evaluator shipped with an undefined hold state.
 	rows, err := tx.Query(ctx,
 		`SELECT monitor_id, ts, up FROM heartbeats
 		  WHERE monitor_id = ANY($1) AND ts >= $2 AND ts < $3
 		 UNION ALL
-		 SELECT DISTINCT ON (monitor_id) monitor_id, ts, up FROM heartbeats
-		  WHERE monitor_id = ANY($1) AND ts < $2
-		  ORDER BY monitor_id, ts DESC`, ids, start, end)
+		 (SELECT DISTINCT ON (monitor_id) monitor_id, ts, up FROM heartbeats
+		   WHERE monitor_id = ANY($1) AND ts < $2
+		   ORDER BY monitor_id, ts DESC)`, ids, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("store: read observations: %w", err)
 	}

@@ -135,6 +135,8 @@ func Main(args []string) int {
 		return runReencrypt(args[1:])
 	case "adopt-fact-month":
 		return runAdoptFactMonth(args[1:])
+	case "enqueue-service-repair":
+		return runEnqueueServiceRepair(args[1:])
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return 0
@@ -153,6 +155,7 @@ func usage(w io.Writer) {
 		"  cerbix migrate --config <path>",
 		"  cerbix reencrypt --config <path>",
 		"  cerbix adopt-fact-month --config <path> --month YYYY-MM [--timeout 10m]",
+		"  cerbix enqueue-service-repair --config <path> --project <id> --service <id> --from RFC3339 --to RFC3339",
 		"  cerbix version",
 	} {
 		if _, err := fmt.Fprintln(w, line); err != nil {
@@ -517,6 +520,66 @@ func runAdoptFactMonth(args []string) int {
 		return 1
 	}
 	logger.Info("adopt_fact_month_complete", "month", *monthFlag)
+	return 0
+}
+
+// runEnqueueServiceRepair is the operator entrypoint for an audited admin recompute
+// (iter-0139): it enqueues a durable repair range through the SAME store path every product
+// enqueue uses — pending same-reason union coalescing, bucket flooring/ceiling, the
+// whitelist reason 'admin' — so the runbook's "restate a range" instruction is an actual
+// command instead of an internal Go method. The range is only ENQUEUED here; the scheduler
+// leader executes it under the normal audited repair machinery (§10.6 before/after record).
+func runEnqueueServiceRepair(args []string) int {
+	fs := flag.NewFlagSet("enqueue-service-repair", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to config YAML (required)")
+	projectID := fs.String("project", "", "project id (required)")
+	serviceID := fs.String("service", "", "service id (required)")
+	fromFlag := fs.String("from", "", "range start, RFC3339 (required; floored to the bucket)")
+	toFlag := fs.String("to", "", "range end, RFC3339 (required; ceiled to the bucket)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *configPath == "" || *projectID == "" || *serviceID == "" || *fromFlag == "" || *toFlag == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "enqueue-service-repair: --config, --project, --service, --from and --to are required")
+		return 2
+	}
+	from, err := time.Parse(time.RFC3339, *fromFlag)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "enqueue-service-repair: --from must be RFC3339: %v\n", err)
+		return 2
+	}
+	to, err := time.Parse(time.RFC3339, *toFlag)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "enqueue-service-repair: --to must be RFC3339: %v\n", err)
+		return 2
+	}
+	if !to.After(from) {
+		_, _ = fmt.Fprintln(os.Stderr, "enqueue-service-repair: --to must be after --from")
+		return 2
+	}
+	cfg := loadConfig(*configPath)
+	if cfg == nil {
+		return 1
+	}
+	logger := logging.New(cfg.Log, os.Stdout)
+	if cfg.Database.DSN == "" {
+		logging.Critical(logger, "enqueue_service_repair_requires_database", "hint", "set database.dsn")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, cfg.Database.DSN)
+	if err != nil {
+		logging.Critical(logger, "db_connect_failed", "error", err.Error())
+		return 1
+	}
+	defer st.Close()
+	if err := st.EnqueueRepairRange(ctx, *projectID, *serviceID, from, to, store.ReasonAdmin); err != nil {
+		logging.Critical(logger, "enqueue_service_repair_failed", "error", err.Error())
+		return 1
+	}
+	logger.Info("service_repair_enqueued", "project", *projectID, "service", *serviceID,
+		"from", from.UTC().Format(time.RFC3339), "to", to.UTC().Format(time.RFC3339))
 	return 0
 }
 

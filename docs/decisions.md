@@ -3260,3 +3260,61 @@ unnecessary costs bounded work; discarding one that was necessary costs correctn
 store-layer capability and its tests remain as the safety proof that cancel-by-origin is
 sound where a future phase needs it (e.g. phase-5 alert ownership); wiring it is that
 phase's decision, not an omission of this one.
+
+## D-0163 — Service reliability reporting surface: fixed burn pair, on-read rollups, era-anchored insufficiency (FR-021 phase 2, iter-0138)
+
+Three implementation choices inside §11/§12's stated contract are externally observable, so
+they are owned here (the [152] lesson: an observable behavior that lives only in code is a
+finding waiting to be written).
+
+**The reporting burn pair is FIXED at 1h/6h.** §11.1 says "burn rate = multi-window, reusing
+the existing rule shapes", and §13 forbids service burn ALERTING until phase 5 — the shared
+`burn_rules` column is schema-rejected for the service scope (00077). What remains for
+phase 2 is display, and the displayed pair is the approved mock's card ("Burn 1h 0.4x /
+6h 0.6x"): windows `[sealed_through − w, sealed_through)`, quoted only when the equivalent
+real-time window holds any sealed time (else `insufficient_sealed_coverage`), never
+aggregated across a definition boundary, never 0× from an empty denominator. Phase 5 may
+replace the fixed pair with rule-derived windows; that is an alerting-ownership decision.
+
+**Hour/day rollups are computed on read, not stored.** §10.2 defines rollups as exact
+associative duration sums keyed by epoch; it mandates behavior, not a table. A 90d window is
+one indexed aggregate over ≤130k narrow rows per service; materialized rollup tables would
+add a write path, a consistency obligation and a repair story with no acceptance invariant
+asking for them. `ServiceReliabilitySeries` groups by (step × epoch × state) — provisional
+time rolls up separately and an epoch boundary inside one step yields one point per epoch,
+which is exactly the never-merge rule. Revisit only with measured read pressure (same
+posture as D-0159's hypertable deferral).
+
+**Insufficiency anchors at `era_start`** (00071): a window reaching left of the current
+contiguous era is `insufficient_history` with no window aggregate — the number "90d" would
+otherwise silently mean "the 3d that exist". Segments still carry their own numbers, so the
+UI can show what exists without the report vouching for what does not. The window aggregate
+also stays withheld across definition revisions even when a diagnostics-only declaration
+caused the boundary (invariant 43's rule is categorical; invariant 42 is honored where it
+binds — no reliability NUMBER moves, and the epoch snapshot hash proves the SLI semantics
+did not).
+
+## D-0164 — current_health is a right-continuous POINT evaluation at the DB as_of (FR-021 phase 2, iter-0140)
+
+The live signal's semantics are a reliability contract and are owned here and in spec §11.3,
+not only in iteration prose ([184] P2-5).
+
+**The contract.** `current_health` is the declared SLI semantics evaluated AT one instant:
+the DB clock's `as_of` (the report snapshot's own `statement_timestamp()`), right-continuous
+— an observation, a stale deadline, a maintenance edge or an epoch boundary effective
+exactly at as_of is included. Observations after as_of (accepted by ingest under
+`result.allowed_skew`) are excluded. The evaluation goes through the SAME member and
+aggregation semantics as the facts — `reliability.StateAt` is composed from the reducer's
+own pieces (`buildSeries` → `censusAt(t)` → `aggregate`), so the live signal and a
+materialized bucket can never disagree about what a member's state at an instant means.
+
+**No fixed-width approximation.** Two window shapes were tried and rejected in review:
+`[as_of − 1µs, as_of)` is the left limit ([175]), and `[as_of, as_of + 1µs)` is splittable —
+freshness durations parse through `time.ParseDuration` with nanosecond granularity, so a
+derived stale deadline can fall strictly inside ANY fixed width ([178]). A point evaluation
+is not an optimization of the window; it is the only shape the precision model admits.
+
+**Unchanged neighbors.** The categorical mapping stays the four declared values
+(down/degraded/healthy/unknown, with an exclusion in force at as_of reading unknown); the
+signal remains `unstable: true` by construction and never reads stored facts; the §11
+reporting numbers remain sealed-facts-only and are untouched by this decision.

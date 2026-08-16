@@ -513,6 +513,26 @@ work, recorded in the iteration reports.
 
 `/readyz` recovers by itself on the next stats cadence (≤15s) once the condition clears.
 
+### Restating pre-fix history (iter-0139 carry-in defect)
+
+Facts sealed BEFORE the iter-0139 carry-in fix may carry a wrong pre-first-observation slice
+in any bucket whose member had two or more observations before the bucket start (the
+evaluator's hold state was undefined and could pick an arbitrary prior row). If a window's
+numbers matter enough to restate, enqueue an audited admin repair over the affected range
+with the shipped command:
+
+```
+cerbix enqueue-service-repair --config /etc/cerbix/config.yaml \
+  --project <project-id> --service <service-id> \
+  --from 2026-06-01T00:00:00Z --to 2026-07-01T00:00:00Z
+```
+
+It goes through the store's own enqueue path — pending same-reason union coalescing, bucket
+flooring/ceiling, the audited `admin` reason — and only ENQUEUES: the scheduler leader
+executes the recompute under the normal repair machinery, with the fixed carry-in, recording
+the before/after movement per §10.6. There is no automatic mass restatement: a correction of
+sealed history is an operator decision, not a background job.
+
 ### Fact partitions
 
 `service_reliability_buckets` is range-partitioned by month in BOTH storage modes. The leader

@@ -404,3 +404,35 @@ func TestSealMaterializesTheIngestRowForAnEmptyBucket(t *testing.T) {
 		t.Fatalf("the seal left no ingest row for an empty bucket: a later arrival would be decided against nothing")
 	}
 }
+
+// iter-0139 — the carry-in state is the LATEST prior observation, by definition, not an
+// arbitrary one. The un-parenthesized DISTINCT ON branch let ANY prior row become the hold
+// state once a member had two of them; a bucket with no in-bucket observations then
+// materialized from whichever row the plan happened to visit first. Two prior observations,
+// old DOWN then recent UP, no in-bucket rows: the bucket must be GOOD end to end.
+func TestCarryInIsTheLatestPriorObservation(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	// Both observations sit INSIDE the member's freshness window at the bucket start, so
+	// staleness cannot mask which row carried in: the wrong (older DOWN) carry-in yields
+	// bad time, the right (newer UP) carry-in yields a fully GOOD minute.
+	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
+	materializeFrom(t, st, ctx, f, base)
+	beat(t, st, ctx, f.http, base.Add(-40*time.Second), false)
+	beat(t, st, ctx, f.http, base.Add(-10*time.Second), true)
+
+	if _, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base, base.Add(time.Minute)); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	fact, ok := readFact(t, st, ctx, f.serviceID, base)
+	if !ok {
+		t.Fatal("no fact")
+	}
+	if fact.good != 60_000_000 {
+		t.Errorf("good = %dµs with a recent UP carry-in, want the whole minute — an arbitrary prior observation held the state", fact.good)
+	}
+	if fact.bad != 0 {
+		t.Errorf("bad = %dµs from an older DOWN that a newer UP superseded", fact.bad)
+	}
+}

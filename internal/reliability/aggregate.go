@@ -244,3 +244,21 @@ func censusAt(series []memberSeries, spans []MaintenanceSpan, p Policies, t time
 	}
 	return out
 }
+
+// StateAt is the POINT evaluator (iter-0140): the aggregated outcome in force AT the
+// instant t, right-continuous — an observation, a stale deadline, a maintenance edge or a
+// policy input effective exactly at t is included, regardless of the sub-microsecond
+// precision of any derived deadline. It is deliberately COMPOSED from the reducer's own
+// pieces — buildSeries → censusAt(t) → aggregate — the exact computation Reduce performs
+// for the sub-interval beginning at t, so the live signal and the facts can never disagree
+// about what a member's state at an instant means. No interval is involved: the iter-0139
+// fixed-width window was splittable by nanosecond-granular freshness deadlines
+// (time.ParseDuration admits them), and any fixed width would be.
+func StateAt(members []Member, observations []Observation, maintenance []MaintenanceSpan, p Policies, t time.Time) Outcome {
+	if len(members) == 0 {
+		// Mirrors aggregate's empty-tally semantics: nothing declared is UNKNOWN, never GOOD.
+		return Outcome{Availability: AvailUnknown, Health: HealthUnknown}
+	}
+	series := buildSeries(members, observations)
+	return aggregate(censusAt(series, maintenance, p, t), p)
+}

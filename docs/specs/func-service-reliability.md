@@ -1394,6 +1394,18 @@ silently reporting a recomputed budget without saying which objective it used is
 **Reporting only in phase 2.** Service SLOs are computed and displayed but do **not** alert
 (§13).
 
+*Amendment (D-0163 / iter-0138):* until phase 5 owns alerting, the displayed burn pair is
+**fixed at 1h/6h** (the approved card), each window `[sealed_through − w, sealed_through)`;
+a pair whose equivalent real-time window holds no sealed time returns
+`insufficient_sealed_coverage`. Hour/day rollups are computed on read as §10.2's exact
+epoch-keyed sums; no rollup table is stored in phase 2.
+
+*Amendment (D-0164 / iter-0140):* `current_health` is a **right-continuous point
+evaluation** at the DB clock's `as_of`: the declared SLI semantics through the same member
+and aggregation rules as the facts, with inputs effective exactly at as_of included and
+observations after as_of excluded. No fixed-width window approximates it — freshness
+durations are nanosecond-granular, so a derived stale deadline can split any width.
+
 ## 12. Presentation
 
 ### 12.1 Reporting across revisions and epochs

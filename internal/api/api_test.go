@@ -556,10 +556,10 @@ func (f *fakeStore) UpsertOIDCSettings(_ context.Context, s domain.OIDCSettings)
 // over sealed facts demands a token bound to THIS mutation. A fake that accepted anything
 // would let the handler ship with the gate removed and the tests still green.
 func (f *fakeStore) CreateMaintenanceWindowChecked(
-	_ context.Context, mw domain.MaintenanceWindow, previewID string, rawFloor time.Time,
+	_ context.Context, mw domain.MaintenanceWindow, previewID string, rawRetention time.Duration,
 ) (domain.MaintenanceWindow, error) {
 	if mw.StartsAt.Before(f.sealedThrough) {
-		if mw.StartsAt.Before(rawFloor) {
+		if rawRetention > 0 && mw.StartsAt.Before(time.Now().Add(-rawRetention)) {
 			return domain.MaintenanceWindow{}, store.ErrUnrecomputableRange
 		}
 		p, ok := f.previews[previewID]
@@ -578,7 +578,7 @@ func (f *fakeStore) CreateMaintenanceWindowChecked(
 
 func (f *fakeStore) PreviewMutationOf(
 	_ context.Context, projectID, monitorID, targetID string, mutation store.MaintenanceMutation,
-	from, to, rawFloor time.Time, createdBy string,
+	from, to time.Time, rawRetention time.Duration, createdBy string,
 ) (store.MaintenancePreview, error) {
 	if f.previews == nil {
 		f.previews = map[string]store.MaintenancePreview{}
@@ -604,7 +604,7 @@ func (f *fakeStore) ArchiveMaintenanceWindow(_ context.Context, projectID, id st
 	return nil
 }
 
-func (f *fakeStore) AnnulMaintenanceWindow(_ context.Context, projectID, id, previewID string, rawFloor time.Time) error {
+func (f *fakeStore) AnnulMaintenanceWindow(_ context.Context, projectID, id, previewID string, rawRetention time.Duration) error {
 	mw, ok := f.maintenance[id]
 	if !ok || mw.ProjectID != projectID {
 		return store.ErrNotFound

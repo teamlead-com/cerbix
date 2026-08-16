@@ -116,6 +116,22 @@ type RegionAggregationPolicy struct {
 	HealthyMinRegions  int        `json:"healthy_min_regions,omitempty"`
 }
 
+// Fan-out limits (func-service-reliability §10.10). Each has a DEFAULT an installation runs
+// with and a HARD MAX it may not be configured past — the hard max is what the storage and
+// reduction costs were sized against, so raising it is not a policy choice an operator gets
+// to make. They live in the domain because two packages need the same numbers: config
+// VALIDATES against them (fail-fast, FR-003) and the store ENFORCES them.
+const (
+	DefaultMaxServicesPerProject = 50
+	HardMaxServicesPerProject    = 200
+
+	DefaultMaxMembersPerRevision = 50
+	HardMaxMembersPerRevision    = 200
+
+	DefaultMaxServicesPerMonitor = 10
+	HardMaxServicesPerMonitor    = 25
+)
+
 // ValidServiceSlug reports whether s is a well-formed service slug, and SlugPattern is that
 // rule spelled for an error message.
 //

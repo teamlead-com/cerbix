@@ -2294,8 +2294,8 @@ export interface paths {
                             services: {
                                 /** Format: uuid */
                                 service_id: string;
-                                before: components["schemas"]["AvailabilitySplit"];
-                                after: components["schemas"]["AvailabilitySplit"];
+                                before: components["schemas"]["ReliabilitySplit"];
+                                after: components["schemas"]["ReliabilitySplit"];
                                 /** @description False when this service's range exceeded the projection bound. */
                                 projected: boolean;
                             }[];
@@ -5348,8 +5348,8 @@ export interface components {
             /** @description The file provider that owns this service; empty when it is UI-owned. Present so the UI can disable the controls rather than discover the 409. */
             managed_by?: string;
         };
-        /** @description One side of a projection: duration in MICROSECONDS across the availability axis. The four conserve to the range's length exactly. */
-        AvailabilitySplit: {
+        /** @description One side of a projection: duration in MICROSECONDS across BOTH conserved axes. Availability (good/bad/unknown/excluded) and health (healthy/degraded/down/health_unknown + shared excluded) each sum to the range's length exactly. Health is carried because a mutation can move it without touching availability — an exclusion entirely inside already-degraded time — and a payload with only the first would show "no change" for a change. */
+        ReliabilitySplit: {
             /** Format: int64 */
             good_us: number;
             /** Format: int64 */
@@ -5358,6 +5358,14 @@ export interface components {
             unknown_us: number;
             /** Format: int64 */
             excluded_us: number;
+            /** Format: int64 */
+            healthy_us: number;
+            /** Format: int64 */
+            degraded_us: number;
+            /** Format: int64 */
+            down_us: number;
+            /** Format: int64 */
+            health_unknown_us: number;
         };
         ServiceSummary: {
             service: components["schemas"]["Service"];

@@ -292,14 +292,41 @@ const maintError = ref("");
 // already have quoted, so the API refuses it without a token issued for exactly that change.
 // This is the operator's half of that: ask what would change, show it, and only then confirm.
 // Without it the ordinary "we had maintenance last night" gets a 409 with nowhere to go.
-type PreviewSplit = { good_us: number; bad_us: number; unknown_us: number; excluded_us: number };
+type PreviewSplit = components["schemas"]["ReliabilitySplit"];
 type PreviewService = { service_id: string; before: PreviewSplit; after: PreviewSplit; projected: boolean };
+// annulTarget is the window an annul preview is for; null means the preview is a create.
 const preview = ref<{ preview_id: string; coverage: string; services: PreviewService[] } | null>(null);
+const annulTarget = ref<MaintenanceWindow | null>(null);
 
 function pct(s: PreviewSplit): string {
-  const decided = s.good_us + s.bad_us;
+  const decided = (s.good_us ?? 0) + (s.bad_us ?? 0);
   if (decided === 0) return "—";
-  return ((s.good_us / decided) * 100).toFixed(3) + "%";
+  return (((s.good_us ?? 0) / decided) * 100).toFixed(3) + "%";
+}
+
+// Health beside availability: a change can move one without the other, and a table showing
+// only the first says "no change" for a change.
+function healthPct(s: PreviewSplit): string {
+  const decided = (s.healthy_us ?? 0) + (s.degraded_us ?? 0) + (s.down_us ?? 0);
+  if (decided === 0) return "—";
+  return (((s.healthy_us ?? 0) / decided) * 100).toFixed(3) + "%";
+}
+
+// loadGen invalidates in-flight answers: a response that started under another project (or an
+// older click) must not render into the current one. The store refuses a cross-tenant confirm
+// anyway, but a preview of project A drawn inside project B misattributes state either way.
+let loadGen = 0;
+
+function resetMaintenanceState() {
+  loadGen++;
+  preview.value = null;
+  annulTarget.value = null;
+  maintError.value = "";
+  maintForm.monitor_id = "";
+  maintForm.starts_at = "";
+  maintForm.ends_at = "";
+  maintForm.reason = "";
+  showMaint.value = false;
 }
 
 async function addMaintenance(previewID?: string) {
@@ -313,11 +340,13 @@ async function addMaintenance(previewID?: string) {
   };
   if (maintForm.monitor_id) body.monitor_id = maintForm.monitor_id;
   if (previewID) body.preview_id = previewID;
+  const gen = loadGen;
   try {
     const res = await api.POST("/api/v1/projects/{projectID}/maintenance", {
       params: { path: { projectID: ws.projectId } },
       body,
     });
+    if (gen !== loadGen) return; // the project moved under this response
     if (res.error || !res.data) {
       const code = (res.error as { error?: string })?.error || "";
       if (code === "preview_required") {
@@ -348,6 +377,7 @@ async function addMaintenance(previewID?: string) {
 }
 
 async function loadPreview() {
+  const gen = loadGen;
   const res = await api.POST("/api/v1/projects/{projectID}/maintenance/preview", {
     params: { path: { projectID: ws.projectId } },
     body: {
@@ -357,11 +387,67 @@ async function loadPreview() {
       ends_at: new Date(maintForm.ends_at).toISOString(),
     },
   });
+  if (gen !== loadGen) return;
   if (res.error || !res.data) {
     maintError.value = (res.error as { error?: string })?.error || "Could not preview the change.";
     return;
   }
+  annulTarget.value = null;
   preview.value = res.data as typeof preview.value;
+}
+
+// ---- annul: say a window never applied -----------------------------------
+//
+// Distinct from archiving on purpose. Archiving retires a window and keeps its past effect;
+// annulling REWRITES history, so it goes preview → shown change → tokened confirm, exactly
+// like a retroactive create.
+async function startAnnul(w: MaintenanceWindow) {
+  if (!w.id || !w.starts_at || !w.ends_at) return;
+  const gen = loadGen;
+  maintError.value = "";
+  const res = await api.POST("/api/v1/projects/{projectID}/maintenance/preview", {
+    params: { path: { projectID: ws.projectId } },
+    body: {
+      monitor_id: w.monitor_id || undefined,
+      mutation: "annul",
+      maintenance_id: w.id,
+      starts_at: w.starts_at,
+      ends_at: w.ends_at,
+    },
+  });
+  if (gen !== loadGen) return;
+  if (res.error || !res.data) {
+    maintError.value = (res.error as { error?: string })?.error || "Could not preview the annul.";
+    return;
+  }
+  showMaint.value = true;
+  annulTarget.value = w;
+  preview.value = res.data as typeof preview.value;
+}
+
+async function confirmAnnul() {
+  const target = annulTarget.value;
+  const token = preview.value?.preview_id;
+  if (!target || !token) return;
+  const gen = loadGen;
+  maintSaving.value = true;
+  try {
+    const res = await api.POST("/api/v1/maintenance/{maintenanceID}/annul", {
+      params: { path: { maintenanceID: target.id! } },
+      body: { preview_id: token },
+    });
+    if (gen !== loadGen) return;
+    if (res.error) {
+      maintError.value = (res.error as { error?: string })?.error || "Could not annul the window.";
+      return;
+    }
+    maintenance.value = maintenance.value.filter((w) => w.id !== target.id);
+    preview.value = null;
+    annulTarget.value = null;
+    showMaint.value = false;
+  } finally {
+    maintSaving.value = false;
+  }
 }
 
 async function deleteMaintenance(id: string) {
@@ -370,7 +456,12 @@ async function deleteMaintenance(id: string) {
 }
 
 onMounted(load);
-watch(() => ws.projectId, load);
+watch(() => ws.projectId, () => {
+  // Sensitive per-tenant state does not survive a project switch: a preview computed for
+  // project A must never be confirmable while the screen shows project B.
+  resetMaintenanceState();
+  load();
+});
 </script>
 
 <template>
@@ -660,15 +751,19 @@ watch(() => ws.projectId, load);
           <!-- A window reaching back over sealed facts restates numbers people may already
                have quoted, so it is SHOWN before it is applied. -->
           <div v-if="preview" class="rounded border border-degraded/40 bg-degraded-weak p-3" data-testid="maint-preview">
-            <div class="text-[12.5px] font-semibold text-degraded">This reaches back over sealed reliability facts.</div>
+            <div class="text-[12.5px] font-semibold text-degraded">
+              {{ annulTarget ? "Annulling says this window never applied — sealed facts are recomputed without it." : "This reaches back over sealed reliability facts." }}
+            </div>
             <p class="mt-1 text-[12px] text-ink-2">
-              Confirming restates numbers that have already been reported. Here is what changes:
+              Confirming restates numbers that have already been reported. Here is what changes, on both axes:
             </p>
             <table class="mt-2 w-full text-[12.5px]">
               <thead>
                 <tr class="text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
                   <th class="py-1 text-left">Service</th>
                   <th class="py-1 text-right">Availability now</th>
+                  <th class="py-1 text-right">After</th>
+                  <th class="py-1 text-right">Health now</th>
                   <th class="py-1 text-right">After</th>
                 </tr>
               </thead>
@@ -679,9 +774,13 @@ watch(() => ws.projectId, load);
                   <td class="py-1 text-right font-mono" :class="svc.projected ? '' : 'text-ink-3'">
                     {{ svc.projected ? pct(svc.after) : "not projected" }}
                   </td>
+                  <td class="py-1 text-right font-mono">{{ healthPct(svc.before) }}</td>
+                  <td class="py-1 text-right font-mono" :class="svc.projected ? '' : 'text-ink-3'">
+                    {{ svc.projected ? healthPct(svc.after) : "—" }}
+                  </td>
                 </tr>
                 <tr v-if="!preview.services.length">
-                  <td colspan="3" class="py-2 text-center text-ink-3">No service reads reliability from this monitor.</td>
+                  <td colspan="5" class="py-2 text-center text-ink-3">No service reads reliability from this monitor.</td>
                 </tr>
               </tbody>
             </table>
@@ -706,11 +805,15 @@ watch(() => ws.projectId, load);
                 :disabled="maintSaving || preview.coverage !== 'complete'"
                 class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50"
                 data-testid="maint-confirm"
-                @click="addMaintenance(preview.preview_id)"
+                @click="annulTarget ? confirmAnnul() : addMaintenance(preview.preview_id)"
               >
-                {{ maintSaving ? "Applying…" : "Confirm and restate" }}
+                {{ maintSaving ? "Applying…" : annulTarget ? "Confirm annul and restate" : "Confirm and restate" }}
               </button>
-              <button type="button" class="h-[34px] rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong" @click="preview = null">
+              <button
+                type="button"
+                class="h-[34px] rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong"
+                @click="preview = null; annulTarget = null"
+              >
                 Cancel
               </button>
             </template>
@@ -732,7 +835,18 @@ watch(() => ws.projectId, load);
                 <span class="block font-mono text-[12.5px] text-ink-2">{{ fmt(w.starts_at) }}</span>
                 <small class="block text-[11px] text-ink-3">{{ duration(w.starts_at, w.ends_at) }}</small>
               </div>
-              <button v-if="canWrite" type="button" class="text-ink-3 hover:text-down" aria-label="Delete window" @click="deleteMaintenance(w.id!)">
+              <!-- Two different removals, on purpose. Archive retires the window and keeps
+                   the time it covered excluded; annul says it NEVER applied and restates the
+                   sealed facts — which is why annul goes through a shown, tokened preview. -->
+              <button
+                v-if="canWrite"
+                type="button"
+                class="rounded-xs px-[7px] py-[2px] text-[11.5px] text-ink-3 hover:bg-degraded-weak hover:text-degraded"
+                data-testid="maint-annul"
+                title="Annul: this window never applied — recompute the facts without it"
+                @click="startAnnul(w)"
+              >annul</button>
+              <button v-if="canWrite" type="button" class="text-ink-3 hover:text-down" aria-label="Archive window" title="Archive: retire the window; its past effect stays" @click="deleteMaintenance(w.id!)">
                 <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18" /></svg>
               </button>
             </div>

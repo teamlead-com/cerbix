@@ -83,7 +83,7 @@ func TestRollupDailyAvailability(t *testing.T) {
 	}
 
 	// A maintenance window over yesterday excludes those heartbeats on re-rollup.
-	if _, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	if _, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: proj.ID, MonitorID: mon.ID,
 		StartsAt: yesterdayNoon.Add(-time.Hour), EndsAt: yesterdayNoon.Add(time.Hour), Reason: "mw",
 	}); err != nil {

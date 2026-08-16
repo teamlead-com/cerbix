@@ -620,7 +620,7 @@ func TestDeletingAMonitorKeepsItsMaintenanceProvenance(t *testing.T) {
 		t.Fatalf("monitor: %v", err)
 	}
 	past := time.Now().UTC().Add(-2 * time.Hour)
-	w, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	w, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: projID, MonitorID: mon.ID,
 		StartsAt: past, EndsAt: past.Add(time.Hour), Reason: "elapsed",
 	})
@@ -733,15 +733,18 @@ func TestTheProjectServiceCapBindsTheBundleToo(t *testing.T) {
 	}
 }
 
-// A configuration may not raise a cap past what the storage and reduction costs were sized for.
-func TestServiceLimitsClampToTheHardMaxima(t *testing.T) {
-	got := clampServiceLimits(ServiceLimits{ServicesPerProject: 9999, MembersPerRevision: 9999, ServicesPerMonitor: 9999})
+// The store's cap is DEFENSE, not policy: operator input is validated fail-fast in
+// internal/config (see config.TestServiceCapsAreRejectedNotReinterpreted), so what reaches
+// here is legal. The store still refuses to run past the hard maxima and fills zeros for
+// programmatic callers that set nothing.
+func TestStoreCapIsDefenseNotReinterpretation(t *testing.T) {
+	got := capServiceLimits(ServiceLimits{ServicesPerProject: 9999, MembersPerRevision: 9999, ServicesPerMonitor: 9999})
 	if got.ServicesPerProject != HardMaxServicesPerProject ||
 		got.MembersPerRevision != HardMaxMembersPerRevision ||
 		got.ServicesPerMonitor != HardMaxServicesPerMonitor {
-		t.Fatalf("clamped to %+v, want the hard maxima", got)
+		t.Fatalf("capped to %+v, want the hard maxima", got)
 	}
-	def := clampServiceLimits(ServiceLimits{})
+	def := capServiceLimits(ServiceLimits{})
 	if def.ServicesPerProject != DefaultMaxServicesPerProject ||
 		def.MembersPerRevision != DefaultMaxMembersPerRevision ||
 		def.ServicesPerMonitor != DefaultMaxServicesPerMonitor {

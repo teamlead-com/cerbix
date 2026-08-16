@@ -30,7 +30,7 @@ func TestMaintenanceDownEnqueuesAndStamps(t *testing.T) {
 	}
 
 	now := time.Now()
-	if _, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	if _, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: proj.ID, Reason: "maint", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("create maintenance: %v", err)

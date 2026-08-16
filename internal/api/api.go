@@ -73,10 +73,10 @@ type Store interface {
 	ProjectSLAReportEnabled(ctx context.Context, projectID string) (bool, error)
 	GetOIDCSettings(ctx context.Context) (domain.OIDCSettings, error)
 	UpsertOIDCSettings(ctx context.Context, s domain.OIDCSettings) error
-	CreateMaintenanceWindowChecked(ctx context.Context, mw domain.MaintenanceWindow, previewID string, rawFloor time.Time) (domain.MaintenanceWindow, error)
-	PreviewMutationOf(ctx context.Context, projectID, monitorID, targetID string, mutation store.MaintenanceMutation, from, to, rawFloor time.Time, createdBy string) (store.MaintenancePreview, error)
+	CreateMaintenanceWindowChecked(ctx context.Context, mw domain.MaintenanceWindow, previewID string, rawRetention time.Duration) (domain.MaintenanceWindow, error)
+	PreviewMutationOf(ctx context.Context, projectID, monitorID, targetID string, mutation store.MaintenanceMutation, from, to time.Time, rawRetention time.Duration, createdBy string) (store.MaintenancePreview, error)
 	ArchiveMaintenanceWindow(ctx context.Context, projectID, id string) error
-	AnnulMaintenanceWindow(ctx context.Context, projectID, id, previewID string, rawFloor time.Time) error
+	AnnulMaintenanceWindow(ctx context.Context, projectID, id, previewID string, rawRetention time.Duration) error
 	ListMaintenanceWindowsByProject(ctx context.Context, projectID string) ([]domain.MaintenanceWindow, error)
 	GetMaintenanceWindow(ctx context.Context, id string) (domain.MaintenanceWindow, error)
 	CreateIncident(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
@@ -352,15 +352,15 @@ func (h *Handler) WithHeartbeatRetention(days int) *Handler {
 	return h
 }
 
-// rawFloor is the earliest instant still recomputable: outside it the raw evidence a repair
-// would read is gone, so a retroactive mutation must fail closed rather than silently
-// producing a window computed from nothing.
-func (h *Handler) rawFloor() time.Time {
+// rawRetention is how long raw heartbeats are kept. The store resolves the actual floor on
+// the DATABASE clock inside the transaction that uses it — passing a process-computed
+// timestamp from here let replica clock skew accept a purged range or reject a whole one.
+func (h *Handler) rawRetention() time.Duration {
 	days := h.heartbeatRetentionDays
 	if days <= 0 {
 		days = 90
 	}
-	return time.Now().UTC().AddDate(0, 0, -days)
+	return time.Duration(days) * 24 * time.Hour
 }
 
 // WithSecretsEnabled sets the project-secret-inventory feature switch

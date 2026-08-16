@@ -618,7 +618,7 @@ func TestSLAAndMaintenanceExclusion(t *testing.T) {
 
 	// A maintenance window covering "now" excludes all four heartbeats.
 	now := time.Now()
-	if _, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	if _, err := st.SeedMaintenanceWindowForTest(ctx, domain.MaintenanceWindow{
 		ProjectID: proj.ID, MonitorID: mon.ID,
 		StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour), Reason: "upgrade",
 	}); err != nil {
@@ -660,12 +660,12 @@ func TestSLATargetUpsert(t *testing.T) {
 	}
 }
 
-func TestMaintenanceWindowCRUD(t *testing.T) {
+func TestMaintenanceWindowLifecycleIsArchiveNotDelete(t *testing.T) {
 	st, ctx := testStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	now := time.Now()
-	mw, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	mw, err := st.SeedMaintenanceWindowForTest(ctx, domain.MaintenanceWindow{
 		ProjectID: proj.ID, StartsAt: now, EndsAt: now.Add(time.Hour), Reason: "x",
 	})
 	if err != nil {
@@ -678,11 +678,19 @@ func TestMaintenanceWindowCRUD(t *testing.T) {
 	if _, err := st.GetMaintenanceWindow(ctx, mw.ID); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if err := st.DeleteMaintenanceWindow(ctx, mw.ID); err != nil {
-		t.Fatalf("delete: %v", err)
+	// The product contract removes a window by ARCHIVING it: the row survives as the
+	// retained exclusion record, and only an annul removes its past effect. There is no
+	// exported hard delete any more — that path destroyed the provenance a later recompute
+	// depends on.
+	if err := st.ArchiveMaintenanceWindow(ctx, proj.ID, mw.ID); err != nil {
+		t.Fatalf("archive: %v", err)
 	}
-	if _, err := st.GetMaintenanceWindow(ctx, mw.ID); err != store.ErrNotFound {
-		t.Fatal("should be gone")
+	if _, err := st.GetMaintenanceWindow(ctx, mw.ID); err != nil {
+		t.Fatalf("an archived window vanished; archiving must retain the row: %v", err)
+	}
+	// Archiving is idempotent-hostile on purpose: the second archive finds nothing active.
+	if err := st.ArchiveMaintenanceWindow(ctx, proj.ID, mw.ID); err != store.ErrNotFound {
+		t.Fatalf("second archive = %v, want ErrNotFound", err)
 	}
 }
 
@@ -1534,7 +1542,7 @@ func TestRecordCheckStatusConfirmationsAndMaintenance(t *testing.T) {
 
 	// With an active maintenance window over the project, a down flip is suppressed.
 	now := time.Now()
-	if _, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	if _, err := st.SeedMaintenanceWindowForTest(ctx, domain.MaintenanceWindow{
 		ProjectID: proj.ID, Reason: "maint", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("create maintenance: %v", err)

@@ -289,7 +289,7 @@ func TestMaintenanceGainsArchiveAndCancelColumns(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	proj, mon, _ := seedService(t, st, ctx)
 	from := time.Now().UTC().Add(-time.Hour)
-	mw, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	mw, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: proj, MonitorID: mon, StartsAt: from, EndsAt: from.Add(2 * time.Hour), Reason: "db failover",
 	})
 	if err != nil {

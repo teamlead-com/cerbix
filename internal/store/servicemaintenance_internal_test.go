@@ -45,7 +45,7 @@ func TestWindowOverUnsealedTimeNeedsNoPreview(t *testing.T) {
 
 	if _, err := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http, StartsAt: from, EndsAt: from.Add(time.Hour), Reason: "planned",
-	}, "", time.Now().UTC().Add(-30*24*time.Hour)); err != nil {
+	}, "", 30*24*time.Hour); err != nil {
 		t.Fatalf("a future window was refused: %v", err)
 	}
 }
@@ -60,7 +60,7 @@ func TestWindowOverSealedTimeRequiresAPreview(t *testing.T) {
 	_, err := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(5 * time.Minute), Reason: "last night",
-	}, "", time.Now().UTC().Add(-30*24*time.Hour))
+	}, "", 30*24*time.Hour)
 	if !errors.Is(err, ErrRetroactiveNeedsPreview) {
 		t.Fatalf("got %v, want ErrRetroactiveNeedsPreview", err)
 	}
@@ -72,7 +72,7 @@ func TestWindowOverSealedTimeRequiresAPreview(t *testing.T) {
 func TestConfirmedRetroactiveWindowInvalidatesImmediately(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
 	beforeGeneration := maintenanceGeneration(t, st, ctx, f.projectID)
 	beforeThrough := sealedThrough(t, st, ctx, f.serviceID)
@@ -80,7 +80,7 @@ func TestConfirmedRetroactiveWindowInvalidatesImmediately(t *testing.T) {
 		t.Fatal("the fixture did not seal anything")
 	}
 
-	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(5*time.Minute), rawFloor, "op")
+	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(5*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestConfirmedRetroactiveWindowInvalidatesImmediately(t *testing.T) {
 	if _, err := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(5 * time.Minute), Reason: "last night",
-	}, p.ID, rawFloor); err != nil {
+	}, p.ID, rawRetention); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 
@@ -125,9 +125,9 @@ func TestConfirmedRetroactiveWindowInvalidatesImmediately(t *testing.T) {
 func TestPreviewTokenIsSpentOnce(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
-	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(5*time.Minute), rawFloor, "op")
+	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(5*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -135,10 +135,10 @@ func TestPreviewTokenIsSpentOnce(t *testing.T) {
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(5 * time.Minute), Reason: "once",
 	}
-	if _, err := st.CreateMaintenanceWindowChecked(ctx, w, p.ID, rawFloor); err != nil {
+	if _, err := st.CreateMaintenanceWindowChecked(ctx, w, p.ID, rawRetention); err != nil {
 		t.Fatalf("first confirm: %v", err)
 	}
-	_, err = st.CreateMaintenanceWindowChecked(ctx, w, p.ID, rawFloor)
+	_, err = st.CreateMaintenanceWindowChecked(ctx, w, p.ID, rawRetention)
 	if !errors.Is(err, ErrPreviewStale) {
 		t.Fatalf("replaying a spent token returned %v, want ErrPreviewStale", err)
 	}
@@ -149,9 +149,9 @@ func TestPreviewTokenIsSpentOnce(t *testing.T) {
 func TestPreviewGoesStaleWhenADeclarationMoves(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
-	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(5*time.Minute), rawFloor, "op")
+	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(5*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestPreviewGoesStaleWhenADeclarationMoves(t *testing.T) {
 	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(5 * time.Minute), Reason: "stale",
-	}, p.ID, rawFloor)
+	}, p.ID, rawRetention)
 	if !errors.Is(err, ErrPreviewStale) {
 		t.Fatalf("got %v, want ErrPreviewStale", err)
 	}
@@ -175,9 +175,9 @@ func TestPreviewGoesStaleWhenADeclarationMoves(t *testing.T) {
 func TestPreviewGoesStaleWhenAServiceJoinsTheAffectedSet(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
-	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(5*time.Minute), rawFloor, "op")
+	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(5*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestPreviewGoesStaleWhenAServiceJoinsTheAffectedSet(t *testing.T) {
 	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(5 * time.Minute), Reason: "set moved",
-	}, p.ID, rawFloor)
+	}, p.ID, rawRetention)
 	if !errors.Is(err, ErrPreviewStale) {
 		t.Fatalf("got %v, want ErrPreviewStale — a service joined the set and would be mutated unpreviewed", err)
 	}
@@ -207,17 +207,20 @@ func TestPreviewGoesStaleWhenAServiceJoinsTheAffectedSet(t *testing.T) {
 func TestRetroactiveMutationBeyondRawFailsClosed(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	// A floor AFTER the range: the raw heartbeats behind those buckets are notionally gone.
-	rawFloor := base.Add(5 * time.Minute)
+	// A retention so short the floor lands AFTER the range: the raw heartbeats behind those
+	// buckets are notionally purged. `base` is ~40 minutes back, so 10 minutes of retention
+	// puts the DB-resolved floor well past it.
+	rawRetention := 10 * time.Minute
+	_ = base
 
-	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(2*time.Minute), rawFloor, "op")
+	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(2*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
 	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "too old",
-	}, p.ID, rawFloor)
+	}, p.ID, rawRetention)
 	if !errors.Is(err, ErrUnrecomputableRange) {
 		t.Fatalf("got %v, want ErrUnrecomputableRange", err)
 	}
@@ -238,7 +241,7 @@ func TestArchiveIsAlwaysPermittedAndLeavesSealedFactsAlone(t *testing.T) {
 	f, base := sealedService(t, st, ctx)
 
 	// A window that already applied to sealed time.
-	w, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	w, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "old",
 	})
@@ -277,9 +280,9 @@ func TestArchiveIsAlwaysPermittedAndLeavesSealedFactsAlone(t *testing.T) {
 func TestAnnulRequiresAPreviewAndRepairsTheRange(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
-	w, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	w, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "mistake",
 	})
@@ -287,7 +290,7 @@ func TestAnnulRequiresAPreviewAndRepairsTheRange(t *testing.T) {
 		t.Fatalf("seed window: %v", err)
 	}
 
-	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, "", rawFloor); !errors.Is(err, ErrRetroactiveNeedsPreview) {
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, "", rawRetention); !errors.Is(err, ErrRetroactiveNeedsPreview) {
 		t.Fatalf("annul without a preview returned %v, want ErrRetroactiveNeedsPreview", err)
 	}
 
@@ -295,11 +298,11 @@ func TestAnnulRequiresAPreviewAndRepairsTheRange(t *testing.T) {
 	// the binding hole this contract closes.
 	// An annul names the WINDOW it removes: two windows over the same monitor and range are
 	// different mutations with different consequences.
-	p, err := st.PreviewMutationOf(ctx, f.projectID, f.http, w.ID, MutationAnnul, base, base.Add(2*time.Minute), rawFloor, "op")
+	p, err := st.PreviewMutationOf(ctx, f.projectID, f.http, w.ID, MutationAnnul, base, base.Add(2*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, p.ID, rawFloor); err != nil {
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, p.ID, rawRetention); err != nil {
 		t.Fatalf("annul: %v", err)
 	}
 	var windows int
@@ -330,10 +333,10 @@ func TestAnnulRequiresAPreviewAndRepairsTheRange(t *testing.T) {
 func TestConfirmedAnnulActuallyRewritesTheSealedFacts(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
 	// A window covering the first two buckets, applied while they were already sealed GOOD.
-	w, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	w, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "planned",
 	})
@@ -362,11 +365,11 @@ func TestConfirmedAnnulActuallyRewritesTheSealedFacts(t *testing.T) {
 	// the binding hole this contract closes.
 	// An annul names the WINDOW it removes: two windows over the same monitor and range are
 	// different mutations with different consequences.
-	p, err := st.PreviewMutationOf(ctx, f.projectID, f.http, w.ID, MutationAnnul, base, base.Add(2*time.Minute), rawFloor, "op")
+	p, err := st.PreviewMutationOf(ctx, f.projectID, f.http, w.ID, MutationAnnul, base, base.Add(2*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, p.ID, rawFloor); err != nil {
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, p.ID, rawRetention); err != nil {
 		t.Fatalf("annul: %v", err)
 	}
 	drainRepair(t, st, ctx)
@@ -419,11 +422,11 @@ func drainRepair(t *testing.T, st *Store, ctx context.Context) {
 func TestAPreviewTokenOnlyAuthorizesTheMutationItWasIssuedFor(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
 	small := func() (string, error) {
 		p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
-			base, base.Add(2*time.Minute), rawFloor, "op")
+			base, base.Add(2*time.Minute), rawRetention, "op")
 		return p.ID, err
 	}
 
@@ -435,7 +438,7 @@ func TestAPreviewTokenOnlyAuthorizesTheMutationItWasIssuedFor(t *testing.T) {
 	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(9 * time.Minute), Reason: "widened",
-	}, id, rawFloor)
+	}, id, rawRetention)
 	if !errors.Is(err, ErrPreviewStale) {
 		t.Errorf("a token for a 2-minute window authorized a 9-minute one: %v", err)
 	}
@@ -456,13 +459,13 @@ func TestAPreviewTokenOnlyAuthorizesTheMutationItWasIssuedFor(t *testing.T) {
 	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.redis,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "wrong monitor",
-	}, id, rawFloor)
+	}, id, rawRetention)
 	if !errors.Is(err, ErrPreviewStale) {
 		t.Errorf("a token for one monitor authorized a window on another with the same affected set: %v", err)
 	}
 
 	// (c) A different KIND. A preview of "create this window" must not confirm an annul.
-	w, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	w, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "seed",
 	})
@@ -473,7 +476,7 @@ func TestAPreviewTokenOnlyAuthorizesTheMutationItWasIssuedFor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, id, rawFloor); !errors.Is(err, ErrPreviewStale) {
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, id, rawRetention); !errors.Is(err, ErrPreviewStale) {
 		t.Errorf("a create-kind token authorized an annul: %v", err)
 	}
 
@@ -485,7 +488,7 @@ func TestAPreviewTokenOnlyAuthorizesTheMutationItWasIssuedFor(t *testing.T) {
 	if _, err := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "exact",
-	}, id, rawFloor); err != nil {
+	}, id, rawRetention); err != nil {
 		t.Errorf("the mutation the token was issued for was refused: %v", err)
 	}
 }
@@ -496,7 +499,7 @@ func TestAPreviewTokenOnlyAuthorizesTheMutationItWasIssuedFor(t *testing.T) {
 func TestDeletingAnAffectedServiceInvalidatesThePreview(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
 	// A SECOND service on the same monitor, so the affected set has two members. With only
 	// one, deleting it leaves nothing for the mutation to touch and no preview is required —
@@ -517,7 +520,7 @@ func TestDeletingAnAffectedServiceInvalidatesThePreview(t *testing.T) {
 	}
 
 	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
-		base, base.Add(2*time.Minute), rawFloor, "op")
+		base, base.Add(2*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -543,7 +546,7 @@ func TestDeletingAnAffectedServiceInvalidatesThePreview(t *testing.T) {
 	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "after the delete",
-	}, p.ID, rawFloor)
+	}, p.ID, rawRetention)
 	if !errors.Is(err, ErrPreviewStale) && !errors.Is(err, ErrRetroactiveNeedsPreview) {
 		t.Errorf("a preview survived the deletion of a service it covered: %v", err)
 	}
@@ -555,10 +558,10 @@ func TestDeletingAnAffectedServiceInvalidatesThePreview(t *testing.T) {
 func TestPreviewProjectsBothSidesOfTheMutation(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
 	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
-		base, base.Add(3*time.Minute), rawFloor, "op")
+		base, base.Add(3*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -587,7 +590,7 @@ func TestPreviewProjectsBothSidesOfTheMutation(t *testing.T) {
 	if _, err := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(3 * time.Minute), Reason: "projected",
-	}, p.ID, rawFloor); err != nil {
+	}, p.ID, rawRetention); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 	drainRepair(t, st, ctx)
@@ -612,16 +615,16 @@ func TestPreviewProjectsBothSidesOfTheMutation(t *testing.T) {
 func TestAnAnnulTokenIsBoundToTheWindowItNames(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
-	first, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	first, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "first",
 	})
 	if err != nil {
 		t.Fatalf("first window: %v", err)
 	}
-	second, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	second, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "second",
 	})
@@ -630,14 +633,14 @@ func TestAnAnnulTokenIsBoundToTheWindowItNames(t *testing.T) {
 	}
 
 	p, err := st.PreviewMutationOf(ctx, f.projectID, f.http, first.ID, MutationAnnul,
-		base, base.Add(2*time.Minute), rawFloor, "op")
+		base, base.Add(2*time.Minute), rawRetention, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, second.ID, p.ID, rawFloor); !errors.Is(err, ErrPreviewStale) {
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, second.ID, p.ID, rawRetention); !errors.Is(err, ErrPreviewStale) {
 		t.Fatalf("a token issued for one window authorized annulling another: %v", err)
 	}
-	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, first.ID, p.ID, rawFloor); err != nil {
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, first.ID, p.ID, rawRetention); err != nil {
 		t.Fatalf("the window the token named was refused: %v", err)
 	}
 }
@@ -648,17 +651,17 @@ func TestAnAnnulTokenIsBoundToTheWindowItNames(t *testing.T) {
 func TestARetroactiveMutationIsAuditedWithItsActorAndToken(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
-	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	rawRetention := 30 * 24 * time.Hour
 
 	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
-		base, base.Add(2*time.Minute), rawFloor, "seymur@teamlead.com")
+		base, base.Add(2*time.Minute), rawRetention, "seymur@teamlead.com")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
 	if _, err := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "audited",
-	}, p.ID, rawFloor); err != nil {
+	}, p.ID, rawRetention); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 

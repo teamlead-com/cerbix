@@ -448,9 +448,17 @@ func (s *Store) putServiceDeclarationTx(
 				return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: read previous inputs: %w", err)
 			}
 			if !prevHadInputs {
+				// The cursor moves WITH the era, in the same statement. The silent period
+				// produces no facts by declaration, so there is nothing there for the
+				// driver to walk — but if the scheduler was down or backlogged through the
+				// silence, `materialized_through` still points at its beginning, and a
+				// revived service would then burn one empty bucket per slice for the whole
+				// gap (90 days of silence = 129 600 buckets) before reaching the new era.
+				// GREATEST keeps a cursor that is somehow already past the boundary.
 				if _, err := tx.Exec(ctx,
 					`UPDATE service_materialization
-					    SET era_start = $2, sealed_through = NULL
+					    SET era_start = $2, sealed_through = NULL,
+					        materialized_through = GREATEST(COALESCE(materialized_through, $2), $2)
 					  WHERE service_id = $1`, serviceID, effectiveAt); err != nil {
 					return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: start materialization era: %w", err)
 				}
@@ -460,26 +468,16 @@ func (s *Store) putServiceDeclarationTx(
 	return rev, epoch, nil
 }
 
-// Fan-out limits (§10.10). Each has a DEFAULT an installation runs with and a HARD MAX it may
-// not be configured past — the hard max is what the storage and reduction costs were sized
-// against, so raising it is not a policy choice an operator gets to make.
-//
-// iter-0125 shipped `MaxServicesPerProject = 500`, which is not a number in the spec at all:
-// the hard max is 200. It was also checked on one of the two writers, so a bundle created
-// services without bound while the AC claimed the cap was refused at the write.
+// The cap numbers are the domain's (§10.10); config validates operator input against them
+// fail-fast, so by the time a value reaches this store it is legal. The store still refuses
+// to run past the hard maxima — defense in depth, not a second interpretation of the config.
 const (
-	DefaultMaxServicesPerProject = 50
-	HardMaxServicesPerProject    = 200
-
-	// DefaultMaxMembersPerRevision caps one declaration's evaluation context. The epoch
-	// snapshots every member and the reducer's breakpoint set grows with them, so an
-	// unbounded list turns one write into an unbounded snapshot and one bucket into an
-	// unbounded reduction.
-	DefaultMaxMembersPerRevision = 50
-	HardMaxMembersPerRevision    = 200
-
-	DefaultMaxServicesPerMonitor = 10
-	HardMaxServicesPerMonitor    = 25
+	DefaultMaxServicesPerProject = domain.DefaultMaxServicesPerProject
+	HardMaxServicesPerProject    = domain.HardMaxServicesPerProject
+	DefaultMaxMembersPerRevision = domain.DefaultMaxMembersPerRevision
+	HardMaxMembersPerRevision    = domain.HardMaxMembersPerRevision
+	DefaultMaxServicesPerMonitor = domain.DefaultMaxServicesPerMonitor
+	HardMaxServicesPerMonitor    = domain.HardMaxServicesPerMonitor
 )
 
 // ServiceLimits is the resolved, clamped policy this store enforces.
@@ -489,11 +487,12 @@ type ServiceLimits struct {
 	ServicesPerMonitor int
 }
 
-// clampServiceLimits fills zeros with the defaults and refuses to exceed the hard maxima. A
-// configuration that asks for more gets the maximum rather than an error: the cap exists to
-// protect the installation, and failing to start over it would be a worse outcome than
-// quietly enforcing the bound the code was sized for.
-func clampServiceLimits(in ServiceLimits) ServiceLimits {
+// capServiceLimits fills zeros with the defaults (for programmatic callers that set nothing)
+// and refuses to run past the hard maxima. It is DEFENSE, not policy: operator configuration
+// is validated fail-fast in internal/config, which REJECTS a negative or over-maximum value
+// at startup rather than silently reinterpreting it — a config the operator wrote and the
+// config the system runs must be the same config (FR-003).
+func capServiceLimits(in ServiceLimits) ServiceLimits {
 	pick := func(v, def, hard int) int {
 		if v <= 0 {
 			v = def
@@ -511,7 +510,7 @@ func clampServiceLimits(in ServiceLimits) ServiceLimits {
 }
 
 // serviceLimits resolves what this store enforces right now.
-func (s *Store) serviceLimits() ServiceLimits { return clampServiceLimits(s.svcLimits) }
+func (s *Store) serviceLimits() ServiceLimits { return capServiceLimits(s.svcLimits) }
 
 // assertProjectServiceCapTx is the ONE owner of the per-project cap, shared by the UI create
 // and the file-provider apply. Two writers with one counting them is how the cap became a

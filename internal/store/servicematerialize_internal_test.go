@@ -243,7 +243,7 @@ func TestArchivedMaintenanceKeepsItsEffectiveSpan(t *testing.T) {
 	materializeFrom(t, st, ctx, f, base)
 	beat(t, st, ctx, f.http, base.Add(-5*time.Second), false) // would be BAD without the window
 
-	mw, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	mw, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(time.Minute), Reason: "db failover",
 	})
@@ -281,7 +281,7 @@ func TestCancelledWindowTruncatesAtItsExactInstant(t *testing.T) {
 	materializeFrom(t, st, ctx, f, base)
 	beat(t, st, ctx, f.http, base.Add(-5*time.Second), true)
 
-	mw, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+	mw, err := st.createMaintenanceWindowUnchecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
 		StartsAt: base, EndsAt: base.Add(time.Minute), Reason: "cut short",
 	})

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // Config is the validated configuration snapshot used by the runtime.
@@ -177,10 +179,11 @@ type ResultConfig struct {
 
 // ServicesConfig bounds service fan-out (func-service-reliability §10.10).
 //
-// Each value has a default and a HARD MAXIMUM the store clamps to. The maximum is what the
-// storage and reduction costs were sized against, so it is not a policy an operator gets to
-// raise; a configuration asking for more is enforced at the maximum rather than refused,
-// because failing to start over a bound is a worse outcome than quietly holding it.
+// Each value has a default and a HARD MAXIMUM the domain owns. Validate REJECTS a value
+// outside [1, hard max] at startup: silently mapping an illegal value to a legal one would
+// mean the config the operator wrote and the config the system runs are different configs,
+// which is exactly what FR-003's fail-fast contract forbids. The store additionally refuses
+// to run past the hard maxima as defense in depth.
 type ServicesConfig struct {
 	// MaxServicesPerProject caps declaration growth (default 50, hard max 200).
 	MaxServicesPerProject int `yaml:"max_services_per_project"`
@@ -429,6 +432,11 @@ func defaults() *Config {
 		Heartbeats: HeartbeatsConfig{
 			RetentionDays: 30,
 		},
+		Services: ServicesConfig{
+			MaxServicesPerProject: domain.DefaultMaxServicesPerProject,
+			MaxMembersPerRevision: domain.DefaultMaxMembersPerRevision,
+			MaxServicesPerMonitor: domain.DefaultMaxServicesPerMonitor,
+		},
 	}
 }
 
@@ -463,6 +471,26 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("database.dsn is required when oidc is enabled (sessions and users need Postgres)")
 		}
 	}
+	// Service fan-out caps (func-service-reliability §10.10). Fail fast: a value the domain
+	// forbids is REJECTED at startup, never silently mapped to something legal — the config
+	// the operator wrote and the config the system runs must be the same config.
+	for _, cap := range []struct {
+		name string
+		v    int
+		hard int
+	}{
+		{"services.max_services_per_project", c.Services.MaxServicesPerProject, domain.HardMaxServicesPerProject},
+		{"services.max_members_per_revision", c.Services.MaxMembersPerRevision, domain.HardMaxMembersPerRevision},
+		{"services.max_services_per_monitor", c.Services.MaxServicesPerMonitor, domain.HardMaxServicesPerMonitor},
+	} {
+		if cap.v < 1 {
+			return fmt.Errorf("%s must be at least 1, got %d", cap.name, cap.v)
+		}
+		if cap.v > cap.hard {
+			return fmt.Errorf("%s must not exceed the hard maximum %d, got %d", cap.name, cap.hard, cap.v)
+		}
+	}
+
 	if c.Local.Enabled {
 		if c.Database.DSN == "" {
 			return fmt.Errorf("database.dsn is required when local login is enabled")

@@ -8,7 +8,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -232,6 +231,12 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 			// stale reading: two batches of one range must not commit under two different
 			// "current" maintenance declarations.
 			return s.releaseRepairRange(ctx, db, r.ID, cursor, err)
+		case errors.Is(err, ErrEvidenceGone):
+			// TERMINAL, not a retry: the evidence is destroyed, and every retry would hit
+			// the same wall while the range sat in the queue looking like progress-to-be.
+			// The `error` state is the honest surface — the sealed facts stay as the record
+			// of what was measured, and an operator can see WHY the range will not run.
+			return s.markRepairRangeUnrecomputable(ctx, db, r.ID, cursor, err)
 		case err != nil:
 			return s.failRepairRange(ctx, db, r, cursor, err)
 		}
@@ -268,15 +273,19 @@ func adaptRepairBatch(batch int, spent, budget time.Duration) int {
 	return batch
 }
 
-// runRepairBatch materializes one batch and advances the cursor in ONE transaction, on a
-// DEDICATED connection whose server-side timeouts are derived from what is left of the
-// slice.
+// runRepairBatch materializes one batch and advances the cursor in ONE transaction whose
+// server-side timeouts are derived from what is left of the slice — as SET LOCAL, inside
+// that transaction.
 //
-// The connection matters. `SET LOCAL` outside a transaction is a no-op, and a context
-// deadline cancels the client's wait without bounding how long the server keeps holding a
-// lock. Setting `statement_timeout` and `lock_timeout` on this session is what actually
-// stops a wait from outliving the slice — and it is the same shape the leader will need
-// when its batches move onto the lock-owning connection.
+// TX-LOCAL is the load-bearing word. An earlier version set session-level timeouts, and on
+// the leader path `db` IS the lock-owning connection: the session then carried this batch's
+// 250ms into everything that ran on it afterwards — the leadership Check, the advisory
+// unlock, and (because Release does not reset session parameters and ignores the unlock
+// error) potentially a pooled connection handed to the next caller while still holding the
+// scheduler's lock. SET LOCAL dies with the transaction, so the session after the batch is
+// the session before it. The values are re-derived from the REMAINING budget on every batch,
+// per D-0159 — a bound set once at slice start would let the last batch inherit the first
+// batch's generosity.
 func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, from, to time.Time, budget time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -285,40 +294,29 @@ func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, fr
 	if ms < 1 {
 		ms = 1
 	}
-	// When the caller handed us the POOL we take one connection for the batch, because the
-	// timeouts below are session state and must apply to the same session the work runs on.
-	// When the caller handed us a pinned connection — the leader's lock-owning one — we use
-	// it as given: that is the whole point of the fence.
-	if pool, isPool := db.(*pgxpool.Pool); isPool {
-		conn, err := pool.Acquire(ctx)
-		if err != nil {
-			return fmt.Errorf("store: acquire repair connection: %w", err)
-		}
-		defer conn.Release()
-		db = conn
-	}
-	for _, stmt := range []string{
-		fmt.Sprintf("SET statement_timeout = %d", ms),
-		fmt.Sprintf("SET lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
-	} {
-		if _, err := db.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("store: set repair timeouts: %w", err)
-		}
-	}
-
-	current, err := maintenanceGenerationOn(ctx, db, r.ProjectID)
-	if err != nil {
-		return err
-	}
-	if current != r.Generation {
-		return ErrRangeSuperseded
-	}
 
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin repair batch: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	for _, stmt := range []string{
+		fmt.Sprintf("SET LOCAL statement_timeout = %d", ms),
+		fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
+	} {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("store: set repair timeouts: %w", err)
+		}
+	}
+
+	current, err := maintenanceGenerationOn(ctx, tx, r.ProjectID)
+	if err != nil {
+		return err
+	}
+	if current != r.Generation {
+		return ErrRangeSuperseded
+	}
 
 	if _, err := s.materializeRangeTx(ctx, tx, r.ProjectID, r.ServiceID, from, to, modeRecompute); err != nil {
 		return err
@@ -412,6 +410,18 @@ func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, c
 // failRepairRange records an error and backs off. The backoff has a floor so a persistent
 // fault cannot become a hot loop, and the range stays claimable rather than being dropped —
 // a range nobody retries is a hole in a watermark defined by contiguity.
+// markRepairRangeUnrecomputable parks a range whose evidence no longer exists. Unlike a
+// failure it does not schedule a retry: retrying cannot bring deleted heartbeats back.
+func (s *Store) markRepairRangeUnrecomputable(ctx context.Context, db dbConn, id string, cursor time.Time, cause error) error {
+	if _, err := db.Exec(ctx,
+		`UPDATE service_repair_ranges
+		    SET state = 'error', cursor_at = $2, last_error = $3, updated_at = now()
+		  WHERE id = $1`, id, cursor, cause.Error()); err != nil {
+		return fmt.Errorf("store: mark range unrecomputable: %w", err)
+	}
+	return cause
+}
+
 func (s *Store) failRepairRange(ctx context.Context, db dbConn, r RepairRange, cursor time.Time, cause error) error {
 	backoff := repairBackoff(r.Attempts + 1)
 	if _, err := db.Exec(ctx,

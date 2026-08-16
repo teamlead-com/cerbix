@@ -163,8 +163,11 @@ type Store struct {
 	// WithResultPolicy at wiring.
 	resultSkew      time.Duration
 	resultRetention time.Duration
-	// svcLimits is the configured service fan-out policy, clamped to the hard maxima on read.
-	svcLimits          ServiceLimits
+	// svcLimits is the configured service fan-out policy, capped to the hard maxima on read.
+	svcLimits ServiceLimits
+	// previewBudget overrides the maintenance-preview wall budget; zero means the default.
+	// It exists for tests — production uses the default.
+	previewBudget      time.Duration
 	resultRevisionMode string // "enforce" (default) | "observe"
 }
 

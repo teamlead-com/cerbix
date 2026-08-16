@@ -45,6 +45,22 @@ var (
 	ErrUnrecomputableRange = errors.New("store: range is no longer recomputable from raw data")
 )
 
+// resolveRawFloorTx computes the earliest recomputable instant on the DATABASE clock. A
+// non-positive retention means "no raw purge is configured", which resolves to the epoch —
+// everything retained is repairable.
+func resolveRawFloorTx(ctx context.Context, tx pgx.Tx, retention time.Duration) (time.Time, error) {
+	if retention <= 0 {
+		return time.Unix(0, 0).UTC(), nil
+	}
+	var floor time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT statement_timestamp() - ($1 * interval '1 microsecond')`,
+		retention.Microseconds()).Scan(&floor); err != nil {
+		return time.Time{}, fmt.Errorf("store: resolve raw floor: %w", err)
+	}
+	return floor, nil
+}
+
 // PreviewExpiry bounds how long a preview token stays confirmable.
 const PreviewExpiry = 10 * time.Minute
 
@@ -96,9 +112,11 @@ type MaintenancePreview struct {
 
 // PreviewMaintenanceMutation computes what a retroactive create or annul would change.
 //
-// rawFloor is the earliest instant still recomputable — the caller resolves it from
-// heartbeat retention, because that is a settings question and this package does no
-// settings I/O.
+// rawRetention is how long raw heartbeats are kept; the earliest recomputable instant (the
+// "raw floor") is resolved from it ON THE DATABASE CLOCK, inside the same transaction as the
+// check it gates. Passing a process-computed floor here let replica clock skew accept a range
+// whose raw evidence was already purged, or reject one that was still whole — every other
+// instant in this protocol is the database's, and this one is no exception.
 // MaintenanceMutation names WHICH change a preview authorizes. A token has to carry it: a
 // preview of "annul this window" must not confirm "create a window here".
 type MaintenanceMutation string
@@ -109,18 +127,18 @@ const (
 )
 
 func (s *Store) PreviewMaintenanceMutation(
-	ctx context.Context, projectID, monitorID string, from, to, rawFloor time.Time, createdBy string,
+	ctx context.Context, projectID, monitorID string, from, to time.Time, rawRetention time.Duration, createdBy string,
 ) (MaintenancePreview, error) {
-	return s.PreviewMutation(ctx, projectID, monitorID, MutationCreate, from, to, rawFloor, createdBy)
+	return s.PreviewMutation(ctx, projectID, monitorID, MutationCreate, from, to, rawRetention, createdBy)
 }
 
 // PreviewMutation computes what a retroactive mutation would change and issues a token BOUND
 // to it: the monitor, the exact range and the kind of change.
 func (s *Store) PreviewMutation(
 	ctx context.Context, projectID, monitorID string, mutation MaintenanceMutation,
-	from, to, rawFloor time.Time, createdBy string,
+	from, to time.Time, rawRetention time.Duration, createdBy string,
 ) (MaintenancePreview, error) {
-	return s.PreviewMutationOf(ctx, projectID, monitorID, "", mutation, from, to, rawFloor, createdBy)
+	return s.PreviewMutationOf(ctx, projectID, monitorID, "", mutation, from, to, rawRetention, createdBy)
 }
 
 // PreviewMutationOf is the full form: `targetID` names the window an annul would remove.
@@ -131,18 +149,44 @@ func (s *Store) PreviewMutation(
 // must not confirm the other.
 func (s *Store) PreviewMutationOf(
 	ctx context.Context, projectID, monitorID, targetID string, mutation MaintenanceMutation,
-	from, to, rawFloor time.Time, createdBy string,
+	from, to time.Time, rawRetention time.Duration, createdBy string,
 ) (MaintenancePreview, error) {
 	if !to.After(from) {
 		return MaintenancePreview{}, fmt.Errorf("store: preview range end %s is not after start %s", to, from)
 	}
+	// The projection runs UNDER the project's membership advisory lock — it has to, or the
+	// affected set could move between projection and token — which makes its runtime the
+	// project's runtime: while it holds the lock, service create/delete/declaration and
+	// every other maintenance mutation wait behind it. So the whole slice is bounded twice:
+	// a wall deadline the loop checks between buckets, and SET LOCAL server timeouts that
+	// stop any single statement from waiting past it. A projection that runs out of budget
+	// degrades to `approximate` — the truthful answer — instead of holding the project.
+	deadline := time.Now().Add(s.previewWallBudget())
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return MaintenancePreview{}, fmt.Errorf("store: begin preview: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
+	budgetMS := s.previewWallBudget().Milliseconds()
+	if budgetMS < 1 {
+		budgetMS = 1
+	}
+	for _, stmt := range []string{
+		fmt.Sprintf("SET LOCAL statement_timeout = %d", budgetMS),
+		fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(budgetMS, repairLockTimeout.Milliseconds())),
+	} {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			return MaintenancePreview{}, fmt.Errorf("store: set preview timeouts: %w", err)
+		}
+	}
+
 	if err := lockServiceMembership(ctx, tx, projectID); err != nil {
+		return MaintenancePreview{}, err
+	}
+	rawFloor, err := resolveRawFloorTx(ctx, tx, rawRetention)
+	if err != nil {
 		return MaintenancePreview{}, err
 	}
 	services, err := servicesAffectedByWindow(ctx, tx, projectID, monitorID, from, to)
@@ -173,7 +217,7 @@ func (s *Store) PreviewMutationOf(
 		if aerr != nil {
 			return MaintenancePreview{}, aerr
 		}
-		after, projected, perr := s.projectMutation(ctx, tx, projectID, services[i].ServiceID, from, to, addSpan, dropID)
+		after, projected, perr := s.projectMutation(ctx, tx, projectID, services[i].ServiceID, from, to, addSpan, dropID, deadline)
 		if perr != nil {
 			return MaintenancePreview{}, perr
 		}
@@ -214,11 +258,16 @@ func (s *Store) PreviewMutationOf(
 			`INSERT INTO maintenance_preview_services
 			   (preview_id, project_id, service_id, definition_generation,
 			    before_good_us, before_bad_us, before_unknown_us, before_excluded_us,
-			    after_good_us, after_bad_us, after_unknown_us, after_excluded_us, projected)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+			    after_good_us, after_bad_us, after_unknown_us, after_excluded_us,
+			    before_healthy_us, before_degraded_us, before_down_us, before_health_unknown_us,
+			    after_healthy_us, after_degraded_us, after_down_us, after_health_unknown_us,
+			    projected)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
 			p.ID, projectID, svc.ServiceID, svc.DefinitionGeneration,
 			svc.Before.Good, svc.Before.Bad, svc.Before.Unknown, svc.Before.Excluded,
 			svc.After.Good, svc.After.Bad, svc.After.Unknown, svc.After.Excluded,
+			svc.Before.Healthy, svc.Before.Degraded, svc.Before.Down, svc.Before.HealthUnknown,
+			svc.After.Healthy, svc.After.Degraded, svc.After.Down, svc.After.HealthUnknown,
 			svc.Projected); err != nil {
 			return MaintenancePreview{}, fmt.Errorf("store: insert preview service: %w", err)
 		}
@@ -293,11 +342,18 @@ func rangeIntersectsSealed(ctx context.Context, tx pgx.Tx, services []PreviewSer
 	for _, svc := range services {
 		ids = append(ids, svc.ServiceID)
 	}
+	// INTERVAL overlap, not boundary membership. A window entirely inside one bucket —
+	// [10:00:30, 10:00:45) — contains no bucket_start at all, so `bucket_start >= from AND
+	// bucket_start < to` counted zero, the mutation needed no token, and the invalidation
+	// then FLOORED to 10:00 and rewrote exactly the sealed bucket this gate exists to guard.
+	// A half-open range overlaps a bucket iff it starts before the bucket ends and ends
+	// after the bucket starts.
 	var n int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FROM service_reliability_buckets
-		  WHERE service_id = ANY($1) AND state='sealed' AND bucket_start >= $2 AND bucket_start < $3`,
-		ids, from, to).Scan(&n); err != nil {
+		  WHERE service_id = ANY($1) AND state='sealed'
+		    AND bucket_start < $3 AND bucket_start + ($4 * interval '1 microsecond') > $2`,
+		ids, from, to, domain.CanonicalBucket.Microseconds()).Scan(&n); err != nil {
 		return false, fmt.Errorf("store: check sealed intersection: %w", err)
 	}
 	return n > 0, nil
@@ -309,7 +365,7 @@ func rangeIntersectsSealed(ctx context.Context, tx pgx.Tx, services []PreviewSer
 // intersect sealed facts the mutation is a retroactive repair by definition — whether it is
 // a create or an annul — and it requires a confirmed preview.
 func (s *Store) CreateMaintenanceWindowChecked(
-	ctx context.Context, w domain.MaintenanceWindow, previewID string, rawFloor time.Time,
+	ctx context.Context, w domain.MaintenanceWindow, previewID string, rawRetention time.Duration,
 ) (domain.MaintenanceWindow, error) {
 	if err := w.Validate(); err != nil {
 		return domain.MaintenanceWindow{}, err
@@ -336,6 +392,10 @@ func (s *Store) CreateMaintenanceWindowChecked(
 			return domain.MaintenanceWindow{}, ErrRetroactiveNeedsPreview
 		}
 		binding := previewBinding{monitorID: w.MonitorID, mutation: MutationCreate, from: w.StartsAt, to: w.EndsAt}
+		rawFloor, ferr := resolveRawFloorTx(ctx, tx, rawRetention)
+		if ferr != nil {
+			return domain.MaintenanceWindow{}, ferr
+		}
 		actor, cerr := confirmPreviewTx(ctx, tx, w.ProjectID, previewID, services, binding, w.StartsAt, rawFloor)
 		if cerr != nil {
 			return domain.MaintenanceWindow{}, cerr
@@ -400,7 +460,7 @@ func (s *Store) ArchiveMaintenanceWindow(ctx context.Context, projectID, id stri
 // This is the privileged act that says the exclusion was a mistake, so it carries the
 // preview, the audit and the raw fence — and it is the ONLY thing that takes a span out of
 // the evaluator's input.
-func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previewID string, rawFloor time.Time) error {
+func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previewID string, rawRetention time.Duration) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin annul: %w", err)
@@ -435,6 +495,10 @@ func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previ
 			return ErrRetroactiveNeedsPreview
 		}
 		binding := previewBinding{monitorID: monitorID, targetID: id, mutation: MutationAnnul, from: from, to: to}
+		rawFloor, ferr := resolveRawFloorTx(ctx, tx, rawRetention)
+		if ferr != nil {
+			return ferr
+		}
 		actor, cerr := confirmPreviewTx(ctx, tx, projectID, previewID, services, binding, from, rawFloor)
 		if cerr != nil {
 			return cerr
@@ -658,6 +722,14 @@ func orDash(s string) string {
 // what they WOULD become, by running the same reducer the materializer runs, over the same
 // range, with the mutation applied — and writing nothing.
 
+// previewWallBudget is how long one preview may hold the project's membership lock.
+func (s *Store) previewWallBudget() time.Duration {
+	if s.previewBudget > 0 {
+		return s.previewBudget
+	}
+	return 2 * time.Second
+}
+
 // previewProjectionBudget bounds how many buckets one preview will re-reduce. Past it the
 // preview is honestly `approximate` and a confirm refuses it: a change nobody could be shown
 // is not one an operator can be said to have approved.
@@ -668,12 +740,18 @@ const previewProjectionBudget = 4320 // three days of canonical buckets
 // window an annul would remove. Exactly one is set.
 func (s *Store) projectMutation(
 	ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to time.Time,
-	addSpan *reliability.MaintenanceSpan, dropWindowID string,
+	addSpan *reliability.MaintenanceSpan, dropWindowID string, deadline time.Time,
 ) (agg ServiceAggregate, projected bool, err error) {
 	if to.Sub(from)/domain.CanonicalBucket > previewProjectionBudget {
 		return ServiceAggregate{}, false, nil
 	}
 	for at := domain.FloorToBucket(from); at.Before(to); at = at.Add(domain.CanonicalBucket) {
+		// The bucket count above bounds WORK; this bounds TIME. Slow buckets under a small
+		// count still hold the project's membership lock, and a preview that cannot finish
+		// inside its wall budget is honestly approximate rather than expensively complete.
+		if !time.Now().Before(deadline) {
+			return ServiceAggregate{}, false, nil
+		}
 		end := at.Add(domain.CanonicalBucket)
 		epochID, members, policies, eerr := epochAt(ctx, tx, serviceID, at)
 		if eerr != nil {
@@ -681,6 +759,15 @@ func (s *Store) projectMutation(
 		}
 		if epochID == "" || len(members) == 0 {
 			continue
+		}
+		// Evidence destroyed since sealing makes the range unrecomputable: the confirm's
+		// repair would park with ErrEvidenceGone, so the token must be unconfirmable NOW —
+		// an approved projection of a change that cannot run is a promise the system knows
+		// it will break.
+		if gone, gerr := anyMemberMonitorGone(ctx, tx, members); gerr != nil {
+			return ServiceAggregate{}, false, gerr
+		} else if gone {
+			return ServiceAggregate{}, false, nil
 		}
 		observations, oerr := observationsFor(ctx, tx, members, at, end)
 		if oerr != nil {
@@ -716,24 +803,42 @@ func (s *Store) projectMutation(
 		agg.Bad += b.Durations.Bad.Microseconds()
 		agg.Unknown += b.Durations.Unknown.Microseconds()
 		agg.Excluded += b.Durations.Excluded.Microseconds()
+		agg.Healthy += b.Durations.Healthy.Microseconds()
+		agg.Degraded += b.Durations.Degraded.Microseconds()
+		agg.Down += b.Durations.Down.Microseconds()
+		agg.HealthUnknown += b.Durations.HealthUnknown.Microseconds()
 	}
 	return agg, true, nil
 }
 
-// ServiceAggregate is the four-way availability split over a range, in microseconds. It is
-// what a preview shows on both sides of a mutation.
-type ServiceAggregate struct{ Good, Bad, Unknown, Excluded int64 }
+// ServiceAggregate is one side of a projection: BOTH conserved axes over a range, in
+// microseconds. Health is carried alongside availability because a mutation can move one
+// without the other — an exclusion landing entirely inside already-degraded time changes
+// health history and leaves good/bad untouched, and a preview showing only availability
+// reports "no change" for a change.
+type ServiceAggregate struct {
+	Good, Bad, Unknown, Excluded           int64
+	Healthy, Degraded, Down, HealthUnknown int64
+}
 
 // currentAggregate sums what the service ALREADY reports over the range, straight from the
 // facts — the "before" half of the projection.
 func currentAggregate(ctx context.Context, tx pgx.Tx, serviceID string, from, to time.Time) (ServiceAggregate, error) {
+	// The same interval-overlap rule as the gate: a sub-minute range still reads the bucket
+	// it lives inside, or the "before" side of a projection would show nothing for exactly
+	// the mutation whose window is smaller than a bucket.
 	var a ServiceAggregate
 	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE(SUM(good_us),0), COALESCE(SUM(bad_us),0),
-		        COALESCE(SUM(unknown_us),0), COALESCE(SUM(excluded_us),0)
+		        COALESCE(SUM(unknown_us),0), COALESCE(SUM(excluded_us),0),
+		        COALESCE(SUM(healthy_us),0), COALESCE(SUM(degraded_us),0),
+		        COALESCE(SUM(down_us),0), COALESCE(SUM(health_unknown_us),0)
 		   FROM service_reliability_buckets
-		  WHERE service_id = $1 AND bucket_start >= $2 AND bucket_start < $3`,
-		serviceID, from, to).Scan(&a.Good, &a.Bad, &a.Unknown, &a.Excluded); err != nil {
+		  WHERE service_id = $1
+		    AND bucket_start < $3 AND bucket_start + ($4 * interval '1 microsecond') > $2`,
+		serviceID, from, to, domain.CanonicalBucket.Microseconds()).
+		Scan(&a.Good, &a.Bad, &a.Unknown, &a.Excluded,
+			&a.Healthy, &a.Degraded, &a.Down, &a.HealthUnknown); err != nil {
 		return ServiceAggregate{}, fmt.Errorf("store: read current aggregate: %w", err)
 	}
 	return a, nil

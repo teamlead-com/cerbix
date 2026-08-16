@@ -465,7 +465,12 @@ func (s *Store) MonitorInMaintenance(ctx context.Context, monitorID string) (boo
 }
 
 // CreateMaintenanceWindow inserts a maintenance window (validated in domain).
-func (s *Store) CreateMaintenanceWindow(ctx context.Context, mw domain.MaintenanceWindow) (domain.MaintenanceWindow, error) {
+// createMaintenanceWindowUnchecked inserts a window with NO preview, generation, repair or
+// audit. It is deliberately unexported: the checked family (CreateMaintenanceWindowChecked /
+// Archive / Annul) is the only contract production may use, and an exported unchecked writer
+// is a standing invitation for the next caller to bypass it. Store-internal tests seed
+// through this when the fixture predates the contract on purpose.
+func (s *Store) createMaintenanceWindowUnchecked(ctx context.Context, mw domain.MaintenanceWindow) (domain.MaintenanceWindow, error) {
 	if err := mw.Validate(); err != nil {
 		return domain.MaintenanceWindow{}, fmt.Errorf("store: invalid maintenance window: %w", err)
 	}
@@ -517,16 +522,4 @@ func (s *Store) GetMaintenanceWindow(ctx context.Context, id string) (domain.Mai
 		return domain.MaintenanceWindow{}, fmt.Errorf("store: get maintenance window: %w", err)
 	}
 	return mw, nil
-}
-
-// DeleteMaintenanceWindow removes a maintenance window.
-func (s *Store) DeleteMaintenanceWindow(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM maintenance_windows WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("store: delete maintenance window: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
 }

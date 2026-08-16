@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -96,28 +97,44 @@ func (s *Store) RecordHistoricalResults(ctx context.Context, hbs []domain.Heartb
 		return 0, 0, fmt.Errorf("store: backfill filter iterate: %w", err)
 	}
 
-	batch := &pgx.Batch{}
-	queued := make([]domain.Heartbeat, 0, len(hbs))
+	accepted := make([]domain.Heartbeat, 0, len(hbs))
 	for _, hb := range hbs {
 		if !live[hb.MonitorID] {
 			skipped++ // monitor gone
 			continue
 		}
-		ts := hb.Ts
 		// Per-row timestamp bounds — identical to scheduled; each invalid row is skipped
 		// (never a synthetic "now").
-		if ts.IsZero() || ts.After(dbNow.Add(skew)) || (s.resultRetention > 0 && ts.Before(dbNow.Add(-s.resultRetention))) {
+		if hb.Ts.IsZero() || hb.Ts.After(dbNow.Add(skew)) || (s.resultRetention > 0 && hb.Ts.Before(dbNow.Add(-s.resultRetention))) {
 			skipped++
 			continue
 		}
-		queued = append(queued, domain.Heartbeat{MonitorID: hb.MonitorID, Ts: ts})
+		accepted = append(accepted, hb)
+	}
+	if len(accepted) == 0 {
+		return 0, skipped, nil
+	}
+
+	// The RAW inserts take their (monitor_id, ts) keys in one global order too, not just the
+	// service marks downstream. Two overlapping backfills inserting the same PK set in
+	// different input orders lock the conflicting rows in opposite sequences and deadlock
+	// before the service-key sorting is ever reached — the batch runs inside one
+	// transaction, so every Queue below is a lock in input order.
+	sort.Slice(accepted, func(i, j int) bool {
+		if accepted[i].MonitorID != accepted[j].MonitorID {
+			return accepted[i].MonitorID < accepted[j].MonitorID
+		}
+		return accepted[i].Ts.Before(accepted[j].Ts)
+	})
+
+	batch := &pgx.Batch{}
+	queued := make([]domain.Heartbeat, 0, len(accepted))
+	for _, hb := range accepted {
+		queued = append(queued, domain.Heartbeat{MonitorID: hb.MonitorID, Ts: hb.Ts})
 		batch.Queue(
 			`INSERT INTO heartbeats (monitor_id, ts, up, latency_ms, code, msg, observed_at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$2) ON CONFLICT (monitor_id, ts) DO NOTHING`,
-			hb.MonitorID, ts, hb.Up, hb.LatencyMS, hb.Code, hb.Msg)
-	}
-	if len(queued) == 0 {
-		return 0, skipped, nil
+			hb.MonitorID, hb.Ts, hb.Up, hb.LatencyMS, hb.Code, hb.Msg)
 	}
 
 	// The batch runs inside an EXPLICIT transaction so the service-ingest marks commit with

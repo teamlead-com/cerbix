@@ -3,11 +3,11 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/reliability"
@@ -71,6 +71,26 @@ func (s *Store) materializeRangeTx(ctx context.Context, tx pgx.Tx, projectID, se
 		return 0, err
 	}
 	return buckets, nil
+}
+
+// ErrEvidenceGone is returned when a recompute would run against destroyed evidence: a
+// sealed bucket's epoch names a member whose monitor — and therefore whose heartbeats —
+// no longer exists. The sealed fact is the surviving record; rewriting it from a partial
+// record would replace measured history with UNKNOWN.
+var ErrEvidenceGone = errors.New("store: sealed evidence no longer exists")
+
+// anyMemberMonitorGone reports whether any snapshot member's monitor row has been deleted.
+func anyMemberMonitorGone(ctx context.Context, tx pgx.Tx, members []reliability.Member) (bool, error) {
+	ids := make([]string, 0, len(members))
+	for _, m := range members {
+		ids = append(ids, m.MonitorID)
+	}
+	var alive int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM monitors WHERE id = ANY($1)`, ids).Scan(&alive); err != nil {
+		return false, fmt.Errorf("store: check member survival: %w", err)
+	}
+	return alive != len(ids), nil
 }
 
 // materializeMode says whether a caller is allowed to rewrite finality.
@@ -140,6 +160,27 @@ func (s *Store) materializeBucketTx(ctx context.Context, tx pgx.Tx, projectID, s
 		// A service with an empty SLI produces no facts at all — it reports availability as
 		// unavailable rather than as anything.
 		return false, nil
+	}
+
+	// A RECOMPUTE of a sealed bucket whose evidence is gone must fail closed, not proceed.
+	//
+	// Deleting a monitor cascades its heartbeats away, but the epoch that governed old
+	// buckets still snapshots it as a member. Rerunning the reducer then finds no
+	// observations and writes UNKNOWN over what was measured GOOD — a recompute triggered by
+	// an unrelated maintenance edit silently degrading sealed history it had no quarrel
+	// with. The sealed fact IS the surviving record of that evidence; leaving it in place is
+	// the correct answer, and the caller surfaces the range as unrecomputable rather than
+	// retrying into the same wall.
+	//
+	// Ordinary (forward) materialization is exempt on purpose: an unsealed bucket whose
+	// evidence disappeared before its accounting closed is genuinely UNKNOWN — nothing final
+	// is being restated.
+	if mode == modeRecompute && wasSealed {
+		if gone, gerr := anyMemberMonitorGone(ctx, tx, members); gerr != nil {
+			return false, gerr
+		} else if gone {
+			return false, fmt.Errorf("%w: bucket %s", ErrEvidenceGone, start.UTC().Format(time.RFC3339))
+		}
 	}
 
 	observations, err := observationsFor(ctx, tx, members, start, end)
@@ -487,26 +528,15 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	defer cancel()
 
 	// A client-side deadline cancels our WAIT; it does not bound how long the server keeps
-	// holding a lock. The server-side pair is what actually stops a wait outliving the slice.
+	// holding a lock. The server-side pair is what actually stops a wait outliving the
+	// slice — and it is SET LOCAL, inside the transaction, because on the leader path `db`
+	// is the lock-owning connection. A session-level SET here outlived the slice: the
+	// leadership Check, the advisory unlock, and whatever the pool handed the connection to
+	// next all inherited this slice's 250ms. SET LOCAL dies with the transaction, so the
+	// session after the slice is the session before it.
 	ms := budget.Milliseconds()
 	if ms < 1 {
 		ms = 1
-	}
-	if pool, isPool := db.(*pgxpool.Pool); isPool {
-		conn, err := pool.Acquire(ctx)
-		if err != nil {
-			return false, fmt.Errorf("store: acquire advance connection: %w", err)
-		}
-		defer conn.Release()
-		db = conn
-	}
-	for _, stmt := range []string{
-		fmt.Sprintf("SET statement_timeout = %d", ms),
-		fmt.Sprintf("SET lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
-	} {
-		if _, err := db.Exec(ctx, stmt); err != nil {
-			return false, fmt.Errorf("store: set advance timeouts: %w", err)
-		}
 	}
 
 	tx, err := db.Begin(ctx)
@@ -514,6 +544,15 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 		return false, fmt.Errorf("store: begin advance: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	for _, stmt := range []string{
+		fmt.Sprintf("SET LOCAL statement_timeout = %d", ms),
+		fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
+	} {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			return false, fmt.Errorf("store: set advance timeouts: %w", err)
+		}
+	}
 
 	// `now` comes from the DB, like every other instant in this subsystem: the seal decision
 	// downstream compares against it, and two clocks would let a fast node seal a bucket a

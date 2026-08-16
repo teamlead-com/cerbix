@@ -1080,8 +1080,8 @@ paths:
                       additionalProperties: false
                       properties:
                         service_id: { type: string, format: uuid }
-                        before: { $ref: '#/components/schemas/AvailabilitySplit' }
-                        after: { $ref: '#/components/schemas/AvailabilitySplit' }
+                        before: { $ref: '#/components/schemas/ReliabilitySplit' }
+                        after: { $ref: '#/components/schemas/ReliabilitySplit' }
                         projected:
                           type: boolean
                           description: False when this service's range exceeded the projection bound.
@@ -2409,18 +2409,26 @@ components:
             The file provider that owns this service; empty when it is UI-owned. Present so
             the UI can disable the controls rather than discover the 409.
 
-    AvailabilitySplit:
+    ReliabilitySplit:
       type: object
       description: >
-        One side of a projection: duration in MICROSECONDS across the availability axis. The
-        four conserve to the range's length exactly.
-      required: [good_us, bad_us, unknown_us, excluded_us]
+        One side of a projection: duration in MICROSECONDS across BOTH conserved axes.
+        Availability (good/bad/unknown/excluded) and health
+        (healthy/degraded/down/health_unknown + shared excluded) each sum to the range's
+        length exactly. Health is carried because a mutation can move it without touching
+        availability — an exclusion entirely inside already-degraded time — and a payload
+        with only the first would show "no change" for a change.
+      required: [good_us, bad_us, unknown_us, excluded_us, healthy_us, degraded_us, down_us, health_unknown_us]
       additionalProperties: false
       properties:
         good_us: { type: integer, format: int64 }
         bad_us: { type: integer, format: int64 }
         unknown_us: { type: integer, format: int64 }
         excluded_us: { type: integer, format: int64 }
+        healthy_us: { type: integer, format: int64 }
+        degraded_us: { type: integer, format: int64 }
+        down_us: { type: integer, format: int64 }
+        health_unknown_us: { type: integer, format: int64 }
 
     ServiceSummary:
       type: object

@@ -215,7 +215,7 @@ func (h *Handler) createMaintenance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	created, err := h.store.CreateMaintenanceWindowChecked(r.Context(), mw, body.PreviewID, h.rawFloor())
+	created, err := h.store.CreateMaintenanceWindowChecked(r.Context(), mw, body.PreviewID, h.rawRetention())
 	if h.writeMaintenanceError(w, "create_maintenance", err) {
 		return
 	}
@@ -282,7 +282,7 @@ func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, err := h.store.PreviewMutationOf(r.Context(), proj.ID, body.MonitorID, body.MaintenanceID, mutation,
-		body.StartsAt, body.EndsAt, h.rawFloor(), h.actorLabel(r))
+		body.StartsAt, body.EndsAt, h.rawRetention(), h.actorLabel(r))
 	if h.writeMaintenanceError(w, "preview_maintenance", err) {
 		return
 	}
@@ -293,6 +293,14 @@ func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
 		Bad      int64 `json:"bad_us"`
 		Unknown  int64 `json:"unknown_us"`
 		Excluded int64 `json:"excluded_us"`
+		// Health rides beside availability: a mutation can move one without the other — an
+		// exclusion entirely inside already-degraded time changes health history and leaves
+		// good/bad untouched — and a payload with only the first would show "no change" for
+		// a change.
+		Healthy       int64 `json:"healthy_us"`
+		Degraded      int64 `json:"degraded_us"`
+		Down          int64 `json:"down_us"`
+		HealthUnknown int64 `json:"health_unknown_us"`
 	}
 	type affected struct {
 		ServiceID string `json:"service_id"`
@@ -311,8 +319,10 @@ func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
 	for _, svc := range p.Services {
 		out.Services = append(out.Services, affected{
 			ServiceID: svc.ServiceID,
-			Before:    split{svc.Before.Good, svc.Before.Bad, svc.Before.Unknown, svc.Before.Excluded},
-			After:     split{svc.After.Good, svc.After.Bad, svc.After.Unknown, svc.After.Excluded},
+			Before: split{svc.Before.Good, svc.Before.Bad, svc.Before.Unknown, svc.Before.Excluded,
+				svc.Before.Healthy, svc.Before.Degraded, svc.Before.Down, svc.Before.HealthUnknown},
+			After: split{svc.After.Good, svc.After.Bad, svc.After.Unknown, svc.After.Excluded,
+				svc.After.Healthy, svc.After.Degraded, svc.After.Down, svc.After.HealthUnknown},
 			Projected: svc.Projected,
 		})
 	}
@@ -343,7 +353,7 @@ func (h *Handler) annulMaintenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.writeMaintenanceError(w, "annul_maintenance",
-		h.store.AnnulMaintenanceWindow(r.Context(), mw.ProjectID, mw.ID, body.PreviewID, h.rawFloor())) {
+		h.store.AnnulMaintenanceWindow(r.Context(), mw.ProjectID, mw.ID, body.PreviewID, h.rawRetention())) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -433,6 +433,29 @@ func (s *Store) putServiceDeclarationTx(
 		if err := ensureMaterializationRowTx(ctx, tx, projectID, serviceID, effectiveAt); err != nil {
 			return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
 		}
+		// Coming back from a declared silence starts a NEW contiguity era. Without this the
+		// watermark stops in front of the empty period forever and a re-enabled service can
+		// never report again: the gap is not a stall the system owes buckets for, it is a
+		// period a human declared it was measuring nothing.
+		if currentRevision > 0 {
+			var prevHadInputs bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS(
+				   SELECT 1 FROM service_definition_members m
+				     JOIN service_definition_revisions r ON r.id = m.revision_id
+				    WHERE r.service_id = $1 AND r.revision = $2 AND m.role = 'sli')`,
+				serviceID, currentRevision).Scan(&prevHadInputs); err != nil {
+				return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: read previous inputs: %w", err)
+			}
+			if !prevHadInputs {
+				if _, err := tx.Exec(ctx,
+					`UPDATE service_materialization
+					    SET era_start = $2, sealed_through = NULL
+					  WHERE service_id = $1`, serviceID, effectiveAt); err != nil {
+					return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: start materialization era: %w", err)
+				}
+			}
+		}
 	}
 	return rev, epoch, nil
 }
@@ -604,8 +627,8 @@ func assertOwnerInProjectTx(ctx context.Context, tx pgx.Tx, projectID, escalatio
 func ensureMaterializationRowTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, start time.Time) error {
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO service_materialization
-		   (service_id, project_id, materialization_start, materialized_through)
-		 VALUES ($1,$2,$3,$3)
+		   (service_id, project_id, materialization_start, materialized_through, era_start)
+		 VALUES ($1,$2,$3,$3,$3)
 		 ON CONFLICT (service_id) DO NOTHING`,
 		serviceID, projectID, start); err != nil {
 		return fmt.Errorf("store: start materialization: %w", err)

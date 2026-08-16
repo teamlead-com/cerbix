@@ -453,3 +453,166 @@ func currentDeclarationTx2(t *testing.T, st *Store, ctx context.Context, service
 	defer tx.Rollback(ctx) //nolint:errcheck // read-only
 	return currentDeclarationTx(ctx, tx, serviceID)
 }
+
+// The forward pass must honour its deadline THROUGH a blocking statement, not only between
+// buckets.
+//
+// The scheduler gives it a slice precisely so dispatch is serviced in between; a slice that
+// can block indefinitely inside one bucket defeats the bound entirely. And the repair path's
+// session timeouts do not cover this: the forward pass runs only when the repair queue was
+// empty, so the connection may still carry `statement_timeout = 0`.
+func TestForwardMaterializationHonoursItsDeadlineWhileBlocked(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+	from := time.Now().UTC().Add(-30 * time.Minute)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: from}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+
+	// Hold the ingest row for the very first bucket the driver will reach, so its upsert
+	// blocks on a live lock rather than merely being slow.
+	var cursor time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT COALESCE(materialized_through, materialization_start) FROM service_materialization WHERE service_id=$1`,
+		f.serviceID).Scan(&cursor); err != nil {
+		t.Fatalf("read cursor: %v", err)
+	}
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := blocker.Exec(ctx,
+		`INSERT INTO service_bucket_ingest (service_id, project_id, bucket_start, ingest_generation)
+		 VALUES ($1,$2,$3,0)`, f.serviceID, f.projectID, cursor); err != nil {
+		t.Fatalf("hold the bucket: %v", err)
+	}
+
+	started := time.Now()
+	deadline := started.Add(250 * time.Millisecond)
+	if _, err := st.AdvanceServiceMaterializationOn(ctx, st.pool, deadline); err == nil {
+		t.Log("the slice returned without error; only its duration is under test here")
+	}
+	spent := time.Since(started)
+	_ = blocker.Rollback(ctx)
+
+	// Generous margin over the 250ms budget: what is being asserted is that the slice is
+	// BOUNDED, not that it is precise.
+	if spent > 3*time.Second {
+		t.Fatalf("the slice blocked for %s against a 250ms deadline; the scheduler's dispatch tick waits behind it", spent)
+	}
+}
+
+// A service that declared silence and came back must be able to report again.
+//
+// Contiguity says a hole holds the watermark, and that is right for a stall — the system owes
+// those buckets. It is wrong for a period the service DECLARED it was measuring nothing: there
+// are no facts because a human said there should be none. iter-0125 made no distinction, so
+// `sealed_through` stopped in front of the empty period forever and every phase-2 window would
+// anchor at a timestamp from before it. Invariant 34 covers an always-empty service; this is
+// the nonempty → empty → nonempty transition.
+func TestAServiceThatDeclaredSilenceCanReportAgain(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+
+	from := time.Now().UTC().Add(-40 * time.Minute)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: from}); err != nil {
+		t.Fatalf("first declaration: %v", err)
+	}
+	early := domain.FloorToBucket(time.Now().UTC().Add(-35 * time.Minute))
+	for i := 0; i < 3; i++ {
+		beat(t, st, ctx, f.http, early.Add(time.Duration(i)*time.Minute+10*time.Second), true)
+	}
+	leaderSliceFor(t, st, ctx, 80)
+	if sealedThrough(t, st, ctx, f.serviceID) == nil {
+		t.Fatal("nothing sealed in the first era; the rest of this test would prove nothing")
+	}
+
+	// Declare silence…
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: nil,
+	}, 1, DeclarationOptions{CreatedBy: "op"}); err != nil {
+		t.Fatalf("empty declaration: %v", err)
+	}
+	leaderSliceFor(t, st, ctx, 80)
+
+	// …and come back.
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 2, DeclarationOptions{CreatedBy: "op"}); err != nil {
+		t.Fatalf("third declaration: %v", err)
+	}
+
+	// The era moved forward and the watermark restarts inside it rather than being pinned
+	// behind the silence.
+	var era time.Time
+	var through *time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT era_start, sealed_through FROM service_materialization WHERE service_id=$1`,
+		f.serviceID).Scan(&era, &through); err != nil {
+		t.Fatalf("read era: %v", err)
+	}
+	if !era.After(early) {
+		t.Fatalf("era_start = %s, still inside the first era (%s) — the silence was treated as a stall", era, early)
+	}
+	if through != nil && through.Before(era) {
+		t.Errorf("sealed_through = %s is behind the current era start %s", *through, era)
+	}
+
+	// Now the state the transition actually produces, made explicit.
+	//
+	// An era boundary is PROSPECTIVE by construction — the third declaration takes effect at
+	// the next bucket — so on the product path alone the factless period only appears after a
+	// bucket plus the late-arrival grace of wall-clock time, and the test would be a sleep.
+	// The two things that period leaves behind are constructed instead: a real HOLE in the
+	// facts where the service declared it was measuring nothing, and an era that begins after
+	// it. What is under test is what the watermark does with those, not how long they took to
+	// arrive.
+	late := domain.FloorToBucket(time.Now().UTC().Add(-8 * time.Minute))
+	if _, err := st.pool.Exec(ctx,
+		`DELETE FROM service_reliability_buckets
+		  WHERE service_id = $1 AND bucket_start >= $2 AND bucket_start < $3`,
+		f.serviceID, early.Add(3*time.Minute), late); err != nil {
+		t.Fatalf("carve the declared-silence hole: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_materialization SET era_start = $2, sealed_through = NULL, materialized_through = $2
+		  WHERE service_id = $1`, f.serviceID, late); err != nil {
+		t.Fatalf("rewind the era boundary: %v", err)
+	}
+	era = late
+	for i := 0; i < 3; i++ {
+		beat(t, st, ctx, f.http, late.Add(time.Duration(i)*time.Minute+10*time.Second), true)
+	}
+	leaderSliceFor(t, st, ctx, 120)
+	after := sealedThrough(t, st, ctx, f.serviceID)
+	if after == nil {
+		t.Fatal("the revived service seals nothing; it can never report again")
+	}
+	// STRICTLY inside the new era. Walking from `materialization_start` instead would stop at
+	// the very first missing bucket of the ORIGINAL era and report a watermark from before
+	// the silence — a number that looks like an answer and describes the wrong period.
+	if after.Before(era) || after.Equal(era) {
+		t.Fatalf("sealed_through = %s is at or behind the era start %s; the watermark is answering for the era before the silence",
+			*after, era)
+	}
+	if !after.After(late.Add(2 * time.Minute)) {
+		t.Errorf("sealed_through = %s did not cover the three buckets sealed in the new era from %s", *after, late)
+	}
+
+	// materialization_start still records the earliest instant this service ever had facts
+	// for — the two columns answer different questions.
+	var origin time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT materialization_start FROM service_materialization WHERE service_id=$1`,
+		f.serviceID).Scan(&origin); err != nil {
+		t.Fatalf("read origin: %v", err)
+	}
+	if !origin.Before(late) {
+		t.Errorf("materialization_start = %s moved with the era", origin)
+	}
+}

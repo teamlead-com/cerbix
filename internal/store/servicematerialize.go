@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/reliability"
@@ -363,9 +364,13 @@ func maintenanceSpansFor(ctx context.Context, tx pgx.Tx, projectID string, membe
 // visible as a lagging timestamp instead of a plausible chart. Taking `MAX(bucket_start)`
 // over sealed rows would skip straight past a gap and report a window that has holes in it.
 func advanceSealedThrough(ctx context.Context, tx pgx.Tx, serviceID string) error {
+	// The watermark is contiguous WITHIN THE CURRENT ERA. Walking from
+	// `materialization_start` instead would make a declared silence — a period the service
+	// said it was measuring nothing — hold the watermark forever, so a service that came back
+	// could never report again.
 	var start *time.Time
 	if err := tx.QueryRow(ctx,
-		`SELECT materialization_start FROM service_materialization WHERE service_id=$1`,
+		`SELECT era_start FROM service_materialization WHERE service_id=$1`,
 		serviceID).Scan(&start); err != nil {
 		if noRows(err) {
 			return nil
@@ -441,6 +446,46 @@ const maxBucketsPerAdvance = 240
 // deadline, and a loop that drained every service inside a single call could not be
 // interrupted when leadership moved.
 func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, deadline time.Time) (bool, error) {
+	// The deadline has to bound the WHOLE slice — BEGIN through commit — not just the gaps
+	// between buckets.
+	//
+	// The first implementation took the deadline as an argument and then checked it only in
+	// the loop condition, on a transaction opened with the caller's plain context. One
+	// statement inside a bucket — the `service_bucket_ingest` upsert waiting on a concurrent
+	// ingest holding the same key, say — could then block indefinitely and hold the
+	// scheduler's dispatch tick far past `max_dispatch_delay`. The repair path's timeouts do
+	// not help here: the forward pass runs only when the repair queue was empty, so the
+	// session may still carry `statement_timeout = 0`.
+	budget := time.Until(deadline)
+	if budget <= 0 {
+		return true, nil
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	// A client-side deadline cancels our WAIT; it does not bound how long the server keeps
+	// holding a lock. The server-side pair is what actually stops a wait outliving the slice.
+	ms := budget.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	if pool, isPool := db.(*pgxpool.Pool); isPool {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			return false, fmt.Errorf("store: acquire advance connection: %w", err)
+		}
+		defer conn.Release()
+		db = conn
+	}
+	for _, stmt := range []string{
+		fmt.Sprintf("SET statement_timeout = %d", ms),
+		fmt.Sprintf("SET lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
+	} {
+		if _, err := db.Exec(ctx, stmt); err != nil {
+			return false, fmt.Errorf("store: set advance timeouts: %w", err)
+		}
+	}
+
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("store: begin advance: %w", err)

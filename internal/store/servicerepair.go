@@ -162,20 +162,36 @@ func (s *Store) claimRepairRangeOn(ctx context.Context, db dbConn) (RepairRange,
 // operator's LOCK TABLE — parks the claim itself, and the claim used to run on the root
 // context, before any envelope existed. On the leader path that parked statement sat on the
 // advisory-lock connection while the scheduler's dispatch tick waited behind it.
+//
+// `claimBy` is ONE absolute instant fixed BEFORE BEGIN: min(caller deadline, now + cap). An
+// earlier revision measured a duration first, ran BEGIN on the caller's root context, and
+// only then minted time.Now().Add(remaining) — so a stalled BEGIN was unbounded AND whatever
+// time it consumed was granted a second time to the statements after it.
+//
+// The cut lands AT the budget everywhere, and the tolerance only ever covers observing it.
+// For the statements the SERVER cuts (bounds derived from the remainder to claimBy) and the
+// client net sits one tolerance behind so the server always speaks first. BEGIN has no server
+// bound to speak (the SET LOCALs come after it), so ITS net is at claimBy itself — a stalled
+// BEGIN dies at the budget, not a tolerance past it, and the flat budget + tolerance
+// assertion holds for this phase by the same arithmetic as every other.
 func (s *Store) claimRepairRangeBounded(ctx context.Context, db dbConn, deadline time.Time) (RepairRange, bool, error) {
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
+	claimBy := time.Now().Add(lifecycleWriteBound)
+	if deadline.Before(claimBy) {
+		claimBy = deadline
+	}
+	if time.Until(claimBy) <= 0 {
 		return RepairRange{}, false, nil
 	}
-	if remaining > lifecycleWriteBound {
-		remaining = lifecycleWriteBound
-	}
-	rawTx, err := db.Begin(ctx)
+	beginCtx, cancelBegin := context.WithDeadline(ctx, claimBy)
+	rawTx, err := db.Begin(beginCtx)
+	cancelBegin()
 	if err != nil {
 		return RepairRange{}, false, fmt.Errorf("store: begin claim: %w", err)
 	}
+	ctx, cancel := context.WithDeadline(ctx, claimBy.Add(schedulingTolerance))
+	defer cancel()
 	defer rawTx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	tx := newDeadlineTx(rawTx, time.Now().Add(remaining), 0)
+	tx := newDeadlineTx(rawTx, claimBy, 0)
 
 	var r RepairRange
 	var reason string
@@ -220,10 +236,12 @@ func (s *Store) claimRepairRangeBounded(ctx context.Context, db dbConn, deadline
 // and commits nothing — a livelock in which every individual bound is respected and progress
 // is zero.
 func (s *Store) RunRepairRange(ctx context.Context, r RepairRange, deadline time.Time) error {
-	return s.runRepairRangeOn(ctx, s.pool, r, deadline)
+	// Standalone entry, pool-based: no leader cadence rides on this connection, so lifecycle
+	// writes may mint the cap even past the caller's deadline (see standaloneLifecycle).
+	return s.runRepairRangeOn(ctx, s.pool, r, deadline, standaloneLifecycle)
 }
 
-func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, deadline time.Time) error {
+func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, deadline time.Time, policy lifecyclePolicy) error {
 	batch := initialRepairBatch
 	cursor := r.Cursor
 	if cursor.Before(r.From) {
@@ -231,11 +249,15 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 	}
 
 	for cursor.Before(r.To) {
-		remaining := time.Until(deadline)
+		// Batches are budgeted to end lifecycleReserve BEFORE the slice deadline: the closing
+		// lifecycle write is part of the slice and takes its time FROM the slice — a write
+		// that minted its own time after the budget ran out put ~100ms on top of a spent
+		// ~250ms, and §10.10 bounds the sum.
+		remaining := time.Until(deadline) - lifecycleReserve
 		if remaining <= 0 {
 			// Out of slice. The cursor is durable, so the next claim resumes rather than
 			// restarts — that is the whole reason work is a table and not a goroutine.
-			return s.releaseRepairRange(ctx, db, r.ID, cursor, nil)
+			return s.releaseRepairRange(ctx, db, r.ID, cursor, nil, policy.writeDeadline(deadline))
 		}
 
 		end := cursor.Add(time.Duration(batch) * domain.CanonicalBucket)
@@ -248,28 +270,34 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 		case errors.Is(err, errSliceBudget):
 			// The slice's budget, not the range's health: release at the cursor already
 			// held so the very next slice resumes exactly there.
-			return s.releaseRepairRange(ctx, db, r.ID, cursor, nil)
+			return s.releaseRepairRange(ctx, db, r.ID, cursor, nil, policy.writeDeadline(deadline))
 		case errors.Is(err, ErrRangeSuperseded):
 			// The declared inputs moved. Re-enqueue what is left rather than finishing on a
 			// stale reading: two batches of one range must not commit under two different
 			// "current" maintenance declarations.
-			return s.releaseRepairRange(ctx, db, r.ID, cursor, err)
+			return s.releaseRepairRange(ctx, db, r.ID, cursor, err, policy.writeDeadline(deadline))
 		case errors.Is(err, ErrEvidenceGone):
 			// TERMINAL, not a retry: the evidence is destroyed, and every retry would hit
 			// the same wall while the range sat in the queue looking like progress-to-be.
 			// The `error` state is the honest surface — the sealed facts stay as the record
 			// of what was measured, and an operator can see WHY the range will not run.
-			return s.markRepairRangeUnrecomputable(ctx, db, r.ID, cursor, err)
+			return s.markRepairRangeUnrecomputable(ctx, db, r.ID, cursor, err, policy.writeDeadline(deadline))
 		case err != nil:
-			return s.failRepairRange(ctx, db, r, cursor, err)
+			return s.failRepairRange(ctx, db, r, cursor, err, policy.writeDeadline(deadline))
 		}
 
 		spent := time.Since(started)
 		batch = adaptRepairBatch(batch, spent, remaining)
 		cursor = end
 	}
-	return s.completeRepairRange(ctx, db, r.ID, cursor)
+	return s.completeRepairRange(ctx, db, r.ID, cursor, policy.writeDeadline(deadline))
 }
+
+// lifecycleReserve is the slice time the repair loop keeps back for its CLOSING lifecycle
+// write — the range-level analogue of advanceCommitReserve inside a batch. Batches end this
+// much before the slice deadline, so the release/complete/fail that follows them normally
+// runs INSIDE the slice instead of being refused at its edge and left to the lease.
+const lifecycleReserve = 40 * time.Millisecond
 
 const (
 	initialRepairBatch = 60   // one hour of canonical buckets
@@ -408,17 +436,17 @@ func maintenanceGenerationOn(ctx context.Context, q queryRower, projectID string
 
 // releaseRepairRange puts a range back as pending, keeping its cursor so the next claim
 // continues rather than restarts.
-func (s *Store) releaseRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time, cause error) error {
+func (s *Store) releaseRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time, cause error, writeBy time.Time) error {
 	note := ""
 	if cause != nil {
 		note = cause.Error()
 	}
-	// Bounded, and SAFE to miss: these writes run outside any batch envelope — a release
-	// happens after the budget expired by design — so what protects the caller's connection
-	// is this fixed bound, and what recovers a write the bound refused is the LEASE: the
-	// range stays `running` until its lease lapses and any claimer resumes it at the durable
-	// cursor. Unbounded, one table lock here held the leader connection open-endedly.
-	if err := boundedLifecycleExec(ctx, db, lifecycleWriteBound,
+	// Bounded by the CALLER's deadline (policy-capped), and SAFE to miss: what recovers a
+	// write the deadline refused is the LEASE — the range stays `running` until its lease
+	// lapses and any claimer resumes it at the durable cursor. Unbounded, one table lock here
+	// held the leader connection open-endedly; minting a fresh bound after the slice was
+	// spent held the scheduler ~100ms past the cadence §10.10 promises it.
+	if err := boundedLifecycleExec(ctx, db, writeBy,
 		`UPDATE service_repair_ranges
 		    SET state = 'pending', cursor_at = $2, last_error = $3,
 		        maintenance_generation = COALESCE(
@@ -430,8 +458,8 @@ func (s *Store) releaseRepairRange(ctx context.Context, db dbConn, id string, cu
 	return nil
 }
 
-func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time) error {
-	if err := boundedLifecycleExec(ctx, db, lifecycleWriteBound,
+func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time, writeBy time.Time) error {
+	if err := boundedLifecycleExec(ctx, db, writeBy,
 		`UPDATE service_repair_ranges SET state = 'complete', cursor_at = $2, last_error = '', updated_at = now()
 		  WHERE id = $1`, id, cursor); err != nil {
 		return fmt.Errorf("store: complete repair range: %w", err)
@@ -444,8 +472,8 @@ func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, c
 // a range nobody retries is a hole in a watermark defined by contiguity.
 // markRepairRangeUnrecomputable parks a range whose evidence no longer exists. Unlike a
 // failure it does not schedule a retry: retrying cannot bring deleted heartbeats back.
-func (s *Store) markRepairRangeUnrecomputable(ctx context.Context, db dbConn, id string, cursor time.Time, cause error) error {
-	if err := boundedLifecycleExec(ctx, db, lifecycleWriteBound,
+func (s *Store) markRepairRangeUnrecomputable(ctx context.Context, db dbConn, id string, cursor time.Time, cause error, writeBy time.Time) error {
+	if err := boundedLifecycleExec(ctx, db, writeBy,
 		`UPDATE service_repair_ranges
 		    SET state = 'error', cursor_at = $2, last_error = $3, updated_at = now()
 		  WHERE id = $1`, id, cursor, cause.Error()); err != nil {
@@ -454,9 +482,9 @@ func (s *Store) markRepairRangeUnrecomputable(ctx context.Context, db dbConn, id
 	return cause
 }
 
-func (s *Store) failRepairRange(ctx context.Context, db dbConn, r RepairRange, cursor time.Time, cause error) error {
+func (s *Store) failRepairRange(ctx context.Context, db dbConn, r RepairRange, cursor time.Time, cause error, writeBy time.Time) error {
 	backoff := repairBackoff(r.Attempts + 1)
-	if err := boundedLifecycleExec(ctx, db, lifecycleWriteBound,
+	if err := boundedLifecycleExec(ctx, db, writeBy,
 		`UPDATE service_repair_ranges
 		    SET state = 'pending', cursor_at = $2, attempts = attempts + 1,
 		        next_attempt_at = now() + $3::interval, last_error = $4, updated_at = now()

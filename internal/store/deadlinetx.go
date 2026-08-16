@@ -150,40 +150,61 @@ func (d *deadlineTx) persistPhase() *deadlineTx {
 	return &deadlineTx{Tx: d.Tx, deadline: d.deadline, reserve: 0}
 }
 
-// boundedLifecycleExec runs ONE statement in its own small transaction under a fixed server
-// bound. It exists for the repair lifecycle writes — claim, release, complete, fail — which
-// run outside any batch envelope: unbounded, a blocked release after the budget would hold
-// the leader connection indefinitely; bounded, a missed release simply falls back to lease
-// expiry, which is what the lease is for.
-func boundedLifecycleExec(ctx context.Context, db dbConn, bound time.Duration, sql string, args ...any) error {
-	tx, err := db.Begin(ctx)
+// boundedLifecycleExec runs ONE statement in its own small transaction under an ABSOLUTE
+// deadline, through the same envelope as every other slice statement: refused client-side
+// once the deadline is spent, server bounds derived from the remainder before each statement,
+// COMMIT included, the client net one scheduling tolerance behind. It exists for the repair
+// lifecycle writes — release, complete, fail, park. Its previous shape took a DURATION and
+// minted it fresh at call time, which bounded each write and not the slice: a release that
+// runs after the budget expired then waited its own ~100ms on top of the ~250ms already
+// spent, and §10.10 promises the scheduler the sum, not the parts.
+func boundedLifecycleExec(ctx context.Context, db dbConn, deadline time.Time, sql string, args ...any) error {
+	if time.Until(deadline) <= 0 {
+		return errSliceBudget
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(schedulingTolerance))
+	defer cancel()
+	rawTx, err := db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin lifecycle write: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	ms := bound.Milliseconds()
-	if ms < 1 {
-		ms = 1
-	}
-	for _, stmt := range []string{
-		fmt.Sprintf("SET LOCAL statement_timeout = %d", ms),
-		fmt.Sprintf("SET LOCAL lock_timeout = %d", ms),
-	} {
-		if _, err := tx.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("store: bound lifecycle write: %w", err)
-		}
-	}
+	defer rawTx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	tx := newDeadlineTx(rawTx, deadline, 0)
 	if _, err := tx.Exec(ctx, sql, args...); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-// lifecycleWriteBound is the fixed budget for one repair-lifecycle write. Independent of the
-// slice budget on purpose: a release runs AFTER the budget expired by design, and what
-// protects the scheduler's cadence there is this bound plus the lease — not the slice clock,
-// which has already run out.
+// lifecycleWriteBound CAPS one repair-lifecycle write. It is a ceiling under the caller's
+// deadline, never a fresh grant on top of it — which policy applies is the lifecyclePolicy
+// below, and what recovers a write the deadline refused is the LEASE.
 const lifecycleWriteBound = 100 * time.Millisecond
+
+// lifecyclePolicy is who a lifecycle write answers to.
+type lifecyclePolicy int
+
+const (
+	// leaderLifecycle fits the write inside the slice: min(slice deadline, now + cap),
+	// refused once the slice is spent. The §10.10 cadence rides on the caller's connection —
+	// a write that mints time past the caller's deadline is how a "250ms" slice measured
+	// ~350ms, bounded at every statement and unbounded as a phase.
+	leaderLifecycle lifecyclePolicy = iota
+	// standaloneLifecycle mints the cap even when the caller's deadline is already spent. No
+	// cadence rides on a pooled connection's next 100ms, and releasing NOW beats parking the
+	// range under a 60-second lease that exists for crashes.
+	standaloneLifecycle
+)
+
+// writeDeadline is the absolute deadline for one lifecycle write made now, under the caller's
+// slice deadline.
+func (p lifecyclePolicy) writeDeadline(slice time.Time) time.Time {
+	capped := time.Now().Add(lifecycleWriteBound)
+	if p == leaderLifecycle && slice.Before(capped) {
+		return slice
+	}
+	return capped
+}
 
 // errRow is the QueryRow shape of a refused statement: the error surfaces at Scan, which is
 // where every caller already looks.

@@ -135,7 +135,10 @@ func (ls *LeaderSession) RunServiceRepairSlice(ctx context.Context, deadline tim
 	if err != nil || !ok {
 		return false, err
 	}
-	if err := ls.store.runRepairRangeOn(ctx, ls.conn, r, deadline); err != nil {
+	// leaderLifecycle: every lifecycle write on this connection fits INSIDE the slice
+	// deadline — the scheduler's cadence rides on it, and a write that mints its own time
+	// after the budget ran out is how a 250ms slice measured ~350ms.
+	if err := ls.store.runRepairRangeOn(ctx, ls.conn, r, deadline, leaderLifecycle); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -149,6 +152,16 @@ func (ls *LeaderSession) RunServiceRepairSlice(ctx context.Context, deadline tim
 // repair queue is empty, which is also what stops a busy repair backlog from being starved
 // by a service adopting ninety days of history.
 func (ls *LeaderSession) RunServiceSlice(ctx context.Context, deadline time.Time) (bool, error) {
+	// A tail too short to claim, work and release is skipped WHOLE, before either phase. An
+	// earlier revision put this guard inside the repair slice returning "nothing to do" — and
+	// false there means "the repair queue is empty", so a short tail ran the forward pass
+	// with a repair backlog still pending, inverting the repair-first rule this function
+	// exists to enforce. Undersized means: less than the claim's own worst case plus the
+	// closing lifecycle write's reserve — a claim there could only park the range under a
+	// 60-second lease that exists for crashes, not for tail-of-slice claims.
+	if time.Until(deadline) < lifecycleWriteBound+lifecycleReserve {
+		return false, nil
+	}
 	worked, err := ls.RunServiceRepairSlice(ctx, deadline)
 	if err != nil || worked {
 		return worked, err

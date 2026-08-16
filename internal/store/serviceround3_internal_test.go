@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/teamlead-com/cerbix/internal/config"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/fileprovider"
@@ -19,18 +21,34 @@ import (
 
 const monthRetention = 30 * 24 * time.Hour
 
-// ciAllowance is the measured test-environment overhead granted ON TOP of the normative
-// bound (budget + schedulingTolerance): fixture reads, connection acquisition, Go scheduling.
-// It is stated separately from the contract on purpose — the assertion is contract plus
-// allowance, never a round number that happens to pass. Local runs measure 40–90ms of
-// overhead; 150ms covers a loaded CI without swallowing a real regression, which would blow
-// past by the whole difference between a bound set once and a bound derived per statement.
-const ciAllowance = 150 * time.Millisecond
-
-// cadenceLimit is the assertion every timing regression uses: the normative budget, the
-// scheduler tolerance the client net grants, and the stated allowance.
+// cadenceLimit is the NORMATIVE §10.10 assertion: the slice budget plus
+// max_scheduling_tolerance, and NOTHING else — the pass threshold, verbatim. The environment
+// is not in it: an uncapped runtime sample added to the bound can grow under contention until
+// it green-lights the very regression under test, which is the fixed-150ms failure mode with
+// extra steps. What the environment costs is measured and LOGGED beside the contract by
+// measuredOverhead, as a diagnostic for reading a failure, never as slack for passing.
 func cadenceLimit(budget time.Duration) time.Duration {
-	return budget + schedulingTolerance + ciAllowance
+	return budget + schedulingTolerance
+}
+
+// measuredOverhead samples what THIS environment spends around one bounded round trip — the
+// same BEGIN / SET LOCAL pair / statement / COMMIT shape the slices use. DIAGNOSTIC ONLY: it
+// is logged next to the contract so a failure can be read (was that the code or a loaded
+// pool?), and it is never added to a pass threshold. The floor is one scheduler quantum, so
+// a suspiciously quiet sample still reads as a real number.
+func measuredOverhead(t *testing.T, ctx context.Context, st *Store) time.Duration {
+	t.Helper()
+	worst := 5 * time.Millisecond
+	for i := 0; i < 5; i++ {
+		started := time.Now()
+		if err := boundedLifecycleExec(ctx, st.pool, time.Now().Add(lifecycleWriteBound), `SELECT 1`); err != nil {
+			t.Fatalf("overhead probe: %v", err)
+		}
+		if d := time.Since(started); d > worst {
+			worst = d
+		}
+	}
+	return worst
 }
 
 // P0-1 — a retroactive window ENTIRELY INSIDE one bucket must still hit the preview gate.
@@ -531,6 +549,7 @@ func TestABlockedPreviewDegradesInsteadOfHoldingTheProject(t *testing.T) {
 	}
 
 	st.previewBudget = 400 * time.Millisecond
+	overhead := measuredOverhead(t, ctx, st)
 	started := time.Now()
 	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
 		base, base.Add(2*time.Minute), monthRetention, "op")
@@ -550,7 +569,8 @@ func TestABlockedPreviewDegradesInsteadOfHoldingTheProject(t *testing.T) {
 			t.Errorf("service %s reason = %q, want %q", svc.ServiceID, svc.Reason, ReasonWallBudget)
 		}
 	}
-	// The normative bound, not a generous one: contract plus the stated allowance.
+	// The normative §10.10 bound itself, plus this run's measured environmental overhead.
+	t.Logf("contract %s, measured overhead %s", cadenceLimit(st.previewBudget), overhead)
 	if limit := cadenceLimit(st.previewBudget); elapsed > limit {
 		t.Fatalf("the preview took %s against the %s contract (budget %s)", elapsed, limit, st.previewBudget)
 	}
@@ -816,6 +836,7 @@ func TestAPreviewBlockedOnTheMembershipLockIsBounded(t *testing.T) {
 	st, ctx := declStore(t)
 	f, base := sealedService(t, st, ctx)
 	st.previewBudget = 500 * time.Millisecond
+	overhead := measuredOverhead(t, ctx, st)
 
 	blocker, err := st.pool.Begin(ctx)
 	if err != nil {
@@ -844,6 +865,7 @@ func TestAPreviewBlockedOnTheMembershipLockIsBounded(t *testing.T) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("the client net fired before the server bound: %v", err)
 	}
+	t.Logf("contract %s, measured overhead %s", cadenceLimit(st.previewBudget), overhead)
 	if limit := cadenceLimit(st.previewBudget); elapsed > limit {
 		t.Fatalf("blocked on the membership lock for %s against the %s contract", elapsed, limit)
 	}
@@ -858,6 +880,7 @@ func TestPreviewPersistsItsTokenInsideTheReserve(t *testing.T) {
 	f, base := sealedService(t, st, ctx)
 	// A budget small enough that the projection exhausts it, leaving ONLY the reserve.
 	st.previewBudget = previewPersistReserve + 50*time.Millisecond
+	overhead := measuredOverhead(t, ctx, st)
 
 	blocker, err := st.pool.Begin(ctx)
 	if err != nil {
@@ -881,6 +904,7 @@ func TestPreviewPersistsItsTokenInsideTheReserve(t *testing.T) {
 	}
 	// The whole operation — lock, resolve, blocked projection, persist, commit — inside the
 	// normative contract.
+	t.Logf("contract %s, measured overhead %s", cadenceLimit(st.previewBudget), overhead)
 	if limit := cadenceLimit(st.previewBudget); elapsed > limit {
 		t.Fatalf("the preview took %s against the %s contract", elapsed, limit)
 	}
@@ -929,6 +953,7 @@ func TestForwardSliceCadenceHoldsWhileBlocked(t *testing.T) {
 	}
 	defer ls.Release()
 
+	overhead := measuredOverhead(t, ctx, st)
 	started := time.Now()
 	_, serr := ls.RunServiceSlice(ctx, started.Add(250*time.Millisecond))
 	elapsed := time.Since(started)
@@ -936,6 +961,7 @@ func TestForwardSliceCadenceHoldsWhileBlocked(t *testing.T) {
 	if serr == nil {
 		t.Log("the blocked slice returned no error; the cadence is what is under test")
 	}
+	t.Logf("contract %s, measured overhead %s", cadenceLimit(250*time.Millisecond), overhead)
 	if limit := cadenceLimit(250 * time.Millisecond); elapsed > limit {
 		t.Fatalf("BEGIN→return took %s against the %s contract", elapsed, limit)
 	}
@@ -1023,6 +1049,7 @@ func TestForwardPersistenceIsBoundedAndTheSessionSurvives(t *testing.T) {
 	}
 	defer ls.Release()
 
+	overhead := measuredOverhead(t, ctx, st)
 	started := time.Now()
 	_, serr := ls.RunServiceSlice(ctx, started.Add(250*time.Millisecond))
 	elapsed := time.Since(started)
@@ -1033,6 +1060,7 @@ func TestForwardPersistenceIsBoundedAndTheSessionSurvives(t *testing.T) {
 	if errors.Is(serr, context.DeadlineExceeded) {
 		t.Fatalf("the client net beat the server bound in the persistence phase: %v", serr)
 	}
+	t.Logf("contract %s, measured overhead %s", cadenceLimit(250*time.Millisecond), overhead)
 	if limit := cadenceLimit(250 * time.Millisecond); elapsed > limit {
 		t.Fatalf("persistence blocked for %s against the %s contract", elapsed, limit)
 	}
@@ -1074,6 +1102,7 @@ func TestABlockedClaimIsBoundedOnTheLeaderSession(t *testing.T) {
 	}
 	defer ls.Release()
 
+	overhead := measuredOverhead(t, ctx, st)
 	started := time.Now()
 	_, serr := ls.RunServiceSlice(ctx, started.Add(250*time.Millisecond))
 	elapsed := time.Since(started)
@@ -1081,6 +1110,7 @@ func TestABlockedClaimIsBoundedOnTheLeaderSession(t *testing.T) {
 	if serr == nil {
 		t.Log("the blocked claim surfaced no error; bounded time and a live session are the contract")
 	}
+	t.Logf("contract %s, measured overhead %s", cadenceLimit(250*time.Millisecond), overhead)
 	if limit := cadenceLimit(250 * time.Millisecond); elapsed > limit {
 		t.Fatalf("the claim blocked for %s against the %s contract", elapsed, limit)
 	}
@@ -1117,16 +1147,20 @@ func TestABlockedReleaseFallsBackToTheLease(t *testing.T) {
 	}
 
 	// Run the claimed range with an already-tiny budget: the batch stops immediately and the
-	// RELEASE is the next thing that touches the locked table.
+	// RELEASE is the next thing that touches the locked table. Under leaderLifecycle the
+	// release takes its time FROM the slice — what little is left of these 10ms — and a
+	// refused or server-refused write both land back here bounded, with the lease owning
+	// recovery. This is the round-6 P0 shape: the old release minted a fresh 100ms here.
+	overhead := measuredOverhead(t, ctx, st)
 	started := time.Now()
-	rerr := st.runRepairRangeOn(ctx, st.pool, claimed, time.Now().Add(10*time.Millisecond))
+	rerr := st.runRepairRangeOn(ctx, st.pool, claimed, time.Now().Add(10*time.Millisecond), leaderLifecycle)
 	elapsed := time.Since(started)
 	if rerr == nil {
 		t.Fatal("the blocked release reported success; the write cannot have happened")
 	}
-	// Bounded by the lifecycle cap, not by the (already spent) slice budget.
-	if elapsed > lifecycleWriteBound+ciAllowance {
-		t.Fatalf("the release blocked for %s against the %s lifecycle bound", elapsed, lifecycleWriteBound)
+	t.Logf("contract %s, measured overhead %s", cadenceLimit(10*time.Millisecond), overhead)
+	if limit := cadenceLimit(10 * time.Millisecond); elapsed > limit {
+		t.Fatalf("the release blocked for %s against the %s slice contract", elapsed, limit)
 	}
 	_ = blocker.Rollback(ctx)
 
@@ -1151,6 +1185,422 @@ func TestABlockedReleaseFallsBackToTheLease(t *testing.T) {
 	}
 	if reclaimed.ID != claimed.ID || !reclaimed.Cursor.Equal(claimed.Cursor) {
 		t.Fatalf("resumed %s at %s, want %s at %s", reclaimed.ID, reclaimed.Cursor, claimed.ID, claimed.Cursor)
+	}
+}
+
+// The lifecycle cap is a CEILING for a generous caller, never a grant: a COMPLETE under a
+// ten-second caller deadline still cannot hold the queue table past the cap.
+func TestALifecycleWriteIsCappedUnderAGenerousDeadline(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(10*time.Minute), ReasonBackfill); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	claimed, ok, err := st.claimRepairRangeOn(ctx, st.pool)
+	if err != nil || !ok {
+		t.Fatalf("claim: %v ok=%v", err, ok)
+	}
+	// Nothing left to walk: the COMPLETE is the first statement to touch the locked queue.
+	claimed.Cursor = claimed.To
+
+	overhead := measuredOverhead(t, ctx, st)
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := blocker.Exec(ctx, `LOCK TABLE service_repair_ranges IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock queue: %v", err)
+	}
+
+	started := time.Now()
+	rerr := st.runRepairRangeOn(ctx, st.pool, claimed, time.Now().Add(10*time.Second), leaderLifecycle)
+	elapsed := time.Since(started)
+	_ = blocker.Rollback(ctx)
+	if rerr == nil {
+		t.Fatal("the blocked complete reported success; the write cannot have happened")
+	}
+	t.Logf("cap contract %s, measured overhead %s", cadenceLimit(lifecycleWriteBound), overhead)
+	if limit := cadenceLimit(lifecycleWriteBound); elapsed > limit {
+		t.Fatalf("the complete held the caller for %s against the %s cap", elapsed, limit)
+	}
+}
+
+// waitForQueryLockWait polls pg_stat_activity until a statement with the given prefix is
+// provably parked at a lock wait — the same determinism device the barriered-deadlock test
+// uses: the interleaving is observed, not hoped for.
+func waitForQueryLockWait(t *testing.T, ctx context.Context, st *Store, prefix string) {
+	t.Helper()
+	for i := 0; i < 400; i++ {
+		var waiting int
+		if err := st.pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE wait_event_type = 'Lock' AND query LIKE $1`, prefix+"%").Scan(&waiting); err != nil {
+			t.Fatalf("watch waiters: %v", err)
+		}
+		if waiting >= 1 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no statement %q ever reached a lock wait", prefix)
+}
+
+// The round-6 P0, asserted at the spec's own number on the WHOLE slice: work consumes the
+// budget, the closing lifecycle write hits a table lock, and RunServiceSlice still returns
+// inside max_dispatch_delay + max_scheduling_tolerance — because the lifecycle write takes
+// its time FROM the slice. The iter-0130 shape minted a fresh 100ms after the budget was
+// spent, and this exact construction measured it at ~350ms for a 250ms slice.
+func TestAFullSliceBlockedAtTheLifecycleWriteHoldsCadence(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
+	materializeFrom(t, st, ctx, f, base)
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(30*time.Minute), ReasonBackfill); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	overhead := measuredOverhead(t, ctx, st)
+
+	// First blocker parks the WORK at its first bucket, creating the observable moment at
+	// which the queue table can be locked while the range is already claimed and running.
+	workBlocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin work blocker: %v", err)
+	}
+	defer workBlocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := workBlocker.Exec(ctx, `LOCK TABLE service_bucket_ingest IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock ingest: %v", err)
+	}
+
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader: %v ok=%v", err, ok)
+	}
+	defer ls.Release()
+
+	type run struct {
+		elapsed time.Duration
+		err     error
+	}
+	done := make(chan run, 1)
+	go func() {
+		started := time.Now()
+		_, serr := ls.RunServiceSlice(ctx, started.Add(250*time.Millisecond))
+		done <- run{time.Since(started), serr}
+	}()
+
+	// The slice is provably AT its work-phase lock wait; the claim is long committed, so the
+	// queue is free to lock — and the next statement to touch it is the lifecycle write.
+	waitForQueryLockWait(t, ctx, st, "INSERT INTO service_bucket_ingest")
+	queueBlocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin queue blocker: %v", err)
+	}
+	defer queueBlocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := queueBlocker.Exec(ctx, `LOCK TABLE service_repair_ranges IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock queue: %v", err)
+	}
+	// Release the work: the batch finishes its buckets and slams into the blocked queue with
+	// the budget nearly spent — persistence first, then the closing lifecycle write.
+	if err := workBlocker.Rollback(ctx); err != nil {
+		t.Fatalf("release work: %v", err)
+	}
+
+	res := <-done
+	_ = queueBlocker.Rollback(ctx)
+	if res.err == nil {
+		t.Log("the blocked slice surfaced no error; the cadence and the session are the contract")
+	}
+	if errors.Is(res.err, context.DeadlineExceeded) {
+		t.Fatalf("the client net beat the server bound at the lifecycle write: %v", res.err)
+	}
+	t.Logf("contract %s, measured overhead %s, elapsed %s", cadenceLimit(250*time.Millisecond), overhead, res.elapsed)
+	if limit := cadenceLimit(250 * time.Millisecond); res.elapsed > limit {
+		t.Fatalf("the slice took %s against the %s §10.10 contract", res.elapsed, limit)
+	}
+
+	// The leader survived: default bounds on the session, leadership still held.
+	var stmtTimeout string
+	if err := ls.conn.QueryRow(ctx, `SHOW statement_timeout`).Scan(&stmtTimeout); err != nil {
+		t.Fatalf("the leader connection did not survive: %v", err)
+	}
+	if stmtTimeout != "0" {
+		t.Fatalf("the slice left statement_timeout=%s on the leader session", stmtTimeout)
+	}
+	if held, err := ls.Check(ctx); err != nil || !held {
+		t.Fatalf("leadership lost: held=%v err=%v", held, err)
+	}
+
+	// Nothing was persisted, so the recovery contract is EXACT: still running under the
+	// lease with the cursor at the range start, and a lapsed lease hands the range back at
+	// that same cursor.
+	var rangeID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM service_repair_ranges WHERE service_id=$1`, f.serviceID).Scan(&rangeID); err != nil {
+		t.Fatalf("find the range: %v", err)
+	}
+	state, cursor := rangeState(t, st, ctx, rangeID)
+	if state != "running" {
+		t.Fatalf("state = %q after the refused lifecycle write, want running (the lease owns recovery)", state)
+	}
+	if !cursor.Equal(base) {
+		t.Fatalf("cursor moved to %s without a committed batch, want %s", cursor, base)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_repair_ranges SET lease_expires_at = now() - interval '1 second' WHERE id=$1`,
+		rangeID); err != nil {
+		t.Fatalf("lapse lease: %v", err)
+	}
+	reclaimed, ok, err := st.claimRepairRangeOn(ctx, st.pool)
+	if err != nil || !ok {
+		t.Fatalf("reclaim after the lapsed lease: %v ok=%v", err, ok)
+	}
+	if reclaimed.ID != rangeID || !reclaimed.Cursor.Equal(base) {
+		t.Fatalf("resumed %s at %s, want %s at %s", reclaimed.ID, reclaimed.Cursor, rangeID, base)
+	}
+}
+
+// delayedBeginConn stalls BEGIN — the one statement no server bound can speak for, because
+// the SET LOCALs come after it. honorCtx models a stall the client net can interrupt (a dead
+// peer); without it the stall resolves by itself and hands the code an already-expired
+// context, which is exactly the shape that used to be granted a fresh 100ms.
+type delayedBeginConn struct {
+	dbConn
+	delay    time.Duration
+	honorCtx bool
+}
+
+func (d delayedBeginConn) Begin(ctx context.Context) (pgx.Tx, error) {
+	if d.honorCtx {
+		timer := time.NewTimer(d.delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	} else {
+		time.Sleep(d.delay)
+	}
+	return d.dbConn.Begin(ctx)
+}
+
+// The iter-0130 P0 (final round): the claim measured `remaining`, ran BEGIN on the root
+// context, and minted time.Now().Add(remaining) AFTER it returned — a stalled BEGIN was
+// unbounded, and the time it consumed was granted a second time. Now one absolute claimBy is
+// fixed before BEGIN: the net (claimBy + tolerance) bounds the stall itself, and a BEGIN
+// that returns past claimBy finds every subsequent statement refused — no claim after expiry.
+func TestAClaimCannotOutliveItsBound(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(10*time.Minute), ReasonBackfill); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	var rangeID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM service_repair_ranges WHERE service_id=$1`, f.serviceID).Scan(&rangeID); err != nil {
+		t.Fatalf("find range: %v", err)
+	}
+	assertUnclaimed := func(when string) {
+		t.Helper()
+		var state string
+		var lease *time.Time
+		if err := st.pool.QueryRow(ctx,
+			`SELECT state, lease_expires_at FROM service_repair_ranges WHERE id=$1`, rangeID).
+			Scan(&state, &lease); err != nil {
+			t.Fatalf("reread range: %v", err)
+		}
+		if state != "pending" || lease != nil {
+			t.Fatalf("%s: state=%q lease=%v — the range was claimed past its bound", when, state, lease)
+		}
+	}
+
+	// (a) A stall the net can interrupt: BEGIN parks for 400ms against the 100ms cap. BEGIN's
+	// net sits at claimBy ITSELF — no server bound exists there to speak first — so the cut
+	// lands at the budget and the flat budget + tolerance assertion holds for this phase by
+	// the same arithmetic as every server-bounded one.
+	stalled := delayedBeginConn{dbConn: st.pool, delay: 400 * time.Millisecond, honorCtx: true}
+	started := time.Now()
+	_, ok, err := st.claimRepairRangeBounded(ctx, stalled, time.Now().Add(10*time.Second))
+	elapsed := time.Since(started)
+	if ok {
+		t.Fatal("a claim came back from a BEGIN the net had to kill")
+	}
+	if err == nil {
+		t.Fatal("a stalled BEGIN surfaced neither a claim nor an error")
+	}
+	if limit := cadenceLimit(lifecycleWriteBound); elapsed > limit {
+		t.Fatalf("the stalled BEGIN held the caller %s against the flat %s contract", elapsed, limit)
+	}
+	assertUnclaimed("after the interrupted stall")
+
+	// (b) A stall that resolves by itself, PAST the bound: BEGIN sleeps 150ms against the
+	// 100ms cap and then proceeds. Expiry must mean refusal — the old shape granted the
+	// statements after BEGIN a fresh 100ms and claimed the range at ~190ms on the leader
+	// connection.
+	slow := delayedBeginConn{dbConn: st.pool, delay: 150 * time.Millisecond, honorCtx: false}
+	if _, ok, err := st.claimRepairRangeBounded(ctx, slow, time.Now().Add(10*time.Second)); ok {
+		t.Fatalf("a claim succeeded AFTER its bound expired (err=%v)", err)
+	}
+	assertUnclaimed("after the self-resolving stall")
+}
+
+// The iter-0130 P1 (final round): the undersized-tail guard lived inside the repair slice
+// and returned "nothing to do" — and false there means "the repair queue is empty", so a
+// short tail ran the FORWARD pass with a repair backlog still pending. Repair-first means an
+// undersized tail runs NEITHER phase: no claim to park under a lease, no forward advance
+// jumping the queue.
+func TestAnUndersizedTailRunsNeitherRepairNorForward(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: time.Now().UTC().Add(-30 * time.Minute)}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	base := domain.FloorToBucket(time.Now().UTC().Add(-20 * time.Minute))
+	beat(t, st, ctx, f.http, base.Add(10*time.Second), true)
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(10*time.Minute), ReasonBackfill); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	forwardCursor := func() *time.Time {
+		var c *time.Time
+		if err := st.pool.QueryRow(ctx,
+			`SELECT materialized_through FROM service_materialization WHERE service_id=$1`,
+			f.serviceID).Scan(&c); err != nil {
+			t.Fatalf("read forward cursor: %v", err)
+		}
+		return c
+	}
+	before := forwardCursor()
+
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader: %v ok=%v", err, ok)
+	}
+	defer ls.Release()
+
+	// 100ms: under the 140ms tail floor, but ABOVE forward's 60ms commit reserve — so the
+	// iter-0130 guard placement does not merely error out of the forward pass, it ADVANCES
+	// the cursor and commits.
+	worked, serr := ls.RunServiceSlice(ctx, time.Now().Add(100*time.Millisecond))
+
+	// The cursor is checked FIRST: the kill for the guard-inside-repair mutant is the
+	// MOVEMENT itself — forward jumped a pending repair backlog — not a side effect of the
+	// phase having been entered.
+	after := forwardCursor()
+	switch {
+	case before == nil && after != nil:
+		t.Fatalf("forward advanced to %s on an undersized tail with a repair backlog pending", *after)
+	case before != nil && (after == nil || !after.Equal(*before)):
+		t.Fatalf("forward cursor moved %v → %v on an undersized tail", before, after)
+	}
+	// The repair range was not touched: still pending, no lease minted.
+	var state string
+	var lease *time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT state, lease_expires_at FROM service_repair_ranges WHERE service_id=$1`,
+		f.serviceID).Scan(&state, &lease); err != nil {
+		t.Fatalf("reread range: %v", err)
+	}
+	if state != "pending" || lease != nil {
+		t.Fatalf("the tail claimed the range: state=%q lease=%v", state, lease)
+	}
+	// And the tail reported exactly nothing to the scheduler.
+	if serr != nil || worked {
+		t.Fatalf("an undersized tail did work: worked=%v err=%v", worked, serr)
+	}
+}
+
+// The §10.10 accumulation acceptance, verbatim: TWO consecutive statements, each finishing
+// near its own sub-deadline, under ONE absolute slice — and the total, BEGIN through
+// rollback, still inside budget + max_scheduling_tolerance. This is the case a set-once
+// timeout cannot pass: statement_timeout is a duration RESTARTED per statement, so a bound
+// issued once lets every following statement consume the original allowance again. The
+// mechanism under test is deadlineTx re-deriving the bound from the REMAINDER: the first
+// sleep fits its bound and spends most of the budget; the second is CUT by what is left —
+// by the SERVER, before the client net says anything.
+func TestConsecutiveStatementsCannotAccumulate(t *testing.T) {
+	st, ctx := declStore(t)
+	const budget = 250 * time.Millisecond
+
+	// A pinned connection, so the session that ran the slice is the session inspected after.
+	conn, err := st.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer conn.Release()
+
+	started := time.Now()
+	deadline := started.Add(budget)
+	// The production net shape: one scheduling tolerance BEHIND the server bounds.
+	cctx, cancel := context.WithDeadline(ctx, deadline.Add(schedulingTolerance))
+	defer cancel()
+
+	rawTx, err := conn.Begin(cctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer rawTx.Rollback(ctx) //nolint:errcheck // rolled back below
+	tx := newDeadlineTx(rawTx, deadline, 0)
+
+	// Statement 1: sleeps 200ms under a ~250ms bound — inside its own sub-deadline, and the
+	// budget is now nearly spent.
+	if _, err := tx.Exec(cctx, `SELECT pg_sleep(0.2)`); err != nil {
+		t.Fatalf("the first statement was within its bound and failed: %v", err)
+	}
+	// Statement 2: the same sleep again. A set-once bound would let it run its full 200ms —
+	// per-statement restart — for a ~400ms total. The remainder-derived bound cuts it at
+	// what is LEFT (~50ms), and the refusal must be the server's.
+	_, serr := tx.Exec(cctx, `SELECT pg_sleep(0.2)`)
+	if serr == nil {
+		t.Fatal("the second statement ran to completion past the slice budget")
+	}
+	if errors.Is(serr, context.DeadlineExceeded) {
+		t.Fatalf("the client net beat the server bound: %v", serr)
+	}
+	if !isStatementBudgetError(serr) && !errors.Is(serr, errSliceBudget) {
+		t.Fatalf("the second statement died of something other than the budget: %v", serr)
+	}
+	if err := rawTx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback after the budget refusal: %v", err)
+	}
+	elapsed := time.Since(started)
+	if limit := cadenceLimit(budget); elapsed > limit {
+		t.Fatalf("BEGIN→rollback took %s against the flat %s contract", elapsed, limit)
+	}
+
+	// The SET LOCALs died with the transaction: the session carries defaults.
+	var stmtTimeout string
+	if err := conn.QueryRow(ctx, `SHOW statement_timeout`).Scan(&stmtTimeout); err != nil {
+		t.Fatalf("the session did not survive: %v", err)
+	}
+	if stmtTimeout != "0" {
+		t.Fatalf("the slice left statement_timeout=%s on the session", stmtTimeout)
+	}
+
+	// And the COMMIT side of the same acceptance: a transaction that stops INSIDE its budget
+	// commits through the adapter, bounded, with time left. Its slice is ITS OWN — a fresh
+	// deadline and a fresh net derived from it, the production envelope — because the first
+	// slice is entitled to consume its whole contract, and a second transaction inheriting
+	// the first's client net would start life with near-zero (or negative) time on a loaded
+	// runner and fail without anything being wrong.
+	deadline2 := time.Now().Add(budget)
+	cctx2, cancel2 := context.WithDeadline(ctx, deadline2.Add(schedulingTolerance))
+	defer cancel2()
+	rawTx2, err := conn.Begin(cctx2)
+	if err != nil {
+		t.Fatalf("begin second tx: %v", err)
+	}
+	defer rawTx2.Rollback(ctx) //nolint:errcheck // no-op after commit
+	tx2 := newDeadlineTx(rawTx2, deadline2, 0)
+	if _, err := tx2.Exec(cctx2, `SELECT 1`); err != nil {
+		t.Fatalf("bounded statement: %v", err)
+	}
+	if err := tx2.Commit(cctx2); err != nil {
+		t.Fatalf("bounded commit: %v", err)
 	}
 }
 

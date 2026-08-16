@@ -288,7 +288,21 @@ const maintForm = reactive({ monitor_id: "", starts_at: "", ends_at: "", reason:
 const maintSaving = ref(false);
 const maintError = ref("");
 
-async function addMaintenance() {
+// A window that reaches back over SEALED reliability facts rewrites numbers somebody may
+// already have quoted, so the API refuses it without a token issued for exactly that change.
+// This is the operator's half of that: ask what would change, show it, and only then confirm.
+// Without it the ordinary "we had maintenance last night" gets a 409 with nowhere to go.
+type PreviewSplit = { good_us: number; bad_us: number; unknown_us: number; excluded_us: number };
+type PreviewService = { service_id: string; before: PreviewSplit; after: PreviewSplit; projected: boolean };
+const preview = ref<{ preview_id: string; coverage: string; services: PreviewService[] } | null>(null);
+
+function pct(s: PreviewSplit): string {
+  const decided = s.good_us + s.bad_us;
+  if (decided === 0) return "—";
+  return ((s.good_us / decided) * 100).toFixed(3) + "%";
+}
+
+async function addMaintenance(previewID?: string) {
   if (!ws.projectId || !maintForm.starts_at || !maintForm.ends_at) return;
   maintSaving.value = true;
   maintError.value = "";
@@ -298,13 +312,25 @@ async function addMaintenance() {
     reason: maintForm.reason,
   };
   if (maintForm.monitor_id) body.monitor_id = maintForm.monitor_id;
+  if (previewID) body.preview_id = previewID;
   try {
     const res = await api.POST("/api/v1/projects/{projectID}/maintenance", {
       params: { path: { projectID: ws.projectId } },
       body,
     });
     if (res.error || !res.data) {
-      maintError.value = (res.error as { error?: string })?.error || "Could not schedule maintenance.";
+      const code = (res.error as { error?: string })?.error || "";
+      if (code === "preview_required") {
+        // Not an error the operator caused — the change simply has to be shown first.
+        await loadPreview();
+        return;
+      }
+      maintError.value =
+        code === "preview_stale"
+          ? "Something changed while you were looking. Preview again to see the current effect."
+          : code === "preview_approximate"
+            ? "This range is too long to project exactly, so it cannot be confirmed. Narrow it."
+            : code || "Could not schedule maintenance.";
       return;
     }
     maintenance.value.push(res.data);
@@ -312,12 +338,30 @@ async function addMaintenance() {
     maintForm.starts_at = "";
     maintForm.ends_at = "";
     maintForm.reason = "";
+    preview.value = null;
     showMaint.value = false;
   } catch {
     maintError.value = "Could not schedule maintenance.";
   } finally {
     maintSaving.value = false;
   }
+}
+
+async function loadPreview() {
+  const res = await api.POST("/api/v1/projects/{projectID}/maintenance/preview", {
+    params: { path: { projectID: ws.projectId } },
+    body: {
+      monitor_id: maintForm.monitor_id || undefined,
+      mutation: "create",
+      starts_at: new Date(maintForm.starts_at).toISOString(),
+      ends_at: new Date(maintForm.ends_at).toISOString(),
+    },
+  });
+  if (res.error || !res.data) {
+    maintError.value = (res.error as { error?: string })?.error || "Could not preview the change.";
+    return;
+  }
+  preview.value = res.data as typeof preview.value;
 }
 
 async function deleteMaintenance(id: string) {
@@ -612,10 +656,64 @@ watch(() => ws.projectId, load);
             <input v-model="maintForm.reason" type="text" placeholder="Database upgrade" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
           </label>
           <div v-if="maintError" class="text-[12.5px] text-down">{{ maintError }}</div>
-          <div>
-            <button type="button" :disabled="maintSaving || !maintForm.starts_at || !maintForm.ends_at" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="addMaintenance">
+
+          <!-- A window reaching back over sealed facts restates numbers people may already
+               have quoted, so it is SHOWN before it is applied. -->
+          <div v-if="preview" class="rounded border border-degraded/40 bg-degraded-weak p-3" data-testid="maint-preview">
+            <div class="text-[12.5px] font-semibold text-degraded">This reaches back over sealed reliability facts.</div>
+            <p class="mt-1 text-[12px] text-ink-2">
+              Confirming restates numbers that have already been reported. Here is what changes:
+            </p>
+            <table class="mt-2 w-full text-[12.5px]">
+              <thead>
+                <tr class="text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                  <th class="py-1 text-left">Service</th>
+                  <th class="py-1 text-right">Availability now</th>
+                  <th class="py-1 text-right">After</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="svc in preview.services" :key="svc.service_id">
+                  <td class="py-1 font-mono">{{ svc.service_id.slice(0, 8) }}</td>
+                  <td class="py-1 text-right font-mono">{{ pct(svc.before) }}</td>
+                  <td class="py-1 text-right font-mono" :class="svc.projected ? '' : 'text-ink-3'">
+                    {{ svc.projected ? pct(svc.after) : "not projected" }}
+                  </td>
+                </tr>
+                <tr v-if="!preview.services.length">
+                  <td colspan="3" class="py-2 text-center text-ink-3">No service reads reliability from this monitor.</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="preview.coverage !== 'complete'" class="mt-2 text-[12px] text-degraded">
+              This range is too long to project exactly, so it cannot be confirmed. Narrow it.
+            </p>
+          </div>
+
+          <div class="flex gap-2">
+            <button
+              v-if="!preview"
+              type="button"
+              :disabled="maintSaving || !maintForm.starts_at || !maintForm.ends_at"
+              class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50"
+              @click="addMaintenance()"
+            >
               {{ maintSaving ? "Scheduling…" : "Schedule" }}
             </button>
+            <template v-else>
+              <button
+                type="button"
+                :disabled="maintSaving || preview.coverage !== 'complete'"
+                class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50"
+                data-testid="maint-confirm"
+                @click="addMaintenance(preview.preview_id)"
+              >
+                {{ maintSaving ? "Applying…" : "Confirm and restate" }}
+              </button>
+              <button type="button" class="h-[34px] rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong" @click="preview = null">
+                Cancel
+              </button>
+            </template>
           </div>
         </div>
 

@@ -3318,3 +3318,28 @@ is not an optimization of the window; it is the only shape the precision model a
 (down/degraded/healthy/unknown, with an exclusion in force at as_of reading unknown); the
 signal remains `unstable: true` by construction and never reads stored facts; the §11
 reporting numbers remain sealed-facts-only and are untouched by this decision.
+
+## D-0165 — SLA objectives live in the open interval (0,100) (FR-021, iter-0142)
+
+The FINAL iter-0141 review ([195]) found a fix-induced P0: widening the objective column to
+numeric(7,4) (00078) made objective=100 a STORABLE live configuration, and the shared budget
+math deliberately answers a zero allowed budget with zero — `sla.BurnRate(100, …) = 0` and
+`ErrorBudget.burned_percent = 0` — so a monitor at objective=100 with burn alerting enabled
+would ride out a total outage with burn 0×, no alert, and the service surface printing
+`rate:0, status:ok`: the exact never-0× lie §11/§13 exist to prevent. numeric(6,4) had been
+rejecting 100 by ACCIDENT of precision, not by contract.
+
+**The decision (owner option A, reviewer-recommended).** Objectives are the OPEN interval
+(0,100): the RAW input must satisfy >0 and <100 (100.00004 is rejected as said, never rounded
+into range), the canonical value — half-up at four decimals, the numeric(7,4) representation
+— must remain inside (0,100) as well (99.99995 rounds to 100 and is rejected), and the
+maximum admissible objective is 99.9999. `domain.CanonicalObjective` is the one rule for
+every scope; migration 00079 tightens the schema CHECK to the same open bound (clamping the
+never-released 100 rows first), so every writer — API or not — meets the same fence. The
+allowed<=0 sentinel in `sla.BurnRate`/`ErrorBudget` becomes unreachable by construction and
+stays as robustness.
+
+**Deliberately out of scope.** A true zero-error-budget objective (alerting semantics for
+"any down second is a breach", a finite wire verdict instead of ∞×) is a legitimate future
+feature and needs its own cross-scope specification; admitting the value without those
+semantics is how the P0 happened.

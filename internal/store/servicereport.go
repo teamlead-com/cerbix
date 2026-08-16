@@ -100,9 +100,21 @@ func (s *Store) serviceReliabilityReportTx(ctx context.Context, tx pgx.Tx, proje
 		serviceID, projectID).Scan(&era, &sealed, &retractedAt, &retractedTo)
 	switch {
 	case noRows(err):
-		// No watermark row at all. An empty sli[] creates no watermark and has NO SLO
-		// (invariant 41); a declared SLI that has not materialized yet is a sealed-coverage
-		// problem instead.
+		// No watermark row at all. First distinguish "no such service in this project" from
+		// "a service with no SLO": answering a nonexistent or foreign ID with a 200-shaped
+		// no_sli report would make the report an existence oracle and a wrong-tenant answer
+		// at once (iter-0141: the API maps ErrNotFound to 404). Then: an empty sli[] creates
+		// no watermark and has NO SLO (invariant 41); a declared SLI that has not
+		// materialized yet is a sealed-coverage problem instead.
+		var owned bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM services WHERE id = $1 AND project_id = $2)`,
+			serviceID, projectID).Scan(&owned); err != nil {
+			return rep, fmt.Errorf("store: report service scope: %w", err)
+		}
+		if !owned {
+			return rep, ErrNotFound
+		}
 		var sliMembers int
 		if err := tx.QueryRow(ctx, `
 			SELECT count(*) FROM service_member_refs
@@ -401,7 +413,9 @@ func serviceHealthNowTx(ctx context.Context, tx pgx.Tx, projectID, serviceID str
 
 	// Tenant scope first: the epoch lookup below is keyed by service alone (it serves the
 	// materializer, which already owns a scoped row), so a wrong-project caller must be
-	// stopped here rather than answered from another tenant's declaration.
+	// stopped here rather than answered from another tenant's declaration — and a service
+	// that does not exist in the project is ErrNotFound, not an unknown-shaped answer
+	// (iter-0141: the API maps it to 404).
 	var owned bool
 	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM services WHERE id = $1 AND project_id = $2)`,
@@ -409,7 +423,7 @@ func serviceHealthNowTx(ctx context.Context, tx pgx.Tx, projectID, serviceID str
 		return h, fmt.Errorf("store: health service scope: %w", err)
 	}
 	if !owned {
-		return h, nil
+		return h, ErrNotFound
 	}
 
 	// The SLI layer: the declared semantics evaluated AT the as_of instant — not the worst
@@ -498,9 +512,26 @@ func serviceHealthNowTx(ctx context.Context, tx pgx.Tx, projectID, serviceID str
 // epoch boundary (§10.2, §12.1) — one step that spans a boundary yields one point per epoch.
 // Provisional buckets — reachable in production through a repair of a range younger than the
 // late-arrival grace — are rolled up separately (Provisional=true) so the timeline can render
-// them at reduced opacity without ever mixing them into a sealed number. One statement, one
-// snapshot.
+// them at reduced opacity without ever mixing them into a sealed number. The existence check
+// and the rollup read share ONE repeatable-read snapshot ([192] P1-4).
 func (s *Store) ServiceReliabilitySeries(ctx context.Context, projectID, serviceID string, from, to time.Time, step time.Duration) ([]domain.ReliabilitySeriesPoint, error) {
+	tx, _, err := s.beginReportSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only; no-op after commit
+	points, err := serviceReliabilitySeriesTx(ctx, tx, projectID, serviceID, from, to, step)
+	if err != nil {
+		return points, err
+	}
+	return points, tx.Commit(ctx)
+}
+
+// serviceReliabilitySeriesTx runs the existence check and the rollup read in ONE snapshot
+// ([192] P1-4): two pool statements let a concurrent service deletion produce a 200/empty
+// answer assembled from two different worlds — existence from before the delete, data from
+// after — when the promised answer for a gone service is ErrNotFound.
+func serviceReliabilitySeriesTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to time.Time, step time.Duration) ([]domain.ReliabilitySeriesPoint, error) {
 	var trunc string
 	switch step {
 	case time.Hour:
@@ -510,9 +541,19 @@ func (s *Store) ServiceReliabilitySeries(ctx context.Context, projectID, service
 	default:
 		return nil, fmt.Errorf("store: unsupported series step %s (hour or day)", step)
 	}
+	// A nonexistent or foreign service is ErrNotFound, not an empty series (iter-0141).
+	var owned bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM services WHERE id = $1 AND project_id = $2)`,
+		serviceID, projectID).Scan(&owned); err != nil {
+		return nil, fmt.Errorf("store: series service scope: %w", err)
+	}
+	if !owned {
+		return nil, ErrNotFound
+	}
 	// date_trunc over the UTC PROJECTION: session-TimeZone-proof, the same lesson the
 	// adoption recovery learned (iter-0136).
-	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+	rows, err := tx.Query(ctx, fmt.Sprintf(`
 		SELECT (date_trunc('%s', b.bucket_start AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS step_start,
 		       b.epoch_id, e.revision_id, (b.state = 'provisional') AS provisional, count(*),
 		       COALESCE(sum(b.good_us), 0)::bigint, COALESCE(sum(b.bad_us), 0)::bigint,
@@ -530,7 +571,9 @@ func (s *Store) ServiceReliabilitySeries(ctx context.Context, projectID, service
 		return nil, fmt.Errorf("store: reliability series: %w", err)
 	}
 	defer rows.Close()
-	var out []domain.ReliabilitySeriesPoint
+	// An empty interval is an EMPTY ARRAY on the wire ([192] P2-1), matching every other
+	// list surface — never null.
+	out := []domain.ReliabilitySeriesPoint{}
 	for rows.Next() {
 		var p domain.ReliabilitySeriesPoint
 		if err := rows.Scan(&p.Start, &p.EpochID, &p.RevisionID, &p.Provisional, &p.Buckets,

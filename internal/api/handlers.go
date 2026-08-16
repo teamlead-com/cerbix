@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -522,6 +523,12 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return false
+	}
+	// One decoder rule everywhere (iter-0141 P1-3): the body is a single JSON value, and a
+	// trailing value — which DisallowUnknownFields cannot see — fails closed.
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "request body must be a single JSON value")
 		return false
 	}
 	return true

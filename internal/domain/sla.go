@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -126,4 +127,28 @@ func (m MaintenanceWindow) Validate() error {
 		return fmt.Errorf("maintenance window: ends_at must be after starts_at")
 	}
 	return nil
+}
+
+// CanonicalObjective is the ONE objective rule for every SLA-target scope (monitor, project,
+// service): objectives live in the OPEN interval (0,100) — D-0165. An objective of 100 means
+// a zero error budget, and the shared budget/burn math's allowed<=0 sentinel would answer a
+// total outage with 0× and fire no alert ([195] P0); a true zero-budget objective is a
+// separately specified cross-scope change, not a value this rule may admit. The RAW input is
+// judged first (>0 and <100 — 100.00004 is rejected as said, never rounded into range), then
+// canonicalized half-up to FOUR decimal places (the numeric(7,4) representation), and the
+// canonical value must remain inside (0,100) too — 99.99995 rounds to 100 and is rejected,
+// 0.00001 rounds to zero and is rejected. The maximum admissible objective is 99.9999. The
+// handler echoes exactly the canonical value, so the wire answer and the stored number can
+// never differ.
+func CanonicalObjective(v float64) (float64, error) {
+	// NaN compares false against every bound, so an explicit check keeps the rule
+	// fail-closed even for callers that bypass JSON (which cannot carry NaN).
+	if math.IsNaN(v) || v <= 0 || v >= 100 {
+		return 0, fmt.Errorf("objective must be within (0,100) — a zero error budget is not a supported configuration")
+	}
+	canonical := math.Round(v*10000) / 10000
+	if canonical <= 0 || canonical >= 100 {
+		return 0, fmt.Errorf("objective must be within (0,100) at four decimal places (maximum 99.9999)")
+	}
+	return canonical, nil
 }

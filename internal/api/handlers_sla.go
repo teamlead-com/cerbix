@@ -87,10 +87,16 @@ func (h *Handler) setMonitorSLATarget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unknown window")
 		return
 	}
-	if body.Objective <= 0 || body.Objective > 100 {
-		writeError(w, http.StatusBadRequest, "objective must be within (0,100]")
+	// ONE objective rule for every scope (iter-0141/0142, D-0165): canonical 4-decimal
+	// rounding inside the OPEN (0,100), so the stored value and the answer are the same
+	// number for monitors exactly as for services, and the zero-error-budget objective the
+	// burn math cannot honestly express is not a configuration.
+	objective, cerr := domain.CanonicalObjective(body.Objective)
+	if cerr != nil {
+		writeError(w, http.StatusBadRequest, cerr.Error())
 		return
 	}
+	body.Objective = objective
 	var rules []domain.BurnRule
 	if body.BurnRules != nil {
 		rules = *body.BurnRules

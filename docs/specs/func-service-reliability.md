@@ -1406,6 +1406,13 @@ and aggregation rules as the facts, with inputs effective exactly at as_of inclu
 observations after as_of excluded. No fixed-width window approximates it — freshness
 durations are nanosecond-granular, so a derived stale deadline can split any width.
 
+*Amendment (D-0165 / iter-0142):* SLA objectives live in the **open interval (0,100)** at
+four canonical decimals (maximum 99.9999), for the service scope AND the pre-existing
+monitor scope alike — invariant 46's "existing monitor-level SLO behaviour is unchanged" is
+bounded by this correction, because objective=100 was only ever storable by an accident of
+numeric precision and the shared burn math answers a zero error budget with 0×. A true
+zero-error-budget objective is a separately specified cross-scope non-goal here.
+
 ## 12. Presentation
 
 ### 12.1 Reporting across revisions and epochs

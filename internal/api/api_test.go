@@ -18,6 +18,7 @@ import (
 	"github.com/teamlead-com/cerbix/internal/auth"
 	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/sla"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
@@ -37,6 +38,7 @@ type fakePullTest struct {
 }
 
 type fakeStore struct {
+	rep *fakeReporting
 	// previews and sealedThrough model the retroactive-maintenance gate.
 	previews           map[string]store.MaintenancePreview
 	sealedThrough      time.Time
@@ -2153,5 +2155,66 @@ func (f *fakeStore) DeleteService(_ context.Context, projectID, serviceID string
 		return store.ErrNotFound
 	}
 	delete(f.serviceStore(), serviceID)
+	return nil
+}
+
+// Phase-2 reporting fakes (iter-0141): canned payloads, tenant-checked like the real store —
+// a nonexistent or foreign service is ErrNotFound, never an empty 200 shape.
+type fakeReporting struct {
+	report     domain.ServiceWindowReport
+	health     domain.ServiceHealthNow
+	series     []domain.ReliabilitySeriesPoint
+	lastWindow string
+	lastFrom   time.Time
+	lastTo     time.Time
+	lastStep   time.Duration
+	slaWindow  string
+	slaObj     float64
+}
+
+func (f *fakeStore) reporting() *fakeReporting {
+	if f.rep == nil {
+		f.rep = &fakeReporting{}
+	}
+	return f.rep
+}
+
+func (f *fakeStore) serviceOwned(projectID, serviceID string) bool {
+	fs, ok := f.serviceStore()[serviceID]
+	return ok && fs.svc.ProjectID == projectID
+}
+
+func (f *fakeStore) ServiceReliabilityReport(_ context.Context, projectID, serviceID string, window sla.Window) (domain.ServiceWindowReport, error) {
+	if !f.serviceOwned(projectID, serviceID) {
+		return domain.ServiceWindowReport{}, store.ErrNotFound
+	}
+	f.reporting().lastWindow = window.Name
+	rep := f.reporting().report
+	rep.ServiceID, rep.Window = serviceID, window.Name
+	return rep, nil
+}
+
+func (f *fakeStore) ServiceHealthNow(_ context.Context, projectID, serviceID string) (domain.ServiceHealthNow, error) {
+	if !f.serviceOwned(projectID, serviceID) {
+		return domain.ServiceHealthNow{}, store.ErrNotFound
+	}
+	return f.reporting().health, nil
+}
+
+func (f *fakeStore) ServiceReliabilitySeries(_ context.Context, projectID, serviceID string, from, to time.Time, step time.Duration) ([]domain.ReliabilitySeriesPoint, error) {
+	if !f.serviceOwned(projectID, serviceID) {
+		return nil, store.ErrNotFound
+	}
+	r := f.reporting()
+	r.lastFrom, r.lastTo, r.lastStep = from, to, step
+	return r.series, nil
+}
+
+func (f *fakeStore) UpsertServiceSLATarget(_ context.Context, projectID, serviceID, window string, objective float64) error {
+	if !f.serviceOwned(projectID, serviceID) {
+		return store.ErrNotFound
+	}
+	r := f.reporting()
+	r.slaWindow, r.slaObj = window, objective
 	return nil
 }

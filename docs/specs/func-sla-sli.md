@@ -9,7 +9,7 @@ of maintenance windows.
 
 - **SLI** = uptime% = up / total over the monitor's/project's heartbeats within a window.
 - **Windows**: rolling **24h / 7d / 30d / 90d** (`internal/sla.StandardWindows`).
-- **SLO** — `sla_targets` (per monitor + window; project-level is a groundwork); objective 0..100.
+- **SLO** — `sla_targets` (per monitor + window; project-level is a groundwork); objective in the OPEN interval (0,100), canonical at four decimals — maximum 99.9999 (amended by D-0165/iter-0142: a zero error budget is not a supported configuration, because the shared burn math would answer a total outage with 0×).
 - **Error budget** = `1 − SLO`; we show allowed/actual/remaining ratio, burned%, met
   (`sla.ErrorBudget`).
 - **Maintenance windows** (`maintenance_windows`, monitor- or project-scoped) — heartbeats

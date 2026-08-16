@@ -1077,23 +1077,25 @@ func TestServiceReportSurfacesAreTenantScoped(t *testing.T) {
 	}
 	foreign := declFixture{projectID: proj2.ID}
 
+	// Since iter-0141 the reads answer a wrong-project caller with ErrNotFound — never a
+	// no_sli/unknown-shaped 200 that doubles as an existence oracle — and still leak nothing.
 	rep, err := st.ServiceReliabilityReport(ctx, foreign.projectID, f.serviceID, testWindow(5))
-	if err != nil {
-		t.Fatalf("foreign report: %v", err)
+	if err != ErrNotFound {
+		t.Fatalf("foreign report = %v, want ErrNotFound", err)
 	}
 	if rep.SealedThrough != nil || len(rep.Segments) != 0 || rep.Availability != nil || rep.Objective != nil {
 		t.Fatalf("a wrong-project report leaked tenant data: %+v", rep)
 	}
 	h, err := st.ServiceHealthNow(ctx, foreign.projectID, f.serviceID)
-	if err != nil {
-		t.Fatalf("foreign health: %v", err)
+	if err != ErrNotFound {
+		t.Fatalf("foreign health = %v, want ErrNotFound", err)
 	}
-	if h.SLI != "unknown" || h.Diagnostics != "unknown" || len(h.FailingMonitors) != 0 {
+	if h.SLI == "healthy" || h.Diagnostics == "failing" || len(h.FailingMonitors) != 0 {
 		t.Fatalf("a wrong-project health read leaked tenant data: %+v", h)
 	}
 	points, err := st.ServiceReliabilitySeries(ctx, foreign.projectID, f.serviceID, sealed.Add(-time.Hour), sealed, time.Hour)
-	if err != nil {
-		t.Fatalf("foreign series: %v", err)
+	if err != ErrNotFound {
+		t.Fatalf("foreign series = %v, want ErrNotFound", err)
 	}
 	if len(points) != 0 {
 		t.Fatalf("a wrong-project series returned %d points", len(points))
@@ -1106,5 +1108,71 @@ func TestServiceReportSurfacesAreTenantScoped(t *testing.T) {
 		`SELECT objective::float8 FROM sla_targets WHERE service_id = $1 AND window_name = '30d'`,
 		f.serviceID).Scan(&objective); err != nil || objective != 99.9 {
 		t.Fatalf("objective after the foreign upsert = %v (%v), want the untouched 99.9", objective, err)
+	}
+}
+
+// [192] P1-4: the series' existence check and its data read share ONE snapshot — a service
+// deleted between them must not yield a 200/empty assembled from two worlds. The pinned
+// snapshot still answers from the pre-delete world; a fresh call is ErrNotFound.
+func TestSeriesExistenceAndDataShareOneSnapshot(t *testing.T) {
+	st, ctx := declStore(t)
+	f := reportService(t, st, ctx)
+	hour := time.Now().UTC().Add(-7 * time.Hour).Truncate(time.Hour)
+	plantRange(t, st, ctx, f, f.epochID, hour, hour.Add(10*time.Minute), minute, 0, 0, 0, "sealed")
+
+	tx, _, err := st.beginReportSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only
+
+	if err := st.DeleteService(ctx, f.projectID, f.serviceID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	points, err := serviceReliabilitySeriesTx(ctx, tx, f.projectID, f.serviceID, hour, hour.Add(time.Hour), time.Hour)
+	if err != nil {
+		t.Fatalf("series in snapshot: %v", err)
+	}
+	if len(points) != 1 || points[0].Durations.GoodUs != 10*minute {
+		t.Fatalf("the pinned snapshot lost its own world: %+v", points)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if _, err := st.ServiceReliabilitySeries(ctx, f.projectID, f.serviceID, hour, hour.Add(time.Hour), time.Hour); err != ErrNotFound {
+		t.Fatalf("fresh series after delete = %v, want ErrNotFound", err)
+	}
+}
+
+// [192] P1-1 + [195] P0 (D-0165): the admissible objective contract (0,100) is
+// REPRESENTABLE at four decimals, the canonical value is what the row holds, and the schema
+// CHECK (00079) is the final fence for EVERY writer — the API rule and the column agree that
+// a zero error budget is not a configuration.
+func TestObjectiveIsCanonicalAndRepresentable(t *testing.T) {
+	st, ctx := declStore(t)
+	f := reportService(t, st, ctx)
+
+	// The maximum admissible objective survives byte-exact: the echo and the row are the
+	// same number.
+	if err := st.UpsertServiceSLATarget(ctx, f.projectID, f.serviceID, "30d", 99.9999); err != nil {
+		t.Fatalf("objective 99.9999: %v", err)
+	}
+	var stored float64
+	if err := st.pool.QueryRow(ctx,
+		`SELECT objective::float8 FROM sla_targets WHERE service_id = $1 AND window_name = '30d'`,
+		f.serviceID).Scan(&stored); err != nil || stored != 99.9999 {
+		t.Fatalf("stored = %v (%v), want exactly 99.9999", stored, err)
+	}
+	// The monitor scope shares the column and the same bound.
+	if _, err := st.UpsertMonitorSLATarget(ctx, f.http, "30d", 99.9999, false, nil); err != nil {
+		t.Fatalf("monitor objective 99.9999: %v", err)
+	}
+	// The SCHEMA fence: a writer that bypasses the application rule still cannot store the
+	// zero-error-budget objective.
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO sla_targets (service_id, window_name, objective) VALUES ($1, '7d', 100)`,
+		f.serviceID); err == nil || !strings.Contains(err.Error(), "sla_targets_objective_chk") {
+		t.Fatalf("objective=100 passed the schema fence: %v", err)
 	}
 }

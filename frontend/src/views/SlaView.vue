@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { api } from "@/api/client";
+import { canonicalObjective } from "@/lib/objective";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
@@ -239,9 +240,12 @@ async function saveSlo(m: Monitor) {
   // `draft` is bound to <input type="number">, so v-model may hand back a number,
   // not a string — normalize before any string ops (a bare .trim() throws on a number).
   const raw = String(draft.value ?? "").trim();
-  const objective = Number(raw);
-  if (!raw || Number.isNaN(objective) || objective <= 0 || objective > 100) {
-    rowError.value = "Enter a target between 0 and 100 (e.g. 99.9).";
+  // The ONE objective rule, mirrored from the server (D-0165): raw in the open (0,100),
+  // canonical half-up at four decimals, canonical also in (0,100) — 99.99995 rounds to 100
+  // and is rejected HERE, not as a server 400; the canonical value is what gets sent.
+  const objective = raw ? canonicalObjective(Number(raw)) : null;
+  if (objective === null) {
+    rowError.value = "Enter a target above 0 and below 100 (max 99.9999, e.g. 99.9).";
     return;
   }
   const ruleErr = validateRules();
@@ -655,7 +659,7 @@ watch(() => ws.projectId, () => {
                       <div class="relative">
                         <input
                           v-model="draft"
-                          type="number" min="0" max="100" step="0.01" placeholder="99.9" autofocus
+                          type="number" min="0" max="99.9999" step="0.01" placeholder="99.9" autofocus
                           class="w-[84px] rounded-sm border border-border bg-surface-2 pl-2 pr-[18px] py-[5px] text-right font-mono text-[12.5px] outline-none focus:border-accent"
                           @keydown.enter.prevent="saveSlo(r.monitor)"
                           @keydown.esc="cancelEdit"

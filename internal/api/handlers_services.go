@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -349,6 +350,13 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, max int64, dst any) 
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return false
+	}
+	// The body is ONE JSON value: DisallowUnknownFields only guards fields inside the first
+	// value, so `{...}{"burn_alert":true}` would otherwise pass with its trailer silently
+	// ignored (iter-0141 P1-3). Fail closed on anything after it.
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "request body must be a single JSON value")
 		return false
 	}
 	return true

@@ -1492,7 +1492,7 @@ export interface paths {
          *
          *     `materialization.sealed_through` is defined by CONTIGUITY, so a gap holds it back rather than being jumped over — a lagging timestamp is the honest answer, and any range listed under `repairing` must be rendered as work in progress, never as data.
          *
-         *     `reliability` is always `null` in this release: SLO, error budget and burn rate are phase 2. The field is present-and-null rather than absent so a client can tell "no answer yet" from "the field moved", and no zero is ever shipped that a UI could render as a number.
+         *     `reliability` is always `null` HERE by design: the detail never embeds a number a UI could misread as fresh. SLO, error budget, burn rate, the live signal and the timeline live on their own endpoints — `…/services/{serviceID}/reliability`, `…/health` and `…/reliability/series` — each with the honesty statuses of spec 11.
          */
         get: {
             parameters: {
@@ -1623,6 +1623,209 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/reliability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The reliability report for one standard window (phase 2)
+         * @description Computed from SEALED facts only, over `[sealed_through - window, sealed_through)` — the window never ends at now (spec 11.3), and the whole report is one database snapshot with the DB clock as `as_of`.
+         *
+         *     Numbers that cannot be honestly stated are ABSENT with a status and a reason — never 100% and never 0x: storage continuity and decidable coverage are judged independently and BOTH govern every quoted aggregate, budget and burn rate; a window spanning definition revisions returns segments with `aggregate_withheld` and no aggregate at all; the objective is a stated current-view parameter. Segments split the retroactive backfill part and label it `declared_reconstruction`; `repairing` intervals are work in progress, never data.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    window?: "24h" | "7d" | "30d" | "90d";
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ServiceWindowReport"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The categorical live signal (explicitly unstable)
+         * @description A DIFFERENT NAMED THING than the report (spec 11.3, D-0164): the declared SLI semantics evaluated at the DB `as_of` instant, right-continuous, through the same member/aggregation rules as the facts — never a percentage, never derived from stored facts, always `unstable: true`. The `diagnostics` layer answers for monitors[]; a failing diagnostic never touches the customer-facing `sli` layer.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ServiceHealthNow"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/reliability/series": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Hour/day rollups for the timeline (epoch-keyed, exact sums)
+         * @description On-read rollups (spec 10.2/12.1): exact integer duration sums keyed by epoch, NEVER merged across an epoch boundary — one step spanning a boundary yields one point per epoch — and provisional time rolls up separately so the timeline can render it at reduced opacity without mixing it into a sealed number. The range is capped at the longest supported window (90d).
+         */
+        get: {
+            parameters: {
+                query: {
+                    from: string;
+                    to: string;
+                    step: "hour" | "day";
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ServiceSeriesResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/sla-target": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set the service-scoped objective for one standard window (editor+)
+         * @description The body is `{window, objective}` and NOTHING else. Service burn alerting is phase 5 (spec 13, invariant 47): any burn field is rejected at the decoder, the store offers no burn parameter, and the schema CHECK is the final fence. Reporting always states which objective produced a budget, and a change is annotated via its timestamp.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SetServiceSLATargetRequest"];
+                };
+            };
+            responses: {
+                /** @description The stored target. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            window: string;
+                            objective: number;
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
             };
         };
         post?: never;
@@ -5461,6 +5664,153 @@ export interface components {
             maintenance?: "exclude";
             freshness?: components["schemas"]["FreshnessPolicy"];
         };
+        /** @description Exact integer-microsecond sums of BOTH duration axes (spec 9.1). */
+        ReliabilityDurations: {
+            /** Format: int64 */
+            GoodUs: number;
+            /** Format: int64 */
+            BadUs: number;
+            /** Format: int64 */
+            UnknownUs: number;
+            /** Format: int64 */
+            ExcludedUs: number;
+            /** Format: int64 */
+            HealthyUs: number;
+            /** Format: int64 */
+            DegradedUs: number;
+            /** Format: int64 */
+            DownUs: number;
+            /** Format: int64 */
+            HealthUnknownUs: number;
+        };
+        /** @enum {string} */
+        ServiceReportStatus: "ok" | "partial" | "unavailable" | "insufficient_history" | "insufficient_sealed_coverage";
+        /** @description One (epoch x reconstruction-part) slice. A window spanning definition revisions is ONLY segments; each carries its own availability and coverage. Only the retroactive backfill part carries `declared_reconstruction`. */
+        ReliabilitySegment: {
+            revision_id: string;
+            /** Format: int64 */
+            revision: number;
+            epoch_id: string;
+            /** Format: int64 */
+            epoch_seq: number;
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /** Format: int64 */
+            buckets: number;
+            durations: components["schemas"]["ReliabilityDurations"];
+            /** @description Percent (0..100); absent when nothing measured. */
+            availability?: number;
+            coverage: number;
+            declared_reconstruction: boolean;
+        };
+        RepairingInterval: {
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+        };
+        /** @description The error budget over MEASURED time, always stating its objective. */
+        ServiceBudget: {
+            objective: number;
+            /** Format: date-time */
+            objective_updated_at: string;
+            allowed_downtime_ratio: number;
+            actual_downtime_ratio: number;
+            remaining_ratio: number;
+            burned_percent: number;
+            met: boolean;
+        };
+        /** @description One reporting burn window over `[sealed_through - w, sealed_through)`, carrying its OWN storage-continuity and coverage verdicts; a rate is quoted only when they allow it — never 0x from an empty or holed window, never across a definition boundary, never from a watermark with no real-time sealed overlap. */
+        ServiceBurnWindow: {
+            window: string;
+            status: components["schemas"]["ServiceReportStatus"];
+            reason?: string;
+            /** Format: int64 */
+            expected_buckets: number;
+            /** Format: int64 */
+            sealed_buckets: number;
+            storage_continuity: boolean;
+            coverage: number;
+            rate?: number;
+        };
+        /** @description The spec-11 reliability answer for one service and one standard window. */
+        ServiceWindowReport: {
+            service_id: string;
+            window: string;
+            /** Format: date-time */
+            as_of: string;
+            /** Format: date-time */
+            sealed_through: string | null;
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            status: components["schemas"]["ServiceReportStatus"];
+            reason?: string;
+            storage_continuity: boolean;
+            /** Format: int64 */
+            expected_buckets: number;
+            /** Format: int64 */
+            sealed_buckets: number;
+            coverage: number;
+            durations: components["schemas"]["ReliabilityDurations"];
+            /** @description Percent (0..100); absent across revisions */
+            availability?: number;
+            /** @description Set to `spans_definition_revisions` only when stored facts actually show more than one revision. */
+            aggregate_withheld?: string;
+            objective?: number;
+            /** Format: date-time */
+            objective_updated_at?: string;
+            budget?: components["schemas"]["ServiceBudget"];
+            burn?: components["schemas"]["ServiceBurnWindow"][];
+            segments: components["schemas"]["ReliabilitySegment"][];
+            repairing?: components["schemas"]["RepairingInterval"][];
+            /** Format: date-time */
+            retracted_at?: string;
+            /** Format: date-time */
+            retracted_to?: string;
+        };
+        /** @description The categorical live signal (spec 11.3, D-0164) — explicitly unstable, never a percentage, computed at the DB as_of instant, never from stored facts. */
+        ServiceHealthNow: {
+            unstable: boolean;
+            /** Format: date-time */
+            as_of: string;
+            /** @enum {string} */
+            sli: "healthy" | "degraded" | "down" | "unknown";
+            /** @enum {string} */
+            diagnostics: "ok" | "failing" | "unknown";
+            failing_monitors?: string[];
+        };
+        ReliabilitySeriesPoint: {
+            /** Format: date-time */
+            start: string;
+            epoch_id: string;
+            revision_id: string;
+            provisional: boolean;
+            /** Format: int64 */
+            buckets: number;
+            durations: components["schemas"]["ReliabilityDurations"];
+        };
+        ServiceSeriesResponse: {
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /** @enum {string} */
+            step: "hour" | "day";
+            points: components["schemas"]["ReliabilitySeriesPoint"][];
+        };
+        /** @description Window and objective ONLY — burn fields are rejected (phase 5 owns alerting). Objectives live in the OPEN interval (0,100), canonical at four decimals (maximum 99.9999): a zero error budget is not a supported configuration (D-0165). */
+        SetServiceSLATargetRequest: {
+            /**
+             * @default 30d
+             * @enum {string}
+             */
+            window: "24h" | "7d" | "30d" | "90d";
+            objective: number;
+        };
         /** @description What a human declared availability to MEAN, as of `effective_at`. */
         ServiceDeclaration: {
             /** Format: int64 */
@@ -6097,7 +6447,7 @@ export interface components {
         SetSLATarget: {
             /**
              * Format: double
-             * @description Target uptime percent, (0,100].
+             * @description Target uptime percent in the OPEN (0,100), canonical at four decimals — maximum 99.9999 (D-0165).
              */
             objective: number;
             /**

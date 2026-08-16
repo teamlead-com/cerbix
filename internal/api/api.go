@@ -16,6 +16,7 @@ import (
 	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/settings"
+	"github.com/teamlead-com/cerbix/internal/sla"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
@@ -167,6 +168,11 @@ type Store interface {
 	ServiceDetail(ctx context.Context, projectID, serviceID string) (store.ServiceDetail, error)
 	PutServiceDeclaration(ctx context.Context, projectID, serviceID string, decl domain.ServiceDeclaration, expectedRevision int64, opts store.DeclarationOptions) (domain.DefinitionRevision, domain.EvaluationEpoch, error)
 	DeleteService(ctx context.Context, projectID, serviceID string) error
+	// Service reliability reporting (FR-021 phase 2, iter-0141).
+	ServiceReliabilityReport(ctx context.Context, projectID, serviceID string, window sla.Window) (domain.ServiceWindowReport, error)
+	ServiceHealthNow(ctx context.Context, projectID, serviceID string) (domain.ServiceHealthNow, error)
+	ServiceReliabilitySeries(ctx context.Context, projectID, serviceID string, from, to time.Time, step time.Duration) ([]domain.ReliabilitySeriesPoint, error)
+	UpsertServiceSLATarget(ctx context.Context, projectID, serviceID, window string, objective float64) error
 
 	ListProjectSecrets(ctx context.Context, projectID string) ([]store.ProjectSecret, error)
 }
@@ -438,14 +444,19 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/availability", h.projectAvailability)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla", h.projectSLA)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-report", h.setProjectSLAReport)
-	// Service reliability (FR-021 phase 1): the resource, its declaration and the state of
-	// materialization. SLO/budget/burn are phase 2 and have no endpoint yet — an endpoint
-	// that answered with zeros would be worse than one that does not exist.
+	// Service reliability (FR-021). Phase 1: the resource, its declaration and the state of
+	// materialization. Phase 2 (iter-0141): the reporting endpoints below — the detail still
+	// embeds no number (an embedded zero would be worse than no field), the numbers live on
+	// their own routes with spec-§11 honesty statuses.
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services", h.listServices)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/services", h.createService)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}", h.getService)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/declaration", h.putServiceDeclaration)
 	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/services/{serviceID}", h.deleteService)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/reliability", h.serviceReliability)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/health", h.serviceHealth)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/reliability/series", h.serviceReliabilitySeries)
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/sla-target", h.setServiceSLATarget)
 
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/secrets", h.listSecrets)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/secrets", h.createSecret)

@@ -212,3 +212,51 @@ describe("SlaView tenant context", () => {
     expect(wrapper.text()).toContain("b-window");
   });
 });
+
+describe("SlaView objective rule (D-0165, iter-0143)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("canonicalizes the objective on the client: post-round bounds reject before any request, the canonical value is what gets sent", async () => {
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path.endsWith("/monitors"))
+        return Promise.resolve({ data: [{ id: "mon-1", name: "api", type: "http", interval_seconds: 30 }] });
+      if (path.endsWith("/sla")) return Promise.resolve({ data: { windows: [] } });
+      return Promise.resolve({ data: [] });
+    });
+    apiMock.PUT.mockResolvedValue({ data: {} });
+
+    const { wrapper } = mountView();
+    await flushPromises();
+
+    const vm = wrapper.vm as unknown as {
+      rows: Array<{ monitor: { id?: string } }>;
+      editSlo: (r: unknown) => void;
+      saveSlo: (m: unknown) => Promise<void>;
+      draft: string | number;
+      rowError: string;
+    };
+    expect(vm.rows.length).toBe(1);
+    const row = vm.rows[0];
+    vm.editSlo(row as never);
+
+    // The two boundary values [203] named: both pass a raw-only check and died as server
+    // 400s before this rule reached the client. Now they are rejected HERE, with no PUT.
+    for (const bad of ["99.99995", "0.00001"]) {
+      vm.draft = bad;
+      await vm.saveSlo(row.monitor as never);
+      expect(vm.rowError, `draft=${bad}`).toContain("above 0 and below 100");
+      expect(apiMock.PUT, `draft=${bad}`).not.toHaveBeenCalled();
+    }
+
+    // The acceptance case: 99.99994 canonicalizes to 99.9999 and THAT is the wire value.
+    vm.draft = "99.99994";
+    await vm.saveSlo(row.monitor as never);
+    await flushPromises();
+    expect(apiMock.PUT).toHaveBeenCalledTimes(1);
+    const putArgs = apiMock.PUT.mock.calls[0] as [string, { body: { objective: number } }];
+    expect(putArgs[0]).toBe("/api/v1/monitors/{monitorID}/sla-target");
+    expect(putArgs[1].body.objective).toBe(99.9999);
+  });
+});

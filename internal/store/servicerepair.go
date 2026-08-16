@@ -287,7 +287,10 @@ func adaptRepairBatch(batch int, spent, budget time.Duration) int {
 // per D-0159 — a bound set once at slice start would let the last batch inherit the first
 // batch's generosity.
 func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, from, to time.Time, budget time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, budget)
+	// Cushioned past the server timeouts on purpose: set to the same instant they race, and
+	// a client cancel that wins closes the connection mid-query — on the leader path, the
+	// connection that owns the advisory lock. The server bound must always speak first.
+	ctx, cancel := context.WithTimeout(ctx, budget+2*time.Second)
 	defer cancel()
 
 	ms := budget.Milliseconds()

@@ -524,7 +524,13 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	if budget <= 0 {
 		return true, nil
 	}
-	ctx, cancel := context.WithDeadline(ctx, deadline)
+	// The client-side deadline is a SAFETY NET behind the server timeouts, not a peer of
+	// them. Set to the same instant, the two race — and when the client cancel wins, pgx
+	// closes the connection mid-query. On the leader path that connection owns the advisory
+	// lock, so one blocked bucket would cost the node its leadership. The cushion guarantees
+	// the server's lock_timeout speaks first: an ordinary SQL error, a rolled-back
+	// transaction, and a session that survives.
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(2*time.Second))
 	defer cancel()
 
 	// A client-side deadline cancels our WAIT; it does not bound how long the server keeps
@@ -545,6 +551,8 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
+	// This first pair bounds the CLAIM below; the bucket loop re-derives from the remaining
+	// budget before every bucket.
 	for _, stmt := range []string{
 		fmt.Sprintf("SET LOCAL statement_timeout = %d", ms),
 		fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
@@ -592,10 +600,28 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	// Bucket at a time so the deadline is honoured mid-range rather than after it. A partial
 	// pass is not a failure: the cursor is committed at whatever point it reached and the
 	// next slice resumes there.
+	//
+	// The server-side bounds are RE-DERIVED from what is left before every bucket (§10.10,
+	// D-0159). Set once at slice start, the last bucket inherits the first bucket's
+	// generosity: a bound equal to the whole budget stops nothing by the time most of the
+	// budget is spent.
 	reached := cursor
 	for at := cursor; at.Before(end); at = at.Add(domain.CanonicalBucket) {
-		if !time.Now().Before(deadline) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
 			break
+		}
+		remainingMS := remaining.Milliseconds()
+		if remainingMS < 1 {
+			remainingMS = 1
+		}
+		for _, stmt := range []string{
+			fmt.Sprintf("SET LOCAL statement_timeout = %d", remainingMS),
+			fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(remainingMS, repairLockTimeout.Milliseconds())),
+		} {
+			if _, err := tx.Exec(ctx, stmt); err != nil {
+				return true, fmt.Errorf("store: rederive advance timeouts: %w", err)
+			}
 		}
 		if _, err := s.materializeBucketTx(ctx, tx, projectID, serviceID, at, modeOrdinary); err != nil {
 			return true, err

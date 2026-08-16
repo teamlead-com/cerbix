@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/reliability"
@@ -45,6 +46,17 @@ var (
 	ErrUnrecomputableRange = errors.New("store: range is no longer recomputable from raw data")
 )
 
+// isStatementBudgetError reports whether an error is the server refusing to spend more time:
+// statement_timeout (57014) or lock_timeout (55P03). These are the budget speaking, not the
+// data — the projection degrades instead of failing.
+func isStatementBudgetError(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == "57014" || pgErr.Code == "55P03"
+}
+
 // resolveRawFloorTx computes the earliest recomputable instant on the DATABASE clock. A
 // non-positive retention means "no raw purge is configured", which resolves to the epoch —
 // everything retained is repairable.
@@ -77,6 +89,10 @@ type previewBinding struct {
 type PreviewService struct {
 	ServiceID            string
 	DefinitionGeneration int64
+	// Reason says WHY a service was not projected: range_too_long, wall_budget or
+	// evidence_gone. Three different remediations — narrow the range, try again, and "this
+	// can never run" — and a bare boolean made the operator guess between them.
+	Reason string
 	// Before and After are the four-way availability split over the requested range, as it
 	// stands and as the mutation would leave it. Both axes are carried because a mutation can
 	// move health without moving good/bad at all, and a projection showing only the first
@@ -169,9 +185,15 @@ func (s *Store) PreviewMutationOf(
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
+	// The PRE-projection phase — the membership lock, the affected set, the generation, the
+	// sealed-intersection gate — is a handful of cheap indexed statements that the token
+	// cannot exist without. It gets a floor under the wall budget: a budget already spent by
+	// the projection loop must skip SERVICES, not blow up the statement that would have told
+	// us which services there are. The projection loop re-derives its own bounds from the
+	// remaining budget per service, inside savepoints.
 	budgetMS := s.previewWallBudget().Milliseconds()
-	if budgetMS < 1 {
-		budgetMS = 1
+	if budgetMS < 1000 {
+		budgetMS = 1000
 	}
 	for _, stmt := range []string{
 		fmt.Sprintf("SET LOCAL statement_timeout = %d", budgetMS),
@@ -194,6 +216,19 @@ func (s *Store) PreviewMutationOf(
 		return MaintenancePreview{}, err
 	}
 
+	// Retention fails closed AT THE PREVIEW, not only at the confirm. A range whose raw
+	// evidence is already purged cannot be recomputed; projecting it anyway produced a
+	// confident "complete after" for a change the confirm was always going to 422 — the
+	// diagnostic surface promising what the system knew it would refuse.
+	if len(services) > 0 && from.Before(rawFloor) {
+		if sealed, serr := rangeIntersectsSealed(ctx, tx, services, from, to); serr != nil {
+			return MaintenancePreview{}, serr
+		} else if sealed {
+			return MaintenancePreview{}, fmt.Errorf("%w: earliest repairable is %s",
+				ErrUnrecomputableRange, rawFloor.UTC().Format(time.RFC3339))
+		}
+	}
+
 	var generation int64
 	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE((SELECT generation FROM project_maintenance_generation WHERE project_id=$1), 0)`,
@@ -213,18 +248,58 @@ func (s *Store) PreviewMutationOf(
 	}
 	coverage := "complete"
 	for i := range services {
-		before, aerr := currentAggregate(ctx, tx, services[i].ServiceID, from, to)
-		if aerr != nil {
-			return MaintenancePreview{}, aerr
+		// The wall budget bounds the WHOLE operation, checked before every service — not
+		// just inside one loop. Without this, up to 49 more per-service statement sequences
+		// ran under the project's membership lock after the budget expired: exactly the
+		// accumulation D-0159 forbids, bounded per statement and unbounded in sum.
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			services[i].Reason = ReasonWallBudget
+			coverage = "approximate"
+			continue
 		}
-		after, projected, perr := s.projectMutation(ctx, tx, projectID, services[i].ServiceID, from, to, addSpan, dropID, deadline)
-		if perr != nil {
+		// Server-side bounds are re-derived from what is LEFT, per service, and the work
+		// runs in a SAVEPOINT: a statement_timeout fired mid-projection then aborts the
+		// savepoint, not the transaction, so exhaustion still delivers the promised
+		// `approximate` token instead of a rolled-back 500.
+		sp, serr := tx.Begin(ctx)
+		if serr != nil {
+			return MaintenancePreview{}, fmt.Errorf("store: begin projection savepoint: %w", serr)
+		}
+		ms := remaining.Milliseconds()
+		if ms < 1 {
+			ms = 1
+		}
+		before, after, reason, perr := func() (ServiceAggregate, ServiceAggregate, string, error) {
+			for _, stmt := range []string{
+				fmt.Sprintf("SET LOCAL statement_timeout = %d", ms),
+				fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
+			} {
+				if _, err := sp.Exec(ctx, stmt); err != nil {
+					return ServiceAggregate{}, ServiceAggregate{}, "", fmt.Errorf("store: set projection timeouts: %w", err)
+				}
+			}
+			return s.projectBothSides(ctx, sp, projectID, services[i].ServiceID, from, to, addSpan, dropID, deadline)
+		}()
+		switch {
+		case perr != nil && isStatementBudgetError(perr):
+			if rerr := sp.Rollback(ctx); rerr != nil {
+				return MaintenancePreview{}, fmt.Errorf("store: rollback projection savepoint: %w", rerr)
+			}
+			services[i].Reason = ReasonWallBudget
+			coverage = "approximate"
+			continue
+		case perr != nil:
 			return MaintenancePreview{}, perr
+		}
+		if cerr := sp.Commit(ctx); cerr != nil {
+			return MaintenancePreview{}, fmt.Errorf("store: release projection savepoint: %w", cerr)
 		}
 		services[i].Before = before
 		services[i].After = after
-		services[i].Projected = projected
-		if !projected {
+		services[i].Projected = reason == ""
+		services[i].Reason = reason
+		if reason != "" {
 			// One unprojectable service makes the WHOLE token approximate. A confirm that
 			// accepted it would be authorizing a change to a service nobody was shown.
 			coverage = "approximate"
@@ -235,7 +310,8 @@ func (s *Store) PreviewMutationOf(
 		ProjectID: projectID, MonitorID: monitorID, TargetID: targetID,
 		Mutation: mutation, From: from, To: to,
 		MaintenanceGeneration: generation, RawFloor: rawFloor,
-		Coverage: coverage, Services: services,
+		EarliestRepairable: rawFloor,
+		Coverage:           coverage, Services: services,
 	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO maintenance_previews
@@ -735,29 +811,60 @@ func (s *Store) previewWallBudget() time.Duration {
 // is not one an operator can be said to have approved.
 const previewProjectionBudget = 4320 // three days of canonical buckets
 
-// projectMutation returns the aggregate a service would report over [from, to) once the
-// mutation is applied. `addSpan` is the window a create would introduce; `dropWindowID` is the
-// window an annul would remove. Exactly one is set.
-func (s *Store) projectMutation(
+// Unprojected reasons. A bare false forces the operator to guess between "narrow the range",
+// "try again" and "this can never run", which are three different remediations.
+const (
+	ReasonRangeTooLong = "range_too_long"
+	ReasonWallBudget   = "wall_budget"
+	ReasonEvidenceGone = "evidence_gone"
+)
+
+// projectBothSides computes the BEFORE and the AFTER over the EXACT requested range, through
+// the same clipped reducer, in one pass.
+//
+// Clipping is the point. The first implementation reduced whole buckets, so an operator
+// previewing [10:00:30, 10:00:45) confirmed numbers computed over a full minute — sixty
+// seconds of splits for a fifteen-second question, violating the payload's own contract that
+// each axis sums to the range's length. Both sides now reduce
+// [max(bucket_start, from), min(bucket_end, to)) per bucket, from the same observations and
+// spans, so each conserves to (to − from) exactly and their difference is exactly the
+// mutation's effect. Time no epoch governs is counted UNKNOWN on both sides — undecided is
+// the honest name for it, and dropping it would break the conservation the client checks.
+//
+// `addSpan` is the window a create would introduce; `dropWindowID` the window an annul would
+// remove. Exactly one is set.
+func (s *Store) projectBothSides(
 	ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to time.Time,
 	addSpan *reliability.MaintenanceSpan, dropWindowID string, deadline time.Time,
-) (agg ServiceAggregate, projected bool, err error) {
+) (before, after ServiceAggregate, reason string, err error) {
 	if to.Sub(from)/domain.CanonicalBucket > previewProjectionBudget {
-		return ServiceAggregate{}, false, nil
+		return ServiceAggregate{}, ServiceAggregate{}, ReasonRangeTooLong, nil
 	}
 	for at := domain.FloorToBucket(from); at.Before(to); at = at.Add(domain.CanonicalBucket) {
 		// The bucket count above bounds WORK; this bounds TIME. Slow buckets under a small
 		// count still hold the project's membership lock, and a preview that cannot finish
 		// inside its wall budget is honestly approximate rather than expensively complete.
 		if !time.Now().Before(deadline) {
-			return ServiceAggregate{}, false, nil
+			return ServiceAggregate{}, ServiceAggregate{}, ReasonWallBudget, nil
 		}
-		end := at.Add(domain.CanonicalBucket)
+		cs, ce := at, at.Add(domain.CanonicalBucket)
+		if cs.Before(from) {
+			cs = from
+		}
+		if ce.After(to) {
+			ce = to
+		}
+		dur := ce.Sub(cs).Microseconds()
+
 		epochID, members, policies, eerr := epochAt(ctx, tx, serviceID, at)
 		if eerr != nil {
-			return ServiceAggregate{}, false, eerr
+			return ServiceAggregate{}, ServiceAggregate{}, "", eerr
 		}
 		if epochID == "" || len(members) == 0 {
+			before.Unknown += dur
+			before.HealthUnknown += dur
+			after.Unknown += dur
+			after.HealthUnknown += dur
 			continue
 		}
 		// Evidence destroyed since sealing makes the range unrecomputable: the confirm's
@@ -765,50 +872,55 @@ func (s *Store) projectMutation(
 		// an approved projection of a change that cannot run is a promise the system knows
 		// it will break.
 		if gone, gerr := anyMemberMonitorGone(ctx, tx, members); gerr != nil {
-			return ServiceAggregate{}, false, gerr
+			return ServiceAggregate{}, ServiceAggregate{}, "", gerr
 		} else if gone {
-			return ServiceAggregate{}, false, nil
+			return ServiceAggregate{}, ServiceAggregate{}, ReasonEvidenceGone, nil
 		}
-		observations, oerr := observationsFor(ctx, tx, members, at, end)
+		observations, oerr := observationsFor(ctx, tx, members, cs, ce)
 		if oerr != nil {
-			return ServiceAggregate{}, false, oerr
+			return ServiceAggregate{}, ServiceAggregate{}, "", oerr
 		}
-		spans, serr := maintenanceSpansFor(ctx, tx, projectID, members, at, end)
+		spans, serr := maintenanceSpansFor(ctx, tx, projectID, members, cs, ce)
 		if serr != nil {
-			return ServiceAggregate{}, false, serr
+			return ServiceAggregate{}, ServiceAggregate{}, "", serr
 		}
-		// Apply the hypothetical. A create ADDS its span; an annul DROPS the one it names.
-		// Both go through the same reducer as the real thing, so the projection cannot drift
-		// from what the confirm would actually produce.
-		if dropWindowID != "" {
-			kept := spans[:0]
-			for _, sp := range spans {
-				if sp.ID != dropWindowID {
-					kept = append(kept, sp)
-				}
+
+		// The BEFORE side reduces the world as it stands; the AFTER side reduces the same
+		// inputs with the hypothetical applied — a create ADDS its span, an annul DROPS the
+		// one it names. One shared read, two reductions, so the two sides cannot drift.
+		spansAfter := make([]reliability.MaintenanceSpan, 0, len(spans)+1)
+		for _, sp := range spans {
+			if dropWindowID != "" && sp.ID == dropWindowID {
+				continue
 			}
-			spans = kept
+			spansAfter = append(spansAfter, sp)
 		}
-		if addSpan != nil && addSpan.To.After(at) && addSpan.From.Before(end) {
-			spans = append(spans, *addSpan)
+		if addSpan != nil && addSpan.To.After(cs) && addSpan.From.Before(ce) {
+			spansAfter = append(spansAfter, *addSpan)
 		}
-		b, rerr := reliability.Reduce(reliability.Input{
-			Start: at, End: end, Members: members,
-			Observations: observations, Maintenance: spans, Policies: policies,
-		})
-		if rerr != nil {
-			return ServiceAggregate{}, false, fmt.Errorf("store: project bucket %s: %w", at, rerr)
+
+		for _, side := range []struct {
+			agg *ServiceAggregate
+			sp  []reliability.MaintenanceSpan
+		}{{&before, spans}, {&after, spansAfter}} {
+			b, rerr := reliability.Reduce(reliability.Input{
+				Start: cs, End: ce, Members: members,
+				Observations: observations, Maintenance: side.sp, Policies: policies,
+			})
+			if rerr != nil {
+				return ServiceAggregate{}, ServiceAggregate{}, "", fmt.Errorf("store: project bucket %s: %w", cs, rerr)
+			}
+			side.agg.Good += b.Durations.Good.Microseconds()
+			side.agg.Bad += b.Durations.Bad.Microseconds()
+			side.agg.Unknown += b.Durations.Unknown.Microseconds()
+			side.agg.Excluded += b.Durations.Excluded.Microseconds()
+			side.agg.Healthy += b.Durations.Healthy.Microseconds()
+			side.agg.Degraded += b.Durations.Degraded.Microseconds()
+			side.agg.Down += b.Durations.Down.Microseconds()
+			side.agg.HealthUnknown += b.Durations.HealthUnknown.Microseconds()
 		}
-		agg.Good += b.Durations.Good.Microseconds()
-		agg.Bad += b.Durations.Bad.Microseconds()
-		agg.Unknown += b.Durations.Unknown.Microseconds()
-		agg.Excluded += b.Durations.Excluded.Microseconds()
-		agg.Healthy += b.Durations.Healthy.Microseconds()
-		agg.Degraded += b.Durations.Degraded.Microseconds()
-		agg.Down += b.Durations.Down.Microseconds()
-		agg.HealthUnknown += b.Durations.HealthUnknown.Microseconds()
 	}
-	return agg, true, nil
+	return before, after, "", nil
 }
 
 // ServiceAggregate is one side of a projection: BOTH conserved axes over a range, in
@@ -819,27 +931,4 @@ func (s *Store) projectMutation(
 type ServiceAggregate struct {
 	Good, Bad, Unknown, Excluded           int64
 	Healthy, Degraded, Down, HealthUnknown int64
-}
-
-// currentAggregate sums what the service ALREADY reports over the range, straight from the
-// facts — the "before" half of the projection.
-func currentAggregate(ctx context.Context, tx pgx.Tx, serviceID string, from, to time.Time) (ServiceAggregate, error) {
-	// The same interval-overlap rule as the gate: a sub-minute range still reads the bucket
-	// it lives inside, or the "before" side of a projection would show nothing for exactly
-	// the mutation whose window is smaller than a bucket.
-	var a ServiceAggregate
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(SUM(good_us),0), COALESCE(SUM(bad_us),0),
-		        COALESCE(SUM(unknown_us),0), COALESCE(SUM(excluded_us),0),
-		        COALESCE(SUM(healthy_us),0), COALESCE(SUM(degraded_us),0),
-		        COALESCE(SUM(down_us),0), COALESCE(SUM(health_unknown_us),0)
-		   FROM service_reliability_buckets
-		  WHERE service_id = $1
-		    AND bucket_start < $3 AND bucket_start + ($4 * interval '1 microsecond') > $2`,
-		serviceID, from, to, domain.CanonicalBucket.Microseconds()).
-		Scan(&a.Good, &a.Bad, &a.Unknown, &a.Excluded,
-			&a.Healthy, &a.Degraded, &a.Down, &a.HealthUnknown); err != nil {
-		return ServiceAggregate{}, fmt.Errorf("store: read current aggregate: %w", err)
-	}
-	return a, nil
 }

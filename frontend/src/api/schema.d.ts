@@ -2291,13 +2291,23 @@ export interface paths {
                             expires_at: string;
                             /** @enum {string} */
                             coverage: "complete" | "approximate";
+                            /**
+                             * Format: date-time
+                             * @description The raw-retention floor, resolved on the database clock: the oldest instant a retroactive mutation can still be recomputed from.
+                             */
+                            earliest_repairable?: string;
                             services: {
                                 /** Format: uuid */
                                 service_id: string;
                                 before: components["schemas"]["ReliabilitySplit"];
                                 after: components["schemas"]["ReliabilitySplit"];
-                                /** @description False when this service's range exceeded the projection bound. */
+                                /** @description False when the after-state could not be computed; `reason` says why. */
                                 projected: boolean;
+                                /**
+                                 * @description Present when `projected` is false. Three different remediations: narrow the range, try again, and — for `evidence_gone` — this range can never be recomputed, because the raw evidence behind its sealed facts was destroyed.
+                                 * @enum {string}
+                                 */
+                                reason?: "range_too_long" | "wall_budget" | "evidence_gone";
                             }[];
                         };
                     };
@@ -2305,6 +2315,15 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                /** @description The range reaches over sealed facts older than raw retention, so its recompute has nothing to read from. The error names the earliest repairable instant — failing closed HERE, rather than issuing a token the confirm was always going to refuse. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         delete?: never;

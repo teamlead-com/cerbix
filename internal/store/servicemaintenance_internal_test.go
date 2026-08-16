@@ -213,16 +213,15 @@ func TestRetroactiveMutationBeyondRawFailsClosed(t *testing.T) {
 	rawRetention := 10 * time.Minute
 	_ = base
 
-	p, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(2*time.Minute), rawRetention, "op")
-	if err != nil {
-		t.Fatalf("preview: %v", err)
-	}
-	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
-		ProjectID: f.projectID, MonitorID: f.http,
-		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "too old",
-	}, p.ID, rawRetention)
+	// The refusal moved FORWARD to the preview: issuing a token the confirm was always going
+	// to 422 showed the operator a "complete after" for a change the system knew it would
+	// refuse. Now the preview itself fails closed, naming the earliest repairable instant.
+	_, err := st.PreviewMaintenanceMutation(ctx, f.projectID, f.http, base, base.Add(2*time.Minute), rawRetention, "op")
 	if !errors.Is(err, ErrUnrecomputableRange) {
-		t.Fatalf("got %v, want ErrUnrecomputableRange", err)
+		t.Fatalf("preview over purged raw returned %v, want ErrUnrecomputableRange", err)
+	}
+	if !strings.Contains(err.Error(), "earliest repairable") {
+		t.Errorf("the refusal does not name the earliest repairable instant: %v", err)
 	}
 	var windows int
 	if err := st.pool.QueryRow(ctx,
@@ -595,13 +594,14 @@ func TestPreviewProjectsBothSidesOfTheMutation(t *testing.T) {
 	}
 	drainRepair(t, st, ctx)
 
-	tx, err := st.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // read-only
-	actual, err := currentAggregate(ctx, tx, f.serviceID, base, base.Add(3*time.Minute))
-	if err != nil {
+	// The range is bucket-aligned, so whole-bucket sums over the stored facts ARE the
+	// range's totals — the promise is checked against what the confirm actually wrote.
+	var actual ServiceAggregate
+	if err := st.pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(good_us),0), COALESCE(SUM(excluded_us),0)
+		   FROM service_reliability_buckets
+		  WHERE service_id=$1 AND bucket_start >= $2 AND bucket_start < $3`,
+		f.serviceID, base, base.Add(3*time.Minute)).Scan(&actual.Good, &actual.Excluded); err != nil {
 		t.Fatalf("read actual: %v", err)
 	}
 	if actual.Excluded != svc.After.Excluded || actual.Good != svc.After.Good {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
@@ -181,11 +181,17 @@ async function loadRow(m: Monitor): Promise<Row> {
 }
 
 async function load() {
+  // The generation is captured BEFORE the first await and checked before EVERY write —
+  // success, error and finally alike. Without this, a slow response for project A landed its
+  // windows, maintenance and rows into an already-selected project B: the store refuses a
+  // cross-tenant confirm, but a screen showing A's numbers under B's name misleads either way.
+  const gen = loadGen;
   loading.value = true;
   error.value = "";
   try {
     await ws.init();
     const projectID = ws.projectId;
+    if (gen !== loadGen) return;
     if (!projectID) {
       rows.value = [];
       projectWindows.value = [];
@@ -197,14 +203,18 @@ async function load() {
       api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID } } }),
       api.GET("/api/v1/projects/{projectID}/maintenance", { params: { path: { projectID } } }),
     ]);
+    if (gen !== loadGen) return;
     projectWindows.value = projSla.data?.windows ?? [];
     reportEnabled.value = projSla.data?.sla_report_weekly ?? false;
     maintenance.value = maint.data ?? [];
-    rows.value = await Promise.all((monitors.data ?? []).map(loadRow));
+    const loaded = await Promise.all((monitors.data ?? []).map(loadRow));
+    if (gen !== loadGen) return;
+    rows.value = loaded;
   } catch {
+    if (gen !== loadGen) return;
     error.value = "Could not load SLA data.";
   } finally {
-    loading.value = false;
+    if (gen === loadGen) loading.value = false;
   }
 }
 
@@ -293,7 +303,7 @@ const maintError = ref("");
 // This is the operator's half of that: ask what would change, show it, and only then confirm.
 // Without it the ordinary "we had maintenance last night" gets a 409 with nowhere to go.
 type PreviewSplit = components["schemas"]["ReliabilitySplit"];
-type PreviewService = { service_id: string; before: PreviewSplit; after: PreviewSplit; projected: boolean };
+type PreviewService = { service_id: string; before: PreviewSplit; after: PreviewSplit; projected: boolean; reason?: string };
 // annulTarget is the window an annul preview is for; null means the preview is a create.
 const preview = ref<{ preview_id: string; coverage: string; services: PreviewService[] } | null>(null);
 const annulTarget = ref<MaintenanceWindow | null>(null);
@@ -306,6 +316,21 @@ function pct(s: PreviewSplit): string {
 
 // Health beside availability: a change can move one without the other, and a table showing
 // only the first says "no change" for a change.
+// Three different remediations, three different words. A single "not projected" made the
+// operator guess between narrowing the range, retrying, and a range that can never run.
+function reasonLabel(reason?: string): string {
+  switch (reason) {
+    case "range_too_long":
+      return "range too long — narrow it";
+    case "wall_budget":
+      return "timed out — try again";
+    case "evidence_gone":
+      return "evidence deleted — unrecomputable";
+    default:
+      return "not projected";
+  }
+}
+
 function healthPct(s: PreviewSplit): string {
   const decided = (s.healthy_us ?? 0) + (s.degraded_us ?? 0) + (s.down_us ?? 0);
   if (decided === 0) return "—";
@@ -327,7 +352,17 @@ function resetMaintenanceState() {
   maintForm.ends_at = "";
   maintForm.reason = "";
   showMaint.value = false;
+  // The collections are per-tenant too: keeping project A's windows on screen while B loads
+  // shows A's data under B's name for however long the requests take.
+  rows.value = [];
+  projectWindows.value = [];
+  maintenance.value = [];
 }
+
+onUnmounted(() => {
+  // A response landing after the view is gone must write nothing.
+  loadGen++;
+});
 
 async function addMaintenance(previewID?: string) {
   if (!ws.projectId || !maintForm.starts_at || !maintForm.ends_at) return;
@@ -370,9 +405,9 @@ async function addMaintenance(previewID?: string) {
     preview.value = null;
     showMaint.value = false;
   } catch {
-    maintError.value = "Could not schedule maintenance.";
+    if (gen === loadGen) maintError.value = "Could not schedule maintenance.";
   } finally {
-    maintSaving.value = false;
+    if (gen === loadGen) maintSaving.value = false;
   }
 }
 
@@ -772,7 +807,7 @@ watch(() => ws.projectId, () => {
                   <td class="py-1 font-mono">{{ svc.service_id.slice(0, 8) }}</td>
                   <td class="py-1 text-right font-mono">{{ pct(svc.before) }}</td>
                   <td class="py-1 text-right font-mono" :class="svc.projected ? '' : 'text-ink-3'">
-                    {{ svc.projected ? pct(svc.after) : "not projected" }}
+                    {{ svc.projected ? pct(svc.after) : reasonLabel(svc.reason) }}
                   </td>
                   <td class="py-1 text-right font-mono">{{ healthPct(svc.before) }}</td>
                   <td class="py-1 text-right font-mono" :class="svc.projected ? '' : 'text-ink-3'">

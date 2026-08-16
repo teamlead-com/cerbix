@@ -306,16 +306,22 @@ func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
 		ServiceID string `json:"service_id"`
 		Before    split  `json:"before"`
 		After     split  `json:"after"`
-		// Projected is false when the range exceeded the projection bound; the preview's
-		// coverage then reads `approximate` and a confirm refuses it.
-		Projected bool `json:"projected"`
+		// Projected false comes WITH a reason: range_too_long, wall_budget or evidence_gone
+		// are three different remediations — narrow the range, try again, and "this can
+		// never run" — and a bare boolean made the operator guess between them.
+		Projected bool   `json:"projected"`
+		Reason    string `json:"reason,omitempty"`
 	}
 	out := struct {
-		PreviewID string     `json:"preview_id"`
-		ExpiresAt time.Time  `json:"expires_at"`
-		Coverage  string     `json:"coverage"`
-		Services  []affected `json:"services"`
-	}{PreviewID: p.ID, ExpiresAt: p.ExpiresAt, Coverage: p.Coverage, Services: []affected{}}
+		PreviewID string    `json:"preview_id"`
+		ExpiresAt time.Time `json:"expires_at"`
+		Coverage  string    `json:"coverage"`
+		// EarliestRepairable is the raw-retention floor resolved on the database clock: the
+		// oldest instant a retroactive mutation can still be recomputed from.
+		EarliestRepairable time.Time  `json:"earliest_repairable"`
+		Services           []affected `json:"services"`
+	}{PreviewID: p.ID, ExpiresAt: p.ExpiresAt, Coverage: p.Coverage,
+		EarliestRepairable: p.EarliestRepairable, Services: []affected{}}
 	for _, svc := range p.Services {
 		out.Services = append(out.Services, affected{
 			ServiceID: svc.ServiceID,
@@ -324,6 +330,7 @@ func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
 			After: split{svc.After.Good, svc.After.Bad, svc.After.Unknown, svc.After.Excluded,
 				svc.After.Healthy, svc.After.Degraded, svc.After.Down, svc.After.HealthUnknown},
 			Projected: svc.Projected,
+			Reason:    svc.Reason,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

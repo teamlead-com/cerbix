@@ -99,6 +99,14 @@ result:
 heartbeats:
   retention_days: 30
 
+# Service reliability fan-out caps (func-service-reliability §10.10). Each value has a hard
+# maximum the domain owns (200 / 200 / 25); a value outside [1, hard max] is REJECTED at
+# startup rather than silently adjusted — the config you wrote is the config that runs.
+services:
+  max_services_per_project: 50
+  max_members_per_revision: 50
+  max_services_per_monitor: 10
+
 # Encryption of secrets stored at rest (webhook signing secrets, notification
 # channel credentials). encryption_key is base64 of 32 bytes (AES-256); generate
 # with `head -c 32 /dev/urandom | base64`. Empty disables encryption (plaintext,

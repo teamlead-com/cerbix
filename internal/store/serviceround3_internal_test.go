@@ -50,11 +50,69 @@ func TestASubMinuteRetroactiveWindowStillNeedsAPreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if len(p.Services) == 0 || p.Services[0].Before.Good == 0 {
-		t.Fatalf("the preview did not see the partially-covered bucket: %+v", p.Services)
+	if len(p.Services) != 1 {
+		t.Fatalf("%d services, want 1", len(p.Services))
+	}
+	svc := p.Services[0]
+	// BOTH sides conserve to the FIFTEEN seconds that were asked about — not to the sixty of
+	// the bucket the window happens to live inside. This is the payload's own contract, and
+	// the previous implementation violated it for every sub-bucket request.
+	span := int64(15 * time.Second / time.Microsecond)
+	for _, side := range []struct {
+		name string
+		a    ServiceAggregate
+	}{{"before", svc.Before}, {"after", svc.After}} {
+		if got := side.a.Good + side.a.Bad + side.a.Unknown + side.a.Excluded; got != span {
+			t.Errorf("%s availability sums to %dus, want the requested %dus", side.name, got, span)
+		}
+		if got := side.a.Healthy + side.a.Degraded + side.a.Down + side.a.HealthUnknown + side.a.Excluded; got != span {
+			t.Errorf("%s health sums to %dus, want the requested %dus", side.name, got, span)
+		}
+	}
+	// The window is IN FORCE on the before side (it exists) and gone on the after side —
+	// annulling those fifteen seconds returns them from excluded to good.
+	if svc.Before.Excluded != span {
+		t.Errorf("before.excluded = %d, want the whole sub-range %d", svc.Before.Excluded, span)
+	}
+	if svc.After.Good != span {
+		t.Errorf("after.good = %d, want the whole sub-range %d", svc.After.Good, span)
 	}
 	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, w.ID, p.ID, monthRetention); err != nil {
 		t.Fatalf("tokened annul: %v", err)
+	}
+}
+
+// A range reaching past everything governed still conserves on both sides: time no epoch
+// governs is UNKNOWN, not silently dropped — dropping it is how a gap summed to zero while
+// the very same payload promised sums equal to the range.
+func TestPreviewConservesAcrossUngovernedTime(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+
+	// Three minutes wholly BEFORE the adopted era: the fixture adopts two hours back, so
+	// this range is governed by no epoch at all.
+	from := base.Add(-3*time.Hour - 2*time.Minute)
+	to := from.Add(3 * time.Minute)
+
+	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate, from, to, 0, "op")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if len(p.Services) != 1 {
+		t.Fatalf("%d services, want 1", len(p.Services))
+	}
+	span := to.Sub(from).Microseconds()
+	svc := p.Services[0]
+	for _, side := range []struct {
+		name string
+		a    ServiceAggregate
+	}{{"before", svc.Before}, {"after", svc.After}} {
+		if got := side.a.Good + side.a.Bad + side.a.Unknown + side.a.Excluded; got != span {
+			t.Errorf("%s availability sums to %d over ungoverned time, want %d", side.name, got, span)
+		}
+	}
+	if svc.Before.Unknown != span {
+		t.Errorf("ungoverned time reads as %+v, want all UNKNOWN", svc.Before)
 	}
 }
 
@@ -137,9 +195,13 @@ func TestPreUpgradePreviewTokensAreDead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	// Re-run the migration's teeth against live rows: every open token dies.
-	if _, err := st.pool.Exec(ctx, `UPDATE maintenance_previews SET expires_at = now() WHERE expires_at > now()`); err != nil {
-		t.Fatalf("apply the expiry: %v", err)
+	// Execute the migration's OWN statements, read from the embedded file — not a copy that
+	// can drift. A previous version of this test hand-wrote the UPDATE, which proved the
+	// test's idea of the migration rather than the migration.
+	for _, stmt := range migrationStatements(t, "00073_preview_health_axis.sql", "UPDATE maintenance_preview") {
+		if _, err := st.pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("apply migration statement %q: %v", stmt, err)
+		}
 	}
 	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.http,
@@ -171,7 +233,12 @@ func TestForwardSliceLeavesTheLeaderSessionUnpoisoned(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("leader session: %v ok=%v", err, ok)
 	}
-	defer ls.Release()
+	released := false
+	defer func() {
+		if !released {
+			ls.Release()
+		}
+	}()
 
 	// Run REAL slices on the pinned connection, with a deadline tight enough that the
 	// timeouts are set to a small value.
@@ -205,6 +272,46 @@ func TestForwardSliceLeavesTheLeaderSessionUnpoisoned(t *testing.T) {
 	if err != nil || !held {
 		t.Fatalf("leadership check after slices: held=%v err=%v", held, err)
 	}
+
+	// Now the ERROR path — the branch the original hazard lived on. A blocked bucket forces
+	// the slice's lock_timeout to fire and the transaction to roll back; the session must
+	// STILL come out clean, and releasing it must actually free the advisory lock.
+	// New evidence FIRST — the blocker below stalls ingest too, and a beat recorded under it
+	// would hang, fail the test, and leave the table lock stranded for the whole package.
+	for i := 0; i < 3; i++ {
+		beat(t, st, ctx, f.http, base.Add(time.Duration(5+i)*time.Minute+10*time.Second), true)
+	}
+	blocker, berr := st.pool.Begin(ctx)
+	if berr != nil {
+		t.Fatalf("begin blocker: %v", berr)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below; defer covers a Fatalf
+	if _, err := blocker.Exec(ctx, `LOCK TABLE service_bucket_ingest IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock ingest: %v", err)
+	}
+	if _, err := ls.RunServiceSlice(ctx, time.Now().Add(300*time.Millisecond)); err == nil {
+		t.Log("the blocked slice returned no error; only session hygiene is under test here")
+	}
+	_ = blocker.Rollback(ctx)
+	if err := ls.conn.QueryRow(ctx, `SHOW statement_timeout`).Scan(&stmtTimeout); err != nil {
+		t.Fatalf("show after error path: %v", err)
+	}
+	if stmtTimeout != "0" {
+		t.Fatalf("the ERROR path poisoned the leader session: statement_timeout=%s", stmtTimeout)
+	}
+	if held, err := ls.Check(ctx); err != nil || !held {
+		t.Fatalf("leadership check after the error path: held=%v err=%v", held, err)
+	}
+
+	// Release frees the lock for a successor — the unlock ran on a healthy session.
+	key := ls.key
+	ls.Release()
+	released = true
+	successor, ok2, err := st.TryBecomeLeaderSession(ctx, key)
+	if err != nil || !ok2 {
+		t.Fatalf("the released lock could not be re-acquired: ok=%v err=%v", ok2, err)
+	}
+	successor.Release()
 }
 
 // P0-6 — starting a new era advances the DRIVER'S CURSOR with it, atomically, so a service
@@ -382,6 +489,250 @@ func TestOverlappingBackfillsInOppositeOrdersDoNotDeadlock(t *testing.T) {
 			if err != nil {
 				t.Fatalf("round %d writer %d: %v", round, i, err)
 			}
+		}
+	}
+}
+
+// P0-2 (round 4) — the wall budget bounds the WHOLE preview, deterministically proven with a
+// real lock wait: a blocker holds heartbeats hostage, the projection's statement bound fires
+// inside its savepoint, and the operation still delivers the promised approximate token —
+// within a bounded wall time, with no service allowed to run after the budget died.
+func TestABlockedPreviewDegradesInsteadOfHoldingTheProject(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+
+	// A SECOND affected service, so the test also proves post-exhaustion services are
+	// SKIPPED rather than each burning a statement bound of their own — the accumulation
+	// D-0159 forbids.
+	second, err := st.CreateService(ctx, domain.Service{ProjectID: f.projectID, Slug: "second", Name: "Second"})
+	if err != nil {
+		t.Fatalf("second service: %v", err)
+	}
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, second.ID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: base}); err != nil {
+		t.Fatalf("declare second: %v", err)
+	}
+
+	// The blocker: even plain SELECTs on heartbeats now wait, which is exactly the shape of
+	// a projection statement stuck behind someone else's lock.
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := blocker.Exec(ctx, `LOCK TABLE heartbeats IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock heartbeats: %v", err)
+	}
+
+	st.previewBudget = 400 * time.Millisecond
+	started := time.Now()
+	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+		base, base.Add(2*time.Minute), monthRetention, "op")
+	elapsed := time.Since(started)
+	_ = blocker.Rollback(ctx)
+	if err != nil {
+		t.Fatalf("a blocked preview failed instead of degrading: %v", err)
+	}
+	if p.Coverage != "approximate" {
+		t.Fatalf("coverage = %q, want approximate", p.Coverage)
+	}
+	for _, svc := range p.Services {
+		if svc.Projected {
+			t.Errorf("service %s claims a projection computed while its statements were blocked", svc.ServiceID)
+		}
+		if svc.Reason != ReasonWallBudget {
+			t.Errorf("service %s reason = %q, want %q", svc.ServiceID, svc.Reason, ReasonWallBudget)
+		}
+	}
+	// Bounded: one blocked statement bound plus overhead — NOT one bound per service.
+	if elapsed > 3*time.Second {
+		t.Fatalf("the preview took %s against a 400ms budget with 2 services; the budget does not bound the whole operation", elapsed)
+	}
+	// …and the project's membership lock is free again: an ordinary write goes straight
+	// through instead of queueing behind a preview that should have let go.
+	if _, err := st.CreateService(ctx, domain.Service{ProjectID: f.projectID, Slug: "after-preview", Name: "After"}); err != nil {
+		t.Fatalf("the membership lock did not come back: %v", err)
+	}
+}
+
+// P1-6a (round 4) — a change that moves HEALTH and leaves availability EXACTLY where it was.
+//
+// Construction: two SLI members under quorum(degraded_min=1, healthy_min=2), one UP and one
+// DOWN — the bucket is GOOD (quorum met) but DEGRADED (healthy_min missed). A window over the
+// DOWN member excludes it, the survivor is up, healthy_min clamps to the eligible one, and
+// the bucket turns HEALTHY while good/bad do not move a microsecond. Cross-wired code that
+// copies availability into the health fields cannot pass: before.Healthy must be ZERO while
+// before.Good is the whole range.
+func TestPreviewShowsAHealthOnlyChange(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+	from := time.Now().UTC().Add(-40 * time.Minute)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http, f.redis}, SLI: []string{f.http, f.redis},
+		Policies: domain.ServicePolicies{
+			Aggregation: domain.AggregationPolicy{Mode: domain.AggQuorum, DegradedMin: 1, HealthyMin: 2},
+		},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: from}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	base := domain.FloorToBucket(time.Now().UTC().Add(-30 * time.Minute))
+	for i := 0; i < 3; i++ {
+		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+10*time.Second), true)
+		beat(t, st, ctx, f.redis, base.Add(time.Duration(i)*time.Minute+12*time.Second), false)
+	}
+	leaderSliceFor(t, st, ctx, 80)
+
+	// The range starts at the SECOND bucket: sample-and-hold has both members' observations
+	// in force from there, so the whole range is decided and the axes are cleanly split.
+	p, err := st.PreviewMutation(ctx, f.projectID, f.redis, MutationCreate,
+		base.Add(time.Minute), base.Add(3*time.Minute), monthRetention, "op")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if len(p.Services) != 1 {
+		t.Fatalf("%d services, want 1", len(p.Services))
+	}
+	svc := p.Services[0]
+	span := int64(2 * time.Minute / time.Microsecond)
+
+	// GOOD but not HEALTHY: the two axes DISAGREE on the before side. This is the assertion
+	// that kills cross-wiring — code copying availability into the health fields would show
+	// healthy == good, and here healthy is zero while good is nearly the whole range.
+	if svc.Before.Good == 0 || svc.Before.Healthy != 0 {
+		t.Fatalf("before = %+v, want good time with ZERO healthy time (quorum met, healthy_min missed)", svc.Before)
+	}
+	if svc.Before.Degraded != svc.Before.Good {
+		t.Fatalf("before = %+v: every good microsecond here is degraded, and the two counts differ", svc.Before)
+	}
+
+	// The mutation moves health and ONLY health: availability is identical to the
+	// microsecond, and every degraded microsecond turned healthy.
+	if svc.After.Good != svc.Before.Good || svc.After.Bad != svc.Before.Bad ||
+		svc.After.Unknown != svc.Before.Unknown || svc.After.Excluded != svc.Before.Excluded {
+		t.Fatalf("availability moved: %+v -> %+v; this window must not touch it", svc.Before, svc.After)
+	}
+	if svc.After.Healthy != svc.Before.Degraded || svc.After.Degraded != 0 {
+		t.Errorf("health did not flip degraded->healthy: %+v -> %+v", svc.Before, svc.After)
+	}
+
+	// And both sides still conserve to the requested range.
+	for _, side := range []struct {
+		name string
+		a    ServiceAggregate
+	}{{"before", svc.Before}, {"after", svc.After}} {
+		if got := side.a.Good + side.a.Bad + side.a.Unknown + side.a.Excluded; got != span {
+			t.Errorf("%s availability sums to %d, want %d", side.name, got, span)
+		}
+		if got := side.a.Healthy + side.a.Degraded + side.a.Down + side.a.HealthUnknown + side.a.Excluded; got != span {
+			t.Errorf("%s health sums to %d, want %d", side.name, got, span)
+		}
+	}
+}
+
+// migrationStatements extracts the statements containing `match` from an embedded migration's
+// Up section, so a test exercises the migration's own SQL rather than a copy that can drift.
+func migrationStatements(t *testing.T, file, match string) []string {
+	t.Helper()
+	raw, err := migrationsFS.ReadFile("migrations/" + file)
+	if err != nil {
+		t.Fatalf("read migration %s: %v", file, err)
+	}
+	up := string(raw)
+	if i := strings.Index(up, "-- +goose Down"); i >= 0 {
+		up = up[:i]
+	}
+	// Comments go FIRST, statements second: a semicolon inside a comment sentence would
+	// otherwise split the comment and leave its tail masquerading as SQL.
+	var kept []string
+	for _, line := range strings.Split(up, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	var out []string
+	for _, stmt := range strings.Split(strings.Join(kept, "\n"), ";") {
+		clean := strings.TrimSpace(stmt)
+		if clean != "" && strings.Contains(clean, match) {
+			out = append(out, clean)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("migration %s has no statement matching %q — the teeth this test relies on are gone", file, match)
+	}
+	return out
+}
+
+// P1-6d (round 4) — the opposite-order deadlock, DETERMINISTICALLY interleaved. A barrier
+// transaction holds the middle heartbeat key; both backfills are launched and provably reach
+// their lock waits (observed in pg_stat_activity) while each already holds its half of the
+// key space; the barrier then releases. With one global insert order the two waits are on the
+// SAME key and no cycle can exist; with input order the forward writer holds the early keys,
+// the backward writer the late ones, and the release completes a cycle Postgres kills.
+func TestBarrieredOppositeOrderBackfillsCannotDeadlock(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: time.Now().UTC().Add(-2 * time.Hour)}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+
+	base := domain.FloorToBucket(time.Now().UTC().Add(-60 * time.Minute))
+	const n = 41
+	forward := make([]domain.Heartbeat, 0, n)
+	for i := 0; i < n; i++ {
+		forward = append(forward, domain.Heartbeat{MonitorID: f.http, Ts: base.Add(time.Duration(i) * time.Second), Up: true})
+	}
+	backward := make([]domain.Heartbeat, n)
+	for i := range forward {
+		backward[i] = forward[n-1-i]
+	}
+	middle := forward[n/2]
+
+	// The barrier: insert and HOLD the middle key, so both writers must stop exactly there.
+	barrier, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin barrier: %v", err)
+	}
+	defer barrier.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := barrier.Exec(ctx,
+		`INSERT INTO heartbeats (monitor_id, ts, up, latency_ms, code, msg, observed_at)
+		 VALUES ($1,$2,true,0,0,'',$2)`, middle.MonitorID, middle.Ts); err != nil {
+		t.Fatalf("hold the middle key: %v", err)
+	}
+
+	done := make(chan error, 2)
+	go func() { _, _, err := st.RecordHistoricalResults(ctx, forward); done <- err }()
+	go func() { _, _, err := st.RecordHistoricalResults(ctx, backward); done <- err }()
+
+	// Both writers are provably AT their lock waits before the barrier lifts — this is what
+	// makes the interleaving deterministic rather than a race the scheduler may serialize.
+	waited := false
+	for i := 0; i < 200; i++ {
+		var waiting int
+		if err := st.pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO heartbeats%'`).Scan(&waiting); err != nil {
+			t.Fatalf("watch waiters: %v", err)
+		}
+		if waiting >= 2 {
+			waited = true
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !waited {
+		t.Fatal("the two backfills never reached their lock waits; the barrier did not bite")
+	}
+	if err := barrier.Rollback(ctx); err != nil {
+		t.Fatalf("release barrier: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("writer %d: %v (a deadlock here means the keys were taken in input order)", i, err)
 		}
 	}
 }

@@ -1072,6 +1072,12 @@ paths:
                   preview_id: { type: string, format: uuid }
                   expires_at: { type: string, format: date-time }
                   coverage: { type: string, enum: [complete, approximate] }
+                  earliest_repairable:
+                    type: string
+                    format: date-time
+                    description: >
+                      The raw-retention floor, resolved on the database clock: the oldest
+                      instant a retroactive mutation can still be recomputed from.
                   services:
                     type: array
                     items:
@@ -1084,10 +1090,27 @@ paths:
                         after: { $ref: '#/components/schemas/ReliabilitySplit' }
                         projected:
                           type: boolean
-                          description: False when this service's range exceeded the projection bound.
+                          description: False when the after-state could not be computed; `reason` says why.
+                        reason:
+                          type: string
+                          enum: [range_too_long, wall_budget, evidence_gone]
+                          description: >
+                            Present when `projected` is false. Three different remediations:
+                            narrow the range, try again, and — for `evidence_gone` — this
+                            range can never be recomputed, because the raw evidence behind
+                            its sealed facts was destroyed.
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: >
+            The range reaches over sealed facts older than raw retention, so its recompute
+            has nothing to read from. The error names the earliest repairable instant —
+            failing closed HERE, rather than issuing a token the confirm was always going to
+            refuse.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/projects/{projectID}/incidents:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]

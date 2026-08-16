@@ -1066,7 +1066,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [preview_id, expires_at, coverage, services]
+                required: [preview_id, expires_at, coverage, earliest_repairable, services]
                 additionalProperties: false
                 properties:
                   preview_id: { type: string, format: uuid }

@@ -128,4 +128,66 @@ describe("SlaView tenant context", () => {
     // The stale failure must not surface as an error in project B's context.
     expect(wrapper.text()).not.toContain("Could not schedule maintenance.");
   });
+
+  it("drops a deferred report toggle from the previous project", async () => {
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path.endsWith("/sla")) return Promise.resolve({ data: { windows: [], sla_report_weekly: false } });
+      return Promise.resolve({ data: [] });
+    });
+    const toggleA = deferred<{ data: { sla_report_weekly: boolean } }>();
+    apiMock.PUT.mockImplementation(() => toggleA.promise);
+
+    const { wrapper, ws } = mountView();
+    await flushPromises();
+
+    const vm = wrapper.vm as unknown as {
+      toggleReport: () => Promise<void>;
+      reportEnabled: boolean;
+      reportSaving: boolean;
+    };
+    const pending = vm.toggleReport();
+
+    ws.projectId = "project-b";
+    await nextTick();
+    await flushPromises();
+
+    // A's toggle result lands late: project B's switch must not flip ON, and the busy flag
+    // A's finally would have cleared must not be touched by a dead generation either way.
+    toggleA.resolve({ data: { sla_report_weekly: true } });
+    await pending;
+    await flushPromises();
+    expect(vm.reportEnabled).toBe(false);
+  });
+
+  it("drops a deferred maintenance archive from the previous project", async () => {
+    apiMock.GET.mockImplementation((path: string, options: { params: { path: { projectID?: string } } }) => {
+      const project = options.params.path.projectID;
+      if (path.endsWith("/maintenance")) {
+        if (project === "project-b") return Promise.resolve({ data: [maintWindow("mw-b", "b-window")] });
+        return Promise.resolve({ data: [maintWindow("mw-b", "a-copy")] });
+      }
+      if (path.endsWith("/sla")) return Promise.resolve({ data: { windows: [] } });
+      return Promise.resolve({ data: [] });
+    });
+    const deleteA = deferred<{ error?: unknown }>();
+    apiMock.DELETE.mockImplementation(() => deleteA.promise);
+
+    const { wrapper, ws } = mountView();
+    await flushPromises();
+
+    const vm = wrapper.vm as unknown as { deleteMaintenance: (id: string) => Promise<void> };
+    const pending = vm.deleteMaintenance("mw-b");
+
+    ws.projectId = "project-b";
+    await nextTick();
+    await flushPromises();
+    expect(wrapper.text()).toContain("b-window");
+
+    // A's archive succeeds late. B's window shares the id in this construction — precisely
+    // the case where an ungated filter would silently remove B's row.
+    deleteA.resolve({});
+    await pending;
+    await flushPromises();
+    expect(wrapper.text()).toContain("b-window");
+  });
 });

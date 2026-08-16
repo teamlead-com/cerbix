@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -87,11 +88,19 @@ func TestASubMinuteRetroactiveWindowStillNeedsAPreview(t *testing.T) {
 // the very same payload promised sums equal to the range.
 func TestPreviewConservesAcrossUngovernedTime(t *testing.T) {
 	st, ctx := declStore(t)
-	f, base := sealedService(t, st, ctx)
+	f, _ := sealedService(t, st, ctx)
 
-	// Three minutes wholly BEFORE the adopted era: the fixture adopts two hours back, so
-	// this range is governed by no epoch at all.
-	from := base.Add(-3*time.Hour - 2*time.Minute)
+	// The range STRADDLES the adopted era's start: the affected set is interval-aware, so a
+	// range wholly outside the service's validity would (correctly) affect nothing and there
+	// would be no conservation to check. Two of these three minutes precede the era and are
+	// governed by no epoch; the third is inside it.
+	var eraStart time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT MIN(effective_at) FROM service_definition_revisions WHERE service_id=$1`,
+		f.serviceID).Scan(&eraStart); err != nil {
+		t.Fatalf("read era start: %v", err)
+	}
+	from := eraStart.Add(-2 * time.Minute)
 	to := from.Add(3 * time.Minute)
 
 	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate, from, to, 0, "op")
@@ -111,8 +120,9 @@ func TestPreviewConservesAcrossUngovernedTime(t *testing.T) {
 			t.Errorf("%s availability sums to %d over ungoverned time, want %d", side.name, got, span)
 		}
 	}
-	if svc.Before.Unknown != span {
-		t.Errorf("ungoverned time reads as %+v, want all UNKNOWN", svc.Before)
+	// The two ungoverned minutes read UNKNOWN — not dropped, not invented.
+	if svc.Before.Unknown < int64(2*time.Minute/time.Microsecond) {
+		t.Errorf("ungoverned time reads as %+v, want at least the two pre-era minutes UNKNOWN", svc.Before)
 	}
 }
 
@@ -158,30 +168,10 @@ func TestPreviewCarriesTheHealthAxis(t *testing.T) {
 	}
 }
 
-// P0-3 — the projection has a WALL budget. Past it the token degrades to `approximate`
-// instead of holding the project's membership lock for the duration.
-func TestPreviewDegradesToApproximateAtItsWallBudget(t *testing.T) {
-	st, ctx := declStore(t)
-	f, base := sealedService(t, st, ctx)
-	st.previewBudget = time.Nanosecond // expire the wall budget before the first bucket
-
-	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
-		base, base.Add(3*time.Minute), monthRetention, "op")
-	if err != nil {
-		t.Fatalf("preview: %v", err)
-	}
-	if p.Coverage != "approximate" {
-		t.Fatalf("coverage = %q under an exhausted wall budget, want approximate", p.Coverage)
-	}
-	// …and an approximate token is unconfirmable, as before.
-	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
-		ProjectID: f.projectID, MonitorID: f.http,
-		StartsAt: base, EndsAt: base.Add(3 * time.Minute), Reason: "unshown",
-	}, p.ID, monthRetention)
-	if !errors.Is(err, ErrPreviewApproximate) {
-		t.Fatalf("an approximate token confirmed: %v", err)
-	}
-}
+// The former TestPreviewDegradesToApproximateAtItsWallBudget was superseded in round 5: with
+// the budget covering the WHOLE operation, a nanosecond budget cannot even take the
+// membership lock, which is a bounded honest error — and the approximate-under-exhaustion
+// property it existed for is proven end to end by TestPreviewPersistsItsTokenInsideTheReserve.
 
 // P0-4 — a token that predates the projection is not confirmable. Simulated exactly as the
 // upgrade left it: a stored preview whose service rows claim projected=true with after_* at
@@ -734,5 +724,254 @@ func TestBarrieredOppositeOrderBackfillsCannotDeadlock(t *testing.T) {
 		if err := <-done; err != nil {
 			t.Fatalf("writer %d: %v (a deadlock here means the keys were taken in input order)", i, err)
 		}
+	}
+}
+
+// Round-5 (iter-0129) regressions.
+
+// P1-4 — the affected set answers "declared the monitor INSIDE the range", not "ever". A
+// service whose only SLI membership ended before the range, or began after it, is not
+// affected; one whose membership begins inside it is.
+func TestAffectedSetIsIntervalAware(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+
+	// Revision 1: monitor in the SLI. Revision 2 (a minute later, backdated via direct
+	// column update because effective_at is prospective by design): monitor REMOVED. The
+	// service's membership therefore ENDED at rev2's boundary.
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: time.Now().UTC().Add(-3 * time.Hour)}); err != nil {
+		t.Fatalf("rev1: %v", err)
+	}
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.redis}, SLI: []string{f.redis},
+	}, 1, DeclarationOptions{CreatedBy: "op"}); err != nil {
+		t.Fatalf("rev2: %v", err)
+	}
+	// Backdate rev2 so the membership visibly ended two hours ago.
+	cut := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Minute)
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_definition_revisions SET effective_at=$2 WHERE service_id=$1 AND revision=2`,
+		f.serviceID, cut); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only
+
+	// A range wholly AFTER the membership ended: not affected.
+	after, err := servicesAffectedByWindow(ctx, tx, f.projectID, f.http,
+		cut.Add(30*time.Minute), cut.Add(40*time.Minute))
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if len(after) != 0 {
+		t.Errorf("a range after the membership ended still affects the service; the set is not interval-aware")
+	}
+
+	// A range straddling the boundary: affected (the membership held for part of it).
+	straddle, err := servicesAffectedByWindow(ctx, tx, f.projectID, f.http,
+		cut.Add(-10*time.Minute), cut.Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("straddle: %v", err)
+	}
+	if len(straddle) != 1 {
+		t.Errorf("a range overlapping the membership does not affect the service (got %d)", len(straddle))
+	}
+
+	// The replacement monitor is affected only after ITS membership began.
+	before, err := servicesAffectedByWindow(ctx, tx, f.projectID, f.redis,
+		cut.Add(-40*time.Minute), cut.Add(-30*time.Minute))
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if len(before) != 0 {
+		t.Errorf("a range before the new membership began still affects the service")
+	}
+}
+
+// P0-1 (round 5) — the preview's budget covers the WHOLE operation. Blocked on the very first
+// thing it needs — the project's membership advisory lock — it returns within the budget plus
+// tolerance, not within some floor invented for the pre-phase.
+func TestAPreviewBlockedOnTheMembershipLockIsBounded(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+	st.previewBudget = 500 * time.Millisecond
+
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below
+	if err := lockServiceMembership(ctx, blocker, f.projectID); err != nil {
+		t.Fatalf("hold membership: %v", err)
+	}
+
+	started := time.Now()
+	_, err = st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+		base, base.Add(2*time.Minute), monthRetention, "op")
+	elapsed := time.Since(started)
+	_ = blocker.Rollback(ctx)
+
+	// Without the lock there is no consistent affected set, so no token of any kind can be
+	// minted: a bounded ERROR is the honest outcome. What is forbidden is the wait itself
+	// exceeding the budget the caller was promised.
+	if err == nil {
+		t.Fatal("a preview minted a token without the membership lock")
+	}
+	// The SERVER must speak first. A refusal that arrives as context.DeadlineExceeded means
+	// the client net fired before the server bound — the wait was "bounded" by killing the
+	// connection, which is the exact mechanism the server-first rule exists to prevent.
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the client net fired before the server bound: %v", err)
+	}
+	// 500ms budget − 300ms reserve = a 200ms lock bound, plus overhead. 700ms is far above
+	// the real ceiling and far below the 1-second pre-phase floor this test exists to forbid.
+	if elapsed > 700*time.Millisecond {
+		t.Fatalf("blocked on the membership lock for %s against a 500ms budget", elapsed)
+	}
+}
+
+// P0-1 (round 5) — the budget reserves time for PERSISTING the token, and the persistence
+// bound is re-issued after the projection savepoints: SET LOCAL issued inside a savepoint
+// SURVIVES its RELEASE, so without the re-issue a successfully degraded projection inherited
+// a near-zero bound and died as a 500 at the token insert.
+func TestPreviewPersistsItsTokenInsideTheReserve(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+	// A budget small enough that the projection exhausts it, leaving ONLY the reserve.
+	st.previewBudget = previewPersistReserve + 50*time.Millisecond
+
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := blocker.Exec(ctx, `LOCK TABLE heartbeats IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock heartbeats: %v", err)
+	}
+
+	started := time.Now()
+	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+		base, base.Add(2*time.Minute), monthRetention, "op")
+	elapsed := time.Since(started)
+	_ = blocker.Rollback(ctx)
+	if err != nil {
+		t.Fatalf("an exhausted budget must still persist the approximate answer, got: %v", err)
+	}
+	if p.Coverage != "approximate" {
+		t.Fatalf("coverage = %q, want approximate", p.Coverage)
+	}
+	// The whole operation — lock, resolve, blocked projection, persist, commit — inside the
+	// budget plus tolerance and overhead.
+	if elapsed > st.previewBudget+700*time.Millisecond {
+		t.Fatalf("the preview took %s against a %s budget", elapsed, st.previewBudget)
+	}
+	// The token is REAL: committed, readable, and honestly unconfirmable.
+	var coverage string
+	if qerr := st.pool.QueryRow(ctx,
+		`SELECT coverage FROM maintenance_previews WHERE id=$1`, p.ID).Scan(&coverage); qerr != nil {
+		t.Fatalf("the approximate token was not persisted: %v", qerr)
+	}
+	if _, cerr := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "unshown",
+	}, p.ID, monthRetention); !errors.Is(cerr, ErrPreviewApproximate) {
+		t.Fatalf("an approximate token confirmed: %v", cerr)
+	}
+}
+
+// P0-2 (round 5) — the forward slice's cadence: blocked or not, BEGIN→commit stays inside
+// the slice deadline plus the scheduling tolerance, because the server bounds are derived
+// from the remainder and always fire before the client's net.
+func TestForwardSliceCadenceHoldsWhileBlocked(t *testing.T) {
+	st, ctx := declStore(t)
+	f := seedDeclaration(t, st, ctx)
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.http}, SLI: []string{f.http},
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: time.Now().UTC().Add(-30 * time.Minute)}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	base := domain.FloorToBucket(time.Now().UTC().Add(-20 * time.Minute))
+	for i := 0; i < 3; i++ {
+		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+10*time.Second), true)
+	}
+
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer blocker.Rollback(ctx) //nolint:errcheck // released below
+	if _, err := blocker.Exec(ctx, `LOCK TABLE service_bucket_ingest IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock ingest: %v", err)
+	}
+
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader: %v ok=%v", err, ok)
+	}
+	defer ls.Release()
+
+	started := time.Now()
+	_, serr := ls.RunServiceSlice(ctx, started.Add(250*time.Millisecond))
+	elapsed := time.Since(started)
+	_ = blocker.Rollback(ctx)
+	if serr == nil {
+		t.Log("the blocked slice returned no error; the cadence is what is under test")
+	}
+	// 250ms slice + 25ms tolerance + generous test-environment overhead — nowhere near the
+	// old +2s cushion, and nowhere near unbounded.
+	if elapsed > 800*time.Millisecond {
+		t.Fatalf("BEGIN→return took %s against a 250ms slice; the cadence contract is broken", elapsed)
+	}
+	// …and the leader's session survived the server-side refusal.
+	var stmtTimeout string
+	if err := ls.conn.QueryRow(ctx, `SHOW statement_timeout`).Scan(&stmtTimeout); err != nil {
+		t.Fatalf("the leader connection did not survive the blocked slice: %v", err)
+	}
+	if stmtTimeout != "0" {
+		t.Fatalf("the slice left statement_timeout=%s on the leader session", stmtTimeout)
+	}
+	if held, err := ls.Check(ctx); err != nil || !held {
+		t.Fatalf("leadership lost to one blocked bucket: held=%v err=%v", held, err)
+	}
+}
+
+// P1-6 (round 5) — the projection bound counts TOUCHED buckets. An unaligned range touches
+// one more bucket than its duration suggests, and integer division admitted budget+1.
+func TestProjectionBoundCountsTouchedBuckets(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+	// Wall budget large enough that range_too_long is the only reason in play for the
+	// unaligned case, and small enough that the aligned case degrades fast instead of
+	// walking four thousand buckets.
+	st.previewBudget = previewPersistReserve + 100*time.Millisecond
+
+	span := time.Duration(previewProjectionBudget) * domain.CanonicalBucket
+
+	// Unaligned: duration == budget buckets, but floor(from)..ceil(to) touches budget+1.
+	unaligned := base.Add(30 * time.Second)
+	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+		unaligned, unaligned.Add(span), monthRetention, "op")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if len(p.Services) == 0 || p.Services[0].Reason != ReasonRangeTooLong {
+		t.Fatalf("an unaligned range touching budget+1 buckets was admitted: %+v", p.Services)
+	}
+
+	// Aligned at exactly the budget: admitted (whatever reason it later degrades with, it
+	// must NOT be range_too_long).
+	p2, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+		base, base.Add(span), monthRetention, "op")
+	if err != nil {
+		t.Fatalf("aligned preview: %v", err)
+	}
+	if len(p2.Services) > 0 && p2.Services[0].Reason == ReasonRangeTooLong {
+		t.Fatalf("a range of exactly the budget was refused as too long")
 	}
 }

@@ -249,17 +249,20 @@ async function saveSlo(m: Monitor) {
   }
   rowError.value = "";
   savingSlo.value = true;
+  const gen = loadGen;
   try {
     const rules = rulesDraft.value.map((r) => ({ ...r, threshold: Number(r.threshold) }));
     const res = await api.PUT("/api/v1/monitors/{monitorID}/sla-target", {
       params: { path: { monitorID: m.id! } },
       body: { objective, window: "30d", burn_alert: rules.length > 0, burn_rules: rules },
     });
+    if (gen !== loadGen) return;
     if (res.error) {
       rowError.value = (res.error as { error?: string })?.error || "Could not save the objective.";
       return;
     }
     const updated = await loadRow(m);
+    if (gen !== loadGen) return;
     const idx = rows.value.findIndex((r) => r.monitor.id === m.id);
     if (idx >= 0) rows.value[idx] = updated;
     editingId.value = null; // close the editor
@@ -268,9 +271,9 @@ async function saveSlo(m: Monitor) {
       if (savedId.value === m.id) savedId.value = null;
     }, 1600);
   } catch {
-    rowError.value = "Could not save the objective.";
+    if (gen === loadGen) rowError.value = "Could not save the objective.";
   } finally {
-    savingSlo.value = false;
+    if (gen === loadGen) savingSlo.value = false;
   }
 }
 
@@ -279,6 +282,7 @@ const reportEnabled = ref(false);
 const reportSaving = ref(false);
 async function toggleReport() {
   if (!ws.projectId || reportSaving.value) return;
+  const gen = loadGen;
   const next = !reportEnabled.value;
   reportSaving.value = true;
   try {
@@ -286,9 +290,10 @@ async function toggleReport() {
       params: { path: { projectID: ws.projectId } },
       body: { enabled: next },
     });
+    if (gen !== loadGen) return; // project A's toggle must not land on project B's switch
     if (!res.error) reportEnabled.value = res.data?.sla_report_weekly ?? next;
   } finally {
-    reportSaving.value = false;
+    if (gen === loadGen) reportSaving.value = false;
   }
 }
 
@@ -331,6 +336,18 @@ function reasonLabel(reason?: string): string {
   }
 }
 
+// The aggregate line derives from the rows' actual reasons: a hardcoded "range too long"
+// under a wall_budget or evidence_gone row told the operator the wrong remediation.
+function approximateSummary(services: PreviewService[]): string {
+  const reasons = new Set(services.filter((s) => !s.projected).map((s) => s.reason ?? ""));
+  const parts: string[] = [];
+  if (reasons.has("range_too_long")) parts.push("the range is too long to project exactly — narrow it");
+  if (reasons.has("wall_budget")) parts.push("projection timed out — try again");
+  if (reasons.has("evidence_gone")) parts.push("some evidence was deleted — those ranges can never be recomputed");
+  if (!parts.length) parts.push("the projection is incomplete");
+  return "This preview cannot be confirmed: " + parts.join("; ") + ".";
+}
+
 function healthPct(s: PreviewSplit): string {
   const decided = (s.healthy_us ?? 0) + (s.degraded_us ?? 0) + (s.down_us ?? 0);
   if (decided === 0) return "—";
@@ -357,6 +374,16 @@ function resetMaintenanceState() {
   rows.value = [];
   projectWindows.value = [];
   maintenance.value = [];
+  // …and so is every piece of editor and busy state. A toggle rendered from project A while
+  // B loads, or a busy flag a late response never clears, misleads exactly as long as the
+  // stale collections would have.
+  reportEnabled.value = false;
+  reportSaving.value = false;
+  editingId.value = null;
+  rowError.value = "";
+  savingSlo.value = false;
+  savedId.value = null;
+  maintSaving.value = false;
 }
 
 onUnmounted(() => {
@@ -481,12 +508,14 @@ async function confirmAnnul() {
     annulTarget.value = null;
     showMaint.value = false;
   } finally {
-    maintSaving.value = false;
+    if (gen === loadGen) maintSaving.value = false;
   }
 }
 
 async function deleteMaintenance(id: string) {
+  const gen = loadGen;
   const res = await api.DELETE("/api/v1/maintenance/{maintenanceID}", { params: { path: { maintenanceID: id } } });
+  if (gen !== loadGen) return; // a late archive from project A must not edit B's list
   if (!res.error) maintenance.value = maintenance.value.filter((w) => w.id !== id);
 }
 
@@ -820,7 +849,7 @@ watch(() => ws.projectId, () => {
               </tbody>
             </table>
             <p v-if="preview.coverage !== 'complete'" class="mt-2 text-[12px] text-degraded">
-              This range is too long to project exactly, so it cannot be confirmed. Narrow it.
+              {{ approximateSummary(preview.services) }}
             </p>
           </div>
 

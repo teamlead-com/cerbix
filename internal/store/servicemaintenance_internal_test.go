@@ -181,14 +181,17 @@ func TestPreviewGoesStaleWhenAServiceJoinsTheAffectedSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	// A SECOND service starts declaring the same monitor as a reliability input.
+	// A SECOND service ADOPTS HISTORY COVERING THE RANGE. This is the only way a service can
+	// join a past range's affected set now that the set is interval-aware: a plain forward
+	// declaration governs the future only and genuinely does not affect a mutation of the
+	// past — first-adoption backfill is what reaches back.
 	other, err := st.CreateService(ctx, domain.Service{ProjectID: f.projectID, Slug: "search", Name: "Search"})
 	if err != nil {
 		t.Fatalf("second service: %v", err)
 	}
 	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, other.ID, domain.ServiceDeclaration{
 		Monitors: []string{f.http}, SLI: []string{f.http},
-	}, 0, DeclarationOptions{CreatedBy: "op"}); err != nil {
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: base.Add(-time.Hour)}); err != nil {
 		t.Fatalf("second declaration: %v", err)
 	}
 
@@ -444,23 +447,32 @@ func TestAPreviewTokenOnlyAuthorizesTheMutationItWasIssuedFor(t *testing.T) {
 
 	// (b) A different MONITOR. Both mutations must resolve to the SAME affected set, or a set
 	// difference would reject it for the wrong reason and prove nothing about the monitor
-	// binding. Widening this service's SLI to both monitors gives exactly that: each window
-	// then affects {this service} and nothing else.
-	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+	// binding. The affected set is interval-aware now, and only a FIRST revision may reach
+	// into the past — so the both-membered service is a fresh one whose first declaration
+	// adopts both monitors across the range, with its own sealed facts to gate on.
+	both, err2 := st.CreateService(ctx, domain.Service{ProjectID: f.projectID, Slug: "both", Name: "Both"})
+	if err2 != nil {
+		t.Fatalf("both service: %v", err2)
+	}
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, both.ID, domain.ServiceDeclaration{
 		Monitors: []string{f.http, f.redis}, SLI: []string{f.http, f.redis},
-	}, 1, DeclarationOptions{CreatedBy: "op"}); err != nil {
-		t.Fatalf("widen sli: %v", err)
+	}, 0, DeclarationOptions{CreatedBy: "op", BackfillFrom: base.Add(-time.Hour)}); err != nil {
+		t.Fatalf("declare both: %v", err)
 	}
-	id, err = small()
-	if err != nil {
-		t.Fatalf("preview: %v", err)
+	if _, err := st.MaterializeServiceRange(ctx, f.projectID, both.ID, base, base.Add(3*time.Minute)); err != nil {
+		t.Fatalf("materialize both: %v", err)
 	}
-	_, err = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
+	pb, err2 := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+		base, base.Add(2*time.Minute), rawRetention, "op")
+	if err2 != nil {
+		t.Fatalf("preview both: %v", err2)
+	}
+	_, err2 = st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
 		ProjectID: f.projectID, MonitorID: f.redis,
 		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "wrong monitor",
-	}, id, rawRetention)
-	if !errors.Is(err, ErrPreviewStale) {
-		t.Errorf("a token for one monitor authorized a window on another with the same affected set: %v", err)
+	}, pb.ID, rawRetention)
+	if !errors.Is(err2, ErrPreviewStale) {
+		t.Errorf("a token for one monitor authorized a window on another with the same affected set: %v", err2)
 	}
 
 	// (c) A different KIND. A preview of "create this window" must not confirm an annul.

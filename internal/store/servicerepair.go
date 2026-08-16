@@ -226,6 +226,10 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 		started := time.Now()
 		err := s.runRepairBatch(ctx, db, r, cursor, end, remaining)
 		switch {
+		case errors.Is(err, errSliceBudget):
+			// The slice's budget, not the range's health: release at the cursor already
+			// held so the very next slice resumes exactly there.
+			return s.releaseRepairRange(ctx, db, r.ID, cursor, nil)
 		case errors.Is(err, ErrRangeSuperseded):
 			// The declared inputs moved. Re-enqueue what is left rather than finishing on a
 			// stale reading: two batches of one range must not commit under two different
@@ -287,31 +291,22 @@ func adaptRepairBatch(batch int, spent, budget time.Duration) int {
 // per D-0159 — a bound set once at slice start would let the last batch inherit the first
 // batch's generosity.
 func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, from, to time.Time, budget time.Duration) error {
-	// Cushioned past the server timeouts on purpose: set to the same instant they race, and
-	// a client cancel that wins closes the connection mid-query — on the leader path, the
-	// connection that owns the advisory lock. The server bound must always speak first.
-	ctx, cancel := context.WithTimeout(ctx, budget+2*time.Second)
+	// The client context is a NET one scheduling tolerance behind the budget — never the
+	// mechanism, because a client cancel that beats the server closes the connection, and on
+	// the leader path that connection owns the advisory lock. The mechanism is deadlineTx:
+	// the remainder is checked before EVERY statement and the server bounds are re-derived
+	// as it shrinks, so a bound set once for the whole batch cannot let consecutive
+	// statements accumulate past the slice (§10.10).
+	deadline := time.Now().Add(budget)
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(schedulingTolerance))
 	defer cancel()
 
-	ms := budget.Milliseconds()
-	if ms < 1 {
-		ms = 1
-	}
-
-	tx, err := db.Begin(ctx)
+	rawTx, err := db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin repair batch: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-
-	for _, stmt := range []string{
-		fmt.Sprintf("SET LOCAL statement_timeout = %d", ms),
-		fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
-	} {
-		if _, err := tx.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("store: set repair timeouts: %w", err)
-		}
-	}
+	defer rawTx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	tx := newDeadlineTx(rawTx, deadline, advanceCommitReserve)
 
 	current, err := maintenanceGenerationOn(ctx, tx, r.ProjectID)
 	if err != nil {
@@ -322,6 +317,12 @@ func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, fr
 	}
 
 	if _, err := s.materializeRangeTx(ctx, tx, r.ProjectID, r.ServiceID, from, to, modeRecompute); err != nil {
+		if errors.Is(err, errSliceBudget) {
+			// Budget spent mid-batch: not a failure, a stop. The transaction rolls back —
+			// including any half-bucket — and the caller releases the range at the cursor it
+			// already held, so the next slice resumes exactly there.
+			return errSliceBudget
+		}
 		return err
 	}
 
@@ -329,8 +330,19 @@ func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, fr
 	// while this batch ran means the batch read one declaration and the world now has
 	// another — and without this, two batches of one range could commit under two different
 	// "current" maintenance declarations.
+	// Persistence — the CAS re-check, the cursor and the lease — runs on the raw transaction
+	// under the reserve's own bound: this is the time the adapter was holding back.
+	reserveMS := advanceCommitReserve.Milliseconds()
+	for _, stmt := range []string{
+		fmt.Sprintf("SET LOCAL statement_timeout = %d", reserveMS),
+		fmt.Sprintf("SET LOCAL lock_timeout = %d", reserveMS),
+	} {
+		if _, err := rawTx.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("store: set repair persistence bounds: %w", err)
+		}
+	}
 	var after int64
-	if err := tx.QueryRow(ctx,
+	if err := rawTx.QueryRow(ctx,
 		`SELECT COALESCE((SELECT generation FROM project_maintenance_generation WHERE project_id=$1), 0)`,
 		r.ProjectID).Scan(&after); err != nil {
 		return fmt.Errorf("store: re-read maintenance generation: %w", err)
@@ -342,14 +354,14 @@ func (s *Store) runRepairBatch(ctx context.Context, db dbConn, r RepairRange, fr
 	// The lease is extended in the SAME transaction as the cursor. A separate heartbeat
 	// could renew a lease for work that then rolled back, which is a lease outliving the
 	// progress it claims to protect.
-	if _, err := tx.Exec(ctx,
+	if _, err := rawTx.Exec(ctx,
 		`UPDATE service_repair_ranges
 		    SET cursor_at = $2, updated_at = now(), lease_expires_at = now() + $3::interval
 		  WHERE id = $1`,
 		r.ID, to, repairLease.String()); err != nil {
 		return fmt.Errorf("store: advance cursor: %w", err)
 	}
-	return tx.Commit(ctx)
+	return rawTx.Commit(ctx)
 }
 
 // repairLockTimeout caps a single lock wait inside a batch, on top of the slice remainder.

@@ -498,6 +498,16 @@ func advanceSealedThrough(ctx context.Context, tx pgx.Tx, serviceID string) erro
 // its cursor IS its state, and enqueuing it as ranges would mean writing a durable row every
 // minute for every service forever.
 
+// advanceCommitReserve is the slice time kept back for the cursor write, the watermark
+// recompute and the commit: work stops while there is still budget to write down what
+// happened. schedulingTolerance mirrors the scheduler's max_scheduling_tolerance — the net
+// the client context adds BEHIND the server bounds, which the server bounds must always
+// beat.
+const (
+	advanceCommitReserve = 60 * time.Millisecond
+	schedulingTolerance  = 25 * time.Millisecond
+)
+
 // maxBucketsPerAdvance bounds one service's share of a slice. A service adopting 90 days of
 // history has 129 600 buckets to walk; without a bound it would hold the slice for minutes
 // and starve both dispatch and every other service.
@@ -524,43 +534,22 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	if budget <= 0 {
 		return true, nil
 	}
-	// The client-side deadline is a SAFETY NET behind the server timeouts, not a peer of
-	// them. Set to the same instant, the two race — and when the client cancel wins, pgx
-	// closes the connection mid-query. On the leader path that connection owns the advisory
-	// lock, so one blocked bucket would cost the node its leadership. The cushion guarantees
-	// the server's lock_timeout speaks first: an ordinary SQL error, a rolled-back
-	// transaction, and a session that survives.
-	ctx, cancel := context.WithDeadline(ctx, deadline.Add(2*time.Second))
+	// The client-side deadline is a NET set at the slice deadline plus the scheduler's own
+	// tolerance — never the mechanism. The mechanism is deadlineTx: a client-side check
+	// refuses to start any statement inside the commit reserve, and the server bounds are
+	// re-derived from the remainder before every statement, so the server always speaks
+	// first and BEGIN→commit stays inside max_dispatch_delay + max_scheduling_tolerance
+	// (§10.10). An earlier version moved the client deadline two seconds past the slice —
+	// which kept the connection alive by abandoning the cadence the slice exists to protect.
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(schedulingTolerance))
 	defer cancel()
 
-	// A client-side deadline cancels our WAIT; it does not bound how long the server keeps
-	// holding a lock. The server-side pair is what actually stops a wait outliving the
-	// slice — and it is SET LOCAL, inside the transaction, because on the leader path `db`
-	// is the lock-owning connection. A session-level SET here outlived the slice: the
-	// leadership Check, the advisory unlock, and whatever the pool handed the connection to
-	// next all inherited this slice's 250ms. SET LOCAL dies with the transaction, so the
-	// session after the slice is the session before it.
-	ms := budget.Milliseconds()
-	if ms < 1 {
-		ms = 1
-	}
-
-	tx, err := db.Begin(ctx)
+	rawTx, err := db.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("store: begin advance: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-
-	// This first pair bounds the CLAIM below; the bucket loop re-derives from the remaining
-	// budget before every bucket.
-	for _, stmt := range []string{
-		fmt.Sprintf("SET LOCAL statement_timeout = %d", ms),
-		fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
-	} {
-		if _, err := tx.Exec(ctx, stmt); err != nil {
-			return false, fmt.Errorf("store: set advance timeouts: %w", err)
-		}
-	}
+	defer rawTx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	tx := newDeadlineTx(rawTx, deadline, advanceCommitReserve)
 
 	// `now` comes from the DB, like every other instant in this subsystem: the seal decision
 	// downstream compares against it, and two clocks would let a fast node seal a bucket a
@@ -599,31 +588,21 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 
 	// Bucket at a time so the deadline is honoured mid-range rather than after it. A partial
 	// pass is not a failure: the cursor is committed at whatever point it reached and the
-	// next slice resumes there.
-	//
-	// The server-side bounds are RE-DERIVED from what is left before every bucket (§10.10,
-	// D-0159). Set once at slice start, the last bucket inherits the first bucket's
-	// generosity: a bound equal to the whole budget stops nothing by the time most of the
-	// budget is spent.
+	// next slice resumes there. The adapter refuses to START any statement inside the commit
+	// reserve — that is what breaks accumulation, which a bound set once (or once per
+	// bucket) cannot: many statements each finishing just under such a bound sum to any
+	// total. Exhaustion surfaces as errSliceBudget mid-bucket; that bucket's fact was not
+	// yet written (the fact insert is its last statement), so committing the cursor at the
+	// previous bucket keeps the walked/not-walked boundary exact.
 	reached := cursor
 	for at := cursor; at.Before(end); at = at.Add(domain.CanonicalBucket) {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
+		if time.Until(deadline) <= advanceCommitReserve {
 			break
 		}
-		remainingMS := remaining.Milliseconds()
-		if remainingMS < 1 {
-			remainingMS = 1
-		}
-		for _, stmt := range []string{
-			fmt.Sprintf("SET LOCAL statement_timeout = %d", remainingMS),
-			fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(remainingMS, repairLockTimeout.Milliseconds())),
-		} {
-			if _, err := tx.Exec(ctx, stmt); err != nil {
-				return true, fmt.Errorf("store: rederive advance timeouts: %w", err)
-			}
-		}
 		if _, err := s.materializeBucketTx(ctx, tx, projectID, serviceID, at, modeOrdinary); err != nil {
+			if errors.Is(err, errSliceBudget) {
+				break
+			}
 			return true, err
 		}
 		reached = at.Add(domain.CanonicalBucket)
@@ -631,10 +610,22 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	if reached.Equal(cursor) {
 		// The deadline landed before the first bucket. Commit nothing and report work
 		// remaining, so the caller backs off to the next sub-tick instead of spinning.
-		return true, tx.Commit(ctx)
+		return true, rawTx.Commit(ctx)
 	}
 
-	if _, err := tx.Exec(ctx,
+	// The PERSISTENCE runs on the raw transaction, under the reserve's own bound: the
+	// adapter would refuse it — the reserve exists precisely so this part still has time —
+	// and the last savepoint-less SET LOCAL in force may be stale, so it is re-issued here.
+	reserveMS := advanceCommitReserve.Milliseconds()
+	for _, stmt := range []string{
+		fmt.Sprintf("SET LOCAL statement_timeout = %d", reserveMS),
+		fmt.Sprintf("SET LOCAL lock_timeout = %d", reserveMS),
+	} {
+		if _, err := rawTx.Exec(ctx, stmt); err != nil {
+			return true, fmt.Errorf("store: set persistence bounds: %w", err)
+		}
+	}
+	if _, err := rawTx.Exec(ctx,
 		`UPDATE service_materialization SET materialized_through = $2 WHERE service_id = $1`,
 		serviceID, reached); err != nil {
 		return true, fmt.Errorf("store: advance materialized_through: %w", err)
@@ -642,8 +633,8 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	// The watermark is recomputed from the FACTS, never set to the cursor: progress and
 	// evidence are different claims, and a hole must hold the watermark while the driver
 	// walks past it.
-	if err := advanceSealedThrough(ctx, tx, serviceID); err != nil {
+	if err := advanceSealedThrough(ctx, rawTx, serviceID); err != nil {
 		return true, err
 	}
-	return true, tx.Commit(ctx)
+	return true, rawTx.Commit(ctx)
 }

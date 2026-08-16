@@ -171,38 +171,23 @@ func (s *Store) PreviewMutationOf(
 		return MaintenancePreview{}, fmt.Errorf("store: preview range end %s is not after start %s", to, from)
 	}
 	// The projection runs UNDER the project's membership advisory lock — it has to, or the
-	// affected set could move between projection and token — which makes its runtime the
-	// project's runtime: while it holds the lock, service create/delete/declaration and
-	// every other maintenance mutation wait behind it. So the whole slice is bounded twice:
-	// a wall deadline the loop checks between buckets, and SET LOCAL server timeouts that
-	// stop any single statement from waiting past it. A projection that runs out of budget
-	// degrades to `approximate` — the truthful answer — instead of holding the project.
+	// affected set could move between projection and token. That makes its runtime the
+	// project's runtime, so ONE caller-side deadline covers the whole operation: lock,
+	// resolve, gate, project, persist, commit. deadlineTx checks the remainder before every
+	// statement and re-derives the server bounds as it shrinks; the persistence of the token
+	// itself runs inside a RESERVE the work phases may not touch, so an exhausted budget
+	// still writes down the approximate answer instead of dying while trying to say it.
 	deadline := time.Now().Add(s.previewWallBudget())
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(schedulingTolerance))
+	defer cancel()
 
-	tx, err := s.pool.Begin(ctx)
+	rawTx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return MaintenancePreview{}, fmt.Errorf("store: begin preview: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-
-	// The PRE-projection phase — the membership lock, the affected set, the generation, the
-	// sealed-intersection gate — is a handful of cheap indexed statements that the token
-	// cannot exist without. It gets a floor under the wall budget: a budget already spent by
-	// the projection loop must skip SERVICES, not blow up the statement that would have told
-	// us which services there are. The projection loop re-derives its own bounds from the
-	// remaining budget per service, inside savepoints.
-	budgetMS := s.previewWallBudget().Milliseconds()
-	if budgetMS < 1000 {
-		budgetMS = 1000
-	}
-	for _, stmt := range []string{
-		fmt.Sprintf("SET LOCAL statement_timeout = %d", budgetMS),
-		fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(budgetMS, repairLockTimeout.Milliseconds())),
-	} {
-		if _, err := tx.Exec(ctx, stmt); err != nil {
-			return MaintenancePreview{}, fmt.Errorf("store: set preview timeouts: %w", err)
-		}
-	}
+	defer rawTx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	tx := newDeadlineTx(rawTx, deadline, previewPersistReserve)
+	workDeadline := deadline.Add(-previewPersistReserve)
 
 	if err := lockServiceMembership(ctx, tx, projectID); err != nil {
 		return MaintenancePreview{}, err
@@ -248,41 +233,27 @@ func (s *Store) PreviewMutationOf(
 	}
 	coverage := "complete"
 	for i := range services {
-		// The wall budget bounds the WHOLE operation, checked before every service — not
-		// just inside one loop. Without this, up to 49 more per-service statement sequences
-		// ran under the project's membership lock after the budget expired: exactly the
-		// accumulation D-0159 forbids, bounded per statement and unbounded in sum.
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
+		// The wall check runs before every service, against the WORK deadline — the whole
+		// budget minus the persistence reserve. Past it, remaining services are skipped
+		// without a single statement: per-statement bounds alone cannot stop accumulation,
+		// only refusing to start can.
+		if !time.Now().Before(workDeadline) {
 			services[i].Reason = ReasonWallBudget
 			coverage = "approximate"
 			continue
 		}
-		// Server-side bounds are re-derived from what is LEFT, per service, and the work
-		// runs in a SAVEPOINT: a statement_timeout fired mid-projection then aborts the
-		// savepoint, not the transaction, so exhaustion still delivers the promised
-		// `approximate` token instead of a rolled-back 500.
+		// Each projection runs in a SAVEPOINT: a statement bound fired mid-projection
+		// aborts the savepoint, not the transaction, so exhaustion still delivers the
+		// promised `approximate` token instead of a rolled-back 500. The adapter re-derives
+		// the bounds inside the savepoint and the parent invalidates its own view when the
+		// child finishes — SET LOCAL issued inside a savepoint SURVIVES its RELEASE.
 		sp, serr := tx.Begin(ctx)
 		if serr != nil {
 			return MaintenancePreview{}, fmt.Errorf("store: begin projection savepoint: %w", serr)
 		}
-		ms := remaining.Milliseconds()
-		if ms < 1 {
-			ms = 1
-		}
-		before, after, reason, perr := func() (ServiceAggregate, ServiceAggregate, string, error) {
-			for _, stmt := range []string{
-				fmt.Sprintf("SET LOCAL statement_timeout = %d", ms),
-				fmt.Sprintf("SET LOCAL lock_timeout = %d", min64(ms, repairLockTimeout.Milliseconds())),
-			} {
-				if _, err := sp.Exec(ctx, stmt); err != nil {
-					return ServiceAggregate{}, ServiceAggregate{}, "", fmt.Errorf("store: set projection timeouts: %w", err)
-				}
-			}
-			return s.projectBothSides(ctx, sp, projectID, services[i].ServiceID, from, to, addSpan, dropID, deadline)
-		}()
+		before, after, reason, perr := s.projectBothSides(ctx, sp, projectID, services[i].ServiceID, from, to, addSpan, dropID, workDeadline)
 		switch {
-		case perr != nil && isStatementBudgetError(perr):
+		case perr != nil && (isStatementBudgetError(perr) || errors.Is(perr, errSliceBudget)):
 			if rerr := sp.Rollback(ctx); rerr != nil {
 				return MaintenancePreview{}, fmt.Errorf("store: rollback projection savepoint: %w", rerr)
 			}
@@ -306,6 +277,21 @@ func (s *Store) PreviewMutationOf(
 		}
 	}
 
+	// PERSISTENCE runs on the raw transaction under the reserve's own bound — the time the
+	// adapter was holding back. Re-issued explicitly, because whatever SET LOCAL the last
+	// released savepoint leaked into this transaction is both stale and possibly near zero,
+	// and a near-zero inherited bound is exactly how a successfully degraded projection
+	// still died as a 500 at the token insert.
+	reserveMS := previewPersistReserve.Milliseconds()
+	for _, stmt := range []string{
+		fmt.Sprintf("SET LOCAL statement_timeout = %d", reserveMS),
+		fmt.Sprintf("SET LOCAL lock_timeout = %d", reserveMS),
+	} {
+		if _, err := rawTx.Exec(ctx, stmt); err != nil {
+			return MaintenancePreview{}, fmt.Errorf("store: set persistence bounds: %w", err)
+		}
+	}
+
 	p := MaintenancePreview{
 		ProjectID: projectID, MonitorID: monitorID, TargetID: targetID,
 		Mutation: mutation, From: from, To: to,
@@ -313,7 +299,7 @@ func (s *Store) PreviewMutationOf(
 		EarliestRepairable: rawFloor,
 		Coverage:           coverage, Services: services,
 	}
-	if err := tx.QueryRow(ctx,
+	if err := rawTx.QueryRow(ctx,
 		`INSERT INTO maintenance_previews
 		   (project_id, monitor_id, target_id, mutation, requested_start, requested_end,
 		    maintenance_generation, raw_floor, coverage, expires_at, created_by)
@@ -330,7 +316,7 @@ func (s *Store) PreviewMutationOf(
 	// nothing about the SET: a truncated array would let a confirm pass while a service it
 	// never checked is mutated.
 	for _, svc := range services {
-		if _, err := tx.Exec(ctx,
+		if _, err := rawTx.Exec(ctx,
 			`INSERT INTO maintenance_preview_services
 			   (preview_id, project_id, service_id, definition_generation,
 			    before_good_us, before_bad_us, before_unknown_us, before_excluded_us,
@@ -348,48 +334,57 @@ func (s *Store) PreviewMutationOf(
 			return MaintenancePreview{}, fmt.Errorf("store: insert preview service: %w", err)
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := rawTx.Commit(ctx); err != nil {
 		return MaintenancePreview{}, fmt.Errorf("store: commit preview: %w", err)
 	}
 	return p, nil
 }
 
-// servicesAffectedByWindow returns every service whose SLI declared the window's monitor at
-// any point inside the range, with its current definition generation and the availability it
-// currently reports over that range.
+// servicesAffectedByWindow returns every service whose declaration DECLARED the window's
+// monitor as a reliability input at some instant inside [from, to), with its current
+// definition generation.
 //
-// A window with an empty monitor id is project-wide and affects every service that has a
-// declaration.
+// "At some instant inside the range" is a validity-interval question: a revision governs
+// [effective_at, next revision's effective_at), and only revisions whose validity OVERLAPS
+// the requested range count. The first implementation joined any effective revision the
+// service ever had, so a service that used the monitor solely OUTSIDE the range entered the
+// affected set — inflating previews, going approximate or evidence_gone for time the
+// mutation does not touch, and queueing repair work with nothing to repair.
+//
+// A window with an empty monitor id is project-wide and affects every service that had any
+// declaration in force inside the range.
 func servicesAffectedByWindow(ctx context.Context, tx pgx.Tx, projectID, monitorID string, from, to time.Time) ([]PreviewService, error) {
 	var rows pgx.Rows
 	var err error
+	const revisionValidity = `
+		revs AS (
+		    SELECT r.id, r.service_id, r.effective_at,
+		           LEAD(r.effective_at) OVER (PARTITION BY r.service_id ORDER BY r.effective_at, r.revision) AS next_at
+		      FROM service_definition_revisions r
+		     WHERE r.project_id = $1 AND r.state = 'effective'
+		)`
 	if monitorID == "" {
 		rows, err = tx.Query(ctx,
-			`SELECT s.id,
-			        COALESCE((SELECT MAX(r.revision) FROM service_definition_revisions r
-			                   WHERE r.service_id = s.id AND r.state='effective'), 0),
-			        COALESCE((SELECT SUM(b.good_us) FROM service_reliability_buckets b
-			                   WHERE b.service_id = s.id AND b.bucket_start >= $2 AND b.bucket_start < $3), 0),
-			        COALESCE((SELECT SUM(b.bad_us) FROM service_reliability_buckets b
-			                   WHERE b.service_id = s.id AND b.bucket_start >= $2 AND b.bucket_start < $3), 0)
+			`WITH `+revisionValidity+`
+			 SELECT DISTINCT s.id,
+			        COALESCE((SELECT MAX(r2.revision) FROM service_definition_revisions r2
+			                   WHERE r2.service_id = s.id AND r2.state='effective'), 0)
 			   FROM services s
+			   JOIN revs rv ON rv.service_id = s.id
+			        AND rv.effective_at < $3 AND COALESCE(rv.next_at, 'infinity'::timestamptz) > $2
 			  WHERE s.project_id = $1
-			    AND EXISTS (SELECT 1 FROM service_definition_revisions r
-			                 WHERE r.service_id = s.id AND r.state='effective')
 			  ORDER BY s.id`, projectID, from, to)
 	} else {
 		rows, err = tx.Query(ctx,
-			`SELECT DISTINCT s.id,
+			`WITH `+revisionValidity+`
+			 SELECT DISTINCT s.id,
 			        COALESCE((SELECT MAX(r2.revision) FROM service_definition_revisions r2
-			                   WHERE r2.service_id = s.id AND r2.state='effective'), 0),
-			        COALESCE((SELECT SUM(b.good_us) FROM service_reliability_buckets b
-			                   WHERE b.service_id = s.id AND b.bucket_start >= $3 AND b.bucket_start < $4), 0),
-			        COALESCE((SELECT SUM(b.bad_us) FROM service_reliability_buckets b
-			                   WHERE b.service_id = s.id AND b.bucket_start >= $3 AND b.bucket_start < $4), 0)
+			                   WHERE r2.service_id = s.id AND r2.state='effective'), 0)
 			   FROM services s
-			   JOIN service_definition_revisions r ON r.service_id = s.id AND r.state='effective'
+			   JOIN revs rv ON rv.service_id = s.id
+			        AND rv.effective_at < $4 AND COALESCE(rv.next_at, 'infinity'::timestamptz) > $3
 			   JOIN service_definition_members m
-			     ON m.revision_id = r.id AND m.role='sli' AND m.monitor_id = $2
+			     ON m.revision_id = rv.id AND m.role='sli' AND m.monitor_id = $2
 			  WHERE s.project_id = $1
 			  ORDER BY s.id`, projectID, monitorID, from, to)
 	}
@@ -400,7 +395,7 @@ func servicesAffectedByWindow(ctx context.Context, tx pgx.Tx, projectID, monitor
 	var out []PreviewService
 	for rows.Next() {
 		var svc PreviewService
-		if err := rows.Scan(&svc.ServiceID, &svc.DefinitionGeneration, &svc.Before.Good, &svc.Before.Bad); err != nil {
+		if err := rows.Scan(&svc.ServiceID, &svc.DefinitionGeneration); err != nil {
 			return nil, fmt.Errorf("store: scan affected service: %w", err)
 		}
 		out = append(out, svc)
@@ -798,6 +793,11 @@ func orDash(s string) string {
 // what they WOULD become, by running the same reducer the materializer runs, over the same
 // range, with the mutation applied — and writing nothing.
 
+// previewPersistReserve is the slice of the preview budget held back for writing the token
+// itself: the work phases may not touch it, so an exhausted budget can still persist the
+// approximate answer instead of dying while trying to say it.
+const previewPersistReserve = 300 * time.Millisecond
+
 // previewWallBudget is how long one preview may hold the project's membership lock.
 func (s *Store) previewWallBudget() time.Duration {
 	if s.previewBudget > 0 {
@@ -837,7 +837,10 @@ func (s *Store) projectBothSides(
 	ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to time.Time,
 	addSpan *reliability.MaintenanceSpan, dropWindowID string, deadline time.Time,
 ) (before, after ServiceAggregate, reason string, err error) {
-	if to.Sub(from)/domain.CanonicalBucket > previewProjectionBudget {
+	// TOUCHED buckets, not duration divided by bucket: an unaligned range touches one more
+	// bucket than its length suggests — [10:00:30, 13:00:30) walks floor(from) through
+	// ceil(to) — and integer division admitted budget+1 buckets at exactly the limit.
+	if domain.CeilToBucket(to).Sub(domain.FloorToBucket(from))/domain.CanonicalBucket > previewProjectionBudget {
 		return ServiceAggregate{}, ServiceAggregate{}, ReasonRangeTooLong, nil
 	}
 	for at := domain.FloorToBucket(from); at.Before(to); at = at.Add(domain.CanonicalBucket) {

@@ -159,6 +159,27 @@ describe("SlaView tenant context", () => {
     expect(vm.reportEnabled).toBe(false);
   });
 
+  it("keeps archived windows out of the scheduler list across reloads", async () => {
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path.endsWith("/maintenance"))
+        return Promise.resolve({
+          data: [
+            maintWindow("mw-live", "live-window"),
+            { ...maintWindow("mw-arch", "archived-window"), archived_at: new Date().toISOString() },
+          ],
+        });
+      if (path.endsWith("/sla")) return Promise.resolve({ data: { windows: [] } });
+      return Promise.resolve({ data: [] });
+    });
+
+    // The reload IS the regression: archiving removed the row locally, but the next load
+    // brought it back because the list carried no archive state to filter on.
+    const { wrapper } = mountView();
+    await flushPromises();
+    expect(wrapper.text()).toContain("live-window");
+    expect(wrapper.text()).not.toContain("archived-window");
+  });
+
   it("drops a deferred maintenance archive from the previous project", async () => {
     apiMock.GET.mockImplementation((path: string, options: { params: { path: { projectID?: string } } }) => {
       const project = options.params.path.projectID;

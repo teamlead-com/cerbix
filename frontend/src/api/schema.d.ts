@@ -2295,7 +2295,7 @@ export interface paths {
                              * Format: date-time
                              * @description The raw-retention floor, resolved on the database clock: the oldest instant a retroactive mutation can still be recomputed from.
                              */
-                            earliest_repairable?: string;
+                            earliest_repairable: string;
                             services: {
                                 /** Format: uuid */
                                 service_id: string;
@@ -6124,6 +6124,16 @@ export interface components {
             reason?: string;
             /** Format: date-time */
             created_at?: string;
+            /**
+             * Format: date-time
+             * @description Set when the window was archived or annulled: it left active inventory.
+             */
+            archived_at?: string | null;
+            /**
+             * Format: date-time
+             * @description Where the window's EFFECT stops. For a window archived while active: the archive instant. For a window archived before it began: its own start — it never takes effect. Consumers must reduce LEAST(ends_at, cancel_effective_at).
+             */
+            cancel_effective_at?: string | null;
         };
         CreateMaintenance: {
             /**

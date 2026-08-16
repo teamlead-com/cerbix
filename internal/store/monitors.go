@@ -908,7 +908,7 @@ func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bo
 		 maint AS (
 		   SELECT EXISTS(
 		     SELECT 1 FROM maintenance_windows mw, cur
-		     WHERE mw.starts_at <= now() AND mw.ends_at >= now()
+		     WHERE mw.starts_at <= now() AND `+maintEffectiveEnd+` > now()
 		       AND (mw.monitor_id = cur.id OR (mw.monitor_id IS NULL AND mw.project_id = cur.project_id))
 		   ) AS in_maint
 		 )

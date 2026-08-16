@@ -470,3 +470,101 @@ credential at the monitored target.
 Prometheus rules are in `docker/alerts/secret-inventory.rules.yml`. The live smoke
 `e2e/secret-inventory-smoke.sh` covers inventory → MaC ref → wrong-key pull-agent degradation
 → correctly keyed recovery/JIT decrypt → real PostgreSQL UP → rotation fence and guards.
+
+## Service reliability operations (FR-021)
+
+The service-reliability subsystem (declared services, duration-weighted facts, durable repair
+ranges) exports its operational surface only from the ACTIVE scheduler leader; a deposed
+leader clears its gauges on step-down, so exactly one process describes the cluster.
+
+### Metrics
+
+| Metric (type) | Meaning | Action when abnormal |
+| --- | --- | --- |
+| `cerbix_service_repair_ranges{state}` (gauge) | Sampled queue depth for `pending`, `running` and the terminal `error` state, each an index-backed probe SATURATING at 1000 (a value of 1000 means "at least"). `complete`/`superseded` are never rescanned — they are outcome counters below. | `error` > 0 is TERMINAL parking (evidence gone / unrecomputable): inspect `last_error` in `service_repair_ranges`; the range will never retry itself. Growing `pending` with idle workers → check the leader's slice loop logs (`service_slice_failed`). |
+| `cerbix_service_watermark_lag_seconds` (gauge, zero-clamped) | Worst sealed-watermark lag across declared services. Steady state ≈ late-arrival grace + one tick. A NEW service backfilling history legitimately shows a large, shrinking value. | Sustained growth (not a shrinking backfill) means the materializer is not progressing: check leader logs, DB locks, the repair queue. |
+| `cerbix_service_slices_total{outcome}` (counter) | Leader slices by `worked`/`empty`/`error`. | A stream of `error` outcomes names its cause in `service_slice_failed` log lines. |
+| `cerbix_service_repair_outcomes_total{outcome,reason}` (counter) | Range lifecycle outcomes, attributed by the range reason (`declaration`/`epoch`/`late_data`/`maintenance`/`admin`/`backfill`) — the reason is what tells a repair from a recompute. | Rising `failed` = a persistent fault under backoff; `unrecomputable` = evidence destroyed (see wedged). |
+| `cerbix_service_unrecomputable_rejections_total` (counter) | The §21 rejection counter: MUTATIONS refused at preview/confirm because their range is unrecomputable (`ErrUnrecomputableRange`). Distinct from a repair range parking on evidence loss, which shows in the outcomes counter as `unrecomputable`. | Rising rejections mean operators keep asking for restatements retention already ate — check the raw retention window. |
+| `cerbix_service_epoch_fanout_total` (counter) | Evaluation epochs CREATED (fan-out of execution-changing writes). | Unbounded growth without monitor edits indicates a writer re-declaring in a loop. |
+| `cerbix_service_late_arrivals_total`, `cerbix_service_late_arrival_overflow_total` (counters) | Heartbeats that arrived behind the seal, and example-slot overflows, as events. | A burst after an agent outage is expected — the repairs enqueue themselves. Persistent growth means an agent's clock or route is wrong. |
+| `cerbix_service_wedged` (gauge) | 1 while the subsystem is wedged. **Wedged fails the scheduler's `/readyz`, and `cerbix_ready` agrees** (§21). | See below. |
+
+Epoch fan-out and late-arrival counters are persisted WITH their owning transaction (a
+rollback takes the delta), then exported by the sampler — monotonic by construction.
+Lifecycle-outcome and rejection counters record commit-independent events. The stats sampler
+runs off the dispatch loop in its own goroutine, scans only index-backed bounded sets, and
+FAILS CLOSED: until its first successful sample (and on any sample failure) the subsystem
+reports wedged/unknown and /readyz is not healthy.
+
+### Wedged: definition and recovery
+
+Wedged is bounded and deliberately NARROW — an operator is REQUIRED, by definition:
+- **a repair range in state `error`** — terminally parked (typically `ErrEvidenceGone`: raw
+  evidence for a sealed bucket was deleted). Recovery: inspect
+  `SELECT id, service_id, reason, last_error FROM service_repair_ranges WHERE state='error'`;
+  if the range is genuinely unrecomputable, resolve it deliberately (delete the row or
+  re-enqueue a narrower range) — the facts it could not restate remain the honest record.
+
+Watermark LAG is deliberately NOT a wedge: a fresh 90-day adoption lags enormously while
+progressing normally, and one absolute sample cannot tell that from a stuck materializer.
+Alert on lag (below) and read its trend; a progress-across-samples wedge tracker is future
+work, recorded in the iteration reports.
+
+`/readyz` recovers by itself on the next stats cadence (≤15s) once the condition clears.
+
+### Fact partitions
+
+`service_reliability_buckets` is range-partitioned by month in BOTH storage modes. The leader
+pre-creates upcoming months (`ensure_service_fact_partitions_failed` warns on failure); the
+DEFAULT partition keeps inserts safe meanwhile. A month whose rows landed in DEFAULT is
+adopted automatically on the maintenance cadence, with the PARENT COPY AUTHORITATIVE
+throughout: the long phase only COPIES into a standalone staging table (facts never leave
+the parent's view; a crash resumes via pg_inherits detection), and the short fenced cutover
+(DELETE…RETURNING under the parent lock → distinct-filtered upsert → ATTACH) imposes the
+final content under ONE transaction-wide 5s budget — queueing, sweep, attach and commit
+together, via the same deadline mechanism as the leader slices. The fenced workload is inherently O(rows still
+in DEFAULT for the month) — hole-free incremental shrinking does not exist under native
+partitioning — so the supported bound is DECLARED (D-0161, spec §10.11): a month with more
+than 100 000 remaining DEFAULT rows is refused, and the bound is enforced TWICE — a cheap
+preflight before any parent lock (no doomed all-row DELETE repeats across cadences), and
+again UNDER the parent's ACCESS EXCLUSIVE lock before the sweep, because the unlocked count
+alone is a TOCTOU against concurrent writers. A refused month stays fully visible and
+surfaces through `cerbix_service_fact_maintenance_failing` with the month named in the
+repeating `ensure_service_fact_partitions_failed` WARN.
+
+Recovery, precisely:
+- **Hot month under the bound**: quiesce the writers keeping it hot (resolve error-state
+  repair ranges, stop replaying historical batches into it) and WAIT — the copy resumes from
+  the staging's own max key each cadence, monotonically, and the last cadence needs one fence
+  window (one transaction-wide 5s budget of parent lock, commit included).
+- **Everything else — oversize month, or a month that still fails the fence every cadence
+  after quiescence** (the bound is a row count, not a wall-clock guarantee; slow storage can
+  exhaust 5s under 100k rows): run the shipped operator command in a maintenance window:
+
+  ```
+  cerbix adopt-fact-month --config /etc/cerbix/config.yaml --month 2026-05 --timeout 10m
+  ```
+
+  It is the SAME adoption code path with an operator-chosen fence budget and the row gate
+  off: month input is validated (`YYYY-MM`), the copy phase holds no parent lock, the fenced
+  cutover (lock → authoritative sweep → attach → commit) runs inside `--timeout`, an error
+  rolls back leaving the parent authoritative and the staging resumable, and a rerun of an
+  already-attached month is a no-op success. The command is covered by an end-to-end test
+  against a real migrated database; there is no manual psql procedure to reproduce.
+
+Past months never roll out of reach: the recovery probe adopts the oldest stranded month, one
+per cadence, before any current-month work.
+Facts are never purged by retention — they are the sealed product; raw heartbeat retention is
+governed separately.
+
+### Suggested alerts
+
+- `cerbix_service_wedged == 1 for 5m` — page: the subsystem needs an operator by definition.
+- `cerbix_service_repair_ranges{state="error"} > 0 for 15m` — ticket.
+- `increase(cerbix_service_slices_total{outcome="error"}[15m]) > 10` — ticket.
+- `cerbix_service_watermark_lag_seconds > 3600 AND its 1h trend is not decreasing` — ticket:
+  a growing lag with no backfill in flight is a stuck materializer.
+- `cerbix_service_fact_maintenance_failing == 1 AND time() - cerbix_service_fact_maintenance_last_success_timestamp_seconds > 1800` —
+  ticket: a stuck month (see the recovery split above). Before any success, last-success is
+  floored at tracking start, so a first-cadence blip cannot trip the 30-minute age.

@@ -109,8 +109,11 @@ func TestHistoricalHeartbeatUsesMembershipAsOfItsBucket(t *testing.T) {
 	st, ctx := declStore(t)
 	f := adoptedService(t, st, ctx) // revision 1, retroactive: sli = [http]
 
-	// A heartbeat from before the removal.
-	old := time.Now().UTC().Add(-10 * time.Minute)
+	// A heartbeat from before the removal, PINNED to the bucket's interior: this test sends a
+	// second beat at old+1s and asserts on old's bucket, so old must sit far enough from the
+	// minute boundary that both instants share it — a raw now()-10m flaked once a day when
+	// the wall clock ran within a second of :59.
+	old := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute).Add(10 * time.Second)
 	beat(t, st, ctx, f.http, old, true)
 	oldBucket := bucketOf(t, st, ctx, old)
 	before := ingestGeneration(t, st, ctx, f.serviceID, oldBucket)
@@ -139,7 +142,9 @@ func TestHeartbeatBeforeMembershipDoesNotMark(t *testing.T) {
 	st, ctx := declStore(t)
 	f := adoptedService(t, st, ctx) // sli = [http]; redis is context only
 
-	old := time.Now().UTC().Add(-10 * time.Minute)
+	// Pinned inside the bucket for the same reason as the membership test above: the second
+	// beat at old+1s must land in old's own bucket for the assertion to mean anything.
+	old := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute).Add(10 * time.Second)
 	beat(t, st, ctx, f.redis, old, true)
 	oldBucket := bucketOf(t, st, ctx, old)
 	if got := ingestGeneration(t, st, ctx, f.serviceID, oldBucket); got != 0 {
@@ -183,7 +188,9 @@ func TestHeartbeatIntoASealedBucketBecomesALateArrival(t *testing.T) {
 	st, ctx := declStore(t)
 	f := adoptedService(t, st, ctx)
 
-	ts := time.Now().UTC().Add(-10 * time.Minute)
+	// Pinned inside the bucket: the second late beat below lands at ts+1s and must aggregate
+	// into THIS sealed bucket, not spill into an unsealed neighbor at a minute boundary.
+	ts := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute).Add(10 * time.Second)
 	bucket := bucketOf(t, st, ctx, ts)
 
 	// Materialize and seal that bucket by hand; the sealing pass itself is a later slice.

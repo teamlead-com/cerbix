@@ -60,7 +60,12 @@ BEGIN
         -- same output, on every run and every replica.
         WHILE EXISTS (SELECT 1 FROM monitors WHERE project_id = m.project_id AND slug = candidate) LOOP
             n := n + 1;
-            candidate := base || '-' || left(replace(m.id::text, '-', ''), 4 + n);
+            -- iter-0133: the suffix must FIT the 63-char shape. The "monitor-" fallback can
+            -- push base to exactly 63, and an untrimmed base || '-' || uuid4+ made the first
+            -- collision candidate 68 chars — the shape constraint added below then rejected
+            -- the whole upgrade for any two pre-upgrade monitors sharing such a name.
+            candidate := regexp_replace(left(base, 63 - (5 + n)), '-+$', '', 'g')
+                         || '-' || left(replace(m.id::text, '-', ''), 4 + n);
         END LOOP;
 
         UPDATE monitors SET slug = candidate WHERE id = m.id;
@@ -75,8 +80,19 @@ END $$;
 -- +goose StatementBegin
 CREATE UNIQUE INDEX IF NOT EXISTS monitors_project_slug_uniq ON monitors (project_id, slug);
 ALTER TABLE monitors ALTER COLUMN slug SET NOT NULL;
-ALTER TABLE monitors ADD CONSTRAINT monitors_slug_shape
-    CHECK (slug ~ '^[a-z][a-z0-9-]{0,62}$');
+-- iter-0133: guarded, because this migration runs OUTSIDE a transaction — a crash after this
+-- statement and before goose records the version would re-run it, and a bare ADD CONSTRAINT
+-- errors on the duplicate and bricks startup. SET NOT NULL above is naturally idempotent.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'monitors_slug_shape' AND conrelid = 'monitors'::regclass
+    ) THEN
+        ALTER TABLE monitors ADD CONSTRAINT monitors_slug_shape
+            CHECK (slug ~ '^[a-z][a-z0-9-]{0,62}$');
+    END IF;
+END $$;
 -- +goose StatementEnd
 
 -- +goose Down

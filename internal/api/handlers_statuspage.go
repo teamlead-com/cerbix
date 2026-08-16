@@ -475,6 +475,11 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		for _, mw := range mws {
+			// Archived windows left active inventory: a status page showing "upcoming
+			// maintenance" an operator cancelled announces downtime that will not happen.
+			if mw.ArchivedAt != nil {
+				continue
+			}
 			if mw.EndsAt.After(now) { // active or scheduled
 				maints = append(maints, mw)
 			}

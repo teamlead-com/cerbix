@@ -41,7 +41,7 @@ func measuredOverhead(t *testing.T, ctx context.Context, st *Store) time.Duratio
 	worst := 5 * time.Millisecond
 	for i := 0; i < 5; i++ {
 		started := time.Now()
-		if err := boundedLifecycleExec(ctx, st.pool, time.Now().Add(lifecycleWriteBound), `SELECT 1`); err != nil {
+		if _, err := boundedLifecycleExec(ctx, st.pool, time.Now().Add(lifecycleWriteBound), `SELECT 1`); err != nil {
 			t.Fatalf("overhead probe: %v", err)
 		}
 		if d := time.Since(started); d > worst {

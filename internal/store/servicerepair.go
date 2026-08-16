@@ -105,14 +105,31 @@ func enqueueRepairRangeTx(
 	to = domain.CeilToBucket(to)
 
 	// Absorb every pending range of this reason that overlaps or abuts, and take the union.
+	// The merged row keeps an origin ONLY when provenance is unambiguous: if any absorbed row
+	// was required by a DIFFERENT origin (or by none), the union belongs to no single origin
+	// and cancel-by-origin must not be able to discard the part someone else still requires —
+	// §10.8 preserves the union exactly, and a union stamped with the latest origin would be
+	// cancellable by that origin alone.
 	var mergedFrom, mergedTo time.Time
+	var absorbed int
+	var distinctOrigins []string
 	if err := tx.QueryRow(ctx,
-		`SELECT LEAST(COALESCE(MIN(range_start), $3), $3), GREATEST(COALESCE(MAX(range_end), $4), $4)
+		`SELECT LEAST(COALESCE(MIN(range_start), $3), $3), GREATEST(COALESCE(MAX(range_end), $4), $4),
+		        count(*), COALESCE(array_agg(DISTINCT COALESCE(origin_id::text, '')), '{}')
 		   FROM service_repair_ranges
 		  WHERE service_id = $1 AND reason = $2 AND state = 'pending'
 		    AND range_start <= $4 AND range_end >= $3`,
-		serviceID, string(reason), from, to).Scan(&mergedFrom, &mergedTo); err != nil {
+		serviceID, string(reason), from, to).Scan(&mergedFrom, &mergedTo, &absorbed, &distinctOrigins); err != nil {
 		return fmt.Errorf("store: compute range union: %w", err)
+	}
+	mergedOrigin := originID
+	if absorbed > 0 {
+		for _, o := range distinctOrigins {
+			if o != originID {
+				mergedOrigin = ""
+				break
+			}
+		}
 	}
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM service_repair_ranges
@@ -129,8 +146,8 @@ func enqueueRepairRangeTx(
 		return fmt.Errorf("store: read maintenance generation: %w", err)
 	}
 	var origin *string
-	if originID != "" {
-		origin = &originID
+	if mergedOrigin != "" {
+		origin = &mergedOrigin
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO service_repair_ranges
@@ -257,7 +274,7 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 		if remaining <= 0 {
 			// Out of slice. The cursor is durable, so the next claim resumes rather than
 			// restarts — that is the whole reason work is a table and not a goroutine.
-			return s.releaseRepairRange(ctx, db, r.ID, cursor, nil, policy.writeDeadline(deadline))
+			return s.releaseRepairRange(ctx, db, r.ID, cursor, r.Reason, nil, policy.writeDeadline(deadline))
 		}
 
 		end := cursor.Add(time.Duration(batch) * domain.CanonicalBucket)
@@ -270,18 +287,18 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 		case errors.Is(err, errSliceBudget):
 			// The slice's budget, not the range's health: release at the cursor already
 			// held so the very next slice resumes exactly there.
-			return s.releaseRepairRange(ctx, db, r.ID, cursor, nil, policy.writeDeadline(deadline))
+			return s.releaseRepairRange(ctx, db, r.ID, cursor, r.Reason, nil, policy.writeDeadline(deadline))
 		case errors.Is(err, ErrRangeSuperseded):
 			// The declared inputs moved. Re-enqueue what is left rather than finishing on a
 			// stale reading: two batches of one range must not commit under two different
 			// "current" maintenance declarations.
-			return s.releaseRepairRange(ctx, db, r.ID, cursor, err, policy.writeDeadline(deadline))
+			return s.releaseRepairRange(ctx, db, r.ID, cursor, r.Reason, err, policy.writeDeadline(deadline))
 		case errors.Is(err, ErrEvidenceGone):
 			// TERMINAL, not a retry: the evidence is destroyed, and every retry would hit
 			// the same wall while the range sat in the queue looking like progress-to-be.
 			// The `error` state is the honest surface — the sealed facts stay as the record
 			// of what was measured, and an operator can see WHY the range will not run.
-			return s.markRepairRangeUnrecomputable(ctx, db, r.ID, cursor, err, policy.writeDeadline(deadline))
+			return s.markRepairRangeUnrecomputable(ctx, db, r.ID, cursor, r.Reason, err, policy.writeDeadline(deadline))
 		case err != nil:
 			return s.failRepairRange(ctx, db, r, cursor, err, policy.writeDeadline(deadline))
 		}
@@ -290,7 +307,7 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 		batch = adaptRepairBatch(batch, spent, remaining)
 		cursor = end
 	}
-	return s.completeRepairRange(ctx, db, r.ID, cursor, policy.writeDeadline(deadline))
+	return s.completeRepairRange(ctx, db, r.ID, cursor, r.Reason, policy.writeDeadline(deadline))
 }
 
 // lifecycleReserve is the slice time the repair loop keeps back for its CLOSING lifecycle
@@ -436,7 +453,7 @@ func maintenanceGenerationOn(ctx context.Context, q queryRower, projectID string
 
 // releaseRepairRange puts a range back as pending, keeping its cursor so the next claim
 // continues rather than restarts.
-func (s *Store) releaseRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time, cause error, writeBy time.Time) error {
+func (s *Store) releaseRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time, reason RepairReason, cause error, writeBy time.Time) error {
 	note := ""
 	if cause != nil {
 		note = cause.Error()
@@ -446,23 +463,37 @@ func (s *Store) releaseRepairRange(ctx context.Context, db dbConn, id string, cu
 	// lapses and any claimer resumes it at the durable cursor. Unbounded, one table lock here
 	// held the leader connection open-endedly; minting a fresh bound after the slice was
 	// spent held the scheduler ~100ms past the cadence §10.10 promises it.
-	if err := boundedLifecycleExec(ctx, db, writeBy,
+	rows, err := boundedLifecycleExec(ctx, db, writeBy,
 		`UPDATE service_repair_ranges
 		    SET state = 'pending', cursor_at = $2, last_error = $3,
 		        maintenance_generation = COALESCE(
 		            (SELECT generation FROM project_maintenance_generation p WHERE p.project_id = service_repair_ranges.project_id), 0),
 		        updated_at = now()
-		  WHERE id = $1`, id, cursor, note); err != nil {
+		  WHERE id = $1`, id, cursor, note)
+	if err != nil {
 		return fmt.Errorf("store: release repair range: %w", err)
+	}
+	// rows == 0 means the range vanished under the claim (a cascade-deleted service): no
+	// row changed, so no outcome durably happened, and none is counted.
+	if rows > 0 {
+		if errors.Is(cause, ErrRangeSuperseded) {
+			s.recordRepairOutcome("superseded", string(reason))
+		} else {
+			s.recordRepairOutcome("released", string(reason))
+		}
 	}
 	return nil
 }
 
-func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time, writeBy time.Time) error {
-	if err := boundedLifecycleExec(ctx, db, writeBy,
+func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, cursor time.Time, reason RepairReason, writeBy time.Time) error {
+	rows, err := boundedLifecycleExec(ctx, db, writeBy,
 		`UPDATE service_repair_ranges SET state = 'complete', cursor_at = $2, last_error = '', updated_at = now()
-		  WHERE id = $1`, id, cursor); err != nil {
+		  WHERE id = $1`, id, cursor)
+	if err != nil {
 		return fmt.Errorf("store: complete repair range: %w", err)
+	}
+	if rows > 0 {
+		s.recordRepairOutcome("complete", string(reason))
 	}
 	return nil
 }
@@ -472,24 +503,32 @@ func (s *Store) completeRepairRange(ctx context.Context, db dbConn, id string, c
 // a range nobody retries is a hole in a watermark defined by contiguity.
 // markRepairRangeUnrecomputable parks a range whose evidence no longer exists. Unlike a
 // failure it does not schedule a retry: retrying cannot bring deleted heartbeats back.
-func (s *Store) markRepairRangeUnrecomputable(ctx context.Context, db dbConn, id string, cursor time.Time, cause error, writeBy time.Time) error {
-	if err := boundedLifecycleExec(ctx, db, writeBy,
+func (s *Store) markRepairRangeUnrecomputable(ctx context.Context, db dbConn, id string, cursor time.Time, reason RepairReason, cause error, writeBy time.Time) error {
+	rows, err := boundedLifecycleExec(ctx, db, writeBy,
 		`UPDATE service_repair_ranges
 		    SET state = 'error', cursor_at = $2, last_error = $3, updated_at = now()
-		  WHERE id = $1`, id, cursor, cause.Error()); err != nil {
+		  WHERE id = $1`, id, cursor, cause.Error())
+	if err != nil {
 		return fmt.Errorf("store: mark range unrecomputable: %w", err)
+	}
+	if rows > 0 {
+		s.recordRepairOutcome("unrecomputable", string(reason))
 	}
 	return cause
 }
 
 func (s *Store) failRepairRange(ctx context.Context, db dbConn, r RepairRange, cursor time.Time, cause error, writeBy time.Time) error {
 	backoff := repairBackoff(r.Attempts + 1)
-	if err := boundedLifecycleExec(ctx, db, writeBy,
+	rows, err := boundedLifecycleExec(ctx, db, writeBy,
 		`UPDATE service_repair_ranges
 		    SET state = 'pending', cursor_at = $2, attempts = attempts + 1,
 		        next_attempt_at = now() + $3::interval, last_error = $4, updated_at = now()
-		  WHERE id = $1`, r.ID, cursor, backoff.String(), cause.Error()); err != nil {
+		  WHERE id = $1`, r.ID, cursor, backoff.String(), cause.Error())
+	if err != nil {
 		return fmt.Errorf("store: fail repair range: %w", err)
+	}
+	if rows > 0 {
+		s.recordRepairOutcome("failed", string(r.Reason))
 	}
 	return cause
 }

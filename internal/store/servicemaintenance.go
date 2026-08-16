@@ -209,6 +209,10 @@ func (s *Store) PreviewMutationOf(
 		if sealed, serr := rangeIntersectsSealed(ctx, tx, services, from, to); serr != nil {
 			return MaintenancePreview{}, serr
 		} else if sealed {
+			// The §21 rejection counter records THIS decision — a mutation refused because
+			// its range is unrecomputable — commit-independently: the caller received the
+			// 422 whether or not the surrounding transaction keeps anything.
+			s.recordUnrecomputableRejection()
 			return MaintenancePreview{}, fmt.Errorf("%w: earliest repairable is %s",
 				ErrUnrecomputableRange, rawFloor.UTC().Format(time.RFC3339))
 		}
@@ -481,7 +485,7 @@ func (s *Store) CreateMaintenanceWindowChecked(
 		if ferr != nil {
 			return domain.MaintenanceWindow{}, ferr
 		}
-		actor, cerr := confirmPreviewTx(ctx, tx, w.ProjectID, previewID, services, binding, w.StartsAt, rawFloor)
+		actor, cerr := s.confirmPreviewTx(ctx, tx, w.ProjectID, previewID, services, binding, w.StartsAt, rawFloor)
 		if cerr != nil {
 			return domain.MaintenanceWindow{}, cerr
 		}
@@ -505,7 +509,7 @@ func (s *Store) CreateMaintenanceWindowChecked(
 		return domain.MaintenanceWindow{}, fmt.Errorf("store: insert maintenance window: %w", err)
 	}
 
-	if err := invalidateForMaintenance(ctx, tx, w.ProjectID, services, w.StartsAt, w.EndsAt); err != nil {
+	if err := invalidateForMaintenance(ctx, tx, w.ProjectID, out.ID, services, w.StartsAt, w.EndsAt); err != nil {
 		return domain.MaintenanceWindow{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -520,21 +524,60 @@ func (s *Store) CreateMaintenanceWindowChecked(
 // It never needs raw data, so an old window can always be cleaned up — which is precisely
 // the operation the alternative design made impossible forever.
 func (s *Store) ArchiveMaintenanceWindow(ctx context.Context, projectID, id string) error {
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin archive window: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	tag, err := tx.Exec(ctx,
 		`UPDATE maintenance_windows
 		    SET archived_at = statement_timestamp(),
-		        -- Only an ACTIVE window is cut short, and at the exact instant: the reducer
-		        -- handles arbitrary maintenance edges, so rounding to a bucket boundary would
-		        -- silently extend or shorten a real exclusion by up to a whole bucket.
+		        -- An ACTIVE window is cut short at the exact instant: the reducer handles
+		        -- arbitrary maintenance edges, so rounding to a bucket boundary would silently
+		        -- extend or shorten a real exclusion by up to a whole bucket. A FUTURE window
+		        -- is cut at its own start — the empty interval [starts_at, starts_at) — so an
+		        -- archived window that never began NEVER takes effect: with cancel left NULL
+		        -- its declared end kept counting in every effective-end reducer, and the
+		        -- archive silently un-archived itself the moment the window's time arrived.
 		        cancel_effective_at = CASE
 		            WHEN starts_at <= statement_timestamp() AND ends_at > statement_timestamp()
-		            THEN statement_timestamp() ELSE cancel_effective_at END
+		            THEN statement_timestamp()
+		            WHEN starts_at > statement_timestamp()
+		            THEN starts_at
+		            ELSE cancel_effective_at END
 		  WHERE id = $1 AND project_id = $2 AND archived_at IS NULL`, id, projectID)
 	if err != nil {
 		return fmt.Errorf("store: archive maintenance window: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	// The archive PARTICIPATES in the generation protocol. It rewrites no sealed history —
+	// the cut only ever removes effect at or after the cancel instant — but a REPAIR batch
+	// over a window's future span (recompute is not horizon-bounded) may have read the
+	// pre-archive span and be mid-flight right now: without this bump its persist-phase CAS
+	// re-reads the same generation and commits an exclusion the operator just cancelled.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO project_maintenance_generation (project_id, generation, updated_at)
+		 VALUES ($1, 1, now())
+		 ON CONFLICT (project_id) DO UPDATE
+		    SET generation = project_maintenance_generation.generation + 1, updated_at = now()`,
+		projectID); err != nil {
+		return fmt.Errorf("store: bump maintenance generation on archive: %w", err)
+	}
+
+	// Audited with the act, in the same transaction: archiving changes what the schedule
+	// PROMISES (a cancelled window must not announce downtime), and that is an operator
+	// decision the org's audit trail has to carry.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
+		 SELECT p.org_id, NULL, false, 'maintenance.window_archived', $2
+		   FROM projects p WHERE p.id = $1`,
+		projectID, "window="+id); err != nil {
+		return fmt.Errorf("store: audit window archive: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit archive window: %w", err)
 	}
 	return nil
 }
@@ -584,7 +627,7 @@ func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previ
 		if ferr != nil {
 			return ferr
 		}
-		actor, cerr := confirmPreviewTx(ctx, tx, projectID, previewID, services, binding, from, rawFloor)
+		actor, cerr := s.confirmPreviewTx(ctx, tx, projectID, previewID, services, binding, from, rawFloor)
 		if cerr != nil {
 			return cerr
 		}
@@ -600,7 +643,7 @@ func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previ
 	if _, err := tx.Exec(ctx, `DELETE FROM maintenance_windows WHERE id=$1 AND project_id=$2`, id, projectID); err != nil {
 		return fmt.Errorf("store: annul maintenance window: %w", err)
 	}
-	if err := invalidateForMaintenance(ctx, tx, projectID, services, from, to); err != nil {
+	if err := invalidateForMaintenance(ctx, tx, projectID, id, services, from, to); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -612,7 +655,7 @@ func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previ
 // lock is held — the same lock every set-changing path takes. Re-resolving the set before
 // the lock would be a check-then-act one level down, and row locks cannot help: they protect
 // rows that exist, and a service created concurrently is exactly what has no row yet.
-func confirmPreviewTx(
+func (s *Store) confirmPreviewTx(
 	ctx context.Context, tx pgx.Tx, projectID, previewID string, current []PreviewService,
 	want previewBinding, sealedStart, rawFloor time.Time,
 ) (actor string, err error) {
@@ -667,6 +710,7 @@ func confirmPreviewTx(
 	// forward, so a token issued against an older floor cannot authorize a range that has
 	// since fallen out of raw.
 	if sealedStart.Before(storedRawFloor) {
+		s.recordUnrecomputableRejection()
 		return actor, fmt.Errorf("%w: earliest repairable is %s", ErrUnrecomputableRange, storedRawFloor.UTC().Format(time.RFC3339))
 	}
 
@@ -684,6 +728,7 @@ func confirmPreviewTx(
 	// with retention, so byte equality would make every token stale by construction. The
 	// question is whether the range is still repairable, not whether the clock stood still.
 	if sealedStart.Before(rawFloor) {
+		s.recordUnrecomputableRejection()
 		return actor, fmt.Errorf("%w: earliest repairable is %s", ErrUnrecomputableRange, rawFloor.UTC().Format(time.RFC3339))
 	}
 
@@ -734,7 +779,7 @@ func confirmPreviewTx(
 // Enqueueing a repair is not enough on its own: a pending job leaves minutes or hours in
 // which the old number is still served. The watermark rewind is what makes the affected
 // range read as incomplete immediately.
-func invalidateForMaintenance(ctx context.Context, tx pgx.Tx, projectID string, services []PreviewService, from, to time.Time) error {
+func invalidateForMaintenance(ctx context.Context, tx pgx.Tx, projectID, windowID string, services []PreviewService, from, to time.Time) error {
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO project_maintenance_generation (project_id, generation, updated_at)
 		 VALUES ($1, 1, now())
@@ -747,12 +792,15 @@ func invalidateForMaintenance(ctx context.Context, tx pgx.Tx, projectID string, 
 	rangeStart := domain.FloorToBucket(from)
 	rangeEnd := domain.CeilToBucket(to)
 	for _, svc := range services {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO service_repair_ranges
-			   (service_id, project_id, range_start, range_end, reason, maintenance_generation, cursor_at)
-			 VALUES ($1,$2,$3,$4,'maintenance',
-			         COALESCE((SELECT generation FROM project_maintenance_generation WHERE project_id=$2), 0), $3)`,
-			svc.ServiceID, projectID, rangeStart, rangeEnd); err != nil {
+		// Through the COALESCING enqueue, with the WINDOW as the range's origin. The previous
+		// raw INSERT bypassed both: every mutation stacked one more pending 'maintenance' row
+		// per service — unbounded queue growth the claim loop then drained one slice at a
+		// time — and the ranges carried no origin, which is what left cancelRangesOfOrigin
+		// with nothing it could ever match (the origin_id overclaim). A merged range carries
+		// the LATEST origin: the union absorbs pending rows of the same reason, and the newest
+		// mutation is the one whose generation the batch will be checked against anyway.
+		if err := enqueueRepairRangeTx(ctx, tx, projectID, svc.ServiceID,
+			rangeStart, rangeEnd, ReasonMaintenance, windowID); err != nil {
 			return fmt.Errorf("store: enqueue maintenance repair: %w", err)
 		}
 		// Rewind the watermark to the earliest affected bucket and RECORD the retraction: a

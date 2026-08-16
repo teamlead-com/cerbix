@@ -133,6 +133,8 @@ func Main(args []string) int {
 		return runMigrate(args[1:])
 	case "reencrypt":
 		return runReencrypt(args[1:])
+	case "adopt-fact-month":
+		return runAdoptFactMonth(args[1:])
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return 0
@@ -150,6 +152,7 @@ func usage(w io.Writer) {
 		"  cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]",
 		"  cerbix migrate --config <path>",
 		"  cerbix reencrypt --config <path>",
+		"  cerbix adopt-fact-month --config <path> --month YYYY-MM [--timeout 10m]",
 		"  cerbix version",
 	} {
 		if _, err := fmt.Fprintln(w, line); err != nil {
@@ -463,6 +466,60 @@ func runReencrypt(args []string) int {
 	return 0
 }
 
+// runAdoptFactMonth is the operator recovery path of D-0161 (spec §10.11): adopt one month
+// of service reliability facts stranded in the DEFAULT partition, using the SAME
+// copy-authoritative code path as the automatic cadence but with an operator-chosen fence
+// budget and the automatic row gate off. Run it in a maintenance window when the automatic
+// adoption reports an oversize month, or keeps timing out after quiescence. Idempotent: an
+// already-attached month is a no-op success.
+func runAdoptFactMonth(args []string) int {
+	fs := flag.NewFlagSet("adopt-fact-month", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to config YAML (required)")
+	monthFlag := fs.String("month", "", "month to adopt, YYYY-MM (required)")
+	timeout := fs.Duration("timeout", 10*time.Minute, "total budget for the fenced cutover (parent lock through commit)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *configPath == "" || *monthFlag == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "adopt-fact-month: --config and --month are required")
+		return 2
+	}
+	month, err := time.ParseInLocation("2006-01", *monthFlag, time.UTC)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "adopt-fact-month: --month must be YYYY-MM: %v\n", err)
+		return 2
+	}
+	if *timeout <= 0 {
+		_, _ = fmt.Fprintln(os.Stderr, "adopt-fact-month: --timeout must be positive")
+		return 2
+	}
+	cfg := loadConfig(*configPath)
+	if cfg == nil {
+		return 1
+	}
+	logger := logging.New(cfg.Log, os.Stdout)
+	if cfg.Database.DSN == "" {
+		logging.Critical(logger, "adopt_fact_month_requires_database", "hint", "set database.dsn")
+		return 1
+	}
+	// The copy phase is unbounded by design (it holds no parent lock); the context leaves
+	// generous room around the fenced budget so a long copy never truncates the fence.
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout+30*time.Minute)
+	defer cancel()
+	st, err := store.Open(ctx, cfg.Database.DSN)
+	if err != nil {
+		logging.Critical(logger, "db_connect_failed", "error", err.Error())
+		return 1
+	}
+	defer st.Close()
+	if err := st.AdoptServiceFactMonthOperator(ctx, month, *timeout); err != nil {
+		logging.Critical(logger, "adopt_fact_month_failed", "month", *monthFlag, "error", err.Error())
+		return 1
+	}
+	logger.Info("adopt_fact_month_complete", "month", *monthFlag)
+	return 0
+}
+
 // notificationEgressGuard builds the SSRF guard for OUTBOUND alert delivery
 // (webhook/Slack/notify HTTP + SMTP) from the notification_egress policy — which
 // defaults to deny-private — NOT the prober policy (which allows private for
@@ -590,6 +647,8 @@ func runServe(args []string) int {
 		// retention floor below which a result is ignored (= the raw heartbeat window).
 		st.WithResultPolicy(cfg.Result.AllowedSkew.Std(), time.Duration(cfg.Heartbeats.RetentionDays)*24*time.Hour)
 		st.WithResultRevisionMode(cfg.Result.RevisionMode)
+		// Service-reliability EVENT counters (§21) fire at their store-side event sites.
+		st.WithServiceEvents(registry)
 		// Secret-at-rest encryption (validated in config; empty key = disabled).
 		if keys, err := cfg.Security.Keys(); err != nil {
 			logging.Critical(logger, "encryption_key_invalid", "error", err.Error())
@@ -890,8 +949,9 @@ func runServe(args []string) int {
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
 				WithLocalCredentialRegions(domain.DefaultRegion).
-				WithPullRegions(cfg.Pull.Regions).                                  // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
-				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
+				WithPullRegions(cfg.Pull.Regions). // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
+				WithPullMetrics(registry).
+				WithServiceMetrics(registry).                                       // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → SSE + incident
 				WithConfirmSignals(confirmSignals()).
@@ -911,8 +971,9 @@ func runServe(args []string) int {
 			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
-				WithPullRegions(cfg.Pull.Regions).                                  // pull-served regions get jobs via pull_jobs, not AMQP
-				WithPullMetrics(registry).                                          // per-region pull-queue depth/lag gauges
+				WithPullRegions(cfg.Pull.Regions). // pull-served regions get jobs via pull_jobs, not AMQP
+				WithPullMetrics(registry).
+				WithServiceMetrics(registry).                                       // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → incident/outbox (SSE only if this process serves it)
 				WithConfirmSignals(confirmSignals()).                               // accelerated failure-confirmation probes

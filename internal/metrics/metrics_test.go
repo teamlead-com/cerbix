@@ -274,3 +274,115 @@ func TestSetFileProviderReconcileStatsPreservesCounts(t *testing.T) {
 		}
 	}
 }
+
+func TestServiceWedgedGatesReadinessAndClearForgetsIt(t *testing.T) {
+	reg := New(buildinfo.Info{}, "scheduler")
+	reg.SetReady(true, "")
+	if !reg.Ready() {
+		t.Fatal("baseline not ready")
+	}
+	reg.SetServiceWedged(true, "service repair ranges parked in error")
+	if reg.Ready() {
+		t.Fatal("§21: readiness reported healthy while service work is wedged")
+	}
+	if reg.LastError() != "service repair ranges parked in error" {
+		t.Fatalf("wedge reason not surfaced: %q", reg.LastError())
+	}
+	var out bytes.Buffer
+	reg.WritePrometheus(&out)
+	if !strings.Contains(out.String(), "cerbix_service_wedged 1") {
+		t.Fatalf("wedged gauge missing:\n%s", out.String())
+	}
+	// /readyz and the exported gauge answer ONE question: a wedged scheduler must not fail
+	// its probe while telling Prometheus cerbix_ready 1.
+	if !strings.Contains(out.String(), "cerbix_ready 0") {
+		t.Fatalf("cerbix_ready disagrees with Ready() while wedged:\n%s", out.String())
+	}
+	reg.SetServiceWedged(false, "")
+	if !reg.Ready() {
+		t.Fatal("readiness did not recover after the wedge cleared")
+	}
+
+	// Leadership loss forgets BOTH the gauges and the wedge: a deposed scheduler exporting
+	// the old leader's verdict makes two scrapes disagree, and a stale wedged=true would
+	// hold a standby's /readyz down.
+	reg.SetServiceReliabilityStats(ServiceReliabilityStat{RepairPending: 7})
+	reg.SetServiceWedged(true, "stale")
+	reg.SetServiceFactMaintenance(false, 12345)
+	reg.ClearServiceReliabilityStats()
+	if !reg.Ready() {
+		t.Fatal("a cleared registry still reports the old leader's wedge")
+	}
+	out.Reset()
+	reg.WritePrometheus(&out)
+	if strings.Contains(out.String(), "cerbix_service_repair_ranges") || strings.Contains(out.String(), "cerbix_service_wedged") ||
+		strings.Contains(out.String(), "cerbix_service_fact_maintenance") {
+		t.Fatalf("cleared registry still exports the old leader's service gauges:\n%s", out.String())
+	}
+}
+
+func TestFactMaintenanceStuckSignal(t *testing.T) {
+	// INITIAL failure: the tracking start is the last-success floor, so the age-based alert
+	// cannot fire on the first startup blip (last_success=0 would read as "stuck since the
+	// epoch").
+	first := New(buildinfo.Info{}, "scheduler")
+	first.SetServiceFactMaintenance(false, 5000)
+	var out0 bytes.Buffer
+	first.WritePrometheus(&out0)
+	if !strings.Contains(out0.String(), "cerbix_service_fact_maintenance_last_success_timestamp_seconds 5000") {
+		t.Fatalf("an initial failure must floor last-success at tracking start, got:\n%s", out0.String())
+	}
+
+	reg := New(buildinfo.Info{}, "scheduler")
+	reg.SetServiceFactMaintenance(true, 1000)
+	reg.SetServiceFactMaintenance(false, 2000) // failure must NOT advance last-success
+	var out bytes.Buffer
+	reg.WritePrometheus(&out)
+	s := out.String()
+	if !strings.Contains(s, "cerbix_service_fact_maintenance_failing 1") {
+		t.Fatalf("failing gauge missing:\n%s", s)
+	}
+	if !strings.Contains(s, "cerbix_service_fact_maintenance_last_success_timestamp_seconds 1000") {
+		t.Fatalf("last-success must hold the last SUCCESS, not the failure time:\n%s", s)
+	}
+}
+
+func TestServiceReliabilityGauges(t *testing.T) {
+	reg := New(buildinfo.Info{}, "scheduler")
+	var before bytes.Buffer
+	reg.WritePrometheus(&before)
+	if strings.Contains(before.String(), "cerbix_service_repair_ranges") {
+		t.Fatal("service gauges should be absent until sampled")
+	}
+	reg.SetServiceReliabilityStats(ServiceReliabilityStat{
+		RepairPending: 3, RepairRunning: 1, RepairErrored: 2, WatermarkLagSeconds: 90.25,
+		EpochFanoutTotal: 2, LateArrivalsTotal: 3, LateOverflowTotal: 1,
+	})
+	reg.RecordServiceSlice("worked")
+	reg.RecordServiceSlice("worked")
+	reg.RecordServiceSlice("error")
+	reg.RecordServiceRepairOutcome("complete", "maintenance")
+	reg.RecordServiceRepairOutcome("unrecomputable", "admin")
+	reg.RecordServiceUnrecomputableRejection()
+	var out bytes.Buffer
+	reg.WritePrometheus(&out)
+	s := out.String()
+	for _, want := range []string{
+		`cerbix_service_repair_ranges{state="pending"} 3`,
+		`cerbix_service_repair_ranges{state="running"} 1`,
+		`cerbix_service_repair_ranges{state="error"} 2`,
+		`cerbix_service_watermark_lag_seconds 90.250`,
+		`cerbix_service_slices_total{outcome="worked"} 2`,
+		`cerbix_service_slices_total{outcome="error"} 1`,
+		`cerbix_service_epoch_fanout_total 2`,
+		`cerbix_service_repair_outcomes_total{outcome="complete",reason="maintenance"} 1`,
+		`cerbix_service_repair_outcomes_total{outcome="unrecomputable",reason="admin"} 1`,
+		`cerbix_service_unrecomputable_rejections_total 1`,
+		`cerbix_service_late_arrivals_total 3`,
+		`cerbix_service_late_arrival_overflow_total 1`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in:\n%s", want, s)
+		}
+	}
+}

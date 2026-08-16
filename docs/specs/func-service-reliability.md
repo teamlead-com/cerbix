@@ -1297,6 +1297,41 @@ explicitly stated scheduling tolerance (`max_scheduling_tolerance`, 25ms). It al
 the dispatch tick is never delayed beyond that sum and that no unbounded goroutine or in-memory
 queue is created.
 
+### 10.11 DEFAULT-month adoption and its declared bound (amendment, D-0161 / iter-0137)
+
+*Added during phase-1 implementation: the mechanism below emerged from review (iter-0134…0137)
+and is normative because its bound and its recovery mode are externally observable.*
+
+The leader pre-creates month partitions ahead of time; when it cannot (leader down across a
+month boundary, fresh adoption of old data), inserts land in the DEFAULT partition and are
+**never lost — only stranded**. Adoption moves a stranded month into a proper attached
+partition with the **parent copy authoritative throughout**: the long phase only COPIES into a
+standalone staging table (every parent read keeps seeing every fact), and one short fenced
+transaction — `DELETE…RETURNING` of everything still in DEFAULT, imposed on the staging, then
+`ATTACH` — runs under the parent's `ACCESS EXCLUSIVE` lock inside ONE absolute
+Begin-through-commit budget (5s, capped by the caller's remaining deadline).
+
+The fenced workload is inherently O(rows still in DEFAULT for the month): under native
+partitioning, any row removed from DEFAULT before ATTACH is invisible through the parent, so
+hole-free incremental shrinking of the fence does not exist. Therefore:
+
+- **The automatic path declares a supported bound**: `adoption_fence_max_rows` = 100 000
+  remaining DEFAULT rows per month. The bound is enforced **twice** — a cheap preflight
+  before any parent lock, and **again under the `ACCESS EXCLUSIVE` lock** before the sweep,
+  because the unlocked count is advisory by construction (a writer can commit between the
+  count and the lock; a bound checked only outside the lock is a TOCTOU, not a bound).
+- **The bound is a row count, not a wall-clock proof.** A month under the bound on
+  pathologically slow storage can still exhaust the 5s fence every cadence.
+- **The recovery mode for BOTH cases is one shipped operator artifact**:
+  `cerbix adopt-fact-month --config <path> --month YYYY-MM [--timeout 10m]`, run in a
+  maintenance window. It executes the SAME adoption code path with an operator-chosen fence
+  budget and the row gate off, validates its month input, is idempotent (an attached month is
+  a no-op success), and is itself covered by an end-to-end test. There is no documented-but-
+  untested psql procedure.
+- A refused or persistently failing automatic adoption keeps every fact visible through the
+  parent and surfaces through the fact-maintenance metric pair (§21); the refusal names the
+  operator command.
+
 ## 11. SLO, error budget, burn rate — and two independent coverage axes
 
 ### 11.1 The formulas

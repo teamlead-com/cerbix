@@ -81,7 +81,7 @@ func (s *Store) noteHeartbeatsForServices(ctx context.Context, tx pgx.Tx, beats 
 		return keys[i].bucket.Before(keys[j].bucket)
 	})
 	for _, k := range keys {
-		if err := markBucket(ctx, tx, k.projectID, k.serviceID, k.monitorID, k.bucket, k.ts); err != nil {
+		if err := s.markBucket(ctx, tx, k.projectID, k.serviceID, k.monitorID, k.bucket, k.ts); err != nil {
 			return err
 		}
 		if err := repairIfBehindWatermark(ctx, tx, k.projectID, k.serviceID, k.bucket); err != nil {
@@ -116,7 +116,7 @@ func (s *Store) noteHeartbeatForServices(ctx context.Context, tx pgx.Tx, monitor
 	// Ascending (service_id, bucket_start) — §15.4. A historical batch touches many of these
 	// keys at once, and two overlapping batches taking them in opposite orders deadlock.
 	for _, a := range affected {
-		if err := markBucket(ctx, tx, a.projectID, a.serviceID, monitorID, bucketStart, ts); err != nil {
+		if err := s.markBucket(ctx, tx, a.projectID, a.serviceID, monitorID, bucketStart, ts); err != nil {
 			return err
 		}
 		// Evidence that arrives BEHIND the watermark makes a sealed number wrong, and the
@@ -209,7 +209,7 @@ func servicesDeclaringMonitorAt(ctx context.Context, tx pgx.Tx, monitorID string
 //
 // The upsert takes the ingest row's lock, and the fact's state is read UNDER that lock. The
 // ingest row is the mutual-exclusion point; the fact is the authority.
-func markBucket(ctx context.Context, tx pgx.Tx, projectID, serviceID, monitorID string, bucketStart, ts time.Time) error {
+func (s *Store) markBucket(ctx context.Context, tx pgx.Tx, projectID, serviceID, monitorID string, bucketStart, ts time.Time) error {
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO service_bucket_ingest (service_id, project_id, bucket_start, ingest_generation)
 		 VALUES ($1,$2,$3,1)
@@ -238,7 +238,8 @@ func markBucket(ctx context.Context, tx pgx.Tx, projectID, serviceID, monitorID 
 	// per event: a single historical batch landing after a seal, multiplied by the per-monitor
 	// service fan-out, would otherwise create millions of rows. The unique key makes
 	// redelivery idempotent, so a genuinely late row cannot multiply the evidence it leaves.
-	if _, err := tx.Exec(ctx,
+	var arrivals int64
+	if err := tx.QueryRow(ctx,
 		`INSERT INTO service_late_arrivals
 		     (service_id, project_id, bucket_start, monitor_id, arrivals, first_received_at, last_received_at, examples)
 		 VALUES ($1,$2,$3,$4,1, now(), now(), jsonb_build_array($5::text))
@@ -252,9 +253,25 @@ func markBucket(ctx context.Context, tx pgx.Tx, projectID, serviceID, monitorID 
 		        overflow = CASE
 		            WHEN jsonb_array_length(service_late_arrivals.examples) < $6
 		            THEN service_late_arrivals.overflow
-		            ELSE service_late_arrivals.overflow + 1 END`,
-		serviceID, projectID, bucketStart, monitorID, ts.UTC().Format(time.RFC3339Nano), MaxLateExamples); err != nil {
+		            ELSE service_late_arrivals.overflow + 1 END
+		 RETURNING arrivals`,
+		serviceID, projectID, bucketStart, monitorID, ts.UTC().Format(time.RFC3339Nano), MaxLateExamples).Scan(&arrivals); err != nil {
 		return fmt.Errorf("store: record late arrival: %w", err)
+	}
+	// One event per call; this call overflowed its example slot exactly when the running
+	// arrival count has passed the bound (examples fill first, overflow counts the rest).
+	// Bumped in the SAME transaction as the late-arrival row: if the outer heartbeat write
+	// rolls back — a failed repair enqueue behind the watermark, say — the event dies with
+	// it instead of counting an arrival that never durably happened.
+	var overflowed int64
+	if arrivals > int64(MaxLateExamples) {
+		overflowed = 1
+	}
+	if err := bumpMetricEventTx(ctx, tx, metricEventLateArrivals, 1); err != nil {
+		return err
+	}
+	if err := bumpMetricEventTx(ctx, tx, metricEventLateOverflow, overflowed); err != nil {
+		return err
 	}
 	return nil
 }

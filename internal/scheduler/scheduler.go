@@ -68,6 +68,7 @@ type Store interface {
 	TryBecomeLeaderSession(ctx context.Context, key int64) (LeaderSession, bool, error)
 	RollupDailyAvailability(ctx context.Context, from, to time.Time) error
 	EnsureHeartbeatPartitions(ctx context.Context, ahead int) error
+	EnsureServiceFactPartitions(ctx context.Context, aheadMonths int) error
 	PurgeOldHeartbeats(ctx context.Context, cutoff time.Time) (int, error)
 	EnqueueRenotifyReminders(ctx context.Context) (int, error)
 	EvaluateBurnAlerts(ctx context.Context) (fired, resolved int, err error)
@@ -85,12 +86,24 @@ type Store interface {
 	DeleteExpiredSessions(ctx context.Context) (int64, error)
 	DeleteExpiredAuthFlows(ctx context.Context) (int64, error)
 	PullQueueStats(ctx context.Context) ([]metrics.PullStat, error)
+	ServiceReliabilityStats(ctx context.Context) (metrics.ServiceReliabilityStat, error)
 }
 
 // PullStatsSink receives the leader's per-region pull-queue gauge snapshot.
 // Implemented by *metrics.Registry.
 type PullStatsSink interface {
 	SetPullStats(stats []metrics.PullStat)
+}
+
+// ServiceStatsSink receives the leader's service-reliability snapshot and slice outcomes.
+// Implemented by *metrics.Registry. Optional: an installation with no services pays one
+// cheap sample per cadence and exports honest zeros.
+type ServiceStatsSink interface {
+	SetServiceReliabilityStats(st metrics.ServiceReliabilityStat)
+	SetServiceWedged(wedged bool, reason string)
+	SetServiceFactMaintenance(ok bool, nowUnix int64)
+	ClearServiceReliabilityStats()
+	RecordServiceSlice(outcome string)
 }
 
 // LeaderStateSink records whether this process currently holds scheduler
@@ -129,6 +142,15 @@ const (
 	maintainEvery = time.Hour
 	// partitionAheadDays is how many future daily partitions to keep pre-created.
 	partitionAheadDays = 2
+	// factPartitionAheadMonths is how many future MONTHLY service-fact partitions to keep
+	// pre-created (facts partition by month; migration 00064 only seeded around its run date).
+	factPartitionAheadMonths = 2
+	// factMaintenanceEvery / factMaintenanceTimeout pace the off-loop fact-partition pass: a
+	// DEFAULT-month adoption moves data in bounded batches and may legitimately take a while,
+	// which is exactly why it does not run inside a dispatch tick.
+	factMaintenanceEvery   = 10 * time.Minute
+	factMaintenanceTimeout = 5 * time.Minute
+
 	// defaultRetentionDays is used when the caller doesn't set one.
 	defaultRetentionDays = 30
 	// refreshEvery is how often the leader reloads the enabled-monitor snapshot
@@ -219,6 +241,8 @@ type Scheduler struct {
 	localCredentialRegions map[string]bool
 	pullRegions            map[string]bool // regions served over HTTP-pull (jobs go to pull_jobs, not AMQP)
 	pullMetrics            PullStatsSink
+	serviceMetrics         ServiceStatsSink
+	statsEvery             time.Duration // test override for the stats cadence
 	leaderState            LeaderStateSink
 	confirmCh              <-chan string      // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
 	configCh               <-chan struct{}    // execution-config changes (LISTEN monitor_config_changed) → force a snapshot reload
@@ -332,6 +356,12 @@ func (s *Scheduler) WithPullRegions(regions []string) *Scheduler {
 
 // WithPullMetrics wires the per-region pull-queue gauge sink so the leader publishes
 // depth/lag for observability. Optional; without it, sampling is skipped.
+// WithServiceMetrics wires the service-reliability gauges/counters sink.
+func (s *Scheduler) WithServiceMetrics(sink ServiceStatsSink) *Scheduler {
+	s.serviceMetrics = sink
+	return s
+}
+
 func (s *Scheduler) WithPullMetrics(sink PullStatsSink) *Scheduler {
 	s.pullMetrics = sink
 	return s
@@ -345,9 +375,103 @@ func (s *Scheduler) WithLeaderState(sink LeaderStateSink) *Scheduler {
 }
 
 // setLeaderState is a nil-safe gauge update.
+// serviceWedgeReason decides whether service-reliability work is WEDGED (§21: readiness
+// must not report healthy while it is). Wedged means an operator is REQUIRED, so the rule is
+// deliberately narrow: a repair range terminally parked in `error` — nothing will ever retry
+// it by itself. Watermark LAG is explicitly NOT a wedge: a service adopting ninety days of
+// history reports an enormous, shrinking lag while every slice advances normally, and a
+// single absolute sample cannot tell that healthy backlog from a stuck materializer. Telling
+// them apart needs progress ACROSS successive samples; until such a tracker exists, lag is a
+// gauge with an alerting suggestion in the runbook, never a readiness verdict.
+func serviceWedgeReason(st metrics.ServiceReliabilityStat) (bool, string) {
+	if st.RepairErrored > 0 {
+		return true, "service repair ranges parked in error"
+	}
+	return false, ""
+}
+
+// serviceStatsLoop samples the bounded service-reliability snapshot on its own cadence and
+// derives the wedge verdict, isolated from dispatch.
+//
+// FAIL-CLOSED from the first instant: until a sample SUCCEEDS the subsystem's state is
+// UNKNOWN, and unknown must not read as healthy — a terminal error range persisted before
+// this leadership began would otherwise hide behind an empty registry until the first query
+// landed. A failed sample re-enters the same unavailable state for the same reason.
+func (s *Scheduler) serviceStatsLoop(ctx context.Context) {
+	s.serviceMetrics.SetServiceWedged(true, "service reliability state unknown (no sample yet)")
+	sample := func() {
+		withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+			st, err := s.store.ServiceReliabilityStats(c)
+			if err != nil {
+				if ctx.Err() != nil {
+					return // shutting down: the join + step-down clear own what follows
+				}
+				s.logger.Warn("service_reliability_stats_failed", "error", err.Error())
+				s.serviceMetrics.SetServiceWedged(true, "service reliability stats unavailable")
+				return
+			}
+			s.serviceMetrics.SetServiceReliabilityStats(st)
+			wedged, reason := serviceWedgeReason(st)
+			s.serviceMetrics.SetServiceWedged(wedged, reason)
+		})
+	}
+	sample()
+	ticker := time.NewTicker(s.statsCadence())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sample()
+		}
+	}
+}
+
+// statsCadence is pullStatsEvery unless a test shortens it to drive multi-sample lifecycles.
+func (s *Scheduler) statsCadence() time.Duration {
+	if s.statsEvery > 0 {
+		return s.statsEvery
+	}
+	return pullStatsEvery
+}
+
+// serviceFactMaintenanceLoop keeps the monthly fact partitions pre-created and adopts
+// stranded DEFAULT months, off the dispatch loop, for this leadership's lifetime.
+func (s *Scheduler) serviceFactMaintenanceLoop(ctx context.Context) {
+	run := func() {
+		withTimeout(ctx, factMaintenanceTimeout, func(c context.Context) {
+			err := s.store.EnsureServiceFactPartitions(c, factPartitionAheadMonths)
+			if err != nil {
+				s.logger.Warn("ensure_service_fact_partitions_failed", "error", err.Error())
+			}
+			if s.serviceMetrics != nil && ctx.Err() == nil {
+				s.serviceMetrics.SetServiceFactMaintenance(err == nil, time.Now().Unix())
+			}
+		})
+	}
+	run()
+	ticker := time.NewTicker(factMaintenanceEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
+}
+
 func (s *Scheduler) setLeaderState(leader bool) {
 	if s.leaderState != nil {
 		s.leaderState.SetSchedulerLeader(leader)
+	}
+	// A deposed leader stops exporting the service gauges and its wedge verdict: two
+	// schedulers describing one cluster from different moments is the HA lie the clear
+	// exists to prevent — and a stale wedged=true would hold /readyz down on a standby.
+	if !leader && s.serviceMetrics != nil {
+		s.serviceMetrics.ClearServiceReliabilityStats()
 	}
 }
 
@@ -375,6 +499,13 @@ func (s *Scheduler) Run(ctx context.Context) {
 			continue
 		}
 		s.logger.Info("scheduler_leader_acquired")
+		// UNKNOWN is published SYNCHRONOUSLY, before leadership is visible and before the
+		// sampler goroutine is even spawned: the readiness endpoint can run between
+		// setLeaderState(true) and the goroutine's first instruction, and in that window a
+		// terminal error state persisted before this leadership must not read as healthy.
+		if s.serviceMetrics != nil {
+			s.serviceMetrics.SetServiceWedged(true, "service reliability state unknown (no sample yet)")
+		}
 		s.setLeaderState(true)
 		lost := s.lead(ctx, session)
 		session.Release()
@@ -401,6 +532,38 @@ func (s *Scheduler) Run(ctx context.Context) {
 // query on its own cadence. Returns true if it stepped down because the advisory lock
 // was lost (the caller re-contends), false on a clean context cancellation.
 func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
+	// The service stats sampler runs OFF the dispatch loop, in its own goroutine for this
+	// leadership's lifetime: its samples, however bounded, are still queries, and a
+	// synchronous sample inside the loop could hold dispatch against §10.10's 250ms cadence.
+	// The lifecycle is CALLER-OWNED: cancel AND JOIN before lead returns, so the step-down
+	// clear in setLeaderState(false) can never race a sample completing mid-cancellation and
+	// resurrecting a deposed leader's gauges.
+	if s.serviceMetrics != nil {
+		statsCtx, stopStats := context.WithCancel(ctx)
+		statsDone := make(chan struct{})
+		go func() {
+			defer close(statsDone)
+			s.serviceStatsLoop(statsCtx)
+		}()
+		defer func() {
+			stopStats()
+			<-statsDone
+		}()
+	}
+	// Fact-partition maintenance likewise runs off the loop: its DEFAULT-month recovery
+	// moves data in batches, and even bounded batches do not belong inside a dispatch tick.
+	{
+		maintCtx, stopMaint := context.WithCancel(ctx)
+		maintDone := make(chan struct{})
+		go func() {
+			defer close(maintDone)
+			s.serviceFactMaintenanceLoop(maintCtx)
+		}()
+		defer func() {
+			stopMaint()
+			<-maintDone
+		}()
+	}
 	nextRun := map[string]time.Time{}
 	credentialFailures := map[string]int{}
 	// Consecutive publish/enqueue failures per monitor, kept apart from credential
@@ -465,6 +628,16 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					started := time.Now()
 					worked, err := session.RunServiceSlice(ctx, started.Add(slice))
 					spent += time.Since(started)
+					if s.serviceMetrics != nil {
+						switch {
+						case err != nil:
+							s.serviceMetrics.RecordServiceSlice("error")
+						case worked:
+							s.serviceMetrics.RecordServiceSlice("worked")
+						default:
+							s.serviceMetrics.RecordServiceSlice("empty")
+						}
+					}
 					if err != nil {
 						s.logger.Error("service_slice_failed", "error", err.Error())
 						break

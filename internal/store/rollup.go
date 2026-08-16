@@ -41,7 +41,7 @@ func (s *Store) RollupDailyAvailability(ctx context.Context, from, to time.Time)
 		 WHERE h.ts >= $1 AND h.ts < $2
 		   AND NOT EXISTS (
 		       SELECT 1 FROM maintenance_windows mw
-		       WHERE mw.starts_at <= h.ts AND mw.ends_at > h.ts
+		       WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
 		         AND (mw.monitor_id = h.monitor_id
 		              OR (mw.monitor_id IS NULL
 		                  AND mw.project_id = (SELECT project_id FROM monitors WHERE id = h.monitor_id)))
@@ -102,7 +102,7 @@ func (s *Store) monitorTodayAvailability(ctx context.Context, monitorID string) 
 		 WHERE h.monitor_id = $1 AND h.ts >= (now() AT TIME ZONE 'UTC')::date
 		   AND NOT EXISTS (
 		       SELECT 1 FROM maintenance_windows mw
-		       WHERE mw.starts_at <= h.ts AND mw.ends_at > h.ts
+		       WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
 		         AND (mw.monitor_id = $1
 		              OR (mw.monitor_id IS NULL
 		                  AND mw.project_id = (SELECT project_id FROM monitors WHERE id = $1)))
@@ -141,7 +141,7 @@ func (s *Store) ProjectDailyAvailability(ctx context.Context, projectID string, 
 		 WHERE m.project_id = $1 AND h.ts >= (now() AT TIME ZONE 'UTC')::date
 		   AND NOT EXISTS (
 		       SELECT 1 FROM maintenance_windows mw
-		       WHERE mw.starts_at <= h.ts AND mw.ends_at > h.ts
+		       WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
 		         AND (mw.monitor_id = h.monitor_id OR (mw.monitor_id IS NULL AND mw.project_id = $1))
 		   )`, projectID).Scan(&d.Day, &d.Up, &d.Total)
 	if err != nil {

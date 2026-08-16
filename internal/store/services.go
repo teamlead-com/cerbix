@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -110,7 +111,11 @@ func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.S
 
 // GetService reads one service by id, scoped to its project.
 func (s *Store) GetService(ctx context.Context, projectID, id string) (domain.Service, error) {
-	row := s.pool.QueryRow(ctx,
+	return getServiceOn(ctx, s.pool, projectID, id)
+}
+
+func getServiceOn(ctx context.Context, q queryRower, projectID, id string) (domain.Service, error) {
+	row := q.QueryRow(ctx,
 		`SELECT id, project_id, slug, name, description,
 		        COALESCE(escalation_policy_id::text,''), COALESCE(oncall_schedule_id::text,''),
 		        created_at, updated_at
@@ -176,6 +181,15 @@ func (s *Store) DeleteService(ctx context.Context, projectID, id string) error {
 	// comparison in confirmPreviewTx sees a member the current set no longer has.
 	if _, err := tx.Exec(ctx, `DELETE FROM services WHERE id = $1 AND project_id = $2`, id, projectID); err != nil {
 		return fmt.Errorf("store: delete service: %w", err)
+	}
+	// Audited in the SAME transaction: a deleted service takes its facts with it (cascade),
+	// and the audit row is then the only durable statement that the deletion was an act.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
+		 SELECT p.org_id, NULL, false, 'service.deleted', $2
+		   FROM projects p WHERE p.id = $1`,
+		projectID, "service="+id); err != nil {
+		return fmt.Errorf("store: audit service delete: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("store: commit delete service: %w", err)
@@ -287,6 +301,18 @@ func (s *Store) PutServiceDeclaration(
 	rev, epoch, err := s.putServiceDeclarationTx(ctx, tx, projectID, serviceID, monitors, sli, decl.Policies, expectedRevision, opts)
 	if err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
+	}
+	// The declaration change is audited IN the transaction that makes it, on the UI path
+	// only — the file apply audits at bundle level, and the system retirement path writes
+	// its own event. The revision row already records who; the audit log is where an org
+	// admin looks first, and a declaration that redefines what availability MEANS belongs
+	// there next to every other privileged act.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
+		 SELECT p.org_id, NULL, false, 'service.declaration_put', $2
+		   FROM projects p WHERE p.id = $1`,
+		projectID, fmt.Sprintf("service=%s revision=%d by=%s", serviceID, rev.Revision, opts.CreatedBy)); err != nil {
+		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: audit declaration: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, fmt.Errorf("store: commit declaration: %w", err)
@@ -417,6 +443,10 @@ func (s *Store) putServiceDeclarationTx(
 	}
 
 	epoch, err := insertEpoch(ctx, tx, rev, members)
+	if err == nil {
+		// Same transaction as the epoch: fan-out counts only what commits.
+		err = bumpMetricEventTx(ctx, tx, metricEventEpochFanout, 1)
+	}
 	if err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
 	}
@@ -931,7 +961,16 @@ func resolveMonitorSlugTx(ctx context.Context, tx pgx.Tx, m domain.Monitor) (str
 		if n > 50 {
 			return "", fmt.Errorf("store: could not derive a free slug from %q", m.Name)
 		}
-		candidate = fmt.Sprintf("%s-%d", base, n)
+		// The suffix must FIT: a base already at the 63-char shape limit (the digit-only
+		// name path yields exactly "monitor-" + 55) plus "-1" is 65 characters — an invalid
+		// slug this loop never re-validated, so the INSERT died on the shape constraint as
+		// a 500. Trim the base, not the suffix: the counter is what keeps candidates unique.
+		suffix := fmt.Sprintf("-%d", n)
+		trimmed := base
+		if maxLen := 63 - len(suffix); len(trimmed) > maxLen {
+			trimmed = strings.TrimRight(trimmed[:maxLen], "-")
+		}
+		candidate = trimmed + suffix
 	}
 }
 
@@ -1039,13 +1078,24 @@ type ServiceDetail struct {
 // materialization.
 func (s *Store) ServiceDetail(ctx context.Context, projectID, serviceID string) (ServiceDetail, error) {
 	var out ServiceDetail
-	svc, err := s.GetService(ctx, projectID, serviceID)
+	// ONE snapshot. This screen is assembled from six reads — service, ownership, revision,
+	// epoch, materialization, repair queue — and six pool round trips each saw their own
+	// instant: a declaration landing between two of them produced a detail whose epoch did
+	// not belong to its revision. REPEATABLE READ pins every read to one MVCC snapshot;
+	// READ ONLY says what this transaction is for.
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return ServiceDetail{}, fmt.Errorf("store: begin detail snapshot: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only
+
+	svc, err := getServiceOn(ctx, tx, projectID, serviceID)
 	if err != nil {
 		return ServiceDetail{}, err
 	}
 	out.Service = svc
 
-	if err := s.pool.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE((SELECT provider_id FROM managed_services WHERE service_id = $1), '')`,
 		serviceID).Scan(&out.ManagedBy); err != nil {
 		return ServiceDetail{}, fmt.Errorf("store: read service ownership: %w", err)
@@ -1053,7 +1103,7 @@ func (s *Store) ServiceDetail(ctx context.Context, projectID, serviceID string) 
 
 	rev := domain.DefinitionRevision{ServiceID: serviceID, ProjectID: projectID}
 	var policyJSON []byte
-	err = s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT id, revision, created_at, effective_at, policies, created_by
 		   FROM service_definition_revisions
 		  WHERE service_id = $1 AND state = 'effective'
@@ -1069,7 +1119,7 @@ func (s *Store) ServiceDetail(ctx context.Context, projectID, serviceID string) 
 			return ServiceDetail{}, fmt.Errorf("store: decode policies: %w", err)
 		}
 		rev.State = domain.RevisionEffective
-		if rev.Monitors, rev.SLI, err = revisionMembers(ctx, s.pool, rev.ID); err != nil {
+		if rev.Monitors, rev.SLI, err = revisionMembers(ctx, tx, rev.ID); err != nil {
 			return ServiceDetail{}, err
 		}
 		out.Declaration = &rev
@@ -1077,7 +1127,7 @@ func (s *Store) ServiceDetail(ctx context.Context, projectID, serviceID string) 
 
 	epoch := domain.EvaluationEpoch{ServiceID: serviceID, ProjectID: projectID}
 	var snapshot []byte
-	err = s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT id, epoch_seq, revision_id, created_at, effective_at, snapshot, snapshot_hash
 		   FROM service_evaluation_epochs
 		  WHERE service_id = $1 AND state = 'effective'
@@ -1095,7 +1145,7 @@ func (s *Store) ServiceDetail(ctx context.Context, projectID, serviceID string) 
 		out.Epoch = &epoch
 	}
 
-	err = s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT materialization_start, sealed_through, retracted_at, retracted_to
 		   FROM service_materialization WHERE service_id = $1`, serviceID).
 		Scan(&out.MaterializationStart, &out.SealedThrough, &out.RetractedAt, &out.RetractedTo)
@@ -1103,7 +1153,7 @@ func (s *Store) ServiceDetail(ctx context.Context, projectID, serviceID string) 
 		return ServiceDetail{}, fmt.Errorf("store: read materialization: %w", err)
 	}
 
-	rows, err := s.pool.Query(ctx,
+	rows, err := tx.Query(ctx,
 		`SELECT range_start, range_end, reason, state, cursor_at, attempts, last_error
 		   FROM service_repair_ranges
 		  WHERE service_id = $1 AND state IN ('pending','running','error')

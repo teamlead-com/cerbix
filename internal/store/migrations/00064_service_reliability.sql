@@ -19,6 +19,11 @@
 --     revision currently in force. Splitting them is what makes both true.
 
 -- +goose Up
+-- iter-0133: every statement below is IDEMPOTENT (IF NOT EXISTS / guarded), because this
+-- migration runs OUTSIDE a transaction: a crash between two statements leaves goose thinking
+-- the migration never ran, and the re-run must walk over what the first attempt already
+-- built instead of erroring out on the first "already exists" and bricking startup.
+
 -- +goose StatementBegin
 
 -- ── The resource ────────────────────────────────────────────────────────────────────────
@@ -28,7 +33,7 @@
 -- "who is responsible" is actionable. ON DELETE SET NULL matches monitors.escalation_policy_id:
 -- losing the reference is a routing gap, not a correctness problem, and phase 1 does not
 -- alert on services at all.
-CREATE TABLE services (
+CREATE TABLE IF NOT EXISTS services (
     id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id           uuid NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     slug                 text NOT NULL,
@@ -43,7 +48,7 @@ CREATE TABLE services (
     UNIQUE (id, project_id)
 );
 
-CREATE INDEX services_project_idx ON services (project_id);
+CREATE INDEX IF NOT EXISTS services_project_idx ON services (project_id);
 
 -- ── Axis 1: the declaration ─────────────────────────────────────────────────────────────
 --
@@ -57,7 +62,7 @@ CREATE INDEX services_project_idx ON services (project_id);
 -- later write marks the earlier one superseded_before_effect in the same transaction; the
 -- row is retained for audit, is never referenced by a fact, and contributes no validity
 -- interval. The partial unique index below is what enforces "exactly one winner".
-CREATE TABLE service_definition_revisions (
+CREATE TABLE IF NOT EXISTS service_definition_revisions (
     id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     service_id   uuid NOT NULL,
     project_id   uuid NOT NULL,
@@ -73,11 +78,11 @@ CREATE TABLE service_definition_revisions (
     FOREIGN KEY (service_id, project_id) REFERENCES services (id, project_id) ON DELETE CASCADE
 );
 
-CREATE UNIQUE INDEX service_definition_revisions_effective_uniq
+CREATE UNIQUE INDEX IF NOT EXISTS service_definition_revisions_effective_uniq
     ON service_definition_revisions (service_id, effective_at)
     WHERE state = 'effective';
 
-CREATE INDEX service_definition_revisions_lookup_idx
+CREATE INDEX IF NOT EXISTS service_definition_revisions_lookup_idx
     ON service_definition_revisions (service_id, effective_at DESC)
     WHERE state = 'effective';
 
@@ -85,7 +90,7 @@ CREATE INDEX service_definition_revisions_lookup_idx
 -- three months ago must remain readable after the monitor it named is deleted, or the
 -- timeline loses the very boundary that explains why the number changed. monitor_name is
 -- the snapshot that keeps such a row legible; the live guard lives in service_member_refs.
-CREATE TABLE service_definition_members (
+CREATE TABLE IF NOT EXISTS service_definition_members (
     revision_id  uuid NOT NULL,
     project_id   uuid NOT NULL,
     monitor_id   uuid NOT NULL,
@@ -103,7 +108,7 @@ CREATE TABLE service_definition_members (
 -- built for secret refs, reused rather than reinvented. The deferred monitor FK is the
 -- commit-time delete guard: deleting a monitor an in-force SLI names fails at COMMIT and is
 -- mapped to 409, while a project delete stays order-independent because both sides go.
-CREATE TABLE service_member_refs (
+CREATE TABLE IF NOT EXISTS service_member_refs (
     service_id uuid NOT NULL,
     project_id uuid NOT NULL,
     monitor_id uuid NOT NULL,
@@ -116,13 +121,13 @@ CREATE TABLE service_member_refs (
 
 -- The ingest handshake resolves "which services declare this monitor as an SLI member" on
 -- every inserted heartbeat, so that lookup gets its own index.
-CREATE INDEX service_member_refs_monitor_idx ON service_member_refs (monitor_id, role);
+CREATE INDEX IF NOT EXISTS service_member_refs_monitor_idx ON service_member_refs (monitor_id, role);
 
 -- ...but the handshake asks that question AS OF the heartbeat's own bucket, which means
 -- reading HISTORICAL membership rather than the current refs. Most monitors have never been
 -- a reliability input for anything, and this index is what turns that overwhelmingly common
 -- case into one probe instead of a scan over the project's revision history.
-CREATE INDEX service_definition_members_monitor_idx
+CREATE INDEX IF NOT EXISTS service_definition_members_monitor_idx
     ON service_definition_members (monitor_id, role);
 
 -- ── Axis 2: the observed execution semantics ────────────────────────────────────────────
@@ -134,7 +139,7 @@ CREATE INDEX service_definition_members_monitor_idx
 -- EVERY definition revision gets a matching epoch, unconditionally: a revision with no
 -- epoch is an unsatisfiable reference, since a fact points at the epoch alone. The
 -- snapshot_hash no-op rule applies only to epochs driven by a monitor execution write.
-CREATE TABLE service_evaluation_epochs (
+CREATE TABLE IF NOT EXISTS service_evaluation_epochs (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     service_id    uuid NOT NULL,
     project_id    uuid NOT NULL,
@@ -156,11 +161,11 @@ CREATE TABLE service_evaluation_epochs (
         REFERENCES service_definition_revisions (id, project_id) ON DELETE CASCADE
 );
 
-CREATE UNIQUE INDEX service_evaluation_epochs_effective_uniq
+CREATE UNIQUE INDEX IF NOT EXISTS service_evaluation_epochs_effective_uniq
     ON service_evaluation_epochs (service_id, effective_at)
     WHERE state = 'effective';
 
-CREATE INDEX service_evaluation_epochs_lookup_idx
+CREATE INDEX IF NOT EXISTS service_evaluation_epochs_lookup_idx
     ON service_evaluation_epochs (service_id, effective_at DESC)
     WHERE state = 'effective';
 
@@ -174,7 +179,7 @@ CREATE INDEX service_evaluation_epochs_lookup_idx
 -- whole bucket, and a reducer that silently loses time produces a number nobody can
 -- reconcile. excluded_us is shared: declared-out-of-scope time is the same time under
 -- either reading.
-CREATE TABLE service_reliability_buckets (
+CREATE TABLE IF NOT EXISTS service_reliability_buckets (
     service_id               uuid NOT NULL,
     project_id               uuid NOT NULL,
     epoch_id                 uuid NOT NULL,
@@ -224,10 +229,10 @@ CREATE TABLE service_reliability_buckets (
 -- A DEFAULT partition means an insert can never fail for want of a partition, exactly as
 -- 00043 does for plain-mode heartbeats. Losing a fact because nobody pre-created a month
 -- would be a silent hole in a watermark defined by contiguity.
-CREATE TABLE service_reliability_buckets_default
+CREATE TABLE IF NOT EXISTS service_reliability_buckets_default
     PARTITION OF service_reliability_buckets DEFAULT;
 
-CREATE INDEX service_reliability_buckets_epoch_idx
+CREATE INDEX IF NOT EXISTS service_reliability_buckets_epoch_idx
     ON service_reliability_buckets (service_id, epoch_id, bucket_start);
 
 -- ── Materialization state, kept apart from the declaration ──────────────────────────────
@@ -236,7 +241,7 @@ CREATE INDEX service_reliability_buckets_epoch_idx
 -- before it exists and is sealed. A materialization hole HOLDS it rather than being jumped
 -- over, which is what lets one scalar answer "did we materialize the window" honestly, and
 -- what makes a stalled service visible as a lagging timestamp instead of a plausible chart.
-CREATE TABLE service_materialization (
+CREATE TABLE IF NOT EXISTS service_materialization (
     service_id            uuid PRIMARY KEY,
     project_id            uuid NOT NULL,
     materialization_start timestamptz NOT NULL,
@@ -258,7 +263,7 @@ CREATE TABLE service_materialization (
 --
 -- Ingest rows carry no history — the FACT's state is the authority — so they are pruned
 -- with their buckets once sealed.
-CREATE TABLE service_bucket_ingest (
+CREATE TABLE IF NOT EXISTS service_bucket_ingest (
     service_id        uuid NOT NULL,
     project_id        uuid NOT NULL,
     bucket_start      timestamptz NOT NULL,
@@ -271,7 +276,7 @@ CREATE TABLE service_bucket_ingest (
 -- single historical agent batch landing after a seal, multiplied by the per-monitor service
 -- fan-out, would otherwise create millions of retained rows. The unique key makes
 -- redelivery idempotent, so a genuinely late row cannot multiply the evidence.
-CREATE TABLE service_late_arrivals (
+CREATE TABLE IF NOT EXISTS service_late_arrivals (
     service_id        uuid NOT NULL,
     project_id        uuid NOT NULL,
     bucket_start      timestamptz NOT NULL,
@@ -291,7 +296,7 @@ CREATE TABLE service_late_arrivals (
 -- Cancelling it would strand buckets no later job is scoped to fill, and the contiguity
 -- watermark would stall at that hole permanently. The epoch is resolved per BUCKET, not per
 -- range, so a range spanning a boundary evaluates each part under the epoch in force there.
-CREATE TABLE service_repair_ranges (
+CREATE TABLE IF NOT EXISTS service_repair_ranges (
     id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     service_id             uuid NOT NULL,
     project_id             uuid NOT NULL,
@@ -312,7 +317,7 @@ CREATE TABLE service_repair_ranges (
     FOREIGN KEY (service_id, project_id) REFERENCES services (id, project_id) ON DELETE CASCADE
 );
 
-CREATE INDEX service_repair_ranges_claim_idx
+CREATE INDEX IF NOT EXISTS service_repair_ranges_claim_idx
     ON service_repair_ranges (next_attempt_at, service_id)
     WHERE state IN ('pending', 'running');
 
@@ -328,16 +333,16 @@ CREATE INDEX service_repair_ranges_claim_idx
 -- archived_at. Only an explicit annul does that, which is why annul — and not the ordinary
 -- delete — carries the preview, the audit and the raw-availability fence.
 ALTER TABLE maintenance_windows
-    ADD COLUMN archived_at         timestamptz,
-    ADD COLUMN cancel_effective_at timestamptz;
+    ADD COLUMN IF NOT EXISTS archived_at         timestamptz,
+    ADD COLUMN IF NOT EXISTS cancel_effective_at timestamptz;
 
-CREATE INDEX maintenance_windows_active_idx
+CREATE INDEX IF NOT EXISTS maintenance_windows_active_idx
     ON maintenance_windows (project_id, starts_at, ends_at)
     WHERE archived_at IS NULL;
 
 -- Bumped in the same transaction as any maintenance mutation. Every repair batch records
 -- the value it read and commits only if it is still current.
-CREATE TABLE project_maintenance_generation (
+CREATE TABLE IF NOT EXISTS project_maintenance_generation (
     project_id uuid PRIMARY KEY REFERENCES projects (id) ON DELETE CASCADE,
     generation bigint NOT NULL DEFAULT 0,
     updated_at timestamptz NOT NULL DEFAULT now()
@@ -349,7 +354,7 @@ CREATE TABLE project_maintenance_generation (
 -- generations of the services already known proves those rows did not move, and proves
 -- nothing about the set. A truncated array would let a confirm pass while a service it
 -- never checked is mutated.
-CREATE TABLE maintenance_previews (
+CREATE TABLE IF NOT EXISTS maintenance_previews (
     id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id             uuid NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     requested_start        timestamptz NOT NULL,
@@ -368,7 +373,7 @@ CREATE TABLE maintenance_previews (
     CHECK (requested_end > requested_start)
 );
 
-CREATE TABLE maintenance_preview_services (
+CREATE TABLE IF NOT EXISTS maintenance_preview_services (
     preview_id            uuid NOT NULL,
     project_id            uuid NOT NULL,
     service_id            uuid NOT NULL,
@@ -385,15 +390,24 @@ CREATE TABLE maintenance_preview_services (
 -- Monthly partitions around today, plus the DEFAULT above. Guarded and idempotent so a
 -- re-run is a no-op, per the 00043 pattern.
 -- +goose StatementBegin
+-- iter-0136: EXPLICITLY UTC, independent of the session TimeZone. date_trunc over a
+-- timestamptz truncates in the SESSION zone, and the interpolated date literals were then
+-- parsed back as session-local timestamptz bounds — a fresh non-UTC database seeded
+-- partitions whose bounds violated the normative "native UTC RANGE partitions" contract by
+-- the session offset, and the runtime's UTC Ensure saw them attached and never corrected
+-- them. Truncating the UTC-projected timestamp and emitting bounds with an explicit +00
+-- offset makes the seed session-proof.
 DO $$
 DECLARE
-    m date := date_trunc('month', now() - interval '3 months')::date;
-    stop date := date_trunc('month', now() + interval '6 months')::date;
+    m date := date_trunc('month', (now() AT TIME ZONE 'UTC') - interval '3 months')::date;
+    stop date := date_trunc('month', (now() AT TIME ZONE 'UTC') + interval '6 months')::date;
 BEGIN
     WHILE m < stop LOOP
         EXECUTE format(
             'CREATE TABLE IF NOT EXISTS service_reliability_buckets_%s PARTITION OF service_reliability_buckets FOR VALUES FROM (%L) TO (%L)',
-            to_char(m, 'YYYYMM'), m, (m + interval '1 month')::date);
+            to_char(m, 'YYYYMM'),
+            to_char(m, 'YYYY-MM-DD') || ' 00:00:00+00',
+            to_char((m + interval '1 month')::date, 'YYYY-MM-DD') || ' 00:00:00+00');
         m := (m + interval '1 month')::date;
     END LOOP;
 END $$;

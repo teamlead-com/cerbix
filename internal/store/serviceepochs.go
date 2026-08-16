@@ -187,5 +187,9 @@ func (s *Store) bumpEpochForService(ctx context.Context, tx pgx.Tx, projectID, s
 		serviceID, projectID, seq, revisionID, effectiveAt, snapshot, hash); err != nil {
 		return fmt.Errorf("store: insert execution epoch: %w", err)
 	}
+	// In the SAME transaction as the epoch: a rolled-back epoch is not fan-out.
+	if err := bumpMetricEventTx(ctx, tx, metricEventEpochFanout, 1); err != nil {
+		return err
+	}
 	return nil
 }

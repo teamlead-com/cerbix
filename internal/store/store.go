@@ -150,6 +150,10 @@ type Store struct {
 	// credentialKeyrings are the separate per-region dispatch trust domain. They are
 	// configured only on materializing roles; executors never instantiate Store.
 	credentialKeyrings dispatch.CredentialKeyrings
+	// serviceEvents receives §21 service-reliability EVENT counters (epoch fan-out,
+	// lifecycle outcomes, late arrivals) at their event sites. Nil-safe: a role without a
+	// registry (tests, agents) simply records nothing.
+	serviceEvents ServiceEventsSink
 	// timescale reports that heartbeats is a TimescaleDB hypertable (migration
 	// 00043 converts it when the extension is installed). Partition maintenance
 	// branches on it: hypertables auto-create chunks and are purged with
@@ -332,4 +336,57 @@ func (s *Store) TruncateAll(ctx context.Context) error {
 
 func noRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+// ServiceEventsSink receives service-reliability event counters (§21) for events that are
+// COMMIT-INDEPENDENT: a lifecycle write records after its own transaction committed, and a
+// mutation rejection is the response the caller received regardless of any rollback.
+// Events that happen INSIDE an outer transaction (epoch creation, late arrivals) do NOT go
+// through this sink — they bump the persisted service_metric_events aggregate in the SAME
+// transaction, so they live or die with it, and the sampler exports them.
+// Implemented by *metrics.Registry.
+type ServiceEventsSink interface {
+	RecordServiceRepairOutcome(outcome, reason string)
+	RecordServiceUnrecomputableRejection()
+}
+
+// WithServiceEvents wires the commit-independent event sink.
+func (s *Store) WithServiceEvents(sink ServiceEventsSink) *Store {
+	s.serviceEvents = sink
+	return s
+}
+
+func (s *Store) recordRepairOutcome(outcome, reason string) {
+	if s.serviceEvents != nil {
+		s.serviceEvents.RecordServiceRepairOutcome(outcome, reason)
+	}
+}
+
+func (s *Store) recordUnrecomputableRejection() {
+	if s.serviceEvents != nil {
+		s.serviceEvents.RecordServiceUnrecomputableRejection()
+	}
+}
+
+// Persisted event kinds (service_metric_events): bumped IN the owning transaction.
+const (
+	metricEventEpochFanout  = "epoch_fanout"
+	metricEventLateArrivals = "late_arrivals"
+	metricEventLateOverflow = "late_overflow"
+)
+
+// bumpMetricEventTx increments one persisted event aggregate ATOMICALLY with the event it
+// counts: a rollback takes the delta with it, so the exported counter never reports an epoch
+// or a late arrival that did not durably happen.
+func bumpMetricEventTx(ctx context.Context, tx pgx.Tx, kind string, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO service_metric_events (kind, value) VALUES ($1, $2)
+		 ON CONFLICT (kind) DO UPDATE SET value = service_metric_events.value + EXCLUDED.value`,
+		kind, delta); err != nil {
+		return fmt.Errorf("store: bump metric event %s: %w", kind, err)
+	}
+	return nil
 }

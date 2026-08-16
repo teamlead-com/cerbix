@@ -3140,6 +3140,19 @@ components:
         ends_at: { type: string, format: date-time }
         reason: { type: string }
         created_at: { type: string, format: date-time }
+        archived_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 'Set when the window was archived or annulled: it left active inventory.'
+        cancel_effective_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Where the window's EFFECT stops. For a window archived while active: the archive
+            instant. For a window archived before it began: its own start — it never takes
+            effect. Consumers must reduce LEAST(ends_at, cancel_effective_at).
     CreateMaintenance:
       type: object
       required: [starts_at, ends_at]

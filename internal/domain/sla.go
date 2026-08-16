@@ -101,6 +101,12 @@ type MaintenanceWindow struct {
 	EndsAt    time.Time `json:"ends_at"`
 	Reason    string    `json:"reason"`
 	CreatedAt time.Time `json:"created_at"`
+	// ArchivedAt marks a window removed from active inventory; CancelEffectiveAt is where
+	// its EFFECT stops (for an archived future window: its own start — it never happened).
+	// Every consumer reduces LEAST(ends_at, cancel_effective_at); raw ends_at lies for any
+	// window an operator archived or annulled.
+	ArchivedAt        *time.Time `json:"archived_at,omitempty"`
+	CancelEffectiveAt *time.Time `json:"cancel_effective_at,omitempty"`
 }
 
 // PublicRedacted returns a copy safe for a public status page: internal

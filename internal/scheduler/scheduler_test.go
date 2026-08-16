@@ -25,13 +25,17 @@ type fakeStore struct {
 	leader        bool
 	elections     int32
 	ensured       int32
+	factEnsured   int32
 	purged        int32
 	sessionPurges int32
 	flowPurges    int32
 	listCalls     int32 // ListEnabledMonitors invocations (snapshot reloads)
 	// checkHeld, when set, is what the leadership watchdog check() returns; nil
 	// means "still leader" (true, nil).
-	checkHeld   func() (bool, error)
+	checkHeld func() (bool, error)
+	// statsFn, when set, backs ServiceReliabilityStats — it must honor ctx like the real
+	// query does.
+	statsFn     func(context.Context) (metrics.ServiceReliabilityStat, error)
 	materialize func([]string) ([]store.MaterializedExecution, error)
 }
 
@@ -141,6 +145,17 @@ func (f *fakeStore) EnsureHeartbeatPartitions(_ context.Context, _ int) error {
 	atomic.AddInt32(&f.ensured, 1)
 	return nil
 }
+func (f *fakeStore) EnsureServiceFactPartitions(ctx context.Context, aheadMonths int) error {
+	atomic.AddInt32(&f.factEnsured, 1)
+	return nil
+}
+
+func (f *fakeStore) ServiceReliabilityStats(ctx context.Context) (metrics.ServiceReliabilityStat, error) {
+	if f.statsFn != nil {
+		return f.statsFn(ctx)
+	}
+	return metrics.ServiceReliabilityStat{}, nil
+}
 
 func (f *fakeStore) PurgeOldHeartbeats(_ context.Context, _ time.Time) (int, error) {
 	atomic.AddInt32(&f.purged, 1)
@@ -219,14 +234,15 @@ func TestSchedulerLeaderMaintainsPartitions(t *testing.T) {
 
 	deadline := time.After(3 * time.Second)
 	for {
-		if atomic.LoadInt32(&fs.ensured) >= 1 && atomic.LoadInt32(&fs.purged) >= 1 &&
+		if atomic.LoadInt32(&fs.ensured) >= 1 && atomic.LoadInt32(&fs.factEnsured) >= 1 &&
+			atomic.LoadInt32(&fs.purged) >= 1 &&
 			atomic.LoadInt32(&fs.sessionPurges) >= 1 && atomic.LoadInt32(&fs.flowPurges) >= 1 {
-			return // leader ran partition maintenance + retention + auth housekeeping
+			return // leader ran partition maintenance (heartbeats AND facts) + retention + auth housekeeping
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("leader did not run maintenance: ensured=%d purged=%d sessions=%d flows=%d",
-				atomic.LoadInt32(&fs.ensured), atomic.LoadInt32(&fs.purged),
+			t.Fatalf("leader did not run maintenance: ensured=%d factEnsured=%d purged=%d sessions=%d flows=%d",
+				atomic.LoadInt32(&fs.ensured), atomic.LoadInt32(&fs.factEnsured), atomic.LoadInt32(&fs.purged),
 				atomic.LoadInt32(&fs.sessionPurges), atomic.LoadInt32(&fs.flowPurges))
 		case <-time.After(20 * time.Millisecond):
 		}
@@ -706,5 +722,352 @@ func TestSkippedMonitorIsNotAFailure(t *testing.T) {
 	}
 	if len(transport) != 0 {
 		t.Fatalf("a skipped monitor was counted as a transport failure: %v", transport)
+	}
+}
+
+// U2 (iter-0134) — lag is NOT a wedge: a service adopting ninety days of history reports an
+// enormous, shrinking lag while every slice advances normally; wedged means an operator is
+// REQUIRED, which today only a terminally parked error range proves.
+func TestOldBackfillLagIsNotWedged(t *testing.T) {
+	if wedged, _ := serviceWedgeReason(metrics.ServiceReliabilityStat{WatermarkLagSeconds: 90 * 24 * 3600}); wedged {
+		t.Fatal("a progressing 90-day backfill was declared wedged from one absolute lag sample")
+	}
+	wedged, reason := serviceWedgeReason(metrics.ServiceReliabilityStat{RepairErrored: 1})
+	if !wedged || reason == "" {
+		t.Fatalf("a terminally parked error range must wedge (wedged=%v reason=%q)", wedged, reason)
+	}
+}
+
+// recordingServiceSink captures the sampler's calls in order, for lifecycle assertions.
+type recordingServiceSink struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *recordingServiceSink) log(e string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+}
+func (r *recordingServiceSink) SetServiceReliabilityStats(metrics.ServiceReliabilityStat) {
+	r.log("stats")
+}
+func (r *recordingServiceSink) SetServiceWedged(wedged bool, reason string) {
+	r.log(fmt.Sprintf("wedged=%v:%s", wedged, reason))
+}
+func (r *recordingServiceSink) ClearServiceReliabilityStats() { r.log("clear") }
+func (r *recordingServiceSink) SetServiceFactMaintenance(ok bool, _ int64) {
+	r.log(fmt.Sprintf("maint=%v", ok))
+}
+func (r *recordingServiceSink) RecordServiceSlice(string) {}
+func (r *recordingServiceSink) SetSchedulerLeader(leader bool) {
+	r.log(fmt.Sprintf("leader=%v", leader))
+}
+func (r *recordingServiceSink) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+// V (iter-0134) — the sampler FAILS CLOSED: before any sample succeeds the subsystem is
+// UNKNOWN (wedged, not ready) — a terminal error range persisted before this leadership
+// began must not hide behind an empty registry — and a failed sample re-enters the same
+// unavailable state instead of preserving a stale healthy verdict.
+func TestSamplerFailsClosedUntilASampleSucceeds(t *testing.T) {
+	release := make(chan struct{})
+	fs := &fakeStore{statsFn: func(ctx context.Context) (metrics.ServiceReliabilityStat, error) {
+		select {
+		case <-release:
+			return metrics.ServiceReliabilityStat{}, nil
+		case <-ctx.Done():
+			return metrics.ServiceReliabilityStat{}, ctx.Err()
+		}
+	}}
+	sink := &recordingServiceSink{}
+	s := New(fs, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); s.serviceStatsLoop(ctx) }()
+
+	// While the first sample is in flight, the state is UNKNOWN — and unknown reads wedged.
+	deadline := time.After(3 * time.Second)
+	for {
+		ev := sink.snapshot()
+		if len(ev) >= 1 {
+			if ev[0] != "wedged=true:service reliability state unknown (no sample yet)" {
+				t.Fatalf("first event %q is not the fail-closed unknown state", ev[0])
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the sampler never declared the unknown state")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	close(release)
+	for {
+		ev := sink.snapshot()
+		if len(ev) >= 3 {
+			if ev[1] != "stats" || ev[2] != "wedged=false:" {
+				t.Fatalf("healthy sample did not clear the unknown state: %v", ev)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("the healthy sample never landed: %v", sink.snapshot())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+}
+
+// V (iter-0134) — a stats FAILURE after a healthy sample marks the component unavailable
+// (not ready) instead of silently preserving the previous verdict.
+func TestSamplerFailureMarksTheComponentUnavailable(t *testing.T) {
+	var calls int32
+	fs := &fakeStore{statsFn: func(ctx context.Context) (metrics.ServiceReliabilityStat, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return metrics.ServiceReliabilityStat{}, nil
+		}
+		return metrics.ServiceReliabilityStat{}, fmt.Errorf("boom")
+	}}
+	sink := &recordingServiceSink{}
+	s := New(fs, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); s.serviceStatsLoop(ctx) }()
+	deadline := time.After(3 * time.Second)
+	for {
+		ev := sink.snapshot()
+		if len(ev) >= 3 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("healthy sample never landed: %v", sink.snapshot())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+
+	// Drive the error path directly through one more sample cycle: a fresh loop whose only
+	// sample fails must surface "unavailable", never a silent healthy carry-over.
+	sink2 := &recordingServiceSink{}
+	s2 := New(fs, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(sink2)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan struct{})
+	go func() { defer close(done2); s2.serviceStatsLoop(ctx2) }()
+	deadline2 := time.After(3 * time.Second)
+	for {
+		ev := sink2.snapshot()
+		if len(ev) >= 2 {
+			if ev[1] != "wedged=true:service reliability stats unavailable" {
+				t.Fatalf("failed sample did not mark the component unavailable: %v", ev)
+			}
+			break
+		}
+		select {
+		case <-deadline2:
+			t.Fatalf("failure verdict never landed: %v", sink2.snapshot())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel2()
+	<-done2
+}
+
+// V (iter-0134) — cancellation JOINS before the step-down clear: a sample completing
+// concurrently with cancellation cannot resurrect a deposed leader's gauges after the clear.
+func TestSamplerJoinPrecedesTheStepDownClear(t *testing.T) {
+	inFlight := make(chan struct{}, 1)
+	fs := &fakeStore{statsFn: func(ctx context.Context) (metrics.ServiceReliabilityStat, error) {
+		select {
+		case inFlight <- struct{}{}:
+		default:
+		}
+		<-ctx.Done() // a slow query the cancellation interrupts
+		return metrics.ServiceReliabilityStat{}, ctx.Err()
+	}}
+	sink := &recordingServiceSink{}
+	s := New(fs, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.serviceStatsLoop(ctx) }()
+	<-inFlight // the sample is provably in flight
+	cancel()
+	<-done // the JOIN the lifecycle owns: nothing of the loop survives this line
+	sink.ClearServiceReliabilityStats()
+
+	ev := sink.snapshot()
+	if ev[len(ev)-1] != "clear" {
+		t.Fatalf("an event landed after the join+clear: %v", ev)
+	}
+	for _, e := range ev[1:] { // ev[0] is the fail-closed unknown verdict
+		if e == "stats" {
+			t.Fatalf("a cancelled sample still published stats: %v", ev)
+		}
+	}
+}
+
+// W (iter-0135) — UNKNOWN is published SYNCHRONOUSLY before leadership: the readiness
+// endpoint can run between setLeaderState(true) and the sampler goroutine's first
+// instruction, and in that window a terminal error state persisted before this leadership
+// must not read as healthy. Exercised through the REAL Run acquisition path.
+func TestLeadershipPublishesUnknownBeforeLeader(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+	fs := &fakeStore{leader: true, statsFn: func(ctx context.Context) (metrics.ServiceReliabilityStat, error) {
+		select {
+		case <-block:
+		case <-ctx.Done():
+		}
+		return metrics.ServiceReliabilityStat{}, ctx.Err()
+	}}
+	sink := &recordingServiceSink{}
+	s := New(fs, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(sink).WithLeaderState(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		ev := sink.snapshot()
+		iUnknown, iLeader := -1, -1
+		for i, e := range ev {
+			if iUnknown < 0 && e == "wedged=true:service reliability state unknown (no sample yet)" {
+				iUnknown = i
+			}
+			if iLeader < 0 && e == "leader=true" {
+				iLeader = i
+			}
+		}
+		if iLeader >= 0 {
+			if iUnknown < 0 || iUnknown > iLeader {
+				t.Fatalf("leadership published before the unknown verdict: %v", ev)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("leadership never published: %v", sink.snapshot())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// W (iter-0135) — healthy → error inside ONE sampler loop: a failed sample after a healthy
+// one marks the component unavailable in the same lifetime, no fresh loop involved.
+func TestSamplerHealthyThenErrorInOneLoop(t *testing.T) {
+	var calls int32
+	fs := &fakeStore{statsFn: func(ctx context.Context) (metrics.ServiceReliabilityStat, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return metrics.ServiceReliabilityStat{}, nil
+		}
+		return metrics.ServiceReliabilityStat{}, fmt.Errorf("boom")
+	}}
+	sink := &recordingServiceSink{}
+	s := New(fs, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(sink)
+	s.statsEvery = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.serviceStatsLoop(ctx) }()
+	deadline := time.After(3 * time.Second)
+	for {
+		ev := sink.snapshot()
+		sawHealthy, sawUnavailable := false, false
+		for _, e := range ev {
+			if e == "wedged=false:" {
+				sawHealthy = true
+			}
+			if sawHealthy && e == "wedged=true:service reliability stats unavailable" {
+				sawUnavailable = true
+			}
+		}
+		if sawUnavailable {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("healthy→error never surfaced in one loop: %v", sink.snapshot())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+}
+
+// W (iter-0135) — the REAL lead return joins the sampler before the step-down clear: with a
+// blocked sample in flight, losing leadership (watchdog says not held) must end in
+// leader=false + clear as the FINAL events, nothing published after.
+func TestStepDownJoinsAndClearsThroughRealLead(t *testing.T) {
+	var held int32 = 1
+	fs := &fakeStore{
+		leader:    true,
+		checkHeld: func() (bool, error) { return atomic.LoadInt32(&held) == 1, nil },
+		statsFn: func(ctx context.Context) (metrics.ServiceReliabilityStat, error) {
+			<-ctx.Done() // a sample that only cancellation ends
+			return metrics.ServiceReliabilityStat{}, ctx.Err()
+		},
+	}
+	sink := &recordingServiceSink{}
+	s := New(fs, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(sink).WithLeaderState(sink)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		ev := sink.snapshot()
+		found := false
+		for _, e := range ev {
+			if e == "leader=true" {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("leadership never acquired: %v", sink.snapshot())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	atomic.StoreInt32(&held, 0) // the watchdog deposes the leader; lead must return
+
+	deadline2 := time.After(5 * time.Second)
+	for {
+		ev := sink.snapshot()
+		if n := len(ev); n >= 2 && ev[n-1] == "clear" && ev[n-2] == "leader=false" {
+			// Settle: nothing may land after the join+clear.
+			time.Sleep(50 * time.Millisecond)
+			ev2 := sink.snapshot()
+			if len(ev2) != n {
+				t.Fatalf("events landed after the step-down clear: %v", ev2[n:])
+			}
+			for _, e := range ev2 {
+				if e == "stats" {
+					t.Fatalf("a blocked sample still published stats: %v", ev2)
+				}
+			}
+			return
+		}
+		select {
+		case <-deadline2:
+			t.Fatalf("step-down never cleared: %v", sink.snapshot())
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }

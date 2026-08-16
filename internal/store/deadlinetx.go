@@ -158,22 +158,30 @@ func (d *deadlineTx) persistPhase() *deadlineTx {
 // minted it fresh at call time, which bounded each write and not the slice: a release that
 // runs after the budget expired then waited its own ~100ms on top of the ~250ms already
 // spent, and §10.10 promises the scheduler the sum, not the parts.
-func boundedLifecycleExec(ctx context.Context, db dbConn, deadline time.Time, sql string, args ...any) error {
+// It returns the affected ROW COUNT so callers can refuse to record a lifecycle outcome for
+// a transition that changed nothing — a claimed range whose service was cascade-deleted
+// commits a zero-row UPDATE, and a metric that counted it reported an outcome that never
+// durably happened.
+func boundedLifecycleExec(ctx context.Context, db dbConn, deadline time.Time, sql string, args ...any) (int64, error) {
 	if time.Until(deadline) <= 0 {
-		return errSliceBudget
+		return 0, errSliceBudget
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline.Add(schedulingTolerance))
 	defer cancel()
 	rawTx, err := db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("store: begin lifecycle write: %w", err)
+		return 0, fmt.Errorf("store: begin lifecycle write: %w", err)
 	}
 	defer rawTx.Rollback(ctx) //nolint:errcheck // no-op after commit
 	tx := newDeadlineTx(rawTx, deadline, 0)
-	if _, err := tx.Exec(ctx, sql, args...); err != nil {
-		return err
+	tag, err := tx.Exec(ctx, sql, args...)
+	if err != nil {
+		return 0, err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 // lifecycleWriteBound CAPS one repair-lifecycle write. It is a ceiling under the caller's

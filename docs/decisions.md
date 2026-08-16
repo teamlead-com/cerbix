@@ -3204,3 +3204,59 @@ not have caught these defects. Re-acceptance requires a fresh iteration report a
 amended §9, with each regression **verified to fail when its fix is reverted**: all three
 blockers passed a green suite, so "the tests are green" is not evidence here. Until the claim
 fix ships, the feature must not be enabled in a region served by an HTTP-pull agent.
+
+## D-0161 — Service fact adoption: declared automatic bound, under-lock enforcement, one shipped operator artifact (FR-021)
+
+The DEFAULT-month adoption mechanism (spec §10.11, added by this decision) carries an
+externally observable limit and an operator-only recovery mode; both are contract, so both
+are recorded here rather than only in code and the runbook.
+
+**The automatic bound.** The fenced cutover's workload is inherently O(rows still in DEFAULT
+for the month) — under native partitioning, removing a row from DEFAULT before ATTACH hides
+it from the parent, so the fence cannot shrink incrementally without lying to readers. The
+automatic cadence therefore declares `adoption_fence_max_rows = 100000` and refuses larger
+months. The gate is enforced **twice**: an unlocked preflight (cheap, takes no parent lock,
+stops the doomed-fence-every-cadence loop), and a second count **under the parent's ACCESS
+EXCLUSIVE lock** before the sweep — the unlocked count alone was a TOCTOU (a writer commits
+between count and lock), reproduced by a deterministic regression. Only the under-lock check
+makes the bound an invariant; the preflight is a courtesy.
+
+**The bound is a row count, not a wall-clock guarantee.** A month under 100k rows on slow
+storage may exhaust the 5s fence budget every cadence. The operator path therefore covers
+ANY persistent automatic-adoption failure after quiescence, not only the oversize refusal.
+
+**One shipped artifact, not a documented procedure.** Recovery is
+`cerbix adopt-fact-month --config <path> --month YYYY-MM [--timeout 10m]`: the SAME adoption
+code path (copy-authoritative staging, deadline-enveloped fence) with an operator-chosen
+budget and the gate off, validated month input, idempotent rerun. It is tested end-to-end
+through the real command line against its own migrated database, and the store-level
+regression proves it adopts a month the automatic gate refuses. The previous runbook psql
+skeleton (placeholders, "<all non-PK columns>") is deleted: an operator artifact that cannot
+be executed as written is documentation debt wearing a recovery procedure's name.
+
+**Staging lifecycle keys are verified by their COMPLETE definition** before sweeps are
+skipped: constraint type, validation, both column-name arrays in declared order, referenced
+relation, ON DELETE and ON UPDATE actions, MATCH type, deferrability and its initial state.
+Anything reserved-named and non-exact — including an unvalidated key of the correct shape —
+fails closed. Name-plus-partial-predicate matching accepted foreign keys over the wrong
+columns (deleting a service would not cascade its staging facts) and an INITIALLY IMMEDIATE
+epoch key; both shapes are regressions now.
+
+## D-0162 — No production canceller for maintenance-origin repair ranges in phase 1 (FR-021, closes the iter-0133 "yet")
+
+iter-0133 stated honestly that cancel-by-origin exists at the store layer but "NO production
+canceller for maintenance origins is wired yet". The "yet" implied future work; this record
+closes it as a DECISION instead: phase 1 wires no production canceller, by design.
+
+The spec requires range cancellation in exactly two places — ranges of a
+`superseded_before_effect` row are cancelled in that same transaction (§6.5), and service or
+project deletion cancels its ranges inside the deleting transaction (§16) — and explicitly
+forbids the generalization: "a newer epoch or revision enqueues its own range; it never
+cancels unfinished historical ranges" (§10.8). A maintenance archive already enqueues its own
+repair over the truncated span; cancelling the earlier window's pending range by origin would
+discard recompute work another window may still require (the exact-union hazard iter-0133
+documented when it made ambiguous merged origins NULL). Recomputing a range that turned out
+unnecessary costs bounded work; discarding one that was necessary costs correctness. The
+store-layer capability and its tests remain as the safety proof that cancel-by-origin is
+sound where a future phase needs it (e.g. phase-5 alert ownership); wiring it is that
+phase's decision, not an omission of this one.

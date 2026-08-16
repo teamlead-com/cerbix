@@ -35,7 +35,7 @@ func (s *Store) MonitorSLI(ctx context.Context, monitorID string, since time.Tim
 		 WHERE h.monitor_id = $1 AND h.ts >= $2
 		 AND NOT EXISTS (
 		     SELECT 1 FROM maintenance_windows mw
-		     WHERE mw.starts_at <= h.ts AND mw.ends_at > h.ts
+		     WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
 		       AND (mw.monitor_id = $1
 		            OR (mw.monitor_id IS NULL
 		                AND mw.project_id = (SELECT project_id FROM monitors WHERE id = $1)))
@@ -74,7 +74,7 @@ func projectSLI(ctx context.Context, q sliQuerier, projectID string, since time.
 		 WHERE m.project_id = $1 AND h.ts >= $2
 		 AND NOT EXISTS (
 		     SELECT 1 FROM maintenance_windows mw
-		     WHERE mw.starts_at <= h.ts AND mw.ends_at > h.ts
+		     WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
 		       AND (mw.monitor_id = h.monitor_id
 		            OR (mw.monitor_id IS NULL AND mw.project_id = $1))
 		 )`,
@@ -232,7 +232,7 @@ func (s *Store) EvaluateBurnAlerts(ctx context.Context) (fired, resolved int, er
 			  WHERE h.monitor_id = $1 AND h.ts >= now() - make_interval(secs => $2)
 			    AND NOT EXISTS (
 			        SELECT 1 FROM maintenance_windows mw
-			        WHERE mw.starts_at <= h.ts AND mw.ends_at > h.ts
+			        WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
 			          AND (mw.monitor_id = $1
 			               OR (mw.monitor_id IS NULL
 			                   AND mw.project_id = (SELECT project_id FROM monitors WHERE id = $1)))
@@ -427,14 +427,25 @@ func (s *Store) EnqueueDueSLAReports(ctx context.Context) (int, error) {
 	return len(projects), nil
 }
 
-const maintenanceColumns = "id, project_id, monitor_id, starts_at, ends_at, reason, created_at"
+// maintEffectiveEnd is the ONE effective-end expression every consumer of maintenance
+// windows must use. An annulled or archived window stops counting at cancel_effective_at —
+// an archived FUTURE window carries cancel_effective_at = starts_at, an empty interval — and
+// a window nobody touched keeps its declared end. Reading raw ends_at re-creates the bug this
+// replaces: an archived window kept suppressing alert delivery and excluding SLA time as if
+// the operator had never touched it. The service axis reduces the same expression
+// (servicemaintenance.go, servicematerialize.go); this constant is the legacy paths' copy of
+// that single rule.
+const maintEffectiveEnd = "LEAST(mw.ends_at, COALESCE(mw.cancel_effective_at, mw.ends_at))"
+
+const maintenanceColumns = "id, project_id, monitor_id, starts_at, ends_at, reason, created_at, archived_at, cancel_effective_at"
 
 func scanMaintenance(row pgx.Row) (domain.MaintenanceWindow, error) {
 	var (
 		mw        domain.MaintenanceWindow
 		monitorID *string
 	)
-	if err := row.Scan(&mw.ID, &mw.ProjectID, &monitorID, &mw.StartsAt, &mw.EndsAt, &mw.Reason, &mw.CreatedAt); err != nil {
+	if err := row.Scan(&mw.ID, &mw.ProjectID, &monitorID, &mw.StartsAt, &mw.EndsAt, &mw.Reason, &mw.CreatedAt,
+		&mw.ArchivedAt, &mw.CancelEffectiveAt); err != nil {
 		return domain.MaintenanceWindow{}, err
 	}
 	if monitorID != nil {
@@ -450,12 +461,20 @@ func scanMaintenance(row pgx.Row) (domain.MaintenanceWindow, error) {
 // gate in RecordCheckStatus. A missing monitor reports false (its transition is dropped
 // upstream anyway). Fail-closed to false so an error never silently mutes a real alert.
 func (s *Store) MonitorInMaintenance(ctx context.Context, monitorID string) (bool, error) {
+	return monitorInMaintenanceOn(ctx, s.pool, monitorID)
+}
+
+// monitorInMaintenanceOn is the body on an explicit querier, so a test can pin now() to a
+// transaction timestamp and drive the EXACT boundary. Every maintenance interval is
+// half-open, [start, effective_end): at the cancel instant itself the window is OVER — the
+// `>=` this replaces kept a just-archived window suppressing for one more comparison.
+func monitorInMaintenanceOn(ctx context.Context, q queryRower, monitorID string) (bool, error) {
 	var inMaint bool
-	err := s.pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT EXISTS(
 		   SELECT 1 FROM maintenance_windows mw
 		   JOIN monitors m ON m.id = $1
-		   WHERE mw.starts_at <= now() AND mw.ends_at >= now()
+		   WHERE mw.starts_at <= now() AND `+maintEffectiveEnd+` > now()
 		     AND (mw.monitor_id = m.id OR (mw.monitor_id IS NULL AND mw.project_id = m.project_id))
 		 )`, monitorID).Scan(&inMaint)
 	if err != nil {

@@ -206,7 +206,9 @@ async function load() {
     if (gen !== loadGen) return;
     projectWindows.value = projSla.data?.windows ?? [];
     reportEnabled.value = projSla.data?.sla_report_weekly ?? false;
-    maintenance.value = maint.data ?? [];
+    // Archived windows stay in the API payload as history, not in the scheduler list: before
+    // this filter an archived window came back on every reload, undoing the archive visually.
+    maintenance.value = (maint.data ?? []).filter((w) => !w.archived_at);
     const loaded = await Promise.all((monitors.data ?? []).map(loadRow));
     if (gen !== loadGen) return;
     rows.value = loaded;

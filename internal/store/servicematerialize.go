@@ -114,11 +114,15 @@ func (s *Store) materializeBucketTx(ctx context.Context, tx pgx.Tx, projectID, s
 	// A sealed bucket is immutable to ordinary materialization. Rewriting it is an audited
 	// recompute or repair, and neither of those comes through here.
 	var existingState string
-	var existingGood, existingBad int64
+	var before bucketSplit
 	err := tx.QueryRow(ctx,
-		`SELECT state, good_us, bad_us FROM service_reliability_buckets
+		`SELECT state, good_us, bad_us, unknown_us, excluded_us,
+		        healthy_us, degraded_us, down_us, health_unknown_us
+		   FROM service_reliability_buckets
 		  WHERE service_id=$1 AND bucket_start=$2`,
-		serviceID, start).Scan(&existingState, &existingGood, &existingBad)
+		serviceID, start).Scan(&existingState,
+		&before.good, &before.bad, &before.unknown, &before.excluded,
+		&before.healthy, &before.degraded, &before.down, &before.healthUnknown)
 	if err != nil && !noRows(err) {
 		return false, fmt.Errorf("store: read bucket state: %w", err)
 	}
@@ -216,23 +220,42 @@ func (s *Store) materializeBucketTx(ctx context.Context, tx pgx.Tx, projectID, s
 	// Restating a SEALED number is an audited act. Someone quoted that figure; if it changed,
 	// the record has to say so, with both sides of the change — a recompute that leaves no
 	// trace is indistinguishable from data quietly rotting.
-	if wasSealed && (existingGood != d.Good.Microseconds() || existingBad != d.Bad.Microseconds()) {
-		if err := recordRecomputeAuditTx(ctx, tx, projectID, serviceID, start,
-			existingGood, existingBad, d.Good.Microseconds(), d.Bad.Microseconds()); err != nil {
+	//
+	// The comparison covers BOTH axes. Comparing only good/bad missed a whole class of real
+	// restatement: an exclusion landing entirely inside already-degraded time moves health
+	// without moving availability at all, and the audit then said nothing had happened.
+	after := bucketSplit{
+		good: d.Good.Microseconds(), bad: d.Bad.Microseconds(),
+		unknown: d.Unknown.Microseconds(), excluded: d.Excluded.Microseconds(),
+		healthy: d.Healthy.Microseconds(), degraded: d.Degraded.Microseconds(),
+		down: d.Down.Microseconds(), healthUnknown: d.HealthUnknown.Microseconds(),
+	}
+	if wasSealed && before != after {
+		if err := recordRecomputeAuditTx(ctx, tx, projectID, serviceID, start, before, after); err != nil {
 			return false, err
 		}
 	}
 	return true, nil
 }
 
+// bucketSplit is one bucket on both conserved axes, in microseconds.
+type bucketSplit struct {
+	good, bad, unknown, excluded           int64
+	healthy, degraded, down, healthUnknown int64
+}
+
+func (b bucketSplit) String() string {
+	return fmt.Sprintf("good=%d bad=%d unknown=%d excluded=%d healthy=%d degraded=%d down=%d health_unknown=%d",
+		b.good, b.bad, b.unknown, b.excluded, b.healthy, b.degraded, b.down, b.healthUnknown)
+}
+
 // recordRecomputeAuditTx writes the before/after of a sealed bucket that changed, in the same
 // transaction as the change itself.
 func recordRecomputeAuditTx(
-	ctx context.Context, tx pgx.Tx, projectID, serviceID string, bucket time.Time,
-	beforeGood, beforeBad, afterGood, afterBad int64,
+	ctx context.Context, tx pgx.Tx, projectID, serviceID string, bucket time.Time, before, after bucketSplit,
 ) error {
-	target := fmt.Sprintf("service=%s bucket=%s good_us %d->%d bad_us %d->%d",
-		serviceID, bucket.UTC().Format(time.RFC3339), beforeGood, afterGood, beforeBad, afterBad)
+	target := fmt.Sprintf("service=%s bucket=%s before[%s] after[%s]",
+		serviceID, bucket.UTC().Format(time.RFC3339), before, after)
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
 		 SELECT p.org_id, NULL, false, 'service.bucket_recomputed', $2

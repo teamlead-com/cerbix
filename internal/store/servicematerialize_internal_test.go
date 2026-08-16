@@ -43,11 +43,12 @@ func materializeFrom(t *testing.T, st *Store, ctx context.Context, f declFixture
 	t.Helper()
 	if _, err := st.pool.Exec(ctx,
 		`INSERT INTO service_materialization
-		   (service_id, project_id, materialization_start, materialized_through)
-		 VALUES ($1,$2,$3,$3)
+		   (service_id, project_id, materialization_start, materialized_through, era_start)
+		 VALUES ($1,$2,$3,$3,$3)
 		 ON CONFLICT (service_id) DO UPDATE
 		    SET materialization_start = EXCLUDED.materialization_start,
-		        materialized_through  = EXCLUDED.materialized_through`,
+		        materialized_through  = EXCLUDED.materialized_through,
+		        era_start             = EXCLUDED.era_start`,
 		f.serviceID, f.projectID, from); err != nil {
 		t.Fatalf("materialization row: %v", err)
 	}

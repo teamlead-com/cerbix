@@ -74,7 +74,7 @@ type Store interface {
 	GetOIDCSettings(ctx context.Context) (domain.OIDCSettings, error)
 	UpsertOIDCSettings(ctx context.Context, s domain.OIDCSettings) error
 	CreateMaintenanceWindowChecked(ctx context.Context, mw domain.MaintenanceWindow, previewID string, rawFloor time.Time) (domain.MaintenanceWindow, error)
-	PreviewMutation(ctx context.Context, projectID, monitorID string, mutation store.MaintenanceMutation, from, to, rawFloor time.Time, createdBy string) (store.MaintenancePreview, error)
+	PreviewMutationOf(ctx context.Context, projectID, monitorID, targetID string, mutation store.MaintenanceMutation, from, to, rawFloor time.Time, createdBy string) (store.MaintenancePreview, error)
 	ArchiveMaintenanceWindow(ctx context.Context, projectID, id string) error
 	AnnulMaintenanceWindow(ctx context.Context, projectID, id, previewID string, rawFloor time.Time) error
 	ListMaintenanceWindowsByProject(ctx context.Context, projectID string) ([]domain.MaintenanceWindow, error)

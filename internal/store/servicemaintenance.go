@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/reliability"
 )
 
 // Maintenance as a retroactive declaration (func-service-reliability §10.9).
@@ -50,25 +51,37 @@ const PreviewExpiry = 10 * time.Minute
 // previewBinding is the mutation a confirm claims the token authorizes.
 type previewBinding struct {
 	monitorID string
-	mutation  MaintenanceMutation
-	from, to  time.Time
+	// targetID is the window an annul names. Empty for a create.
+	targetID string
+	mutation MaintenanceMutation
+	from, to time.Time
 }
 
 // PreviewService is one affected service and the generation the preview saw it at.
 type PreviewService struct {
 	ServiceID            string
 	DefinitionGeneration int64
-	BeforeGood           int64
-	BeforeBad            int64
+	// Before and After are the four-way availability split over the requested range, as it
+	// stands and as the mutation would leave it. Both axes are carried because a mutation can
+	// move health without moving good/bad at all, and a projection showing only the first
+	// would report "nothing changes" for a change.
+	Before, After ServiceAggregate
+	// Projected is false when the range exceeded the projection bound, which makes the whole
+	// preview `approximate` and unconfirmable.
+	Projected bool
 }
 
 // MaintenancePreview is the token a retroactive mutation must carry.
 type MaintenancePreview struct {
 	ID        string
 	ProjectID string
-	// MonitorID and Mutation are what the token AUTHORIZES. A confirm that does not check
-	// them is a token for "some change somewhere", which is not a gate.
-	MonitorID             string
+	// MonitorID, TargetID and Mutation are what the token AUTHORIZES. A confirm that does not
+	// check them is a token for "some change somewhere", which is not a gate.
+	MonitorID string
+	// TargetID is the window an annul would remove. Empty for a create — annul is identified
+	// by its window, because two windows over the same monitor and range are different
+	// mutations with different consequences.
+	TargetID              string
 	Mutation              MaintenanceMutation
 	From, To              time.Time
 	MaintenanceGeneration int64
@@ -107,6 +120,19 @@ func (s *Store) PreviewMutation(
 	ctx context.Context, projectID, monitorID string, mutation MaintenanceMutation,
 	from, to, rawFloor time.Time, createdBy string,
 ) (MaintenancePreview, error) {
+	return s.PreviewMutationOf(ctx, projectID, monitorID, "", mutation, from, to, rawFloor, createdBy)
+}
+
+// PreviewMutationOf is the full form: `targetID` names the window an annul would remove.
+//
+// Annul is identified by its WINDOW, not by monitor and range. Two windows over the same
+// monitor and the same range are different mutations — with both in place, annulling one may
+// change nothing while annulling the other changes the number — so a token issued for one
+// must not confirm the other.
+func (s *Store) PreviewMutationOf(
+	ctx context.Context, projectID, monitorID, targetID string, mutation MaintenanceMutation,
+	from, to, rawFloor time.Time, createdBy string,
+) (MaintenancePreview, error) {
 	if !to.After(from) {
 		return MaintenancePreview{}, fmt.Errorf("store: preview range end %s is not after start %s", to, from)
 	}
@@ -131,18 +157,49 @@ func (s *Store) PreviewMutation(
 		return MaintenancePreview{}, fmt.Errorf("store: read maintenance generation: %w", err)
 	}
 
+	// What the mutation WOULD do, per affected service, through the same reducer the
+	// materializer uses.
+	addSpan := (*reliability.MaintenanceSpan)(nil)
+	dropID := ""
+	switch mutation {
+	case MutationCreate:
+		addSpan = &reliability.MaintenanceSpan{ID: "preview", MonitorID: monitorID, From: from, To: to}
+	case MutationAnnul:
+		dropID = targetID
+	}
+	coverage := "complete"
+	for i := range services {
+		before, aerr := currentAggregate(ctx, tx, services[i].ServiceID, from, to)
+		if aerr != nil {
+			return MaintenancePreview{}, aerr
+		}
+		after, projected, perr := s.projectMutation(ctx, tx, projectID, services[i].ServiceID, from, to, addSpan, dropID)
+		if perr != nil {
+			return MaintenancePreview{}, perr
+		}
+		services[i].Before = before
+		services[i].After = after
+		services[i].Projected = projected
+		if !projected {
+			// One unprojectable service makes the WHOLE token approximate. A confirm that
+			// accepted it would be authorizing a change to a service nobody was shown.
+			coverage = "approximate"
+		}
+	}
+
 	p := MaintenancePreview{
-		ProjectID: projectID, MonitorID: monitorID, Mutation: mutation, From: from, To: to,
+		ProjectID: projectID, MonitorID: monitorID, TargetID: targetID,
+		Mutation: mutation, From: from, To: to,
 		MaintenanceGeneration: generation, RawFloor: rawFloor,
-		Coverage: "complete", Services: services,
+		Coverage: coverage, Services: services,
 	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO maintenance_previews
-		   (project_id, monitor_id, mutation, requested_start, requested_end,
+		   (project_id, monitor_id, target_id, mutation, requested_start, requested_end,
 		    maintenance_generation, raw_floor, coverage, expires_at, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now() + $9::interval, $10)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now() + $10::interval, $11)
 		 RETURNING id, expires_at`,
-		projectID, nullableID(monitorID), string(mutation), from, to,
+		projectID, nullableID(monitorID), nullableID(targetID), string(mutation), from, to,
 		generation, rawFloor, p.Coverage, PreviewExpiry.String(), createdBy).
 		Scan(&p.ID, &p.ExpiresAt); err != nil {
 		return MaintenancePreview{}, fmt.Errorf("store: insert preview: %w", err)
@@ -155,9 +212,14 @@ func (s *Store) PreviewMutation(
 	for _, svc := range services {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO maintenance_preview_services
-			   (preview_id, project_id, service_id, definition_generation, before_good_us, before_bad_us)
-			 VALUES ($1,$2,$3,$4,$5,$6)`,
-			p.ID, projectID, svc.ServiceID, svc.DefinitionGeneration, svc.BeforeGood, svc.BeforeBad); err != nil {
+			   (preview_id, project_id, service_id, definition_generation,
+			    before_good_us, before_bad_us, before_unknown_us, before_excluded_us,
+			    after_good_us, after_bad_us, after_unknown_us, after_excluded_us, projected)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+			p.ID, projectID, svc.ServiceID, svc.DefinitionGeneration,
+			svc.Before.Good, svc.Before.Bad, svc.Before.Unknown, svc.Before.Excluded,
+			svc.After.Good, svc.After.Bad, svc.After.Unknown, svc.After.Excluded,
+			svc.Projected); err != nil {
 			return MaintenancePreview{}, fmt.Errorf("store: insert preview service: %w", err)
 		}
 	}
@@ -213,7 +275,7 @@ func servicesAffectedByWindow(ctx context.Context, tx pgx.Tx, projectID, monitor
 	var out []PreviewService
 	for rows.Next() {
 		var svc PreviewService
-		if err := rows.Scan(&svc.ServiceID, &svc.DefinitionGeneration, &svc.BeforeGood, &svc.BeforeBad); err != nil {
+		if err := rows.Scan(&svc.ServiceID, &svc.DefinitionGeneration, &svc.Before.Good, &svc.Before.Bad); err != nil {
 			return nil, fmt.Errorf("store: scan affected service: %w", err)
 		}
 		out = append(out, svc)
@@ -274,7 +336,16 @@ func (s *Store) CreateMaintenanceWindowChecked(
 			return domain.MaintenanceWindow{}, ErrRetroactiveNeedsPreview
 		}
 		binding := previewBinding{monitorID: w.MonitorID, mutation: MutationCreate, from: w.StartsAt, to: w.EndsAt}
-		if err := confirmPreviewTx(ctx, tx, w.ProjectID, previewID, services, binding, w.StartsAt, rawFloor); err != nil {
+		actor, cerr := confirmPreviewTx(ctx, tx, w.ProjectID, previewID, services, binding, w.StartsAt, rawFloor)
+		if cerr != nil {
+			return domain.MaintenanceWindow{}, cerr
+		}
+		// The MUTATION itself is audited, separately from the bucket restatements it causes.
+		// A reader looking for "who authorized rewriting these numbers, and under which
+		// token" cannot answer it from per-bucket rows: those say what changed, not who
+		// decided it should.
+		if err := recordMutationAuditTx(ctx, tx, w.ProjectID, MutationCreate, w.MonitorID, "",
+			previewID, actor, w.StartsAt, w.EndsAt, services); err != nil {
 			return domain.MaintenanceWindow{}, err
 		}
 	}
@@ -363,8 +434,13 @@ func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previ
 		if previewID == "" {
 			return ErrRetroactiveNeedsPreview
 		}
-		binding := previewBinding{monitorID: monitorID, mutation: MutationAnnul, from: from, to: to}
-		if err := confirmPreviewTx(ctx, tx, projectID, previewID, services, binding, from, rawFloor); err != nil {
+		binding := previewBinding{monitorID: monitorID, targetID: id, mutation: MutationAnnul, from: from, to: to}
+		actor, cerr := confirmPreviewTx(ctx, tx, projectID, previewID, services, binding, from, rawFloor)
+		if cerr != nil {
+			return cerr
+		}
+		if err := recordMutationAuditTx(ctx, tx, projectID, MutationAnnul, monitorID, id,
+			previewID, actor, from, to, services); err != nil {
 			return err
 		}
 	}
@@ -390,66 +466,76 @@ func (s *Store) AnnulMaintenanceWindow(ctx context.Context, projectID, id, previ
 func confirmPreviewTx(
 	ctx context.Context, tx pgx.Tx, projectID, previewID string, current []PreviewService,
 	want previewBinding, sealedStart, rawFloor time.Time,
-) error {
+) (actor string, err error) {
 	var storedGeneration int64
 	var storedRawFloor, expiresAt time.Time
 	var coverage string
-	var storedMonitor *string
+	var storedMonitor, storedTarget *string
 	var storedMutation string
 	var storedFrom, storedTo time.Time
 	if err := tx.QueryRow(ctx,
-		`SELECT maintenance_generation, raw_floor, coverage, expires_at,
-		        monitor_id::text, mutation, requested_start, requested_end
+		`SELECT COALESCE(created_by,''), maintenance_generation, raw_floor, coverage, expires_at,
+		        monitor_id::text, target_id::text, mutation, requested_start, requested_end
 		   FROM maintenance_previews WHERE id=$1 AND project_id=$2 FOR UPDATE`,
-		previewID, projectID).Scan(&storedGeneration, &storedRawFloor, &coverage, &expiresAt,
-		&storedMonitor, &storedMutation, &storedFrom, &storedTo); err != nil {
+		previewID, projectID).Scan(&actor, &storedGeneration, &storedRawFloor, &coverage, &expiresAt,
+		&storedMonitor, &storedTarget, &storedMutation, &storedFrom, &storedTo); err != nil {
 		if noRows(err) {
-			return ErrPreviewStale
+			return actor, ErrPreviewStale
 		}
-		return fmt.Errorf("store: read preview: %w", err)
+		return actor, fmt.Errorf("store: read preview: %w", err)
 	}
 	if coverage != "complete" {
-		return ErrPreviewApproximate
+		return actor, ErrPreviewApproximate
 	}
-	if time.Now().After(expiresAt) {
-		return ErrPreviewStale
+	// Expiry is decided by the DATABASE clock, like every other instant in this protocol.
+	// Comparing a process clock against a stored timestamp lets replica skew accept a token
+	// that has expired or reject one that has not.
+	var expired bool
+	if err := tx.QueryRow(ctx, `SELECT statement_timestamp() > $1`, expiresAt).Scan(&expired); err != nil {
+		return actor, fmt.Errorf("store: check preview expiry: %w", err)
+	}
+	if expired {
+		return actor, ErrPreviewStale
 	}
 
 	// The token authorizes ONE mutation. Without this the confirm checked that the world had
 	// not moved and never checked what it was being asked to do, so a token issued for a
 	// two-minute window on one monitor authorized a twelve-hour window on another as long as
 	// both touched the same services.
-	storedMonitorID := ""
-	if storedMonitor != nil {
-		storedMonitorID = *storedMonitor
+	deref := func(p *string) string {
+		if p == nil {
+			return ""
+		}
+		return *p
 	}
 	if storedMutation != string(want.mutation) ||
-		storedMonitorID != want.monitorID ||
+		deref(storedMonitor) != want.monitorID ||
+		deref(storedTarget) != want.targetID ||
 		!storedFrom.Equal(want.from) || !storedTo.Equal(want.to) {
-		return ErrPreviewStale
+		return actor, ErrPreviewStale
 	}
 	// The floor recorded WHEN THE PREVIEW RAN also has to still hold: retention only moves
 	// forward, so a token issued against an older floor cannot authorize a range that has
 	// since fallen out of raw.
 	if sealedStart.Before(storedRawFloor) {
-		return fmt.Errorf("%w: earliest repairable is %s", ErrUnrecomputableRange, storedRawFloor.UTC().Format(time.RFC3339))
+		return actor, fmt.Errorf("%w: earliest repairable is %s", ErrUnrecomputableRange, storedRawFloor.UTC().Format(time.RFC3339))
 	}
 
 	var generation int64
 	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE((SELECT generation FROM project_maintenance_generation WHERE project_id=$1), 0)`,
 		projectID).Scan(&generation); err != nil {
-		return fmt.Errorf("store: read maintenance generation: %w", err)
+		return actor, fmt.Errorf("store: read maintenance generation: %w", err)
 	}
 	if generation != storedGeneration {
-		return ErrPreviewStale
+		return actor, ErrPreviewStale
 	}
 
 	// raw_floor is a MONOTONIC predicate, not an equality: the floor advances continuously
 	// with retention, so byte equality would make every token stale by construction. The
 	// question is whether the range is still repairable, not whether the clock stood still.
 	if sealedStart.Before(rawFloor) {
-		return fmt.Errorf("%w: earliest repairable is %s", ErrUnrecomputableRange, rawFloor.UTC().Format(time.RFC3339))
+		return actor, fmt.Errorf("%w: earliest repairable is %s", ErrUnrecomputableRange, rawFloor.UTC().Format(time.RFC3339))
 	}
 
 	// Exact SET equality, over the complete relation.
@@ -457,39 +543,39 @@ func confirmPreviewTx(
 	rows, err := tx.Query(ctx,
 		`SELECT service_id, definition_generation FROM maintenance_preview_services WHERE preview_id=$1`, previewID)
 	if err != nil {
-		return fmt.Errorf("store: read preview services: %w", err)
+		return actor, fmt.Errorf("store: read preview services: %w", err)
 	}
 	for rows.Next() {
 		var id string
 		var gen int64
 		if err := rows.Scan(&id, &gen); err != nil {
 			rows.Close()
-			return fmt.Errorf("store: scan preview service: %w", err)
+			return actor, fmt.Errorf("store: scan preview service: %w", err)
 		}
 		stored[id] = gen
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("store: read preview services: %w", err)
+		return actor, fmt.Errorf("store: read preview services: %w", err)
 	}
 	if len(stored) != len(current) {
-		return fmt.Errorf("%w: the affected set changed size (%d previewed, %d now)", ErrPreviewStale, len(stored), len(current))
+		return actor, fmt.Errorf("%w: the affected set changed size (%d previewed, %d now)", ErrPreviewStale, len(stored), len(current))
 	}
 	for _, svc := range current {
 		gen, ok := stored[svc.ServiceID]
 		if !ok {
-			return fmt.Errorf("%w: service %s was not in the preview", ErrPreviewStale, svc.ServiceID)
+			return actor, fmt.Errorf("%w: service %s was not in the preview", ErrPreviewStale, svc.ServiceID)
 		}
 		if gen != svc.DefinitionGeneration {
-			return fmt.Errorf("%w: service %s moved from revision %d to %d", ErrPreviewStale, svc.ServiceID, gen, svc.DefinitionGeneration)
+			return actor, fmt.Errorf("%w: service %s moved from revision %d to %d", ErrPreviewStale, svc.ServiceID, gen, svc.DefinitionGeneration)
 		}
 	}
 
 	// A confirmed token is spent.
 	if _, err := tx.Exec(ctx, `DELETE FROM maintenance_previews WHERE id=$1`, previewID); err != nil {
-		return fmt.Errorf("store: consume preview: %w", err)
+		return actor, fmt.Errorf("store: consume preview: %w", err)
 	}
-	return nil
+	return actor, nil
 }
 
 // invalidateForMaintenance does, in the SAME transaction as the mutation, everything that
@@ -532,4 +618,123 @@ func invalidateForMaintenance(ctx context.Context, tx pgx.Tx, projectID string, 
 		}
 	}
 	return nil
+}
+
+// recordMutationAuditTx records the retroactive mutation an operator authorized: which kind,
+// which monitor and window, under which preview token, over which range, and how many services
+// it restates.
+//
+// The per-bucket recompute rows say WHAT changed. This says who decided it should, and on the
+// strength of which token — the two questions an audit of a history rewrite has to answer, and
+// neither can be reconstructed from the other.
+func recordMutationAuditTx(
+	ctx context.Context, tx pgx.Tx, projectID string, mutation MaintenanceMutation,
+	monitorID, windowID, previewID, createdBy string, from, to time.Time, services []PreviewService,
+) error {
+	target := fmt.Sprintf("mutation=%s monitor=%s window=%s preview=%s by=%s range=[%s,%s) services=%d",
+		mutation, orDash(monitorID), orDash(windowID), previewID, orDash(createdBy),
+		from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), len(services))
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
+		 SELECT p.org_id, NULL, false, 'service.maintenance_mutated', $2
+		   FROM projects p WHERE p.id = $1`,
+		projectID, target); err != nil {
+		return fmt.Errorf("store: audit maintenance mutation: %w", err)
+	}
+	return nil
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// ── The projection ──────────────────────────────────────────────────────────────────────
+//
+// A preview that shows only the CURRENT numbers is not a preview: the operator is being asked
+// to authorize a change to sealed figures and is shown what they already are. This computes
+// what they WOULD become, by running the same reducer the materializer runs, over the same
+// range, with the mutation applied — and writing nothing.
+
+// previewProjectionBudget bounds how many buckets one preview will re-reduce. Past it the
+// preview is honestly `approximate` and a confirm refuses it: a change nobody could be shown
+// is not one an operator can be said to have approved.
+const previewProjectionBudget = 4320 // three days of canonical buckets
+
+// projectMutation returns the aggregate a service would report over [from, to) once the
+// mutation is applied. `addSpan` is the window a create would introduce; `dropWindowID` is the
+// window an annul would remove. Exactly one is set.
+func (s *Store) projectMutation(
+	ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to time.Time,
+	addSpan *reliability.MaintenanceSpan, dropWindowID string,
+) (agg ServiceAggregate, projected bool, err error) {
+	if to.Sub(from)/domain.CanonicalBucket > previewProjectionBudget {
+		return ServiceAggregate{}, false, nil
+	}
+	for at := domain.FloorToBucket(from); at.Before(to); at = at.Add(domain.CanonicalBucket) {
+		end := at.Add(domain.CanonicalBucket)
+		epochID, members, policies, eerr := epochAt(ctx, tx, serviceID, at)
+		if eerr != nil {
+			return ServiceAggregate{}, false, eerr
+		}
+		if epochID == "" || len(members) == 0 {
+			continue
+		}
+		observations, oerr := observationsFor(ctx, tx, members, at, end)
+		if oerr != nil {
+			return ServiceAggregate{}, false, oerr
+		}
+		spans, serr := maintenanceSpansFor(ctx, tx, projectID, members, at, end)
+		if serr != nil {
+			return ServiceAggregate{}, false, serr
+		}
+		// Apply the hypothetical. A create ADDS its span; an annul DROPS the one it names.
+		// Both go through the same reducer as the real thing, so the projection cannot drift
+		// from what the confirm would actually produce.
+		if dropWindowID != "" {
+			kept := spans[:0]
+			for _, sp := range spans {
+				if sp.ID != dropWindowID {
+					kept = append(kept, sp)
+				}
+			}
+			spans = kept
+		}
+		if addSpan != nil && addSpan.To.After(at) && addSpan.From.Before(end) {
+			spans = append(spans, *addSpan)
+		}
+		b, rerr := reliability.Reduce(reliability.Input{
+			Start: at, End: end, Members: members,
+			Observations: observations, Maintenance: spans, Policies: policies,
+		})
+		if rerr != nil {
+			return ServiceAggregate{}, false, fmt.Errorf("store: project bucket %s: %w", at, rerr)
+		}
+		agg.Good += b.Durations.Good.Microseconds()
+		agg.Bad += b.Durations.Bad.Microseconds()
+		agg.Unknown += b.Durations.Unknown.Microseconds()
+		agg.Excluded += b.Durations.Excluded.Microseconds()
+	}
+	return agg, true, nil
+}
+
+// ServiceAggregate is the four-way availability split over a range, in microseconds. It is
+// what a preview shows on both sides of a mutation.
+type ServiceAggregate struct{ Good, Bad, Unknown, Excluded int64 }
+
+// currentAggregate sums what the service ALREADY reports over the range, straight from the
+// facts — the "before" half of the projection.
+func currentAggregate(ctx context.Context, tx pgx.Tx, serviceID string, from, to time.Time) (ServiceAggregate, error) {
+	var a ServiceAggregate
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(SUM(good_us),0), COALESCE(SUM(bad_us),0),
+		        COALESCE(SUM(unknown_us),0), COALESCE(SUM(excluded_us),0)
+		   FROM service_reliability_buckets
+		  WHERE service_id = $1 AND bucket_start >= $2 AND bucket_start < $3`,
+		serviceID, from, to).Scan(&a.Good, &a.Bad, &a.Unknown, &a.Excluded); err != nil {
+		return ServiceAggregate{}, fmt.Errorf("store: read current aggregate: %w", err)
+	}
+	return a, nil
 }

@@ -576,8 +576,8 @@ func (f *fakeStore) CreateMaintenanceWindowChecked(
 	return mw, nil
 }
 
-func (f *fakeStore) PreviewMutation(
-	_ context.Context, projectID, monitorID string, mutation store.MaintenanceMutation,
+func (f *fakeStore) PreviewMutationOf(
+	_ context.Context, projectID, monitorID, targetID string, mutation store.MaintenanceMutation,
 	from, to, rawFloor time.Time, createdBy string,
 ) (store.MaintenancePreview, error) {
 	if f.previews == nil {
@@ -585,7 +585,7 @@ func (f *fakeStore) PreviewMutation(
 	}
 	p := store.MaintenancePreview{
 		ID: fmt.Sprintf("prev-%d", len(f.previews)+1), ProjectID: projectID,
-		MonitorID: monitorID, Mutation: mutation, From: from, To: to,
+		MonitorID: monitorID, TargetID: targetID, Mutation: mutation, From: from, To: to,
 		Coverage: "complete", ExpiresAt: time.Now().Add(10 * time.Minute),
 	}
 	f.previews[p.ID] = p
@@ -614,7 +614,7 @@ func (f *fakeStore) AnnulMaintenanceWindow(_ context.Context, projectID, id, pre
 		if !ok {
 			return store.ErrRetroactiveNeedsPreview
 		}
-		if p.Mutation != store.MutationAnnul || p.MonitorID != mw.MonitorID {
+		if p.Mutation != store.MutationAnnul || p.MonitorID != mw.MonitorID || p.TargetID != id {
 			return store.ErrPreviewStale
 		}
 	}

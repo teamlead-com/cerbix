@@ -254,7 +254,7 @@ func TestServiceDeletionCascadesTheWholeDomain(t *testing.T) {
 	for _, q := range []string{
 		`INSERT INTO service_bucket_ingest (service_id, project_id, bucket_start) VALUES ($1,$2,$3)`,
 		`INSERT INTO service_late_arrivals (service_id, project_id, bucket_start, monitor_id) VALUES ($1,$2,$3,'` + mon + `')`,
-		`INSERT INTO service_materialization (service_id, project_id, materialization_start) VALUES ($1,$2,$3)`,
+		`INSERT INTO service_materialization (service_id, project_id, materialization_start, era_start) VALUES ($1,$2,$3,$3)`,
 	} {
 		if _, err := st.pool.Exec(ctx, q, svc, proj, start); err != nil {
 			t.Fatalf("seed %q: %v", q, err)

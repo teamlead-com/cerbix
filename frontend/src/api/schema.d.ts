@@ -1757,7 +1757,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Schedule a maintenance window (editor+) */
+        /**
+         * Schedule a maintenance window (editor+)
+         * @description A window reaching back over SEALED reliability facts requires a preview token issued for exactly this mutation (409 `preview_required` without one). A prospective window changes no settled number and needs none.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -2122,7 +2125,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete a maintenance window (editor+) */
+        /**
+         * Archive a maintenance window (editor+)
+         * @description ARCHIVES the window: it leaves active inventory, an active one is cut short at the exact instant, and the time it already covered STAYS excluded. A hard delete would destroy the retained exclusion row, and the next recompute would then silently restate sealed numbers with no preview and no audit. Removing a window's PAST effect is a different operation — see `/annul`.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -2134,7 +2140,7 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Deleted. */
+                /** @description Archived. */
                 204: {
                     headers: {
                         [name: string]: unknown;
@@ -2145,6 +2151,163 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/maintenance/{maintenanceID}/annul": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                maintenanceID: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Annul a maintenance window — say it never applied (editor+)
+         * @description Removes the window's span from the evaluator's input and repairs the facts computed under it. This rewrites history, so it carries a preview token bound to THIS window, and the raw fence: outside heartbeat retention the recompute has nothing to read from and the mutation fails closed rather than producing a number from nothing.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    maintenanceID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** Format: uuid */
+                        preview_id?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Annulled; the affected ranges are queued for recompute. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description `preview_required`, `preview_stale` or `preview_approximate`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description The range is older than raw retention, so it cannot be recomputed. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/maintenance/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview a retroactive maintenance mutation (editor+)
+         * @description Issues a token BOUND to one mutation — this monitor, this exact range, this kind of change, and for an annul the specific window — and shows what the change would do to every service it touches, on BOTH axes, before and after.
+         *
+         *     A mutation reaching back over sealed reliability facts requires one. A prospective window changes no settled number and needs none.
+         *
+         *     `coverage: approximate` means at least one affected service could not be projected because the range exceeded the projection bound; a confirm refuses such a token, because a change nobody could be shown is not one an operator can be said to have approved.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /**
+                         * Format: uuid
+                         * @description Empty means the whole project.
+                         */
+                        monitor_id?: string;
+                        /**
+                         * @default create
+                         * @enum {string}
+                         */
+                        mutation?: "create" | "annul";
+                        /**
+                         * Format: uuid
+                         * @description The window an annul would remove. REQUIRED for `annul`: two windows over the same monitor and range are different mutations with different consequences.
+                         */
+                        maintenance_id?: string;
+                        /** Format: date-time */
+                        starts_at: string;
+                        /** Format: date-time */
+                        ends_at: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description The token and the projection. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: uuid */
+                            preview_id: string;
+                            /** Format: date-time */
+                            expires_at: string;
+                            /** @enum {string} */
+                            coverage: "complete" | "approximate";
+                            services: {
+                                /** Format: uuid */
+                                service_id: string;
+                                before: components["schemas"]["AvailabilitySplit"];
+                                after: components["schemas"]["AvailabilitySplit"];
+                                /** @description False when this service's range exceeded the projection bound. */
+                                projected: boolean;
+                            }[];
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -5185,6 +5348,17 @@ export interface components {
             /** @description The file provider that owns this service; empty when it is UI-owned. Present so the UI can disable the controls rather than discover the 409. */
             managed_by?: string;
         };
+        /** @description One side of a projection: duration in MICROSECONDS across the availability axis. The four conserve to the range's length exactly. */
+        AvailabilitySplit: {
+            /** Format: int64 */
+            good_us: number;
+            /** Format: int64 */
+            bad_us: number;
+            /** Format: int64 */
+            unknown_us: number;
+            /** Format: int64 */
+            excluded_us: number;
+        };
         ServiceSummary: {
             service: components["schemas"]["Service"];
             /**
@@ -5935,6 +6109,11 @@ export interface components {
             /** Format: date-time */
             ends_at: string;
             reason?: string;
+            /**
+             * Format: uuid
+             * @description Required only when the window reaches back over sealed reliability facts; the token must have been issued for exactly this monitor, range and kind of change.
+             */
+            preview_id?: string;
         };
         Incident: {
             /** Format: uuid */

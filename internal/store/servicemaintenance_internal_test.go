@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -292,7 +293,9 @@ func TestAnnulRequiresAPreviewAndRepairsTheRange(t *testing.T) {
 
 	// The token has to be issued FOR AN ANNUL. A create-kind preview authorizing an annul is
 	// the binding hole this contract closes.
-	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationAnnul, base, base.Add(2*time.Minute), rawFloor, "op")
+	// An annul names the WINDOW it removes: two windows over the same monitor and range are
+	// different mutations with different consequences.
+	p, err := st.PreviewMutationOf(ctx, f.projectID, f.http, w.ID, MutationAnnul, base, base.Add(2*time.Minute), rawFloor, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -357,7 +360,9 @@ func TestConfirmedAnnulActuallyRewritesTheSealedFacts(t *testing.T) {
 	// …then annul the window, which says it never applied, and require the facts to come back.
 	// The token has to be issued FOR AN ANNUL. A create-kind preview authorizing an annul is
 	// the binding hole this contract closes.
-	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationAnnul, base, base.Add(2*time.Minute), rawFloor, "op")
+	// An annul names the WINDOW it removes: two windows over the same monitor and range are
+	// different mutations with different consequences.
+	p, err := st.PreviewMutationOf(ctx, f.projectID, f.http, w.ID, MutationAnnul, base, base.Add(2*time.Minute), rawFloor, "op")
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -541,5 +546,175 @@ func TestDeletingAnAffectedServiceInvalidatesThePreview(t *testing.T) {
 	}, p.ID, rawFloor)
 	if !errors.Is(err, ErrPreviewStale) && !errors.Is(err, ErrRetroactiveNeedsPreview) {
 		t.Errorf("a preview survived the deletion of a service it covered: %v", err)
+	}
+}
+
+// A preview must show what WOULD change, not only what is. The shipped version summed the
+// current good/bad and called that a preview: the operator was asked to authorize a change to
+// sealed numbers and shown the numbers they already had.
+func TestPreviewProjectsBothSidesOfTheMutation(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+		base, base.Add(3*time.Minute), rawFloor, "op")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if len(p.Services) != 1 {
+		t.Fatalf("%d affected services, want 1", len(p.Services))
+	}
+	svc := p.Services[0]
+	if !svc.Projected {
+		t.Fatal("the after-state was not projected for a three-bucket range")
+	}
+	if svc.Before.Good == 0 {
+		t.Fatalf("before shows no good time: %+v", svc.Before)
+	}
+	// A maintenance window over sealed GOOD time moves it into EXCLUDED. Availability before
+	// and after must therefore differ — that difference is the whole content of a preview.
+	if svc.After.Excluded <= svc.Before.Excluded {
+		t.Errorf("after excludes %d us and before %d — the projection did not apply the window",
+			svc.After.Excluded, svc.Before.Excluded)
+	}
+	if svc.After.Good >= svc.Before.Good {
+		t.Errorf("good time did not fall: before %d, after %d", svc.Before.Good, svc.After.Good)
+	}
+
+	// And the projection matches what the confirm actually produces: the preview runs the
+	// same reducer, so the two cannot drift.
+	if _, err := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(3 * time.Minute), Reason: "projected",
+	}, p.ID, rawFloor); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	drainRepair(t, st, ctx)
+
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only
+	actual, err := currentAggregate(ctx, tx, f.serviceID, base, base.Add(3*time.Minute))
+	if err != nil {
+		t.Fatalf("read actual: %v", err)
+	}
+	if actual.Excluded != svc.After.Excluded || actual.Good != svc.After.Good {
+		t.Errorf("the preview promised %+v and the confirm produced %+v", svc.After, actual)
+	}
+}
+
+// Annul is identified by its WINDOW. With two windows over the same monitor and range,
+// annulling one may change nothing while annulling the other changes the number, so a token
+// issued for one must not confirm the other.
+func TestAnAnnulTokenIsBoundToTheWindowItNames(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	first, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "first",
+	})
+	if err != nil {
+		t.Fatalf("first window: %v", err)
+	}
+	second, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "second",
+	})
+	if err != nil {
+		t.Fatalf("second window: %v", err)
+	}
+
+	p, err := st.PreviewMutationOf(ctx, f.projectID, f.http, first.ID, MutationAnnul,
+		base, base.Add(2*time.Minute), rawFloor, "op")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, second.ID, p.ID, rawFloor); !errors.Is(err, ErrPreviewStale) {
+		t.Fatalf("a token issued for one window authorized annulling another: %v", err)
+	}
+	if err := st.AnnulMaintenanceWindow(ctx, f.projectID, first.ID, p.ID, rawFloor); err != nil {
+		t.Fatalf("the window the token named was refused: %v", err)
+	}
+}
+
+// The mutation itself is audited, with who authorized it and under which token — questions
+// the per-bucket recompute rows cannot answer, because they record what changed rather than
+// who decided it should.
+func TestARetroactiveMutationIsAuditedWithItsActorAndToken(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+	rawFloor := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	p, err := st.PreviewMutation(ctx, f.projectID, f.http, MutationCreate,
+		base, base.Add(2*time.Minute), rawFloor, "seymur@teamlead.com")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if _, err := st.CreateMaintenanceWindowChecked(ctx, domain.MaintenanceWindow{
+		ProjectID: f.projectID, MonitorID: f.http,
+		StartsAt: base, EndsAt: base.Add(2 * time.Minute), Reason: "audited",
+	}, p.ID, rawFloor); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+
+	var target string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT target FROM audit_logs WHERE action='service.maintenance_mutated' ORDER BY created_at DESC LIMIT 1`).
+		Scan(&target); err != nil {
+		t.Fatalf("no mutation audit row: %v", err)
+	}
+	for _, want := range []string{"mutation=create", "by=seymur@teamlead.com", "preview=" + p.ID, f.http} {
+		if !strings.Contains(target, want) {
+			t.Errorf("audit target %q is missing %q", target, want)
+		}
+	}
+}
+
+// A restatement that moves HEALTH without moving availability is still a restatement. Auditing
+// only good/bad reported that nothing had happened.
+func TestARecomputeThatMovesOnlyHealthIsStillAudited(t *testing.T) {
+	st, ctx := declStore(t)
+	f, base := sealedService(t, st, ctx)
+
+	// Rewrite the sealed bucket so only the HEALTH axis differs from what a recompute will
+	// produce; availability stays exactly where it is.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_reliability_buckets
+		    SET healthy_us = 0, degraded_us = healthy_us + degraded_us
+		  WHERE service_id=$1 AND bucket_start=$2`, f.serviceID, base); err != nil {
+		t.Fatalf("skew the health axis: %v", err)
+	}
+	before, ok := readFact(t, st, ctx, f.serviceID, base)
+	if !ok {
+		t.Fatal("no fact to recompute")
+	}
+
+	if err := st.EnqueueRepairRange(ctx, f.projectID, f.serviceID, base, base.Add(time.Minute), ReasonAdmin); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	drainRepair(t, st, ctx)
+
+	after, _ := readFact(t, st, ctx, f.serviceID, base)
+	if after.good != before.good || after.bad != before.bad {
+		t.Fatalf("availability moved too (%d/%d -> %d/%d); this test would then prove nothing",
+			before.good, before.bad, after.good, after.bad)
+	}
+	if after.healthy == before.healthy {
+		t.Fatalf("the recompute did not restore the health axis: %+v", after)
+	}
+
+	var audits int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_logs WHERE action='service.bucket_recomputed' AND target LIKE '%'||$1||'%'`,
+		f.serviceID).Scan(&audits); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if audits == 0 {
+		t.Error("health moved on a sealed bucket with no audit row; comparing only availability calls that 'nothing happened'")
 	}
 }

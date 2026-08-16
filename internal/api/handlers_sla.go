@@ -253,10 +253,13 @@ func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		MonitorID string    `json:"monitor_id"`
-		Mutation  string    `json:"mutation"`
-		StartsAt  time.Time `json:"starts_at"`
-		EndsAt    time.Time `json:"ends_at"`
+		MonitorID string `json:"monitor_id"`
+		Mutation  string `json:"mutation"`
+		// MaintenanceID names the window an annul would remove. Required for `annul`: two
+		// windows over the same monitor and range are different mutations.
+		MaintenanceID string    `json:"maintenance_id"`
+		StartsAt      time.Time `json:"starts_at"`
+		EndsAt        time.Time `json:"ends_at"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -266,6 +269,10 @@ func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
 	case "", string(store.MutationCreate):
 	case string(store.MutationAnnul):
 		mutation = store.MutationAnnul
+		if body.MaintenanceID == "" {
+			writeError(w, http.StatusBadRequest, "maintenance_id is required to preview an annul")
+			return
+		}
 	default:
 		writeError(w, http.StatusBadRequest, "mutation must be create or annul")
 		return
@@ -274,15 +281,26 @@ func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ends_at must be after starts_at")
 		return
 	}
-	p, err := h.store.PreviewMutation(r.Context(), proj.ID, body.MonitorID, mutation,
+	p, err := h.store.PreviewMutationOf(r.Context(), proj.ID, body.MonitorID, body.MaintenanceID, mutation,
 		body.StartsAt, body.EndsAt, h.rawFloor(), h.actorLabel(r))
 	if h.writeMaintenanceError(w, "preview_maintenance", err) {
 		return
 	}
+	// Both sides, both axes. A "before" alone is not a preview: the operator is being asked
+	// to authorize a change to sealed numbers and would be shown only what they already are.
+	type split struct {
+		Good     int64 `json:"good_us"`
+		Bad      int64 `json:"bad_us"`
+		Unknown  int64 `json:"unknown_us"`
+		Excluded int64 `json:"excluded_us"`
+	}
 	type affected struct {
-		ServiceID  string `json:"service_id"`
-		BeforeGood int64  `json:"before_good_us"`
-		BeforeBad  int64  `json:"before_bad_us"`
+		ServiceID string `json:"service_id"`
+		Before    split  `json:"before"`
+		After     split  `json:"after"`
+		// Projected is false when the range exceeded the projection bound; the preview's
+		// coverage then reads `approximate` and a confirm refuses it.
+		Projected bool `json:"projected"`
 	}
 	out := struct {
 		PreviewID string     `json:"preview_id"`
@@ -292,7 +310,10 @@ func (h *Handler) previewMaintenance(w http.ResponseWriter, r *http.Request) {
 	}{PreviewID: p.ID, ExpiresAt: p.ExpiresAt, Coverage: p.Coverage, Services: []affected{}}
 	for _, svc := range p.Services {
 		out.Services = append(out.Services, affected{
-			ServiceID: svc.ServiceID, BeforeGood: svc.BeforeGood, BeforeBad: svc.BeforeBad,
+			ServiceID: svc.ServiceID,
+			Before:    split{svc.Before.Good, svc.Before.Bad, svc.Before.Unknown, svc.Before.Excluded},
+			After:     split{svc.After.Good, svc.After.Bad, svc.After.Unknown, svc.After.Excluded},
+			Projected: svc.Projected,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

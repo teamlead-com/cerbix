@@ -107,6 +107,14 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusConflict, "slug already in use")
 	case errors.Is(err, store.ErrServiceManagedByFile):
 		writeError(w, http.StatusConflict, "managed_by_file")
+	case errors.Is(err, store.ErrOwnerNotInProject):
+		writeError(w, http.StatusBadRequest, "owner_not_in_project")
+	case errors.Is(err, store.ErrTooManyServices):
+		writeError(w, http.StatusConflict, "too_many_services")
+	case errors.Is(err, store.ErrTooManyMembers):
+		writeError(w, http.StatusBadRequest, "too_many_members")
+	case errors.Is(err, store.ErrMonitorInTooManyServices):
+		writeError(w, http.StatusConflict, "monitor_in_too_many_services")
 	case errors.Is(err, store.ErrRevisionConflict):
 		writeError(w, http.StatusConflict, "revision_conflict")
 	case errors.Is(err, store.ErrSLINotInContext):

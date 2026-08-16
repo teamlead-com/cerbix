@@ -161,13 +161,22 @@ type Store struct {
 	// resultRetention is the lower bound below which a result is ignored (outside the raw
 	// window). Zero → sane fallbacks (skew 5m; retention floor disabled). Set via
 	// WithResultPolicy at wiring.
-	resultSkew         time.Duration
-	resultRetention    time.Duration
+	resultSkew      time.Duration
+	resultRetention time.Duration
+	// svcLimits is the configured service fan-out policy, clamped to the hard maxima on read.
+	svcLimits          ServiceLimits
 	resultRevisionMode string // "enforce" (default) | "observe"
 }
 
 // WithResultPolicy sets the timestamp bounds used by RecordScheduledResult. Returns the
 // store for chaining, mirroring WithCipher.
+// WithServiceLimits sets the service fan-out policy. Zeros take the defaults; anything past a
+// hard maximum is clamped to it.
+func (s *Store) WithServiceLimits(l ServiceLimits) *Store {
+	s.svcLimits = l
+	return s
+}
+
 func (s *Store) WithResultPolicy(skew, retention time.Duration) *Store {
 	s.resultSkew = skew
 	s.resultRetention = retention

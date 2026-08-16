@@ -204,6 +204,26 @@ func replaceMonitorSecretRefsTx(ctx context.Context, tx pgx.Tx, monitorID, proje
 	return nil
 }
 
+// monitorSecretRefsTx reads a monitor's CURRENT normalized credential references, so a caller
+// whose write touches no credential can carry them forward instead of rewriting them to empty.
+func monitorSecretRefsTx(ctx context.Context, tx pgx.Tx, monitorID string) (map[string]string, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT setting_key, secret_id::text FROM monitor_secret_refs WHERE monitor_id = $1`, monitorID)
+	if err != nil {
+		return nil, fmt.Errorf("store: read monitor secret refs: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var key, id string
+		if err := rows.Scan(&key, &id); err != nil {
+			return nil, fmt.Errorf("store: scan monitor secret ref: %w", err)
+		}
+		out[key] = id
+	}
+	return out, rows.Err()
+}
+
 // monitorColumns includes a correlated aggregate for depends_on; the bare `id`
 // inside it resolves to the outer monitors row under any table alias.
 const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, execution_revision, state_sequence, last_probe_error_reason, last_probe_error_at, last_probe_error_job_id, " +
@@ -596,15 +616,10 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 			return domain.Monitor{}, fmt.Errorf("%w: %q is stored, %q was submitted", ErrMonitorSlugImmutable, stored, m.Slug)
 		}
 	}
-	updated, err := updateMonitorTxPrepared(ctx, tx, s, m, preserveInline)
+	updated, err := updateMonitorTxPreparedWithRefs(ctx, tx, s, m, preserveInline, bindings)
 	if err != nil {
 		return domain.Monitor{}, err
 	}
-	if err := replaceMonitorSecretRefsTx(ctx, tx, m.ID, m.ProjectID, bindings); err != nil {
-		return domain.Monitor{}, err
-	}
-	// The epoch bump lives inside updateMonitorTxPrepared, so every caller of the shared
-	// write contract gets it — not just this one.
 	if err := tx.Commit(ctx); err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: commit update monitor: %w", err)
 	}
@@ -612,10 +627,21 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 }
 
 // updateMonitorTx is the shared config-write contract (D-0142): it bumps execution_revision,
-// applies the freshness-watermark / push re-arm rules, and returns the updated row. Both the
-// user path (UpdateMonitor, after its ownership guard) and the file-apply path (which owns
-// the row and must NOT be blocked by the guard) call it inside their own transaction.
-func updateMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor) (domain.Monitor, error) {
+// applies the freshness-watermark / push re-arm rules, normalizes the monitor's credential
+// references, opens evaluation epochs, and returns the updated row. Both the user path
+// (UpdateMonitor, after its ownership guard) and the file-apply path (which owns the row and
+// must NOT be blocked by the guard) call it inside their own transaction.
+//
+// The ORDER is the contract, and it is here so no caller can get it wrong: row, then refs,
+// then epochs.
+//
+// An earlier attempt put the epoch bump inside the row-write helper. That is one statement
+// too early: every caller replaces `monitor_secret_refs` AFTER the row is written, and the
+// epoch snapshot reads credential generations from exactly those refs. Changing a monitor's
+// `*_ref` therefore produced an epoch describing the OLD credential identity while execution
+// already used the new one — the two axes disagreeing about the same write, which is the
+// failure the epoch axis exists to prevent. Moving the defect one level down is not fixing it.
+func updateMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor, bindings map[string]string) (domain.Monitor, error) {
 	preserveInline := false
 	if domain.CredentialedType(m.Type) {
 		prepared, preserve, err := prepareCredentialUpdate(m.Type, m.Config)
@@ -625,7 +651,35 @@ func updateMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor)
 		m.Config = prepared
 		preserveInline = preserve
 	}
-	return updateMonitorTxPrepared(ctx, tx, s, m, preserveInline)
+	updated, err := updateMonitorTxPrepared(ctx, tx, s, m, preserveInline)
+	if err != nil {
+		return domain.Monitor{}, err
+	}
+	if err := replaceMonitorSecretRefsTx(ctx, tx, updated.ID, updated.ProjectID, bindings); err != nil {
+		return domain.Monitor{}, err
+	}
+	if err := s.BumpEpochsForMonitor(ctx, tx, updated.ProjectID, updated.ID); err != nil {
+		return domain.Monitor{}, err
+	}
+	return updated, nil
+}
+
+// updateMonitorTxPreparedWithRefs is updateMonitorTx for a caller that has already prepared
+// the credential config. Same sequence, same reason: row, refs, epochs.
+func updateMonitorTxPreparedWithRefs(
+	ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor, preserveInline bool, bindings map[string]string,
+) (domain.Monitor, error) {
+	updated, err := updateMonitorTxPrepared(ctx, tx, s, m, preserveInline)
+	if err != nil {
+		return domain.Monitor{}, err
+	}
+	if err := replaceMonitorSecretRefsTx(ctx, tx, updated.ID, updated.ProjectID, bindings); err != nil {
+		return domain.Monitor{}, err
+	}
+	if err := s.BumpEpochsForMonitor(ctx, tx, updated.ProjectID, updated.ID); err != nil {
+		return domain.Monitor{}, err
+	}
+	return updated, nil
 }
 
 func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor, preserveInline bool) (domain.Monitor, error) {
@@ -673,20 +727,6 @@ func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.
 	}
 	if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: update monitor: %w", err)
-	}
-	// Evaluation epochs for every service whose SLI declares this monitor, in THIS
-	// transaction. The epoch and the write it describes have to become visible together:
-	// snapshotting later would leave an interval in which concurrent ingest is attributed to
-	// an epoch that does not yet describe the monitor it measured. Services that read the
-	// same inputs as before get nothing — the snapshot-hash no-op rule lives here, and only
-	// here (FR-021 §6.2).
-	//
-	// It belongs on the SHARED contract, not on the API handler above it. Sitting one level
-	// up, it covered UpdateMonitor alone, so every file-provider apply — target, condition,
-	// region and enabled changes included — advanced execution semantics with no epoch at
-	// all, and the declared linearization point held for exactly one of its callers.
-	if err := s.BumpEpochsForMonitor(ctx, tx, updated.ProjectID, updated.ID); err != nil {
-		return domain.Monitor{}, err
 	}
 	return updated, nil
 }
@@ -1334,6 +1374,29 @@ func (s *Store) retireMonitorFromServicesTx(ctx context.Context, tx pgx.Tx, proj
 	serviceIDs, err := collectIDs(rows)
 	if err != nil {
 		return err
+	}
+
+	// §15.1, the UI→file cell. A system-authored revision is permitted only when the mutating
+	// authority may also mutate every affected service. This is a UI delete, so a file-owned
+	// declaration is out of its reach: the reference has to leave the bundle first.
+	//
+	// The first implementation checked no ownership at all and rewrote file-owned
+	// declarations with a system revision — a UI action forcing a change to a resource the
+	// UI does not own, which is the whole thing the matrix exists to prevent. Its test only
+	// ever built a UI-owned service, so the matrix was never exercised.
+	if len(serviceIDs) > 0 {
+		var owner string
+		err := tx.QueryRow(ctx,
+			`SELECT provider_id FROM managed_services
+			  WHERE service_id = ANY($1) ORDER BY service_id LIMIT 1`, serviceIDs).Scan(&owner)
+		switch {
+		case noRows(err):
+			// Every affected service is UI-owned: the delete may proceed.
+		case err != nil:
+			return fmt.Errorf("store: check service ownership: %w", err)
+		default:
+			return fmt.Errorf("%w: a service owned by %q declares this monitor", ErrServiceManagedByFile, owner)
+		}
 	}
 
 	for _, serviceID := range serviceIDs {

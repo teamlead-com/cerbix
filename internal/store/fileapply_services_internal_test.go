@@ -563,3 +563,188 @@ func TestBundleRefusesAnUnknownOwner(t *testing.T) {
 		t.Fatalf("got %v, want ErrServiceOwnerUnknown", err)
 	}
 }
+
+// §15.1, the UI→file cell: a UI delete may not rewrite a file-owned declaration.
+//
+// iter-0125's implementation checked no ownership and authored a system revision for EVERY
+// referencing service — a UI action forcing a change to a resource the UI does not own. Its
+// test built only a UI-owned service, so the matrix was never exercised.
+func TestDeletingAMonitorDeclaredByAFileOwnedServiceIsRefused(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	applyServiceBundle(t, st, ctx, svcBundle)
+
+	// A UI-owned monitor, declared into the FILE-owned service by a UI declaration.
+	ui, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: projID, Name: "ui-extra", Type: domain.MonitorTCP,
+		Target: "localhost:1", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("ui monitor: %v", err)
+	}
+	var svcID, httpID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM services WHERE project_id=$1 AND slug='checkout'`, projID).Scan(&svcID); err != nil {
+		t.Fatalf("service: %v", err)
+	}
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM monitors WHERE project_id=$1 AND slug='checkout-http'`, projID).Scan(&httpID); err != nil {
+		t.Fatalf("monitor: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO service_member_refs (service_id, project_id, monitor_id, role) VALUES ($1,$2,$3,'context')`,
+		svcID, projID, ui.ID); err != nil {
+		t.Fatalf("reference the ui monitor from the file-owned service: %v", err)
+	}
+
+	if err := st.DeleteMonitor(ctx, ui.ID); !errors.Is(err, ErrServiceManagedByFile) {
+		t.Fatalf("got %v, want ErrServiceManagedByFile — a UI delete rewrote a file-owned declaration", err)
+	}
+	// …and the monitor survives: the refusal is not a partial delete.
+	if _, err := st.GetMonitor(ctx, ui.ID); err != nil {
+		t.Errorf("the monitor was removed by a refused delete: %v", err)
+	}
+}
+
+// §10.9: an elapsed or archived window is retained for at least the fact horizon, and ONLY an
+// annul removes its span. Deleting a monitor used to be rejected outright, which hid that
+// `maintenance_windows.monitor_id` cascaded — making the delete SUCCEED is what exposed it.
+func TestDeletingAMonitorKeepsItsMaintenanceProvenance(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: projID, Name: "doomed", Type: domain.MonitorTCP,
+		Target: "localhost:1", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("monitor: %v", err)
+	}
+	past := time.Now().UTC().Add(-2 * time.Hour)
+	w, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{
+		ProjectID: projID, MonitorID: mon.ID,
+		StartsAt: past, EndsAt: past.Add(time.Hour), Reason: "elapsed",
+	})
+	if err != nil {
+		t.Fatalf("window: %v", err)
+	}
+
+	if err := st.DeleteMonitor(ctx, mon.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	var kept int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM maintenance_windows WHERE id=$1`, w.ID).Scan(&kept); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if kept != 1 {
+		t.Fatal("the window vanished with the monitor; the next recompute would silently rewrite sealed history without the exclusion")
+	}
+	// It keeps its SCOPED identity: a window that lost its monitor is not a project-wide one.
+	var scoped *string
+	if err := st.pool.QueryRow(ctx, `SELECT monitor_id::text FROM maintenance_windows WHERE id=$1`, w.ID).Scan(&scoped); err != nil {
+		t.Fatalf("read scope: %v", err)
+	}
+	if scoped == nil || *scoped != mon.ID {
+		t.Errorf("monitor_id = %v, want the retained %s — NULL already means the whole project", scoped, mon.ID)
+	}
+}
+
+// The composite owner FK must clear the OWNER on delete, not the tenant key. iter-0125 wrote
+// a bare ON DELETE SET NULL, which Postgres applies to every referencing column — including
+// the NOT NULL project_id — so a referenced policy could not be deleted at all.
+func TestDeletingAReferencedOwnerClearsTheReferenceAndNotTheTenant(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+
+	for _, tc := range []struct {
+		what   string
+		seed   func() string
+		assign func(string) domain.Service
+		del    string
+		column string
+	}{
+		{
+			what: "escalation policy",
+			seed: func() string { return seedPolicy(t, st, ctx, projID, "pol") },
+			assign: func(id string) domain.Service {
+				return domain.Service{ProjectID: projID, Slug: "svc-esc", Name: "E", EscalationPolicyID: id}
+			},
+			del: "escalation_policies", column: "escalation_policy_id",
+		},
+		{
+			what: "on-call schedule",
+			seed: func() string { return seedSchedule(t, st, ctx, projID, "sched") },
+			assign: func(id string) domain.Service {
+				return domain.Service{ProjectID: projID, Slug: "svc-oncall", Name: "O", OncallScheduleID: id}
+			},
+			del: "oncall_schedules", column: "oncall_schedule_id",
+		},
+	} {
+		ownerID := tc.seed()
+		svc, err := st.CreateService(ctx, tc.assign(ownerID))
+		if err != nil {
+			t.Fatalf("%s: create service: %v", tc.what, err)
+		}
+		if _, err := st.pool.Exec(ctx, `DELETE FROM `+tc.del+` WHERE id=$1`, ownerID); err != nil {
+			t.Fatalf("%s: deleting a referenced owner failed: %v", tc.what, err)
+		}
+		var project string
+		var owner *string
+		if err := st.pool.QueryRow(ctx,
+			`SELECT project_id::text, `+tc.column+`::text FROM services WHERE id=$1`, svc.ID).Scan(&project, &owner); err != nil {
+			t.Fatalf("%s: read back: %v", tc.what, err)
+		}
+		if owner != nil {
+			t.Errorf("%s: the reference survived the delete", tc.what)
+		}
+		if project != projID {
+			t.Errorf("%s: project_id became %q — the tenant key was cleared instead of the owner", tc.what, project)
+		}
+	}
+}
+
+func seedSchedule(t *testing.T, st *Store, ctx context.Context, projectID, name string) string {
+	t.Helper()
+	var id string
+	if err := st.pool.QueryRow(ctx,
+		`INSERT INTO oncall_schedules (project_id, name, shift_seconds, anchor_at)
+		 VALUES ($1,$2,86400,now()) RETURNING id::text`,
+		projectID, name).Scan(&id); err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+	return id
+}
+
+// The per-project cap has ONE owner, used by both writers. iter-0125 checked it on the UI path
+// only, so a bundle created services without bound while the AC claimed otherwise.
+func TestTheProjectServiceCapBindsTheBundleToo(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	st.WithServiceLimits(ServiceLimits{ServicesPerProject: 1})
+
+	applyServiceBundle(t, st, ctx, svcBundle) // one service — at the cap
+
+	two := strings.Replace(svcBundle, "services:\n", "services:\n  cart:\n    name: Cart\n    monitors: [checkout-db]\n    sli: [checkout-db]\n", 1)
+	if err := applyServiceBundleErr(t, st, ctx, two); !errors.Is(err, ErrTooManyServices) {
+		t.Fatalf("got %v, want ErrTooManyServices — a bundle crossed the per-project cap", err)
+	}
+	if _, err := st.CreateService(ctx, domain.Service{ProjectID: projID, Slug: "ui-one", Name: "UI"}); !errors.Is(err, ErrTooManyServices) {
+		t.Errorf("the UI path disagrees with the bundle about the same cap: %v", err)
+	}
+}
+
+// A configuration may not raise a cap past what the storage and reduction costs were sized for.
+func TestServiceLimitsClampToTheHardMaxima(t *testing.T) {
+	got := clampServiceLimits(ServiceLimits{ServicesPerProject: 9999, MembersPerRevision: 9999, ServicesPerMonitor: 9999})
+	if got.ServicesPerProject != HardMaxServicesPerProject ||
+		got.MembersPerRevision != HardMaxMembersPerRevision ||
+		got.ServicesPerMonitor != HardMaxServicesPerMonitor {
+		t.Fatalf("clamped to %+v, want the hard maxima", got)
+	}
+	def := clampServiceLimits(ServiceLimits{})
+	if def.ServicesPerProject != DefaultMaxServicesPerProject ||
+		def.MembersPerRevision != DefaultMaxMembersPerRevision ||
+		def.ServicesPerMonitor != DefaultMaxServicesPerMonitor {
+		t.Fatalf("defaults resolved to %+v", def)
+	}
+}

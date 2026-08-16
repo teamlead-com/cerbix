@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -36,6 +37,60 @@ import (
 // already sealed.
 //
 // It runs inside the ingesting transaction, so the mark and the heartbeat commit together.
+// noteHeartbeatsForServices marks a WHOLE BATCH, taking the (service_id, bucket_start) keys in
+// one global order.
+//
+// Sorting the heartbeats by (monitor_id, ts) and marking one at a time is NOT the same thing,
+// and it deadlocks: with monitors A<B<C where A and C belong to service 2 and B to service 1,
+// a batch [A,B] takes service 2 then waits on service 1 while a batch [B,C] takes service 1
+// then waits on service 2. The mandatory order in §15.4 is over the KEYS actually locked, so
+// they have to be resolved first and sorted as keys — per-heartbeat sorting can only order
+// what one heartbeat happens to touch.
+func (s *Store) noteHeartbeatsForServices(ctx context.Context, tx pgx.Tx, beats []domain.Heartbeat) error {
+	type key struct {
+		serviceID, projectID, monitorID string
+		bucket                          time.Time
+		ts                              time.Time
+	}
+	var keys []key
+	for _, hb := range beats {
+		if hb.MonitorID == "" || hb.Ts.IsZero() {
+			continue
+		}
+		var bucketStart time.Time
+		if err := tx.QueryRow(ctx,
+			`SELECT date_bin('1 minute', $1::timestamptz, 'epoch'::timestamptz)`, hb.Ts).Scan(&bucketStart); err != nil {
+			return fmt.Errorf("store: resolve heartbeat bucket: %w", err)
+		}
+		affected, err := servicesDeclaringMonitorAt(ctx, tx, hb.MonitorID, bucketStart)
+		if err != nil {
+			return err
+		}
+		if len(affected) > s.serviceLimits().ServicesPerMonitor {
+			return fmt.Errorf("store: monitor %s was a reliability input for %d services at %s, above the %d cap",
+				hb.MonitorID, len(affected), bucketStart, s.serviceLimits().ServicesPerMonitor)
+		}
+		for _, a := range affected {
+			keys = append(keys, key{a.serviceID, a.projectID, hb.MonitorID, bucketStart, hb.Ts})
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].serviceID != keys[j].serviceID {
+			return keys[i].serviceID < keys[j].serviceID
+		}
+		return keys[i].bucket.Before(keys[j].bucket)
+	})
+	for _, k := range keys {
+		if err := markBucket(ctx, tx, k.projectID, k.serviceID, k.monitorID, k.bucket, k.ts); err != nil {
+			return err
+		}
+		if err := repairIfBehindWatermark(ctx, tx, k.projectID, k.serviceID, k.bucket); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) noteHeartbeatForServices(ctx context.Context, tx pgx.Tx, monitorID string, ts time.Time) error {
 	if monitorID == "" || ts.IsZero() {
 		return nil
@@ -53,9 +108,9 @@ func (s *Store) noteHeartbeatForServices(ctx context.Context, tx pgx.Tx, monitor
 	if len(affected) == 0 {
 		return nil
 	}
-	if len(affected) > MaxServicesPerMonitor {
+	if len(affected) > s.serviceLimits().ServicesPerMonitor {
 		return fmt.Errorf("store: monitor %s was a reliability input for %d services at %s, above the %d cap",
-			monitorID, len(affected), bucketStart, MaxServicesPerMonitor)
+			monitorID, len(affected), bucketStart, s.serviceLimits().ServicesPerMonitor)
 	}
 
 	// Ascending (service_id, bucket_start) — §15.4. A historical batch touches many of these

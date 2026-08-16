@@ -613,6 +613,11 @@ func runServe(args []string) int {
 			}
 		}
 		st.WithSecretsEnabled(cfg.Secrets.Enabled)
+		st.WithServiceLimits(store.ServiceLimits{
+			ServicesPerProject: cfg.Services.MaxServicesPerProject,
+			MembersPerRevision: cfg.Services.MaxMembersPerRevision,
+			ServicesPerMonitor: cfg.Services.MaxServicesPerMonitor,
+		})
 		if owned.materializing && cfg.Secrets.EnvelopeEnforced() {
 			st.WithCredentialKeyrings(credentialRings)
 		}

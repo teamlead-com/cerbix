@@ -89,7 +89,7 @@ func (s *Store) applyBundleServicesTx(
 
 		switch {
 		case existing == "":
-			id, err := insertServiceTx(ctx, tx, projID, svc)
+			id, err := s.insertServiceTx(ctx, tx, projID, svc)
 			if err != nil {
 				return counts, err
 			}
@@ -253,7 +253,13 @@ func lookupServiceBySlug(ctx context.Context, tx pgx.Tx, projID, slug string) (s
 	return id, nil
 }
 
-func insertServiceTx(ctx context.Context, tx pgx.Tx, projID string, svc fileprovider.DesiredService) (string, error) {
+func (s *Store) insertServiceTx(ctx context.Context, tx pgx.Tx, projID string, svc fileprovider.DesiredService) (string, error) {
+	// The SAME cap owner the UI create uses. A bundle is a writer like any other, and the
+	// first implementation counted nothing here at all — so the per-project bound held for
+	// one of the two paths that can cross it.
+	if err := s.assertProjectServiceCapTx(ctx, tx, projID, 1); err != nil {
+		return "", err
+	}
 	escalation, oncall, err := resolveServiceOwnerTx(ctx, tx, projID, svc)
 	if err != nil {
 		return "", err

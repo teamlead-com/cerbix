@@ -280,11 +280,8 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 			m := desired.Monitors[e.UID].Monitor
 			m.ID, m.ProjectID = id, projID
 			bindings := bindingsByUID[e.UID]
-			if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
+			if _, uerr := updateMonitorTx(ctx, tx, s, m, bindings); uerr != nil {
 				return ApplyResult{}, uerr
-			}
-			if err := replaceMonitorSecretRefsTx(ctx, tx, id, projID, bindings); err != nil {
-				return ApplyResult{}, err
 			}
 			if _, err := tx.Exec(ctx,
 				`UPDATE managed_monitors SET spec_hash=$2, source_path=$3, generation=$4, orphaned_at=NULL, applied_at=$5
@@ -306,11 +303,8 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 				m := desired.Monitors[e.UID].Monitor
 				m.ID, m.ProjectID = id, projID
 				bindings := bindingsByUID[e.UID]
-				if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
+				if _, uerr := updateMonitorTx(ctx, tx, s, m, bindings); uerr != nil {
 					return ApplyResult{}, uerr
-				}
-				if err := replaceMonitorSecretRefsTx(ctx, tx, id, projID, bindings); err != nil {
-					return ApplyResult{}, err
 				}
 				if _, err := tx.Exec(ctx,
 					`UPDATE managed_monitors SET spec_hash=$2, source_path=$3, generation=$4, orphaned_at=NULL, applied_at=$5 WHERE monitor_id=$1`,
@@ -395,7 +389,13 @@ func (s *Store) applyBundleTx(ctx context.Context, tx pgx.Tx, providerID string,
 				return ApplyResult{}, gerr
 			}
 			m.Enabled = false
-			if _, uerr := updateMonitorTx(ctx, tx, s, m); uerr != nil {
+			// A grace-disable changes no credential, so the stored references are carried
+			// forward unchanged rather than rewritten to empty.
+			stored, serr := monitorSecretRefsTx(ctx, tx, m.ID)
+			if serr != nil {
+				return ApplyResult{}, serr
+			}
+			if _, uerr := updateMonitorTx(ctx, tx, s, m, stored); uerr != nil {
 				return ApplyResult{}, uerr
 			}
 			execChanged, stateChanged = true, true

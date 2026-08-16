@@ -307,7 +307,7 @@ func TestExceedingTheFanOutCapIsRefusedAtTheDeclarationNotAtIngest(t *testing.T)
 	f := seedDeclaration(t, st, ctx)
 
 	// Fill the cap with services that all declare the same monitor as their SLI.
-	for i := 0; i < MaxServicesPerMonitor; i++ {
+	for i := 0; i < DefaultMaxServicesPerMonitor; i++ {
 		svc, err := st.CreateService(ctx, domain.Service{
 			ProjectID: f.projectID, Slug: fmt.Sprintf("fanout-%d", i), Name: "Fan-out",
 		})
@@ -346,7 +346,7 @@ func TestAnOversizedDeclarationIsRefused(t *testing.T) {
 	st, ctx := declStore(t)
 	f := seedDeclaration(t, st, ctx)
 
-	huge := make([]string, MaxMembersPerRevision+1)
+	huge := make([]string, DefaultMaxMembersPerRevision+1)
 	for i := range huge {
 		huge[i] = f.http
 	}

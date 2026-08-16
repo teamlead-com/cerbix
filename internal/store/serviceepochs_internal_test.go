@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/secret"
 )
 
 func epochCount(t *testing.T, st *Store, ctx context.Context, serviceID string) int {
@@ -330,7 +333,7 @@ func TestAFileProviderApplyOpensAnEpochJustLikeTheAPIDoes(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	if _, err := updateMonitorTx(ctx, tx, st, m); err != nil {
+	if _, err := updateMonitorTx(ctx, tx, st, m, nil); err != nil {
 		t.Fatalf("shared write contract: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -340,4 +343,141 @@ func TestAFileProviderApplyOpensAnEpochJustLikeTheAPIDoes(t *testing.T) {
 	if after := epochCount(t, st, ctx, f.serviceID); after == before {
 		t.Fatal("a write through the shared contract created no epoch; the linearization point held for one caller only")
 	}
+}
+
+// The epoch has to describe the credential the monitor will actually USE.
+//
+// iter-0125 moved the bump into the row-write helper, which runs one statement too early:
+// every caller replaces `monitor_secret_refs` after the row is written, and the snapshot reads
+// credential generations from exactly those refs. Changing a `*_ref` therefore produced an
+// epoch built from the OLD identity while execution already used the new one. The earlier
+// regression missed it because it varied `interval` — a field that does not travel through
+// the refs at all.
+func TestChangingACredentialRefOpensAnEpochDescribingTheNewCredential(t *testing.T) {
+	st, ctx := declStore(t)
+	// The inventory is fail-closed and refuses to operate without a key.
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := secret.New(key)
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	st.WithCipher(cipher)
+	st.WithSecretsEnabled(true)
+
+	f := seedDeclaration(t, st, ctx)
+
+	// Two inventory secrets and a credentialed SLI member pointing at the first.
+	secretB := seedSecret(t, st, ctx, f.projectID, "db-pass-b")
+	_ = seedSecret(t, st, ctx, f.projectID, "db-pass-a")
+
+	mon, cerr := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: f.projectID, Name: "pg", Type: domain.MonitorPostgres,
+		Target: "db.internal:5432", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
+		Config: map[string]string{"username": "app", "database": "app", "password_ref": "db-pass-a"},
+	})
+	if cerr != nil {
+		t.Fatalf("create credentialed monitor: %v", cerr)
+	}
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{mon.ID}, SLI: []string{mon.ID},
+	}, 0, DeclarationOptions{CreatedBy: "op"}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+
+	refsBefore := secretRefsOf(t, st, ctx, mon.ID)
+	_, _, hashBefore := currentEpoch(t, st, ctx, f.serviceID)
+
+	// Point the same slot at secret B.
+	mon.Config = map[string]string{"username": "app", "database": "app", "password_ref": "db-pass-b"}
+	if _, err := st.UpdateMonitor(ctx, mon); err != nil {
+		t.Fatalf("repoint credential: %v", err)
+	}
+
+	refsAfter := secretRefsOf(t, st, ctx, mon.ID)
+	if refsAfter["password_ref"] == refsBefore["password_ref"] {
+		t.Fatalf("the reference did not move: %v", refsAfter)
+	}
+	if refsAfter["password_ref"] != secretB {
+		t.Fatalf("the reference points at %s, want secret B %s", refsAfter["password_ref"], secretB)
+	}
+	_, _, hashAfter := currentEpoch(t, st, ctx, f.serviceID)
+	if hashAfter == hashBefore {
+		t.Fatal("the credential identity changed and the epoch snapshot did not; the epoch describes a credential execution no longer uses")
+	}
+
+	// Hash inequality alone proves nothing here: the ref NAME travels into the snapshot
+	// straight from Config, so the hash moves even when the bump ran before the refs were
+	// replaced. What distinguishes the two orders is the GENERATION, which is read from the
+	// refs table — so that is what this asserts.
+	wantGen := secretGeneration(t, st, ctx, secretB)
+	if got := epochCredentialGeneration(t, st, ctx, f.serviceID, mon.ID, "password_ref"); got != wantGen {
+		t.Fatalf("epoch carries credential generation %q, want secret B's %q — the snapshot was taken before the reference moved",
+			got, wantGen)
+	}
+}
+
+// epochCredentialGeneration digs the snapshotted generation for one credential slot out of the
+// epoch in force.
+func epochCredentialGeneration(t *testing.T, st *Store, ctx context.Context, serviceID, monitorID, slot string) string {
+	t.Helper()
+	var raw []byte
+	if err := st.pool.QueryRow(ctx,
+		`SELECT snapshot FROM service_evaluation_epochs
+		  WHERE service_id=$1 AND state='effective'
+		  ORDER BY effective_at DESC, epoch_seq DESC LIMIT 1`, serviceID).Scan(&raw); err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	var members []domain.EpochMember
+	if err := json.Unmarshal(raw, &members); err != nil {
+		t.Fatalf("decode snapshot: %v (%s)", err, raw)
+	}
+	for _, m := range members {
+		if m.MonitorID == monitorID {
+			return m.Semantics.CredentialGenerations[slot]
+		}
+	}
+	t.Fatalf("monitor %s is not in the snapshot", monitorID)
+	return ""
+}
+
+func secretGeneration(t *testing.T, st *Store, ctx context.Context, secretID string) string {
+	t.Helper()
+	var gen time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT COALESCE(rotated_at, created_at) FROM project_secrets WHERE id=$1`, secretID).Scan(&gen); err != nil {
+		t.Fatalf("read secret generation: %v", err)
+	}
+	return gen.UTC().Format(time.RFC3339Nano)
+}
+
+// seedSecret puts a value in the project inventory and returns its id.
+func seedSecret(t *testing.T, st *Store, ctx context.Context, projectID, name string) string {
+	t.Helper()
+	sec, err := st.CreateProjectSecret(ctx, SecretActor{}, projectID, name, "value-of-"+name)
+	if err != nil {
+		t.Fatalf("create secret %s: %v", name, err)
+	}
+	return sec.ID
+}
+
+func secretRefsOf(t *testing.T, st *Store, ctx context.Context, monitorID string) map[string]string {
+	t.Helper()
+	rows, err := st.pool.Query(ctx,
+		`SELECT setting_key, secret_id::text FROM monitor_secret_refs WHERE monitor_id=$1`, monitorID)
+	if err != nil {
+		t.Fatalf("read refs: %v", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			t.Fatalf("scan ref: %v", err)
+		}
+		out[k] = v
+	}
+	return out
 }

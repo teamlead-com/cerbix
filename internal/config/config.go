@@ -32,6 +32,7 @@ type Config struct {
 	Heartbeats         HeartbeatsConfig         `yaml:"heartbeats"`
 	Security           SecurityConfig           `yaml:"security"`
 	Secrets            SecretsConfig            `yaml:"secrets"`
+	Services           ServicesConfig           `yaml:"services"`
 	Mail               MailConfig               `yaml:"mail"`
 	Pull               PullConfig               `yaml:"pull"`
 	Providers          ProvidersConfig          `yaml:"providers"`
@@ -172,6 +173,22 @@ type NotificationEgressConfig struct {
 type ResultConfig struct {
 	AllowedSkew  Duration `yaml:"allowed_skew"`
 	RevisionMode string   `yaml:"revision_mode"` // enforce | observe
+}
+
+// ServicesConfig bounds service fan-out (func-service-reliability §10.10).
+//
+// Each value has a default and a HARD MAXIMUM the store clamps to. The maximum is what the
+// storage and reduction costs were sized against, so it is not a policy an operator gets to
+// raise; a configuration asking for more is enforced at the maximum rather than refused,
+// because failing to start over a bound is a worse outcome than quietly holding it.
+type ServicesConfig struct {
+	// MaxServicesPerProject caps declaration growth (default 50, hard max 200).
+	MaxServicesPerProject int `yaml:"max_services_per_project"`
+	// MaxMembersPerRevision caps aggregation width (default 50, hard max 200).
+	MaxMembersPerRevision int `yaml:"max_members_per_revision"`
+	// MaxServicesPerMonitor caps epoch and ingest fan-out from one monitor write
+	// (default 10, hard max 25).
+	MaxServicesPerMonitor int `yaml:"max_services_per_monitor"`
 }
 
 // HeartbeatsConfig controls raw heartbeat retention. RetentionDays bounds how many

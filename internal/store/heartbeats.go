@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -156,16 +155,8 @@ func (s *Store) RecordHistoricalResults(ctx context.Context, hbs []domain.Heartb
 	//
 	// Sorted so a batch takes the (service_id, bucket_start) keys in one direction; two
 	// overlapping backfills taking them in opposite orders deadlock.
-	sort.Slice(landed, func(i, j int) bool {
-		if landed[i].MonitorID != landed[j].MonitorID {
-			return landed[i].MonitorID < landed[j].MonitorID
-		}
-		return landed[i].Ts.Before(landed[j].Ts)
-	})
-	for _, hb := range landed {
-		if err := s.noteHeartbeatForServices(ctx, tx, hb.MonitorID, hb.Ts); err != nil {
-			return 0, skipped, err
-		}
+	if err := s.noteHeartbeatsForServices(ctx, tx, landed); err != nil {
+		return 0, skipped, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, skipped, fmt.Errorf("store: commit backfill: %w", err)

@@ -81,13 +81,8 @@ func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.S
 		return domain.Service{}, err
 	}
 
-	var existing int
-	if err := tx.QueryRow(ctx,
-		`SELECT count(*) FROM services WHERE project_id = $1`, svc.ProjectID).Scan(&existing); err != nil {
-		return domain.Service{}, fmt.Errorf("store: count services: %w", err)
-	}
-	if existing >= MaxServicesPerProject {
-		return domain.Service{}, fmt.Errorf("%w: %d, cap %d", ErrTooManyServices, existing, MaxServicesPerProject)
+	if err := s.assertProjectServiceCapTx(ctx, tx, svc.ProjectID, 1); err != nil {
+		return domain.Service{}, err
 	}
 	row := tx.QueryRow(ctx,
 		`INSERT INTO services (project_id, slug, name, description, escalation_policy_id, oncall_schedule_id)
@@ -340,7 +335,7 @@ func (s *Store) putServiceDeclarationTx(
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, ErrRevisionConflict
 	}
 
-	if err := enforceDeclarationBoundsTx(ctx, tx, projectID, serviceID, monitors, sli); err != nil {
+	if err := s.enforceDeclarationBoundsTx(ctx, tx, projectID, serviceID, monitors, sli); err != nil {
 		return domain.DefinitionRevision{}, domain.EvaluationEpoch{}, err
 	}
 
@@ -442,13 +437,77 @@ func (s *Store) putServiceDeclarationTx(
 	return rev, epoch, nil
 }
 
-// MaxMembersPerRevision caps one declaration's evaluation context. The epoch snapshots every
-// member, and the reducer's breakpoint set grows with them; an unbounded list turns one write
-// into an unbounded snapshot and one bucket into an unbounded reduction.
-const MaxMembersPerRevision = 200
+// Fan-out limits (§10.10). Each has a DEFAULT an installation runs with and a HARD MAX it may
+// not be configured past — the hard max is what the storage and reduction costs were sized
+// against, so raising it is not a policy choice an operator gets to make.
+//
+// iter-0125 shipped `MaxServicesPerProject = 500`, which is not a number in the spec at all:
+// the hard max is 200. It was also checked on one of the two writers, so a bundle created
+// services without bound while the AC claimed the cap was refused at the write.
+const (
+	DefaultMaxServicesPerProject = 50
+	HardMaxServicesPerProject    = 200
 
-// MaxServicesPerProject caps how many services one project may declare.
-const MaxServicesPerProject = 500
+	// DefaultMaxMembersPerRevision caps one declaration's evaluation context. The epoch
+	// snapshots every member and the reducer's breakpoint set grows with them, so an
+	// unbounded list turns one write into an unbounded snapshot and one bucket into an
+	// unbounded reduction.
+	DefaultMaxMembersPerRevision = 50
+	HardMaxMembersPerRevision    = 200
+
+	DefaultMaxServicesPerMonitor = 10
+	HardMaxServicesPerMonitor    = 25
+)
+
+// ServiceLimits is the resolved, clamped policy this store enforces.
+type ServiceLimits struct {
+	ServicesPerProject int
+	MembersPerRevision int
+	ServicesPerMonitor int
+}
+
+// clampServiceLimits fills zeros with the defaults and refuses to exceed the hard maxima. A
+// configuration that asks for more gets the maximum rather than an error: the cap exists to
+// protect the installation, and failing to start over it would be a worse outcome than
+// quietly enforcing the bound the code was sized for.
+func clampServiceLimits(in ServiceLimits) ServiceLimits {
+	pick := func(v, def, hard int) int {
+		if v <= 0 {
+			v = def
+		}
+		if v > hard {
+			v = hard
+		}
+		return v
+	}
+	return ServiceLimits{
+		ServicesPerProject: pick(in.ServicesPerProject, DefaultMaxServicesPerProject, HardMaxServicesPerProject),
+		MembersPerRevision: pick(in.MembersPerRevision, DefaultMaxMembersPerRevision, HardMaxMembersPerRevision),
+		ServicesPerMonitor: pick(in.ServicesPerMonitor, DefaultMaxServicesPerMonitor, HardMaxServicesPerMonitor),
+	}
+}
+
+// serviceLimits resolves what this store enforces right now.
+func (s *Store) serviceLimits() ServiceLimits { return clampServiceLimits(s.svcLimits) }
+
+// assertProjectServiceCapTx is the ONE owner of the per-project cap, shared by the UI create
+// and the file-provider apply. Two writers with one counting them is how the cap became a
+// claim rather than a rule.
+//
+// The caller holds the project's service-membership advisory lock, which is what makes this a
+// serialized check rather than a check-then-act (§10.10).
+func (s *Store) assertProjectServiceCapTx(ctx context.Context, tx pgx.Tx, projectID string, adding int) error {
+	limit := s.serviceLimits().ServicesPerProject
+	var existing int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM services WHERE project_id = $1`, projectID).Scan(&existing); err != nil {
+		return fmt.Errorf("store: count services: %w", err)
+	}
+	if existing+adding > limit {
+		return fmt.Errorf("%w: %d + %d exceeds the cap of %d", ErrTooManyServices, existing, adding, limit)
+	}
+	return nil
+}
 
 var (
 	// ErrTooManyMembers is returned when a declaration's context exceeds the cap.
@@ -467,11 +526,12 @@ var (
 // and then broke ingest for that monitor: a service-configuration change took down core
 // monitoring, and the error surfaced nowhere near the write that caused it. A cap has to be
 // refused where it is exceeded, not enforced later by a kill switch.
-func enforceDeclarationBoundsTx(
+func (s *Store) enforceDeclarationBoundsTx(
 	ctx context.Context, tx pgx.Tx, projectID, serviceID string, monitors, sli []string,
 ) error {
-	if len(monitors) > MaxMembersPerRevision {
-		return fmt.Errorf("%w: %d declared, cap %d", ErrTooManyMembers, len(monitors), MaxMembersPerRevision)
+	limits := s.serviceLimits()
+	if len(monitors) > limits.MembersPerRevision {
+		return fmt.Errorf("%w: %d declared, cap %d", ErrTooManyMembers, len(monitors), limits.MembersPerRevision)
 	}
 	if len(sli) == 0 {
 		return nil
@@ -494,9 +554,9 @@ func enforceDeclarationBoundsTx(
 		if err := rows.Scan(&monitorID, &n); err != nil {
 			return fmt.Errorf("store: scan fan-out: %w", err)
 		}
-		if n+1 > MaxServicesPerMonitor {
+		if n+1 > limits.ServicesPerMonitor {
 			return fmt.Errorf("%w: %s would be an input for %d services, cap %d",
-				ErrMonitorInTooManyServices, monitorID, n+1, MaxServicesPerMonitor)
+				ErrMonitorInTooManyServices, monitorID, n+1, limits.ServicesPerMonitor)
 		}
 	}
 	return rows.Err()

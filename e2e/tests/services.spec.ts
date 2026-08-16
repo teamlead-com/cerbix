@@ -68,6 +68,8 @@ test.describe("services", () => {
     await page.getByTestId("service-create-slug").fill(SLUG);
     await page.getByTestId("service-create-name").fill("E2E Checkout");
     await page.getByTestId("service-create-submit").click();
+    await page.waitForURL(/\/services\/[0-9a-f-]{36}$/);
+    const svcID = page.url().split("/").pop()!;
 
     // …and it lands on the detail screen, which says so out loud rather than showing 100%.
     await expect(page.getByTestId("service-no-declaration")).toBeVisible();
@@ -103,8 +105,17 @@ test.describe("services", () => {
     await expect(row.getByTestId("service-sli-count")).toHaveText("1");
     await expect(row.getByTestId("service-context-count")).toHaveText("2");
 
-    // Nothing has been materialized, so the watermark says so instead of showing a date.
-    await expect(row.getByTestId("service-unsealed")).toBeVisible();
+    // The declaration must put the service ON the materialization path. This is the assertion
+    // whose absence let a subsystem that produced nothing in production pass every gate: the
+    // first version of this spec accepted "not materialized yet" as a resting state, when it
+    // was the only state the system could ever reach.
+    //
+    // The watermark itself is proven in Go (store.TestDeclaringAServiceMakesItMaterialize…),
+    // because sealing waits out a 60s bucket plus the late-arrival grace and a browser suite
+    // has no business sitting through that.
+    const detail = await apiGet(page, `/api/v1/projects/${projectID}/services/${svcID}`);
+    expect(detail.materialization.materialization_start,
+      "declaring reliability inputs did not start materialization").toBeTruthy();
 
     // No release-2 number leaks onto the screen. This is the invariant the whole feature is
     // for: the absence of a plausible figure nothing computed.

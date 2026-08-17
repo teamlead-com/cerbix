@@ -1469,7 +1469,10 @@ Monitor-level burn alerting already exists and pages through the same channels. 
 service burn alerts without an ownership rule would page twice for one failure — the exact
 noise this specification claims to reduce. Alert ownership (which level is the single source of
 paging semantics, and how a monitor in an SLI delegates or suppresses its own burn alert) is
-phase 5 and is deliberately unspecified here.
+phase 5, and is now specified to implementable depth in **§16** (owner decisions of 2026-08-17,
+D-0168): ownership is DECLARED at the service and defaults to OFF, a service alerts on a live
+health transition AND a sealed burn breach, the alert notifies without opening an incident, and
+member monitors' alert DELIVERIES are suppressed while their service owns paging.
 
 ## 14. Dependencies and incident correlation (phase 3)
 
@@ -2533,6 +2536,203 @@ leader work does not make a cross-project reference safe; it makes it invisible.
   background query like every other; and the cross-tenant negative tests extend to the
   direct-SQL/store layer for links and anchors, not only the API.
 
+## 16. Alerting ownership (phase 5)
+
+*Specified to implementable depth in the phase-5 spec cycle (2026-08-17); until then §13 held it
+as intent only. Decision record reserved: **D-0168**.*
+
+### 16.0 What phase 5 decides, and what it refuses to decide
+
+§13 states the problem exactly: monitor burn alerting already exists and pages through the same
+channels, so turning on service alerts without an ownership rule pages twice for one failure. The
+owner's decisions (2026-08-17) are:
+
+1. **ownership is DECLARED at the SERVICE and defaults to OFF** — nothing an installation already
+   relies on changes until someone says so;
+2. **a service alerts on TWO signals with different latencies** — a live health transition and a
+   sealed burn-rate breach;
+3. **a service alert NOTIFIES; it does not open an incident** — incidents stay monitor-anchored and
+   reach services through the §14 links;
+4. **service burn rules are the SAME `BurnRule` shape monitors already use** — one semantics owner,
+   one implementation, one familiar editor.
+
+Everything below follows from those four, and the parts that do NOT follow are named in §16.7 so a
+later phase does not have to guess what was deliberate.
+
+### 16.1 The ownership rule
+
+```
+services.owns_paging  boolean NOT NULL DEFAULT false
+```
+
+While a service `owns_paging`, every monitor in its **declared SLI** has its own alert deliveries
+SUPPRESSED. Three properties make that safe rather than merely quiet:
+
+- **Suppression is at DELIVERY, never at recording.** Heartbeats, status flips, auto-incidents,
+  outbox rows and the whole SLO history keep happening exactly as before. This is the same
+  boundary escalation flat-down, dependency `DownAncestors` and instance-wide silence already use:
+  facts always record; only delivery is muted.
+- **Suppression is VISIBLE.** Every suppressed delivery is logged, counted
+  (`cerbix_alert_suppressed_total{reason="service_delegation"}`), annotated once on the monitor's
+  open auto-incident with the existing `⏸ Suppressed:` marker naming the owning service, and shown
+  on the monitor's page as "paging delegated to «Service»". An operator must never have to infer
+  silence from its absence.
+- **Suppression is FAIL-OPEN.** A lookup error mutes nothing. A page that should not have been sent
+  is noise; a page that was owed and never sent is the failure this whole feature exists to
+  prevent, so the ambiguous case pages.
+
+**Scope: what is suppressed.** Both `monitor_transition` and `slo_burn_alert` deliveries for that
+monitor. Suppressing only burn alerts — which is the narrower reading of §13's sentence — would
+leave the double page in place for the case that actually wakes someone, because the owner chose a
+service that pages on live transitions too.
+
+**Scope: which membership.** The DECLARED `sli[]` of the current effective definition revision
+(`service_member_refs`, role `sli`), not the evaluation epoch's snapshot. Ownership is a statement
+of intent about who answers the phone; the epoch is a statement about measurement semantics, and
+using it would make a paging decision change because a monitor's interval was edited.
+
+**Scope: several services.** A monitor may be an SLI member of several services (§5). If ANY of
+them owns paging, the monitor's own alerts are suppressed: the alert has an owner, and asking
+"which one" would invent a precedence rule nobody declared. The delegation notice names all of
+them.
+
+**The one thing this rule deliberately allows.** Under `any` or `quorum` aggregation a member can
+be DOWN while the service is HEALTHY — and then nothing pages, because the operator declared that
+this member alone does not constitute an outage. That is not a lost signal; it is the declaration
+doing its job, and it is exactly why the aggregation policy exists. The monitor still turns red,
+still opens its incident and still appears in every list; what it does not do is wake someone at
+04:00 for a state its owner declared tolerable.
+
+### 16.2 Signal 1 — the live health transition
+
+A service that alerts is evaluated by the LEADER on a fixed sub-tick (`serviceAlertEvery`, 30s)
+using the SAME `reliability.StateAt` the card and the status page use. No second evaluator, and no
+second definition of what "down" means.
+
+```
+service_alert_state
+├── service_id      (PK, → services, ON DELETE CASCADE)
+├── state           healthy | degraded | down | unknown | excluded
+├── since           when the CURRENT state began
+├── streak          consecutive evaluations in this state
+├── notified_state  the state the last delivered notification announced
+└── evaluated_at    the last evaluation instant (so a stalled leader is visible as a stale row)
+```
+
+**Which states page** is declared, not assumed:
+
+```
+services.page_on          text[]  DEFAULT '{down}'      -- subset of {down, degraded}
+services.page_on_unknown  boolean DEFAULT false
+services.confirm_evaluations int  DEFAULT 2             -- 1..10
+```
+
+- `down` pages by default. `degraded` is opt-in, because a service that declared a degraded band
+  usually declared it precisely to distinguish "worse" from "page me".
+- **UNKNOWN NEVER pages as DOWN.** It is its own state with its own opt-in. An unknown service is
+  one cerbix cannot see; announcing that as an outage would be the confident falsehood this whole
+  specification exists to remove, and staying silent forever about a service nobody can measure is
+  the opposite failure — hence the explicit switch, off by default and surfaced in the UI as
+  "unknown does not page".
+- **EXCLUDED never pages.** A declared maintenance window is a declared silence.
+- A transition notifies only after `confirm_evaluations` consecutive evaluations in the new state.
+  The cadence is fixed and stated, so the worst-case delay is `confirm_evaluations × 30s` and the
+  UI prints it rather than leaving the operator to multiply.
+
+**Edges only.** A notification is emitted when `state != notified_state` after confirmation, and
+`notified_state` is then updated in the SAME transaction as the outbox row — the phase-1 outbox
+discipline, so a delivered alert can never be forgotten and a forgotten one can never be delivered
+twice.
+
+**Recovery notifies too**, on the same edge rule: a service that paged must say when it stopped.
+
+### 16.3 Signal 2 — the sealed burn-rate breach
+
+`sla_targets` already carries `service_id` as a third exclusive scope with `burn_alert_enabled`
+REJECTED at both layers "until phase 5" (§11.3). Phase 5 lifts exactly that rejection and nothing
+else about the table.
+
+- The rules are `domain.BurnRule` values — long window, short window, threshold, severity — the
+  same shape, the same editor and the same defaults the monitor path already uses.
+- The BURN NUMBER comes from the phase-2 report machinery (`reportBurn`, over
+  `[sealed_through − w, sealed_through)`) and the §11.2/§11.3 withholding decision
+  (`decideServiceWindow`). There is no second computation of a service's burn rate anywhere.
+- **Insufficient sealed coverage neither fires NOR resolves.** A window with no sealed time returns
+  `insufficient_sealed_coverage`; the rule keeps its previous firing state and the reason is
+  recorded. Treating absent data as "burn = 0" would silently resolve a firing alert, which is the
+  single most dangerous mistake available in this file.
+- The signal is inherently LATE by construction — it trails `sealed_through` — and the UI says so
+  next to the switch. It is a budget signal, not an outage page; the live signal above is the
+  outage page. An installation that enables only the burn signal has NOT delegated outage paging,
+  and the delegation notice says which signals the service actually covers.
+
+### 16.4 Delivery and routing
+
+A service alert is a new outbox topic `service_alert` (whitelist migration + a worker case + the
+three fakes, per the §22 change-pattern note). It routes through the service's OWN owners —
+`services.escalation_policy_id` and `services.oncall_schedule_id`, which have existed since
+migration 00064 and have had no consumer until now — falling back to the project's channels when a
+service names none.
+
+Instance-wide silence, per-channel enablement and the escalation ladder apply unchanged: phase 5
+adds a new SOURCE of alerts, not a new delivery path.
+
+### 16.5 Cost
+
+Alerting must not reintroduce the amplification phase 4 spent two review rounds removing:
+
+- ONE batched evaluation per tick for ALL alerting services — the members, observations and
+  maintenance spans of every alerting service in one snapshot with a CONSTANT statement count,
+  with maintenance spans kept per project (a project-wide span covers every member handed to the
+  evaluator, §15.0/[318] P0-1);
+- ONE batched burn pass, over the report machinery, for all service-scoped targets;
+- the delivery-time delegation lookup is ONE indexed read per suppressed candidate, and its result
+  is not cached: a stale "no owner" would page twice and a stale "owner" would page never.
+
+### 16.6 Acceptance invariants (phase 5)
+
+75. ownership is DECLARED (`services.owns_paging`, default false) and nothing about an existing
+    installation's paging changes until it is set; enabling it is audited with the actor;
+76. while a service owns paging, `monitor_transition` AND `slo_burn_alert` deliveries for every
+    monitor in its DECLARED `sli[]` are suppressed at DELIVERY only — facts, status flips,
+    auto-incidents and outbox rows are untouched — and the suppression is logged, counted,
+    annotated once on the open auto-incident with the owning service named, and shown in the UI;
+77. the delegation lookup is FAIL-OPEN: any error pages rather than mutes, with a regression that
+    injects a store failure and asserts the alert was delivered;
+78. a monitor in the SLI of SEVERAL services is suppressed when ANY of them owns paging, and the
+    notice names all owners; a monitor in no owning service's SLI is never suppressed;
+79. the live signal uses `reliability.StateAt` — no second evaluator — pages only for states the
+    service DECLARED, never for `unknown` unless `page_on_unknown` is set, never while excluded by
+    maintenance, and only after `confirm_evaluations` consecutive evaluations;
+80. the live signal is edge-triggered: the state row and the outbox event commit in ONE
+    transaction, recovery notifies on the same rule, and a redelivery cannot double-notify;
+81. the sealed burn signal reuses `domain.BurnRule` and the phase-2 burn computation, and
+    `insufficient_sealed_coverage` NEITHER fires NOR resolves — pinned by a regression that starts
+    from a FIRING rule, removes the sealed coverage, and asserts the alert does not resolve;
+82. service alerts route through the service's own escalation policy / on-call schedule when set
+    and fall back to the project's channels otherwise, under instance-wide silence unchanged;
+83. the evaluation is batched: ONE snapshot with a constant statement count for all alerting
+    services regardless of their number or the number of projects they span, witnessed by a
+    statement-count regression, with maintenance spans scoped per project;
+84. no service alert opens, resolves or annotates an incident in phase 5, and a regression asserts
+    the incident tables are untouched by an alerting cycle.
+
+### 16.7 What phase 5 does NOT do
+
+Named so a later phase inherits decisions rather than silence:
+
+- **service incidents** (`incidents.service_id`, their lifecycle, their public rendering and their
+  postmortems) — the owner chose notify-only, and an incident anchored to a service touches the
+  status page, the §14 correlation and the postmortem flow, which is its own cycle;
+- **retroactive alerting** — a burn rule enabled today says nothing about last week, and a
+  recompute that back-fires alerts would page for history;
+- **cross-project delegation** — ownership is same-project, like every other reference in this
+  file;
+- **per-member severity** — a service pages with one severity per signal; distinguishing "which
+  member" inside a service page is diagnostics, and the alert already links to the service;
+- **suppressing anything other than the two alert topics** — SLA reports, incident webhooks and
+  status-page output are untouched by delegation.
+
 ## 17. Backward compatibility (acceptance criterion, not a footnote)
 
 ```
@@ -2575,12 +2775,12 @@ visibility (§15.5), and no historical number is recomputed or reinterpreted.
 | 2 | Reliability reporting: service SLO, error budget, burn-rate computation, both coverage axes, revision and epoch segmentation, insufficient-history UX, two-layer health card. |
 | 3 | Dependency impact graph: same-project service DAG (schema-enforced tenancy, bounded, outside the declaration — no revisions, no epochs), symmetric open-time incident correlation into structured incident-service links with 🕸 annotations, list+badge UI. Annotates and links; never suppresses, merges or hides. Specified in §14. |
 | 4 | Status-page service projection: a third component source (`service_id` under ONE active discriminator, dormant bindings retained), the SLI layer alone projected into the public vocabulary plus the new `no_data` status, sealed-facts-only 90-day strips, explicit previewed reversible conversion in both directions, the corrected `pending` mapping, and composite retire tooling with two-ended links. Impact links stay non-public. Specified in §15.0/§15.5. |
-| 5 | *Intent only.* Alerting ownership: service burn alerts and monitor delegation/suppression rules. |
+| 5 | Alerting ownership: a DECLARED `owns_paging` service that alerts on a live health transition and a sealed burn breach, suppressing its SLI members' alert DELIVERIES (never their facts) with the suppression logged, counted, annotated and shown. Notifies; opens no incident. Specified in §16. |
 
-Phase 5 is **deliberately not specified** (phases 3 and 4 now are, in §14 and §15.0/§15.5). Its
-UX depends on facts phases 1–4 produce — real `UNKNOWN` density, late-arrival behaviour,
-recompute cost, and how often a service's public state actually differs from its monitors' —
-and specifying it now would encode assumptions the data may refute.
+Phases 3, 4 and 5 are now specified (§14, §15.0/§15.5, §16). Phase 5 waited on purpose: its shape
+depends on facts phases 1–4 produce — `UNKNOWN` density, late-arrival behaviour and the latency of
+sealed facts — and the last of those is what forced its central decision, since a sealed-only
+signal trails the watermark and could not have carried outage paging on its own.
 
 ## 19. Acceptance invariants
 

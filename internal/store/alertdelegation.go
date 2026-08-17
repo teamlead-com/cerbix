@@ -265,24 +265,40 @@ func appendSuppressionNoteTx(
 	return ct.RowsAffected() == 1, nil
 }
 
-// ServiceAlertSequence returns the CURRENT sequence for a service's signal, which delivery compares
-// against the one stamped into the payload (§16.5).
+// ServiceAlertSequence returns the CURRENT sequence for the latch the given alert belongs to, which
+// delivery compares against the sequence stamped into that payload (§16.5).
 //
-// `ErrNotFound` means the service or its rule is gone — the caller decides what that implies, and the
-// answers differ: an ONSET for a vanished service has nothing to announce, while a CLOSE must still
-// reach the people who heard the onset, which is exactly why the episode outlives its service.
-func (s *Store) ServiceAlertSequence(
-	ctx context.Context, serviceID string, signal domain.ServiceAlertSignal, ruleKey string,
-) (int64, error) {
+// It takes the WHOLE payload rather than a few of its fields on purpose. The burn latch's identity is
+// the tuple (service, project, target, rule) — 00077 keys service targets by (service_id,
+// window_name), so one service may hold a 7d and a 30d target whose rules share a canonical key, and
+// a lookup missing the target silently reads whichever of the two rows Postgres returns first. That
+// is not a wrong number in a log line: it is one target's onset being dropped as superseded by the
+// other target's sequence. Passing the payload makes an under-scoped call unwritable.
+//
+// `ErrNotFound` means the service, its target or its rule is gone — the caller decides what that
+// implies, and the answers differ: an ONSET for a vanished service has nothing to announce, while a
+// CLOSE must still reach the people who heard the onset, which is exactly why the episode outlives
+// the service, the target and the rule.
+func (s *Store) ServiceAlertSequence(ctx context.Context, a domain.ServiceAlert) (int64, error) {
 	var seq int64
 	var err error
-	if signal == domain.ServiceSignalBurn {
+	if a.Signal == domain.ServiceSignalBurn {
+		// A burn payload without its identity cannot be fenced, and delivering it unfenced would
+		// hand somebody a page whose ordering nobody checked. Fail loudly instead: the outbox
+		// retries and dead-letters, which is visible, unlike a silently unfenced delivery.
+		if a.SLATargetID == "" || a.RuleKey == "" {
+			return 0, fmt.Errorf(
+				"store: burn alert sequence: payload carries no target/rule identity (service %s)",
+				a.ServiceID)
+		}
 		err = s.pool.QueryRow(ctx,
 			`SELECT emitted_seq FROM service_burn_alert_state
-			  WHERE service_id = $1 AND rule_key = $2`, serviceID, ruleKey).Scan(&seq)
+			  WHERE service_id = $1 AND project_id = $2 AND sla_target_id = $3 AND rule_key = $4`,
+			a.ServiceID, a.ProjectID, a.SLATargetID, a.RuleKey).Scan(&seq)
 	} else {
 		err = s.pool.QueryRow(ctx,
-			`SELECT emitted_seq FROM service_alert_state WHERE service_id = $1`, serviceID).Scan(&seq)
+			`SELECT emitted_seq FROM service_alert_state WHERE service_id = $1 AND project_id = $2`,
+			a.ServiceID, a.ProjectID).Scan(&seq)
 	}
 	if noRows(err) {
 		return 0, ErrNotFound

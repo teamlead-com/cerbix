@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -458,4 +459,84 @@ func TestRecordSuppressionIsIdempotent(t *testing.T) {
 		t.Fatalf("%d suppression rows for two owners, want one per (event, owner)", rows)
 	}
 	_ = time.Now
+}
+
+// FR-021 §16.4b — the delivery fence must be keyed by the LATCH's identity, not by half of it.
+//
+// 00077 keys service targets by (service_id, window_name), so one service may legally hold a 7d and a
+// 30d target whose burn rules are identical — the canonical key is severity/windows/threshold and
+// names no window. A fence scoped by (service, rule) matches BOTH rows and takes whichever Postgres
+// returns first, which is not a cosmetic error: one target's onset gets dropped as "superseded" by
+// the other target's sequence, and the page is simply never delivered.
+func TestBurnSequenceIsScopedToItsTarget(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// A SECOND target on the same service, different window, THE SAME rule.
+	var second string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled, burn_rules)
+		VALUES ($1,'7d',99.9,true,'[{"long_window_seconds":3600,"short_window_seconds":300,"threshold":14,"severity":"page"}]')
+		RETURNING id`, f.serviceID).Scan(&second); err != nil {
+		t.Fatalf("second target: %v", err)
+	}
+	// One shared canonical key, two independent sequences.
+	const shared = "page/3600/300/14"
+	for _, tc := range []struct {
+		target string
+		seq    int64
+	}{{f.targetID, 4}, {second, 11}} {
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO service_burn_alert_state
+			  (service_id, project_id, sla_target_id, rule_key, firing, last_verdict,
+			   target_generation, config_generation, emitted_seq, evaluated_at, lease_until)
+			SELECT s.id, s.project_id, $2, $3, true, 'fire', t.alert_generation,
+			       s.alert_config_generation, $4, now(), now() + interval '90 seconds'
+			  FROM services s JOIN sla_targets t ON t.id = $2
+			 WHERE s.id = $1`, f.serviceID, tc.target, shared, tc.seq); err != nil {
+			t.Fatalf("latch %s: %v", tc.target, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   int64
+	}{
+		{"30d target reads its own sequence", f.targetID, 4},
+		{"7d target reads its own sequence", second, 11},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := st.ServiceAlertSequence(ctx, domain.ServiceAlert{
+				ServiceID: f.serviceID, ProjectID: f.projectID,
+				Signal:  domain.ServiceSignalBurn,
+				RuleKey: shared, SLATargetID: tc.target,
+			})
+			if err != nil {
+				t.Fatalf("sequence: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("sequence %d, want %d — the fence read the other target's latch", got, tc.want)
+			}
+		})
+	}
+
+	// A burn payload that cannot identify its latch is an ERROR, not an unfenced delivery: the
+	// outbox retries and dead-letters visibly, where a silent pass would page somebody with an
+	// ordering nobody checked.
+	if _, err := st.ServiceAlertSequence(ctx, domain.ServiceAlert{
+		ServiceID: f.serviceID, ProjectID: f.projectID,
+		Signal: domain.ServiceSignalBurn, RuleKey: shared,
+	}); err == nil {
+		t.Fatal("a burn payload with no target identity was fenced anyway, want a loud error")
+	}
+
+	// Cross-tenant safety on the health latch: the right service in the WRONG project is absent,
+	// not answered from the service row alone.
+	if _, err := st.ServiceAlertSequence(ctx, domain.ServiceAlert{
+		ServiceID: f.serviceID, ProjectID: f.serviceID, // a real uuid that is not this project
+		Signal: domain.ServiceSignalHealth,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("health sequence for a foreign project: %v, want ErrNotFound", err)
+	}
 }

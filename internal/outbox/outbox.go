@@ -45,7 +45,7 @@ type Store interface {
 	// Alerting ownership (FR-021 §16.1): whether a service ACTIVELY covers this signal for this
 	// monitor — armed, quotable, routable, generation-matched and fresh. An error here must page.
 	ActiveDelegation(ctx context.Context, monitorID, projectID string, signal store.DelegationSignal) (store.DelegationVerdict, error)
-	ServiceAlertSequence(ctx context.Context, serviceID string, signal domain.ServiceAlertSignal, ruleKey string) (int64, error)
+	ServiceAlertSequence(ctx context.Context, a domain.ServiceAlert) (int64, error)
 	RecordSuppression(ctx context.Context, eventID, monitorID, projectID, topic string, owners []store.DelegationOwner) error
 }
 
@@ -458,12 +458,12 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		// arrive after a newer close, and delivering it would re-announce a state the service has
 		// already left. A superseded event is dropped, exactly as a superseded monitor transition is.
 		// A CLOSE is never dropped by this gate — it carries the sequence of the onset it ends.
-		current, err := w.store.ServiceAlertSequence(ctx, a.ServiceID, a.Signal, a.RuleKey)
+		current, err := w.store.ServiceAlertSequence(ctx, a)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			// The service or its rule is gone. A CLOSE must still deliver — its episode outlived its
-			// service precisely so that whoever was paged learns it ended — while an ONSET for a
-			// vanished service has nothing to announce.
+			// The service, its target or its rule is gone. A CLOSE must still deliver — its episode
+			// outlived all three precisely so that whoever was paged learns it ended — while an
+			// ONSET for a vanished latch has nothing to announce.
 			if a.Firing {
 				return nil
 			}

@@ -249,6 +249,12 @@ type ServiceAlert struct {
 	// RuleKey identifies which burn rule this is about; empty for the health signal. It is the
 	// canonical key over the rule's DECLARED fields, so it cannot change because the rule fired.
 	RuleKey string `json:"rule_key,omitempty"`
+	// SLATargetID completes that identity, and it is not optional decoration: a service may hold a
+	// 7d and a 30d target whose rules share a canonical key, and the pair (target, rule) is what the
+	// latch, the episode and the delivery fence are all keyed by. A rule key alone would let one
+	// target's onset be fenced against the other's sequence. The human half of that distinction is
+	// `Window` below, which carries the target's window name exactly as the monitor payload does.
+	SLATargetID string `json:"sla_target_id,omitempty"`
 	// Recipients is the IMMUTABLE snapshot resolved when the episode opened. A close goes to the
 	// people who heard the onset, not to whoever is on call at close time — a schedule that rotated
 	// mid-incident would otherwise page a stranger and leave the original recipient hanging.
@@ -299,6 +305,9 @@ const SuppressionServiceDelegation AlertSuppressionReason = "service_delegation"
 // budget over sealed time.
 func (a ServiceAlert) Message() string {
 	if a.Signal == ServiceSignalBurn {
+		// `Window` is the TARGET's window name ("30d"), the same field the monitor burn payload
+		// carries — and the reason two targets of one service whose rules are identical still read
+		// as two different pages.
 		if !a.Firing {
 			return fmt.Sprintf("✅ %s: error-budget burn back under %.0f× (%s window, %s).",
 				a.ServiceName, a.Threshold, a.Window, a.closeSuffix())

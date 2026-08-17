@@ -174,6 +174,18 @@ CREATE TABLE service_alert_episodes (
     service_name  text NOT NULL,
     signal        text NOT NULL,
     rule_key      text,
+    -- Target identity as a SNAPSHOT, which is why it is named that way and carries no foreign key.
+    -- It is needed because 00077 keys service targets by (service_id, window_name), so ONE service
+    -- may hold a 7d and a 30d target whose burn rules share a canonical key (the key is
+    -- severity/windows/threshold and contains no window name); without the target here those two
+    -- rules are ONE episode, the second onset unique-violates and a close binds the wrong one.
+    -- A LIVE reference is the wrong tool: `rule_removed` and target deletion close THROUGH this row,
+    -- and an FK — cascading or nulling — would erase the identity at exactly the moment the close
+    -- needs it. `service_id` below is the live reference; these two are the historical record.
+    target_snapshot_id uuid,
+    -- The window name at onset, snapshotted for the record and for the page text: two targets
+    -- carrying the identical rule differ ONLY by their window, so a page without it is unreadable.
+    target_window text,
     state         text NOT NULL,
     started_at    timestamptz NOT NULL DEFAULT now(),
     closed_at     timestamptz,
@@ -186,14 +198,32 @@ CREATE TABLE service_alert_episodes (
         OR (closed_at IS NOT NULL AND close_reason IN (
             'recovered', 'visibility_lost', 'entered_maintenance', 'ownership_disabled',
             'policy_changed', 'burn_disabled', 'rule_removed', 'service_deleted'))),
-    -- The burn signal is per rule; the health signal has no rule.
+    -- The burn signal is per rule OF A TARGET; the health signal has neither. The three travel
+    -- together because a rule key without its target does not identify a rule.
     CONSTRAINT service_alert_episodes_rule_chk
-        CHECK ((signal = 'burn') = (rule_key IS NOT NULL))
+        CHECK ((signal = 'burn') = (rule_key IS NOT NULL)
+           AND (signal = 'burn') = (target_snapshot_id IS NOT NULL)
+           AND (signal = 'burn') = (target_window IS NOT NULL)),
+    -- The survival promise is the DATABASE's, not the delete path's. Lifecycle code still closes and
+    -- enqueues in the same transaction as a removal, but a direct SQL DELETE, a cascade from the
+    -- project, or a path nobody has written yet must not be able to leave an episode pointing at a
+    -- service that no longer exists. PostgreSQL 15's column-list SET NULL is exactly this promise:
+    -- the DB clears ONLY service_id and keeps project_id, so the tenant, the recipients, the name
+    -- and the target snapshot all outlive the service and the close stays deliverable. (Every
+    -- cerbix deployment target is Postgres 16 — dev, prod compose, CI and docs all pin it.)
+    -- On the way IN the same constraint refuses an episode whose (service, project) pair is not a
+    -- real service: a cross-tenant episode would be a page addressed to the wrong customer.
+    CONSTRAINT service_alert_episodes_service_fkey
+        FOREIGN KEY (service_id, project_id) REFERENCES services (id, project_id)
+        ON DELETE SET NULL (service_id)
 );
 
--- At most ONE open episode per (service, signal, rule): a second would make "the close" ambiguous.
+-- At most ONE open episode per (service, signal, TARGET, rule): a second would make "the close"
+-- ambiguous. The target belongs in the key — see the column comment: two targets of one service may
+-- legally carry the same canonical rule key, and they are two independent alerts.
 CREATE UNIQUE INDEX service_alert_episodes_open_uniq
-    ON service_alert_episodes (service_id, signal, COALESCE(rule_key, ''))
+    ON service_alert_episodes
+       (service_id, signal, COALESCE(target_snapshot_id::text, ''), COALESCE(rule_key, ''))
     WHERE closed_at IS NULL AND service_id IS NOT NULL;
 CREATE INDEX service_alert_episodes_open_idx ON service_alert_episodes (project_id)
     WHERE closed_at IS NULL;

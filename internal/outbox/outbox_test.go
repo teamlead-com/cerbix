@@ -53,7 +53,7 @@ type fakeStore struct {
 	delegationErr   error
 	suppressRecords []string // "event|monitor|topic|owners"
 	suppressErr     error
-	alertSeq        map[string]int64 // "service|signal|rule" → current sequence
+	alertSeq        map[string]int64 // "service|signal|target|rule" → current sequence
 	alertSeqMissing bool
 
 	// impact-correlation fakes (FR-021 §14.3)
@@ -908,12 +908,15 @@ func (f *fakeStore) RecordSuppression(
 }
 
 func (f *fakeStore) ServiceAlertSequence(
-	_ context.Context, serviceID string, signal domain.ServiceAlertSignal, ruleKey string,
+	_ context.Context, a domain.ServiceAlert,
 ) (int64, error) {
 	if f.alertSeqMissing {
 		return 0, store.ErrNotFound
 	}
-	return f.alertSeq[serviceID+"|"+string(signal)+"|"+ruleKey], nil
+	// Keyed by the same tuple the real latch is keyed by: two targets of one service may carry the
+	// same canonical rule key, so a fake keyed by (service, rule) would answer for the wrong one and
+	// make the ordering gate look correct in a test while it is broken in the store.
+	return f.alertSeq[a.ServiceID+"|"+string(a.Signal)+"|"+a.SLATargetID+"|"+a.RuleKey], nil
 }
 
 // FR-021 §16.1 at the delivery boundary. These are the cases the two design rounds produced, and
@@ -1101,7 +1104,7 @@ func TestServiceAlertOrderingGate(t *testing.T) {
 	}
 
 	fs := &fakeStore{
-		alertSeq: map[string]int64{"svc-1|health|": 7},
+		alertSeq: map[string]int64{"svc-1|health||": 7},
 		pending: []domain.OutboxEvent{
 			{ID: "e-stale", Topic: domain.TopicServiceAlert, Payload: alert(3, true, "")},
 		},

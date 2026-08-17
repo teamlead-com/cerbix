@@ -148,6 +148,25 @@ func (s *Store) evaluateServiceAlertsOn(
 		return out, tx.Commit(ctx)
 	}
 
+	// (1a) LINEARIZE against the configuration writers (§16.6a). The slice above was read from a
+	// REPEATABLE READ snapshot, so without this an operator's edit can commit between the snapshot
+	// and the emission and the evaluation then publishes a page for a policy that no longer exists —
+	// and nothing closes it, because the writer looked for an open episode before the evaluator had
+	// opened one. Generation mismatch dis-arms the MEMBERS' delegation afterwards; it does not
+	// un-send the service's own stale page.
+	//
+	// Locking the rows the writers lock, in the same order, resolves it in whichever direction the
+	// race actually went: if the evaluation gets there first the writer waits and then sees (and
+	// closes) the episode; if the writer committed first, this statement raises a serialization
+	// failure and the whole evaluation rolls back BEFORE it can emit anything.
+	lockIDs := make([]string, 0, len(slice))
+	for _, c := range slice {
+		lockIDs = append(lockIDs, c.serviceID)
+	}
+	if err := lockAlertConfigRowsTx(ctx, tx, lockIDs); err != nil {
+		return out, err
+	}
+
 	// (2) ONE snapshot for the whole slice, through the public page's own evaluation path.
 	refs := make([]ServiceRef, 0, len(slice))
 	for _, c := range slice {
@@ -475,6 +494,33 @@ func resolveServiceRecipientsTx(
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// lockAlertConfigRowsTx takes the row locks that make an evaluation and a paging-config write
+// LINEARIZABLE with respect to each other, in the writers' own order: services first, then targets.
+//
+// Under REPEATABLE READ a locking read of a row that a committed transaction has changed since the
+// snapshot raises 40001 rather than returning the stale version, which is exactly the outcome an
+// evaluator needs: it aborts before publishing anything about a configuration that has been
+// replaced. The order matches `UpdateServiceAlertPolicy` / `SetServiceBurnAlerting` (the service row
+// before its target), and the ids are sorted, so two of these can never deadlock each other.
+func lockAlertConfigRowsTx(ctx context.Context, tx pgx.Tx, serviceIDs []string, targetIDs ...[]string) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM services WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
+		serviceIDs); err != nil {
+		return fmt.Errorf("store: linearize alert config: %w", err)
+	}
+	for _, ids := range targetIDs {
+		if len(ids) == 0 {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`SELECT 1 FROM sla_targets WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
+			ids); err != nil {
+			return fmt.Errorf("store: linearize burn config: %w", err)
+		}
+	}
+	return nil
 }
 
 // alertConn is what an evaluator needs from the thing it runs on: the ability to open its OWN

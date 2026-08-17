@@ -163,6 +163,20 @@ func (s *Store) evaluateServiceBurnAlertsOn(
 		return out, tx.Commit(ctx)
 	}
 
+	// (1a) LINEARIZE against the configuration writers (§16.6a), in the writers' own order: the
+	// service rows, then the target rows. Without it an operator can disable a target or replace a
+	// rule between this snapshot and the emission below, and the pass would then announce a budget
+	// breach for a rule that no longer exists — with nothing to close it, because the writer looked
+	// for an open episode before this transaction opened one. Under REPEATABLE READ the locking read
+	// raises a serialization failure instead of handing back the replaced configuration.
+	serviceIDs := make([]string, 0, len(slice))
+	for _, c := range slice {
+		serviceIDs = append(serviceIDs, c.serviceID)
+	}
+	if err := lockAlertConfigRowsTx(ctx, tx, serviceIDs, targetIDs); err != nil {
+		return out, err
+	}
+
 	// (2) The latches, for the whole slice in one read. Keyed by the FULL identity: two targets of
 	// one service may carry the same canonical rule key, and a map keyed by rule alone would hand
 	// one target's level to the other.

@@ -1,16 +1,19 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/teamlead-com/cerbix/internal/buildinfo"
 	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/metrics"
@@ -43,6 +46,15 @@ type fakeStore struct {
 	// dis-arms a healthy evaluator or keeps coverage armed after it stopped.
 	alertCalls, burnCalls   int32
 	alertCadence, burnCadns int64 // nanoseconds, atomically stored
+	// What each arm reports back, and the failure it reports instead. Written before Run and read
+	// from the leader loop, like every other field of this fake.
+	alertEval store.ServiceAlertEvaluation
+	burnEval  store.ServiceBurnEvaluation
+	alertErr  error
+	burnErr   error
+	// alertStats backs ServiceAlertStats (FR-021 §16.6b); alertStatsErr fails the sample.
+	alertStats    metrics.ServiceAlertStat
+	alertStatsErr error
 }
 
 type staticCredentialRegions map[string]bool
@@ -142,13 +154,19 @@ func (s fakeLeaderSession) RunServiceSlice(context.Context, time.Time) (bool, er
 func (s fakeLeaderSession) EvaluateServiceAlerts(_ context.Context, cadence time.Duration) (store.ServiceAlertEvaluation, error) {
 	atomic.AddInt32(&s.owner.alertCalls, 1)
 	atomic.StoreInt64(&s.owner.alertCadence, int64(cadence))
-	return store.ServiceAlertEvaluation{}, nil
+	if s.owner.alertErr != nil {
+		return store.ServiceAlertEvaluation{}, s.owner.alertErr
+	}
+	return s.owner.alertEval, nil
 }
 
 func (s fakeLeaderSession) EvaluateServiceBurnAlerts(_ context.Context, cadence time.Duration) (store.ServiceBurnEvaluation, error) {
 	atomic.AddInt32(&s.owner.burnCalls, 1)
 	atomic.StoreInt64(&s.owner.burnCadns, int64(cadence))
-	return store.ServiceBurnEvaluation{}, nil
+	if s.owner.burnErr != nil {
+		return store.ServiceBurnEvaluation{}, s.owner.burnErr
+	}
+	return s.owner.burnEval, nil
 }
 
 func (f *fakeStore) TryBecomeLeaderSession(_ context.Context, _ int64) (LeaderSession, bool, error) {
@@ -175,6 +193,13 @@ func (f *fakeStore) ServiceReliabilityStats(ctx context.Context) (metrics.Servic
 		return f.statsFn(ctx)
 	}
 	return metrics.ServiceReliabilityStat{}, nil
+}
+
+func (f *fakeStore) ServiceAlertStats(context.Context) (metrics.ServiceAlertStat, error) {
+	if f.alertStatsErr != nil {
+		return metrics.ServiceAlertStat{}, f.alertStatsErr
+	}
+	return f.alertStats, nil
 }
 
 func (f *fakeStore) PurgeOldHeartbeats(_ context.Context, _ time.Time) (int, error) {
@@ -781,6 +806,15 @@ func (r *recordingServiceSink) SetServiceFactMaintenance(ok bool, _ int64) {
 	r.log(fmt.Sprintf("maint=%v", ok))
 }
 func (r *recordingServiceSink) RecordServiceSlice(string) {}
+
+// The §16.6b families are deliberately NOT logged into the event sequence: these tests pin the
+// reliability sampler's ORDER of verdicts, and an alerting sample riding the same loop must not
+// rewrite what those assertions are reading.
+func (r *recordingServiceSink) RecordServiceAlertEvaluations(string, string, int) {}
+func (r *recordingServiceSink) RecordServiceAlertEmitted(string, string, int)     {}
+func (r *recordingServiceSink) SetServiceAlertPass(string, int64, float64)        {}
+func (r *recordingServiceSink) SetServiceAlertStats(metrics.ServiceAlertStat)     {}
+func (r *recordingServiceSink) SetServiceAlertStalled(string, bool, string)       {}
 func (r *recordingServiceSink) SetSchedulerLeader(leader bool) {
 	r.log(fmt.Sprintf("leader=%v", leader))
 }
@@ -1143,5 +1177,189 @@ func TestStandbyEvaluatesNeitherServiceAlertArm(t *testing.T) {
 
 	if a, b := atomic.LoadInt32(&fs.alertCalls), atomic.LoadInt32(&fs.burnCalls); a != 0 || b != 0 {
 		t.Fatalf("a standby evaluated service alerts (live=%d burn=%d)", a, b)
+	}
+}
+
+// leadUntilMetrics runs a scheduler against a REAL registry and returns the first scrape that
+// satisfies `ready`, with the scheduler STILL leader — the gauges are leadership-scoped and the
+// step-down clear forgets them, so a scrape taken after cancellation would read an empty page.
+func leadUntilMetrics(t *testing.T, fs *fakeStore, reg *metrics.Registry, ready func(string) bool) string {
+	t.Helper()
+	s := New(fs, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(reg)
+	s.tick = 15 * time.Millisecond
+	s.retry = 15 * time.Millisecond
+	s.statsEvery = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		var buf bytes.Buffer
+		reg.WritePrometheus(&buf)
+		if got := buf.String(); ready(got) {
+			return got
+		}
+		select {
+		case <-deadline:
+			var buf bytes.Buffer
+			reg.WritePrometheus(&buf)
+			t.Fatalf("the expected telemetry never landed:\n%s", buf.String())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// FR-021 §16.6b — one pass of each arm moves the evaluator families, fed from what the evaluation
+// RETURNED. Driven through the real leader loop against the real registry: the point is the wiring,
+// and a hand-called observer would pass with the loop never publishing anything.
+func TestLeaderPublishesServiceAlertTelemetry(t *testing.T) {
+	fs := &fakeStore{
+		leader: true,
+		alertEval: store.ServiceAlertEvaluation{
+			Evaluated: 2, Onsets: 1, Closes: 1, Errors: 1, Lag: 12500 * time.Millisecond,
+		},
+		// Rules 3 with 1 HOLD: two rules could speak, one evaluated successfully and could not.
+		burnEval: store.ServiceBurnEvaluation{
+			Targets: 2, Rules: 3, Holds: 1, Onsets: 2, Closes: 0, Errors: 1, Lag: 3 * time.Second,
+		},
+		alertStats: metrics.ServiceAlertStat{
+			ActiveHealth: 4, ActiveBurn: 2, BacklogHealth: 7, BacklogBurn: 1,
+		},
+	}
+	reg := metrics.New(buildinfo.Info{}, "scheduler")
+	reg.SetReady(true, "")
+	got := leadUntilMetrics(t, fs, reg, func(s string) bool {
+		return strings.Contains(s, `cerbix_service_alert_evaluations_total{signal="health",outcome="ok"} 2`) &&
+			strings.Contains(s, `cerbix_service_alert_evaluations_total{signal="burn",outcome="ok"} 2`) &&
+			strings.Contains(s, `cerbix_service_alert_active{signal="health"} 4`)
+	})
+
+	for _, want := range []string{
+		// The live arm's unit is the service: Evaluated → ok, Errors → error, no skips.
+		`cerbix_service_alert_evaluations_total{signal="health",outcome="ok"} 2`,
+		`cerbix_service_alert_evaluations_total{signal="health",outcome="error"} 1`,
+		`cerbix_service_alert_evaluations_total{signal="health",outcome="skipped"} 0`,
+		// The burn arm's unit is the rule: Rules−Holds → ok, Holds → skipped, Errors (targets).
+		`cerbix_service_alert_evaluations_total{signal="burn",outcome="ok"} 2`,
+		`cerbix_service_alert_evaluations_total{signal="burn",outcome="skipped"} 1`,
+		`cerbix_service_alert_evaluations_total{signal="burn",outcome="error"} 1`,
+		`cerbix_service_alert_emitted_total{signal="health",edge="onset"} 1`,
+		`cerbix_service_alert_emitted_total{signal="health",edge="close"} 1`,
+		`cerbix_service_alert_emitted_total{signal="burn",edge="onset"} 2`,
+		`cerbix_service_alert_emitted_total{signal="burn",edge="close"} 0`,
+		`cerbix_service_alert_lag_seconds{signal="health"} 12.500`,
+		`cerbix_service_alert_lag_seconds{signal="burn"} 3.000`,
+		// The sampled half: what the slice cannot see.
+		`cerbix_service_alert_active{signal="health"} 4`,
+		`cerbix_service_alert_active{signal="burn"} 2`,
+		`cerbix_service_alert_backlog{signal="health"} 7`,
+		`cerbix_service_alert_backlog{signal="burn"} 1`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, `cerbix_service_alert_last_success_seconds{signal="health"}`) {
+		t.Fatalf("a successful pass did not stamp last-success:\n%s", got)
+	}
+	// 12.5s and 3s are both inside 3 × their cadence: a busy evaluator is not a stalled one.
+	if !reg.Ready() {
+		t.Fatalf("a pass inside the lease bound marked the scheduler not-ready: %q", reg.LastError())
+	}
+}
+
+// An arm that FAILS counts the pass as an error and stamps no success: a slice that rolled back
+// evaluated none of its units, and a family that only counts successes would render a permanently
+// broken evaluator as silence.
+func TestErroringServiceAlertArmCountsAnErrorOutcome(t *testing.T) {
+	fs := &fakeStore{leader: true, alertErr: errors.New("boom")}
+	reg := metrics.New(buildinfo.Info{}, "scheduler")
+	reg.SetReady(true, "")
+	got := leadUntilMetrics(t, fs, reg, func(s string) bool {
+		return strings.Contains(s, `cerbix_service_alert_evaluations_total{signal="health",outcome="error"} 1`)
+	})
+	if strings.Contains(got, `cerbix_service_alert_evaluations_total{signal="health",outcome="ok"}`) {
+		t.Fatalf("a failed pass reported evaluated units:\n%s", got)
+	}
+	if strings.Contains(got, `cerbix_service_alert_last_success_seconds{signal="health"}`) {
+		t.Fatalf("a failed pass stamped a last SUCCESS:\n%s", got)
+	}
+	// The burn arm is independent and still healthy — one broken arm does not blank the other.
+	if !strings.Contains(got, `cerbix_service_alert_evaluations_total{signal="burn",outcome="ok"} 0`) {
+		t.Fatalf("the healthy burn arm published nothing:\n%s", got)
+	}
+}
+
+// §16.6b readiness — the bound is the LEASE's own multiplier, and equality is still fresh
+// (`now() < lease_until` is what the store writes, so lag == bound has not expired anything).
+func TestServiceAlertStallThresholdIsTheLeaseBound(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		cadence time.Duration
+		lag     time.Duration
+		stalled bool
+	}{
+		{name: "well inside", cadence: serviceAlertEvery, lag: serviceAlertEvery, stalled: false},
+		{name: "at the bound", cadence: serviceAlertEvery,
+			lag: store.ServiceAlertLeaseMultiplier * serviceAlertEvery, stalled: false},
+		{name: "past the bound", cadence: serviceAlertEvery,
+			lag: store.ServiceAlertLeaseMultiplier*serviceAlertEvery + time.Second, stalled: true},
+		{name: "burn cadence scales the bound", cadence: serviceBurnEvery,
+			lag: store.ServiceAlertLeaseMultiplier*serviceAlertEvery + time.Second, stalled: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := metrics.New(buildinfo.Info{}, "scheduler")
+			reg.SetReady(true, "")
+			s := New(&fakeStore{}, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(reg)
+			s.observeServiceAlertPass(serviceAlertPass{
+				signal: "health", cadence: tt.cadence, lag: tt.lag,
+			})
+			if reg.Ready() == tt.stalled {
+				t.Fatalf("lag %s against cadence %s: ready=%v, want stalled=%v (%q)",
+					tt.lag, tt.cadence, reg.Ready(), tt.stalled, reg.LastError())
+			}
+		})
+	}
+}
+
+// §16.6b — a stalled evaluator marks the SCHEDULER not-ready and NOTHING else: taking the API out
+// of rotation for an alerting stall would turn a degradation into an outage. Both directions, and
+// the recovery, through the real leader loop.
+func TestServiceAlertStallMarksSchedulerNotReadyOnly(t *testing.T) {
+	// The API's registry: a process that never runs the leader loop is never handed this sink, so
+	// no evaluation verdict can reach its readiness.
+	api := metrics.New(buildinfo.Info{}, "api")
+	api.SetReady(true, "")
+
+	fs := &fakeStore{leader: true, alertEval: store.ServiceAlertEvaluation{
+		Lag: store.ServiceAlertLeaseMultiplier*serviceAlertEvery + time.Minute,
+	}}
+	sched := metrics.New(buildinfo.Info{}, "scheduler")
+	sched.SetReady(true, "")
+	got := leadUntilMetrics(t, fs, sched, func(string) bool { return !sched.Ready() })
+
+	if sched.Ready() {
+		t.Fatal("§16.6b: a stalled evaluator left the scheduler ready")
+	}
+	if !strings.Contains(sched.LastError(), "lagging") {
+		t.Fatalf("the stall reason is not surfaced on /readyz: %q", sched.LastError())
+	}
+	if !strings.Contains(got, "cerbix_ready 0") {
+		t.Fatalf("cerbix_ready disagrees with Ready() while stalled:\n%s", got)
+	}
+	if !api.Ready() || api.LastError() != "" {
+		t.Fatalf("an alerting stall degraded the API's readiness: ready=%v err=%q",
+			api.Ready(), api.LastError())
+	}
+
+	// The other direction: a pass back inside the bound clears the stall on the same registry.
+	s := New(&fakeStore{}, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(sched)
+	s.observeServiceAlertPass(serviceAlertPass{
+		signal: "health", cadence: serviceAlertEvery, lag: time.Second,
+	})
+	if !sched.Ready() {
+		t.Fatalf("a recovered evaluator did not restore readiness: %q", sched.LastError())
 	}
 }

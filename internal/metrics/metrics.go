@@ -45,6 +45,20 @@ type Registry struct {
 	// metrics endpoint.
 	alertSuppressed    map[string]uint64 // "topic|reason" → count
 	delegationFailOpen map[string]uint64 // reason → count
+	// The EVALUATOR half of the same §16.6b table. `signal` is the only dimension the alerting
+	// surface ever grows along, and it has exactly two values (health, burn) — no service, no
+	// target, no rule, no tenant.
+	serviceAlertEvals   map[string]map[string]uint64 // signal → outcome → count (ok|error|skipped)
+	serviceAlertEmitted map[string]map[string]uint64 // signal → edge → count (onset|close)
+	// Set on every SUCCESSFUL pass of an arm. A stalled evaluator has to read as lag rather than
+	// as an absence of alerts, which is indistinguishable from "nothing is wrong" (§16.7).
+	serviceAlertLastSuccess map[string]int64   // signal → unix seconds
+	serviceAlertLag         map[string]float64 // signal → seconds
+	serviceAlertStats       *ServiceAlertStat
+	// serviceAlertStalls holds the signals whose evaluation lag exceeded lease_multiplier ×
+	// cadence, keyed by signal so both arms can be stalled at once and each recovers on its own
+	// pass. Presence IS the stall; the value is the readiness reason (§16.6b).
+	serviceAlertStalls map[string]string
 	// Status-page projection (FR-021 §15.0, invariant 71a): a component whose ACTIVE service the
 	// projection could not read. With the RESTRICT FK it cannot legitimately be absent, so this is
 	// a failed READ, and it is counted rather than only logged because the public page's rendering
@@ -109,6 +123,23 @@ type ServiceReliabilityStat struct {
 	EpochFanoutTotal  int64
 	LateArrivalsTotal int64
 	LateOverflowTotal int64
+}
+
+// ServiceAlertStat is the alerting evaluator's sampled snapshot (FR-021 §16.6b), exported as
+// gauges: open episodes and the evaluation backlog, PER SIGNAL and nothing finer.
+//
+// Deliberately four scalars rather than a map keyed by anything the caller controls: this surface
+// is reachable by anyone who can create a service, and a per-tenant or per-service breakdown would
+// let them grow the metrics endpoint without limit.
+type ServiceAlertStat struct {
+	// Open (unclosed) service_alert_episodes rows.
+	ActiveHealth int
+	ActiveBurn   int
+	// Owning services / enabled burn targets DUE for evaluation — lease expired on the DB clock,
+	// or never evaluated at all. Backlog that does not drain is the same wedge the lag gauge
+	// reports from the other side.
+	BacklogHealth int
+	BacklogBurn   int
 }
 
 // PullStat is one region's pull-queue depth and lag, exported as gauges.
@@ -421,6 +452,93 @@ func (r *Registry) RecordDelegationFailOpen(reason string) {
 	r.delegationFailOpen[reason]++
 }
 
+// RecordServiceAlertEvaluations counts n units of alerting work reaching one outcome, for one
+// signal (FR-021 §16.6b). The UNIT is the thing that gets a verdict: a service for the live arm, a
+// burn RULE for the sealed arm — and `error` additionally counts the whole pass when the arm itself
+// fails, because a slice that rolled back evaluated nothing at all.
+//
+// n == 0 is recorded rather than dropped: it materializes the series, so `outcome="error"` exists
+// at 0 from the first healthy pass and an alerting rule on it does not have to survive a missing
+// series before it can fire.
+func (r *Registry) RecordServiceAlertEvaluations(signal, outcome string, n int) {
+	if n < 0 {
+		n = 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.serviceAlertEvals == nil {
+		r.serviceAlertEvals = map[string]map[string]uint64{}
+	}
+	if r.serviceAlertEvals[signal] == nil {
+		r.serviceAlertEvals[signal] = map[string]uint64{}
+	}
+	r.serviceAlertEvals[signal][outcome] += uint64(n)
+}
+
+// RecordServiceAlertEmitted counts n alert EDGES enqueued for one signal (onset|close). Edges, not
+// deliveries: the outbox is at-least-once and owns its own counters, and conflating the two would
+// make a retried delivery look like a second onset.
+func (r *Registry) RecordServiceAlertEmitted(signal, edge string, n int) {
+	if n < 0 {
+		n = 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.serviceAlertEmitted == nil {
+		r.serviceAlertEmitted = map[string]map[string]uint64{}
+	}
+	if r.serviceAlertEmitted[signal] == nil {
+		r.serviceAlertEmitted[signal] = map[string]uint64{}
+	}
+	r.serviceAlertEmitted[signal][edge] += uint64(n)
+}
+
+// SetServiceAlertPass records one SUCCESSFUL evaluation pass of a signal: when it happened and how
+// far behind the stalest verdict it found was. Both are gauges of the LAST success — a failed pass
+// leaves them untouched on purpose, so an aging last-success next to a live process is exactly the
+// stalled-evaluator symptom the §16.6b runbook names.
+func (r *Registry) SetServiceAlertPass(signal string, lastSuccessUnix int64, lagSeconds float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.serviceAlertLastSuccess == nil {
+		r.serviceAlertLastSuccess = map[string]int64{}
+	}
+	if r.serviceAlertLag == nil {
+		r.serviceAlertLag = map[string]float64{}
+	}
+	r.serviceAlertLastSuccess[signal] = lastSuccessUnix
+	r.serviceAlertLag[signal] = lagSeconds
+}
+
+// SetServiceAlertStats records the sampled active/backlog snapshot. Calling it marks the subsystem
+// as tracked, so the gauges are exported only by a process that actually runs the leader loop.
+func (r *Registry) SetServiceAlertStats(st ServiceAlertStat) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.serviceAlertStats = &st
+}
+
+// SetServiceAlertStalled marks one alerting signal's evaluator stalled or healthy — §16.6b: an
+// evaluation whose lag exceeds lease_multiplier × cadence marks the SCHEDULER not-ready, because a
+// stalled evaluator is exactly the state in which delegation dis-arms and members resume paging.
+//
+// Component readiness, mirroring SetCredentialReady and SetServiceWedged: a later generic
+// SetReady(true) cannot erase it. It is set ONLY from the scheduler's leader loop, which is what
+// keeps it off the API's readiness — taking the API out of rotation for an alerting stall would
+// turn a degradation into an outage.
+func (r *Registry) SetServiceAlertStalled(signal string, stalled bool, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !stalled {
+		delete(r.serviceAlertStalls, signal)
+		return
+	}
+	if r.serviceAlertStalls == nil {
+		r.serviceAlertStalls = map[string]string{}
+	}
+	r.serviceAlertStalls[signal] = reason
+}
+
 // RecordStatusPageUnreadableComponent counts a status-page component whose active service could
 // not be read. Plain counter: no page or tenant labels, because an unauthenticated surface must not
 // grow per-tenant metric cardinality for anyone who can request a page.
@@ -474,6 +592,15 @@ func (r *Registry) ClearServiceReliabilityStats() {
 	r.factMaintTracked = false
 	r.factMaintFailing = false
 	r.factMaintLastOKUnix = 0
+	// The alerting evaluator's SAMPLED state goes with them, for both halves of the same
+	// argument: a deposed leader exporting the old leader's backlog makes two scrapes disagree
+	// about one cluster, and a stale stall verdict would hold a standby's /readyz down for an
+	// evaluation it is no longer running. The monotonic counters stay — they are this PROCESS's
+	// history, not a claim about the cluster's current state.
+	r.serviceAlertStats = nil
+	r.serviceAlertStalls = nil
+	r.serviceAlertLastSuccess = nil
+	r.serviceAlertLag = nil
 }
 
 // RecordServiceRepairOutcome counts one repair/recompute range reaching a lifecycle outcome,
@@ -553,7 +680,8 @@ func (r *Registry) SetBrokerUp(up bool) {
 func (r *Registry) Ready() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.ready && (!r.credentialTracked || r.credentialReady) && (!r.serviceWedgedSet || !r.serviceWedged)
+	return r.ready && (!r.credentialTracked || r.credentialReady) &&
+		(!r.serviceWedgedSet || !r.serviceWedged) && len(r.serviceAlertStalls) == 0
 }
 
 // LastError returns the last recorded not-ready reason.
@@ -562,6 +690,11 @@ func (r *Registry) LastError() string {
 	defer r.mu.RUnlock()
 	if r.serviceWedgedSet && r.serviceWedged {
 		return r.serviceWedgedReason
+	}
+	if len(r.serviceAlertStalls) > 0 {
+		// Deterministic when both arms are stalled: /readyz must not alternate its reason
+		// between scrapes for one unchanged state.
+		return r.serviceAlertStalls[sortedKeys(r.serviceAlertStalls)[0]]
 	}
 	if r.credentialTracked && !r.credentialReady {
 		return "credential envelope decrypt unavailable"
@@ -575,7 +708,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	// The SAME composite Ready() reports: /readyz and cerbix_ready must never disagree —
 	// a wedged scheduler failing its probe while exporting cerbix_ready 1 is two answers
 	// to one question.
-	ready := r.ready && (!r.credentialTracked || r.credentialReady) && (!r.serviceWedgedSet || !r.serviceWedged)
+	ready := r.ready && (!r.credentialTracked || r.credentialReady) &&
+		(!r.serviceWedgedSet || !r.serviceWedged) && len(r.serviceAlertStalls) == 0
 	dbEnabled := r.dbEnabled
 	dbUp := r.dbUp
 	checksUp := r.checksUp
@@ -589,18 +723,17 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	statusPageUnreadable := r.statusPageUnreadable
 	alertSuppressed := maps.Clone(r.alertSuppressed)
 	delegationFailOpen := maps.Clone(r.delegationFailOpen)
+	serviceAlertEvals := copyCounts2(r.serviceAlertEvals)
+	serviceAlertEmitted := copyCounts2(r.serviceAlertEmitted)
+	serviceAlertLastSuccess := maps.Clone(r.serviceAlertLastSuccess)
+	serviceAlertLag := maps.Clone(r.serviceAlertLag)
+	serviceAlertStats := r.serviceAlertStats
 	pullStats := r.pullStats
 	serviceStats := r.serviceStats
 	serviceWedgedSet, serviceWedged := r.serviceWedgedSet, r.serviceWedged
 	factMaintTracked, factMaintFailing, factMaintLastOKUnix := r.factMaintTracked, r.factMaintFailing, r.factMaintLastOKUnix
 	serviceRejections := r.serviceRejections
-	serviceRepairOutcomes := make(map[string]map[string]uint64, len(r.serviceRepairOutcomes))
-	for outcome, reasons := range r.serviceRepairOutcomes {
-		serviceRepairOutcomes[outcome] = make(map[string]uint64, len(reasons))
-		for reason, v := range reasons {
-			serviceRepairOutcomes[outcome][reason] = v
-		}
-	}
+	serviceRepairOutcomes := copyCounts2(r.serviceRepairOutcomes)
 	serviceSlices := make(map[string]uint64, len(r.serviceSlices))
 	for k, v := range r.serviceSlices {
 		serviceSlices[k] = v
@@ -743,6 +876,50 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		sort.Strings(keys)
 		for _, k := range keys {
 			out.printf("cerbix_alert_delegation_fail_open_total{reason=%q} %d\n", k, delegationFailOpen[k])
+		}
+	}
+	// The EVALUATOR half of §16.6b. Every family here is labelled by `signal` only (health|burn)
+	// plus a fixed enum: no tenant, service, target or rule label anywhere.
+	if len(serviceAlertEvals) > 0 {
+		out.println("# HELP cerbix_service_alert_evaluations_total Service alerting evaluations by signal and outcome (FR-021 §16.6b).")
+		out.println("# TYPE cerbix_service_alert_evaluations_total counter")
+		for _, signal := range sortedKeys(serviceAlertEvals) {
+			for _, outcome := range sortedKeys(serviceAlertEvals[signal]) {
+				out.printf("cerbix_service_alert_evaluations_total{signal=%q,outcome=%q} %d\n",
+					signal, outcome, serviceAlertEvals[signal][outcome])
+			}
+		}
+	}
+	if len(serviceAlertEmitted) > 0 {
+		out.println("# HELP cerbix_service_alert_emitted_total Service alert edges enqueued, by signal and edge.")
+		out.println("# TYPE cerbix_service_alert_emitted_total counter")
+		for _, signal := range sortedKeys(serviceAlertEmitted) {
+			for _, edge := range sortedKeys(serviceAlertEmitted[signal]) {
+				out.printf("cerbix_service_alert_emitted_total{signal=%q,edge=%q} %d\n",
+					signal, edge, serviceAlertEmitted[signal][edge])
+			}
+		}
+	}
+	if serviceAlertStats != nil {
+		out.println("# HELP cerbix_service_alert_active Open service alert episodes, by signal.")
+		out.println("# TYPE cerbix_service_alert_active gauge")
+		out.printf("cerbix_service_alert_active{signal=\"burn\"} %d\n", serviceAlertStats.ActiveBurn)
+		out.printf("cerbix_service_alert_active{signal=\"health\"} %d\n", serviceAlertStats.ActiveHealth)
+		out.println("# HELP cerbix_service_alert_backlog Owning services (health) and enabled burn targets (burn) due for evaluation: lease expired on the DB clock, or never evaluated.")
+		out.println("# TYPE cerbix_service_alert_backlog gauge")
+		out.printf("cerbix_service_alert_backlog{signal=\"burn\"} %d\n", serviceAlertStats.BacklogBurn)
+		out.printf("cerbix_service_alert_backlog{signal=\"health\"} %d\n", serviceAlertStats.BacklogHealth)
+	}
+	if len(serviceAlertLastSuccess) > 0 {
+		out.println("# HELP cerbix_service_alert_last_success_seconds Unix time of the last SUCCESSFUL evaluation pass, by signal (a failed pass leaves it aging).")
+		out.println("# TYPE cerbix_service_alert_last_success_seconds gauge")
+		for _, signal := range sortedKeys(serviceAlertLastSuccess) {
+			out.printf("cerbix_service_alert_last_success_seconds{signal=%q} %d\n", signal, serviceAlertLastSuccess[signal])
+		}
+		out.println("# HELP cerbix_service_alert_lag_seconds How far behind the stalest verdict of the last successful pass was, by signal.")
+		out.println("# TYPE cerbix_service_alert_lag_seconds gauge")
+		for _, signal := range sortedKeys(serviceAlertLag) {
+			out.printf("cerbix_service_alert_lag_seconds{signal=%q} %.3f\n", signal, serviceAlertLag[signal])
 		}
 	}
 	if statusPageUnreadable > 0 {
@@ -896,6 +1073,18 @@ func copyCounts(m map[string]uint64) map[string]uint64 {
 	out := make(map[string]uint64, len(m))
 	for k, v := range m {
 		out[k] = v
+	}
+	return out
+}
+
+// copyCounts2 snapshots a two-label counter map (outer → inner → count) under the caller's lock.
+func copyCounts2(m map[string]map[string]uint64) map[string]map[string]uint64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]uint64, len(m))
+	for outer, inner := range m {
+		out[outer] = copyCounts(inner)
 	}
 	return out
 }

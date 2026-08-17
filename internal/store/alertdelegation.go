@@ -246,3 +246,31 @@ func appendSuppressionNoteTx(
 	// incident has already resolved, and inventing one would be worse than saying nothing.
 	return ct.RowsAffected() == 1, nil
 }
+
+// ServiceAlertSequence returns the CURRENT sequence for a service's signal, which delivery compares
+// against the one stamped into the payload (§16.5).
+//
+// `ErrNotFound` means the service or its rule is gone — the caller decides what that implies, and the
+// answers differ: an ONSET for a vanished service has nothing to announce, while a CLOSE must still
+// reach the people who heard the onset, which is exactly why the episode outlives its service.
+func (s *Store) ServiceAlertSequence(
+	ctx context.Context, serviceID string, signal domain.ServiceAlertSignal, ruleKey string,
+) (int64, error) {
+	var seq int64
+	var err error
+	if signal == domain.ServiceSignalBurn {
+		err = s.pool.QueryRow(ctx,
+			`SELECT emitted_seq FROM service_burn_alert_state
+			  WHERE service_id = $1 AND rule_key = $2`, serviceID, ruleKey).Scan(&seq)
+	} else {
+		err = s.pool.QueryRow(ctx,
+			`SELECT emitted_seq FROM service_alert_state WHERE service_id = $1`, serviceID).Scan(&seq)
+	}
+	if noRows(err) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: service alert sequence: %w", err)
+	}
+	return seq, nil
+}

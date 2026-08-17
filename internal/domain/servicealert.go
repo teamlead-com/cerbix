@@ -242,10 +242,17 @@ type ServiceAlert struct {
 	// EpisodeID ties a close to the onset it ends, and carries the immutable recipient snapshot the
 	// close must reach — the people who heard the onset, not whoever is on call now.
 	EpisodeID string `json:"episode_id"`
-	// Seq is the monotonic per-service (health) or per-rule (burn) sequence. Delivery drops an event
+	// Seq is the monotonic per-service (health) or per-rule (burn) sequence. Delivery drops an ONSET
 	// whose Seq is behind the current one, so a retried onset cannot re-announce a state already
 	// left. The outbox is at-least-once; this is what keeps a duplicate from being a LIE.
 	Seq int64 `json:"seq"`
+	// RuleKey identifies which burn rule this is about; empty for the health signal. It is the
+	// canonical key over the rule's DECLARED fields, so it cannot change because the rule fired.
+	RuleKey string `json:"rule_key,omitempty"`
+	// Recipients is the IMMUTABLE snapshot resolved when the episode opened. A close goes to the
+	// people who heard the onset, not to whoever is on call at close time — a schedule that rotated
+	// mid-incident would otherwise page a stranger and leave the original recipient hanging.
+	Recipients []string `json:"recipients"`
 
 	// Health-signal fields.
 	State ServiceAlertState `json:"state,omitempty"`
@@ -286,3 +293,55 @@ type AlertSuppressionReason string
 // monitor. It is recorded per suppressed delivery, because a suppressed alert leaves no trace in
 // the outbox or the channels, and "did anyone get told?" is the first question after an incident.
 const SuppressionServiceDelegation AlertSuppressionReason = "service_delegation"
+
+// Message renders the human-readable notification. It states which signal it is, because the two
+// have different latencies and an operator holding a page must know whether it describes now or a
+// budget over sealed time.
+func (a ServiceAlert) Message() string {
+	if a.Signal == ServiceSignalBurn {
+		if !a.Firing {
+			return fmt.Sprintf("✅ %s: error-budget burn back under %.0f× (%s window, %s).",
+				a.ServiceName, a.Threshold, a.Window, a.closeSuffix())
+		}
+		basis := "sealed facts"
+		if a.SealedThrough != nil {
+			basis = "facts sealed through " + a.SealedThrough.UTC().Format("15:04 MST")
+		}
+		return fmt.Sprintf("🔥 %s is burning its %s budget %.1f× too fast (objective %.3f%%, %s — this signal trails the seal watermark).",
+			a.ServiceName, a.Window, a.BurnRate, a.Objective, basis)
+	}
+	if !a.Firing {
+		return fmt.Sprintf("✅ %s: alert closed (%s).", a.ServiceName, a.closeSuffix())
+	}
+	inputs := ""
+	if a.TotalInputs > 0 {
+		inputs = fmt.Sprintf(" — %d of %d reliability inputs failing", a.FailingInputs, a.TotalInputs)
+	}
+	return fmt.Sprintf("🚨 %s is %s%s (confirmed over %d evaluations).",
+		a.ServiceName, a.State, inputs, a.ConfirmedOver)
+}
+
+// closeSuffix renders WHY an announcement ended. Only a return to healthy is a recovery; the others
+// are statements about what cerbix can say, and a channel must be able to tell them apart.
+func (a ServiceAlert) closeSuffix() string {
+	switch a.CloseReason {
+	case CloseRecovered:
+		return "recovered"
+	case CloseVisibilityLost:
+		return "no longer measurable — this is not a recovery"
+	case CloseEnteredMaintenance:
+		return "entered a declared maintenance window — this is not a recovery"
+	case CloseOwnershipDisabled:
+		return "paging ownership was turned off for this service"
+	case ClosePolicyChanged:
+		return "the paging policy no longer covers this state"
+	case CloseBurnDisabled:
+		return "burn alerting was disabled for this service"
+	case CloseRuleRemoved:
+		return "the burn rule was removed"
+	case CloseServiceDeleted:
+		return "the service was deleted"
+	default:
+		return string(a.CloseReason)
+	}
+}

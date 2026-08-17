@@ -42,6 +42,11 @@ type Store interface {
 	// Returns the NEWLY inserted links plus the witness-overflow count of the
 	// [278] bound; a redelivery inserts none.
 	CorrelateIncident(ctx context.Context, incidentID string) ([]domain.ServiceImpactLink, int, error)
+	// Alerting ownership (FR-021 §16.1): whether a service ACTIVELY covers this signal for this
+	// monitor — armed, quotable, routable, generation-matched and fresh. An error here must page.
+	ActiveDelegation(ctx context.Context, monitorID, projectID string, signal store.DelegationSignal) (store.DelegationVerdict, error)
+	ServiceAlertSequence(ctx context.Context, serviceID string, signal domain.ServiceAlertSignal, ruleKey string) (int64, error)
+	RecordSuppression(ctx context.Context, eventID, monitorID, projectID, topic string, owners []store.DelegationOwner) error
 }
 
 // WebhookDeliverer delivers an incident event to a project's webhooks.
@@ -73,6 +78,10 @@ type Metrics interface {
 	// a durable-fact omission that must never be silent.
 	RecordImpactLinks(role string, n int)
 	RecordImpactFailure()
+	// Alerting-ownership telemetry (FR-021 §16.6b): a suppressed delivery leaves no other trace,
+	// and a fail-open is the state in which members page for themselves.
+	RecordAlertSuppressed(topic, reason string)
+	RecordDelegationFailOpen(reason string)
 	RecordImpactWitnessOverflow(n int)
 }
 
@@ -208,6 +217,46 @@ func (w *Worker) dependencySuppressed(ctx context.Context, monitor domain.Monito
 	return true
 }
 
+// serviceDelegationSuppressed reports whether a monitor's ONSET-like alert should stay quiet because
+// a service actively covers that signal (FR-021 §16.1).
+//
+// Three properties, each of which is a finding from the design rounds:
+//
+//   - it is called ONLY for onset-like events. A recovery or a burn CLEAR is never suppressed, because
+//     arming changes between an onset and its close: a DOWN can fail-open while the service is still
+//     catching up, and muting the matching UP would leave whoever was paged holding an alert that can
+//     never end.
+//   - it FAILS OPEN. Any error, any ambiguity, delivers — and says why, with a counted reason.
+//   - the suppression RECORD is written in the same scoped store operation that resolved the owners,
+//     and a failure there also fails open: a suppression nobody can see is worse than a duplicate page.
+func (w *Worker) serviceDelegationSuppressed(
+	ctx context.Context, eventID string, monitor domain.Monitor, signal store.DelegationSignal, topic string,
+) bool {
+	v, err := w.store.ActiveDelegation(ctx, monitor.ID, monitor.ProjectID, signal)
+	if err != nil {
+		w.logger.Warn("delegation_lookup_failed", "monitor_id", monitor.ID,
+			"signal", string(signal), "error", err.Error())
+		w.metrics.RecordDelegationFailOpen("error")
+		return false
+	}
+	if !v.Suppress() {
+		w.metrics.RecordDelegationFailOpen(v.FailOpenReason)
+		return false
+	}
+	if err := w.store.RecordSuppression(ctx, eventID, monitor.ID, monitor.ProjectID, topic, v.Owners); err != nil {
+		// The visibility path is not optional: if the suppression cannot be recorded and explained,
+		// it does not happen.
+		w.logger.Warn("suppression_record_failed", "monitor_id", monitor.ID,
+			"topic", topic, "error", err.Error())
+		w.metrics.RecordDelegationFailOpen("record_failed")
+		return false
+	}
+	w.logger.Info("alert_suppressed_by_service", "monitor_id", monitor.ID, "monitor", monitor.Name,
+		"topic", topic, "owner", v.Owners[0].Name, "owners", len(v.Owners))
+	w.metrics.RecordAlertSuppressed(topic, string(domain.SuppressionServiceDelegation))
+	return true
+}
+
 // attachIncidentContext computes and posts the heuristic context summary for an
 // opened auto-incident. Errors are logged, never propagated — the incident event
 // itself was already delivered.
@@ -333,6 +382,13 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		if monitor.EscalationPolicyID != "" && monitor.AutoIncident && mt.Cur == domain.StatusDown {
 			return nil
 		}
+		// Service delegation (FR-021 §16.1): a service that ACTIVELY covers the live signal for
+		// this monitor answers for it. DOWN and its reminders only — a recovery is never
+		// suppressed, whatever the arming state.
+		if mt.Cur == domain.StatusDown &&
+			w.serviceDelegationSuppressed(ctx, e.ID, monitor, store.DelegationLive, domain.TopicMonitorTransition) {
+			return nil
+		}
 		// Dependency-graph suppression: while a (transitive) parent is down, the
 		// child's DOWN alerts (and reminders) stay quiet — the parent's alert names
 		// the root cause. Recovery is never suppressed. Facts keep recording; only
@@ -373,12 +429,52 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		if err != nil {
 			return err
 		}
+		// Service delegation on the BURN signal, and only for a FIRING alert: a CLEAR is never
+		// suppressed, because arming can change between the two and a recipient left holding a
+		// firing burn alert has no way to learn it ended.
+		if a.Firing &&
+			w.serviceDelegationSuppressed(ctx, e.ID, monitor, store.DelegationBurn, domain.TopicSLOBurnAlert) {
+			return nil
+		}
 		// A burn alert firing while a dependency ancestor is down is the cascade
 		// speaking — suppress it like the down-notify. Recovery passes through.
 		if a.Firing && w.dependencySuppressed(ctx, monitor) {
 			return nil
 		}
 		return w.notifs.DeliverText(ctx, monitor, a.Message(monitor.Name))
+
+	case domain.TopicServiceAlert:
+		var a domain.ServiceAlert
+		if err := json.Unmarshal(e.Payload, &a); err != nil {
+			return err
+		}
+		if w.alertSilenced() {
+			return nil // instance-wide silence applies to a service alert exactly as to a monitor's
+		}
+		if w.notifs == nil {
+			return errors.New("no notification deliverer configured")
+		}
+		// The ORDERING gate (§16.5). The outbox is at-least-once and it says so: a retried onset can
+		// arrive after a newer close, and delivering it would re-announce a state the service has
+		// already left. A superseded event is dropped, exactly as a superseded monitor transition is.
+		// A CLOSE is never dropped by this gate — it carries the sequence of the onset it ends.
+		current, err := w.store.ServiceAlertSequence(ctx, a.ServiceID, a.Signal, a.RuleKey)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// The service or its rule is gone. A CLOSE must still deliver — its episode outlived its
+			// service precisely so that whoever was paged learns it ended — while an ONSET for a
+			// vanished service has nothing to announce.
+			if a.Firing {
+				return nil
+			}
+		case err != nil:
+			return err
+		case a.Firing && a.Seq < current:
+			w.logger.Info("service_alert_superseded", "service_id", a.ServiceID,
+				"signal", string(a.Signal), "event_seq", a.Seq, "current_seq", current)
+			return nil
+		}
+		return w.notifs.DeliverChannels(ctx, a.Recipients, a.Message())
 
 	case domain.TopicSLAReport:
 		var rep domain.SLAReport
@@ -410,6 +506,16 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		}
 		if w.alertSilenced() {
 			return nil // instance-wide silence: suppress the escalation step (no-op, delivered)
+		}
+		// The ladder is where a monitor with an escalation policy ACTUALLY pages — its flat DOWN
+		// transition is already dropped above — so delegation has to cover it, or phase 5 would
+		// keep its no-double-page promise for everyone except the installations that page properly.
+		// The ladder's row, its progress and its incident are untouched; only this delivery is muted.
+		if mon, err := w.store.GetMonitor(ctx, a.MonitorID); err != nil {
+			w.logger.Warn("escalation_monitor_lookup_failed", "monitor_id", a.MonitorID, "error", err.Error())
+			w.metrics.RecordDelegationFailOpen("error")
+		} else if w.serviceDelegationSuppressed(ctx, e.ID, mon, store.DelegationLive, domain.TopicEscalationStep) {
+			return nil
 		}
 		if w.notifs == nil {
 			return errors.New("no notification deliverer configured")

@@ -33,6 +33,11 @@ const (
 	// correlation and a correlation failure never blocks incident delivery
 	// (FR-021 §14.3). FENCED: see FencedTopic.
 	TopicIncidentCorrelation = "incident_correlation"
+	// TopicServiceAlert carries a ServiceAlert: a service's own page, on either of its two
+	// signals (FR-021 §16). Its own topic rather than a rider on `slo_burn_alert`, because the
+	// delegation rule has to be able to tell WHOSE alert it is holding, and a monitor-shaped
+	// payload has no room for a service that has no monitor id. FENCED: see FencedTopic.
+	TopicServiceAlert = "service_alert"
 )
 
 // FencedTopic reports whether a topic's rows use the fenced claimable class
@@ -59,7 +64,7 @@ func FencedTopic(topic string) bool {
 // introduced (the same protection the fence gives against pre-fence binaries,
 // carried forward automatically).
 func FencedTopics() []string {
-	return []string{TopicIncidentCorrelation}
+	return []string{TopicIncidentCorrelation, TopicServiceAlert}
 }
 
 // IncidentCorrelation is the payload for a TopicIncidentCorrelation outbox

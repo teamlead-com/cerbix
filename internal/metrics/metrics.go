@@ -7,7 +7,9 @@ package metrics
 import (
 	"fmt"
 	"io"
+	"maps"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +40,11 @@ type Registry struct {
 	impactLinks           map[string]uint64
 	impactFailures        uint64
 	impactWitnessOverflow uint64
+	// Alerting ownership (FR-021 §16.6b). Fixed, low-cardinality labels only: this surface is
+	// reachable by anyone who can create a service, so per-tenant labels would let them grow the
+	// metrics endpoint.
+	alertSuppressed    map[string]uint64 // "topic|reason" → count
+	delegationFailOpen map[string]uint64 // reason → count
 	// Status-page projection (FR-021 §15.0, invariant 71a): a component whose ACTIVE service the
 	// projection could not read. With the RESTRICT FK it cannot legitimately be absent, so this is
 	// a failed READ, and it is counted rather than only logged because the public page's rendering
@@ -384,6 +391,36 @@ func (r *Registry) RecordImpactWitnessOverflow(n int) {
 	r.impactWitnessOverflow += uint64(n)
 }
 
+// RecordAlertSuppressed counts a monitor alert withheld because a service actively covers that
+// signal. A suppressed delivery leaves NO other trace — the outbox row is marked delivered and no
+// channel sees it — so this counter and the `alert_suppressions` rows are the only way to answer
+// "did anyone get told?" after an incident.
+func (r *Registry) RecordAlertSuppressed(topic, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.alertSuppressed == nil {
+		r.alertSuppressed = map[string]uint64{}
+	}
+	r.alertSuppressed[topic+"|"+reason]++
+}
+
+// RecordDelegationFailOpen counts a delivery that PAGED because coverage could not be confirmed.
+// It is not an error counter: "no_active_owner" is the overwhelmingly common value and means the
+// system is behaving exactly as designed. What makes it worth collecting is the OTHER values —
+// stale, error, unroutable — which say members are paging for themselves because a replacement
+// went quiet.
+func (r *Registry) RecordDelegationFailOpen(reason string) {
+	if reason == "" {
+		reason = "unspecified"
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.delegationFailOpen == nil {
+		r.delegationFailOpen = map[string]uint64{}
+	}
+	r.delegationFailOpen[reason]++
+}
+
 // RecordStatusPageUnreadableComponent counts a status-page component whose active service could
 // not be read. Plain counter: no page or tenant labels, because an unauthenticated surface must not
 // grow per-tenant metric cardinality for anyone who can request a page.
@@ -550,6 +587,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	impactFailures := r.impactFailures
 	impactWitnessOverflow := r.impactWitnessOverflow
 	statusPageUnreadable := r.statusPageUnreadable
+	alertSuppressed := maps.Clone(r.alertSuppressed)
+	delegationFailOpen := maps.Clone(r.delegationFailOpen)
 	pullStats := r.pullStats
 	serviceStats := r.serviceStats
 	serviceWedgedSet, serviceWedged := r.serviceWedgedSet, r.serviceWedged
@@ -680,6 +719,31 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		out.println("# HELP cerbix_service_impact_witness_overflow_total Open incidents beyond the per-service correlation witness bound (deterministically not selected; never silent).")
 		out.println("# TYPE cerbix_service_impact_witness_overflow_total counter")
 		out.printf("cerbix_service_impact_witness_overflow_total %d\n", impactWitnessOverflow)
+	}
+	if len(alertSuppressed) > 0 {
+		out.println("# HELP cerbix_alert_suppressed_total Monitor alerts withheld because a service actively covers that signal (FR-021 §16).")
+		out.println("# TYPE cerbix_alert_suppressed_total counter")
+		keys := make([]string, 0, len(alertSuppressed))
+		for k := range alertSuppressed {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			topic, reason, _ := strings.Cut(k, "|")
+			out.printf("cerbix_alert_suppressed_total{topic=%q,reason=%q} %d\n", topic, reason, alertSuppressed[k])
+		}
+	}
+	if len(delegationFailOpen) > 0 {
+		out.println("# HELP cerbix_alert_delegation_fail_open_total Alert deliveries that PAGED because service coverage could not be confirmed.")
+		out.println("# TYPE cerbix_alert_delegation_fail_open_total counter")
+		keys := make([]string, 0, len(delegationFailOpen))
+		for k := range delegationFailOpen {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			out.printf("cerbix_alert_delegation_fail_open_total{reason=%q} %d\n", k, delegationFailOpen[k])
+		}
 	}
 	if statusPageUnreadable > 0 {
 		out.println("# HELP cerbix_status_page_component_unreadable_total Status-page components whose active service could not be read (a FAILED read, not absent measurement).")

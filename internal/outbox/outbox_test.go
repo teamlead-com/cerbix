@@ -47,6 +47,14 @@ type fakeStore struct {
 	inMaintenance    map[string]bool
 	inMaintenanceErr error
 
+	// alerting-ownership fakes (FR-021 §16)
+	delegation      map[string]store.DelegationVerdict // "monitor|signal" → verdict
+	delegationErr   error
+	suppressRecords []string // "event|monitor|topic|owners"
+	suppressErr     error
+	alertSeq        map[string]int64 // "service|signal|rule" → current sequence
+	alertSeqMissing bool
+
 	// impact-correlation fakes (FR-021 §14.3)
 	correlated        []string // incident ids passed to CorrelateIncident
 	correlateLinks    []domain.ServiceImpactLink
@@ -176,6 +184,8 @@ func (f *fakeNotify) DeliverChannels(_ context.Context, channelIDs []string, tex
 }
 
 type fakeMetrics struct {
+	suppressed                                      map[string]int
+	failOpen                                        map[string]int
 	delivered, dead, impactFailures, impactOverflow int
 	impactLinks                                     map[string]int
 }
@@ -188,7 +198,19 @@ func (m *fakeMetrics) RecordImpactLinks(role string, n int) {
 	}
 	m.impactLinks[role] += n
 }
-func (m *fakeMetrics) RecordImpactFailure()              { m.impactFailures++ }
+func (m *fakeMetrics) RecordImpactFailure() { m.impactFailures++ }
+func (m *fakeMetrics) RecordAlertSuppressed(topic, reason string) {
+	if m.suppressed == nil {
+		m.suppressed = map[string]int{}
+	}
+	m.suppressed[topic+"|"+reason]++
+}
+func (m *fakeMetrics) RecordDelegationFailOpen(reason string) {
+	if m.failOpen == nil {
+		m.failOpen = map[string]int{}
+	}
+	m.failOpen[reason]++
+}
 func (m *fakeMetrics) RecordImpactWitnessOverflow(n int) { m.impactOverflow += n }
 
 func incidentEvent(t *testing.T, typ, project string) []byte {
@@ -796,6 +818,12 @@ func TestCorrelationAndWebhookFailIndependently(t *testing.T) {
 func TestFencedTopicsAreDispatchable(t *testing.T) {
 	payloads := map[string][]byte{
 		domain.TopicIncidentCorrelation: []byte(`{"incident_id":"i1"}`),
+		// A CLOSE, deliberately: an onset for a service the fake knows nothing about would be dropped
+		// by the ordering gate as "the service is gone", and this test is about the switch knowing
+		// the topic, not about the gate.
+		domain.TopicServiceAlert: []byte(
+			`{"service_id":"s1","service_name":"Checkout","signal":"health","firing":false,` +
+				`"close_reason":"recovered","seq":1,"recipients":["ch-1"]}`),
 	}
 	for _, topic := range domain.FencedTopics() {
 		payload, ok := payloads[topic]
@@ -807,5 +835,266 @@ func TestFencedTopicsAreDispatchable(t *testing.T) {
 		if len(fs.delivered) != 1 {
 			t.Fatalf("fenced topic %q not dispatched: delivered=%v failed=%v", topic, fs.delivered, fs.failed)
 		}
+	}
+}
+
+// ── FR-021 §16 store surface ─────────────────────────────────────────────────────────────
+
+func (f *fakeStore) ActiveDelegation(
+	_ context.Context, monitorID, projectID string, signal store.DelegationSignal,
+) (store.DelegationVerdict, error) {
+	if f.delegationErr != nil {
+		return store.DelegationVerdict{}, f.delegationErr
+	}
+	v, ok := f.delegation[monitorID+"|"+string(signal)]
+	if !ok {
+		return store.DelegationVerdict{FailOpenReason: "no_active_owner"}, nil
+	}
+	return v, nil
+}
+
+func (f *fakeStore) RecordSuppression(
+	_ context.Context, eventID, monitorID, projectID, topic string, owners []store.DelegationOwner,
+) error {
+	if f.suppressErr != nil {
+		return f.suppressErr
+	}
+	names := make([]string, 0, len(owners))
+	for _, o := range owners {
+		names = append(names, o.Name)
+	}
+	f.suppressRecords = append(f.suppressRecords,
+		eventID+"|"+monitorID+"|"+topic+"|"+strings.Join(names, ","))
+	return nil
+}
+
+func (f *fakeStore) ServiceAlertSequence(
+	_ context.Context, serviceID string, signal domain.ServiceAlertSignal, ruleKey string,
+) (int64, error) {
+	if f.alertSeqMissing {
+		return 0, store.ErrNotFound
+	}
+	return f.alertSeq[serviceID+"|"+string(signal)+"|"+ruleKey], nil
+}
+
+// FR-021 §16.1 at the delivery boundary. These are the cases the two design rounds produced, and
+// each of them is a way to lose a page or its ending.
+
+func armedFor(monitorID string, signals ...store.DelegationSignal) map[string]store.DelegationVerdict {
+	m := map[string]store.DelegationVerdict{}
+	for _, sig := range signals {
+		m[monitorID+"|"+string(sig)] = store.DelegationVerdict{
+			Owners: []store.DelegationOwner{{ServiceID: "svc-1", Slug: "checkout", Name: "Checkout"}},
+		}
+	}
+	return m
+}
+
+// A DOWN is suppressed while live coverage is armed; the RECOVERY of the same monitor is not,
+// whatever the arming says. Arming changes between an onset and its close, and a muted recovery
+// leaves whoever was paged holding an alert that can never end.
+func TestDelegationSuppressesOnsetButNeverRecovery(t *testing.T) {
+	fs := &fakeStore{
+		monitors: map[string]domain.Monitor{
+			"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusDown},
+		},
+		delegation: armedFor("m1", store.DelegationLive),
+		pending: []domain.OutboxEvent{
+			{ID: "e-down", Topic: domain.TopicMonitorTransition,
+				Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 0, false)},
+		},
+	}
+	nf, m := &fakeNotify{}, &fakeMetrics{}
+	newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+	if nf.called != 0 {
+		t.Fatalf("a DOWN was delivered while the service actively covers it (called=%d)", nf.called)
+	}
+	if len(fs.suppressRecords) != 1 || !strings.Contains(fs.suppressRecords[0], "Checkout") {
+		t.Fatalf("suppression records = %v, want one naming the covering service", fs.suppressRecords)
+	}
+	if m.suppressed["monitor_transition|service_delegation"] != 1 {
+		t.Fatalf("suppression counter = %v", m.suppressed)
+	}
+
+	// The recovery, with delegation still armed.
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusUp}
+	fs.pending = []domain.OutboxEvent{
+		{ID: "e-up", Topic: domain.TopicMonitorTransition,
+			Payload: transitionSeq(t, "m1", domain.StatusDown, domain.StatusUp, 0, false)},
+	}
+	nf.called = 0
+	newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("the RECOVERY was suppressed (called=%d): a recipient would hold a DOWN forever", nf.called)
+	}
+}
+
+// Everything ambiguous PAGES, and says why.
+func TestDelegationFailsOpen(t *testing.T) {
+	cases := []struct {
+		name       string
+		arrange    func(*fakeStore)
+		wantReason string
+	}{
+		{"lookup error", func(f *fakeStore) { f.delegationErr = errors.New("boom") }, "error"},
+		{"no active owner", func(f *fakeStore) {
+			f.delegation = map[string]store.DelegationVerdict{
+				"m1|live": {FailOpenReason: "no_active_owner"},
+			}
+		}, "no_active_owner"},
+		{"the suppression cannot be recorded", func(f *fakeStore) {
+			f.delegation = armedFor("m1", store.DelegationLive)
+			f.suppressErr = errors.New("write failed")
+		}, "record_failed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := &fakeStore{
+				monitors: map[string]domain.Monitor{
+					"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusDown},
+				},
+				pending: []domain.OutboxEvent{
+					{ID: "e", Topic: domain.TopicMonitorTransition,
+						Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 0, false)},
+				},
+			}
+			c.arrange(fs)
+			nf, m := &fakeNotify{}, &fakeMetrics{}
+			newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+			if nf.called != 1 {
+				t.Fatalf("%s: the alert was MUTED (called=%d) — an ambiguous delegation must page",
+					c.name, nf.called)
+			}
+			if m.failOpen[c.wantReason] != 1 {
+				t.Fatalf("%s: fail-open counters = %v, want reason %q", c.name, m.failOpen, c.wantReason)
+			}
+		})
+	}
+}
+
+// The ladder is where a monitor with an escalation policy ACTUALLY pages, so delegation has to cover
+// it — otherwise phase 5 keeps its promise for everyone except the installations that page properly.
+func TestDelegationSuppressesTheEscalationLadder(t *testing.T) {
+	payload, err := json.Marshal(domain.EscalationStepAlert{
+		IncidentID: "inc-1", MonitorID: "m1", MonitorName: "checkout-http",
+		Step: 0, ChannelIDs: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	fs := &fakeStore{
+		monitors:   map[string]domain.Monitor{"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http"}},
+		delegation: armedFor("m1", store.DelegationLive),
+		pending:    []domain.OutboxEvent{{ID: "e-step", Topic: domain.TopicEscalationStep, Payload: payload}},
+	}
+	nf, m := &fakeNotify{}, &fakeMetrics{}
+	newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+	if nf.called != 0 {
+		t.Fatalf("the escalation step paged anyway (called=%d)", nf.called)
+	}
+	if m.suppressed["escalation_step|service_delegation"] != 1 {
+		t.Fatalf("suppression counter = %v, want the ladder counted", m.suppressed)
+	}
+}
+
+// The burn signal is delegated SEPARATELY: a service can cover the live signal while its burn window
+// is held, and then a member's burn alert must still be delivered.
+func TestBurnDelegationIsIndependentOfLive(t *testing.T) {
+	firing, err := json.Marshal(domain.SLOBurnAlert{MonitorID: "m1", Window: "30d", Firing: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	clear, err := json.Marshal(domain.SLOBurnAlert{MonitorID: "m1", Window: "30d", Firing: false})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	base := func(d map[string]store.DelegationVerdict, ev domain.OutboxEvent) *fakeStore {
+		return &fakeStore{
+			monitors:   map[string]domain.Monitor{"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http"}},
+			delegation: d,
+			pending:    []domain.OutboxEvent{ev},
+		}
+	}
+
+	// LIVE coverage alone must not touch a burn alert.
+	fs := base(armedFor("m1", store.DelegationLive),
+		domain.OutboxEvent{ID: "e1", Topic: domain.TopicSLOBurnAlert, Payload: firing})
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("a burn alert was suppressed by LIVE coverage (called=%d)", nf.called)
+	}
+
+	// With burn armed, the FIRING alert is suppressed...
+	fs = base(armedFor("m1", store.DelegationLive, store.DelegationBurn),
+		domain.OutboxEvent{ID: "e2", Topic: domain.TopicSLOBurnAlert, Payload: firing})
+	nf = &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 0 {
+		t.Fatalf("a FIRING burn alert was delivered while burn coverage is armed (called=%d)", nf.called)
+	}
+
+	// ...and a CLEAR still is not.
+	fs = base(armedFor("m1", store.DelegationLive, store.DelegationBurn),
+		domain.OutboxEvent{ID: "e3", Topic: domain.TopicSLOBurnAlert, Payload: clear})
+	nf = &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("the burn CLEAR was suppressed: a recipient would hold a firing alert forever")
+	}
+}
+
+// The service's own alert: the ordering gate drops a superseded ONSET, and never a close.
+func TestServiceAlertOrderingGate(t *testing.T) {
+	alert := func(seq int64, firing bool, reason domain.ServiceAlertCloseReason) []byte {
+		b, err := json.Marshal(domain.ServiceAlert{
+			ServiceID: "svc-1", ServiceName: "Checkout", Signal: domain.ServiceSignalHealth,
+			Firing: firing, State: domain.ServiceAlertDown, Seq: seq, ConfirmedOver: 2,
+			CloseReason: reason, Recipients: []string{"ch-1"},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	fs := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health|": 7},
+		pending: []domain.OutboxEvent{
+			{ID: "e-stale", Topic: domain.TopicServiceAlert, Payload: alert(3, true, "")},
+		},
+	}
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 0 {
+		t.Fatalf("a superseded ONSET was announced (called=%d)", nf.called)
+	}
+
+	fs.pending = []domain.OutboxEvent{
+		{ID: "e-now", Topic: domain.TopicServiceAlert, Payload: alert(7, true, "")},
+	}
+	nf = &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("the current onset was not delivered (called=%d)", nf.called)
+	}
+
+	// A CLOSE for a service that no longer exists still delivers: its episode outlived it precisely
+	// so the people who were paged learn that it ended, and it says WHY.
+	fs.alertSeqMissing = true
+	fs.pending = []domain.OutboxEvent{
+		{ID: "e-close", Topic: domain.TopicServiceAlert,
+			Payload: alert(8, false, domain.CloseServiceDeleted)},
+	}
+	nf = &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("a close for a deleted service was dropped (called=%d)", nf.called)
+	}
+	if !strings.Contains(nf.text, "deleted") {
+		t.Fatalf("the close does not say why it ended: %q", nf.text)
 	}
 }

@@ -171,22 +171,50 @@ var activeLiveDelegationSQL = `
 	evaluatedCurrentRevisionClause + effectiveSLIClause + routableClause + `
 	 ORDER BY s.slug`
 
-// BURN coverage: an enabled target with at least one rule whose LAST VERDICT WAS QUOTABLE — a HOLD
-// dis-arms, because a rule that cannot fire replaces nothing — for the current target and config
-// generations, fresh, error-free, and routable.
+// The predicate ONE burn rule's latch must satisfy to be a replacement: quotable (a HOLD is a
+// successful evaluation that cannot fire), for the current target and config generations, error-free
+// and fresh. Written once because it is asked twice below, in opposite directions.
+const burnRuleCoversSQL = `
+		           bs.last_verdict IN ('fire', 'clear')
+		       AND bs.config_generation = s.alert_config_generation
+		       AND bs.target_generation = t.alert_generation
+		       AND bs.last_error IS NULL
+		       AND now() < bs.lease_until`
+
+// BURN coverage: §16.1's "**Any HOLD dis-arms BURN coverage**", which is a claim about the SERVICE's
+// coverage and not about one row of it.
+//
+// The two halves are deliberate. The first says a replacement EXISTS at all; the second says NOTHING
+// the service owns is blind. They differ the moment a service owns more than one rule — `burn_rules`
+// is an array of up to four, and 00077 keys service targets by (service_id, window_name) so one
+// service may hold several enabled targets — and a single JOIN over the rows answers only the first
+// question. It would arm on "some rule is quotable" while a sibling rule sits at HOLD, which is the
+// P0 §16.1 was written against, one level down: the member's own burn alert is muted by a
+// replacement that is only partly able to speak.
+//
+// An enabled target with NO latch row at all (never evaluated, or no rules) also dis-arms: absence of
+// evidence is not coverage. The consequence is a monitor burn page that may be redundant; the
+// alternative is a burn page that never happens, and §16.1 does not trade the second for the first.
 var activeBurnDelegationSQL = `
-	SELECT DISTINCT s.id, s.slug, s.name
+	SELECT s.id, s.slug, s.name
 	  FROM services s
-	  JOIN sla_targets t ON t.service_id = s.id AND t.burn_alert_enabled
-	  JOIN service_burn_alert_state bs
-	    ON bs.service_id = s.id AND bs.project_id = s.project_id AND bs.sla_target_id = t.id
 	 WHERE s.project_id = $2
 	   AND s.owns_paging
-	   AND bs.last_verdict IN ('fire', 'clear')
-	   AND bs.config_generation = s.alert_config_generation
-	   AND bs.target_generation = t.alert_generation
-	   AND bs.last_error IS NULL
-	   AND now() < bs.lease_until` + effectiveSLIClause + routableClause + `
+	   AND EXISTS (
+	       SELECT 1
+	         FROM sla_targets t
+	         JOIN service_burn_alert_state bs
+	           ON bs.service_id = s.id AND bs.project_id = s.project_id AND bs.sla_target_id = t.id
+	        WHERE t.service_id = s.id AND t.burn_alert_enabled
+	          AND (` + burnRuleCoversSQL + `))
+	   AND NOT EXISTS (
+	       SELECT 1
+	         FROM sla_targets t
+	         LEFT JOIN service_burn_alert_state bs
+	           ON bs.service_id = s.id AND bs.project_id = s.project_id AND bs.sla_target_id = t.id
+	        WHERE t.service_id = s.id AND t.burn_alert_enabled
+	          AND (bs.sla_target_id IS NULL OR NOT (` + burnRuleCoversSQL + `)))` +
+	effectiveSLIClause + routableClause + `
 	 ORDER BY s.slug`
 
 // RecordSuppression writes the visibility half of §16.1 and annotates the monitor's open incident, in

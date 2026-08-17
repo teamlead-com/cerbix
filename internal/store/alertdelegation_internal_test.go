@@ -540,3 +540,87 @@ func TestBurnSequenceIsScopedToItsTarget(t *testing.T) {
 		t.Fatalf("health sequence for a foreign project: %v, want ErrNotFound", err)
 	}
 }
+
+// armBurnRule writes ONE rule's latch, for tests about services that own more than one rule.
+func armBurnRule(t *testing.T, st *Store, ctx context.Context, f armFixture,
+	targetID, ruleKey, verdict string) {
+	t.Helper()
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO service_burn_alert_state
+		  (service_id, project_id, sla_target_id, rule_key, firing, last_verdict,
+		   target_generation, config_generation, evaluated_at, lease_until)
+		SELECT s.id, s.project_id, t.id, $3, false, $4, t.alert_generation,
+		       s.alert_config_generation, now(), now() + interval '90 seconds'
+		  FROM services s JOIN sla_targets t ON t.id = $2
+		 WHERE s.id = $1
+		ON CONFLICT (service_id, project_id, sla_target_id, rule_key) DO UPDATE SET
+		   last_verdict = EXCLUDED.last_verdict, evaluated_at = EXCLUDED.evaluated_at,
+		   lease_until = EXCLUDED.lease_until, last_error = NULL`,
+		f.serviceID, targetID, ruleKey, verdict); err != nil {
+		t.Fatalf("arm burn rule %s: %v", ruleKey, err)
+	}
+}
+
+// FR-021 §16.1 — "**Any HOLD dis-arms BURN coverage**" is a statement about the SERVICE's coverage,
+// not about one row of it. A target carries an ARRAY of up to four rules and 00077 lets one service
+// hold several enabled targets, so "some rule is quotable" and "every rule can speak" are different
+// predicates that coincide only when there is exactly one rule — which is exactly the shape every
+// earlier test had, and how the gap survived. The direction of the error is the dangerous one: the
+// member's own burn alert is muted while part of the replacement is structurally unable to fire.
+func TestOneHoldingRuleAmongManyDisarmsBurnCoverage(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("fixture is not armed for burn: the rest of this test proves nothing")
+	}
+
+	// A SECOND rule on the SAME target, also quotable. The negative control: without it, the test
+	// would pass for the trivial reason that any second row dis-arms.
+	armBurnRule(t, st, ctx, f, f.targetID, "rule-2", "clear")
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("a second QUOTABLE rule dis-armed burn coverage")
+	}
+
+	// Now that rule cannot speak. One of the two replacements the service owns is blind.
+	armBurnRule(t, st, ctx, f, f.targetID, "rule-2", "hold")
+	if delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("a service with a HELD rule armed burn coverage anyway: the member's own burn " +
+			"alert is muted while one of the replacement rules cannot fire")
+	}
+	// The live signal is a different replacement and must be untouched.
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a held BURN rule dis-armed the LIVE signal too")
+	}
+}
+
+// The same coverage question asked of a target the evaluator has never answered for: an operator can
+// enable a second burn target at any moment, and between that write and the next evaluation there is
+// no verdict to be quotable. Absence of evidence is not coverage (§16.1), so it dis-arms — the safe
+// direction, in which members keep paging for themselves.
+func TestEnabledTargetWithNoVerdictDisarmsBurnCoverage(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled, burn_rules)
+		VALUES ($1,'7d',99.9,true,'[{"long_window_seconds":3600,"short_window_seconds":300,"threshold":14,"severity":"page"}]')`,
+		f.serviceID); err != nil {
+		t.Fatalf("second target: %v", err)
+	}
+	if delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("an enabled burn target with no evaluation at all armed burn coverage")
+	}
+
+	// Once the evaluator has answered for it, coverage returns — the dis-arm is about missing
+	// evidence, not about owning two targets.
+	var second string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM sla_targets WHERE service_id = $1 AND window_name = '7d'`,
+		f.serviceID).Scan(&second); err != nil {
+		t.Fatalf("read second target: %v", err)
+	}
+	armBurnRule(t, st, ctx, f, second, "rule-1", "clear")
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("two targets, both quotable, fresh and current, did not arm burn coverage")
+	}
+}

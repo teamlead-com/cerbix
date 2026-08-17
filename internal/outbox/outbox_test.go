@@ -26,11 +26,12 @@ func burnAlert(t *testing.T, monitorID string, firing bool) []byte {
 }
 
 type fakeStore struct {
-	pending   []domain.OutboxEvent
-	delivered []string
-	failed    []string
-	monitors  map[string]domain.Monitor
-	claimErr  error
+	pending     []domain.OutboxEvent
+	delivered   []string
+	failed      []string
+	failReasons []string
+	monitors    map[string]domain.Monitor
+	claimErr    error
 
 	// incident-context fakes
 	ictx       domain.IncidentContext
@@ -121,8 +122,9 @@ func (f *fakeStore) MarkOutboxDelivered(_ context.Context, id, _ string) (bool, 
 	f.delivered = append(f.delivered, id)
 	return true, nil
 }
-func (f *fakeStore) FailOutbox(_ context.Context, id, _, _ string, _ int) (bool, error) {
+func (f *fakeStore) FailOutbox(_ context.Context, id, _, lastErr string, _ int) (bool, error) {
 	f.failed = append(f.failed, id)
+	f.failReasons = append(f.failReasons, lastErr)
 	return true, nil
 }
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {
@@ -835,6 +837,43 @@ func TestFencedTopicsAreDispatchable(t *testing.T) {
 		if len(fs.delivered) != 1 {
 			t.Fatalf("fenced topic %q not dispatched: delivered=%v failed=%v", topic, fs.delivered, fs.failed)
 		}
+	}
+}
+
+// The THIRD parity leg (the other two live in internal/store): every topic this binary can
+// ENQUEUE must be one its own worker can DISPATCH. The schema-side guard proves such a row can be
+// written; without this one, a topic could be written, accepted, and then sit failing forever
+// because the switch has no case for it — the mirror image of the whitelist narrowing that stopped
+// three live topics in phase 5.
+//
+// It asserts the SWITCH, not the payloads: a topic the worker knows fails on its fixture ("cannot
+// unmarshal", a nil deliverer), while a topic it does not know fails with "unknown outbox topic".
+// Only the second is drift, so only the second fails this test.
+func TestEveryEnqueueableTopicIsDispatchable(t *testing.T) {
+	for _, topic := range domain.AllTopics() {
+		fs := &fakeStore{pending: []domain.OutboxEvent{
+			{ID: "e", Topic: topic, Payload: []byte(`{}`), Attempts: 1},
+		}}
+		newWorker(fs, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).drain(context.Background())
+		for _, reason := range fs.failReasons {
+			if strings.Contains(reason, "unknown outbox topic") {
+				t.Fatalf("topic %q is enqueueable but the worker has no dispatch case: %s", topic, reason)
+			}
+		}
+	}
+	// The guard has teeth: a topic nobody dispatches IS reported this way.
+	fs := &fakeStore{pending: []domain.OutboxEvent{
+		{ID: "e", Topic: "not_a_topic", Payload: []byte(`{}`), Attempts: 1},
+	}}
+	newWorker(fs, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).drain(context.Background())
+	var sawUnknown bool
+	for _, reason := range fs.failReasons {
+		if strings.Contains(reason, "unknown outbox topic") {
+			sawUnknown = true
+		}
+	}
+	if !sawUnknown {
+		t.Fatal("the drift signal this guard reads no longer exists — it would pass vacuously")
 	}
 }
 

@@ -828,3 +828,54 @@ func TestFileAlertingEditWritesNoRevisionAndNoEpoch(t *testing.T) {
 			genAfter, gen)
 	}
 }
+
+// §15.2 — the file IS the desired state, so the same file must converge to the same database
+// whatever it used to say.
+//
+// The case that makes it concrete: a bundle declares `owns_paging: true`, and the block is later
+// deleted from the file. If absence meant "leave it", the service would keep owning paging forever
+// — and being file-managed, the UI could not correct it, because those edits are refused with a 409.
+// A fresh installation applying the same final file would meanwhile get the default. One file, two
+// databases.
+func TestRemovingTheAlertingBlockRestoresTheDeclaredDefault(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+
+	owning := svcBundle + `    alerting:
+      owns_paging: true
+      page_on: [down, degraded]
+      confirm_evaluations: 5
+`
+	applyServiceBundle(t, st, ctx, owning)
+
+	var serviceID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM services WHERE project_id = $1`, projID).Scan(&serviceID); err != nil {
+		t.Fatalf("read service: %v", err)
+	}
+	policy := func() domain.ServiceAlertPolicy {
+		t.Helper()
+		p, err := st.ServiceAlertPolicy(ctx, projID, serviceID)
+		if err != nil {
+			t.Fatalf("read policy: %v", err)
+		}
+		return p
+	}
+	if got := policy(); !got.OwnsPaging || got.ConfirmEvaluations != 5 {
+		t.Fatalf("the declaration did not apply: %+v", got)
+	}
+
+	// The block is deleted from the file.
+	applyServiceBundle(t, st, ctx, svcBundle)
+
+	got := policy()
+	want := domain.DefaultServiceAlertPolicy().Canonical()
+	if got.OwnsPaging {
+		t.Fatal("the service still owns paging after the declaration was deleted from the file: " +
+			"the same file now means two different things depending on history, and a file-managed " +
+			"service cannot be corrected through the UI")
+	}
+	if got.ConfirmEvaluations != want.ConfirmEvaluations || len(got.PageOn) != len(want.PageOn) {
+		t.Fatalf("removing the block converged to %+v, want the default %+v", got, want)
+	}
+}

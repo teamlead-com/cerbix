@@ -164,24 +164,30 @@ func TestAlertingIsOutsideTheCanonicalHash(t *testing.T) {
 	}
 }
 
-// An absent block declares NOTHING about paging — it is not the default policy.
+// An absent block declares the DEFAULT policy, and this is the test that says why.
 //
-// The consequence, asserted here at the only place it can be: a service whose declaration
-// carried `alerting:` and no longer does parses to a nil policy, which the apply writes nothing
-// from. It neither disowns a service that has ownership on nor claims it for one that does not.
-// A declaration that says nothing about paging is silence, exactly as a format-1 bundle's
-// silence about `services` is not a request to delete them (§15.2).
-func TestAbsentAlertingBlockDeclaresNothing(t *testing.T) {
-	if p := alertingOf(t, format2Bundle); p != nil {
-		t.Fatalf("an absent `alerting:` block parsed to %+v, want nil", *p)
+// A file describes the desired state. If an absent block meant "leave whatever is there", the SAME
+// file would converge to two different databases depending on what it used to say — a bundle that
+// once declared `owns_paging: true` and then dropped the block would leave the service still owning
+// paging, and for a file-managed service the UI cannot correct it, because §16.6a refuses those
+// edits with a 409. Converging to the default is also safe for every existing bundle: a service that
+// never declared alerting already holds exactly these values.
+func TestAbsentAlertingBlockIsTheDefaultDeclaration(t *testing.T) {
+	p := alertingOf(t, format2Bundle)
+	if p == nil {
+		t.Fatal("an absent `alerting:` block parsed to nil; the file would then depend on history")
 	}
-	// Silence and a declaration of the defaults are still different STATEMENTS — the first parses
-	// to nil and writes nothing, the second parses to a policy the apply reconciles — even though
-	// neither moves the canonical hash, which is about the declaration of availability.
+	want := domain.DefaultServiceAlertPolicy().Canonical()
+	if p.OwnsPaging != want.OwnsPaging || p.PageOnUnknown != want.PageOnUnknown ||
+		p.ConfirmEvaluations != want.ConfirmEvaluations || len(p.PageOn) != len(want.PageOn) {
+		t.Fatalf("an absent block parsed to %+v, want the default %+v", *p, want)
+	}
+	// Declaring those same defaults explicitly is the same declaration, and hashes the same —
+	// the hash is about what availability MEANS, and paging is not part of that (see above).
 	quiet := "    alerting:\n      owns_paging: false\n      page_on: [down]\n" +
 		"      page_on_unknown: false\n      confirm_evaluations: 2\n"
-	if p := alertingOf(t, alertingYAML(quiet)); p == nil {
-		t.Error("declaring the defaults parsed to nil, which is what SILENCE parses to")
+	if hashOf(t, alertingYAML(quiet)) != hashOf(t, format2Bundle) {
+		t.Error("declaring the defaults hashes differently from taking them")
 	}
 }
 

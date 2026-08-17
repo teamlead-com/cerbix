@@ -100,7 +100,9 @@ type DesiredService struct {
 	SLI      []string
 	Policies domain.ServicePolicies
 
-	// Alerting is the §16.6a paging declaration, canonical and already validated, or NIL when
+	// Alerting is the §16.6a paging declaration, canonical and already validated. It is NEVER nil
+	// for a parsed format-2 service: an absent block declares the DEFAULT policy, because a file
+	// that describes the desired state cannot let history decide what a service pages for. NIL when
 	// the bundle declares nothing about paging at all.
 	//
 	// Nil is not "the default policy". A service that has ownership ON and whose declaration
@@ -312,14 +314,20 @@ func decodeServicePolicies(slug string, rs rawService) (domain.ServicePolicies, 
 // The order is canonical THEN validate, matching the store's UI path exactly, so a declaration
 // can never be accepted in one spelling and refused in another.
 func decodeServiceAlerting(slug string, ra *rawServiceAlerting) (*domain.ServiceAlertPolicy, error) {
-	if ra == nil {
-		// No declaration. NOT the default policy — see DesiredService.Alerting.
-		return nil, nil
-	}
-	// The block's own defaults are the domain's quiet ones: page for `down`, not for unknown,
-	// confirmed over two evaluations. A field the author omitted INSIDE a present block is a
-	// default, which is a statement; a whole block the author omitted is silence, which is not.
+	// An ABSENT block is the DEFAULT policy, not silence — the file is the desired state, and a
+	// desired state that depends on what the file used to say is not declarative. An earlier
+	// revision returned nil here and the apply skipped the columns, which meant a bundle that once
+	// declared `owns_paging: true` and then dropped the block left the service still owning paging:
+	// the same file converged to two different databases depending on history, and for a
+	// file-managed service the UI cannot even correct it (§16.6a refuses those edits with a 409).
+	// Converging to the default is also safe for existing bundles, because a service that never
+	// declared alerting already holds exactly these values.
+	//
+	// Inside a PRESENT block the same defaults apply per field, so the two readings agree.
 	p := domain.DefaultServiceAlertPolicy()
+	if ra == nil {
+		return &p, nil
+	}
 	if ra.OwnsPaging != nil {
 		p.OwnsPaging = *ra.OwnsPaging
 	}

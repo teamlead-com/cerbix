@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 )
 
@@ -34,10 +35,19 @@ func DefaultBurnRules() []BurnRule {
 	}
 }
 
-// Key identifies a rule's configuration (not its latch) — used to carry Firing
-// across edits that keep a rule unchanged.
+// Key identifies a rule's CONFIGURATION, never its latch: severity, both windows and the
+// threshold, in canonical order. It carries Firing across edits that leave a rule unchanged, and
+// for a SERVICE target it is the persisted `rule_key` a normalized latch and its episodes live
+// under (§16.4b) — so it must be LOSSLESS. A `%.4f` threshold was not: 14.40001 and 14.40002 are
+// distinct, valid rules that collapsed to one key, which would have made the duplicate check reject
+// them and, worse, made one latch answer for both. FormatFloat with -1 precision emits the shortest
+// text that parses back to the same float64, so distinct thresholds stay distinct and the same
+// threshold always spells the same way.
 func (r BurnRule) Key() string {
-	return fmt.Sprintf("%s/%d/%d/%.4f", r.Severity, r.LongWindowSeconds, r.ShortWindowSeconds, r.Threshold)
+	return r.Severity + "/" +
+		strconv.Itoa(r.LongWindowSeconds) + "/" +
+		strconv.Itoa(r.ShortWindowSeconds) + "/" +
+		strconv.FormatFloat(r.Threshold, 'g', -1, 64)
 }
 
 // ValidateBurnRules enforces rule invariants: at most 4 rules; per rule a known
@@ -49,6 +59,12 @@ func ValidateBurnRules(rules []BurnRule) error {
 	for i, r := range rules {
 		if r.Severity != BurnSeverityPage && r.Severity != BurnSeverityTicket {
 			return fmt.Errorf("burn rule %d: severity must be %q or %q", i+1, BurnSeverityPage, BurnSeverityTicket)
+		}
+		// Finiteness first: NaN fails EVERY comparison, so `<= 0` lets it through, and an infinite
+		// threshold is a rule that can never fire. Both would also reach the canonical key and
+		// become a persisted latch identity of "NaN" or "+Inf".
+		if math.IsNaN(r.Threshold) || math.IsInf(r.Threshold, 0) {
+			return fmt.Errorf("burn rule %d: threshold must be a finite number", i+1)
 		}
 		if r.Threshold <= 0 {
 			return fmt.Errorf("burn rule %d: threshold must be positive", i+1)
@@ -62,6 +78,19 @@ func ValidateBurnRules(rules []BurnRule) error {
 		if r.LongWindowSeconds > 7*24*3600 {
 			return fmt.Errorf("burn rule %d: long window must be at most 7 days", i+1)
 		}
+	}
+	// Two rules with the SAME canonical key are a validation error, never a silent merge: the key
+	// is what a service's normalized latch is stored under (§16.4b), so a duplicate would make one
+	// latch ambiguous between two rules — and whichever wrote last would silently own the other's
+	// firing state. Checked AFTER the per-rule rules, so a malformed threshold reports as malformed
+	// rather than as a duplicate of another malformed one.
+	seen := make(map[string]int, len(rules))
+	for i, r := range rules {
+		if first, dup := seen[r.Key()]; dup {
+			return fmt.Errorf("burn rule %d duplicates rule %d: same window pair, threshold and "+
+				"severity, so the two cannot have separate firing state", i+1, first+1)
+		}
+		seen[r.Key()] = i
 	}
 	return nil
 }

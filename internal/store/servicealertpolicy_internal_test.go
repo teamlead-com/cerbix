@@ -66,6 +66,70 @@ func auditTargets(t *testing.T, st *Store, ctx context.Context, action string) [
 	return out
 }
 
+// alertAuditRow is an audit row read back with its ACTOR, not only its text. The target string says
+// what changed; these three columns say WHO changed it and inside which tenant, which is the half a
+// reader needs when the question is "who turned paging off at 03:00".
+type alertAuditRow struct {
+	orgID    string
+	actorID  *string
+	viaToken bool
+	target   string
+}
+
+func alertAuditRows(t *testing.T, st *Store, ctx context.Context, action string) []alertAuditRow {
+	t.Helper()
+	rows, err := st.pool.Query(ctx, `
+		SELECT org_id, actor_user_id, via_token, target
+		  FROM audit_logs WHERE action = $1 ORDER BY created_at, id`, action)
+	if err != nil {
+		t.Fatalf("read audit rows: %v", err)
+	}
+	defer rows.Close()
+	var out []alertAuditRow
+	for rows.Next() {
+		var r alertAuditRow
+		if err := rows.Scan(&r.orgID, &r.actorID, &r.viaToken, &r.target); err != nil {
+			t.Fatalf("scan audit row: %v", err)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// storedPolicy reads the four declared columns back as the domain type, so a test can compare what
+// the DATABASE holds against what the write surface said it stored.
+func storedPolicy(t *testing.T, st *Store, ctx context.Context, serviceID string) domain.ServiceAlertPolicy {
+	t.Helper()
+	var p domain.ServiceAlertPolicy
+	var pageOn []string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations
+		  FROM services WHERE id = $1`, serviceID).
+		Scan(&p.OwnsPaging, &pageOn, &p.PageOnUnknown, &p.ConfirmEvaluations); err != nil {
+		t.Fatalf("read stored policy: %v", err)
+	}
+	for _, s := range pageOn {
+		p.PageOn = append(p.PageOn, domain.ServiceAlertState(s))
+	}
+	return p
+}
+
+// storedBurn reads a target's alerting declaration: the switch, the generation, and the rules as
+// JSONB TEXT — the exact value the generation trigger compares, which is what makes "a reorder is
+// not a change" a claim about the stored bytes rather than about the caller's intent.
+func storedBurn(t *testing.T, st *Store, ctx context.Context, targetID string) (bool, int64, string) {
+	t.Helper()
+	var enabled bool
+	var generation int64
+	var rules string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT burn_alert_enabled, alert_generation, burn_rules::text
+		  FROM sla_targets WHERE id = $1`, targetID).Scan(&enabled, &generation, &rules); err != nil {
+		t.Fatalf("read stored burn declaration: %v", err)
+	}
+	return enabled, generation, rules
+}
+
 func countRows(t *testing.T, st *Store, ctx context.Context, sql string, args ...any) int {
 	t.Helper()
 	var n int
@@ -677,5 +741,582 @@ func TestPagingWritesRejectInvalidInputBeforeWriting(t *testing.T) {
 	}
 	if len(pageOn) != 2 || pageOn[0] != "degraded" || pageOn[1] != "down" {
 		t.Fatalf("stored page_on = %v, want the canonical form", pageOn)
+	}
+}
+
+// The OTHER half of the pageability declaration, and the half every test above narrows around:
+// `page_on_unknown` true→false is exactly as destructive as narrowing `page_on`. A service
+// announcing that nobody can see it is announcing a state the new policy no longer covers, so the
+// episode has to end here — nothing else ever will, because after the commit the evaluator judges
+// `unknown` as unpageable and has nothing to close. And it ends as `policy_changed`: the service did
+// not become visible, the operator stopped asking to hear about it, so `recovered` would assert
+// evidence that does not exist.
+func TestClearingPageOnUnknownClosesTheAnnouncementItNoLongerCovers(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := alertingService(t, st, ctx)
+
+	// Declared through the write surface itself, so the true→false edit below is judged against a
+	// value this path stored rather than one a test wrote behind its back.
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		domain.ServiceAlertPolicy{OwnsPaging: true,
+			PageOn:        []domain.ServiceAlertState{domain.ServiceAlertDown},
+			PageOnUnknown: true, ConfirmEvaluations: 2}, AlertActor{}); err != nil {
+		t.Fatalf("declare page_on_unknown: %v", err)
+	}
+	// No heartbeats at all: nothing is decidable, so the service is UNKNOWN rather than down.
+	evalOnce(t, st, ctx)
+	evalOnce(t, st, ctx)
+	onset := alertEvents(t, st, ctx)
+	if len(onset) != 1 || !onset[0].Firing || onset[0].State != domain.ServiceAlertUnknown {
+		t.Fatalf("expected one UNKNOWN onset, got %+v", onset)
+	}
+
+	// Only `page_on_unknown` moves: `page_on` stays {down} and the confirmation stays 2, so the close
+	// below cannot be attributed to any other field.
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		pagingPolicy(domain.ServiceAlertDown), AlertActor{}); err != nil {
+		t.Fatalf("clear page_on_unknown: %v", err)
+	}
+
+	events := alertEvents(t, st, ctx)
+	if len(events) != 2 {
+		t.Fatalf("%d events, want the onset and ONE close — an UNKNOWN announcement left open by "+
+			"the switch that produced it is one nothing can ever end", len(events))
+	}
+	got := events[1]
+	switch {
+	case got.Firing:
+		t.Fatal("clearing page_on_unknown published another onset")
+	case got.CloseReason != domain.ClosePolicyChanged:
+		t.Fatalf("close reason = %q, want policy_changed — the service is still unmeasurable, so "+
+			"nothing here is evidence that it recovered", got.CloseReason)
+	case got.Signal != domain.ServiceSignalHealth || got.State != domain.ServiceAlertUnknown:
+		t.Fatalf("the close does not name what ended: %+v", got)
+	case got.EpisodeID != onset[0].EpisodeID:
+		t.Fatalf("the close ends episode %q, want the onset's %q", got.EpisodeID, onset[0].EpisodeID)
+	case len(got.Recipients) == 0 || len(got.Recipients) != len(onset[0].Recipients):
+		t.Fatalf("close recipients = %v, want the ONSET's snapshot %v",
+			got.Recipients, onset[0].Recipients)
+	case got.Seq <= onset[0].Seq:
+		t.Fatalf("close seq %d does not follow the onset's %d", got.Seq, onset[0].Seq)
+	}
+	if n := openHealthEpisodes(t, st, ctx, f.serviceID); n != 0 {
+		t.Fatalf("%d health episodes still open after the close", n)
+	}
+	if liveFiring(t, st, ctx, f.serviceID) {
+		t.Fatal("the live latch is still FIRING with no open episode: re-declaring page_on_unknown " +
+			"would swallow the next onset as 'no edge'")
+	}
+	audits := auditTargets(t, st, ctx, "service.alerting")
+	if len(audits) != 2 || !strings.Contains(audits[1], "page_on_unknown:true→false") {
+		t.Fatalf("audit = %v, want the page_on_unknown before→after", audits)
+	}
+	if strings.Contains(audits[1], "page_on:") || strings.Contains(audits[1], "confirm_evaluations") {
+		t.Fatalf("audit target = %q, want ONLY the field that moved", audits[1])
+	}
+}
+
+// Disowning a service that is firing on BOTH signals: one edit, TWO announcements to end, and each
+// one is a separate promise to a separate set of people. The failure this pins is cardinality — one
+// close covering both episodes leaves one announcement open forever, and two closes for one episode
+// tells the same recipients twice that something ended once.
+//
+// The recipient snapshots are deliberately made to DIFFER, by rotating the schedule between the two
+// onsets. With one route for both, "each close reached its own onset's people" is not a claim this
+// test could ever fail.
+func TestDisowningClosesEachOpenSignalExactlyOnce(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+	live := alertFixture{projectID: f.projectID, serviceID: f.serviceID, monitorID: f.monitorID}
+
+	var schedule string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO oncall_schedules (project_id, name, shift_seconds, anchor_at, participants)
+		VALUES ($1,'primary',604800,now(),'["ch-burn"]') RETURNING id`, f.projectID).Scan(&schedule); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE services SET oncall_schedule_id = $2 WHERE id = $1`, f.serviceID, schedule); err != nil {
+		t.Fatalf("attach schedule: %v", err)
+	}
+
+	// (a) the burn announcement, to "ch-burn".
+	plantBurn(t, st, ctx, f, 5, minute/60) // ~16.7×, over the rule's threshold of 14
+	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
+		t.Fatalf("onsets = %d, want the burn rule firing", got.Onsets)
+	}
+	burnOnset := burnEventsFor(t, st, ctx, f.targetID)
+	if len(burnOnset) != 1 || len(burnOnset[0].Recipients) != 1 ||
+		burnOnset[0].Recipients[0] != "ch-burn" {
+		t.Fatalf("burn onset = %+v, want one alert to ch-burn", burnOnset)
+	}
+
+	// (b) the rotation, and then the LIVE announcement, to somebody else entirely.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE oncall_schedules SET participants = '["ch-live"]' WHERE id = $1`, schedule); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	setMemberHealth(t, st, ctx, live, false)
+	evalOnce(t, st, ctx)
+	evalOnce(t, st, ctx)
+	var healthOnset domain.ServiceAlert
+	for _, e := range allServiceAlerts(t, st, ctx) {
+		if e.Firing && e.Signal == domain.ServiceSignalHealth {
+			healthOnset = e
+		}
+	}
+	if healthOnset.EpisodeID == "" || len(healthOnset.Recipients) != 1 ||
+		healthOnset.Recipients[0] != "ch-live" {
+		t.Fatalf("health onset = %+v, want one alert to ch-live", healthOnset)
+	}
+	if healthOnset.EpisodeID == burnOnset[0].EpisodeID {
+		t.Fatal("the two signals share an episode: this fixture cannot tell two closes from one")
+	}
+
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		domain.ServiceAlertPolicy{OwnsPaging: false,
+			PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
+			ConfirmEvaluations: 2}, AlertActor{}); err != nil {
+		t.Fatalf("disown: %v", err)
+	}
+
+	events := allServiceAlerts(t, st, ctx)
+	if len(events) != 4 {
+		t.Fatalf("%d events, want two onsets and ONE close per signal", len(events))
+	}
+	closes := map[domain.ServiceAlertSignal][]domain.ServiceAlert{}
+	perEpisode := map[string]int{}
+	for _, e := range events {
+		if e.Firing {
+			continue
+		}
+		closes[e.Signal] = append(closes[e.Signal], e)
+		perEpisode[e.EpisodeID]++
+	}
+	if len(closes[domain.ServiceSignalBurn]) != 1 || len(closes[domain.ServiceSignalHealth]) != 1 {
+		t.Fatalf("closes per signal = %d burn / %d health, want exactly one each: a single close "+
+			"covering both leaves one announcement open forever",
+			len(closes[domain.ServiceSignalBurn]), len(closes[domain.ServiceSignalHealth]))
+	}
+	for id, n := range perEpisode {
+		if n != 1 {
+			t.Fatalf("episode %q was closed %d times: its recipients are told twice that one "+
+				"announcement ended once", id, n)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		got   domain.ServiceAlert
+		onset domain.ServiceAlert
+	}{
+		{"burn", closes[domain.ServiceSignalBurn][0], burnOnset[0]},
+		{"health", closes[domain.ServiceSignalHealth][0], healthOnset},
+	} {
+		switch {
+		case tc.got.CloseReason != domain.CloseOwnershipDisabled:
+			t.Fatalf("%s close reason = %q, want ownership_disabled", tc.name, tc.got.CloseReason)
+		case tc.got.EpisodeID != tc.onset.EpisodeID:
+			t.Fatalf("the %s close ends episode %q, want its own onset's %q",
+				tc.name, tc.got.EpisodeID, tc.onset.EpisodeID)
+		case len(tc.got.Recipients) != 1 || tc.got.Recipients[0] != tc.onset.Recipients[0]:
+			t.Fatalf("%s close recipients = %v, want its OWN onset's snapshot %v — the two signals "+
+				"were announced to different people", tc.name, tc.got.Recipients, tc.onset.Recipients)
+		case tc.got.Seq <= tc.onset.Seq:
+			t.Fatalf("%s close seq %d does not follow its onset's %d", tc.name, tc.got.Seq, tc.onset.Seq)
+		}
+	}
+
+	// Both episodes are closed and both latches are cleared: a level left set with no open episode
+	// would swallow the next onset as "no edge" once ownership came back.
+	if n := openBurnEpisodes(t, st, ctx, f.targetID); n != 0 {
+		t.Fatalf("%d burn episodes still open after disowning", n)
+	}
+	if n := openHealthEpisodes(t, st, ctx, f.serviceID); n != 0 {
+		t.Fatalf("%d health episodes still open after disowning", n)
+	}
+	if s := burnState(t, st, ctx, f.targetID, oneBurnRuleKey); s.firing {
+		t.Fatal("the burn latch is still FIRING with no open episode")
+	}
+	if liveFiring(t, st, ctx, f.serviceID) {
+		t.Fatal("the live latch is still FIRING with no open episode")
+	}
+	// One edit, one audit line — two closes do not make two configuration changes.
+	if audits := auditTargets(t, st, ctx, "service.alerting"); len(audits) != 1 ||
+		!strings.Contains(audits[0], "owns_paging:true→false") {
+		t.Fatalf("audit = %v, want exactly one row naming the ownership flip", audits)
+	}
+}
+
+// §16.6a requires every paging-config change to carry its ACTOR, and the actor is three columns, not
+// a sentence in `target`: who (or NULL for a machine principal), whether the principal was an API
+// token, and the tenant the row belongs to. A row that names the change but not the changer answers
+// nothing the audit log exists to answer, and one filed under the wrong org is invisible to the only
+// people entitled to read it.
+func TestPagingWritesAuditTheirActor(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	// A decoy org and project, so "the service's own org" is a claim that can fail: with one org in
+	// the table any value passes.
+	decoy, err := st.CreateOrganization(ctx, "decoy", "Decoy")
+	if err != nil {
+		t.Fatalf("decoy org: %v", err)
+	}
+	if _, err := st.CreateProject(ctx, decoy.ID, "elsewhere", "Elsewhere"); err != nil {
+		t.Fatalf("decoy project: %v", err)
+	}
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+
+	// `actor_user_id` is a soft FK to a real row (00018), so the human actor has to exist.
+	var userID string
+	if err := st.pool.QueryRow(ctx,
+		`INSERT INTO users (email, display_name) VALUES ('ops@example.com','Ops') RETURNING id`).
+		Scan(&userID); err != nil {
+		t.Fatalf("user: %v", err)
+	}
+
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		domain.ServiceAlertPolicy{OwnsPaging: true,
+			PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
+			ConfirmEvaluations: 5}, AlertActor{ActorUserID: userID}); err != nil {
+		t.Fatalf("policy edit by a human: %v", err)
+	}
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		domain.ServiceAlertPolicy{OwnsPaging: true,
+			PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
+			ConfirmEvaluations: 6}, AlertActor{ViaToken: true}); err != nil {
+		t.Fatalf("policy edit by a token: %v", err)
+	}
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true,
+		twoBurnRuleSet(), AlertActor{ActorUserID: userID}); err != nil {
+		t.Fatalf("burn edit by a human: %v", err)
+	}
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", false,
+		twoBurnRuleSet(), AlertActor{ViaToken: true}); err != nil {
+		t.Fatalf("burn edit by a token: %v", err)
+	}
+
+	var orgID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT org_id FROM projects WHERE id = $1`, f.projectID).Scan(&orgID); err != nil {
+		t.Fatalf("read org: %v", err)
+	}
+	if orgID == decoy.ID {
+		t.Fatal("the fixture is wrong: the decoy org must not be the service's own")
+	}
+	for _, action := range []string{"service.alerting", "service.burn_alerting"} {
+		rows := alertAuditRows(t, st, ctx, action)
+		if len(rows) != 2 {
+			t.Fatalf("%s audit rows = %d, want the human's and the machine's", action, len(rows))
+		}
+		human, machine := rows[0], rows[1]
+		switch {
+		case human.actorID == nil || *human.actorID != userID:
+			t.Fatalf("%s: actor_user_id = %v, want the user that made the change — a change with no "+
+				"changer answers nothing the audit log exists to answer", action, human.actorID)
+		case human.viaToken:
+			t.Fatalf("%s: a session principal was recorded as via_token", action)
+		case machine.actorID != nil:
+			t.Fatalf("%s: an empty ActorUserID stored %q, want NULL — a machine actor must not be "+
+				"attributed to a person", action, *machine.actorID)
+		case !machine.viaToken:
+			t.Fatalf("%s: a token principal was not marked via_token, so a service account reads as "+
+				"an interactive operator", action)
+		}
+		for _, r := range rows {
+			if r.orgID != orgID {
+				t.Fatalf("%s: org_id = %q, want the service's own org %q — a row filed under another "+
+					"tenant is invisible to the only people entitled to read it", action, r.orgID, orgID)
+			}
+			if !strings.Contains(r.target, "service="+f.serviceID) {
+				t.Fatalf("%s: target = %q, want the service it is about", action, r.target)
+			}
+		}
+	}
+}
+
+// A save that changes nothing must BE nothing. This is the pin that keeps the UI's "Save" — pressed
+// on a form nobody edited, or replayed by a MaC apply — from bumping the generations, dis-arming the
+// service and paging every member for a change that was never made; and from closing announcements
+// that are still true.
+//
+// Both spellings are exercised: re-sending the same declaration, and re-sending a REORDERED one. The
+// second is the load-bearing half, because both generations are owned by triggers that compare
+// stored values, so "a reorder is not a change" is a property of the canonical form this surface
+// writes, not of the caller's discipline.
+func TestSemanticNoOpWritesChangeNothing(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, twoRulesJSON)
+	live := alertFixture{projectID: f.projectID, serviceID: f.serviceID, monitorID: f.monitorID}
+
+	// Both signals firing, so "closes nothing" is a claim with something to lose.
+	plantBurn(t, st, ctx, f, 5, 2*minute/60) // 33.3×: over BOTH thresholds
+	if got := burnEvalOnce(t, st, ctx); got.Onsets != 2 {
+		t.Fatalf("onsets = %d, want both burn rules firing", got.Onsets)
+	}
+	setMemberHealth(t, st, ctx, live, false)
+	evalOnce(t, st, ctx)
+	evalOnce(t, st, ctx)
+	if n := len(allServiceAlerts(t, st, ctx)); n != 3 {
+		t.Fatalf("%d announcements, want two burn onsets and one health onset", n)
+	}
+
+	// Both declarations are first written THROUGH the surface, so what follows is compared against
+	// the canonical spelling this path stores rather than against the fixture's.
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		pagingPolicy(domain.ServiceAlertDegraded, domain.ServiceAlertDown), AlertActor{}); err != nil {
+		t.Fatalf("declare policy: %v", err)
+	}
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true,
+		twoBurnRuleSet(), AlertActor{}); err != nil {
+		t.Fatalf("declare rules: %v", err)
+	}
+
+	policy := storedPolicy(t, st, ctx, f.serviceID)
+	generation := alertConfigGeneration(t, st, ctx, f.serviceID)
+	enabled, targetGeneration, rules := storedBurn(t, st, ctx, f.targetID)
+	policyAudits := len(auditTargets(t, st, ctx, "service.alerting"))
+	burnAudits := len(auditTargets(t, st, ctx, "service.burn_alerting"))
+	events := len(allServiceAlerts(t, st, ctx))
+
+	unchanged := func(after string) {
+		t.Helper()
+		// The generations FIRST: they are what a drifting write actually costs, and a stored value
+		// that moved without moving them would still be a bug this helper reports below.
+		if got := alertConfigGeneration(t, st, ctx, f.serviceID); got != generation {
+			t.Fatalf("%s: alert_config_generation %d → %d — the service dis-arms and every member "+
+				"pages for itself, for a change nobody made", after, generation, got)
+		}
+		gotEnabled, gotGeneration, gotRules := storedBurn(t, st, ctx, f.targetID)
+		if gotGeneration != targetGeneration {
+			t.Fatalf("%s: sla_targets.alert_generation %d → %d — burn coverage dis-arms until every "+
+				"rule has been re-evaluated, for a change nobody made",
+				after, targetGeneration, gotGeneration)
+		}
+		if got := storedPolicy(t, st, ctx, f.serviceID); got.OwnsPaging != policy.OwnsPaging ||
+			got.PageOnUnknown != policy.PageOnUnknown ||
+			got.ConfirmEvaluations != policy.ConfirmEvaluations ||
+			statesText(got.PageOn) != statesText(policy.PageOn) {
+			t.Fatalf("%s: stored policy %+v, want the identical canonical value %+v", after, got, policy)
+		}
+		if gotEnabled != enabled || gotRules != rules {
+			t.Fatalf("%s: stored burn declaration enabled=%v rules=%s, want the identical canonical "+
+				"value enabled=%v rules=%s", after, gotEnabled, gotRules, enabled, rules)
+		}
+		if got := len(auditTargets(t, st, ctx, "service.alerting")); got != policyAudits {
+			t.Fatalf("%s: %d service.alerting audit rows, want %d — a no-op edit is not a decision "+
+				"and an audit reader must not be trained to skim", after, got, policyAudits)
+		}
+		if got := len(auditTargets(t, st, ctx, "service.burn_alerting")); got != burnAudits {
+			t.Fatalf("%s: %d service.burn_alerting audit rows, want %d", after, got, burnAudits)
+		}
+		if got := len(allServiceAlerts(t, st, ctx)); got != events {
+			t.Fatalf("%s: %d announcements, want %d — a save without changes ended an announcement "+
+				"that is still true", after, got, events)
+		}
+		if n := openHealthEpisodes(t, st, ctx, f.serviceID); n != 1 {
+			t.Fatalf("%s: %d open health episodes, want the announcement untouched", after, n)
+		}
+		if n := openBurnEpisodes(t, st, ctx, f.targetID); n != 2 {
+			t.Fatalf("%s: %d open burn episodes, want both untouched", after, n)
+		}
+		if !liveFiring(t, st, ctx, f.serviceID) {
+			t.Fatalf("%s: the live latch was cleared by an edit that changed nothing", after)
+		}
+		for _, key := range []string{oneBurnRuleKey, ticketBurnRuleKey} {
+			if s := burnState(t, st, ctx, f.targetID, key); !s.firing {
+				t.Fatalf("%s: the latch for %s was cleared by an edit that changed nothing", after, key)
+			}
+		}
+	}
+	unchanged("baseline")
+
+	// (a) the same policy, spelled in the other order.
+	stored, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		pagingPolicy(domain.ServiceAlertDown, domain.ServiceAlertDegraded), AlertActor{})
+	if err != nil {
+		t.Fatalf("rewrite the same policy: %v", err)
+	}
+	if statesText(stored.PageOn) != statesText(policy.PageOn) {
+		t.Fatalf("the returned policy %v is not the stored one %v",
+			statesText(stored.PageOn), statesText(policy.PageOn))
+	}
+	unchanged("after rewriting the same policy")
+
+	// (b) the same rules, in the same order.
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true,
+		twoBurnRuleSet(), AlertActor{}); err != nil {
+		t.Fatalf("rewrite the same rules: %v", err)
+	}
+	unchanged("after rewriting the same rules")
+
+	// (c) the same rules, REORDERED — the spelling a UI or a bundle can change without anybody
+	// editing anything.
+	reordered := twoBurnRuleSet()
+	reordered[0], reordered[1] = reordered[1], reordered[0]
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true,
+		reordered, AlertActor{}); err != nil {
+		t.Fatalf("reorder the rules: %v", err)
+	}
+	unchanged("after reordering the same rules")
+}
+
+// One answer for four different ways of naming something that is not yours: a foreign project, a
+// project id that is not a uuid, a foreign service, and a service id that is not a uuid. They must be
+// indistinguishable, or the difference between "not found" and "invalid" becomes a cross-tenant
+// existence oracle — and a driver error leaking out would additionally be a 500 where the API owes a
+// 404. Both arguments of both methods, because the pair is what addresses the row: scoping by only
+// one of them is the mistake this matrix exists to catch, and it is a WRITE mistake, so every case
+// also has to leave both tenants' rows exactly as it found them.
+func TestPagingWritesRefuseForeignAndMalformedIdentifiers(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+	plantBurn(t, st, ctx, f, 5, minute/60)
+	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
+		t.Fatalf("onsets = %d, want a firing rule the refused writes could destroy", got.Onsets)
+	}
+
+	// A second tenant with its own service and its own enabled burn target: the row a write that
+	// scoped by service alone — or by project alone — would reach.
+	other, err := st.CreateProject(ctx, f.orgID, "other", "Other")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	otherSvc, err := st.CreateService(ctx, domain.Service{
+		ProjectID: other.ID, Slug: "orders", Name: "Orders",
+	})
+	if err != nil {
+		t.Fatalf("foreign service: %v", err)
+	}
+	// Owning and burn-enabled, so BOTH refused writes would visibly land on it if either one were
+	// scoped by the service id alone.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE services SET owns_paging = true WHERE id = $1`, otherSvc.ID); err != nil {
+		t.Fatalf("own the foreign service: %v", err)
+	}
+	var otherTarget string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled, burn_rules)
+		VALUES ($1,'30d',99.9,true,$2::jsonb) RETURNING id`,
+		otherSvc.ID, oneBurnRule).Scan(&otherTarget); err != nil {
+		t.Fatalf("foreign target: %v", err)
+	}
+
+	policy := storedPolicy(t, st, ctx, f.serviceID)
+	generation := alertConfigGeneration(t, st, ctx, f.serviceID)
+	enabled, targetGeneration, rules := storedBurn(t, st, ctx, f.targetID)
+
+	for _, tc := range []struct {
+		name, projectID, serviceID string
+	}{
+		{"foreign project", other.ID, f.serviceID},
+		{"malformed project", "not-a-uuid", f.serviceID},
+		{"foreign service", f.projectID, otherSvc.ID},
+		{"malformed service", f.projectID, "not-a-uuid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Both edits are destructive if they land: the policy disowns the service, and the burn
+			// write turns its target off. Both would close a firing announcement.
+			if _, err := st.UpdateServiceAlertPolicy(ctx, tc.projectID, tc.serviceID,
+				domain.ServiceAlertPolicy{OwnsPaging: false,
+					PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
+					ConfirmEvaluations: 2}, AlertActor{ViaToken: true}); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("policy write = %v, want ErrNotFound — one answer for every way of naming "+
+					"something that is not yours", err)
+			}
+			if err := st.SetServiceBurnAlerting(ctx, tc.projectID, tc.serviceID, "30d", false,
+				oneBurnRuleSet(), AlertActor{ViaToken: true}); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("burn write = %v, want ErrNotFound", err)
+			}
+		})
+	}
+
+	// Nothing moved on the addressed tenant: not the declaration, not either generation, not the
+	// announcement, not the latch.
+	if got := storedPolicy(t, st, ctx, f.serviceID); got.OwnsPaging != policy.OwnsPaging ||
+		got.PageOnUnknown != policy.PageOnUnknown ||
+		got.ConfirmEvaluations != policy.ConfirmEvaluations ||
+		statesText(got.PageOn) != statesText(policy.PageOn) {
+		t.Fatalf("a refused write changed the policy to %+v, want %+v", got, policy)
+	}
+	if got := alertConfigGeneration(t, st, ctx, f.serviceID); got != generation {
+		t.Fatalf("alert_config_generation %d → %d on refused writes", generation, got)
+	}
+	gotEnabled, gotGeneration, gotRules := storedBurn(t, st, ctx, f.targetID)
+	if gotEnabled != enabled || gotRules != rules || gotGeneration != targetGeneration {
+		t.Fatalf("a refused write changed the burn declaration to enabled=%v gen=%d rules=%s, want "+
+			"enabled=%v gen=%d rules=%s", gotEnabled, gotGeneration, gotRules,
+			enabled, targetGeneration, rules)
+	}
+	if events := allServiceAlerts(t, st, ctx); len(events) != 1 {
+		t.Fatalf("%d events, want only the onset — a refused write ended an announcement", len(events))
+	}
+	if n := openBurnEpisodes(t, st, ctx, f.targetID); n != 1 {
+		t.Fatalf("open episodes = %d, want the announcement untouched", n)
+	}
+	if s := burnState(t, st, ctx, f.targetID, oneBurnRuleKey); !s.firing {
+		t.Fatal("a refused write cleared the firing latch")
+	}
+	if a := auditTargets(t, st, ctx, "service.alerting"); len(a) != 0 {
+		t.Fatalf("a refused write audited %v", a)
+	}
+	if a := auditTargets(t, st, ctx, "service.burn_alerting"); len(a) != 0 {
+		t.Fatalf("a refused write audited %v", a)
+	}
+
+	// ...and nothing moved on the OTHER tenant either, which is the half that catches a write scoped
+	// by service id alone.
+	var foreignOwns, foreignEnabled bool
+	if err := st.pool.QueryRow(ctx, `
+		SELECT s.owns_paging, t.burn_alert_enabled
+		  FROM services s JOIN sla_targets t ON t.id = $2 WHERE s.id = $1`,
+		otherSvc.ID, otherTarget).Scan(&foreignOwns, &foreignEnabled); err != nil {
+		t.Fatalf("read the foreign declaration: %v", err)
+	}
+	if !foreignOwns || !foreignEnabled {
+		t.Fatalf("a write addressed with THIS project's id reached the other tenant's rows: "+
+			"owns_paging=%v burn_alert_enabled=%v", foreignOwns, foreignEnabled)
+	}
+}
+
+// The READ half. A PATCH merges onto it, so it has to answer with the canonical stored value and it
+// has to refuse a foreign or malformed id exactly as the writers do — a merge base that leaked
+// across a tenant, or that was invented because the read failed open, is how "leave ownership alone"
+// becomes a silent disowning.
+func TestServiceAlertPolicyReadIsCanonicalAndTenantScoped(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// Stored deliberately UNSORTED and with a repeat, which the write path would have
+	// canonicalized — a direct edit is how a row gets into this shape.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE services SET owns_paging = true, page_on = '{degraded,down,degraded}',
+		       page_on_unknown = true, confirm_evaluations = 5
+		 WHERE id = $1`, f.serviceID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, err := st.ServiceAlertPolicy(ctx, f.projectID, f.serviceID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got.PageOn) != 2 || got.PageOn[0] != domain.ServiceAlertDegraded ||
+		got.PageOn[1] != domain.ServiceAlertDown {
+		t.Fatalf("page_on = %v, want the canonical sorted, deduplicated set", got.PageOn)
+	}
+	if !got.OwnsPaging || !got.PageOnUnknown || got.ConfirmEvaluations != 5 {
+		t.Fatalf("read did not carry the declaration: %+v", got)
+	}
+
+	for _, tc := range []struct{ name, project, service string }{
+		{"foreign project", f.serviceID, f.serviceID},
+		{"malformed project", "not-a-uuid", f.serviceID},
+		{"foreign service", f.projectID, f.projectID},
+		{"malformed service", f.projectID, "not-a-uuid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := st.ServiceAlertPolicy(ctx, tc.project, tc.service); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("%s answered %v, want ErrNotFound — one answer for all of them, so "+
+					"existence never leaks across a tenant", tc.name, err)
+			}
+		})
 	}
 }

@@ -49,6 +49,38 @@ type AlertActor struct {
 	ViaToken bool
 }
 
+// ServiceAlertPolicy reads a service's stored paging declaration.
+//
+// It exists because a PATCH must merge onto what is actually stored: a partial edit whose merge BASE
+// was invented is exactly how "leave ownership alone" turns into "disown". The read is tenant-scoped
+// and answers a foreign, unknown or malformed id the same way the two writers do — one answer for
+// all three, so existence never leaks across a tenant boundary — and it returns the CANONICAL form,
+// because the value a caller echoes must be the value the database holds.
+//
+// Latches, leases and generations are absent from the return type, not filtered out of it: this is
+// the declaration, and a read that could carry server-owned state is a read somebody will eventually
+// send back as a write.
+func (s *Store) ServiceAlertPolicy(
+	ctx context.Context, projectID, serviceID string,
+) (domain.ServiceAlertPolicy, error) {
+	var p domain.ServiceAlertPolicy
+	var pageOn []string
+	err := s.pool.QueryRow(ctx, `
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations
+		  FROM services WHERE id = $1 AND project_id = $2`, serviceID, projectID).
+		Scan(&p.OwnsPaging, &pageOn, &p.PageOnUnknown, &p.ConfirmEvaluations)
+	if noRows(err) || isInvalidTextRepresentation(err) {
+		return domain.ServiceAlertPolicy{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.ServiceAlertPolicy{}, fmt.Errorf("store: read alert policy: %w", err)
+	}
+	for _, state := range pageOn {
+		p.PageOn = append(p.PageOn, domain.ServiceAlertState(state))
+	}
+	return p.Canonical(), nil
+}
+
 // UpdateServiceAlertPolicy writes a service's paging declaration and ends any announcement the new
 // declaration no longer covers, atomically.
 //

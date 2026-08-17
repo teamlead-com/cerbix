@@ -60,6 +60,11 @@ type NotifyDeliverer interface {
 	DeliverText(ctx context.Context, monitor domain.Monitor, text string) error
 	DeliverProjectText(ctx context.Context, projectID, text string) error
 	DeliverChannels(ctx context.Context, channelIDs []string, text string) error
+	// DeliverChannelsReporting is the same delivery, plus what it actually REACHED. A service
+	// alert carries the recipient snapshot from when the announcement opened (§16.4a), so a
+	// channel in it may since have been deleted or disabled: that is not an error and not
+	// success, and §16.6b requires it to be counted rather than silently absorbed.
+	DeliverChannelsReporting(ctx context.Context, channelIDs []string, text string) (domain.ChannelDelivery, error)
 }
 
 // MailSender delivers a plain-text email (status-page subscription confirmations).
@@ -82,6 +87,12 @@ type Metrics interface {
 	// and a fail-open is the state in which members page for themselves.
 	RecordAlertSuppressed(topic, reason string)
 	RecordDelegationFailOpen(reason string)
+	// Per-signal delegation outcomes, and the two ways a service alert can fail to reach anybody
+	// without failing (§16.6b): a snapshot recipient that no longer exists, and an announcement
+	// with nobody left to tell.
+	RecordServiceDelegation(signal, state string)
+	RecordServiceAlertUndeliverable(signal string)
+	RecordServiceAlertRecipientMissing(n int)
 	RecordImpactWitnessOverflow(n int)
 }
 
@@ -237,10 +248,12 @@ func (w *Worker) serviceDelegationSuppressed(
 		w.logger.Warn("delegation_lookup_failed", "monitor_id", monitor.ID,
 			"signal", string(signal), "error", err.Error())
 		w.metrics.RecordDelegationFailOpen("error")
+		w.metrics.RecordServiceDelegation(delegationSignalName(signal), "degraded")
 		return false
 	}
 	if !v.Suppress() {
 		w.metrics.RecordDelegationFailOpen(v.FailOpenReason)
+		w.metrics.RecordServiceDelegation(delegationSignalName(signal), "disarmed")
 		return false
 	}
 	if err := w.store.RecordSuppression(ctx, eventID, monitor.ID, monitor.ProjectID, topic, v.Owners); err != nil {
@@ -249,12 +262,23 @@ func (w *Worker) serviceDelegationSuppressed(
 		w.logger.Warn("suppression_record_failed", "monitor_id", monitor.ID,
 			"topic", topic, "error", err.Error())
 		w.metrics.RecordDelegationFailOpen("record_failed")
+		w.metrics.RecordServiceDelegation(delegationSignalName(signal), "degraded")
 		return false
 	}
 	w.logger.Info("alert_suppressed_by_service", "monitor_id", monitor.ID, "monitor", monitor.Name,
 		"topic", topic, "owner", v.Owners[0].Name, "owners", len(v.Owners))
 	w.metrics.RecordAlertSuppressed(topic, string(domain.SuppressionServiceDelegation))
+	w.metrics.RecordServiceDelegation(delegationSignalName(signal), "armed")
 	return true
+}
+
+// delegationSignalName maps the store's delegation signal to §16.6b's `signal` label, which is the
+// same vocabulary the evaluator families use — two names for one signal would split every dashboard.
+func delegationSignalName(signal store.DelegationSignal) string {
+	if signal == store.DelegationBurn {
+		return string(domain.ServiceSignalBurn)
+	}
+	return string(domain.ServiceSignalHealth)
 }
 
 // attachIncidentContext computes and posts the heuristic context summary for an
@@ -474,7 +498,29 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 				"signal", string(a.Signal), "event_seq", a.Seq, "current_seq", current)
 			return nil
 		}
-		return w.notifs.DeliverChannels(ctx, a.Recipients, a.Message())
+		// Nobody to tell is a FACT about this announcement, not a delivery to retry: the snapshot
+		// was taken when it opened and every channel in it has since gone, or it opened with an
+		// empty route. Counted, and then done — retrying it forever would park a dead letter for
+		// something no retry can fix.
+		if len(a.Recipients) == 0 {
+			w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
+			w.logger.Warn("service_alert_undeliverable", "service_id", a.ServiceID,
+				"signal", string(a.Signal), "reason", "empty_recipient_snapshot")
+			return nil
+		}
+		res, err := w.notifs.DeliverChannelsReporting(ctx, a.Recipients, a.Message())
+		if missing := res.Requested - res.Resolved; missing > 0 {
+			// §16.4a: a snapshot recipient whose channel has been deleted is COUNTED, never
+			// silently replaced by whoever is on call now — replacing it would page a stranger
+			// and leave the person who heard the onset holding it.
+			w.metrics.RecordServiceAlertRecipientMissing(missing)
+			w.logger.Warn("service_alert_recipient_missing", "service_id", a.ServiceID,
+				"signal", string(a.Signal), "missing", missing, "requested", res.Requested)
+		}
+		if err == nil && res.Resolved == 0 {
+			w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
+		}
+		return err
 
 	case domain.TopicSLAReport:
 		var rep domain.SLAReport

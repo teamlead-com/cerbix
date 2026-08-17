@@ -50,6 +50,11 @@ type Registry struct {
 	// target, no rule, no tenant.
 	serviceAlertEvals   map[string]map[string]uint64 // signal → outcome → count (ok|error|skipped)
 	serviceAlertEmitted map[string]map[string]uint64 // signal → edge → count (onset|close)
+	// The DELIVERY side of §16.6b: what delegation concluded per signal, and the two ways an
+	// announcement can fail to reach anybody without failing to deliver.
+	serviceDelegation       map[string]map[string]uint64 // signal → state → count
+	serviceAlertUndeliver   map[string]uint64            // signal → count
+	serviceRecipientMissing uint64
 	// Set on every SUCCESSFUL pass of an arm. A stalled evaluator has to read as lag rather than
 	// as an absence of alerts, which is indistinguishable from "nothing is wrong" (§16.7).
 	serviceAlertLastSuccess map[string]int64   // signal → unix seconds
@@ -440,6 +445,52 @@ func (r *Registry) RecordAlertSuppressed(topic, reason string) {
 // system is behaving exactly as designed. What makes it worth collecting is the OTHER values —
 // stale, error, unroutable — which say members are paging for themselves because a replacement
 // went quiet.
+// RecordServiceDelegation counts what delegation concluded for one signal: `armed` (a member's
+// alert was suppressed because a replacement is active), `disarmed` (no active replacement, so the
+// member paged for itself) or `degraded` (the lookup could not conclude, which also pages).
+func (r *Registry) RecordServiceDelegation(signal, state string) {
+	if signal == "" || state == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.serviceDelegation == nil {
+		r.serviceDelegation = map[string]map[string]uint64{}
+	}
+	if r.serviceDelegation[signal] == nil {
+		r.serviceDelegation[signal] = map[string]uint64{}
+	}
+	r.serviceDelegation[signal][state]++
+}
+
+// RecordServiceAlertUndeliverable counts an announcement with nobody left to tell — an empty
+// recipient snapshot, or one whose every channel has since gone. It is not a delivery failure and
+// there is nothing to retry, which is exactly why it needs a counter of its own: otherwise it is
+// indistinguishable from a successful page.
+func (r *Registry) RecordServiceAlertUndeliverable(signal string) {
+	if signal == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.serviceAlertUndeliver == nil {
+		r.serviceAlertUndeliver = map[string]uint64{}
+	}
+	r.serviceAlertUndeliver[signal]++
+}
+
+// RecordServiceAlertRecipientMissing counts snapshot recipients whose channel no longer exists.
+// §16.4a: they are COUNTED, never silently replaced by whoever is on call now — replacing one would
+// page a stranger and leave the person who heard the onset holding an alert nothing will close.
+func (r *Registry) RecordServiceAlertRecipientMissing(n int) {
+	if n <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.serviceRecipientMissing += uint64(n)
+}
+
 func (r *Registry) RecordDelegationFailOpen(reason string) {
 	if reason == "" {
 		reason = "unspecified"
@@ -723,6 +774,12 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	statusPageUnreadable := r.statusPageUnreadable
 	alertSuppressed := maps.Clone(r.alertSuppressed)
 	delegationFailOpen := maps.Clone(r.delegationFailOpen)
+	serviceDelegation := make(map[string]map[string]uint64, len(r.serviceDelegation))
+	for signal, states := range r.serviceDelegation {
+		serviceDelegation[signal] = maps.Clone(states)
+	}
+	serviceAlertUndeliver := maps.Clone(r.serviceAlertUndeliver)
+	serviceRecipientMissing := r.serviceRecipientMissing
 	serviceAlertEvals := copyCounts2(r.serviceAlertEvals)
 	serviceAlertEmitted := copyCounts2(r.serviceAlertEmitted)
 	serviceAlertLastSuccess := maps.Clone(r.serviceAlertLastSuccess)
@@ -877,6 +934,46 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		for _, k := range keys {
 			out.printf("cerbix_alert_delegation_fail_open_total{reason=%q} %d\n", k, delegationFailOpen[k])
 		}
+	}
+	// The DELIVERY half of §16.6b: what delegation concluded, and the two ways an announcement can
+	// fail to reach anybody without failing to deliver.
+	if len(serviceDelegation) > 0 {
+		out.println("# HELP cerbix_service_alert_delegation_total Delegation outcomes per signal: armed (a member's alert was suppressed), disarmed (it paged for itself), degraded (the lookup could not conclude, which also pages).")
+		out.println("# TYPE cerbix_service_alert_delegation_total counter")
+		signals := make([]string, 0, len(serviceDelegation))
+		for signal := range serviceDelegation {
+			signals = append(signals, signal)
+		}
+		sort.Strings(signals)
+		for _, signal := range signals {
+			states := make([]string, 0, len(serviceDelegation[signal]))
+			for state := range serviceDelegation[signal] {
+				states = append(states, state)
+			}
+			sort.Strings(states)
+			for _, state := range states {
+				out.printf("cerbix_service_alert_delegation_total{signal=%q,state=%q} %d\n",
+					signal, state, serviceDelegation[signal][state])
+			}
+		}
+	}
+	if len(serviceAlertUndeliver) > 0 {
+		out.println("# HELP cerbix_service_alert_undeliverable_total Service alerts with nobody left to tell — an empty recipient snapshot, or one whose every channel has since gone. Not a delivery failure, which is why it needs its own counter.")
+		out.println("# TYPE cerbix_service_alert_undeliverable_total counter")
+		signals := make([]string, 0, len(serviceAlertUndeliver))
+		for signal := range serviceAlertUndeliver {
+			signals = append(signals, signal)
+		}
+		sort.Strings(signals)
+		for _, signal := range signals {
+			out.printf("cerbix_service_alert_undeliverable_total{signal=%q} %d\n",
+				signal, serviceAlertUndeliver[signal])
+		}
+	}
+	if serviceRecipientMissing > 0 {
+		out.println("# HELP cerbix_service_alert_recipient_missing_total Snapshot recipients whose channel no longer exists. COUNTED rather than replaced by whoever is on call now (FR-021 §16.4a).")
+		out.println("# TYPE cerbix_service_alert_recipient_missing_total counter")
+		out.printf("cerbix_service_alert_recipient_missing_total %d\n", serviceRecipientMissing)
 	}
 	// The EVALUATOR half of §16.6b. Every family here is labelled by `signal` only (health|burn)
 	// plus a fixed enum: no tenant, service, target or rule label anywhere.

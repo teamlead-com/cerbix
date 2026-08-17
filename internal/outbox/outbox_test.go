@@ -163,6 +163,7 @@ type fakeNotify struct {
 	channelIDs []string
 	called     int
 	err        error
+	resolved   *int
 }
 
 func (f *fakeNotify) Deliver(_ context.Context, m domain.Monitor, up bool) error {
@@ -185,9 +186,25 @@ func (f *fakeNotify) DeliverChannels(_ context.Context, channelIDs []string, tex
 	return f.err
 }
 
+// resolved, when set, is how many of the requested channels still exist — the fake's way of
+// deleting a snapshot recipient out from under an announcement. Zero means "all of them".
+func (f *fakeNotify) DeliverChannelsReporting(
+	_ context.Context, channelIDs []string, text string,
+) (domain.ChannelDelivery, error) {
+	f.channelIDs, f.text, f.called = channelIDs, text, f.called+1
+	out := domain.ChannelDelivery{Requested: len(channelIDs), Resolved: len(channelIDs)}
+	if f.resolved != nil {
+		out.Resolved = *f.resolved
+	}
+	return out, f.err
+}
+
 type fakeMetrics struct {
 	suppressed                                      map[string]int
 	failOpen                                        map[string]int
+	delegation                                      map[string]int // "signal/state" → count
+	undeliverable                                   map[string]int
+	recipientMissing                                int
 	delivered, dead, impactFailures, impactOverflow int
 	impactLinks                                     map[string]int
 }
@@ -207,6 +224,22 @@ func (m *fakeMetrics) RecordAlertSuppressed(topic, reason string) {
 	}
 	m.suppressed[topic+"|"+reason]++
 }
+func (m *fakeMetrics) RecordServiceDelegation(signal, state string) {
+	if m.delegation == nil {
+		m.delegation = map[string]int{}
+	}
+	m.delegation[signal+"/"+state]++
+}
+
+func (m *fakeMetrics) RecordServiceAlertUndeliverable(signal string) {
+	if m.undeliverable == nil {
+		m.undeliverable = map[string]int{}
+	}
+	m.undeliverable[signal]++
+}
+
+func (m *fakeMetrics) RecordServiceAlertRecipientMissing(n int) { m.recipientMissing += n }
+
 func (m *fakeMetrics) RecordDelegationFailOpen(reason string) {
 	if m.failOpen == nil {
 		m.failOpen = map[string]int{}
@@ -1139,4 +1172,120 @@ func TestServiceAlertOrderingGate(t *testing.T) {
 	if !strings.Contains(nf.text, "deleted") {
 		t.Fatalf("the close does not say why it ended: %q", nf.text)
 	}
+}
+
+// FR-021 §16.4a/§16.6b — the two ways an announcement reaches nobody WITHOUT failing.
+//
+// Both are invisible in every other signal: the outbox marks the row delivered, no error is
+// returned, no retry happens, and the operator sees a page that was never sent. They are the reason
+// the spec asks for counters of their own.
+func TestServiceAlertThatReachesNobodyIsCounted(t *testing.T) {
+	alert := func(recipients []string) []byte {
+		b, err := json.Marshal(domain.ServiceAlert{
+			ServiceID: "svc-1", ServiceName: "Checkout", Signal: domain.ServiceSignalHealth,
+			Firing: false, State: domain.ServiceAlertDown, Seq: 9,
+			CloseReason: domain.CloseRecovered, Recipients: recipients,
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	t.Run("a snapshot recipient whose channel is gone", func(t *testing.T) {
+		fs := &fakeStore{alertSeqMissing: true, pending: []domain.OutboxEvent{
+			{ID: "e1", Topic: domain.TopicServiceAlert, Payload: alert([]string{"ch-1", "ch-2"})},
+		}}
+		one := 1
+		nf := &fakeNotify{resolved: &one} // ch-2 has been deleted since the onset
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+		if nf.called != 1 {
+			t.Fatalf("the close was not attempted (called=%d)", nf.called)
+		}
+		if m.recipientMissing != 1 {
+			t.Fatalf("recipient_missing = %d, want 1: a snapshot recipient that no longer exists "+
+				"is COUNTED, never silently replaced by whoever is on call now", m.recipientMissing)
+		}
+		if m.undeliverable["health"] != 0 {
+			t.Fatalf("an alert that reached one of two recipients was called undeliverable")
+		}
+	})
+
+	t.Run("nobody left at all", func(t *testing.T) {
+		fs := &fakeStore{alertSeqMissing: true, pending: []domain.OutboxEvent{
+			{ID: "e2", Topic: domain.TopicServiceAlert, Payload: alert([]string{"ch-1"})},
+		}}
+		zero := 0
+		nf := &fakeNotify{resolved: &zero}
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+		if m.recipientMissing != 1 || m.undeliverable["health"] != 1 {
+			t.Fatalf("missing=%d undeliverable=%d, want 1 and 1: an announcement nobody heard is "+
+				"not a successful delivery", m.recipientMissing, m.undeliverable["health"])
+		}
+	})
+
+	t.Run("an empty recipient snapshot", func(t *testing.T) {
+		fs := &fakeStore{alertSeqMissing: true, pending: []domain.OutboxEvent{
+			{ID: "e3", Topic: domain.TopicServiceAlert, Payload: alert(nil)},
+		}}
+		nf := &fakeNotify{}
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+		if nf.called != 0 {
+			t.Fatalf("an empty route was still sent somewhere (called=%d)", nf.called)
+		}
+		if m.undeliverable["health"] != 1 {
+			t.Fatalf("undeliverable = %d, want 1", m.undeliverable["health"])
+		}
+	})
+}
+
+// §16.6b — delegation reports its outcome per signal, in three states, because "why is this monitor
+// still paging" is the question the runbook starts from. `armed` means a member's alert was
+// suppressed by an active replacement; `disarmed` means there was none, so it paged for itself;
+// `degraded` means the lookup could not conclude, which also pages.
+func TestDelegationOutcomesAreCountedPerSignal(t *testing.T) {
+	down := func() []domain.OutboxEvent {
+		return []domain.OutboxEvent{{ID: "e", Topic: domain.TopicMonitorTransition,
+			Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 0, false)}}
+	}
+	monitors := map[string]domain.Monitor{
+		"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusDown},
+	}
+
+	t.Run("armed", func(t *testing.T) {
+		fs := &fakeStore{monitors: monitors, delegation: armedFor("m1", store.DelegationLive), pending: down()}
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, &fakeNotify{}, m).drain(context.Background())
+		if m.delegation["health/armed"] != 1 {
+			t.Fatalf("delegation counters = %v, want one health/armed", m.delegation)
+		}
+	})
+
+	t.Run("disarmed", func(t *testing.T) {
+		fs := &fakeStore{monitors: monitors, pending: down()} // no active owner
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, &fakeNotify{}, m).drain(context.Background())
+		if m.delegation["health/disarmed"] != 1 {
+			t.Fatalf("delegation counters = %v, want one health/disarmed", m.delegation)
+		}
+	})
+
+	t.Run("degraded", func(t *testing.T) {
+		fs := &fakeStore{monitors: monitors, delegationErr: errors.New("lookup exploded"), pending: down()}
+		m := &fakeMetrics{}
+		nf := &fakeNotify{}
+		newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+		if m.delegation["health/degraded"] != 1 {
+			t.Fatalf("delegation counters = %v, want one health/degraded", m.delegation)
+		}
+		if nf.called != 1 {
+			t.Fatal("an ambiguous delegation lookup did not FAIL OPEN: the page was withheld")
+		}
+	})
 }

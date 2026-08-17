@@ -382,3 +382,17 @@ func (a ServiceAlert) closeSuffix() string {
 		return string(a.CloseReason)
 	}
 }
+
+// ChannelDelivery is what one channel delivery actually REACHED, as opposed to what it was asked to
+// reach.
+//
+// The two differ for a reason that matters (§16.4a): a service alert carries the recipient snapshot
+// taken when the announcement OPENED, and a channel in it may since have been deleted or disabled.
+// Resolving fewer channels than requested is not an error — there is nothing to retry — but it is
+// not success either, and §16.6b requires it to be COUNTED rather than silently absorbed or, worse,
+// replaced by whoever is on call now. Without this a caller cannot tell "told three people" from
+// "told nobody".
+type ChannelDelivery struct {
+	Requested int
+	Resolved  int
+}

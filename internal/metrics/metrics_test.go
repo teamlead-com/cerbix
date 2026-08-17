@@ -601,3 +601,41 @@ func TestServiceReliabilityGauges(t *testing.T) {
 		}
 	}
 }
+
+// The three DELIVERY-side families of §16.6b render with the same fixed labels as the evaluator
+// half: `signal` and a small enum, nothing per-tenant.
+func TestServiceAlertDeliveryFamilies(t *testing.T) {
+	r := New(buildinfo.Info{}, "api")
+
+	var empty bytes.Buffer
+	r.WritePrometheus(&empty)
+	for _, name := range []string{
+		"cerbix_service_alert_delegation_total",
+		"cerbix_service_alert_undeliverable_total",
+		"cerbix_service_alert_recipient_missing_total",
+	} {
+		if strings.Contains(empty.String(), name) {
+			t.Fatalf("%s is published before anything happened", name)
+		}
+	}
+
+	r.RecordServiceDelegation("health", "armed")
+	r.RecordServiceDelegation("health", "armed")
+	r.RecordServiceDelegation("burn", "disarmed")
+	r.RecordServiceAlertUndeliverable("burn")
+	r.RecordServiceAlertRecipientMissing(2)
+	r.RecordServiceAlertRecipientMissing(0) // nothing missing is not an observation
+
+	var out bytes.Buffer
+	r.WritePrometheus(&out)
+	for _, want := range []string{
+		`cerbix_service_alert_delegation_total{signal="burn",state="disarmed"} 1`,
+		`cerbix_service_alert_delegation_total{signal="health",state="armed"} 2`,
+		`cerbix_service_alert_undeliverable_total{signal="burn"} 1`,
+		`cerbix_service_alert_recipient_missing_total 2`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing series %q in:\n%s", want, out.String())
+		}
+	}
+}

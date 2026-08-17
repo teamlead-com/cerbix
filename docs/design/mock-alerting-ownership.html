@@ -1,0 +1,579 @@
+<title>Cerbix Alerting Ownership</title>
+
+<style>
+/* Tokens 1:1 from docs/design/notes.md. Phase 5 adds NO colour at all: alerting is a question of
+   who is paged, not of a new state, so every surface here reuses the existing status hues plus one
+   structural device — a DASHED "delegated" chip, the same visual grammar phase 4 used for a
+   dormant binding. Silence must never look like health, so a delegated monitor keeps its own real
+   status pill and gains a chip; it is never greyed out. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+
+.top{
+  position:sticky; top:0; z-index:20; height:56px; display:flex; align-items:center; gap:12px;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.brand{display:flex; align-items:center; gap:9px}
+.brand .wm{font-size:15px; font-weight:600; letter-spacing:-.01em}
+.top .spacer{flex:1}
+.tbtn{border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:12.5px; color:var(--ink-2); background:var(--surface)}
+.tbtn.on{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+
+.screens{
+  position:sticky; top:56px; z-index:19; display:flex; gap:2px; overflow-x:auto;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.screens button{padding:10px 12px 9px; font-size:13px; color:var(--ink-3); border-bottom:2px solid transparent; white-space:nowrap}
+.screens button.on{color:var(--ink); border-bottom-color:var(--accent); font-weight:550}
+.screens .n{font-size:10.5px; color:var(--ink-3); margin-right:5px}
+
+.wrap{padding:22px; max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+.head h1{font-size:21px; font-weight:650; letter-spacing:-.015em}
+.head .sub{margin-top:3px; font-size:13px; color:var(--ink-3)}
+
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.card > header{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card > header h2{font-size:14px; font-weight:600}
+.card .body{padding:16px}
+.card .spacer{flex:1}
+
+.pill{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px 0 7px; border-radius:999px; font-size:12px; font-weight:500}
+.pill .dot{width:7px; height:7px; border-radius:50%; flex:none}
+.pill.up{color:var(--up); background:var(--up-weak)} .pill.up .dot{background:var(--up)}
+.pill.down{color:var(--down); background:var(--down-weak)} .pill.down .dot{background:var(--down)}
+.pill.deg{color:var(--degraded); background:var(--degraded-weak)} .pill.deg .dot{background:var(--degraded)}
+.pill.mnt{color:var(--maint); background:var(--maint-weak)} .pill.mnt .dot{background:var(--maint)}
+/* no_data: pending hue + DASHED ring. Never green, never a second hue. */
+.pill.nd{color:var(--ink-2); background:var(--pending-weak); border:1px dashed var(--border-strong)}
+.pill.nd .dot{background:var(--pending)}
+
+.chip{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:11.5px; color:var(--ink-2); background:var(--surface-2)}
+.chip.mono{font-family:ui-monospace,Menlo,monospace; font-size:10.5px}
+.chip.file{background:var(--inset)}
+.chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.chip.dorm{border-style:dashed; color:var(--ink-3)}
+
+.row{display:flex; flex-wrap:wrap; align-items:center; gap:9px; padding:11px 16px; border-bottom:1px solid var(--border)}
+.row:last-child{border-bottom:0}
+.row .nm{font-weight:550; font-size:13.5px}
+.row .spacer{flex:1}
+.src{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden}
+.src span{padding:3px 9px; font-size:11.5px; color:var(--ink-3)}
+.src span.on{background:var(--accent-weak); color:var(--accent); font-weight:600}
+
+/* 90-day strip: discrete ticks, gaps are GAPS (absent days), never zeros. */
+.strip{display:flex; gap:1px; align-items:flex-end; height:26px}
+.strip i{flex:1; border-radius:1px}
+.strip i.up{background:var(--up); height:100%}
+.strip i.deg{background:var(--degraded); height:100%}
+.strip i.down{background:var(--down); height:100%}
+.strip i.part{background:var(--up); height:60%; opacity:.55}
+.strip i.gap{background:var(--inset); height:36%}
+.axis{display:flex; justify-content:space-between; font-size:11px; color:var(--ink-3); padding-top:6px}
+
+.diff{display:grid; grid-template-columns:1fr auto 1fr; gap:0; align-items:stretch; border:1px solid var(--border); border-radius:8px; overflow:hidden}
+.diff > div{padding:13px 15px}
+.diff .mid{display:grid; place-items:center; padding:0 12px; background:var(--surface-2); border-left:1px solid var(--border); border-right:1px solid var(--border); color:var(--ink-3)}
+.diff .lbl{margin-bottom:8px}
+
+.err{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--down); background:var(--down-weak); color:var(--down); border-radius:6px; padding:10px 12px; font-size:12.5px}
+.err b{font-weight:650}
+.err .fix{margin-left:auto; flex:none; border:1px solid var(--down); border-radius:5px; padding:2px 8px; font-size:11.5px; background:var(--surface)}
+.warn{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--degraded); background:var(--degraded-weak); color:var(--degraded); border-radius:6px; padding:10px 12px; font-size:12.5px}
+.btn{display:inline-flex; align-items:center; height:30px; border:1px solid var(--border); border-radius:6px; padding:0 12px; font-size:13px; color:var(--ink-2); background:var(--surface)}
+.btn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:550}
+.btn.danger{border-color:var(--down); color:var(--down)}
+.btn.sm{height:26px; font-size:12.5px; padding:0 10px}
+
+.note{
+  border:1px dashed var(--note-border); border-left:3px solid var(--note);
+  background:var(--note-bg); border-radius:6px; padding:10px 12px; font-size:12.5px; color:var(--ink-2);
+  display:flex; gap:10px; align-items:flex-start;
+}
+.note .ref{flex:none; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--note); border:1px solid var(--note-border); border-radius:4px; padding:1px 5px; background:var(--surface)}
+.note b{color:var(--ink); font-weight:600}
+body.hide-notes .note{display:none}
+
+/* Public page replica — deliberately plainer than the app chrome. */
+.public{border:1px solid var(--border); border-radius:10px; background:var(--surface); overflow:hidden}
+.public .banner{padding:18px 20px; border-bottom:1px solid var(--border)}
+.public .banner h3{font-size:17px; font-weight:620}
+.public .banner .sub{margin-top:4px; font-size:13px; color:var(--ink-3)}
+.public .comp{padding:14px 20px; border-bottom:1px solid var(--border)}
+.public .comp:last-child{border-bottom:0}
+.public .comp .line{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.public .comp .nm{font-weight:550}
+.public .comp .num{margin-left:auto; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:var(--ink-2)}
+.public .comp .withheld{margin-left:auto; font-size:11.5px; color:var(--ink-3)}
+
+.tbl-wrap{overflow-x:auto}
+table{width:100%; border-collapse:collapse; font-size:13px; min-width:520px}
+th{text-align:left; font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3); padding:8px 16px; border-bottom:1px solid var(--border)}
+td{padding:10px 16px; border-bottom:1px solid var(--border); vertical-align:top}
+tbody tr:last-child td{border-bottom:0}
+
+.foot{padding:22px; border-top:1px solid var(--border); color:var(--ink-3); font-size:12.5px; max-width:1080px; margin:0 auto}
+@media (max-width:760px){ .diff{grid-template-columns:1fr} .diff .mid{border:0; border-top:1px solid var(--border); border-bottom:1px solid var(--border); padding:6px} }
+</style>
+
+<header class="top">
+  <div class="brand">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.2-2.8 7.6-7 9-4.2-1.4-7-4.8-7-9V6z"/><path d="M8.5 12.5l2.2 2.2 4.8-5"/></svg>
+    <span class="wm mono">cerbix</span>
+  </div>
+  <span class="chip mono">FR-021 phase 4 · status projection</span>
+  <div class="spacer"></div>
+  <button class="tbtn on" id="notesBtn" aria-pressed="true">Spec notes</button>
+  <button class="tbtn" id="themeBtn">Theme</button>
+</header>
+
+<nav class="screens" id="screens" aria-label="Mocked screens"></nav>
+<div class="wrap" id="view"></div>
+<footer class="foot">
+  FR-021 <b>phase 4</b> design track · mock for approval BEFORE any frontend code · tokens from
+  <span class="mono">docs/design/notes.md</span> · behaviour follows
+  <span class="mono">func-service-reliability.md §15.0/§15.5</span> (design gate cleared at [310]).
+</footer>
+
+<script>
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const note = (ref, html) => `<div class="note"><span class="ref">${esc(ref)}</span><div>${html}</div></div>`;
+const pill = (k, t) => `<span class="pill ${k}"><span class="dot"></span>${esc(t)}</span>`;
+
+/* ── screen 1: the ownership switch, on the service ───────────────────────── */
+function sOwnership() {
+  return `
+  <div class="head">
+    <h1>Checkout · alerting</h1>
+    <p class="sub">Payments · service <span class="mono">checkout</span></p>
+  </div>
+
+  ${note("§16.1", `Ownership is <b>declared</b>, never inferred, and it is OFF until someone sets it.
+    An installation that already pages from its monitors keeps paging from its monitors until an
+    operator says otherwise — the same rule §17 applies to public output applies to who gets woken.`)}
+
+  <div class="card">
+    <header><h2>Paging ownership</h2><span class="spacer"></span>
+      <span class="chip acc">declared here</span></header>
+    <div class="body" style="display:flex; flex-direction:column; gap:14px">
+      <label style="display:flex; gap:11px; align-items:flex-start">
+        <input type="checkbox" checked style="margin-top:3px">
+        <span>
+          <b>This service owns paging for its reliability inputs</b>
+          <span style="display:block; color:var(--ink-2); font-size:13px; margin-top:3px">
+            While this is on, the 3 monitors in this service's <span class="mono">sli[]</span> stop
+            <b>sending</b> their own alerts. They keep probing, keep flipping status, keep opening
+            incidents and stay visible everywhere — only the notification is suppressed, and every
+            suppressed one is logged and shown.
+          </span>
+        </span>
+      </label>
+
+      <div class="diff">
+        <div>
+          <div class="lbl">Pages today</div>
+          <div style="font-size:13px; color:var(--ink-2)">
+            <div>checkout-http — its own transition + burn</div>
+            <div>checkout-db — its own transition + burn</div>
+            <div>checkout-queue — its own transition + burn</div>
+          </div>
+        </div>
+        <div class="mid">→</div>
+        <div>
+          <div class="lbl">Pages with ownership on</div>
+          <div style="font-size:13px; color:var(--ink-2)">
+            <div><b>Checkout</b> — service transition + service burn</div>
+            <div style="color:var(--ink-3)">the three monitors: delegated, not silent</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="border:1px solid var(--border); border-radius:7px; padding:11px 13px">
+        <span class="lbl" style="min-width:120px">Reliability inputs</span>
+        <span class="chip mono">checkout-http</span>
+        <span class="chip mono">checkout-db</span>
+        <span class="chip mono">checkout-queue</span>
+        <span class="spacer"></span>
+        <span class="chip">declared sli · not the epoch snapshot</span>
+      </div>
+    </div>
+  </div>
+
+  ${note("§16.1", `Membership is the <b>declared</b> <span class="mono">sli[]</span>, not the epoch
+    snapshot. Ownership is a statement about who answers the phone; the epoch is a statement about
+    measurement semantics, and keying on it would move a paging decision because somebody edited a
+    monitor's interval.`)}
+
+  <div class="card">
+    <header><h2>What this service pages for</h2></header>
+    <div class="body" style="display:flex; flex-direction:column; gap:13px">
+      <label style="display:flex; gap:11px; align-items:flex-start">
+        <input type="checkbox" checked style="margin-top:3px">
+        <span><b>Health transition</b> — live, evaluated every 30s
+          <span style="display:block; color:var(--ink-2); font-size:13px">
+            Pages when the service enters a state you choose below. This is the outage page.
+          </span>
+        </span>
+      </label>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; padding-left:27px">
+        <span class="chip acc">down</span>
+        <span class="chip">degraded</span>
+        <span class="chip dorm">unknown — does not page</span>
+      </div>
+      <div style="padding-left:27px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+        <span class="lbl">Confirm</span>
+        <span class="chip mono">2 evaluations</span>
+        <span style="font-size:12.5px; color:var(--ink-3)">= at most 60s before the first page</span>
+      </div>
+
+      <label style="display:flex; gap:11px; align-items:flex-start; border-top:1px solid var(--border); padding-top:13px">
+        <input type="checkbox" checked style="margin-top:3px">
+        <span><b>Error-budget burn</b> — from sealed facts, so it trails the watermark
+          <span style="display:block; color:var(--ink-2); font-size:13px">
+            The budget signal, not the outage page: it can only speak about time that has been
+            sealed. Sealed through <span class="mono">14:32 UTC</span>, 4 min ago.
+          </span>
+        </span>
+      </label>
+      <div style="padding-left:27px; display:flex; gap:8px; flex-wrap:wrap">
+        <span class="chip mono">1h / 6h · 14× · page</span>
+        <span class="chip mono">6h / 3d · 6× · ticket</span>
+        <span class="chip">same rules monitors use</span>
+      </div>
+    </div>
+  </div>
+
+  ${note("§16.2/§16.3", `Two signals with two latencies, and the UI says which is which. A
+    sealed-only signal could not carry outage paging — it trails <span class="mono">sealed_through</span>
+    by construction — which is exactly why the live transition exists. UNKNOWN never pages as DOWN:
+    "we cannot see it" is not "it is broken", and it has its own switch, off by default.`)}
+
+  <div class="card">
+    <header><h2>Who is notified</h2></header>
+    <div class="body">
+      <div class="row" style="padding:0 0 10px">
+        <span class="lbl" style="min-width:120px">Escalation</span>
+        <span class="chip">Payments on-call ladder</span>
+        <span class="spacer"></span><span class="chip mono">services.escalation_policy_id</span>
+      </div>
+      <div class="row" style="padding:10px 0 0; border-bottom:0">
+        <span class="lbl" style="min-width:120px">Schedule</span>
+        <span class="chip">Payments primary</span>
+        <span class="spacer"></span><span class="chip mono">services.oncall_schedule_id</span>
+      </div>
+    </div>
+  </div>
+
+  ${note("§16.4", `These two columns have existed since migration 00064 with no consumer. Phase 5 is
+    the consumer: a service alert routes through the service's own owners and falls back to the
+    project's channels when it names none. Instance-wide silence and the escalation ladder are
+    unchanged — phase 5 adds a SOURCE of alerts, not a delivery path.`)}`;
+}
+
+/* ── screen 2: what a delegated monitor looks like ─────────────────────────── */
+function sDelegated() {
+  return `
+  <div class="head">
+    <h1>checkout-db</h1>
+    <p class="sub">Payments · postgres monitor · every 30s</p>
+  </div>
+
+  <div class="card">
+    <header>
+      <h2>checkout-db</h2>
+      ${pill("down", "Down")}
+      <span class="chip dorm">paging delegated → Checkout</span>
+      <span class="spacer"></span>
+      <span class="btn sm">Pause</span><span class="btn sm">Edit</span>
+    </header>
+    <div class="body" style="display:flex; flex-direction:column; gap:12px">
+      <div class="warn">
+        <span>
+          <b>This monitor's alerts are delivered by «Checkout».</b>
+          It still probes, still turns red, still opens incidents and still counts toward every
+          number. What it does not do is notify on its own — the service does, so one failure is
+          one page. Turn ownership off on Checkout to restore its own alerts.
+        </span>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <span class="chip">transition alerts — delegated</span>
+        <span class="chip">burn alerts — delegated</span>
+        <span class="chip mono">since 2026-08-17 09:14</span>
+      </div>
+    </div>
+  </div>
+
+  ${note("§16.1", `Silence must be <b>visible</b>. The monitor keeps its real status pill — it is
+    DOWN and it says so — and gains a dashed chip that names the owner. A greyed-out or hidden
+    monitor would be the system doing one thing and showing another, which §14 and §11 exist to
+    prevent.`)}
+
+  <div class="card">
+    <header><h2>Incident #418 · checkout-db is down</h2><span class="spacer"></span>
+      <span class="chip">open · auto</span></header>
+    <div>
+      <div class="row"><span class="mono" style="color:var(--ink-3); min-width:74px">09:14:31</span>
+        <span>Monitor reported <b>down</b> after 3 consecutive failures.</span></div>
+      <div class="row"><span class="mono" style="color:var(--ink-3); min-width:74px">09:14:31</span>
+        <span>⏸ Suppressed: notification delegated to service <b>Checkout</b>, which owns paging for
+          this monitor.</span></div>
+      <div class="row"><span class="mono" style="color:var(--ink-3); min-width:74px">09:15:02</span>
+        <span>⚡ Context: 1 of 3 reliability inputs of Checkout is down.</span></div>
+    </div>
+  </div>
+
+  ${note("§16.1", `The <span class="mono">⏸ Suppressed:</span> marker is the one dependency
+    suppression already uses, with its idempotent-insert prefix. An operator reading the incident
+    later sees WHY nobody was paged, in the incident itself — not by inferring it from an absence.`)}`;
+}
+
+/* ── screen 3: the honest silence — a member down under `any` ──────────────── */
+function sTolerated() {
+  return `
+  <div class="head">
+    <h1>Search · one input down</h1>
+    <p class="sub">Search · aggregation <span class="mono">any</span> — one healthy input is enough</p>
+  </div>
+
+  ${note("§16.1", `This is the case worth arguing about, so the mock shows it rather than hiding it.
+    Under <span class="mono">any</span> or <span class="mono">quorum</span>, a member can be DOWN
+    while the service is HEALTHY — and then <b>nothing pages</b>. That is the declaration doing its
+    job: the operator declared that this member alone is not an outage. The screen's whole purpose
+    is to make that legible instead of surprising.`)}
+
+  <div class="card">
+    <header><h2>Search</h2>${pill("up", "Healthy")}<span class="chip acc">owns paging</span>
+      <span class="spacer"></span><span class="chip mono">any · 1 of 3 needed</span></header>
+    <div>
+      <div class="row"><span class="nm">search-eu</span>${pill("up", "Up")}<span class="spacer"></span>
+        <span class="chip dorm">delegated</span></div>
+      <div class="row"><span class="nm">search-us</span>${pill("up", "Up")}<span class="spacer"></span>
+        <span class="chip dorm">delegated</span></div>
+      <div class="row"><span class="nm">search-ap</span>${pill("down", "Down")}<span class="spacer"></span>
+        <span class="chip dorm">delegated</span>
+        <span class="chip">no page — see below</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>What happened, and what did not</h2></header>
+    <div class="body" style="display:flex; flex-direction:column; gap:10px; font-size:13px; color:var(--ink-2)">
+      <div><b style="color:var(--ink)">Recorded:</b> search-ap is down, incident #521 is open, its
+        heartbeats and SLO history are unaffected, and its own error budget is burning.</div>
+      <div><b style="color:var(--ink)">Not paged:</b> nobody was woken, because Search declares
+        <span class="mono">any</span> — one healthy region is enough — and Search is healthy.</div>
+      <div><b style="color:var(--ink)">If that is wrong,</b> the fix is the declaration, not the
+        alerting: change the aggregation to <span class="mono">all</span>, or add search-ap's region
+        to the region policy, or turn ownership off and let the monitor page for itself.</div>
+    </div>
+  </div>
+
+  ${note("§16.1", `The alternative — page anyway — would mean the aggregation policy governs the
+    number but not the phone, and an operator who deliberately declared regional tolerance would
+    still be woken for one region. Then <span class="mono">any</span> would mean nothing. What phase
+    5 owes instead is <b>legibility</b>: the monitor is red, the incident is open, the delegation is
+    named, and this panel says in words that no page was sent and why.`)}`;
+}
+
+/* ── screen 4: the alerts themselves ──────────────────────────────────────── */
+function sAlerts() {
+  return `
+  <div class="head">
+    <h1>What the page says</h1>
+    <p class="sub">Two signals, two latencies, and each one admits which it is</p>
+  </div>
+
+  <div class="card">
+    <header><h2>Live transition</h2>${pill("down", "Down")}<span class="spacer"></span>
+      <span class="chip mono">service_alert · live</span></header>
+    <div class="body" style="display:flex; flex-direction:column; gap:8px">
+      <div style="font-size:15px; font-weight:600">Checkout is DOWN</div>
+      <div style="font-size:13px; color:var(--ink-2)">
+        2 of 3 reliability inputs are failing · aggregation <span class="mono">all</span> ·
+        confirmed over 2 evaluations (60s) · Payments on-call
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; padding-top:4px">
+        <span class="chip mono">checkout-db — down</span>
+        <span class="chip mono">checkout-queue — down</span>
+        <span class="chip">checkout-http — up</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Sealed burn</h2>${pill("deg", "Burning")}<span class="spacer"></span>
+      <span class="chip mono">service_alert · sealed</span></header>
+    <div class="body" style="display:flex; flex-direction:column; gap:8px">
+      <div style="font-size:15px; font-weight:600">Checkout is burning its 30-day budget 14× too fast</div>
+      <div style="font-size:13px; color:var(--ink-2)">
+        1h and 6h windows both above 14× · objective 99.9% ·
+        computed over facts sealed through <span class="mono">14:32 UTC</span>
+      </div>
+      <div class="chip">this signal trails the seal watermark — it is a budget signal, not an outage page</div>
+    </div>
+  </div>
+
+  ${note("§16.3", `The burn alert states the watermark it was computed from, because a number
+    without its basis is what §11.2 spent a whole phase removing. The two alerts are separate
+    events with separate severities: one wakes someone, the other tells a team its month is at
+    risk.`)}
+
+  <div class="card">
+    <header><h2>Recovery</h2>${pill("up", "Recovered")}<span class="spacer"></span>
+      <span class="chip mono">edge</span></header>
+    <div class="body" style="font-size:13px; color:var(--ink-2)">
+      <b style="color:var(--ink)">Checkout is healthy again</b> — down for 22 minutes.
+      A service that paged says when it stopped; the state row and the notification commit in one
+      transaction, so a recovery cannot be lost and cannot be sent twice.
+    </div>
+  </div>`;
+}
+
+/* ── screen 5: the refusals ───────────────────────────────────────────────── */
+function sRefusals() {
+  return `
+  <div class="head">
+    <h1>What refuses to page</h1>
+    <p class="sub">Each of these is a decision, not a gap</p>
+  </div>
+
+  <div class="card">
+    <header><h2>Unknown</h2>${pill("nd", "Unknown")}<span class="spacer"></span>
+      <span class="chip dorm">does not page</span></header>
+    <div class="body" style="font-size:13px; color:var(--ink-2)">
+      Checkout has no decidable observation right now. It is <b>not</b> reported as down: "we cannot
+      see it" and "it is broken" are different statements, and paging the first as the second is the
+      confident falsehood this feature exists to remove. A separate switch —
+      <span class="mono">page on unknown</span>, off by default — exists for teams that want to hear
+      about blindness, because never mentioning it is the opposite failure.
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Under maintenance</h2>${pill("mnt", "Maintenance")}<span class="spacer"></span>
+      <span class="chip dorm">does not page</span></header>
+    <div class="body" style="font-size:13px; color:var(--ink-2)">
+      A declared window is a declared silence. The service is excluded from evaluation for its
+      duration, and no state entered during it can produce a page.
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Not enough sealed time</h2><span class="chip mono">insufficient_sealed_coverage</span>
+      <span class="spacer"></span><span class="chip dorm">neither fires nor resolves</span></header>
+    <div class="body" style="font-size:13px; color:var(--ink-2)">
+      A burn window with no sealed time returns nothing — and a rule that is already FIRING
+      <b>stays firing</b>. Treating absent data as "burn = 0" would silently resolve a live alert,
+      which is the most dangerous mistake available here; the alert keeps its state and the reason is
+      recorded.
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>A lookup that failed</h2><span class="spacer"></span>
+      <span class="chip acc">pages anyway</span></header>
+    <div class="body" style="font-size:13px; color:var(--ink-2)">
+      If cerbix cannot determine whether a monitor is delegated, it <b>sends</b> the alert. A page
+      that was not needed is noise; a page that was owed and never sent is the failure this whole
+      feature exists to prevent — so the ambiguous case is loud.
+    </div>
+  </div>
+
+  ${note("§16.7", `And what phase 5 does not do at all: no service incidents, no retroactive
+    alerting from a rule enabled today, no cross-project delegation, no per-member severity inside a
+    service page, and nothing suppressed beyond the two alert topics — SLA reports, incident
+    webhooks and the public status page are untouched.`)}`;
+}
+
+const SCREENS = [
+  ["ownership", "Ownership switch", sOwnership],
+  ["delegated", "A delegated monitor", sDelegated],
+  ["tolerated", "Tolerated failure", sTolerated],
+  ["alerts", "The alerts", sAlerts],
+  ["refusals", "Refusals", sRefusals],
+];
+let active = "ownership";
+const nav = document.getElementById("screens");
+const view = document.getElementById("view");
+nav.innerHTML = SCREENS.map(([k, t], i) =>
+  `<button data-k="${k}" class="${k === active ? "on" : ""}"><span class="n">${i + 1}</span>${esc(t)}</button>`).join("");
+function render() {
+  const [, , fn] = SCREENS.find(([k]) => k === active);
+  view.innerHTML = fn();
+  nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.k === active));
+  window.scrollTo(0, 0);
+}
+nav.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-k]");
+  if (!b) return;
+  active = b.dataset.k;
+  render();
+});
+document.getElementById("themeBtn").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = getComputedStyle(root).getPropertyValue("--bg").trim() === "#0b0b0f";
+  root.setAttribute("data-theme", dark ? "light" : "dark");
+});
+const notesBtn = document.getElementById("notesBtn");
+notesBtn.addEventListener("click", () => {
+  const off = document.body.classList.toggle("hide-notes");
+  notesBtn.classList.toggle("on", !off);
+  notesBtn.setAttribute("aria-pressed", String(!off));
+});
+render();
+</script>

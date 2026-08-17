@@ -3514,3 +3514,77 @@ contested item is [315]/[316] (split accepted, with §15.1 narrowed as above). R
 direct regression for every finding — including the two-session page-scope race in both commit
 orders, the rendered-monitor delete under API and cascade, a MEASURED statement count, and
 page-versus-report agreement on the withheld reason.
+
+## D-0168 — FR-021 phase 5: alerting ownership, per-signal ARMED delegation, and the refusal to suppress a close (iter-0151)
+
+Phase 5 answers the question §13 deliberately left open: monitor burn alerting already pages, so
+turning on service alerts without an ownership rule pages twice for one failure. The owner's decisions
+(2026-08-17) and the two design rounds ([324] REJECTED before code, [326] REJECTED with a closed
+authority ledger, amended and dispositioned here under the delegated authority) produce the following.
+
+**The owner's seven decisions.** Ownership is DECLARED at the service and defaults to OFF; a service
+alerts on TWO signals — a LIVE health transition and a SEALED burn breach; the alert NOTIFIES and opens
+no incident; service burn rules are the same `BurnRule` monitors use; routing is NARROWED to the
+service's on-call schedule or the project's channels with escalation POLICIES deferred;
+`escalation_step` IS suppressed for a delegated monitor; and losing sight of a paged service CLOSES the
+alert with a named reason rather than as "recovered".
+
+- **`owns_paging` alone silences NOTHING.** Delegation is per SIGNAL and must be ARMED: owns_paging ∧ a
+  policy that can page the current state ∧ a QUOTABLE last verdict ∧ the CURRENT (config generation,
+  target generation, effective definition revision, canonical rule key) ∧ a FRESH DB-clock lease ∧
+  effective ROUTABILITY. Three findings drove each clause and each one could lose a page:
+  a HOLD is a *successful* evaluation, so quotability had to join arming or a CLEAR rule holding on
+  `nothing_sealed` would mute a member's real burn alert while being structurally unable to fire; an
+  unroutable service satisfied every other clause and delivered nothing; and a missing or stale
+  evaluation is not evidence of coverage. Everything ambiguous FAILS OPEN and pages.
+- **A RECOVERY is never suppressed.** Arming is evaluated at delivery and changes between an onset and
+  its close: a monitor DOWN can fail-open while dis-armed, the evaluator can then arm, and the matching
+  UP would be muted — leaving a recipient holding a DOWN that can never end. Only onset-like events
+  (DOWN transitions and reminders, `escalation_step`, `firing = true` burn) are suppressible. An
+  episode table per monitor per owner per generation would be the general fix; refusing to suppress
+  closes is the fix that cannot be got wrong, and a duplicate "recovered" is strictly safer than an
+  unmatched "down".
+- **`escalation_step` is in the suppressed set, and that is the finding that mattered most.** The
+  worker already drops the flat DOWN `monitor_transition` for a monitor with an escalation policy and
+  auto-incident; its real pages are the ladder's steps over the open incident. Suppressing only
+  transitions and burn would have delivered phase 5's promise to everyone EXCEPT the installations that
+  page correctly. The ladder's rows, progress and incident are untouched; only delivery is muted.
+- **Membership is the CURRENT EFFECTIVE definition revision**, never `service_member_refs`, which is
+  rewritten at authoring time while a declaration becomes effective on its bucket boundary. Otherwise a
+  monitor added at 12:00:30 for a 12:01 revision is suppressed at 12:00:40 by a service that is still
+  measuring the old definition and cannot replace the page. Arming is stamped with the revision id.
+- **Delivery is at-least-once, ordered — and the spec says so.** The first draft claimed a
+  same-transaction enqueue made redelivery harmless; the worker explicitly permits a duplicate external
+  send when the delivery mark fails. Phase 5 adds `emitted_seq` per service and a per-rule sequence,
+  both checked at delivery so a retried onset cannot re-announce a state the service has left. A CLOSE
+  whose ONSET never reached a channel is still delivered.
+- **Routing is narrowed because "the ladder applies unchanged" was not implementable.** Escalation steps
+  are defined relative to an incident start with acknowledgement, progress and repeat state, and owner
+  decision 3 forbids service incidents. Phase 5 resolves the service's on-call schedule at ONSET, falls
+  back to the project's channels, and leaves `services.escalation_policy_id` unconsumed with the UI
+  saying so. A later phase needs a durable non-incident occurrence before "ladder" means anything here.
+- **An ONSET creates a durable episode with an IMMUTABLE recipient snapshot**, which is what makes a
+  close both correct and possible: a rotating schedule must not receive a close for an onset it never
+  saw, and a close must still deliver after the service, target or rule has been deleted — so every
+  removal path enqueues its close in the same transaction, with a named reason. Losing the ROUTE closes
+  nothing: dis-arming is not a recovery.
+- **The service burn latch is normalized** per `(service_id, project_id, sla_target_id, rule_key)` with
+  the canonical key excluding every server-owned field, so a rule cannot change identity by firing. The
+  MONITOR latch stays inside `sla_targets.burn_rules` exactly as it is: phase 5 changes no monitor
+  behaviour.
+- **Bounded slices, not one global transaction.** Per-project caps do not bound an installation, and a
+  single global snapshot can monopolize the leader's connection. Keyset slices with a hard cap, a
+  per-slice deadline, cursor fairness, constant statements per slice, per-project maintenance scoping,
+  and generation/lease CAS against a deposed evaluator.
+- **A stalled evaluator marks the SCHEDULER not-ready, never the API.** The stall is exactly the state
+  in which delegation dis-arms and members resume paging; reporting ready would hide a degradation,
+  while taking the API out of rotation would turn it into an outage.
+
+`any`/`quorum` tolerated failure is APPROVED as designed and is not reopened: with live coverage armed
+and fresh, one DOWN member under a declaration that tolerates it does not phone-page, and the monitor
+stays red with its incident open and its delegation named.
+
+Review chain: design round 1/2 [324] REJECTED before code (4 P0 + 10 P1 + 2 P2), revised design [325],
+FINAL round 2/2 [326] REJECTED with a closed authority ledger and no third round. The P0/P1 items of
+[326] are amended in §16.1/§16.4/§16.4a/§16.4b/§16.5a/§16.6a/§16.6b with invariants 75–91 and the
+§16.10 test matrix; implementation proceeds under that record.

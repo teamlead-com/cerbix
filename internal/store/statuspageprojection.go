@@ -66,16 +66,33 @@ type ServicePageProjection struct {
 func (s *Store) ServicePageProjections(
 	ctx context.Context, refs []ServiceRef, withHistory bool,
 ) (map[string]ServicePageProjection, error) {
-	out := make(map[string]ServicePageProjection, len(refs))
-	projects, services := splitRefs(refs)
-	if len(services) == 0 {
-		return out, nil
+	if len(refs) == 0 {
+		return map[string]ServicePageProjection{}, nil
 	}
 	tx, asOf, err := s.beginReportSnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // read-only; no-op after commit
+	out, err := s.servicePageProjectionsTx(ctx, tx, refs, asOf, withHistory)
+	if err != nil {
+		return nil, err
+	}
+	return out, tx.Commit(ctx)
+}
+
+// servicePageProjectionsTx is the BODY, separated so a caller that already owns a transaction can
+// evaluate the same way — §16's alerting evaluation does, because "no second evaluator" is an
+// invariant and not an aspiration: the public page and the pager must agree about what `down` means
+// at the same instant, and the only way to guarantee that is to run the same code.
+func (s *Store) servicePageProjectionsTx(
+	ctx context.Context, tx pgx.Tx, refs []ServiceRef, asOf time.Time, withHistory bool,
+) (map[string]ServicePageProjection, error) {
+	out := make(map[string]ServicePageProjection, len(refs))
+	projects, services := splitRefs(refs)
+	if len(services) == 0 {
+		return out, nil
+	}
 
 	// (1) Scope, epoch, era and watermark. The pair filter is what makes ONE query cover a page
 	// that spans projects: a service is matched only under the project its component declared, so a
@@ -251,7 +268,7 @@ func (s *Store) ServicePageProjections(
 		}
 		out[sid] = p
 	}
-	return out, tx.Commit(ctx)
+	return out, nil
 }
 
 // windowAgg is one service's 90-day sealed totals plus how many definition revisions produced them.

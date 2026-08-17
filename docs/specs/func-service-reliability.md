@@ -1471,7 +1471,10 @@ noise this specification claims to reduce. Alert ownership (which level is the s
 paging semantics, and how a monitor in an SLI delegates or suppresses its own burn alert) is
 phase 5 and is deliberately unspecified here.
 
-## 14. Dependencies and incident correlation (phase 3 intent)
+## 14. Dependencies and incident correlation (phase 3)
+
+*Specified to implementable depth in the phase-3 spec cycle (2026-08-17); until then this
+section was intent only. Decision record reserved: D-0166.*
 
 Three behaviors must never be conflated:
 
@@ -1487,9 +1490,313 @@ subscriptions`). This preserves the project's existing philosophy — facts alwa
 recording, only delivery is muted — and prevents a real second incident from being hidden under
 a "root" one. The service graph is the canonical *impact* graph; monitor `depends_on` remains
 the low-level *suppression* override; the former may recommend the latter but they are not
-required to be identical.
+required to be identical. (Recommendation tooling is explicitly out of phase 3 — §14.8.)
 
-Detailed semantics are deferred (§18).
+### 14.1 The graph
+
+`service_dependencies` — one row per directed edge *child depends on parent*:
+
+```
+service_dependencies
+├── service_id      the dependent (downstream) service
+├── depends_on_id   the dependency (upstream) service
+├── project_id
+├── created_at / created_by (audit)
+PK (service_id, depends_on_id) · CHECK (service_id <> depends_on_id) · index on depends_on_id
+FK (service_id,    project_id) → services (id, project_id) ON DELETE CASCADE
+FK (depends_on_id, project_id) → services (id, project_id) ON DELETE CASCADE
+```
+
+Both composite FKs share ONE `project_id` column, so **same-project is enforced by the
+schema**, not by a query that a later writer can forget (the 00060/00061 tenant pattern).
+Cross-project impact is out of scope exactly as it is for monitor dependencies.
+
+The graph is a DAG by validation at write time: a self, direct or transitive cycle is a 400;
+traversal depth is capped at 10, and hitting the cap **rejects the write and names the cap** —
+a silently truncated cycle check would be a cycle check that lies. Direct upstream edges per
+service are bounded by `max_service_dependencies` = **20, fixed in phase 3** (the
+`min_decidable_coverage` pattern: a bound the operator cannot lower away); the write is a
+replace-set, and an oversized set is a 400 naming the bound.
+
+**Concurrency.** Two concurrent edge writes, each acyclic against the state it read, can
+compose a cycle. Edge writes therefore serialize on a **per-project `service_graph` advisory
+xact lock**, taken by every edge-mutating path — enumerated, not implied: **service
+create-with-edges, the UI replace-set (§14.2), format-2 apply's edge track, and service
+delete** (whose cascade mutates the graph) — one store path, as with the shared validator of
+§15.2. In the §15.4 order it sits immediately after the `service_membership` advisory lock,
+always `membership → graph → row classes`; no path takes them in the other direction. The
+cycle check (recursive CTE, cap 10) runs inside the same transaction and is sound because of
+the lock, which a concurrent-writers test asserts (two edges individually acyclic, jointly a
+cycle — exactly one commits). The cap is pinned at the boundary: depth 9 and depth 10 chains
+are valid, and the first write that would require depth 11 is the rejected one, so "cap hit"
+is a tested value and not a phrase.
+
+### 14.2 Edges are OUTSIDE the declaration
+
+§6.2 already rules: *dependency-only edits create no epoch*; §6.3 classifies *dependency
+wiring* out of the evaluation-semantics projection — delivery, not measurement. Phase 3 takes
+the same position for the declaration axis:
+
+- Edges are **not part of `DefinitionRevision`** and do not enter the canonical service hash.
+  An edge write creates no definition revision, no epoch, moves no `sealed_through`, and
+  changes the meaning of no stored number. Required regression: an edge-only mutation leaves
+  revision count, epoch count and every canonical hash byte-identical.
+- **Mutation authority is the service's owner** — the UI for a UI-owned service, the bundle
+  for a file-owned one. This is the plain ownership rule, not the §15.1 matrix: the matrix
+  protects *declarations*, and an edge is not one.
+- **The transport is a dedicated pair of routes** — no generic service-update endpoint exists
+  and none is invented for this:
+  `GET /api/v1/projects/{projectID}/services/{serviceID}/dependencies` returns the edge set
+  plus **`graph_generation`**, a per-service edge-set counter; and
+  `PUT .../services/{serviceID}/dependencies` takes `{depends_on: [service_id],
+  graph_generation}` as a replace-set. Edges are outside the declaration, so the existing
+  `expected_revision` CAS cannot protect them; `graph_generation` is their own concurrency
+  token: a mismatch is a **409** and the two-operators lost-update (`[A]` read twice,
+  `[A,B]` and `[A,C]` submitted) resolves as first-committer-wins, second told so. A no-op
+  replace-set (identical set) bumps nothing and audits nothing.
+- **Every non-no-op delta writes a tenant-scoped audit row in the SAME transaction** — actor,
+  service, added edges, removed edges (bounded lists) — because `created_by` on surviving
+  rows cannot testify about a removal: deleting an edge deletes the only row that knew who
+  made it. The audit row is what remains.
+- **Bundle format 2** gains an optional per-service key `depends_on: [service-slug]` —
+  references are service slugs, tenant-scoped, and MAY point at a UI-owned service (the
+  cross-owner reference rule of §15.2 for monitors, applied unchanged). Edges reconcile as a
+  **separate track** from the declaration on apply, through the SAME validator and mutator as
+  the UI route under the provider's owner authority (replace-set under the `service_graph`
+  lock, same audit rule, actor = the provider): an edge-only bundle change mutates edges and
+  creates no revision — the exact analogue of "moving a file may update provenance
+  separately". `depends_on` does **not** enter the canonical hash; the no-op rule of §15.2 is
+  therefore undisturbed.
+- **A desired edge pins its target — one deletion contract, the §15.1 shape.** An incoming
+  bundle whose `depends_on` slug resolves to nothing is **rejected at validation and the
+  provider keeps last-known-good** — fail-fast on author error, and LKG stays literally true
+  because a target is never allowed to vanish underneath an applied desired state: a UI (or
+  API) delete of a service named in any file-owned service's applied `depends_on` returns
+  **409 naming the provider and the referencing service**, until the bundle drops the slug.
+  One provider's desired state may remove its own target and the edge atomically; a removal
+  that would dangle ANOTHER provider's desired edge freezes exactly as §15.1 row 4 freezes
+  cross-provider dangling references. (An earlier draft allowed the delete and let the
+  provider "freeze with last-known-good" — incoherent, since the cascaded edge's target no
+  longer exists and no good state remains to keep; the guard is the version of this rule that
+  can be true.) Deletion tests observe graph state immediately after the delete attempt and
+  after the next reconcile, not merely the apply verdict.
+- Deleting a service (when permitted by the rule above) cascades its edges (both directions)
+  and its impact links (§14.3); already-written 🕸 timeline notes are immutable text and
+  remain. UI-owned edges never block anything: only an applied file desired-state pins.
+
+### 14.3 Correlation — symmetric at open, event-driven, best-effort
+
+**Anchor.** An incident participates in correlation iff it has a `monitor_id` (every auto
+incident; a manual one only if it is monitor-anchored). Its **own services** are the services
+whose current effective `monitors[]` contains that monitor — operational membership (§5), not
+`sli[]`: an incident on a diagnostics-only member is operationally that service's incident,
+and correlation is annotation, not measurement. Membership resolves **at delivery time**
+against the current effective definition revision; correlation runs only at open-time events,
+so the drift window is the delivery lag and is accepted and stated (no retrospection exists
+that it could corrupt).
+
+**The relation.** `incident_service_impacts` — structured links, the §14 table's "links facts"
+made a table. Tenancy is enforced by the SCHEMA on **both** ends, the §16 composite rule with
+no exception for a link table:
+
+```
+incident_service_impacts
+├── incident_id
+├── service_id
+├── project_id    ONE shared column under BOTH composite FKs
+├── role          probable_root | affected
+├── path          canonical ROOT-FIRST slug path (§ below), endpoint-inclusive,
+│                 bounded text[], max length depth cap + 1 = 11
+├── computed_at
+PK (incident_id, service_id, role)
+FK (incident_id, project_id) → incidents (id, project_id) ON DELETE CASCADE
+FK (service_id,  project_id) → services  (id, project_id) ON DELETE CASCADE
+```
+
+`incidents` gains `UNIQUE (id, project_id)` in the same migration (the 00060/00061 target
+pattern — it does not have one today), and `incidents.monitor_id` — which this section
+promotes from a UI convenience into a background-query anchor — is **hardened to the composite
+`(monitor_id, project_id) → monitors (id, project_id)`** so a cross-project anchor is
+unrepresentable, not merely unqueried: today only the API checks that membership, and a
+background writer bypasses the API. Required negative tests at BOTH layers: a direct-SQL/store
+attempt to link an incident in project A to a service or monitor in project B fails on the
+constraint, and the API never exposes another project's slug, name or path inside an
+authorized incident payload. These tables and the correlation query join §16's enumeration.
+
+**When — a dedicated durable topic, not a rider.** Correlation gets its own outbox topic,
+`incident_correlation`, enqueued in the SAME transaction that creates a monitor-anchored
+incident's `opened` state (the existing spine; non-anchored incidents enqueue nothing). It
+does NOT ride the `incident_event` webhook delivery: that branch returns on webhook failure
+before any rider runs, so a dead webhook would dead-letter correlation with it — and making
+delivery wait on correlation would invert the harm. Two topics, two failure envelopes:
+**webhook death never blocks correlation; a correlation failure never blocks incident
+delivery.** Both inherit the outbox worker's retry/backoff/dead-letter unchanged. (Change
+pattern: topic whitelist migration + a worker case + the interface-growth fakes, per the
+standing gotcha.)
+
+**Mixed-version activation — the claim fence, over the WHOLE lifecycle.** A new topic is not
+deployable by whitelist alone: `ClaimDueOutbox` claims every due row `WHERE status = 'pending'`
+with NO topic predicate, and core delivery is owned by `all`, `api` AND `scheduler` — so during
+a rolling deployment an old owner claims the new topic's row, falls through to `unknown outbox
+topic`, burns an attempt per claim and can park a durable correlation fact as dead before any
+capable owner reaches it. And enqueue-time fencing alone is a fence with three gaps, because
+the row's status is REWRITTEN downstream: a failed attempt below max writes `status='pending'`
+(`FailOutbox`), and both dead replays — single and replay-all, reachable through an OLD API
+replica's admin endpoints during the mixed fleet — write `status='pending'` too. A fence that
+only holds until the first transient failure is not a barrier.
+
+The barrier is therefore TWO schema pieces, covering every transition:
+
+- **An immutable class column.** `fenced boolean NOT NULL DEFAULT false`, set once at enqueue
+  (`true` for `incident_correlation` and every post-phase-2 topic) and never modified by any
+  transition — it survives claim, failure, dead and replay.
+- **A demotion CHECK.** `CHECK (NOT fenced OR status <> 'pending')`: a fenced row may be
+  `pending_fenced`, `delivered` or `dead`, but the legacy-claimable state is UNREPRESENTABLE
+  for it. The old replay shape (`SET status='pending' WHERE ... status='dead'`) executed
+  against a fenced row **fails closed on the constraint** — an error, never a silent
+  demotion. (Old `FailOutbox` needs no guard beyond this: an old owner can only fail a row it
+  claimed, and it can never claim a fenced one.)
+
+The phase-3 transitions read the column as the ONE source of truth for the claimable class:
+`ClaimDueOutbox` claims `pending` rows unconditionally (legacy topics, known to every owner)
+plus `pending_fenced` rows **whose topic is in its own dispatch set**; a failed attempt below
+max restores `CASE WHEN fenced THEN 'pending_fenced' ELSE 'pending' END`; both replays restore
+the same expression; delivery marks `delivered` regardless of class. The topic→class mapping
+at ENQUEUE lives in one store-side map and is pinned by test — that mapping is code, not
+schema, and the spec claims schema force only for what the schema enforces: **once a row is
+fenced, no transition, no old binary and no operator endpoint can ever make it
+legacy-claimable.** A fenced row enqueued while old owners still run simply WAITS —
+at-least-once latency, never loss — and a capable owner always eventually exists because
+every producer of the topic is itself a core-delivery owner. Migration: the status CHECK
+widens with `pending_fenced`, the `fenced` column and demotion CHECK are added, and the
+partial claim index covers the fenced class.
+
+Required mixed-version regressions: the legacy claim shape against a fenced row claims zero
+rows and changes zero attempts, then a capable owner delivers it; a capable claim followed by
+ONE forced failure leaves the row `pending_fenced` (old claim still zero) and the capable
+retry delivers; a dead fenced row through single replay AND replay-all stays fenced (old claim
+still zero); the legacy replay SQL against a dead fenced row is REJECTED by the schema; an
+ordinary legacy-topic retry/replay still round-trips through `pending` unchanged; and the
+`incident_correlation` enqueue is pinned to `fenced=true` so a refactor cannot demote the
+producer.
+
+**What.** On the correlation attempt for incident `I` with own services `S`:
+
+- *upward*: every service `A` reachable upstream from `S` (cap 10) that has an OPEN
+  monitor-anchored incident right now → insert `(I, A, probable_root, path)`.
+- *downward*: every open incident `J` on a service `D` reachable downstream from some
+  `S' ∈ S` → insert `(I, D, affected, path)`, **and** back-fill `(J, S', probable_root,
+  path)` for that same `S'` — the service the path to `D` descends from, carrying the SAME
+  root-first array (there is no "reverse path": the stored direction is fixed and the role
+  says which endpoint is the row's own service). The late-root race is closed by symmetry,
+  not by a retrospective sweep.
+
+`probable_root` marks **every** upstream service on a path with an open incident; the relation
+records candidates and their paths, it does not elect a single culprit — ranking (by path
+depth) is presentation.
+
+**The canonical path.** A diamond admits two paths between the same pair, and the PK holds one
+row, so the stored path must not depend on CTE row order or query plan. The path is computed
+deterministically BEFORE insert: **shortest wins; equal lengths tie-break lexicographically on
+the immutable-slug sequence**. Shape, stated exactly so no convention is implied: the array is
+**endpoint-inclusive and root-first** — `[upstream endpoint, …, downstream endpoint]` — so a
+direct edge stores 2 slugs and a maximal depth-10 chain stores **11**, which is the schema
+bound (`depth cap + 1`); a 10-slug bound would silently drop an endpoint and make "reversal"
+ambiguous. Stored and wire type: `text[]` of slugs. Required regressions: the diamond, the
+equal-length tie, the direct-edge 2-slug and depth-10 11-slug boundaries, the back-fill row
+carrying the identical array as its `affected` counterpart, and byte-identical relation
+content across a redelivery.
+
+**One transaction, or nothing.** The correlation attempt is a single store transaction on the
+delivery side:
+
+1. lock the anchor incident row and every counterpart incident row found, `FOR UPDATE` in
+   ascending id order;
+2. recheck every locked incident is STILL open — "open" read before the lock is a
+   check-then-act, and a link or note landing in a just-resolved incident would rewrite closed
+   history (invariant 56);
+3. insert the link rows, `ON CONFLICT DO NOTHING`;
+4. for each incident that gained at least one NEW row in step 3, insert its 🕸 note — in this
+   same transaction, so "links committed but the promised note can never appear" (every retry
+   ON CONFLICTs away) and "note without links" are both unrepresentable;
+5. commit, or none of it happened and the outbox retry re-attempts.
+
+**Symmetry — qualified to what the mechanism guarantees.** A correlation attempt starts only
+after its incident's row committed (same-transaction enqueue). Take incidents I and J on
+graph-related services, both still open at the moment either's attempt commits: if I's attempt
+read before J's commit, then J's attempt — which starts after J's commit, which is after I's
+commit — reads after I's commit and sees I. Both attempts missing each other is impossible;
+at-least-once redelivery only widens the union. An incident **resolved before any authoritative
+attempt reaches it is skipped by design** — that is the no-retrospection rule (invariant 56),
+not a missed link. Both interleavings (child-first, parent-first) are required tests, per the
+§6.2 discipline, plus: webhook-dead-but-correlation-delivered, resolve-racing-correlate (the
+step-2 barrier holds), note-insert-failure rolls back the batch, and redelivery inserts zero
+rows and zero notes.
+
+**Idempotency.** Step 3's `ON CONFLICT` plus step 4's newly-inserted condition make the whole
+attempt idempotent: a redelivery inserts nothing and writes nothing; a genuinely new late root
+inserts new rows and earns a new note, which is a new fact at a new time, not a duplicate. Note
+rendering is bounded: at most 8 service names per role, then `+N more` — the relation stays
+complete, only the prose truncates, and the truncation names its remainder.
+
+### 14.4 API
+
+- **Impacts are an authenticated-detail enrichment, never a field of the shared incident
+  model.** The incident DETAIL payload (authenticated, project-scoped) gains
+  `impacts: [{service_id, slug, name, role, path, computed_at}]`; the incident LIST carries
+  **no impacts field in phase 3** — the list endpoint returns unbounded project history today,
+  and multiplying it by the per-incident impact set is the read amplification §14.7 forbids.
+  The field is populated by the authenticated handlers only, NOT added to `domain.Incident`
+  where the status-page serializer would inherit it: the public path embeds the incident model
+  and redacts by allowlisting-in-reverse (`PublicRedacted`), so a shared field would ride into
+  unauthenticated JSON the moment one future redactor forgets it. **Public and internal
+  status-page projections carry no impacts until phase 4 explicitly opts in** (§17: existing
+  status pages unchanged; internal topology is not public data). Required regression: the raw
+  UNAUTHENTICATED status-page JSON for a page whose project has correlated incidents contains
+  no impact service ids, slugs, names or paths.
+- Edge reads and writes use the dedicated `/dependencies` routes of §14.2 (with
+  `graph_generation`); service create additionally accepts `depends_on` for create-with-edges
+  under the same validator and lock.
+- The service detail payload gains `dependencies: {upstream: [{service, health}],
+  downstream: [...]}` with health from the phase-2 two-layer signal — fetched as **one batched
+  snapshot query for the whole neighbour set**, never a per-service `ServiceHealthNow` loop
+  (§14.7).
+- `openapi.yaml` bump + regenerated `schema.d.ts`, per the standing contract.
+
+### 14.5 UI (phase-3 scope: lists and badges — no visual graph)
+
+Approved scope, mock-gated before any frontend code (§22): a "Depends on" multiselect in the
+service form (project's services minus itself; cycle → the API's 400 rendered verbatim);
+Upstream/Downstream blocks with health dots on the service detail; 🕸 `probable root` /
+`affected` chips on the incident detail linking to the named services; the 🕸 timeline note
+renders through the existing system-update mechanism, unchanged.
+
+### 14.6 Observability
+
+`cerbix_service_impact_links_total{role}` (counter, incremented on INSERTED rows only) and
+`cerbix_service_impact_correlation_failures_total` (best-effort failures — the WARN path made
+countable). No gauge: the relation is queryable and bounded.
+
+### 14.7 Bounds (§21 discipline)
+
+| Bound | Value | Settable | Why |
+|---|---|---|---|
+| `max_service_dependencies` | 20 direct edges | no (phase 3) | a graph a human can still read |
+| traversal depth cap | 10 | no | mirrors monitor graph; cap hit rejects, never truncates; pinned at 9/10/11 |
+| stored `path` length | ≤ depth cap + 1 = 11 slugs, endpoint-inclusive, root-first | no | a depth-10 chain has 11 endpoints; a 10-slug bound would drop one silently |
+| 🕸 note names per role | 8 + `+N more` | no | bounded prose over a complete relation |
+| impacts on incident LIST | none (detail only) | no | the list is unbounded history; list × impacts is unbounded² |
+| dependency health on service detail | ONE batched snapshot query | no | per-neighbour `ServiceHealthNow` is an N+1 at the project service cap |
+
+Read-side work bounds are TESTED, not asserted: the incident-list handler is pinned to emit no
+impacts and no per-row impact query; the service-detail dependency block is pinned to a
+constant query count at the maximum neighbour set.
+
+### 14.8 Out of phase 3
+
+Recommending monitor `depends_on` from service edges ("may recommend", deliberately unbuilt);
+any visual graph rendering; status-page projection of impact (phase 4); alerting on impact
+(phase 5); any retrospective annotation of resolved incidents; cross-project edges.
 
 ## 15. Coexistence and migration
 
@@ -1684,6 +1991,8 @@ rather than replacing it:
 project `service_membership` advisory xact lock                 (new — §10.9; only on paths
                                                                  that change the affected-set
                                                                  predicate)
+→ project `service_graph` advisory xact lock                    (phase 3 — §14.1; only on
+                                                                 edge-mutating paths)
 → referenced secret rows,  id ascending                         (FR-020 §4.3 — unchanged)
 → referenced routing rows (escalation policy, on-call schedule),
                          id ascending, FOR KEY SHARE            (new — see below)
@@ -1766,6 +2075,12 @@ leader work does not make a cross-project reference safe; it makes it invisible.
   seal, repair and retention.
 - Required negative tests, all cross-tenant: API read and write; range resume after restart;
   MaC reference resolution; owner reference assignment; and delete/cancel cascades.
+- **Phase 3 joins this enumeration**: `service_dependencies` and `incident_service_impacts`
+  each carry one shared `project_id` under composite FKs on BOTH endpoints; `incidents` gains
+  the `(id, project_id)` unique target and its `monitor_id` anchor becomes the composite
+  `(monitor_id, project_id)` FK (§14.3); the correlation traversal is a project-scoped
+  background query like every other; and the cross-tenant negative tests extend to the
+  direct-SQL/store layer for links and anchors, not only the API.
 
 ## 17. Backward compatibility (acceptance criterion, not a footnote)
 
@@ -1790,7 +2105,7 @@ Service-aware UX begins only after explicit adoption. Upgrade day must not prese
 |---|---|
 | 1 | Domain + storage foundation: Service resource, definition revisions and evaluation epochs, the evaluation-semantics projection, effective-state model and piecewise reducer, duration-weighted fact schema, seal/ingest handshake, durable ranges, maintenance mutation contract, monitor slug, bundle format 2, bounds. No alerting, no status projection, no correlation. |
 | 2 | Reliability reporting: service SLO, error budget, burn-rate computation, both coverage axes, revision and epoch segmentation, insufficient-history UX, two-layer health card. |
-| 3 | *Intent only.* Dependency impact graph, incident correlation/annotation. |
+| 3 | Dependency impact graph: same-project service DAG (schema-enforced tenancy, bounded, outside the declaration — no revisions, no epochs), symmetric open-time incident correlation into structured incident-service links with 🕸 annotations, list+badge UI. Annotates and links; never suppresses, merges or hides. Specified in §14. |
 | 4 | *Intent only.* Status-page service projection, manual-component coexistence, composite conversion tooling. |
 | 5 | *Intent only.* Alerting ownership: service burn alerts and monitor delegation/suppression rules. |
 
@@ -1940,6 +2255,73 @@ encode assumptions that the data may refute.
 
 Invariant 42 is the single sharpest test of whether this design succeeded: if it holds, Service
 is a reliability-domain object; if it fails, Service is still a grouping abstraction.
+
+**Phase 3** adds:
+
+48. service dependency edges AND impact links are same-project by SCHEMA: one shared
+    `project_id` under composite FKs on BOTH endpoints of each relation, `incidents` carries
+    the `(id, project_id)` unique target, and `incidents.monitor_id` is the composite
+    `(monitor_id, project_id)` FK — a cross-tenant edge, link or anchor is unrepresentable,
+    proven by direct-SQL/store negative tests, not only API ones;
+49. an edge-only mutation creates no definition revision and no epoch, enters no canonical
+    hash, and moves no sealed fact — proven by a regression that counts revisions and epochs
+    and compares hashes before and after;
+50. edge mutation goes through the dedicated `/dependencies` routes (or create-with-edges, or
+    the bundle's edge track — one validator, one mutator) guarded by `graph_generation`: a
+    stale token is a 409 and the two-operators lost-update is impossible; every non-no-op
+    delta writes a tenant audit row (actor, added, removed) in the SAME transaction, and a
+    no-op bumps nothing and audits nothing;
+51. a desired file edge pins its target: an incoming bundle with an unresolvable `depends_on`
+    slug is rejected keeping a last-known-good that is still literally true; deleting a
+    service named in an applied file `depends_on` is a 409 naming the provider; one provider
+    may remove its own target and edge atomically; cross-provider dangling freezes per §15.1;
+52. correlation is carried by its OWN outbox topic (`incident_correlation`, enqueued in the
+    incident's opening transaction): webhook death never blocks correlation, a correlation
+    failure never blocks incident delivery, and both keep the outbox retry/dead-letter
+    envelope; correlation never suppresses recording or delivery and never merges or hides an
+    incident;
+53. the correlation attempt is ONE store transaction: counterpart incident rows locked FOR
+    UPDATE in ascending id order, open-state RECHECKED under the lock, links inserted, and the
+    🕸 notes for newly gained rows inserted in that same transaction — link-without-note and
+    note-without-link are both unrepresentable, and a resolve racing the attempt loses to the
+    barrier, never to check-then-act;
+54. symmetry, qualified to the mechanism: for two incidents both still open when either's
+    attempt commits, at least one attempt observes the other — proven for both interleavings;
+    an incident resolved before any attempt reaches it is skipped by design; a redelivery
+    inserts zero rows and zero notes, and relation content is byte-identical across redelivery;
+55. `probable_root` marks EVERY upstream service on a path with an open incident and
+    `affected` every downstream one; each row carries `computed_at` and its CANONICAL path —
+    shortest, then lexicographic slug tie-break, endpoint-inclusive and root-first, bounded
+    text[] of at most depth cap + 1 = 11 slugs (a direct edge stores 2, a depth-10 chain 11,
+    and a back-fill row carries the identical array as its `affected` counterpart) —
+    deterministic under diamonds and equal-length ties; the relation never elects a single
+    culprit — ranking is presentation only;
+56. resolved incidents are never annotated; membership resolves via the current effective
+    `monitors[]` (never `sli[]`) at attempt time, and that drift window is stated;
+57. the 🕸 note is written only for a batch that inserted at least one new link row, its prose
+    is bounded (8 names + `+N more`) over a complete relation, and it survives service
+    deletion as immutable timeline text while the link rows cascade;
+58. every edge-mutating path — create-with-edges, UI replace-set, format-2 apply, service
+    delete — serializes on the per-project `service_graph` advisory lock, ordered after
+    `service_membership`, and the cycle check is sound only under that lock (asserted by a
+    concurrent-writers test); the depth cap is pinned at 9 (valid), 10 (valid), 11 (the
+    rejected write);
+59. impacts are an authenticated-detail enrichment: absent from the shared incident model,
+    absent from the incident LIST, and absent from every public and internal status-page
+    projection until phase 4 opts in — proven by a raw unauthenticated JSON regression over a
+    project with correlated incidents;
+60. read-side work is bounded and tested: no per-row impact query on the incident list, and
+    the service-detail dependency health is ONE batched snapshot query at the maximum
+    neighbour set;
+61. the new topic is safe under a mixed-version fleet BY SCHEMA and stays safe for the row's
+    WHOLE lifetime: an immutable `fenced` column set at enqueue plus the demotion CHECK
+    (`NOT fenced OR status <> 'pending'`) make the legacy-claimable state unrepresentable for
+    a fenced row through claim, failure, dead and BOTH replay paths — a failed capable attempt
+    restores `pending_fenced`, replays restore it, and the old replay SQL against a fenced
+    dead row fails closed on the constraint; the capable claim adds fenced rows only for
+    topics in its own dispatch set; the enqueue topic→class mapping is one store-side map
+    pinned by test; proven by the mixed-owner, forced-failure, replay-both-paths,
+    legacy-replay-rejected and legacy-topic-unchanged regressions.
 
 ## 20. Adversarial cases — answered
 
@@ -2101,3 +2483,14 @@ maintenance archive versus annul, leader fencing on the lock-owning connection, 
 with the monitor slug, the native-RANGE storage decision and the TSDB boundary) → iteration
 report `docs/iterations/iter-NNNN.md` → a row in `docs/traceability.md` → `docs/overview.md` when
 behavior or stack changes.
+
+**Phase 3 process** (commissioned 2026-08-17): this §14 amendment reviewed as a DESIGN round →
+UI mock approval for the §14.5 surface **before** any frontend code → implementation on
+`feat/service-reliability` → `-race` in both storage modes → E2E cascade scenario on a live
+stack → decision record **D-0166** (edges outside the declaration; the `service_graph` lock;
+the dedicated `incident_correlation` outbox topic, its one-transaction attempt and the
+whole-lifecycle claim fence for mixed-version fleets (immutable `fenced` column + demotion
+CHECK + class-restoring retry/replay); the `graph_generation` token and
+same-transaction edge audit; the desired-edge delete guard; the canonical endpoint-inclusive
+root-first shortest-lexicographic path) → iteration report + status + traceability rows at
+completion, per the standing convention.

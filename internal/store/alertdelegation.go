@@ -1,0 +1,248 @@
+package store
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
+)
+
+// FR-021 §16.1 — the delegation lookup, which is the only thing that can silence a monitor.
+//
+// Two design rounds shaped this function, and every clause below exists because its absence loses a
+// page:
+//
+//   - `owns_paging` alone silences NOTHING. Coverage must be ARMED per SIGNAL: a policy that can page,
+//     a QUOTABLE last verdict, the CURRENT generations and effective revision, a FRESH DB-clock lease,
+//     and a resolvable recipient.
+//   - a HOLD is a SUCCESSFUL evaluation that cannot fire, so it dis-arms burn: a rule sitting at CLEAR
+//     with a held window is not a replacement for a member's burn alert.
+//   - ROUTABILITY is checked HERE rather than cached, because schedule membership and channel
+//     enablement change without touching any column on the service.
+//   - membership is the CURRENT EFFECTIVE definition revision, never `service_member_refs` — those are
+//     rewritten when a declaration is AUTHORED, while it becomes effective on its bucket boundary, so
+//     a monitor added at 12:00:30 for a 12:01 revision would otherwise be muted at 12:00:40 by a
+//     service still measuring the old definition.
+//
+// Everything ambiguous FAILS OPEN: the caller pages. A page that was not needed is noise; a page that
+// was owed and never sent is the failure this feature exists to prevent.
+
+// DelegationSignal is which replacement a monitor's alert would be delegated to.
+type DelegationSignal string
+
+const (
+	// DelegationLive covers DOWN transitions (reminders included) and escalation steps.
+	DelegationLive DelegationSignal = "live"
+	// DelegationBurn covers FIRING burn alerts.
+	DelegationBurn DelegationSignal = "burn"
+)
+
+// DelegationOwner is one service that is ACTIVELY covering a signal for a monitor.
+type DelegationOwner struct {
+	ServiceID string
+	Slug      string
+	Name      string
+}
+
+// DelegationVerdict is the answer for one (monitor, signal).
+type DelegationVerdict struct {
+	// Owners is non-empty only when suppression is warranted. Ordered by slug so the note text and
+	// the tests are stable.
+	Owners []DelegationOwner
+	// FailOpenReason is set when the lookup could not conclude that a replacement is active. It is
+	// the metric label and the UI's degradation reason, and it is never empty when Owners is empty:
+	// "why is this monitor still paging" must be answerable.
+	FailOpenReason string
+}
+
+// Suppress reports whether the caller may withhold delivery.
+func (v DelegationVerdict) Suppress() bool { return len(v.Owners) > 0 }
+
+// ActiveDelegation resolves whether ANY service actively covers `signal` for this monitor.
+//
+// The query answers all of arming in one statement, because a multi-step lookup would leave windows
+// in which a service is armed for one clause and not another. It is deliberately NOT cached: a stale
+// "no owner" pages twice and a stale "owner" pages never.
+func (s *Store) ActiveDelegation(
+	ctx context.Context, monitorID, projectID string, signal DelegationSignal,
+) (DelegationVerdict, error) {
+	var rows interface {
+		Next() bool
+		Scan(...any) error
+		Close()
+		Err() error
+	}
+	var err error
+
+	switch signal {
+	case DelegationLive:
+		rows, err = s.pool.Query(ctx, activeLiveDelegationSQL, monitorID, projectID)
+	case DelegationBurn:
+		rows, err = s.pool.Query(ctx, activeBurnDelegationSQL, monitorID, projectID)
+	default:
+		return DelegationVerdict{}, fmt.Errorf("store: unknown delegation signal %q", signal)
+	}
+	if err != nil {
+		// The caller treats an error as fail-open; returning it lets the caller name the reason and
+		// count it rather than guessing here.
+		return DelegationVerdict{}, fmt.Errorf("store: active delegation: %w", err)
+	}
+	defer rows.Close()
+
+	var out DelegationVerdict
+	for rows.Next() {
+		var o DelegationOwner
+		if err := rows.Scan(&o.ServiceID, &o.Slug, &o.Name); err != nil {
+			return DelegationVerdict{}, fmt.Errorf("store: scan delegation owner: %w", err)
+		}
+		out.Owners = append(out.Owners, o)
+	}
+	if err := rows.Err(); err != nil {
+		return DelegationVerdict{}, fmt.Errorf("store: iterate delegation owners: %w", err)
+	}
+	if len(out.Owners) == 0 {
+		out.FailOpenReason = "no_active_owner"
+	}
+	return out, nil
+}
+
+// The routable clause, shared by both signals. A service is routable when it has an on-call schedule
+// with at least one target, or its project has at least one ENABLED notification channel. Both halves
+// are live reads: a channel disabled after arming must dis-arm immediately, which a generation stamped
+// on the service cannot see.
+const routableClause = `
+		AND (
+		    EXISTS (SELECT 1 FROM oncall_schedules os
+		             WHERE os.id = s.oncall_schedule_id AND os.project_id = s.project_id
+		               AND jsonb_array_length(os.participants) > 0)
+		    OR EXISTS (SELECT 1 FROM notification_channels nc
+		                WHERE nc.project_id = s.project_id AND nc.enabled)
+		)`
+
+// The effective-membership clause. `service_definition_revisions` is the declaration axis; the
+// EFFECTIVE one is the latest revision whose boundary has passed, and its members are the SLI of that
+// revision. Anything else would suppress on an authored-but-not-yet-effective declaration.
+const effectiveSLIClause = `
+		AND EXISTS (
+		    SELECT 1
+		      FROM service_definition_revisions r
+		      JOIN service_definition_members m ON m.revision_id = r.id
+		     WHERE r.service_id = s.id AND r.state = 'effective' AND r.effective_at <= now()
+		       AND m.monitor_id = $1 AND m.role = 'sli'
+		       AND r.revision = (
+		           SELECT max(r2.revision) FROM service_definition_revisions r2
+		            WHERE r2.service_id = s.id AND r2.state = 'effective' AND r2.effective_at <= now()
+		       )
+		)`
+
+// LIVE coverage: a policy that can page something, a fresh successful evaluation of the CURRENT
+// generation and effective revision, no evaluation error, and a route.
+var activeLiveDelegationSQL = `
+	SELECT s.id, s.slug, s.name
+	  FROM services s
+	  JOIN service_alert_state st ON st.service_id = s.id AND st.project_id = s.project_id
+	 WHERE s.project_id = $2
+	   AND s.owns_paging
+	   AND (cardinality(s.page_on) > 0 OR s.page_on_unknown)
+	   AND st.config_generation = s.alert_config_generation
+	   AND st.last_error IS NULL
+	   AND now() < st.lease_until` + effectiveSLIClause + routableClause + `
+	 ORDER BY s.slug`
+
+// BURN coverage: an enabled target with at least one rule whose LAST VERDICT WAS QUOTABLE — a HOLD
+// dis-arms, because a rule that cannot fire replaces nothing — for the current target and config
+// generations, fresh, error-free, and routable.
+var activeBurnDelegationSQL = `
+	SELECT DISTINCT s.id, s.slug, s.name
+	  FROM services s
+	  JOIN sla_targets t ON t.service_id = s.id AND t.burn_alert_enabled
+	  JOIN service_burn_alert_state bs
+	    ON bs.service_id = s.id AND bs.project_id = s.project_id AND bs.sla_target_id = t.id
+	 WHERE s.project_id = $2
+	   AND s.owns_paging
+	   AND bs.last_verdict IN ('fire', 'clear')
+	   AND bs.config_generation = s.alert_config_generation
+	   AND bs.target_generation = t.alert_generation
+	   AND bs.last_error IS NULL
+	   AND now() < bs.lease_until` + effectiveSLIClause + routableClause + `
+	 ORDER BY s.slug`
+
+// RecordSuppression writes the visibility half of §16.1 and annotates the monitor's open incident, in
+// ONE scoped operation — the same operation that resolved the owners, so a suppression cannot be
+// counted without also being explainable.
+//
+// The row key is `(outbox_event_id, service_id, topic)`: the outbox is at-least-once, so a redelivery
+// re-runs this and the key is what keeps an audit-shaped table from growing a duplicate per retry.
+// Any error here FAILS OPEN — the caller delivers — because a suppression nobody can see is worse
+// than a duplicate page.
+func (s *Store) RecordSuppression(
+	ctx context.Context, eventID, monitorID, projectID, topic string, owners []DelegationOwner,
+) error {
+	if len(owners) == 0 {
+		return fmt.Errorf("store: record suppression with no owners")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin record suppression: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	names := make([]string, 0, len(owners))
+	for _, o := range owners {
+		names = append(names, o.Name)
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO alert_suppressions (outbox_event_id, monitor_id, project_id, service_id, topic, reason)
+			VALUES ($1,$2,$3,$4,$5,$6)
+			ON CONFLICT (outbox_event_id, service_id, topic) DO NOTHING`,
+			eventID, monitorID, projectID, o.ServiceID, topic, string(domain.SuppressionServiceDelegation),
+		); err != nil {
+			return fmt.Errorf("store: record suppression row: %w", err)
+		}
+	}
+	// The note is idempotent on its marker prefix plus the OWNER SET: a changed set of covering
+	// services is a different statement and deserves its own line, while a redelivery of the same
+	// one adds nothing.
+	if _, err := appendSuppressionNoteTx(ctx, tx, monitorID, names); err != nil {
+		return fmt.Errorf("store: annotate suppression: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit record suppression: %w", err)
+	}
+	return nil
+}
+
+// appendSuppressionNoteTx is the delegation flavour of the dependency note, inside the caller's
+// transaction so the row and the explanation cannot diverge.
+//
+// Its idempotency key is the marker prefix PLUS the rendered owner set: a redelivery of the same
+// suppression adds nothing, while a CHANGED set of covering services is a different statement about
+// who is answering and earns its own line.
+func appendSuppressionNoteTx(
+	ctx context.Context, tx pgx.Tx, monitorID string, ownerNames []string,
+) (bool, error) {
+	sorted := append([]string(nil), ownerNames...)
+	sort.Strings(sorted)
+	body := domain.SuppressionMarker + " notification delegated to " +
+		strings.Join(sorted, ", ") + ", which owns paging for this monitor."
+	ct, err := tx.Exec(ctx, `
+		INSERT INTO incident_updates (incident_id, status, body, author)
+		SELECT i.id, i.status, $2, 'system'
+		  FROM incidents i
+		 WHERE i.monitor_id = $1 AND i.source = 'auto' AND i.status <> 'resolved'
+		   AND NOT EXISTS (
+		       SELECT 1 FROM incident_updates u
+		        WHERE u.incident_id = i.id AND u.author = 'system' AND u.body = $2
+		   )
+		 ORDER BY i.started_at DESC
+		 LIMIT 1`, monitorID, body)
+	if err != nil {
+		return false, fmt.Errorf("store: append delegation note: %w", err)
+	}
+	// No open incident is a VALID outcome, not a failure: a monitor can be suppressed while its
+	// incident has already resolved, and inventing one would be worse than saying nothing.
+	return ct.RowsAffected() == 1, nil
+}

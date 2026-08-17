@@ -107,6 +107,14 @@ button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
 .chip.file{background:var(--inset)}
 .chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
 .chip.dorm{border-style:dashed; color:var(--ink-3)}
+/* Arming badges. `armed` is the ONLY state in which anything is suppressed, so it is the only one
+   that gets the accent; `pending` and `degraded` both mean "members page for themselves", which is
+   the safe direction and must never read as a failure of the member. */
+.arm{display:inline-flex; align-items:center; gap:6px; border-radius:999px; padding:2px 9px; font-size:11.5px; font-weight:600}
+.arm .dot{width:7px; height:7px; border-radius:50%}
+.arm.on{color:var(--up); background:var(--up-weak)} .arm.on .dot{background:var(--up)}
+.arm.wait{color:var(--ink-2); background:var(--pending-weak); border:1px dashed var(--border-strong)} .arm.wait .dot{background:var(--pending)}
+.arm.bad{color:var(--degraded); background:var(--degraded-weak)} .arm.bad .dot{background:var(--degraded)}
 
 .row{display:flex; flex-wrap:wrap; align-items:center; gap:9px; padding:11px 16px; border-bottom:1px solid var(--border)}
 .row:last-child{border-bottom:0}
@@ -262,9 +270,16 @@ function sOwnership() {
   <div class="card">
     <header><h2>What this service pages for</h2></header>
     <div class="body" style="display:flex; flex-direction:column; gap:13px">
+      <div class="warn" style="margin-bottom:2px">
+        <span><b>This switch is a declaration, not coverage.</b> A monitor stops sending its own alerts
+          only while this service's replacement for THAT signal is armed and fresh. Each signal below
+          carries its own badge, and anything other than <b>armed</b> means the monitors page for
+          themselves — which is the safe direction, not a fault.</span>
+      </div>
       <label style="display:flex; gap:11px; align-items:flex-start">
         <input type="checkbox" checked style="margin-top:3px">
         <span><b>Health transition</b> — live, evaluated every 30s
+          <span class="arm on" style="margin-left:8px"><span class="dot"></span>armed</span>
           <span style="display:block; color:var(--ink-2); font-size:13px">
             Pages when the service enters a state you choose below. This is the outage page.
           </span>
@@ -278,12 +293,19 @@ function sOwnership() {
       <div style="padding-left:27px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
         <span class="lbl">Confirm</span>
         <span class="chip mono">2 evaluations</span>
-        <span style="font-size:12.5px; color:var(--ink-3)">= at most 60s before the first page</span>
+        <span style="font-size:12.5px; color:var(--ink-3)">≈ 60s before the first page, when the
+          evaluator is running uninterrupted</span>
+      </div>
+      <div style="padding-left:27px; display:flex; gap:8px; flex-wrap:wrap">
+        <span class="chip mono">evaluated 12s ago</span>
+        <span class="chip mono">revision 7 · config gen 4</span>
+        <span class="chip">route: Payments primary (3 targets)</span>
       </div>
 
       <label style="display:flex; gap:11px; align-items:flex-start; border-top:1px solid var(--border); padding-top:13px">
         <input type="checkbox" checked style="margin-top:3px">
         <span><b>Error-budget burn</b> — from sealed facts, so it trails the watermark
+          <span class="arm wait" style="margin-left:8px"><span class="dot"></span>pending — window held</span>
           <span style="display:block; color:var(--ink-2); font-size:13px">
             The budget signal, not the outage page: it can only speak about time that has been
             sealed. Sealed through <span class="mono">14:32 UTC</span>, 4 min ago.
@@ -294,6 +316,11 @@ function sOwnership() {
         <span class="chip mono">1h / 6h · 14× · page</span>
         <span class="chip mono">6h / 3d · 6× · ticket</span>
         <span class="chip">same rules monitors use</span>
+      </div>
+      <div style="padding-left:27px" class="warn">
+        <span>The 6h/3d rule's window is <b>held</b>: not enough sealed time to quote a rate. A held
+          rule cannot fire, so it does not cover anything — <b>burn delegation is off</b> and the
+          monitors' own burn alerts are being delivered normally until it can speak.</span>
       </div>
     </div>
   </div>
@@ -350,10 +377,18 @@ function sDelegated() {
           one page. Turn ownership off on Checkout to restore its own alerts.
         </span>
       </div>
-      <div style="display:flex; gap:8px; flex-wrap:wrap">
-        <span class="chip">transition alerts — delegated</span>
-        <span class="chip">burn alerts — delegated</span>
-        <span class="chip mono">since 2026-08-17 09:14</span>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+        <span class="chip">DOWN transitions — delegated</span>
+        <span class="chip">escalation ladder — delegated</span>
+        <span class="chip dorm">burn — NOT delegated (service window held)</span>
+        <span class="chip acc">recovery — never delegated</span>
+        <span class="chip mono">since 09:14</span>
+      </div>
+      <div style="font-size:12.5px; color:var(--ink-2)">
+        A <b>recovery is never suppressed</b>, whatever the delegation state. Arming is decided when an
+        alert is delivered and it changes: this monitor's DOWN could have gone out while the service was
+        still catching up, and muting the matching UP would leave whoever was paged holding an alert
+        that can never end.
       </div>
     </div>
   </div>
@@ -514,13 +549,38 @@ function sRefusals() {
   </div>
 
   <div class="card">
-    <header><h2>Not enough sealed time</h2><span class="chip mono">insufficient_sealed_coverage</span>
-      <span class="spacer"></span><span class="chip dorm">neither fires nor resolves</span></header>
+    <header><h2>Not enough sealed time</h2><span class="chip mono">held</span>
+      <span class="spacer"></span><span class="arm wait"><span class="dot"></span>burn dis-armed</span></header>
+    <div class="body" style="font-size:13px; color:var(--ink-2); display:flex; flex-direction:column; gap:8px">
+      <div>A burn window with no quotable rate <b>holds</b>: a rule already FIRING stays firing, and a
+        rule at CLEAR stays clear. Treating absent data as "burn = 0" would silently resolve a live
+        alert, which is the most dangerous mistake available here.</div>
+      <div><b style="color:var(--ink)">And a held rule covers nothing.</b> A rule that cannot speak is
+        not a replacement, so burn delegation dis-arms and the monitors' own burn alerts are delivered.
+        The badge above is what an operator sees; the alternative was a silence with no author.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Nobody to notify</h2><span class="spacer"></span>
+      <span class="arm bad"><span class="dot"></span>degraded — both signals dis-armed</span></header>
     <div class="body" style="font-size:13px; color:var(--ink-2)">
-      A burn window with no sealed time returns nothing — and a rule that is already FIRING
-      <b>stays firing</b>. Treating absent data as "burn = 0" would silently resolve a live alert,
-      which is the most dangerous mistake available here; the alert keeps its state and the reason is
-      recorded.
+      This service's schedule is empty and its project has no channels, so a service alert would be
+      recorded and counted but delivered to nobody. Routability is therefore part of arming: the
+      members keep paging for themselves until there is somebody to page. A channel disabled AFTER
+      arming does the same, which is why this is computed when an alert is delivered rather than
+      cached on the service.
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>A recovery</h2>${pill("up", "Up")}<span class="spacer"></span>
+      <span class="chip acc">never suppressed</span></header>
+    <div class="body" style="font-size:13px; color:var(--ink-2)">
+      A monitor's recovery and a burn CLEAR are delivered whatever the delegation state. Arming is
+      decided when an alert is delivered and it changes: a DOWN can go out while the service is still
+      catching up, and muting the matching UP would leave the person who was paged holding an alert
+      that can never end. A duplicate "recovered" is strictly safer than an unmatched "down".
     </div>
   </div>
 

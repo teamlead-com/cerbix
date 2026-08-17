@@ -254,3 +254,37 @@ bars. A zero-height day and a zero-availability day would look identical, which 
 confusion `daily[]` omitting absent days exists to prevent. The window label reads
 `sealed through …`, never "now" — the mock says so on the axis because an implementation that
 ended the window at page load would be silently wrong.
+
+## FR-021 phase 5 — alerting ownership (approved 2026-08-17)
+
+Source: `docs/design/mock-alerting-ownership.html`. Approved by the owner after the design's second
+revision, which is the version that matters: the first mock showed a single ownership toggle, and two
+design rounds established that a toggle is a DECLARATION and not coverage.
+
+Five screens: Ownership switch (the declaration, the per-signal ARMED / PENDING / DEGRADED badge with
+its reason, the before/after of who pages, the confirmation delay stated as nominal, and the routing
+that says plainly which field is not consumed yet) · A delegated monitor (its own real status pill
+kept, a dashed delegation chip naming the owner, which signals are delegated and which are NOT, and
+the `⏸ Suppressed:` note in the incident timeline) · Tolerated failure (a member DOWN under `any`
+while the service is HEALTHY — what was recorded, what was not paged, and what to change if that is
+wrong) · The alerts (live transition vs sealed burn with its watermark, and a CLOSE that names its
+reason and goes to the onset's recipients) · Refusals (unknown, maintenance, a held burn window that
+dis-arms, nobody to notify, and a recovery that is never suppressed).
+
+### The additions to the design language (approved)
+
+**Arming badges, and no new hue.** `armed` borrows `--up`, `pending` borrows the `--pending` hue with
+a dashed ring (the phase-4 dormant grammar), `degraded` borrows `--degraded`. Alerting is a question
+of who is paged, not a new state of a thing, so it introduces no colour of its own. `armed` is the
+only badge that means anything is suppressed, and it is the only one carrying the accent weight.
+
+**A delegated monitor is never greyed out.** It keeps its real status pill — DOWN reads as DOWN — and
+gains a dashed chip naming the owner. Dimming it would make the system show something other than what
+it knows, which is what §11 and §14 exist to prevent.
+
+### Fidelity notes for implementation
+
+The per-signal badge must render the SERVER's arming reason, never a client reconstruction from a
+timestamp: two implementations of "fresh" is how a badge says armed while delivery suppresses nothing.
+Screen 1's held-burn warning is the mandatory case — a green ownership toggle beside a dis-armed burn
+signal is the exact confusion the badges exist to remove.

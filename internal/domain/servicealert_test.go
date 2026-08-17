@@ -66,8 +66,9 @@ func TestServiceAlertPolicyValidate(t *testing.T) {
 	}
 }
 
-// The edge rule. Every row here is a sentence from §16.2 that an implementation could get wrong in
-// a way no integration test would notice until someone was not paged.
+// The edge rule. Every row is a sentence from §16.3 that an implementation could get wrong in a way
+// no integration test would notice until somebody was not paged — or was paged for a state the
+// service had already left.
 func TestDecideServiceAlert(t *testing.T) {
 	own := func(mut func(*ServiceAlertPolicy)) ServiceAlertPolicy {
 		p := DefaultServiceAlertPolicy()
@@ -77,16 +78,23 @@ func TestDecideServiceAlert(t *testing.T) {
 		}
 		return p
 	}
+	bothStates := func(p *ServiceAlertPolicy) {
+		p.PageOn = []ServiceAlertState{ServiceAlertDown, ServiceAlertDegraded}
+		p.ConfirmEvaluations = 1
+	}
 
 	cases := []struct {
-		name         string
-		policy       ServiceAlertPolicy
-		current      ServiceAlertState
-		streak       int
-		notified     ServiceAlertState
-		wantNotify   bool
-		wantRecovery bool
-		wantNext     ServiceAlertState
+		name        string
+		policy      ServiceAlertPolicy
+		current     ServiceAlertState
+		streak      int
+		firing      bool
+		emitted     ServiceAlertState
+		wantNotify  bool
+		wantClose   bool
+		wantReason  ServiceAlertCloseReason
+		wantEmitted ServiceAlertState
+		wantFiring  bool
 	}{
 		{
 			name: "a service that does not own paging never notifies",
@@ -95,86 +103,125 @@ func TestDecideServiceAlert(t *testing.T) {
 				p.OwnsPaging = false
 				return p
 			}(),
-			current: ServiceAlertDown, streak: 9, notified: "",
+			current: ServiceAlertDown, streak: 9,
 		},
 		{
-			name: "an unconfirmed state waits", policy: own(nil),
-			current: ServiceAlertDown, streak: 1, notified: "",
+			name: "an unconfirmed state waits and keeps the level", policy: own(nil),
+			current: ServiceAlertDown, streak: 1, firing: true, emitted: ServiceAlertDown,
+			wantFiring: true,
 		},
 		{
-			name: "a confirmed down announces", policy: own(nil),
-			current: ServiceAlertDown, streak: 2, notified: "",
-			wantNotify: true, wantNext: ServiceAlertDown,
+			name: "a confirmed down opens an announcement", policy: own(nil),
+			current: ServiceAlertDown, streak: 2,
+			wantNotify: true, wantEmitted: ServiceAlertDown, wantFiring: true,
 		},
 		{
-			name: "the same state is not re-announced", policy: own(nil),
-			current: ServiceAlertDown, streak: 40, notified: ServiceAlertDown,
+			name: "the same open state is not re-announced", policy: own(nil),
+			current: ServiceAlertDown, streak: 40, firing: true, emitted: ServiceAlertDown,
+			wantFiring: true,
 		},
 		{
-			name: "recovery: down → healthy announces the END", policy: own(nil),
-			current: ServiceAlertHealthy, streak: 2, notified: ServiceAlertDown,
-			wantNotify: true, wantRecovery: true, wantNext: ServiceAlertHealthy,
+			// The LEVEL is what makes this right: with page_on={down}, degraded is not pageable, so
+			// this changes the state and must not open anything.
+			name: "healthy → degraded with down-only pages nothing", policy: own(nil),
+			current: ServiceAlertDegraded, streak: 5,
 		},
 		{
-			// The first observed state being healthy must NOT emit a recovery for something that was
-			// never announced — a service that starts life healthy pages nobody.
-			name: "healthy with nothing ever announced is silent", policy: own(nil),
-			current: ServiceAlertHealthy, streak: 5, notified: "",
+			// ...and must not emit a recovery either, because nothing was ever announced.
+			name: "degraded → healthy with nothing open is silent", policy: own(nil),
+			current: ServiceAlertHealthy, streak: 5,
 		},
 		{
-			// degraded → down is a NEW announcement, not a recovery followed by a page.
-			name: "pageable → pageable is one new announcement",
-			policy: own(func(p *ServiceAlertPolicy) {
-				p.PageOn = []ServiceAlertState{ServiceAlertDown, ServiceAlertDegraded}
-				p.ConfirmEvaluations = 1
-			}),
-			current: ServiceAlertDown, streak: 1, notified: ServiceAlertDegraded,
-			wantNotify: true, wantNext: ServiceAlertDown,
+			name: "down → healthy closes as RECOVERED", policy: own(nil),
+			current: ServiceAlertHealthy, streak: 2, firing: true, emitted: ServiceAlertDown,
+			wantNotify: true, wantClose: true, wantReason: CloseRecovered,
+			wantEmitted: ServiceAlertHealthy,
 		},
 		{
-			// down → excluded: the new state would never page, but the operator was told something
-			// was wrong and is owed the end of it.
-			name: "entering maintenance while paged is a recovery", policy: own(nil),
-			current: ServiceAlertExcluded, streak: 2, notified: ServiceAlertDown,
-			wantNotify: true, wantRecovery: true, wantNext: ServiceAlertExcluded,
+			// down → degraded while only `down` pages: the operator was told DOWN and it is not down
+			// any more, so the announcement ENDS. Leaving it open would keep a page alive for a state
+			// the service left.
+			name: "down → degraded with down-only closes", policy: own(nil),
+			current: ServiceAlertDegraded, streak: 2, firing: true, emitted: ServiceAlertDown,
+			wantNotify: true, wantClose: true, wantReason: ClosePolicyChanged,
+			wantEmitted: ServiceAlertDegraded,
 		},
 		{
-			// down → unknown with the switch OFF: same reasoning. Losing sight of a service that was
-			// down is not "still down" and not "fixed"; the honest move is to end the announcement.
-			name: "losing sight while paged ends the announcement", policy: own(nil),
-			current: ServiceAlertUnknown, streak: 2, notified: ServiceAlertDown,
-			wantNotify: true, wantRecovery: true, wantNext: ServiceAlertUnknown,
+			// ...but when BOTH page, it is one new onset, not a close plus an onset: a manufactured
+			// "recovered" in between would be false.
+			name: "degraded → down when both page is ONE new onset", policy: own(bothStates),
+			current: ServiceAlertDown, streak: 1, firing: true, emitted: ServiceAlertDegraded,
+			wantNotify: true, wantEmitted: ServiceAlertDown, wantFiring: true,
 		},
 		{
-			// ...and with the switch ON it is a page in its own right, not a recovery.
-			name: "unknown pages when declared, and is not a recovery",
+			name: "entering maintenance while paged closes as ENTERED_MAINTENANCE", policy: own(nil),
+			current: ServiceAlertExcluded, streak: 2, firing: true, emitted: ServiceAlertDown,
+			wantNotify: true, wantClose: true, wantReason: CloseEnteredMaintenance,
+			wantEmitted: ServiceAlertExcluded,
+		},
+		{
+			// The owner's decision 7: losing sight ENDS the announcement, and says so. Calling it
+			// "recovered" would assert evidence nobody has.
+			name: "losing sight while paged closes as VISIBILITY_LOST", policy: own(nil),
+			current: ServiceAlertUnknown, streak: 2, firing: true, emitted: ServiceAlertDown,
+			wantNotify: true, wantClose: true, wantReason: CloseVisibilityLost,
+			wantEmitted: ServiceAlertUnknown,
+		},
+		{
+			// ...and with the switch ON it is a page in its own right, not a close.
+			name: "unknown pages when declared, and is not a close",
 			policy: own(func(p *ServiceAlertPolicy) {
 				p.PageOnUnknown = true
 				p.ConfirmEvaluations = 1
 			}),
-			current: ServiceAlertUnknown, streak: 1, notified: ServiceAlertDown,
-			wantNotify: true, wantNext: ServiceAlertUnknown,
+			current: ServiceAlertUnknown, streak: 1, firing: true, emitted: ServiceAlertDown,
+			wantNotify: true, wantEmitted: ServiceAlertUnknown, wantFiring: true,
 		},
 		{
-			name: "excluded with nothing announced is silent", policy: own(nil),
-			current: ServiceAlertExcluded, streak: 3, notified: "",
+			name: "excluded with nothing open is silent", policy: own(nil),
+			current: ServiceAlertExcluded, streak: 3,
 		},
 	}
 
 	for _, c := range cases {
-		got := DecideServiceAlert(c.policy, c.current, c.streak, c.notified)
-		if got.Notify != c.wantNotify || got.Recovery != c.wantRecovery {
-			t.Errorf("%s: notify=%v recovery=%v, want notify=%v recovery=%v (reason %q)",
-				c.name, got.Notify, got.Recovery, c.wantNotify, c.wantRecovery, got.Reason)
+		got := DecideServiceAlert(c.policy, c.current, c.streak, c.firing, c.emitted)
+		if got.Notify != c.wantNotify || got.Close != c.wantClose {
+			t.Errorf("%s: notify=%v close=%v, want notify=%v close=%v (reason %q)",
+				c.name, got.Notify, got.Close, c.wantNotify, c.wantClose, got.Reason)
 			continue
 		}
-		if c.wantNotify && got.NextNotified != c.wantNext {
-			t.Errorf("%s: next notified = %q, want %q", c.name, got.NextNotified, c.wantNext)
+		if c.wantClose && got.CloseReason != c.wantReason {
+			t.Errorf("%s: close reason = %q, want %q", c.name, got.CloseReason, c.wantReason)
 		}
-		// Silence always has a name: an empty reason with no notification would leave "why was I
-		// not paged" unanswerable, which is the question this whole feature has to survive.
+		if !c.wantClose && got.CloseReason != "" {
+			t.Errorf("%s: a non-close carries close reason %q", c.name, got.CloseReason)
+		}
+		if c.wantNotify && got.NextEmitted != c.wantEmitted {
+			t.Errorf("%s: next emitted = %q, want %q", c.name, got.NextEmitted, c.wantEmitted)
+		}
+		if got.NextFiring != c.wantFiring {
+			t.Errorf("%s: next firing = %v, want %v", c.name, got.NextFiring, c.wantFiring)
+		}
+		// Silence always has a name: an empty reason with no notification leaves "why was I not
+		// paged" unanswerable, which is the question this feature has to survive.
 		if !got.Notify && got.Reason == "" {
 			t.Errorf("%s: silent with no stated reason", c.name)
+		}
+	}
+}
+
+// A close ALWAYS names its reason, and only a return to healthy is a recovery. This is the honesty
+// rule of owner decision 7 stated as a table, because a future refactor that made "close" implicitly
+// mean "recovered" would pass every behavioural test above.
+func TestCloseReasonNeverInventsARecovery(t *testing.T) {
+	for state, want := range map[ServiceAlertState]ServiceAlertCloseReason{
+		ServiceAlertHealthy:  CloseRecovered,
+		ServiceAlertExcluded: CloseEnteredMaintenance,
+		ServiceAlertUnknown:  CloseVisibilityLost,
+		ServiceAlertDegraded: ClosePolicyChanged,
+	} {
+		if got := closeReasonFor(state); got != want {
+			t.Errorf("closeReasonFor(%q) = %q, want %q", state, got, want)
 		}
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // FR-021 §16.6a/§16.7 — an evaluation and a paging-config write are LINEARIZABLE.
@@ -225,5 +227,91 @@ func TestAWaitingWriterStampsTheCloseAfterItsWait(t *testing.T) {
 	if closed.Before(released) {
 		t.Fatalf("the close is stamped %s, before the writer's wait even ended at %s: the clock was "+
 			"read at transaction start rather than after the locks", closed, released)
+	}
+}
+
+// §16.6a "omitted = unchanged" is a promise about the row at COMMIT time, not about the value the
+// caller read a moment earlier.
+//
+// Two PATCHes that each mention ONE field must both survive, in either order. An earlier revision
+// read the policy, merged in Go and handed the store a full value: both writers then read the same
+// row, and whichever committed second wrote its stale copy of the field it never mentioned —
+// silently restoring ownership after an explicit disown, or dropping the confirmation change,
+// depending on which won. The merge now happens inside the write transaction, under the row lock.
+func TestConcurrentPartialPatchesBothSurvive(t *testing.T) {
+	for _, order := range []string{"disown first", "confirm first"} {
+		t.Run(order, func(t *testing.T) {
+			st, ctx := serviceSchemaStore(t)
+			f := armedService(t, st, ctx)
+			if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+				FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{
+					OwnsPaging: true,
+					PageOn:     []domain.ServiceAlertState{domain.ServiceAlertDown},
+					// A distinctive starting value, so "unchanged" is falsifiable.
+					ConfirmEvaluations: 2,
+				}), AlertActor{}); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			disown := func() error {
+				no := false
+				_, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+					ServiceAlertPolicyPatch{OwnsPaging: &no}, AlertActor{})
+				return err
+			}
+			confirm := func() error {
+				four := 4
+				_, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+					ServiceAlertPolicyPatch{ConfirmEvaluations: &four}, AlertActor{})
+				return err
+			}
+
+			// A blocker holds the row so BOTH writers have unquestionably begun before either can
+			// commit — the interleaving the race needs, made deterministic.
+			blocker, err := st.pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin blocker: %v", err)
+			}
+			if _, err := blocker.Exec(ctx,
+				`SELECT 1 FROM services WHERE id = $1 FOR UPDATE`, f.serviceID); err != nil {
+				t.Fatalf("blocker lock: %v", err)
+			}
+
+			first, second := disown, confirm
+			if order == "confirm first" {
+				first, second = confirm, disown
+			}
+			firstDone, secondDone := make(chan error, 1), make(chan error, 1)
+			go func() { firstDone <- first() }()
+			waitForLockWait(t, st, ctx)
+			go func() { secondDone <- second() }()
+			// Both are queued behind the blocker; releasing it lets them run one after the other.
+			if err := blocker.Rollback(ctx); err != nil {
+				t.Fatalf("release blocker: %v", err)
+			}
+			for _, done := range []chan error{firstDone, secondDone} {
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatalf("patch: %v", err)
+					}
+				case <-time.After(15 * time.Second):
+					t.Fatal("a patch never returned")
+				}
+			}
+
+			got, err := st.ServiceAlertPolicy(ctx, f.projectID, f.serviceID)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if got.OwnsPaging {
+				t.Fatalf("ownership came back after an explicit disown (%+v): the other patch "+
+					"never mentioned it, so it wrote a stale copy of a field it did not own", got)
+			}
+			if got.ConfirmEvaluations != 4 {
+				t.Fatalf("confirm_evaluations = %d, want 4: the disown wrote its stale copy of a "+
+					"field it never mentioned", got.ConfirmEvaluations)
+			}
+		})
 	}
 }

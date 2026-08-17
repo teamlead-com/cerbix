@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -184,9 +185,8 @@ func TestDisowningPagingClosesAFiringBurnAnnouncement(t *testing.T) {
 		t.Fatalf("expected one onset, got %+v", onset)
 	}
 
-	stored, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		domain.ServiceAlertPolicy{OwnsPaging: false, PageOn: []domain.ServiceAlertState{domain.ServiceAlertDown},
-			ConfirmEvaluations: 2}, AlertActor{ViaToken: true})
+	stored, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: false, PageOn: []domain.ServiceAlertState{domain.ServiceAlertDown},
+		ConfirmEvaluations: 2}), AlertActor{ViaToken: true})
 	if err != nil {
 		t.Fatalf("disown: %v", err)
 	}
@@ -254,8 +254,7 @@ func TestNarrowingPageOnClosesTheAnnouncementItNoLongerCovers(t *testing.T) {
 		t.Fatalf("expected one DOWN onset, got %+v", onset)
 	}
 
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		pagingPolicy(domain.ServiceAlertDegraded), AlertActor{}); err != nil {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(pagingPolicy(domain.ServiceAlertDegraded)), AlertActor{}); err != nil {
 		t.Fatalf("narrow page_on: %v", err)
 	}
 
@@ -304,8 +303,7 @@ func TestWideningPageOnClosesNothing(t *testing.T) {
 		t.Fatal("expected one onset before the edit")
 	}
 
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		pagingPolicy(domain.ServiceAlertDegraded, domain.ServiceAlertDown), AlertActor{}); err != nil {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(pagingPolicy(domain.ServiceAlertDegraded, domain.ServiceAlertDown)), AlertActor{}); err != nil {
 		t.Fatalf("widen page_on: %v", err)
 	}
 
@@ -340,9 +338,8 @@ func TestConfirmEvaluationsEditClosesNothing(t *testing.T) {
 	}
 	before := alertConfigGeneration(t, st, ctx, f.serviceID)
 
-	stored, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		domain.ServiceAlertPolicy{OwnsPaging: true,
-			PageOn: []domain.ServiceAlertState{domain.ServiceAlertDown}, ConfirmEvaluations: 5},
+	stored, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: true,
+		PageOn: []domain.ServiceAlertState{domain.ServiceAlertDown}, ConfirmEvaluations: 5}),
 		AlertActor{})
 	if err != nil {
 		t.Fatalf("confirm edit: %v", err)
@@ -586,8 +583,7 @@ func TestFileManagedServiceRefusesPagingWrites(t *testing.T) {
 	}
 	genBefore := alertConfigGeneration(t, st, ctx, f.serviceID)
 
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		pagingPolicy(domain.ServiceAlertDegraded), AlertActor{}); !errors.Is(err, ErrServiceManagedByFile) {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(pagingPolicy(domain.ServiceAlertDegraded)), AlertActor{}); !errors.Is(err, ErrServiceManagedByFile) {
 		t.Fatalf("policy write on a file-owned service = %v, want ErrServiceManagedByFile", err)
 	}
 	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", false,
@@ -646,8 +642,7 @@ func TestForeignProjectCannotEditPagingConfig(t *testing.T) {
 	}
 	genBefore := alertConfigGeneration(t, st, ctx, f.serviceID)
 
-	if _, err := st.UpdateServiceAlertPolicy(ctx, other.ID, f.serviceID,
-		pagingPolicy(domain.ServiceAlertDegraded), AlertActor{}); !errors.Is(err, ErrNotFound) {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, other.ID, f.serviceID, FullServiceAlertPolicyPatch(pagingPolicy(domain.ServiceAlertDegraded)), AlertActor{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-tenant policy write = %v, want ErrNotFound", err)
 	}
 	if err := st.SetServiceBurnAlerting(ctx, other.ID, f.serviceID, "30d", false,
@@ -655,8 +650,7 @@ func TestForeignProjectCannotEditPagingConfig(t *testing.T) {
 		t.Fatalf("cross-tenant burn write = %v, want ErrNotFound", err)
 	}
 	// An id that is not even a uuid answers the same way rather than surfacing a driver error.
-	if _, err := st.UpdateServiceAlertPolicy(ctx, "not-a-uuid", f.serviceID,
-		pagingPolicy(domain.ServiceAlertDown), AlertActor{}); !errors.Is(err, ErrNotFound) {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, "not-a-uuid", f.serviceID, FullServiceAlertPolicyPatch(pagingPolicy(domain.ServiceAlertDown)), AlertActor{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("malformed project id = %v, want ErrNotFound", err)
 	}
 
@@ -703,15 +697,13 @@ func TestPagingWritesRejectInvalidInputBeforeWriting(t *testing.T) {
 	f := burnAlertService(t, st, ctx, oneBurnRule)
 	genBefore := alertConfigGeneration(t, st, ctx, f.serviceID)
 
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		domain.ServiceAlertPolicy{OwnsPaging: true,
-			PageOn: []domain.ServiceAlertState{domain.ServiceAlertUnknown}, ConfirmEvaluations: 2},
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: true,
+		PageOn: []domain.ServiceAlertState{domain.ServiceAlertUnknown}, ConfirmEvaluations: 2}),
 		AlertActor{}); err == nil {
 		t.Fatal("page_on accepted `unknown`, which has its own switch")
 	}
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		domain.ServiceAlertPolicy{OwnsPaging: true,
-			PageOn: []domain.ServiceAlertState{domain.ServiceAlertDown}, ConfirmEvaluations: 99},
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: true,
+		PageOn: []domain.ServiceAlertState{domain.ServiceAlertDown}, ConfirmEvaluations: 99}),
 		AlertActor{}); err == nil {
 		t.Fatal("confirm_evaluations accepted 99")
 	}
@@ -724,8 +716,7 @@ func TestPagingWritesRejectInvalidInputBeforeWriting(t *testing.T) {
 		t.Fatalf("alert_config_generation %d → %d on a rejected write", genBefore, got)
 	}
 	// The canonical form is what is STORED and what comes back, not the caller's spelling.
-	stored, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		pagingPolicy(domain.ServiceAlertDown, domain.ServiceAlertDegraded, domain.ServiceAlertDown),
+	stored, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(pagingPolicy(domain.ServiceAlertDown, domain.ServiceAlertDegraded, domain.ServiceAlertDown)),
 		AlertActor{})
 	if err != nil {
 		t.Fatalf("canonical write: %v", err)
@@ -757,10 +748,9 @@ func TestClearingPageOnUnknownClosesTheAnnouncementItNoLongerCovers(t *testing.T
 
 	// Declared through the write surface itself, so the true→false edit below is judged against a
 	// value this path stored rather than one a test wrote behind its back.
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		domain.ServiceAlertPolicy{OwnsPaging: true,
-			PageOn:        []domain.ServiceAlertState{domain.ServiceAlertDown},
-			PageOnUnknown: true, ConfirmEvaluations: 2}, AlertActor{}); err != nil {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: true,
+		PageOn:        []domain.ServiceAlertState{domain.ServiceAlertDown},
+		PageOnUnknown: true, ConfirmEvaluations: 2}), AlertActor{}); err != nil {
 		t.Fatalf("declare page_on_unknown: %v", err)
 	}
 	// No heartbeats at all: nothing is decidable, so the service is UNKNOWN rather than down.
@@ -773,8 +763,7 @@ func TestClearingPageOnUnknownClosesTheAnnouncementItNoLongerCovers(t *testing.T
 
 	// Only `page_on_unknown` moves: `page_on` stays {down} and the confirmation stays 2, so the close
 	// below cannot be attributed to any other field.
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		pagingPolicy(domain.ServiceAlertDown), AlertActor{}); err != nil {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(pagingPolicy(domain.ServiceAlertDown)), AlertActor{}); err != nil {
 		t.Fatalf("clear page_on_unknown: %v", err)
 	}
 
@@ -873,10 +862,9 @@ func TestDisowningClosesEachOpenSignalExactlyOnce(t *testing.T) {
 		t.Fatal("the two signals share an episode: this fixture cannot tell two closes from one")
 	}
 
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		domain.ServiceAlertPolicy{OwnsPaging: false,
-			PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
-			ConfirmEvaluations: 2}, AlertActor{}); err != nil {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: false,
+		PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
+		ConfirmEvaluations: 2}), AlertActor{}); err != nil {
 		t.Fatalf("disown: %v", err)
 	}
 
@@ -973,16 +961,14 @@ func TestPagingWritesAuditTheirActor(t *testing.T) {
 		t.Fatalf("user: %v", err)
 	}
 
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		domain.ServiceAlertPolicy{OwnsPaging: true,
-			PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
-			ConfirmEvaluations: 5}, AlertActor{ActorUserID: userID}); err != nil {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: true,
+		PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
+		ConfirmEvaluations: 5}), AlertActor{ActorUserID: userID}); err != nil {
 		t.Fatalf("policy edit by a human: %v", err)
 	}
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		domain.ServiceAlertPolicy{OwnsPaging: true,
-			PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
-			ConfirmEvaluations: 6}, AlertActor{ViaToken: true}); err != nil {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: true,
+		PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
+		ConfirmEvaluations: 6}), AlertActor{ViaToken: true}); err != nil {
 		t.Fatalf("policy edit by a token: %v", err)
 	}
 	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true,
@@ -1042,6 +1028,63 @@ func TestPagingWritesAuditTheirActor(t *testing.T) {
 // second is the load-bearing half, because both generations are owned by triggers that compare
 // stored values, so "a reorder is not a change" is a property of the canonical form this surface
 // writes, not of the caller's discipline.
+// A no-op must not even STAMP the row: an UPDATE that changes no column still moves `updated_at`
+// and burns an MVCC row version, and a UI saving an unchanged form would then show a service as
+// freshly edited by nobody.
+func TestSemanticNoOpDoesNotEvenStampTheRow(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+
+	policy := domain.ServiceAlertPolicy{
+		OwnsPaging: true, PageOn: []domain.ServiceAlertState{domain.ServiceAlertDown},
+		ConfirmEvaluations: 2,
+	}
+	rules := []domain.BurnRule{{
+		LongWindowSeconds: 300, ShortWindowSeconds: 120, Threshold: 14,
+		Severity: domain.BurnSeverityPage,
+	}}
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		FullServiceAlertPolicyPatch(policy), AlertActor{}); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true, rules,
+		AlertActor{}); err != nil {
+		t.Fatalf("seed rules: %v", err)
+	}
+
+	stamps := func() (svc, target time.Time) {
+		t.Helper()
+		if err := st.pool.QueryRow(ctx, `
+			SELECT s.updated_at, t.updated_at
+			  FROM services s JOIN sla_targets t ON t.id = $2
+			 WHERE s.id = $1`, f.serviceID, f.targetID).Scan(&svc, &target); err != nil {
+			t.Fatalf("read stamps: %v", err)
+		}
+		return
+	}
+	svcBefore, targetBefore := stamps()
+
+	// The same declarations again, the rules re-spelled in the other order.
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		FullServiceAlertPolicyPatch(policy), AlertActor{}); err != nil {
+		t.Fatalf("re-apply policy: %v", err)
+	}
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true, rules,
+		AlertActor{}); err != nil {
+		t.Fatalf("re-apply rules: %v", err)
+	}
+
+	svcAfter, targetAfter := stamps()
+	if !svcAfter.Equal(svcBefore) {
+		t.Fatalf("services.updated_at moved %s → %s for a declaration nobody changed",
+			svcBefore, svcAfter)
+	}
+	if !targetAfter.Equal(targetBefore) {
+		t.Fatalf("sla_targets.updated_at moved %s → %s for rules nobody changed",
+			targetBefore, targetAfter)
+	}
+}
+
 func TestSemanticNoOpWritesChangeNothing(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := burnAlertService(t, st, ctx, twoRulesJSON)
@@ -1061,8 +1104,7 @@ func TestSemanticNoOpWritesChangeNothing(t *testing.T) {
 
 	// Both declarations are first written THROUGH the surface, so what follows is compared against
 	// the canonical spelling this path stores rather than against the fixture's.
-	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		pagingPolicy(domain.ServiceAlertDegraded, domain.ServiceAlertDown), AlertActor{}); err != nil {
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(pagingPolicy(domain.ServiceAlertDegraded, domain.ServiceAlertDown)), AlertActor{}); err != nil {
 		t.Fatalf("declare policy: %v", err)
 	}
 	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true,
@@ -1130,8 +1172,7 @@ func TestSemanticNoOpWritesChangeNothing(t *testing.T) {
 	unchanged("baseline")
 
 	// (a) the same policy, spelled in the other order.
-	stored, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
-		pagingPolicy(domain.ServiceAlertDown, domain.ServiceAlertDegraded), AlertActor{})
+	stored, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(pagingPolicy(domain.ServiceAlertDown, domain.ServiceAlertDegraded)), AlertActor{})
 	if err != nil {
 		t.Fatalf("rewrite the same policy: %v", err)
 	}
@@ -1215,10 +1256,9 @@ func TestPagingWritesRefuseForeignAndMalformedIdentifiers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Both edits are destructive if they land: the policy disowns the service, and the burn
 			// write turns its target off. Both would close a firing announcement.
-			if _, err := st.UpdateServiceAlertPolicy(ctx, tc.projectID, tc.serviceID,
-				domain.ServiceAlertPolicy{OwnsPaging: false,
-					PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
-					ConfirmEvaluations: 2}, AlertActor{ViaToken: true}); !errors.Is(err, ErrNotFound) {
+			if _, err := st.UpdateServiceAlertPolicy(ctx, tc.projectID, tc.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: false,
+				PageOn:             []domain.ServiceAlertState{domain.ServiceAlertDown},
+				ConfirmEvaluations: 2}), AlertActor{ViaToken: true}); !errors.Is(err, ErrNotFound) {
 				t.Fatalf("policy write = %v, want ErrNotFound — one answer for every way of naming "+
 					"something that is not yours", err)
 			}

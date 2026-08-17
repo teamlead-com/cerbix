@@ -201,7 +201,7 @@ type Store interface {
 	// The COVERAGE that declaration is currently producing, per signal (§16.1/§16.6b). Read from
 	// the delegation lookup's own predicates, so a badge cannot disagree with the delivery gate.
 	ServiceAlertingState(ctx context.Context, projectID, serviceID string) (store.ServiceAlertingState, error)
-	UpdateServiceAlertPolicy(ctx context.Context, projectID, serviceID string, p domain.ServiceAlertPolicy, actor store.AlertActor) (domain.ServiceAlertPolicy, error)
+	UpdateServiceAlertPolicy(ctx context.Context, projectID, serviceID string, patch store.ServiceAlertPolicyPatch, actor store.AlertActor) (domain.ServiceAlertPolicy, error)
 	SetServiceBurnAlerting(ctx context.Context, projectID, serviceID, window string, enabled bool, rules []domain.BurnRule, actor store.AlertActor) error
 	// Service impact graph + correlation reads (FR-021 phase 3, iter-0147).
 	GetServiceDependencies(ctx context.Context, projectID, serviceID string) (store.ServiceGraphView, error)

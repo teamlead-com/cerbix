@@ -81,6 +81,51 @@ func (s *Store) ServiceAlertPolicy(
 	return p.Canonical(), nil
 }
 
+// ServiceAlertPolicyPatch is a PARTIAL declaration: a nil field means "leave this alone".
+//
+// It exists because the merge has to happen INSIDE the write transaction. An earlier revision read
+// the policy, merged in Go and handed the store a full value, which loses a concurrent partial edit:
+// two PATCHes that each mention one field both read the same row, and whichever commits second
+// writes its stale copy of the field it never mentioned — silently restoring `owns_paging` after an
+// explicit disown, or dropping a `confirm_evaluations` change, depending on the order. §16.6a's
+// "omitted = unchanged" is a promise about the STORED value at commit time, not about the value the
+// caller happened to read a moment earlier.
+type ServiceAlertPolicyPatch struct {
+	OwnsPaging         *bool
+	PageOn             *[]domain.ServiceAlertState
+	PageOnUnknown      *bool
+	ConfirmEvaluations *int
+}
+
+// FullServiceAlertPolicyPatch is every field set, for callers that genuinely declare the whole
+// policy (the MaC apply, and any test that means "make it exactly this").
+func FullServiceAlertPolicyPatch(p domain.ServiceAlertPolicy) ServiceAlertPolicyPatch {
+	states := append([]domain.ServiceAlertState(nil), p.PageOn...)
+	return ServiceAlertPolicyPatch{
+		OwnsPaging: &p.OwnsPaging, PageOn: &states,
+		PageOnUnknown: &p.PageOnUnknown, ConfirmEvaluations: &p.ConfirmEvaluations,
+	}
+}
+
+// Merged applies the patch to a declaration. Exported because the HTTP layer judges what it can
+// judge without the stored row (the states themselves, the confirmation bound) before calling the
+// store at all — using this same merge rather than a second one.
+func (p ServiceAlertPolicyPatch) Merged(base domain.ServiceAlertPolicy) domain.ServiceAlertPolicy {
+	if p.OwnsPaging != nil {
+		base.OwnsPaging = *p.OwnsPaging
+	}
+	if p.PageOn != nil {
+		base.PageOn = append([]domain.ServiceAlertState(nil), (*p.PageOn)...)
+	}
+	if p.PageOnUnknown != nil {
+		base.PageOnUnknown = *p.PageOnUnknown
+	}
+	if p.ConfirmEvaluations != nil {
+		base.ConfirmEvaluations = *p.ConfirmEvaluations
+	}
+	return base
+}
+
 // UpdateServiceAlertPolicy writes a service's paging declaration and ends any announcement the new
 // declaration no longer covers, atomically.
 //
@@ -97,7 +142,7 @@ func (s *Store) ServiceAlertPolicy(
 // It returns the canonical policy that was stored, so a caller can echo exactly what the database
 // holds rather than what it was sent.
 func (s *Store) UpdateServiceAlertPolicy(
-	ctx context.Context, projectID, serviceID string, p domain.ServiceAlertPolicy, actor AlertActor,
+	ctx context.Context, projectID, serviceID string, patch ServiceAlertPolicyPatch, actor AlertActor,
 ) (domain.ServiceAlertPolicy, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -142,12 +187,24 @@ func (s *Store) UpdateServiceAlertPolicy(
 		return domain.ServiceAlertPolicy{}, err
 	}
 
-	// Canonical THEN validate, and both before any write: the canonical form is what is stored and
-	// what the bounds are judged against, so an input that only differs by order or repetition can
-	// never be accepted in one spelling and refused in another.
-	next := p.Canonical()
+	// The MERGE happens HERE, under the lock, onto the row this transaction just read — never onto
+	// a value the caller read earlier. Then canonical, then validate, and all of it before any
+	// write: the canonical form is what is stored and what the bounds are judged against, so an
+	// input that only differs by order or repetition can never be accepted in one spelling and
+	// refused in another.
+	next := patch.Merged(before).Canonical()
 	if err := next.Validate(); err != nil {
 		return domain.ServiceAlertPolicy{}, fmt.Errorf("store: %w", err)
+	}
+
+	// A declaration identical to the stored one is NOT a write. The trigger would not bump the
+	// generation for it either, but an UPDATE still stamps `updated_at` and burns an MVCC row
+	// version — and a UI that saves an unchanged form, or a client that PUTs on a timer, would then
+	// show a service as freshly edited by nobody. Checked AFTER the lock, so the comparison is
+	// against the row this transaction is about to write.
+	diff := alertPolicyDiff(before, next)
+	if diff == "" {
+		return next, tx.Commit(ctx)
 	}
 
 	// ── The closes, from the BEFORE state, in this transaction ───────────────────────────────
@@ -195,11 +252,9 @@ func (s *Store) UpdateServiceAlertPolicy(
 	}
 
 	// ── The audit, in the SAME transaction, naming only what moved ───────────────────────────
-	if diff := alertPolicyDiff(before, next); diff != "" {
-		if err := insertAlertAudit(ctx, tx, projectID, actor, "service.alerting",
-			"service="+serviceID+" "+diff); err != nil {
-			return domain.ServiceAlertPolicy{}, err
-		}
+	if err := insertAlertAudit(ctx, tx, projectID, actor, "service.alerting",
+		"service="+serviceID+" "+diff); err != nil {
+		return domain.ServiceAlertPolicy{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.ServiceAlertPolicy{}, fmt.Errorf("store: commit alert policy: %w", err)
@@ -292,6 +347,31 @@ func (s *Store) SetServiceBurnAlerting(
 	}
 	keys := burnRuleKeys(rules)
 
+	// `Firing` is zeroed on the way in. For a SERVICE target the latch is the normalized
+	// `service_burn_alert_state` row (§16.4b) and the JSON's copy is read by nothing; storing a
+	// caller's value there would leave a second, editable statement about what is currently firing.
+	//
+	// The array is stored in canonical KEY ORDER, and that is what makes the generation trigger
+	// honest: it compares the stored JSON, so without a canonical order a pure reorder would bump
+	// the generation, dis-arm the service and page its members for a change nobody made.
+	stored := make([]domain.BurnRule, 0, len(rules))
+	for _, r := range rules {
+		r.Firing = false
+		stored = append(stored, r)
+	}
+	sort.Slice(stored, func(i, j int) bool { return stored[i].Key() < stored[j].Key() })
+	payload, err := json.Marshal(stored)
+	if err != nil {
+		return fmt.Errorf("store: marshal burn rules: %w", err)
+	}
+
+	// A declaration the row already holds is NOT a write: no closes to make, no latches to prune,
+	// nothing to audit, and no `updated_at` stamp for an edit nobody made. Compared as the CANONICAL
+	// bytes, after the lock, against what this transaction would otherwise store.
+	if enabled == beforeEnabled && string(payload) == canonicalJSON(beforeRaw) {
+		return tx.Commit(ctx)
+	}
+
 	// ── The closes, from the BEFORE state ────────────────────────────────────────────────────
 	switch {
 	case beforeEnabled && !enabled:
@@ -331,25 +411,6 @@ func (s *Store) SetServiceBurnAlerting(
 	}
 
 	// ── The write ────────────────────────────────────────────────────────────────────────────
-	//
-	// `Firing` is zeroed on the way in. For a SERVICE target the latch is the normalized
-	// `service_burn_alert_state` row (§16.4b) and the JSON's copy is read by nothing; storing a
-	// caller's value there would leave a second, editable statement about what is currently firing.
-	//
-	// The array is also stored in canonical KEY ORDER, and that is what makes the generation trigger
-	// honest: it compares the stored JSON, so without a canonical order a pure reorder would bump
-	// the generation, dis-arm the service and page its members for a change nobody made — while with
-	// one, a textual difference IS a semantic difference.
-	stored := make([]domain.BurnRule, 0, len(rules))
-	for _, r := range rules {
-		r.Firing = false
-		stored = append(stored, r)
-	}
-	sort.Slice(stored, func(i, j int) bool { return stored[i].Key() < stored[j].Key() })
-	payload, err := json.Marshal(stored)
-	if err != nil {
-		return fmt.Errorf("store: marshal burn rules: %w", err)
-	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE sla_targets
 		   SET burn_alert_enabled = $2, burn_rules = $3::jsonb, updated_at = now()
@@ -494,4 +555,24 @@ func insertAlertAudit(
 		return fmt.Errorf("store: audit %s: %w", action, err)
 	}
 	return nil
+}
+
+// canonicalJSON re-encodes a stored `burn_rules` payload the way the write path encodes it, so the
+// no-op comparison is about the DECLARATION and not about whitespace or key order a previous writer
+// happened to produce. An undecodable payload compares equal to nothing, which correctly makes the
+// write proceed and replace it.
+func canonicalJSON(raw []byte) string {
+	var rules []domain.BurnRule
+	if err := json.Unmarshal(raw, &rules); err != nil {
+		return ""
+	}
+	for i := range rules {
+		rules[i].Firing = false
+	}
+	sort.Slice(rules, func(i, j int) bool { return rules[i].Key() < rules[j].Key() })
+	out, err := json.Marshal(rules)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }

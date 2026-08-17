@@ -171,35 +171,32 @@ func (h *Handler) patchServiceAlerting(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, serviceMaxBody, &body) {
 		return
 	}
-	next, ok := h.readServiceAlertPolicy(w, r, proj.ID, serviceID)
-	if !ok {
-		return
-	}
-	if body.OwnsPaging != nil {
-		next.OwnsPaging = *body.OwnsPaging
+	// The patch travels to the STORE as a patch. Merging here — onto a value read a moment ago,
+	// outside the write's transaction — loses a concurrent partial edit: two PATCHes that each
+	// mention one field would both read the same row, and whichever committed second would write
+	// its stale copy of the field it never mentioned, silently restoring ownership after an
+	// explicit disown. §16.6a's "omitted = unchanged" is a promise about the row at COMMIT time.
+	patch := store.ServiceAlertPolicyPatch{
+		OwnsPaging:         body.OwnsPaging,
+		PageOnUnknown:      body.PageOnUnknown,
+		ConfirmEvaluations: body.ConfirmEvaluations,
 	}
 	if body.PageOn != nil {
 		states := make([]domain.ServiceAlertState, 0, len(*body.PageOn))
-		for _, s := range *body.PageOn {
-			states = append(states, domain.ServiceAlertState(s))
+		for _, v := range *body.PageOn {
+			states = append(states, domain.ServiceAlertState(v))
 		}
-		next.PageOn = states
+		patch.PageOn = &states
 	}
-	if body.PageOnUnknown != nil {
-		next.PageOnUnknown = *body.PageOnUnknown
-	}
-	if body.ConfirmEvaluations != nil {
-		next.ConfirmEvaluations = *body.ConfirmEvaluations
-	}
-	// The SAME validator the store and the MaC apply call — not a second copy of the bounds, which
-	// is how the two come to disagree. Calling it here is what turns "confirm_evaluations: 0" or an
-	// `unknown` in `page_on` into a 400 instead of a store error that would land as a 500.
-	next = next.Canonical()
-	if err := next.Validate(); err != nil {
+	// What CAN be judged without the stored value is judged here, so an invalid request is a 400
+	// and the store is never called: the states themselves and the confirmation bound are absolute,
+	// not relative to what is stored. The store validates the merged result again under its lock —
+	// the same one validator, called at both places it can refuse.
+	if err := patch.Merged(domain.DefaultServiceAlertPolicy()).Canonical().Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	stored, err := h.store.UpdateServiceAlertPolicy(r.Context(), proj.ID, serviceID, next, h.alertActor(r))
+	stored, err := h.store.UpdateServiceAlertPolicy(r.Context(), proj.ID, serviceID, patch, h.alertActor(r))
 	if h.writeServiceError(w, err) {
 		return
 	}
@@ -227,9 +224,35 @@ type setServiceBurnAlertingRequest struct {
 }
 
 type serviceBurnAlertingView struct {
-	Window           string            `json:"window"`
-	BurnAlertEnabled bool              `json:"burn_alert_enabled"`
-	BurnRules        []domain.BurnRule `json:"burn_rules"`
+	Window           string `json:"window"`
+	BurnAlertEnabled bool   `json:"burn_alert_enabled"`
+	// BurnRules are DECLARATION views, not `domain.BurnRule`. That type always serializes `firing`,
+	// which is the server-owned latch — and for a service target the latch is not even in this JSON,
+	// it is the normalized `service_burn_alert_state` row. Echoing `"firing": false` would have been
+	// a statement about a latch this endpoint never read and may well contradict.
+	BurnRules []burnRuleView `json:"burn_rules"`
+}
+
+// burnRuleView is a stored rule as this surface may state it: the four DECLARED fields, the same set
+// the request type accepts. The symmetry is the point — what a client may send is what it gets back.
+type burnRuleView struct {
+	LongWindowSeconds  int     `json:"long_window_seconds"`
+	ShortWindowSeconds int     `json:"short_window_seconds"`
+	Threshold          float64 `json:"threshold"`
+	Severity           string  `json:"severity"`
+}
+
+func newBurnRuleViews(rules []domain.BurnRule) []burnRuleView {
+	out := make([]burnRuleView, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, burnRuleView{
+			LongWindowSeconds:  r.LongWindowSeconds,
+			ShortWindowSeconds: r.ShortWindowSeconds,
+			Threshold:          r.Threshold,
+			Severity:           r.Severity,
+		})
+	}
+	return out
 }
 
 // setServiceBurnAlerting declares which error-budget burns page for one service SLA target.
@@ -284,6 +307,7 @@ func (h *Handler) setServiceBurnAlerting(w http.ResponseWriter, r *http.Request)
 	// so the response is sorted the same way rather than in the order the client happened to type.
 	sort.Slice(rules, func(i, j int) bool { return rules[i].Key() < rules[j].Key() })
 	writeJSON(w, http.StatusOK, serviceBurnAlertingView{
-		Window: body.Window, BurnAlertEnabled: body.BurnAlertEnabled, BurnRules: rules,
+		Window: body.Window, BurnAlertEnabled: body.BurnAlertEnabled,
+		BurnRules: newBurnRuleViews(rules),
 	})
 }

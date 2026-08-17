@@ -2636,7 +2636,8 @@ func (f *fakeStore) ServiceAlertingState(
 }
 
 func (f *fakeStore) UpdateServiceAlertPolicy(
-	_ context.Context, projectID, serviceID string, p domain.ServiceAlertPolicy, actor store.AlertActor,
+	_ context.Context, projectID, serviceID string, patch store.ServiceAlertPolicyPatch,
+	actor store.AlertActor,
 ) (domain.ServiceAlertPolicy, error) {
 	fs, ok := f.serviceStore()[serviceID]
 	if !ok || fs.svc.ProjectID != projectID {
@@ -2645,7 +2646,10 @@ func (f *fakeStore) UpdateServiceAlertPolicy(
 	if fs.fileManaged {
 		return domain.ServiceAlertPolicy{}, store.ErrServiceManagedByFile
 	}
-	next := p.Canonical()
+	// The MERGE is the store's, and the fake mirrors that: it merges onto what it holds, so an
+	// HTTP test asserting "an omitted field is unchanged" is asserting the real contract rather
+	// than the handler's own arithmetic.
+	next := patch.Merged(fs.alertPolicy()).Canonical()
 	if err := next.Validate(); err != nil {
 		return domain.ServiceAlertPolicy{}, err
 	}

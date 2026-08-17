@@ -369,70 +369,21 @@ func reportSegments(ctx context.Context, tx pgx.Tx, projectID, serviceID string,
 	return out, rows.Err()
 }
 
-// reportBurn computes the fixed reporting burn pair over sealed facts,
-// [sealed_through − w, sealed_through), with the SAME honesty rules as the main window:
-// storage continuity is measured per window and a gap withholds the rate (a burn window with
-// one surviving bucket returning "0×" would be exactly the fabricated confidence §11.1
-// forbids); a window spanning definition revisions offers no rate (invariant 43); low
-// decidable coverage keeps its rate WITH the fraction and reason (§11.2). §11.3's staleness
-// rule: when the equivalent real-time window [asOf − w, asOf) contains no sealed time at all
-// — sealed_through ≤ asOf − w — the answer is insufficient_sealed_coverage, not a stale rate.
+// reportBurn computes the fixed reporting pair (D-0163) over sealed facts by asking §16.4's
+// ONE burn math owner for its two durations — the same owner the alerting rule path calls
+// with the rule's arbitrary pair, so the card and the page cannot disagree about whether a
+// number may be quoted. The honesty rules and the staleness test live there
+// (decideBurnWindow); this function owns only WHICH windows the card shows.
 func reportBurn(ctx context.Context, tx pgx.Tx, projectID, serviceID string, objective float64, era, sealed, asOf time.Time) ([]domain.ServiceBurnWindow, error) {
-	out := make([]domain.ServiceBurnWindow, 0, len(serviceBurnWindows))
+	reqs := make([]burnWindowRequest, 0, len(serviceBurnWindows))
 	for _, w := range serviceBurnWindows {
-		bw := domain.ServiceBurnWindow{Window: w.Name, ExpectedBuckets: int64(w.Duration / domain.CanonicalBucket)}
-		from := sealed.Add(-w.Duration)
-
-		// The anchored window's OWN verdict is computed FIRST, unconditionally ([170]
-		// P1-2): the fields describe [sealed_through − w, sealed_through), and a stale or
-		// era-short status must not relabel a fully stored, fully measured window as 0/N
-		// with zero coverage — staleness qualifies the ANSWER, it does not rewrite the
-		// window's storage facts.
-		var revisions int
-		var d domain.ReliabilityDurations
-		if err := tx.QueryRow(ctx, `
-			SELECT count(*), count(DISTINCT e.revision_id),
-			       COALESCE(sum(b.good_us), 0)::bigint, COALESCE(sum(b.bad_us), 0)::bigint,
-			       COALESCE(sum(b.unknown_us), 0)::bigint
-			  FROM service_reliability_buckets b
-			  JOIN service_evaluation_epochs e ON e.id = b.epoch_id
-			 WHERE b.service_id = $1 AND b.project_id = $2
-			   AND b.bucket_start >= $3 AND b.bucket_start < $4
-			   AND b.state = 'sealed'`,
-			serviceID, projectID, from, sealed).Scan(&bw.SealedBuckets, &revisions, &d.GoodUs, &d.BadUs, &d.UnknownUs); err != nil {
-			return nil, fmt.Errorf("store: burn window %s: %w", w.Name, err)
-		}
-		bw.StorageContinuity = bw.SealedBuckets == bw.ExpectedBuckets
-		bw.Coverage = decidableCoverage(d)
-		measured := d.GoodUs + d.BadUs
-
-		switch {
-		case !sealed.After(asOf.Add(-w.Duration)):
-			bw.Status, bw.Reason = domain.ServiceReportInsufficientSealed, domain.ServiceReportReasonStaleWatermark
-		case from.Before(era):
-			bw.Status, bw.Reason = domain.ServiceReportInsufficientHistory, domain.ServiceReportReasonEraShort
-		case !bw.StorageContinuity:
-			// A gap withholds the rate: the surviving rows cannot vouch for the window
-			// and cannot even prove it spans one revision.
-			bw.Status, bw.Reason = domain.ServiceReportPartial, domain.ServiceReportReasonStorageGap
-		case revisions > 1:
-			// A burn window is a window: no aggregate across a definition boundary
-			// (invariant 43).
-			bw.Status, bw.Reason = domain.ServiceReportUnavailable, domain.ServiceReportReasonSpansRevisions
-		case measured == 0:
-			bw.Status, bw.Reason = domain.ServiceReportUnavailable, domain.ServiceReportReasonZeroDecidable
-		default:
-			rate := sla.BurnRate(objective, d.GoodUs, measured)
-			bw.Rate = &rate
-			if bw.Coverage < minDecidableCoverage {
-				bw.Status, bw.Reason = domain.ServiceReportPartial, domain.ServiceReportReasonLowCoverage
-			} else {
-				bw.Status = domain.ServiceReportOK
-			}
-		}
-		out = append(out, bw)
+		reqs = append(reqs, burnWindowRequest{
+			serviceID: serviceID, projectID: projectID,
+			label: w.Name, duration: w.Duration,
+			objective: objective, era: era, sealed: sealed,
+		})
 	}
-	return out, nil
+	return computeBurnWindows(ctx, tx, reqs, asOf)
 }
 
 // ServiceHealthNow is the categorical LIVE signal (§11.3): a different named thing than the

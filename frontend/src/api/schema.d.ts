@@ -5728,6 +5728,8 @@ export interface components {
             id: string;
             slug: string;
             name: string;
+            /** @description The file provider owning this NEIGHBOUR, absent when the UI owns it. Bounded provenance (the provider id only): a file-owned downstream dependent PINS this service, so deleting it is a 409 — a reader who cannot tell the two apart cannot predict that. */
+            managed_by?: string;
             /** @description The phase-2 two-layer signal, evaluated for the WHOLE neighbour set in one snapshot. Absent when the health read degraded — never a guessed pill. */
             health?: components["schemas"]["ServiceHealthNow"] | null;
         };

@@ -18,10 +18,14 @@ import (
 // reused verbatim — evaluated for the WHOLE neighbour set in one report
 // snapshot, never a per-service loop (§14.7, invariant 60).
 type serviceEdgeView struct {
-	ID     string                   `json:"id"`
-	Slug   string                   `json:"slug"`
-	Name   string                   `json:"name"`
-	Health *domain.ServiceHealthNow `json:"health,omitempty"`
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+	// ManagedBy is the provider owning the NEIGHBOUR, or absent when the UI owns
+	// it ([298] P1-4): a file-owned DOWNSTREAM dependent pins this service, so the
+	// reader must be able to tell which delete will be a 409.
+	ManagedBy string                   `json:"managed_by,omitempty"`
+	Health    *domain.ServiceHealthNow `json:"health,omitempty"`
 }
 
 // serviceGraphView is the edge set plus its concurrency token. The token and
@@ -55,7 +59,7 @@ func (h *Handler) buildServiceGraphView(r *http.Request, projectID string, v sto
 	conv := func(es []store.ServiceEdge) []serviceEdgeView {
 		out := make([]serviceEdgeView, 0, len(es))
 		for _, e := range es {
-			ev := serviceEdgeView{ID: e.ID, Slug: e.Slug, Name: e.Name}
+			ev := serviceEdgeView{ID: e.ID, Slug: e.Slug, Name: e.Name, ManagedBy: e.ManagedBy}
 			if hn, ok := health[e.ID]; ok {
 				hh := hn
 				ev.Health = &hh

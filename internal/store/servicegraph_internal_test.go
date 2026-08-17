@@ -645,3 +645,44 @@ func TestSharedMutatorNormalizesAndCaps(t *testing.T) {
 		t.Fatalf("create-with-edges over cap = %v, want ErrServiceGraphLimit", err)
 	}
 }
+
+// The edge view carries bounded provenance ([298] P1-4): a file-owned NEIGHBOUR is named
+// by its provider on both directions, a UI-owned one carries nothing. The downstream case
+// is the load-bearing one — a file-owned dependent PINS this service, so a reader who
+// cannot see it cannot predict the 409 on delete.
+func TestServiceGraphEdgeCarriesOwnership(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := seedGraph(t, st, ctx, 3)
+	// s0 depends on s1 (UI-owned); s2 depends on s0 and is FILE-owned.
+	if _, err := st.ReplaceServiceDependencies(ctx, f.projectID, f.svc["s0"],
+		[]string{f.svc["s1"]}, 0, GraphActor{Label: "t"}); err != nil {
+		t.Fatalf("upstream edge: %v", err)
+	}
+	if _, err := st.ReplaceServiceDependencies(ctx, f.projectID, f.svc["s2"],
+		[]string{f.svc["s0"]}, 0, GraphActor{Label: "t"}); err != nil {
+		t.Fatalf("downstream edge: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO managed_services (service_id, provider_id, org_id, project_id, source_uid)
+		SELECT $1, 'file:shop.yaml', p.org_id, p.id, 's2' FROM projects p WHERE p.id = $2`,
+		f.svc["s2"], f.projectID); err != nil {
+		t.Fatalf("manage: %v", err)
+	}
+
+	v, err := st.GetServiceDependencies(ctx, f.projectID, f.svc["s0"])
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(v.DependsOn) != 1 || v.DependsOn[0].ManagedBy != "" {
+		t.Errorf("UI-owned upstream carries ownership: %+v", v.DependsOn)
+	}
+	if len(v.DependedOnBy) != 1 || v.DependedOnBy[0].ManagedBy != "file:shop.yaml" {
+		t.Fatalf("file-owned dependent = %+v, want managed_by file:shop.yaml", v.DependedOnBy)
+	}
+	// The pin the chip predicts is real: deleting s0 is refused, naming that provider.
+	err = st.DeleteService(ctx, f.projectID, f.svc["s0"])
+	var pinned ErrServicePinnedByFile
+	if !errors.As(err, &pinned) || pinned.Provider != "file:shop.yaml" {
+		t.Fatalf("delete of the pinned target = %v, want the 409 the chip predicts", err)
+	}
+}

@@ -8,6 +8,7 @@ import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import ServiceReliability from "@/components/ServiceReliability.vue";
+import ServiceDependencies from "@/components/ServiceDependencies.vue";
 import { humanDuration, lagExact, sealedLabel } from "@/lib/services";
 
 type Detail = components["schemas"]["ServiceDetail"];
@@ -152,6 +153,15 @@ watch(() => [route.params.id, ws.projectId], load);
           :service-id="serviceId"
           :can-write="canWrite"
           :has-sli="sli.size > 0"
+        />
+
+        <!-- Phase 3 (iter-0148): the impact graph — both edge directions with the two-layer
+             neighbour health, and the replace-set editor over the edge set's own token. -->
+        <ServiceDependencies
+          :project-id="ws.projectId"
+          :service-id="serviceId"
+          :can-write="canWrite"
+          :managed-by="managed"
         />
 
         <!-- Declaration: two lists, side by side, separated by the rule that is the whole

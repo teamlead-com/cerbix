@@ -40,6 +40,12 @@ type ServiceEdge struct {
 	ID   string `json:"id"`
 	Slug string `json:"slug"`
 	Name string `json:"name"`
+	// ManagedBy is the provider owning the NEIGHBOUR service, or "" when the UI
+	// owns it — bounded provenance, the provider id and nothing else ([298] P1-4).
+	// A downstream dependent that is file-owned PINS this service (§14.2), so a
+	// reader who cannot tell the two apart cannot predict a 409 on delete; the
+	// approved mock carries the chip for exactly that reason.
+	ManagedBy string `json:"managed_by,omitempty"`
 }
 
 // ServiceGraphView is the edge set of one service plus its concurrency token.
@@ -71,14 +77,16 @@ func lockServiceGraph(ctx context.Context, tx pgx.Tx, projectID string) error {
 func (s *Store) GetServiceDependencies(ctx context.Context, projectID, serviceID string) (ServiceGraphView, error) {
 	var v ServiceGraphView
 	rows, err := s.pool.Query(ctx, `
-		SELECT s.graph_generation, e.dir, e.id, e.slug, e.name
+		SELECT s.graph_generation, e.dir, e.id, e.slug, e.name, COALESCE(e.managed_by, '')
 		  FROM services s
 		  LEFT JOIN LATERAL (
-		      SELECT 'up' AS dir, p.id, p.slug, p.name
+		      SELECT 'up' AS dir, p.id, p.slug, p.name,
+		             (SELECT ms.provider_id FROM managed_services ms WHERE ms.service_id = p.id) AS managed_by
 		        FROM service_dependencies d JOIN services p ON p.id = d.depends_on_id
 		       WHERE d.service_id = s.id
 		      UNION ALL
-		      SELECT 'down', c.id, c.slug, c.name
+		      SELECT 'down', c.id, c.slug, c.name,
+		             (SELECT ms.provider_id FROM managed_services ms WHERE ms.service_id = c.id)
 		        FROM service_dependencies d JOIN services c ON c.id = d.service_id
 		       WHERE d.depends_on_id = s.id
 		  ) e ON true
@@ -92,13 +100,14 @@ func (s *Store) GetServiceDependencies(ctx context.Context, projectID, serviceID
 	for rows.Next() {
 		found = true
 		var dir, id, slug, name *string
-		if err := rows.Scan(&v.GraphGeneration, &dir, &id, &slug, &name); err != nil {
+		var managedBy string
+		if err := rows.Scan(&v.GraphGeneration, &dir, &id, &slug, &name, &managedBy); err != nil {
 			return v, fmt.Errorf("store: scan service dependency: %w", err)
 		}
 		if dir == nil {
 			continue // the LEFT JOIN row of an edgeless service: generation only
 		}
-		e := ServiceEdge{ID: *id, Slug: *slug, Name: *name}
+		e := ServiceEdge{ID: *id, Slug: *slug, Name: *name, ManagedBy: managedBy}
 		if *dir == "up" {
 			v.DependsOn = append(v.DependsOn, e)
 		} else {

@@ -204,4 +204,53 @@ test.describe("services", () => {
     await apiSend(page, "delete", `/api/v1/projects/${projectID}/services/${svc.id}`);
     await apiSend(page, "delete", `/api/v1/monitors/${monitor.id}`);
   });
+
+  // FR-021 phase 3 (§14.1-14.4): the impact graph on the surface an operator touches.
+  // The Go suites prove the transactional contract; this proves the two things a screen
+  // can still get wrong — that a cycle is refused as a CYCLE (not merged, not a generic
+  // failure), and that the dependency block renders both directions with real health.
+  test("the impact graph refuses a cycle and renders both directions", async ({ page }) => {
+    await page.goto("/");
+    const { projectID } = await ensureE2EWorkspace(page);
+
+    const mk = async (slug: string) => {
+      const r = await apiSend(page, "post", `/api/v1/projects/${projectID}/services`, { slug, name: slug });
+      expect(r.status()).toBe(201);
+      return (await r.json()).id as string;
+    };
+    const parent = await mk(`${SLUG}-graph-parent`);
+    const child = await mk(`${SLUG}-graph-child`);
+
+    // child depends on parent, through the UI's own editor.
+    await page.goto(`/services/${child}`);
+    await expect(page.getByTestId("service-dependencies")).toBeVisible();
+    await page.getByTestId("svc-dep-edit").click();
+    await page.locator(`[data-testid="svc-dep-option"] input[data-slug="${SLUG}-graph-parent"]`).check();
+    await page.getByTestId("svc-dep-save").click();
+    await expect(page.getByTestId("svc-dep-upstream")).toContainText(`${SLUG}-graph-parent`);
+    await expect(page.getByTestId("svc-dep-count")).toContainText("1 / 20");
+
+    // The parent's screen shows the reverse direction — the same edge, read from the
+    // other end, with a REAL health signal rather than a blank ([298] P2-2: the claim is
+    // now asserted, not merely commented).
+    await page.goto(`/services/${parent}`);
+    await expect(page.getByTestId("svc-dep-downstream")).toContainText(`${SLUG}-graph-child`);
+    // A service with no declaration has no SLI, so the honest signal is "unknown" — the
+    // point is that SOMETHING categorical is rendered, never an empty cell.
+    await expect(page.getByTestId("svc-dep-downstream-health")).toHaveText(/Operational|Degraded|Down|Unknown|unknown/);
+    // Both services are UI-owned, so neither row carries a file-pin chip.
+    await expect(page.getByTestId("svc-dep-managed-chip")).toHaveCount(0);
+
+    // Closing the loop is refused AS A CYCLE, with the editor still open so the operator
+    // can fix their own edit.
+    await page.getByTestId("svc-dep-edit").click();
+    await page.locator(`[data-testid="svc-dep-option"] input[data-slug="${SLUG}-graph-child"]`).check();
+    await page.getByTestId("svc-dep-save").click();
+    await expect(page.getByTestId("svc-dep-save-error")).toContainText("dependency_cycle");
+    await expect(page.getByTestId("svc-dep-editor")).toBeVisible();
+
+    // And the graph did not move: the parent still has no upstream edges.
+    const graph = await apiGet(page, `/api/v1/projects/${projectID}/services/${parent}/dependencies`);
+    expect(graph.depends_on ?? []).toEqual([]);
+  });
 });

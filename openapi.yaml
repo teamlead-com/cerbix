@@ -2698,6 +2698,13 @@ components:
         id: { type: string, format: uuid }
         slug: { type: string }
         name: { type: string }
+        managed_by:
+          type: string
+          description: >
+            The file provider owning this NEIGHBOUR, absent when the UI owns it. Bounded
+            provenance (the provider id only): a file-owned downstream dependent PINS this
+            service, so deleting it is a 409 — a reader who cannot tell the two apart cannot
+            predict that.
         health:
           allOf: [ { $ref: '#/components/schemas/ServiceHealthNow' } ]
           nullable: true

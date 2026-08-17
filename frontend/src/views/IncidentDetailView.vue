@@ -9,9 +9,10 @@ import { useWorkspace } from "@/stores/workspace";
 import { STATUS_ORDER, impactBadge, relTime, statusBadge } from "@/lib/incident";
 import { PM_SECTIONS, emptySections, parsePostmortem, renderSections, serializePostmortem } from "@/lib/postmortem";
 
-type Incident = components["schemas"]["Incident"];
+type Incident = components["schemas"]["AuthedIncident"];
 type IncidentUpdate = components["schemas"]["IncidentUpdate"];
 type Postmortem = components["schemas"]["Postmortem"];
+type ImpactLink = components["schemas"]["ServiceImpactLink"];
 
 const route = useRoute();
 const ws = useWorkspace();
@@ -27,13 +28,35 @@ const postmortem = ref<Postmortem | null>(null);
 const isResolved = computed(() => incident.value?.status === "resolved");
 const isAcked = computed(() => !!incident.value?.acknowledged_at);
 
+// FR-021 phase 3 (§14.4): the impact links of the service graph, as CHIPS — the structured
+// relation, never parsed prose. Ranking is presentation only: nearest first by path length,
+// then slug, exactly as the 🕸 note orders them. `impacts: null` with impacts_unavailable is
+// a FAILED read and says so; an empty array is the honest "no links".
+const impacts = computed<ImpactLink[]>(() => {
+  const list = incident.value?.impacts ?? [];
+  return [...list].sort((a, b) => (a.path?.length ?? 0) - (b.path?.length ?? 0) || a.slug.localeCompare(b.slug));
+});
+const impactsUnavailable = computed(() => !!incident.value?.impacts_unavailable);
+const probableRoots = computed(() => impacts.value.filter((l) => l.role === "probable_root"));
+const affected = computed(() => impacts.value.filter((l) => l.role === "affected"));
+
 async function acknowledge() {
   if (!incident.value) return;
   posting.value = true;
   const res = await api.POST("/api/v1/incidents/{incidentID}/acknowledge", {
     params: { path: { incidentID: id } },
   });
-  if (!res.error && res.data) incident.value = res.data as Incident;
+  // The acknowledge response is the BASE incident — it carries no impacts and no
+  // impacts_unavailable ([298] P1-1). Assigning it wholesale would silently erase the
+  // enrichment the detail was loaded with, so merge the base fields into what we have
+  // and keep the impact state this endpoint knows nothing about.
+  if (!res.error && res.data && incident.value) {
+    incident.value = {
+      ...res.data,
+      impacts: incident.value.impacts,
+      impacts_unavailable: incident.value.impacts_unavailable,
+    } as Incident;
+  }
   posting.value = false;
 }
 
@@ -172,6 +195,41 @@ onMounted(() => {
           <RouterLink v-if="incident.monitor_id" :to="{ name: 'monitor', params: { id: incident.monitor_id } }" class="text-accent hover:underline">monitor →</RouterLink>
           <span v-if="incident.external_key" class="rounded-xs border border-border bg-inset px-[6px] py-px font-mono text-[11px]" :title="'External correlation key'">{{ incident.external_key }}</span>
         </div>
+      </div>
+
+      <!-- Impact chips (FR-021 §14.4): every impacted upstream service is a candidate —
+           the relation never elects one culprit; the "via" path is the stored array. -->
+      <div v-if="impacts.length || impactsUnavailable" class="mb-5 flex flex-wrap gap-2" data-testid="incident-impacts">
+        <RouterLink
+          v-for="l in probableRoots"
+          :key="'r-' + l.service_id"
+          :to="{ name: 'service', params: { id: l.service_id } }"
+          class="inline-flex items-center gap-[7px] rounded-sm border border-border bg-surface-2 px-[9px] py-[4px] text-[12.5px] hover:border-border-strong"
+          :title="'via ' + (l.path ?? []).join(' → ')"
+          data-testid="impact-root"
+        >
+          <span class="text-[10.5px] font-semibold uppercase tracking-[0.06em] text-down">🕸 probable root</span>
+          <span class="font-medium">{{ l.slug }}</span>
+          <span class="font-mono text-[11px] text-ink-3">via {{ (l.path ?? []).join(" → ") }}</span>
+        </RouterLink>
+        <RouterLink
+          v-for="l in affected"
+          :key="'a-' + l.service_id"
+          :to="{ name: 'service', params: { id: l.service_id } }"
+          class="inline-flex items-center gap-[7px] rounded-sm border border-border bg-surface-2 px-[9px] py-[4px] text-[12.5px] hover:border-border-strong"
+          :title="'via ' + (l.path ?? []).join(' → ')"
+          data-testid="impact-affected"
+        >
+          <span class="text-[10.5px] font-semibold uppercase tracking-[0.06em] text-degraded">affected</span>
+          <span class="font-medium">{{ l.slug }}</span>
+        </RouterLink>
+        <span
+          v-if="impactsUnavailable"
+          class="inline-flex items-center gap-[6px] rounded-sm border border-dashed border-border-strong px-[9px] py-[4px] text-[12.5px] text-ink-3"
+          data-testid="impact-unavailable"
+        >
+          🕸 impact links unavailable — the read failed, so this is not “no impact”
+        </span>
       </div>
 
       <!-- timeline -->

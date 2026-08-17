@@ -145,6 +145,20 @@ holds it back instead of being jumped over. Phase 1 ships the declaration, the e
 and the file-provider format-2 surface; availability over a window, the error budget and the
 burn rate are phase 2 and are **absent** from the API rather than returned as zeros.
 
+**Alerting ownership (FR-021, phase 5).** A service can be the thing that pages, and its declared
+SLI members can stop delivering their own alerts for the same failure — but `owns_paging = true`
+silences nothing on its own. Suppression is per SIGNAL (a LIVE health transition, a SEALED burn
+breach), per POLARITY (only onset-like events; a recovery or a burn CLEAR is never suppressed), and
+only while a replacement for THAT signal is demonstrably ARMED: a policy that can page the current
+state, a quotable last verdict for every declared rule, the current generations and effective
+revision, a fresh DB-clock lease, and a recipient that resolves right now. Anything ambiguous FAILS
+OPEN — the member pages — because a page that was not needed is noise and a page that was owed and
+never sent is the failure the design exists to prevent. Facts, status flips, incidents and history
+are untouched by all of this: suppression applies to DELIVERY only. An announcement that ends
+carries WHY it ended, and only a genuine return to health is called `recovered`; ownership turned
+off, a policy that no longer covers the state, a target disabled, a rule removed and a service
+deleted each say so in their own words, from a durable episode that outlives what fired.
+
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
 `mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `push` (dead-man's-switch).
 HTTP-like types use the declarative conditions engine

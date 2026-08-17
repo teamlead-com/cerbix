@@ -145,3 +145,43 @@ func assertEmpty(t *testing.T, st *Store, ctx context.Context, table string) {
 		t.Fatalf("%s has %d rows after a deposed leader's evaluation, want none", table, n)
 	}
 }
+
+// The CAS is the second half of the same protection, and its RESULT has to be acted on. The episode
+// and the outbox row are written BEFORE the latch upsert, so a CAS that silently changed nothing
+// would leave the one pairing nobody can defend: a page that went out and a latch that never moved,
+// after which the next pass announces the same edge again while the sequence stands still.
+func TestAnEvaluationThatLosesTheCASPublishesNothing(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+	plantBurn(t, st, ctx, f, 5, minute/60) // this pass would fire
+
+	// A NEWER verdict already exists for the rule — what a successor writes while a slower
+	// evaluator is still mid-pass.
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO service_burn_alert_state
+		  (service_id, project_id, sla_target_id, rule_key, firing, last_verdict,
+		   target_generation, config_generation, evaluated_at, lease_until)
+		VALUES ($1,$2,$3,$4,false,'clear',0,0, now() + interval '1 hour', now() + interval '2 hours')`,
+		f.serviceID, f.projectID, f.targetID, oneBurnRuleKey); err != nil {
+		t.Fatalf("newer verdict: %v", err)
+	}
+
+	if _, err := st.evaluateServiceBurnAlertsOn(ctx, st.pool, burnCadence); err == nil {
+		t.Fatal("an evaluation that lost the CAS reported success")
+	}
+	if events := allServiceAlerts(t, st, ctx); len(events) != 0 {
+		t.Fatalf("it published %+v anyway", events)
+	}
+	assertEmpty(t, st, ctx, "service_alert_episodes")
+
+	// The newer verdict is untouched: the loser rolled back whole.
+	var verdict string
+	var firing bool
+	if err := st.pool.QueryRow(ctx,
+		`SELECT last_verdict, firing FROM service_burn_alert_state`).Scan(&verdict, &firing); err != nil {
+		t.Fatalf("read latch: %v", err)
+	}
+	if verdict != "clear" || firing {
+		t.Fatalf("the newer verdict became %q/firing=%v", verdict, firing)
+	}
+}

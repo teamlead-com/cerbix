@@ -307,7 +307,7 @@ func (s *Store) evaluateServiceBurnAlertsOn(
 			out.Holds++
 		}
 
-		if _, err := tx.Exec(ctx, `
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO service_burn_alert_state
 			  (service_id, project_id, sla_target_id, rule_key, firing, last_verdict, last_reason,
 			   target_generation, config_generation, emitted_seq, emitted_at, evaluated_at,
@@ -334,8 +334,18 @@ func (s *Store) evaluateServiceBurnAlertsOn(
 			 WHERE service_burn_alert_state.evaluated_at <= EXCLUDED.evaluated_at`,
 			c.serviceID, c.projectID, c.targetID, key, decision.Firing, string(decision.Verdict),
 			nullableText(decision.HoldReason), c.targetGeneration, c.configGeneration,
-			seq, decision.Edge, asOf, lease); err != nil {
+			seq, decision.Edge, asOf, lease)
+		if err != nil {
 			return out, fmt.Errorf("store: write burn alert state: %w", err)
+		}
+		// A CAS that changed NOTHING means a newer verdict already exists — and this pass may
+		// already have written an episode and an outbox row a few lines above. Failing here rolls
+		// BOTH back with the transaction. Ignoring it would leave the worst possible pair: a page
+		// that went out and a latch that never moved, so the next pass announces the same edge
+		// again while the sequence stands still.
+		if tag.RowsAffected() == 0 {
+			return out, fmt.Errorf(
+				"store: burn verdict for rule %s of target %s lost to a newer evaluation", key, c.targetID)
 		}
 		out.Rules++
 	}

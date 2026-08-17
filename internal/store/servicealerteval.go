@@ -188,8 +188,12 @@ func (s *Store) EvaluateServiceAlerts(ctx context.Context, cadence time.Duration
 			emittedSeq = c.emittedSeq + 1
 			if err := s.emitServiceAlertTx(ctx, tx, serviceAlertEmission{
 				serviceID: c.serviceID, projectID: c.projectID, name: c.name, slug: c.slug,
-				scheduleID: c.scheduleID, decision: decision, state: candidateState,
-				confirmedOver: streak, seq: emittedSeq, asOf: asOf,
+				scheduleID: c.scheduleID, signal: domain.ServiceSignalHealth,
+				close: decision.Close, closeReason: decision.CloseReason,
+				episodeState: string(candidateState), seq: emittedSeq, asOf: asOf,
+				// The live half of the payload. Target, window and rule stay empty: the schema's
+				// CHECK makes them exclusive to the burn signal.
+				alert: domain.ServiceAlert{State: candidateState, ConfirmedOver: streak},
 			}); err != nil {
 				return out, err
 			}
@@ -261,6 +265,16 @@ func nullableState(s domain.ServiceAlertState) *string {
 	return &v
 }
 
+// nullableText writes "" as SQL NULL. The alert schema distinguishes the two everywhere it can:
+// an empty `rule_key` is the LIVE signal (its CHECK forbids a value), not a burn rule with a blank
+// name, and the same holds for the target columns.
+func nullableText(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // writeAlertErrorTx records a failed evaluation and COLLAPSES the lease, so delegation dis-arms
 // immediately rather than coasting on the previous success until it would have expired.
 func writeAlertErrorTx(
@@ -283,15 +297,39 @@ func writeAlertErrorTx(
 	return nil
 }
 
-// serviceAlertEmission is one edge to publish.
+// serviceAlertEmission is one edge to publish, for EITHER signal.
+//
+// One episode implementation serves both, because "a close must reach the onset's recipients and
+// must survive the deletion of what fired" (§16.4a) is one property, not two — a second copy of it
+// for the burn signal would be a second place for that property to rot.
 type serviceAlertEmission struct {
 	serviceID, projectID, name, slug string
 	scheduleID                       string
-	decision                         domain.ServiceAlertDecision
-	state                            domain.ServiceAlertState
-	confirmedOver                    int
-	seq                              int64
-	asOf                             time.Time
+	// signal scopes the episode as well as the payload: the live signal keeps ONE episode per
+	// service, the burn signal one per (target, rule).
+	signal domain.ServiceAlertSignal
+	// targetID / targetWindow / ruleKey are the burn signal's identity, empty for the live one.
+	//
+	// The TARGET is part of that identity and not a decoration: `sla_targets` is unique on
+	// (service_id, window_name), so one service may carry a 7d and a 30d target whose rules share a
+	// canonical key — the key spells severity/long/short/threshold and names no window. Scoping the
+	// episode by rule alone would make those two rules collide on one open episode and fence each
+	// other's deliveries. On the episode it is stored as `target_snapshot_id`, without a foreign
+	// key: a `rule_removed` or target-deletion close routes THROUGH that row, so the identity has to
+	// survive the target it names.
+	targetID, targetWindow, ruleKey string
+	// close marks an edge that ENDS an announcement; closeReason is never inferred.
+	close       bool
+	closeReason domain.ServiceAlertCloseReason
+	// episodeState is `service_alert_episodes.state` — §16.4a's "the state or rule that fired": the
+	// alerting state for the live signal, the canonical rule key for the burn one.
+	episodeState string
+	seq          int64
+	asOf         time.Time
+	// alert carries the SIGNAL-SPECIFIC half of the payload. Every field this function owns —
+	// identity, signal, firing, close reason, episode, sequence, rule and recipients — is
+	// overwritten below, so no caller can publish an alert its episode does not back.
+	alert domain.ServiceAlert
 }
 
 // emitServiceAlertTx opens or closes the episode and enqueues the event, in the caller's transaction.
@@ -303,16 +341,19 @@ func (s *Store) emitServiceAlertTx(ctx context.Context, tx pgx.Tx, e serviceAler
 	var episodeID string
 	var recipients []string
 
-	if e.decision.Close {
+	if e.close {
 		// Close the open episode and take ITS recipients. A close with no open episode is possible
 		// after a crash mid-onset; it still notifies, with the current route, because somebody may
 		// have been told.
 		err := tx.QueryRow(ctx, `
 			UPDATE service_alert_episodes
 			   SET closed_at = $2, close_reason = $3
-			 WHERE service_id = $1 AND signal = 'health' AND closed_at IS NULL
+			 WHERE service_id = $1 AND signal = $4 AND closed_at IS NULL
+			   AND COALESCE(rule_key, '') = $5
+			   AND COALESCE(target_snapshot_id::text, '') = $6
 			 RETURNING id, ARRAY(SELECT jsonb_array_elements_text(recipients))`,
-			e.serviceID, e.asOf, string(e.decision.CloseReason)).Scan(&episodeID, &recipients)
+			e.serviceID, e.asOf, string(e.closeReason), string(e.signal), e.ruleKey, e.targetID).
+			Scan(&episodeID, &recipients)
 		if err != nil && !noRows(err) {
 			return fmt.Errorf("store: close alert episode: %w", err)
 		}
@@ -330,31 +371,49 @@ func (s *Store) emitServiceAlertTx(ctx context.Context, tx pgx.Tx, e serviceAler
 		if err != nil {
 			return fmt.Errorf("store: marshal recipients: %w", err)
 		}
-		// An onset supersedes any episode still open — a state change from one pageable state to
-		// another is ONE new announcement, not a close plus an onset, and leaving the old episode
-		// open would make "the close" ambiguous.
+		// An onset supersedes any episode still open FOR THIS IDENTITY — a state change from one
+		// pageable state to another is ONE new announcement, not a close plus an onset, and leaving
+		// the old episode open would make "the close" ambiguous. For the burn signal this is the
+		// guard against an episode orphaned by a latch that cascaded away with its target: without
+		// it the next onset would collide with the open-episode unique index.
 		if _, err := tx.Exec(ctx, `
 			UPDATE service_alert_episodes SET closed_at = $2, close_reason = 'policy_changed'
-			 WHERE service_id = $1 AND signal = 'health' AND closed_at IS NULL`,
-			e.serviceID, e.asOf); err != nil {
+			 WHERE service_id = $1 AND signal = $3 AND closed_at IS NULL
+			   AND COALESCE(rule_key, '') = $4
+			   AND COALESCE(target_snapshot_id::text, '') = $5`,
+			e.serviceID, e.asOf, string(e.signal), e.ruleKey, e.targetID); err != nil {
 			return fmt.Errorf("store: supersede alert episode: %w", err)
 		}
+		// `project_id` is the SERVICE'S own project, read in the same snapshot: the episode carries a
+		// composite FK to (services.id, project_id), so a caller-supplied tenant would be refused by
+		// the database rather than silently filed under the wrong one.
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO service_alert_episodes
-			  (service_id, project_id, service_name, signal, state, started_at, recipients, emitted_seq)
-			VALUES ($1,$2,$3,'health',$4,$5,$6,$7) RETURNING id`,
-			e.serviceID, e.projectID, e.name, string(e.state), e.asOf, snapshot, e.seq).
-			Scan(&episodeID); err != nil {
+			  (service_id, project_id, service_name, signal, target_snapshot_id, target_window,
+			   rule_key, state, started_at, recipients, emitted_seq)
+			VALUES ($1,$2,$3,$4,$5::uuid,$6,$7,$8,$9,$10,$11) RETURNING id`,
+			e.serviceID, e.projectID, e.name, string(e.signal), nullableText(e.targetID),
+			nullableText(e.targetWindow), nullableText(e.ruleKey), e.episodeState, e.asOf,
+			snapshot, e.seq).Scan(&episodeID); err != nil {
 			return fmt.Errorf("store: open alert episode: %w", err)
 		}
 	}
 
-	payload, err := json.Marshal(domain.ServiceAlert{
-		ServiceID: e.serviceID, ProjectID: e.projectID, ServiceName: e.name, ServiceSlug: e.slug,
-		Signal: domain.ServiceSignalHealth, Firing: !e.decision.Close,
-		CloseReason: e.decision.CloseReason, EpisodeID: episodeID, Seq: e.seq,
-		State: e.state, ConfirmedOver: e.confirmedOver, Recipients: recipients,
-	})
+	alert := e.alert
+	alert.ServiceID, alert.ProjectID = e.serviceID, e.projectID
+	alert.ServiceName, alert.ServiceSlug = e.name, e.slug
+	alert.Signal, alert.Firing = e.signal, !e.close
+	alert.CloseReason = e.closeReason
+	alert.SLATargetID, alert.RuleKey = e.targetID, e.ruleKey
+	// `Window` is the target's window name, the same field the monitor burn payload carries. The
+	// emission owns it rather than the caller's template, so a payload cannot name one target while
+	// its episode snapshots another.
+	if e.targetWindow != "" {
+		alert.Window = e.targetWindow
+	}
+	alert.EpisodeID, alert.Seq, alert.Recipients = episodeID, e.seq, recipients
+
+	payload, err := json.Marshal(alert)
 	if err != nil {
 		return fmt.Errorf("store: marshal service alert: %w", err)
 	}

@@ -1,7 +1,11 @@
 package store
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -82,4 +86,47 @@ func outboxStatusFor(topic string) string {
 		return "pending_fenced"
 	}
 	return "pending"
+}
+
+// The claim CLASS has one owner too, and it is easier to bypass than the whitelist: a raw
+// `INSERT INTO outbox_events` compiles, migrates and passes every functional test, while quietly
+// taking the column default and filing a FENCED topic's row in the LEGACY class. That is what
+// happened to the first version of the lifecycle close (b38a2ab): the onset was invisible to a
+// pre-fence binary while its close was claimable by one, so in a rolling fleet the ENDING of an
+// announcement was the row that got attempt-burned by a worker unable to dispatch it.
+//
+// `enqueueOutboxTx` / `EnqueueOutbox` derive the class from `domain.FencedTopic`, and this test is
+// what keeps them the only writers. It reads source rather than behaviour on purpose: the defect is
+// not that some path is wrong today, it is that the NEXT path can be wrong in a way no delivery test
+// looks at.
+func TestOnlyTheOutboxOwnerInsertsOutboxRows(t *testing.T) {
+	root := ".."
+	var offenders []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		if filepath.Base(path) == "outbox.go" && filepath.Base(filepath.Dir(path)) == "store" {
+			return nil // the owner itself
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(src), "INSERT INTO outbox_events") {
+			offenders = append(offenders, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk sources: %v", err)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("outbox rows inserted outside the enqueue owner in %v — a raw INSERT takes the "+
+			"legacy 'pending' default and files a fenced topic in the wrong claim class; call "+
+			"enqueueOutboxTx/EnqueueOutbox instead", offenders)
+	}
 }

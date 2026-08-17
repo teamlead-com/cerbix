@@ -3855,6 +3855,349 @@ export interface paths {
         };
         options?: never;
         head?: never;
+        /**
+         * Edit a component's presentation (org admin)
+         * @description Cannot change the source: that is the previewed conversion below. An update path able to change what a page line MEANS would be the way around that gate.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    componentID: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateComponent"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Component"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/v1/components/{componentID}/conversion/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                componentID: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview a component source conversion (org admin)
+         * @description Renders the page twice — as it is and as it would be — and returns the two CAS tokens the confirmation must carry. Writes nothing, takes no locks, and expires nothing: an abandoned preview leaves no state behind.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    componentID: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ConversionTarget"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ConversionPreview"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/components/{componentID}/conversion": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                componentID: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm a previewed conversion (org admin)
+         * @description Applies the conversion under BOTH CAS tokens. `page_generation` is bumped by ANY component mutation on the page, neighbours included, because the preview showed the page SUMMARY. A mismatch is 409 `page_configuration_stale` — first committer wins, re-preview and retry. Confirming without the tokens is a 400: the fence is not optional.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    componentID: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ConversionTarget"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Component"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitors/{monitorID}/successor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                monitorID: components["parameters"]["MonitorID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Record or clear the service that supersedes this composite (project write)
+         * @description An ANNOTATION (FR-021 §15.5). The monitor keeps probing, keeps alerting, keeps its history and its status-page component; nothing a customer sees changes, and no execution state moves — not the config generation, not the freshness watermark, not the transition sequence. ONE stored fact, rendered from both ends, so there is no pair of links to fall out of sync. Send an empty `service_id` to clear it. COMPOSITE monitors only. A FILE-MANAGED composite MAY be annotated, unlike retire/reactivate below: `superseded_by_service_id` is not a declared field, so no reapply can restate it, and refusing would remove the only way to annotate a file-managed composite while protecting nothing.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    monitorID: components["parameters"]["MonitorID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /**
+                         * Format: uuid
+                         * @description Empty clears the annotation.
+                         */
+                        service_id?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Monitor"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitors/{monitorID}/retire": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                monitorID: components["parameters"]["MonitorID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retire a monitor (project write)
+         * @description ONE transaction setting BOTH `retired_at` (the lifecycle statement) and `enabled = false` (the execution semantics), together with the config fence, the state-sequence advance that makes queued transition deliveries stale, and the evaluation-epoch fan-out for every service that names it. `retired_at` alone would leave a "retired" monitor probing and paging. NOTHING is deleted: heartbeats, incidents and past numbers stay. Refused for a file-managed monitor, whose lifecycle belongs to its provider.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    monitorID: components["parameters"]["MonitorID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Monitor"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitors/{monitorID}/reactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                monitorID: components["parameters"]["MonitorID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reactivate a retired monitor (project write)
+         * @description The explicit inverse, so a mistaken retire is recoverable. The monitor starts `pending`: an observation from before the retirement is not evidence about the target now, and fabricating a freshness watermark is what would produce a false dead-man DOWN.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    monitorID: components["parameters"]["MonitorID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Monitor"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/monitors/{monitorID}/convert-to-service": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                monitorID: components["parameters"]["MonitorID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Build a Service from a composite monitor (project write)
+         * @description One serialized transaction: the composite is taken FOR UPDATE, then the service, its declaration and the link are written atomically, so two simultaneous confirms cannot create two services. The composite's children become BOTH the operational context and the SLI, and its aggregation mode becomes the service's policy — `quorum` translated as `degraded_min = n - M + 1` with `healthy_min` equal to it, the EXACT binary mapping, because a composite has two states and adding a degraded band would report more than it did on a customer-facing page. A quorum composite whose children span regions is REFUSED with 400, because a flat M-of-N is not expressible as per-region quorum plus a region rollup and approximating it would silently redefine availability. A composite whose declared children are not all live is refused too: converting on the survivors moves the aggregation's meaning without anybody stating it. These endpoints apply to COMPOSITE monitors only. A slug collision is a 409 naming the existing slug, never a suffixed twin. Re-confirming returns 200 with the existing service. The composite keeps running: retiring is a separate act.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    monitorID: components["parameters"]["MonitorID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        sli: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Already converted — the existing service, unchanged. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CompositeConversion"];
+                    };
+                };
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CompositeConversion"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
         patch?: never;
         trace?: never;
     };
@@ -6028,6 +6371,17 @@ export interface components {
             reliability: unknown;
             /** @description The phase-3 impact-graph block: both directions with batched neighbour health. Absent when the graph read degraded. */
             dependencies?: components["schemas"]["ServiceGraph"] | null;
+            /** @description The composites this service now expresses (FR-021 §15.5), read from the SAME single column the monitor side reads — there is no second fact to keep in step. A converted composite appears at full strength: still probing, still alerting, and carrying its own retired_at, so the UI never infers a lifecycle from `enabled`, which an afternoon's disable also clears. A read failure leaves the list empty rather than failing the detail. */
+            supersedes: {
+                /** Format: uuid */
+                id?: string;
+                name?: string;
+                slug?: string;
+                type?: string;
+                enabled?: boolean;
+                /** Format: date-time */
+                retired_at?: string | null;
+            }[];
         };
         PutDeclarationRequest: {
             /**
@@ -6333,6 +6687,16 @@ export interface components {
              */
             readonly last_probe_error_at?: string;
             management?: components["schemas"]["MonitorManagement"];
+            /**
+             * Format: uuid
+             * @description The service that now expresses what this monitor expresses (FR-021 §15.5). An ANNOTATION — the monitor keeps probing, alerting and holding its own history.
+             */
+            superseded_by_service_id?: string;
+            /**
+             * Format: date-time
+             * @description Set when an operator ended this monitor's working life. ALWAYS accompanied by enabled=false, because retired_at alone stops nothing: the scheduler, dead-man, ingest and SLO paths key on enabled.
+             */
+            retired_at?: string | null;
             /** Format: date-time */
             created_at?: string;
             /** Format: date-time */
@@ -6948,8 +7312,21 @@ export interface components {
         };
         /** @enum {string} */
         Visibility: "public" | "internal" | "unlisted";
-        /** @enum {string} */
-        ComponentStatus: "operational" | "degraded" | "partial_outage" | "major_outage" | "maintenance";
+        /**
+         * @description A component's displayed state. `no_data` (FR-021 §15.0) means measurement is ABSENT — nothing sealed, no SLI declared, a monitor never confirmed either way, or a manual component whose operator has said nothing. It is deliberately OUTSIDE the severity ladder: asking whether "we do not know" is better or worse than declared maintenance is a false comparison, so the page summary keeps measured and unmeasured apart instead of ordering them. An operator can never SET it — see ComponentSource and manual_status.
+         * @enum {string}
+         */
+        ComponentStatus: "operational" | "degraded" | "partial_outage" | "major_outage" | "maintenance" | "no_data";
+        /**
+         * @description Which binding a component actually renders from (FR-021 §15.0). The source is a DISCRIMINATOR, not the presence of a column: the inactive binding stays DORMANT so a conversion can be reverted without re-choosing what it replaced.
+         * @enum {string}
+         */
+        ComponentSource: "monitor" | "service" | "manual";
+        /**
+         * @description The page headline. It exists because one ComponentStatus cannot express "operational, but part of this page was not measured". `empty` is a page with no components — which before FR-021 phase 4 reported `operational`, i.e. all-clear with nothing configured.
+         * @enum {string}
+         */
+        PageSummaryState: "operational" | "impaired" | "no_data" | "empty";
         StatusPage: {
             /** Format: uuid */
             id?: string;
@@ -6993,15 +7370,37 @@ export interface components {
             position?: number;
             /**
              * Format: uuid
-             * @description Set to derive status from a monitor.
+             * @description The component's own tenant identity.
+             */
+            org_id?: string;
+            source?: components["schemas"]["ComponentSource"];
+            /**
+             * Format: uuid
+             * @description Project of the BINDINGS — not the page's scope, since an org-level page may hold several projects.
+             */
+            source_project?: string;
+            /**
+             * Format: uuid
+             * @description The monitor binding. Present but DORMANT when source is not `monitor`.
              */
             monitor_id?: string;
+            /**
+             * Format: uuid
+             * @description The service binding. Present but DORMANT when source is not `service`.
+             */
+            service_id?: string;
             manual_status?: components["schemas"]["ComponentStatus"];
+            /**
+             * Format: int64
+             * @description Structural CAS token for the conversion contract.
+             */
+            revision?: number;
             /** Format: date-time */
             created_at?: string;
             /** Format: date-time */
             updated_at?: string;
         };
+        /** @description The source is DERIVED from the bindings server-side, never taken from the caller; a service binding wins over a leftover monitor one. `manual_status` may not be `no_data`. */
         CreateComponent: {
             name: string;
             description?: string;
@@ -7009,7 +7408,57 @@ export interface components {
             position?: number;
             /** Format: uuid */
             monitor_id?: string;
+            /** Format: uuid */
+            service_id?: string;
             manual_status?: components["schemas"]["ComponentStatus"];
+        };
+        /** @description Presentation only. A component's SOURCE changes exclusively through the previewed, CAS-fenced conversion, and `manual_status` is ignored unless the source is `manual` — so an edit form that does not show a dormant status cannot destroy it. */
+        UpdateComponent: {
+            name: string;
+            description?: string;
+            group?: string;
+            position?: number;
+            manual_status?: components["schemas"]["ComponentStatus"];
+        };
+        /** @description What the component should render from. On a REVERT the id may be omitted: the dormant binding is the target. `revision` and `page_generation` are required on confirm ONLY, and must be the pair a preview returned. */
+        ConversionTarget: {
+            source: components["schemas"]["ComponentSource"];
+            /** Format: uuid */
+            service_id?: string;
+            /** Format: uuid */
+            monitor_id?: string;
+            manual_status?: components["schemas"]["ComponentStatus"];
+            /** Format: int64 */
+            revision?: number;
+            /** Format: int64 */
+            page_generation?: number;
+        };
+        /** @description The component line and the page summary, BEFORE and AFTER, rendered with the SAME resolver the public page uses — a preview that predicted something else would defeat its purpose. */
+        ConversionPreview: {
+            component?: components["schemas"]["ComponentView"];
+            proposed?: components["schemas"]["ComponentView"];
+            summary?: components["schemas"]["PageSummary"];
+            proposed_summary?: components["schemas"]["PageSummary"];
+            /** Format: int64 */
+            revision?: number;
+            /** Format: int64 */
+            page_generation?: number;
+            /** @description The component already renders from that source; confirming changes nothing. */
+            no_op?: boolean;
+            reverts_to?: components["schemas"]["ComponentSource"];
+            /** @description Consequences the two summaries do not show. */
+            notes?: string[];
+        };
+        PageSummary: {
+            summary?: components["schemas"]["ComponentStatus"];
+            summary_state?: components["schemas"]["PageSummaryState"];
+            unmeasured_count?: number;
+        };
+        CompositeConversion: {
+            service?: components["schemas"]["Service"];
+            monitor?: components["schemas"]["Monitor"];
+            /** @description The composite was already linked; the existing service is returned unchanged. */
+            already_converted?: boolean;
         };
         /** @description One day of a component's 90-day availability strip. */
         ComponentDay: {
@@ -7029,14 +7478,25 @@ export interface components {
             status?: components["schemas"]["ComponentStatus"];
             /** Format: double */
             uptime_90d?: number | null;
-            /** @description Per-day availability; empty for manual components. */
+            /** @description Per-day availability; empty for manual components. For a service source these are SEALED buckets only and the window ends at the service's sealed watermark, so days without data are ABSENT rather than zero. */
             daily?: components["schemas"]["ComponentDay"][];
+            source?: components["schemas"]["ComponentSource"];
+            /** @description AUTHENTICATED ONLY: why a status is not a measurement (`no_manual_status`, `monitor_never_confirmed`, `monitor_deleted`, `no_sli_declared`, `no_decidable_observation`, `excluded_by_maintenance`, `service_unreadable`). */
+            reason?: string;
+            /** @description PUBLIC. The component's state could not be READ, as opposed to measurement being absent. It says something about cerbix, not about the customer's topology, and without it a failed read would be byte-identical to a calm `no_data` (§15.0, invariant 71a). */
+            unavailable?: boolean;
+            /** @description PUBLIC. Why `uptime_90d` is absent, per §11.2/§11.3: `no_sli`, `nothing_sealed`, `window_precedes_materialization_era`, `storage_gap`, `zero_decidable_time`, `decidable_coverage_below_min`, `spans_definition_revisions`, `nothing_measured`. A missing number without its reason is indistinguishable from one nobody computed. */
+            withheld_reason?: string;
         };
         StatusPageRender: {
             slug?: string;
             title?: string;
             visibility?: components["schemas"]["Visibility"];
+            /** @description The worst MEASURED status. Unchanged in name and type; `no_data` when nothing was measured. */
             summary?: components["schemas"]["ComponentStatus"];
+            summary_state?: components["schemas"]["PageSummaryState"];
+            /** @description How many components reported no measurement. */
+            unmeasured_count?: number;
             components?: components["schemas"]["ComponentView"][];
             active_incidents?: components["schemas"]["IncidentDetail"][];
             /** @description Resolved in the last 90 days, newest first; each carries its timeline and postmortem (if published). */
@@ -7212,6 +7672,15 @@ export interface components {
         };
         /** @description Invalid request. */
         BadRequest: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description The request lost a race or contradicts current state: a stale CAS token, an already-applied lifecycle act, a name already taken. First committer wins; re-read and decide again. */
+        Conflict: {
             headers: {
                 [name: string]: unknown;
             };

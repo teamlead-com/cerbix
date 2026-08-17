@@ -164,6 +164,29 @@ watch(() => [route.params.id, ws.projectId], load);
           :managed-by="managed"
         />
 
+        <!-- Phase 4 (§15.5): the OTHER end of the composite link, from the same single column the
+             monitor side reads. A converted composite appears at full strength — still probing,
+             still alerting — because a monitor absent from where it is described while it can still
+             page someone is the defect this block exists to avoid. -->
+        <section v-if="detail.supersedes?.length" class="mb-4 overflow-hidden rounded border border-border bg-surface shadow-card" data-testid="service-supersedes">
+          <header class="flex items-center gap-2 border-b border-border px-4 py-[10px]">
+            <h2 class="text-[13.5px] font-semibold">Converted from</h2>
+            <span class="font-mono text-[11.5px] text-ink-3">{{ detail.supersedes.length }} composite{{ detail.supersedes.length === 1 ? "" : "s" }}</span>
+          </header>
+          <ul>
+            <li v-for="m in detail.supersedes" :key="m.id" class="flex items-center gap-3 border-b border-border px-4 py-[10px] last:border-b-0">
+              <RouterLink :to="{ name: 'monitor', params: { id: m.id } }" class="text-[13px] text-accent hover:underline">{{ m.name }}</RouterLink>
+              <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ m.type }}</span>
+              <span v-if="m.retired_at" class="rounded-full border border-border px-[8px] py-px text-[11.5px] text-ink-3">retired</span>
+              <span v-else-if="!m.enabled" class="rounded-full bg-pending-weak px-[8px] py-px text-[11.5px] text-ink-3">paused</span>
+              <span v-else class="rounded-full bg-up-weak px-[8px] py-px text-[11.5px] text-up" data-testid="supersede-active">still probing</span>
+            </li>
+          </ul>
+          <p class="border-t border-border px-4 py-[9px] text-[12px] text-ink-3">
+            A composite listed here keeps its own history and alerts until someone retires it. Retiring is done on the monitor.
+          </p>
+        </section>
+
         <!-- Declaration: two lists, side by side, separated by the rule that is the whole
              point of the model. Adding a monitor on the left never adds it on the right. -->
         <section class="mb-4 overflow-hidden rounded border border-border bg-surface shadow-card">

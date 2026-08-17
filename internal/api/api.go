@@ -129,7 +129,26 @@ type Store interface {
 	ListComponentsByPage(ctx context.Context, pageID string) ([]domain.Component, error)
 	GetComponent(ctx context.Context, id string) (domain.Component, error)
 	DeleteComponent(ctx context.Context, id string) error
+	// FR-021 §15.0/§15.5 — the status-page service projection and the composite lifecycle.
+	UpdateComponent(ctx context.Context, orgID string, c domain.Component) (domain.Component, error)
+	// ONE page-scoped snapshot over (project, service) pairs, plus three set-wise monitor reads:
+	// an org-level page spans projects, so a per-project batch was never one snapshot ([314] P1-3).
+	ServicePageProjections(ctx context.Context, refs []store.ServiceRef, withHistory bool) (map[string]store.ServicePageProjection, error)
+	MonitorPageProjections(ctx context.Context, monitorIDs []string, since time.Time, withHistory bool) (map[string]store.MonitorPageProjection, error)
+	PreviewComponentConversion(ctx context.Context, orgID, componentID string, target store.ComponentConversionTarget) (store.ComponentConversionPlan, error)
+	ConfirmComponentConversion(ctx context.Context, orgID, componentID string, target store.ComponentConversionTarget, revision, pageGeneration int64, actor store.GraphActor) (domain.Component, error)
+	SetMonitorSuccessor(ctx context.Context, projectID, monitorID, serviceID string, actor store.GraphActor) (domain.Monitor, error)
+	RetireMonitor(ctx context.Context, projectID, monitorID string, actor store.GraphActor) (domain.Monitor, error)
+	ReactivateMonitor(ctx context.Context, projectID, monitorID string, actor store.GraphActor) (domain.Monitor, error)
+	ConvertCompositeToService(ctx context.Context, projectID, monitorID string, sli []string, actor store.GraphActor) (store.CompositeConversion, error)
+	ListMonitorsSupersededBy(ctx context.Context, projectID, serviceID string) ([]domain.Monitor, error)
 	ListOpenIncidentsByProject(ctx context.Context, projectID string) ([]domain.Incident, error)
+	// The page's incident/maintenance context, batched across ALL its projects: an org page spans
+	// projects, and a per-project loop made the unauthenticated render O(projects) ([318] P1-1).
+	IncidentsForPage(ctx context.Context, projectIDs []string, since time.Time) (store.PageIncidents, error)
+	MaintenanceForPage(ctx context.Context, projectIDs []string, now time.Time) ([]domain.MaintenanceWindow, error)
+	IncidentTimelines(ctx context.Context, incidentIDs []string) (map[string][]domain.IncidentUpdate, error)
+	PostmortemsForIncidents(ctx context.Context, incidentIDs []string) (map[string]domain.Postmortem, error)
 	CreateApiToken(ctx context.Context, t domain.ApiToken, hash string) (domain.ApiToken, error)
 	ListApiTokensByOrg(ctx context.Context, orgID string) ([]domain.ApiToken, error)
 	GetApiToken(ctx context.Context, id string) (domain.ApiToken, error)
@@ -194,6 +213,10 @@ type Mailer interface {
 // nil-safe: handlers guard on it, so tests and embed-only modes can omit it.
 type Metrics interface {
 	RecordIncidentOpened()
+	// RecordStatusPageUnreadableComponent counts a status-page component whose ACTIVE service could
+	// not be read (§15.0, invariant 71a). It is a FAILED read, not absent measurement, and a log
+	// alone leaves it invisible to anything watching trends.
+	RecordStatusPageUnreadableComponent()
 }
 
 // ResultSink publishes a heartbeat into the ingestion pipeline. Used by the AGENT results
@@ -216,6 +239,7 @@ type PushRecorder interface {
 type Handler struct {
 	store             Store
 	logger            *slog.Logger
+	renderCache       *statusPageCache
 	minPasswordLen    int
 	metrics           Metrics
 	results           ResultSink
@@ -273,7 +297,8 @@ func New(store Store, logger *slog.Logger, minPasswordLen int) *Handler {
 	if minPasswordLen < 1 {
 		minPasswordLen = 8
 	}
-	return &Handler{store: store, logger: logger, minPasswordLen: minPasswordLen}
+	return &Handler{store: store, logger: logger, minPasswordLen: minPasswordLen,
+		renderCache: newStatusPageCache()}
 }
 
 // effectiveMinPasswordLen resolves the live policy value, falling back to the
@@ -447,6 +472,12 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/monitors/{monitorID}/sla", h.monitorSLA)
 	mux.HandleFunc("PUT /api/v1/monitors/{monitorID}/sla-target", h.setMonitorSLATarget)
 	mux.HandleFunc("GET /api/v1/monitors/{monitorID}/availability", h.monitorAvailability)
+	// FR-021 §15.5 composite lifecycle: the annotation, the explicit retire/reactivate pair, and
+	// the composite→service conversion. Each is its own act; none is a side effect of another.
+	mux.HandleFunc("PUT /api/v1/monitors/{monitorID}/successor", h.setMonitorSuccessor)
+	mux.HandleFunc("POST /api/v1/monitors/{monitorID}/retire", h.retireMonitor)
+	mux.HandleFunc("POST /api/v1/monitors/{monitorID}/reactivate", h.reactivateMonitor)
+	mux.HandleFunc("POST /api/v1/monitors/{monitorID}/convert-to-service", h.convertCompositeToService)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/availability", h.projectAvailability)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla", h.projectSLA)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-report", h.setProjectSLAReport)
@@ -511,6 +542,11 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/components", h.listComponents)
 	mux.HandleFunc("POST /api/v1/status-pages/{pageID}/components", h.createComponent)
 	mux.HandleFunc("DELETE /api/v1/components/{componentID}", h.deleteComponent)
+	// FR-021 §15.0: a component's presentation is editable; its SOURCE changes only through the
+	// previewed, CAS-fenced conversion below.
+	mux.HandleFunc("PATCH /api/v1/components/{componentID}", h.updateComponent)
+	mux.HandleFunc("POST /api/v1/components/{componentID}/conversion/preview", h.previewComponentConversion)
+	mux.HandleFunc("POST /api/v1/components/{componentID}/conversion", h.confirmComponentConversion)
 	mux.HandleFunc("GET /api/v1/organizations/{orgID}/tokens", h.listApiTokens)
 	mux.HandleFunc("POST /api/v1/organizations/{orgID}/tokens", h.createApiToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{tokenID}", h.deleteApiToken)

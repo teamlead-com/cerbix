@@ -135,9 +135,21 @@ type Monitor struct {
 	DependsOn []string      `json:"depends_on"`
 	Status    MonitorStatus `json:"status"`
 	PushToken string        `json:"push_token,omitempty"` // set for push monitors
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	// SupersededByServiceID names the service that now expresses what this monitor was built to
+	// express (FR-021 §15.5). It is an ANNOTATION, not a redirect: the monitor keeps probing,
+	// keeps alerting and keeps its own history. ONE stored fact, rendered from both ends, so
+	// there is no pair of links to fall out of sync.
+	SupersededByServiceID string `json:"superseded_by_service_id,omitempty"`
+	// RetiredAt is the LIFECYCLE statement — an explicit operator act, never a consequence of
+	// building a service. `Enabled` remains the execution switch; retiring sets both, because
+	// retired_at alone would leave a "retired" monitor probing and paging.
+	RetiredAt *time.Time `json:"retired_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
+
+// Retired reports whether an operator has explicitly ended this monitor's life.
+func (m Monitor) Retired() bool { return m.RetiredAt != nil }
 
 // Interval returns the configured check interval.
 func (m Monitor) Interval() time.Duration { return time.Duration(m.IntervalSeconds) * time.Second }

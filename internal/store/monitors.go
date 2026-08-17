@@ -227,7 +227,11 @@ func monitorSecretRefsTx(ctx context.Context, tx pgx.Tx, monitorID string) (map[
 // monitorColumns includes a correlated aggregate for depends_on; the bare `id`
 // inside it resolves to the outer monitors row under any table alias.
 const monitorColumns = "id, project_id, name, type, target, interval_seconds, timeout_seconds, retries, conditions, enabled, status, created_at, updated_at, push_token_enc, method, grace_seconds, config, auto_incident, failure_threshold, renotify_seconds, tags, region, escalation_policy_id, confirm_interval_seconds, consecutive_failures, execution_revision, state_sequence, last_probe_error_reason, last_probe_error_at, last_probe_error_job_id, " +
-	"(SELECT COALESCE(array_agg(d.depends_on_id::text ORDER BY d.created_at), '{}') FROM monitor_dependencies d WHERE d.monitor_id = id) AS depends_on, slug"
+	"(SELECT COALESCE(array_agg(d.depends_on_id::text ORDER BY d.created_at), '{}') FROM monitor_dependencies d WHERE d.monitor_id = id) AS depends_on, slug, " +
+	// FR-021 §15.5: the composite lifecycle. `superseded_by_service_id` is the two-ended link a
+	// service's page renders from; `retired_at` is the lifecycle statement, while `enabled`
+	// stays the execution switch. New columns append at the END, here and in scanMonitorMode.
+	"COALESCE(superseded_by_service_id::text,''), retired_at"
 
 // methodOrGet keeps the NOT NULL method column concrete; the prober ignores it
 // for non-HTTP monitors.
@@ -274,7 +278,8 @@ func (s *Store) scanMonitorMode(row pgx.Row, decryptConfigSecrets bool, extra ..
 	var config []byte
 	dests := []any{&m.ID, &m.ProjectID, &m.Name, &typ, &m.Target,
 		&m.IntervalSeconds, &m.TimeoutSeconds, &m.Retries, &m.Conditions,
-		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.StateSequence, &probeReason, &m.LastProbeErrorAt, &probeJobID, &m.DependsOn, &m.Slug}
+		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.StateSequence, &probeReason, &m.LastProbeErrorAt, &probeJobID, &m.DependsOn, &m.Slug,
+		&m.SupersededByServiceID, &m.RetiredAt}
 	dests = append(dests, extra...)
 	err := row.Scan(dests...)
 	if err != nil {

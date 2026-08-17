@@ -38,15 +38,20 @@ type Registry struct {
 	impactLinks           map[string]uint64
 	impactFailures        uint64
 	impactWitnessOverflow uint64
-	pullStats             []PullStat
-	serviceStats          *ServiceReliabilityStat
-	serviceSlices         map[string]uint64 // outcome → count (worked|empty|error)
-	serviceWedgedSet      bool
-	serviceWedged         bool
-	serviceWedgedReason   string
-	factMaintTracked      bool
-	factMaintFailing      bool
-	factMaintLastOKUnix   int64
+	// Status-page projection (FR-021 §15.0, invariant 71a): a component whose ACTIVE service the
+	// projection could not read. With the RESTRICT FK it cannot legitimately be absent, so this is
+	// a failed READ, and it is counted rather than only logged because the public page's rendering
+	// of it is deliberately indistinguishable from a calm value to a customer's eye.
+	statusPageUnreadable uint64
+	pullStats            []PullStat
+	serviceStats         *ServiceReliabilityStat
+	serviceSlices        map[string]uint64 // outcome → count (worked|empty|error)
+	serviceWedgedSet     bool
+	serviceWedged        bool
+	serviceWedgedReason  string
+	factMaintTracked     bool
+	factMaintFailing     bool
+	factMaintLastOKUnix  int64
 	// Service-reliability EVENT counters (§21): fan-out, terminal rejections, lifecycle
 	// outcomes, late-excluded arrivals. Monotonic — unlike a gauge over a table sum, they
 	// cannot decrease when a service (and its rows) is deleted.
@@ -379,6 +384,15 @@ func (r *Registry) RecordImpactWitnessOverflow(n int) {
 	r.impactWitnessOverflow += uint64(n)
 }
 
+// RecordStatusPageUnreadableComponent counts a status-page component whose active service could
+// not be read. Plain counter: no page or tenant labels, because an unauthenticated surface must not
+// grow per-tenant metric cardinality for anyone who can request a page.
+func (r *Registry) RecordStatusPageUnreadableComponent() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.statusPageUnreadable++
+}
+
 // SetPullStats replaces the per-region pull-queue gauge snapshot (leader-sampled).
 // SetServiceFactMaintenance records the fact-partition maintenance pass outcome: the [142]
 // stuck-month signal, low-cardinality by construction — one boolean and one timestamp, never
@@ -535,6 +549,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	impactLinks := copyCounts(r.impactLinks)
 	impactFailures := r.impactFailures
 	impactWitnessOverflow := r.impactWitnessOverflow
+	statusPageUnreadable := r.statusPageUnreadable
 	pullStats := r.pullStats
 	serviceStats := r.serviceStats
 	serviceWedgedSet, serviceWedged := r.serviceWedgedSet, r.serviceWedged
@@ -665,6 +680,11 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		out.println("# HELP cerbix_service_impact_witness_overflow_total Open incidents beyond the per-service correlation witness bound (deterministically not selected; never silent).")
 		out.println("# TYPE cerbix_service_impact_witness_overflow_total counter")
 		out.printf("cerbix_service_impact_witness_overflow_total %d\n", impactWitnessOverflow)
+	}
+	if statusPageUnreadable > 0 {
+		out.println("# HELP cerbix_status_page_component_unreadable_total Status-page components whose active service could not be read (a FAILED read, not absent measurement).")
+		out.println("# TYPE cerbix_status_page_component_unreadable_total counter")
+		out.printf("cerbix_status_page_component_unreadable_total %d\n", statusPageUnreadable)
 	}
 
 	if leaderTracked {

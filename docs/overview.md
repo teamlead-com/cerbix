@@ -123,7 +123,7 @@ flowchart LR
 | `sla` | SLI/SLO/error-budget/burn-rate for a MONITOR (pure computations). |
 | `reliability` | Reliability of a **service** (FR-021): a piecewise reducer over breakpoints producing duration-weighted facts on two conserved axes. Pure — no I/O, no clock. |
 | `incidents`↔`api`/`store` | Incidents, timeline updates, postmortems, external-key correlation (Alertmanager). |
-| `statuspage`/`feed`/`subscribe` | Public status pages, RSS/Atom/JSON feeds, subscribers. |
+| `statuspage`/`feed`/`subscribe` | Public status pages, RSS/Atom/JSON feeds, subscribers. A component renders from ONE of three sources under a discriminator (`monitor` / `service` / `manual`, FR-021 §15.0) with the replaced binding kept dormant for revert; the page summary reports worst-of-MEASURED plus an unmeasured count, and measurement ABSENT is the public status `no_data` — never `operational`. |
 | `notify` | Delivery of transitions/alerts to channels (webhook/Slack/Telegram/email). |
 | `webhook` | Outbound incident webhooks (signed). |
 | `outbox` | Transactional outbox: durable event delivery with retry/backoff/dead-letter, `SKIP LOCKED`. |

@@ -2006,7 +2006,7 @@ card folds away — the same numbers, one extra bit, no second semantics owner.
 
 Two consequences the reviewer was right to demand in writing:
 
-- **`has_sealed` does not affect the STATUS.** A service that is live-healthy before its first
+- **`sealed_in_window` does not affect the STATUS.** A service that is live-healthy before its first
   bucket seals is `operational` — its current state IS measured — while its 90-day strip is
   absent, because its history is not. Conflating the two would have made a healthy new service
   publish `no_data`, which is false in the opposite direction.
@@ -2192,6 +2192,16 @@ Convert composite → Service
   requires: explicit confirmation of sli[] — never silently "all children"
 ```
 
+The SLI is a REQUIRED input with no default, and every live child joins the operational CONTEXT
+regardless — the two lists exist precisely so that keeping a diagnostic visible does not change the
+number. A composite whose declared children are not ALL live is REFUSED, naming the missing ids:
+converting on the survivors would move the aggregation's meaning without anyone stating it, since
+`all` over 2 is not `all` over 3 and a quorum threshold is defined against a specific N. The quorum
+translation is `degraded_min = n − M + 1` with `healthy_min` EQUAL to it — the exact binary mapping,
+because a composite has two states and adding a degraded band would report more than the composite
+did on a page a customer reads. Widening that vocabulary is a separate owner decision with a preview
+that shows the delta.
+
 No historical data is migrated or reinterpreted in v1.
 
 ### 15.5 After conversion, a composite stays visible until its owner retires it (phase 4)
@@ -2227,6 +2237,14 @@ the alert and fail to find its source. Saving a list row is not worth that.
   is recoverable; a file-managed composite refuses both through the ownership rule that already
   governs its `enabled`. A retired composite keeps its history, incidents and past numbers, and
   still renders under the "superseded" filter.
+- **The lifecycle actions are COMPOSITE-only, and file ownership splits by DECLARATION authority,
+  not by row.** `retire`/`reactivate` and the conversion refuse for a file-managed composite,
+  because they write `enabled` or create a declaration — state a reapply would restate. The
+  `superseded_by_service_id` annotation is PERMITTED there: it is not part of bundle format 2, it
+  enters no canonical hash or generation, and no reconcile can contradict it, so refusing it would
+  remove the only way to annotate a file-managed composite while protecting nothing. §15.1's "may
+  MUTATE a resource" therefore means declaration/desired-state authority, not every column of the
+  row.
 - **Composite conversion is one serialized transaction, not a read-then-create.** It takes the
   composite row `FOR UPDATE`, then creates the service, writes the link and the audit row
   atomically; two simultaneous confirms therefore cannot create two services with
@@ -2247,6 +2265,16 @@ the list, which is the only arrangement in which its absence from the list is no
 ```
 Resource ownership determines who may MUTATE a resource, not who may REFERENCE it.
 ```
+
+**"Mutate" here means DECLARATION and desired-state authority, not every column of the row.** The
+system and the runtime already write non-declarative state on a file-managed monitor — status,
+counters, watermarks, revisions — and no reconcile contradicts them. A presentation-only annotation
+that is absent from the bundle format, enters no canonical hash or generation, and cannot be restated
+by an apply is therefore permitted as well; `superseded_by_service_id` (§15.5) is the one such field
+phase 4 adds. What ownership forbids is a UI write to a DECLARED field, because the very next apply
+would silently overwrite it — which is why `enabled`, and therefore `retire`/`reactivate`, stay
+refused. Without this narrowing the matrix would read as a whole-row prohibition and contradict a
+permission §15.5 grants.
 
 The rule that decides every cell: **a system-authored revision is permitted only when the
 mutating authority may also mutate every affected Service; otherwise the mutation is blocked or
@@ -2789,19 +2817,26 @@ is a reliability-domain object; if it fails, Service is still a grouping abstrac
     impact links; a service component's project joins the page's incident/maintenance scope
     exactly as a monitor component's does, and that too is pinned by a raw-JSON regression;
 66. the projection reads ONE authoritative batched DTO at ONE `as_of` carrying `sli`, `excluded`,
-    `reason` and `has_sealed`, over the existing evaluator — no second semantics owner — and the
-    §15.0 precedence is TOTAL: maintenance outranks absence, `has_sealed` governs the STRIP and
-    never the status, so a live-healthy service before its first seal publishes `operational`
-    with no strip; required tests: active maintenance, generic unknown, no `sli[]`,
-    healthy-before-first-seal, first seal;
+    `reason` and `sealed_in_window`, over the existing evaluator — no second semantics owner — and
+    the §15.0 precedence is TOTAL: maintenance outranks absence, `sealed_in_window` governs the
+    STRIP and never the status, so a live-healthy service before its first seal publishes
+    `operational` with no strip; required tests: active maintenance, generic unknown, no `sli[]`,
+    healthy-before-first-seal, first seal. The batch is PAGE-scoped over `(project_id, service_id)`
+    pairs, not per project: an org-level page legitimately spans projects, so a per-project batch
+    is neither one snapshot nor a constant statement count;
 67. `no_data` does not join the severity ladder: the summary is `worst-of MEASURED` plus an
     `unmeasured` count, and the §15.0 headline table is total — operational+unmeasured never
     reads "all systems operational", all-`no_data` is not operational, an EMPTY page reports
     "no components configured" instead of today's `operational`, and `severity()`'s unknown
-    default becomes `no_data` instead of `operational`;
-68. `pending` monitor components render `no_data`, not `operational` — the one intentional change
-    to existing public output, recorded in §15.0, §17 and D-0167, with a regression that pins the
-    OLD behaviour as removed;
+    default becomes the WORST measured rank instead of `operational` — the function orders measured
+    statuses and returns an int, so "the default becomes `no_data`" (§15.0) was not implementable
+    as written; what it protects against is a future enum value silently ranking as health, which
+    the worst-rank default delivers;
+68. THREE intentional changes to existing public output, each recorded in §15.0, §17 and D-0167 and
+    each with a regression that pins the OLD behaviour as REMOVED rather than merely unasserted:
+    a `pending` monitor component renders `no_data`; a manual component with no stated status
+    renders `no_data`; and an EMPTY page reports "no components configured" instead of
+    `operational`. §17 enumerates three, so an invariant naming one was an undercount;
 69. the 90-day history is bounded and honest: `daily[]` is UTC days from SEALED buckets only,
     at most 90 points, days without data ABSENT (never zeros, never interpolation) and partial
     days carrying their covered fraction; `uptime_90d` follows §11.2/§11.3 — withheld with its
@@ -2823,14 +2858,23 @@ is a reliability-domain object; if it fails, Service is still a grouping abstrac
     cascade (D-0150/FR-019) stays ONE statement, with affected components enumerated in its
     deletion preview and covered by tests on both a project-scoped and an org-level page;
 71a. the projection's inputs are window-scoped and error-honest: the 90-day window ends at
-    `sealed_through` (never at the page's `as_of`), `sealed_in_window` — not "any fact" — decides
+    `sealed_through` (never at the page's `as_of`) with UTC day boundaries converted in SQL and the
+    NEWEST day retained under the 90-point cap, `sealed_in_window` — not "any fact" — decides
     whether a strip exists, and an ACTIVE service that the projection cannot find degrades the
-    render with a logged, counted failure instead of publishing the calm statement `no_data`;
+    render with a logged, COUNTED failure plus a PUBLIC `unavailable` marker instead of publishing
+    the calm statement `no_data` — a failed read whose bytes match a calm value is the confusion
+    this forbids. `uptime_90d` and its `withheld_reason` come from the SAME §11.2/§11.3 decision the
+    authenticated report uses, never a second implementation;
 71b. the public render is bounded in ROWS, MEMORY and TIME, not merely in statement count: a
-    per-page ceiling persisted as `max(50, current)` that can only shrink, and an absolute
-    fail-closed public ceiling of 500 above which the page returns
-    `status_page_over_safe_limit` naming the count and the limit — never a truncated subset
-    posing as the whole page — while the authenticated view still lists everything;
+    per-page ceiling persisted as `max(50, current)` that can only shrink — LOWERED by every
+    removal and never raisable above `max(50, current count)`, so no write creates headroom — an
+    absolute fail-closed public ceiling of 500 above which the page returns
+    `status_page_over_safe_limit` naming the count and the limit (never a truncated subset posing
+    as the whole page) while the authenticated view still lists everything, and a short-TTL render
+    cache keyed to the exact access shape (page + public/authenticated + unlisted token) as the
+    RATE bound, since a ceiling bounds one request and not repetition. Both counters — the page
+    generation and each component's revision — are DB-owned, because FK actions are part of the
+    contract and a cascade has no application on its path;
 72. a converted composite keeps probing, keeps its SLO, stays listed at full strength and is
     never hidden by default; the link is ONE stored fact (`monitors.superseded_by_service_id`,
     tenant-composite FK, `SET NULL` on service deletion) rendered from both ends;

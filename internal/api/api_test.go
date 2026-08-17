@@ -51,6 +51,19 @@ type fakeStore struct {
 	neighbourHealth      map[string]domain.ServiceHealthNow
 	neighbourHealthErr   error
 	neighbourHealthCalls int
+	// FR-021 phase-4 fakes: the status-page projection, the page CAS counter and the strips.
+	projections            map[string]store.ServiceStatusProjection
+	serviceDaily           map[string][]store.ServiceDayPoint
+	serviceUptime          map[string]*float64
+	serviceWithheld        map[string]string
+	monitorUptime          map[string]float64
+	pageGeneration         map[string]int64
+	projectionCalls        int
+	monitorProjectionCalls int
+	pageIncidentCalls      int
+	pageMaintenanceCalls   int
+	timelineCalls          int
+	postmortemCalls        int
 	// previews and sealedThrough model the retroactive-maintenance gate.
 	previews           map[string]store.MaintenancePreview
 	sealedThrough      time.Time
@@ -123,28 +136,34 @@ type fakeSecret struct {
 
 func seededStore() *fakeStore {
 	fs := &fakeStore{
-		orgs:        map[string]domain.Organization{},
-		projects:    map[string]domain.Project{},
-		users:       map[string]domain.User{},
-		byOrg:       map[string][]domain.Project{},
-		userOrgs:    map[string][]domain.Organization{},
-		members:     map[string][]domain.Membership{},
-		monitors:    map[string]domain.Monitor{},
-		passwords:   map[string]string{},
-		slaTargets:  map[string]domain.SLATarget{},
-		slaReports:  map[string]bool{},
-		maintenance: map[string]domain.MaintenanceWindow{},
-		incidents:   map[string]domain.Incident{},
-		incUpdates:  map[string][]domain.IncidentUpdate{},
-		postmortems: map[string]domain.Postmortem{},
-		pages:       map[string]domain.StatusPage{},
-		components:  map[string]domain.Component{},
-		apiTokens:   map[string]domain.ApiToken{},
-		webhooks:    map[string]domain.Webhook{},
-		channels:    map[string]domain.NotificationChannel{},
-		monLinks:    map[string][]string{},
-		deadOutbox:  map[string]domain.OutboxEventView{},
-		subscribers: map[string]domain.Subscriber{},
+		orgs:            map[string]domain.Organization{},
+		projects:        map[string]domain.Project{},
+		users:           map[string]domain.User{},
+		byOrg:           map[string][]domain.Project{},
+		userOrgs:        map[string][]domain.Organization{},
+		members:         map[string][]domain.Membership{},
+		monitors:        map[string]domain.Monitor{},
+		passwords:       map[string]string{},
+		slaTargets:      map[string]domain.SLATarget{},
+		slaReports:      map[string]bool{},
+		maintenance:     map[string]domain.MaintenanceWindow{},
+		incidents:       map[string]domain.Incident{},
+		incUpdates:      map[string][]domain.IncidentUpdate{},
+		postmortems:     map[string]domain.Postmortem{},
+		pages:           map[string]domain.StatusPage{},
+		components:      map[string]domain.Component{},
+		projections:     map[string]store.ServiceStatusProjection{},
+		serviceDaily:    map[string][]store.ServiceDayPoint{},
+		serviceUptime:   map[string]*float64{},
+		serviceWithheld: map[string]string{},
+		monitorUptime:   map[string]float64{},
+		pageGeneration:  map[string]int64{},
+		apiTokens:       map[string]domain.ApiToken{},
+		webhooks:        map[string]domain.Webhook{},
+		channels:        map[string]domain.NotificationChannel{},
+		monLinks:        map[string][]string{},
+		deadOutbox:      map[string]domain.OutboxEventView{},
+		subscribers:     map[string]domain.Subscriber{},
 	}
 	o1 := domain.Organization{ID: "o1", Slug: "acme", Name: "Acme"}
 	o2 := domain.Organization{ID: "o2", Slug: "globex", Name: "Globex"}
@@ -168,7 +187,9 @@ func seededStore() *fakeStore {
 	fs.pages["sp1"] = domain.StatusPage{ID: "sp1", OrgID: "o1", Slug: "acme-status", Title: "Acme", Visibility: domain.VisibilityPublic}
 	fs.pages["sp2"] = domain.StatusPage{ID: "sp2", OrgID: "o1", Slug: "internal-status", Title: "Internal", Visibility: domain.VisibilityInternal}
 	fs.pages["sp3"] = domain.StatusPage{ID: "sp3", OrgID: "o1", Slug: "secret-status", Title: "Secret", Visibility: domain.VisibilityUnlisted, UnlistedToken: "tok123"}
-	fs.components["c1"] = domain.Component{ID: "c1", StatusPageID: "sp1", Name: "API", MonitorID: "mon1"}
+	// A migrated row: the backfill gave every monitor-bound component source='monitor' (00081).
+	fs.components["c1"] = domain.Component{ID: "c1", StatusPageID: "sp1", OrgID: "o1", Name: "API",
+		Source: domain.ComponentSourceMonitor, SourceProject: "p1", MonitorID: "mon1"}
 	fs.apiTokens["at1"] = domain.ApiToken{ID: "at1", OrgID: "o1", Name: "ci", Role: domain.RoleEditor}
 	fs.webhooks["wh1"] = domain.Webhook{ID: "wh1", OrgID: "o1", URL: "https://hook.example/x", Secret: "s", Enabled: true}
 	fs.channels["nc1"] = domain.NotificationChannel{ID: "nc1", ProjectID: "p1", Type: domain.ChannelWebhook, Name: "ops", Config: map[string]string{"url": "https://hook.example/n"}, Enabled: true}
@@ -1030,8 +1051,322 @@ func (f *fakeStore) ListStatusPagesByOrg(_ context.Context, orgID string) ([]dom
 }
 func (f *fakeStore) CreateComponent(_ context.Context, c domain.Component) (domain.Component, error) {
 	c.ID = "c-new"
+	// Mirrors the store: the source is DERIVED, never taken from the caller, and a service
+	// binding wins over a leftover monitor one.
+	switch {
+	case c.ServiceID != "":
+		c.Source = domain.ComponentSourceService
+	case c.MonitorID != "":
+		c.Source = domain.ComponentSourceMonitor
+	default:
+		c.Source = domain.ComponentSourceManual
+	}
+	if sp, ok := f.pages[c.StatusPageID]; ok {
+		c.OrgID = sp.OrgID
+	}
 	f.components[c.ID] = c
 	return c, nil
+}
+
+// ── FR-021 phase 4: the status-page projection and the composite lifecycle ────────────────
+
+// The page's incident/maintenance context, batched. Each carries a call counter, because the
+// difference between "batched" and "looped" is invisible in the payload ([318] P1-1).
+func (f *fakeStore) IncidentsForPage(ctx context.Context, projectIDs []string, since time.Time) (store.PageIncidents, error) {
+	f.pageIncidentCalls++
+	out := store.PageIncidents{Active: []domain.Incident{}, Recent: []domain.Incident{}}
+	want := map[string]bool{}
+	for _, id := range projectIDs {
+		want[id] = true
+	}
+	for _, in := range f.incidents {
+		if !want[in.ProjectID] {
+			continue
+		}
+		if in.Status != domain.IncidentResolved {
+			out.Active = append(out.Active, in)
+			continue
+		}
+		if in.ResolvedAt != nil && in.ResolvedAt.After(since) {
+			out.Recent = append(out.Recent, in)
+		}
+	}
+	sort.Slice(out.Active, func(i, j int) bool { return out.Active[i].ID < out.Active[j].ID })
+	sort.Slice(out.Recent, func(i, j int) bool { return out.Recent[i].ID < out.Recent[j].ID })
+	return out, nil
+}
+
+func (f *fakeStore) MaintenanceForPage(ctx context.Context, projectIDs []string, now time.Time) ([]domain.MaintenanceWindow, error) {
+	f.pageMaintenanceCalls++
+	want := map[string]bool{}
+	for _, id := range projectIDs {
+		want[id] = true
+	}
+	out := []domain.MaintenanceWindow{}
+	for _, mw := range f.maintenance {
+		if want[mw.ProjectID] && mw.ArchivedAt == nil && mw.EndsAt.After(now) {
+			out = append(out, mw)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartsAt.Before(out[j].StartsAt) })
+	return out, nil
+}
+
+func (f *fakeStore) IncidentTimelines(ctx context.Context, incidentIDs []string) (map[string][]domain.IncidentUpdate, error) {
+	f.timelineCalls++
+	out := map[string][]domain.IncidentUpdate{}
+	for _, id := range incidentIDs {
+		if ups, ok := f.incUpdates[id]; ok {
+			out[id] = ups
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) PostmortemsForIncidents(ctx context.Context, incidentIDs []string) (map[string]domain.Postmortem, error) {
+	f.postmortemCalls++
+	out := map[string]domain.Postmortem{}
+	for _, id := range incidentIDs {
+		if pm, ok := f.postmortems[id]; ok {
+			out[id] = pm
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpdateComponent(_ context.Context, orgID string, c domain.Component) (domain.Component, error) {
+	cur, ok := f.components[c.ID]
+	if !ok || cur.OrgID != orgID {
+		return domain.Component{}, store.ErrNotFound
+	}
+	cur.Name, cur.Description, cur.GroupName, cur.Position = c.Name, c.Description, c.GroupName, c.Position
+	if cur.Source == domain.ComponentSourceManual {
+		cur.ManualStatus = c.ManualStatus
+	}
+	cur.Revision++
+	f.components[c.ID] = cur
+	f.pageGeneration[cur.StatusPageID]++
+	return cur, nil
+}
+
+// ServicePageProjections is ONE call for the whole page, across projects. The call counter is what
+// pins that: a per-component or per-project loop would satisfy every behavioural assertion.
+func (f *fakeStore) ServicePageProjections(_ context.Context, refs []store.ServiceRef, withHistory bool) (map[string]store.ServicePageProjection, error) {
+	f.projectionCalls++
+	out := map[string]store.ServicePageProjection{}
+	for _, ref := range refs {
+		p, ok := f.projections[ref.ServiceID]
+		if !ok {
+			continue // absent on purpose: invariant 71a's unreadable-service case
+		}
+		page := store.ServicePageProjection{
+			ProjectID: ref.ProjectID, ServiceID: ref.ServiceID,
+			SLI: p.SLI, Excluded: p.Excluded, Reason: p.Reason,
+			SealedThrough: p.SealedThrough, SealedInWindow: p.SealedInWindow,
+			Uptime: f.serviceUptime[ref.ServiceID], UptimeWithheld: f.serviceWithheld[ref.ServiceID],
+		}
+		if withHistory {
+			page.Daily = f.serviceDaily[ref.ServiceID]
+		}
+		out[ref.ServiceID] = page
+	}
+	return out, nil
+}
+
+// MonitorPageProjections is the batched monitor half, with its own call counter.
+func (f *fakeStore) MonitorPageProjections(_ context.Context, monitorIDs []string, since time.Time, withHistory bool) (map[string]store.MonitorPageProjection, error) {
+	f.monitorProjectionCalls++
+	out := map[string]store.MonitorPageProjection{}
+	for _, id := range monitorIDs {
+		m, ok := f.monitors[id]
+		if !ok {
+			continue // a deleted monitor simply does not come back
+		}
+		p := store.MonitorPageProjection{MonitorID: id, ProjectID: m.ProjectID, Status: m.Status}
+		if withHistory {
+			// The same two days and the same aggregate the per-monitor fakes served, so the
+			// batching change does not silently alter what the render tests assert.
+			p.Daily = []store.DailyAvailability{
+				{Up: 90, Total: 100, UptimePercent: 90},
+				{Up: 100, Total: 100, UptimePercent: 100},
+			}
+			u := 95.0
+			if custom, ok := f.monitorUptime[id]; ok {
+				u = custom
+			}
+			p.Uptime = &u
+		}
+		out[id] = p
+	}
+	return out, nil
+}
+
+func (f *fakeStore) PreviewComponentConversion(_ context.Context, orgID, componentID string, target store.ComponentConversionTarget) (store.ComponentConversionPlan, error) {
+	cur, ok := f.components[componentID]
+	if !ok || cur.OrgID != orgID {
+		return store.ComponentConversionPlan{}, store.ErrNotFound
+	}
+	proposed := cur
+	proposed.Source = target.Source
+	switch target.Source {
+	case domain.ComponentSourceService:
+		if target.ServiceID != "" {
+			proposed.ServiceID = target.ServiceID
+		}
+		if proposed.ServiceID == "" {
+			return store.ComponentConversionPlan{}, store.ErrComponentConversionTarget
+		}
+	case domain.ComponentSourceMonitor:
+		if target.MonitorID != "" {
+			proposed.MonitorID = target.MonitorID
+		}
+		if proposed.MonitorID == "" {
+			return store.ComponentConversionPlan{}, store.ErrComponentConversionTarget
+		}
+	case domain.ComponentSourceManual:
+		if target.ManualStatus != "" {
+			proposed.ManualStatus = target.ManualStatus
+		}
+	default:
+		return store.ComponentConversionPlan{}, store.ErrComponentConversionTarget
+	}
+	return store.ComponentConversionPlan{
+		Current: cur, Proposed: proposed, Revision: cur.Revision,
+		PageGeneration: f.pageGeneration[cur.StatusPageID],
+		NoOp:           cur.Source == proposed.Source && cur.ServiceID == proposed.ServiceID && cur.MonitorID == proposed.MonitorID && cur.ManualStatus == proposed.ManualStatus,
+	}, nil
+}
+
+func (f *fakeStore) ConfirmComponentConversion(ctx context.Context, orgID, componentID string, target store.ComponentConversionTarget, revision, pageGeneration int64, actor store.GraphActor) (domain.Component, error) {
+	plan, err := f.PreviewComponentConversion(ctx, orgID, componentID, target)
+	if err != nil {
+		return domain.Component{}, err
+	}
+	if plan.Revision != revision || plan.PageGeneration != pageGeneration {
+		return domain.Component{}, store.ErrComponentConversionStale
+	}
+	if plan.NoOp {
+		return plan.Current, nil
+	}
+	next := plan.Proposed
+	next.Revision++
+	f.components[componentID] = next
+	f.pageGeneration[next.StatusPageID]++
+	return next, nil
+}
+
+func (f *fakeStore) SetMonitorSuccessor(_ context.Context, projectID, monitorID, serviceID string, actor store.GraphActor) (domain.Monitor, error) {
+	m, ok := f.monitors[monitorID]
+	if !ok || m.ProjectID != projectID {
+		return domain.Monitor{}, store.ErrNotFound
+	}
+	if m.Type != domain.MonitorComposite {
+		return domain.Monitor{}, store.ErrNotAComposite
+	}
+	if serviceID != "" {
+		if fs, ok := f.serviceStore()[serviceID]; !ok || fs.svc.ProjectID != projectID {
+			return domain.Monitor{}, store.ErrSuccessorNotAService
+		}
+	}
+	m.SupersededByServiceID = serviceID
+	f.monitors[monitorID] = m
+	return m, nil
+}
+
+func (f *fakeStore) RetireMonitor(_ context.Context, projectID, monitorID string, actor store.GraphActor) (domain.Monitor, error) {
+	m, ok := f.monitors[monitorID]
+	if !ok || m.ProjectID != projectID {
+		return domain.Monitor{}, store.ErrNotFound
+	}
+	if m.Type != domain.MonitorComposite {
+		return domain.Monitor{}, store.ErrNotAComposite
+	}
+	if m.RetiredAt != nil {
+		return domain.Monitor{}, store.ErrMonitorAlreadyRetired
+	}
+	now := time.Now()
+	m.RetiredAt, m.Enabled, m.Status = &now, false, domain.StatusPending
+	m.ExecutionRevision++
+	m.StateSequence++
+	f.monitors[monitorID] = m
+	return m, nil
+}
+
+func (f *fakeStore) ReactivateMonitor(_ context.Context, projectID, monitorID string, actor store.GraphActor) (domain.Monitor, error) {
+	m, ok := f.monitors[monitorID]
+	if !ok || m.ProjectID != projectID {
+		return domain.Monitor{}, store.ErrNotFound
+	}
+	if m.Type != domain.MonitorComposite {
+		return domain.Monitor{}, store.ErrNotAComposite
+	}
+	if m.RetiredAt == nil {
+		return domain.Monitor{}, store.ErrMonitorNotRetired
+	}
+	m.RetiredAt, m.Enabled, m.Status = nil, true, domain.StatusPending
+	m.ExecutionRevision++
+	m.StateSequence++
+	f.monitors[monitorID] = m
+	return m, nil
+}
+
+func (f *fakeStore) ConvertCompositeToService(_ context.Context, projectID, monitorID string, sli []string, actor store.GraphActor) (store.CompositeConversion, error) {
+	m, ok := f.monitors[monitorID]
+	if !ok || m.ProjectID != projectID {
+		return store.CompositeConversion{}, store.ErrNotFound
+	}
+	if m.Type != domain.MonitorComposite {
+		return store.CompositeConversion{}, store.ErrCompositeNotComposite
+	}
+	// Mirrors the store: the SLI is the operator's statement and every member must be a live child.
+	if len(sli) == 0 && m.SupersededByServiceID == "" {
+		return store.CompositeConversion{}, store.ErrCompositeSLIRequired
+	}
+	children := map[string]bool{}
+	for _, id := range m.ChildIDs() {
+		children[id] = true
+	}
+	for _, id := range sli {
+		if !children[id] {
+			return store.CompositeConversion{}, store.ErrCompositeSLINotAChild
+		}
+	}
+	if m.SupersededByServiceID != "" {
+		fs, ok := f.serviceStore()[m.SupersededByServiceID]
+		if !ok {
+			return store.CompositeConversion{}, store.ErrNotFound
+		}
+		return store.CompositeConversion{Service: fs.svc, Monitor: m, AlreadyConverted: true}, nil
+	}
+	slug := m.Slug
+	if slug == "" {
+		slug = "converted"
+	}
+	for _, existing := range f.serviceStore() {
+		if existing.svc.ProjectID == projectID && existing.svc.Slug == slug {
+			return store.CompositeConversion{}, store.ErrServiceSlugTaken
+		}
+	}
+	f.serviceSeq++
+	svc := domain.Service{
+		ID:        fmt.Sprintf("00000000-0000-4000-8000-%012d", f.serviceSeq),
+		ProjectID: projectID, Slug: slug, Name: m.Name,
+	}
+	f.serviceStore()[svc.ID] = &fakeService{svc: svc}
+	m.SupersededByServiceID = svc.ID
+	f.monitors[monitorID] = m
+	return store.CompositeConversion{Service: svc, Monitor: m}, nil
+}
+
+func (f *fakeStore) ListMonitorsSupersededBy(_ context.Context, projectID, serviceID string) ([]domain.Monitor, error) {
+	out := []domain.Monitor{}
+	for _, m := range f.monitors {
+		if m.ProjectID == projectID && m.SupersededByServiceID == serviceID {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 func (f *fakeStore) ListComponentsByPage(_ context.Context, pageID string) ([]domain.Component, error) {
 	var out []domain.Component

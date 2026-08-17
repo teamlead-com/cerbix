@@ -4,7 +4,7 @@ import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import { useTheme } from "@/composables/useTheme";
-import { componentMeta, summaryHeadline } from "@/lib/statuspage";
+import { componentMeta, summaryHeadline, withheldText } from "@/lib/statuspage";
 import { useBranding } from "@/stores/branding";
 import { impactBadge, relTime, statusBadge } from "@/lib/incident";
 import { renderSections } from "@/lib/postmortem";
@@ -61,20 +61,35 @@ const feed = (fmt: string) =>
     : `/api/v1/public/status-pages/${slug}/feed?format=${fmt}${token ? "&token=" + token : ""}`;
 
 // Banner sub-line derived from the page summary (no dedicated backend copy field).
+//
+// The unmeasured half is stated FIRST when it exists, because "all monitored services are running
+// normally" beside two components nobody measured is the sentence FR-021 §17 set out to remove.
 const summarySub = computed(() => {
+  const unmeasured = page.value?.unmeasured_count ?? 0;
+  switch (page.value?.summary_state) {
+    case "empty":
+      return "This page has no components yet, so there is nothing to report.";
+    case "no_data":
+      return unmeasured === 1
+        ? "The one component on this page has no measurement yet."
+        : "None of the components on this page have a measurement yet.";
+  }
+  const tail = unmeasured > 0
+    ? ` ${unmeasured} component${unmeasured === 1 ? "" : "s"} on this page ${unmeasured === 1 ? "has" : "have"} no measurement.`
+    : "";
   switch (page.value?.summary) {
     case "operational":
-      return "All monitored services are running normally.";
+      return "All measured services are running normally." + tail;
     case "degraded":
-      return "Some services are experiencing elevated latency. We’re on it.";
+      return "Some services are experiencing elevated latency. We’re on it." + tail;
     case "partial_outage":
-      return "Some services are partially unavailable.";
+      return "Some services are partially unavailable." + tail;
     case "major_outage":
-      return "A major outage is affecting one or more services.";
+      return "A major outage is affecting one or more services." + tail;
     case "maintenance":
-      return "Scheduled maintenance is in progress.";
+      return "Scheduled maintenance is in progress." + tail;
     default:
-      return "Live status of every monitored service.";
+      return "Live status of every monitored service." + tail;
   }
 });
 const updatedUTC = computed(() => {
@@ -255,11 +270,11 @@ onMounted(async () => {
         <!-- overall summary banner -->
         <div class="mb-[14px] flex flex-wrap items-center gap-4 rounded-lg border p-[22px] shadow-card" :class="[componentMeta(page.summary).band, 'border-border']">
           <span class="grid h-[42px] w-[42px] flex-none place-items-center rounded-[11px] text-white" :class="meterColor(page.summary)">
-            <svg v-if="page.summary === 'operational'" viewBox="0 0 24 24" class="h-[22px] w-[22px]" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6L9 17l-5-5" /></svg>
+            <svg v-if="page.summary === 'operational' && !(page.unmeasured_count ?? 0)" viewBox="0 0 24 24" class="h-[22px] w-[22px]" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6L9 17l-5-5" /></svg>
             <svg v-else viewBox="0 0 24 24" class="h-[22px] w-[22px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v5M12 16h.01" /><circle cx="12" cy="12" r="9" /></svg>
           </span>
           <div class="min-w-0">
-            <h1 class="m-0 text-[20px] font-semibold tracking-tight" :class="componentMeta(page.summary).text">{{ summaryHeadline(page.summary) }}</h1>
+            <h1 class="m-0 text-[20px] font-semibold tracking-tight" :class="componentMeta(page.summary).text">{{ summaryHeadline(page.summary, page.summary_state, page.unmeasured_count) }}</h1>
             <div class="mt-[2px] text-[13.5px] text-ink-2">{{ summarySub }}</div>
           </div>
           <div class="ml-auto text-right font-mono text-[12px] text-ink-3">updated {{ relTime(page.updated_at) }}<br />{{ updatedUTC }}</div>
@@ -328,16 +343,25 @@ onMounted(async () => {
             <div class="mb-[9px] flex items-center gap-[10px]">
               <span class="text-[14px] font-medium">{{ c.name }}</span>
               <span v-if="c.description" class="min-w-0 truncate text-[12px] text-ink-3">{{ c.description }}</span>
-              <span class="ml-auto inline-flex items-center gap-[7px] text-[12.5px] font-semibold" :class="componentMeta(c.status).text"><span class="h-[8px] w-[8px] rounded-full" :class="componentMeta(c.status).dot"></span>{{ componentMeta(c.status).label }}</span>
+              <span v-if="c.unavailable" class="ml-auto inline-flex items-center gap-[7px] text-[12.5px] font-semibold text-degraded" data-testid="component-unavailable">
+                <svg viewBox="0 0 24 24" class="h-[13px] w-[13px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v5M12 16h.01" /><circle cx="12" cy="12" r="9" /></svg>
+                Status unavailable
+              </span>
+              <span v-else class="ml-auto inline-flex items-center gap-[7px] text-[12.5px] font-semibold" :class="componentMeta(c.status).text"><span class="h-[8px] w-[8px] rounded-full" :class="componentMeta(c.status).dot"></span>{{ componentMeta(c.status).label }}</span>
             </div>
             <!-- per-day 90-day availability strip (aggregate meter fallback for manual components) -->
             <div v-if="c.daily && c.daily.length" class="flex h-[26px] items-stretch gap-[2px]">
               <span v-for="(d, i) in strip(c.daily)" :key="i" class="min-w-0 flex-1 rounded-[2px]" :class="daySegClass(d.pct)" :title="dayTitle(d)"></span>
             </div>
-            <div v-else class="h-[8px] overflow-hidden rounded-[3px] bg-inset">
-              <i v-if="c.uptime_90d != null" class="block h-full rounded-[3px]" :class="meterColor(c.status)" :style="{ width: Math.max(0, Math.min(100, c.uptime_90d ?? 0)) + '%' }"></i>
+            <div v-else-if="c.uptime_90d != null" class="h-[8px] overflow-hidden rounded-[3px] bg-inset">
+              <i class="block h-full rounded-[3px]" :class="meterColor(c.status)" :style="{ width: Math.max(0, Math.min(100, c.uptime_90d ?? 0)) + '%' }"></i>
             </div>
-            <div class="mt-[7px] flex justify-between font-mono text-[11.5px] text-ink-3">
+            <!-- No history at all: an empty rail under "90 days ago … today" would claim a
+                 90-day record that reads as flawless. The absence is stated, WITH its reason when
+                 the server gave one — a missing number without a reason is indistinguishable from
+                 one nobody computed. -->
+            <p v-else class="m-0 font-mono text-[11.5px] text-ink-3" data-testid="no-history">{{ withheldText(c.withheld_reason) }}</p>
+            <div v-if="(c.daily && c.daily.length) || c.uptime_90d != null" class="mt-[7px] flex justify-between font-mono text-[11.5px] text-ink-3">
               <span>90 days ago</span>
               <span v-if="pct(c.uptime_90d)"><b class="font-semibold text-ink-2">{{ pct(c.uptime_90d) }}</b> uptime</span>
               <span>today</span>

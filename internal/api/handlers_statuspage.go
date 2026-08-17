@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"time"
@@ -312,7 +315,22 @@ func (h *Handler) renderStatusPagePublic(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	h.writeStatusPageRender(w, r, sp, true) // public: strip internal ids
+	// §15.0's rate bound: a few seconds of shared bytes, keyed to the exact access shape so an
+	// unlisted page's render is unreachable without its token — and COALESCED, so N simultaneous
+	// cold requests cost ONE render rather than N ([318] P1-2).
+	key := statusPageCacheKey(sp.ID, true, r.URL.Query().Get("token"))
+	body, hit, err := h.renderCache.do(key, func() ([]byte, bool, error) {
+		rec := &bufferedResponse{header: http.Header{}, status: http.StatusOK}
+		h.writeStatusPageRender(rec, r, sp, true) // public: strip internal ids
+		// ONLY a successful render is cached. A 503 over the safe limit or a 500 must be
+		// re-derived, or one bad moment would be served for the whole TTL.
+		return rec.bytesWithStatus(), rec.status == http.StatusOK, nil
+	})
+	if err != nil {
+		h.serverError(w, "render_status_page", err)
+		return
+	}
+	writeBufferedResponse(w, body, hit)
 }
 
 // dayPoint is one day of a component's 90-day availability strip.
@@ -330,13 +348,32 @@ type componentView struct {
 	Status      domain.ComponentStatus `json:"status"`
 	Uptime90d   *float64               `json:"uptime_90d,omitempty"`
 	Daily       []dayPoint             `json:"daily,omitempty"`
+	// The three fields below are AUTHENTICATED-only enrichment (§15.0): `source` is internal
+	// topology, and `reason` / `unavailable` are operator diagnostics. A public page states what
+	// is true about the service, never how cerbix is wired or which of its reads failed.
+	Source domain.ComponentSource `json:"source,omitempty"`
+	Reason string                 `json:"reason,omitempty"`
+	// Unavailable marks a component whose state could not be READ (invariant 71a), as opposed to
+	// one whose measurement is genuinely absent. PUBLIC: a failed read that looked like a calm
+	// value would be the quiet lie this whole phase exists to remove.
+	Unavailable bool `json:"unavailable,omitempty"`
+	// UptimeWithheld names why `uptime_90d` is absent — insufficient history, a storage gap, zero
+	// decidable time, coverage below the minimum, or facts spanning definition revisions. PUBLIC,
+	// because a missing number without its reason is indistinguishable from a number nobody
+	// bothered to compute (§11.2/§11.3).
+	UptimeWithheld string `json:"withheld_reason,omitempty"`
 }
 
 type statusPageRender struct {
-	Slug            string                     `json:"slug"`
-	Title           string                     `json:"title"`
-	Visibility      domain.Visibility          `json:"visibility"`
+	Slug       string            `json:"slug"`
+	Title      string            `json:"title"`
+	Visibility domain.Visibility `json:"visibility"`
+	// Summary is the worst MEASURED status, unchanged in name and type so every shipped client
+	// keeps parsing it. SummaryState and Unmeasured are the halves it cannot express: a page can
+	// be operational AND partly unmeasured, and those two facts must not be merged (invariant 67).
 	Summary         domain.ComponentStatus     `json:"summary"`
+	SummaryState    domain.PageSummaryState    `json:"summary_state"`
+	Unmeasured      int                        `json:"unmeasured_count"`
 	Components      []componentView            `json:"components"`
 	ActiveIncidents []incidentDetailView       `json:"active_incidents"`
 	RecentIncidents []incidentDetailView       `json:"recent_incidents"`
@@ -359,37 +396,89 @@ type incidentDetailView struct {
 func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs []domain.Incident, withPostmortem, public bool) ([]incidentDetailView, bool) {
 	ctx := r.Context()
 	out := make([]incidentDetailView, 0, len(incs))
+	if len(incs) == 0 {
+		return out, true
+	}
+	// TWO statements for the whole list, not two per incident ([318] P1-1). A page with fifty
+	// resolved incidents used to cost a hundred round trips on an unauthenticated surface.
+	ids := make([]string, 0, len(incs))
 	for _, in := range incs {
-		updates, err := h.store.ListIncidentUpdates(ctx, in.ID)
-		if err != nil {
-			h.serverError(w, "list_incident_updates", err)
+		ids = append(ids, in.ID)
+	}
+	timelines, err := h.store.IncidentTimelines(ctx, ids)
+	if err != nil {
+		h.serverError(w, "list_incident_updates", err)
+		return nil, false
+	}
+	postmortems := map[string]domain.Postmortem{}
+	if withPostmortem {
+		if postmortems, err = h.store.PostmortemsForIncidents(ctx, ids); err != nil {
+			h.serverError(w, "get_postmortem", err)
 			return nil, false
 		}
+	}
+	for _, in := range incs {
+		updates := timelines[in.ID]
 		var pm *domain.Postmortem
-		if withPostmortem {
-			if got, err := h.store.GetPostmortem(ctx, in.ID); err == nil {
-				pm = &got
-			} else if !errors.Is(err, store.ErrNotFound) {
-				h.serverError(w, "get_postmortem", err)
-				return nil, false
-			}
+		if got, ok := postmortems[in.ID]; ok {
+			pm = &got
 		}
-		// On the public endpoint, strip internal ids / actors from the incident AND its
-		// timeline updates + postmortem before they leave the server to an unauthenticated
-		// viewer (each carried its own id, incident id, and author UUID).
+		// On the public endpoint, strip internal ids / actors from the incident AND its timeline
+		// updates + postmortem before they leave the server to an unauthenticated viewer (each
+		// carried its own id, incident id, and author UUID). The updates are COPIED first: they
+		// come from a shared map now, and redacting in place would mutate what another call sees.
 		if public {
 			in = in.PublicRedacted()
-			for i := range updates {
-				updates[i] = updates[i].PublicRedacted()
+			red := make([]domain.IncidentUpdate, len(updates))
+			for i, u := range updates {
+				red[i] = u.PublicRedacted()
 			}
+			updates = red
 			if pm != nil {
-				red := pm.PublicRedacted()
-				pm = &red
+				redPM := pm.PublicRedacted()
+				pm = &redPM
 			}
 		}
 		out = append(out, incidentDetailView{Incident: in, Updates: updates, Postmortem: pm})
 	}
 	return out, true
+}
+
+// bufferedResponse captures a render so the SAME bytes can be served and shared. Computing the
+// view twice, or caching a struct a later handler could mutate, would let the two diverge.
+type bufferedResponse struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (b *bufferedResponse) Header() http.Header { return b.header }
+func (b *bufferedResponse) WriteHeader(s int)   { b.status = s }
+func (b *bufferedResponse) Write(p []byte) (int, error) {
+	return b.body.Write(p)
+}
+
+// bytesWithStatus packs the status ahead of the body, so a coalesced waiter reproduces the whole
+// response — a refusal shared as a 200 would be worse than no coalescing at all.
+func (b *bufferedResponse) bytesWithStatus() []byte {
+	out := make([]byte, 0, b.body.Len()+4)
+	out = append(out, byte(b.status>>8), byte(b.status))
+	return append(out, b.body.Bytes()...)
+}
+
+// writeBufferedResponse unpacks what the cache stored and writes it, marking a served-from-cache
+// answer so operators (and the tests) can tell the two apart.
+func writeBufferedResponse(w http.ResponseWriter, packed []byte, hit bool) {
+	status, body := http.StatusOK, packed
+	if len(packed) >= 2 {
+		status, body = int(packed[0])<<8|int(packed[1]), packed[2:]
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if hit {
+		w.Header().Set("X-Cerbix-Cache", "hit")
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 // writeStatusPageRender assembles and writes a page's public view: each
@@ -402,91 +491,77 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 		h.serverError(w, "list_components", err)
 		return
 	}
+	// The absolute fail-closed public ceiling (§15.0, invariant 71b). An unauthenticated render is
+	// the one surface an attacker can amplify for free, so above the bound the page refuses AS A
+	// WHOLE and names the numbers. A truncated subset would be worse than a refusal: it would look
+	// like a complete page that happens to be healthy. The AUTHENTICATED view keeps listing
+	// everything, so the operator can see and fix what the public page cannot serve.
+	if public && len(comps) > publicComponentHardCeiling {
+		h.logger.Error("status page exceeds the public safe limit",
+			slog.String("page", sp.ID), slog.Int("components", len(comps)),
+			slog.Int("limit", publicComponentHardCeiling))
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf(
+			"status_page_over_safe_limit: this page has %d components, above the public limit of %d",
+			len(comps), publicComponentHardCeiling))
+		return
+	}
 	now := time.Now()
 	win90, _ := sla.WindowByName("90d")
+	resolved, err := h.resolveComponents(ctx, comps, true)
+	if err != nil {
+		h.serverError(w, "resolve_components", err)
+		return
+	}
 	views := make([]componentView, 0, len(comps))
-	statuses := make([]domain.ComponentStatus, 0, len(comps))
 	projSet := map[string]struct{}{}
 	for _, c := range comps {
-		status := domain.CompOperational
-		var uptime *float64
-		var days []dayPoint
-		if c.MonitorID != "" {
-			mon, err := h.store.GetMonitor(ctx, c.MonitorID)
-			switch {
-			case errors.Is(err, store.ErrNotFound):
-				// Monitor gone (FK set null races): treat as manual/unknown.
-			case err != nil:
-				h.serverError(w, "get_monitor", err)
-				return
-			default:
-				status = domain.ComponentStatusFromMonitor(mon.Status)
-				projSet[mon.ProjectID] = struct{}{}
-				counts, err := h.store.MonitorSLI(ctx, c.MonitorID, now.Add(-win90.Duration))
-				if err != nil {
-					h.serverError(w, "monitor_sli", err)
-					return
-				}
-				u := sla.Uptime(counts.Up, counts.Total)
-				uptime = &u
-				// Per-day 90-day availability strip for a monitor-backed component.
-				rows, err := h.store.MonitorDailyAvailability(ctx, c.MonitorID, now.Add(-win90.Duration))
-				if err != nil {
-					h.serverError(w, "monitor_daily_availability", err)
-					return
-				}
-				for _, d := range rows {
-					days = append(days, dayPoint{Day: d.Day.Format("2006-01-02"), UptimePercent: d.UptimePercent, Total: d.Total})
-				}
-			}
+		res := resolved[c.ID]
+		if res.Project != "" {
+			projSet[res.Project] = struct{}{}
 		}
-		if c.ManualStatus != "" {
-			status = c.ManualStatus // explicit manual override wins
+		view := componentView{
+			ID: c.ID, Name: c.Name, Group: c.GroupName, Description: c.Description,
+			Status: res.Status, Uptime90d: res.Uptime90d, Daily: res.Daily,
 		}
-		statuses = append(statuses, status)
-		views = append(views, componentView{ID: c.ID, Name: c.Name, Group: c.GroupName, Description: c.Description, Status: status, Uptime90d: uptime, Daily: days})
+		// `unavailable` is PUBLIC (§15.0, invariant 71a): it says our own read failed, which is a
+		// statement about cerbix and not about the customer's topology. Without it, a failed read
+		// would be byte-identical to the calm "no data" — the exact confusion that invariant
+		// forbids. `withheld_reason` is public for the same reason a missing number always carries
+		// one; `source` and `reason` stay authenticated, because those describe internal wiring.
+		view.Unavailable = res.Unavailable
+		view.UptimeWithheld = res.UptimeWithheld
+		if !public {
+			view.Source = c.Source
+			view.Reason = res.Reason
+		}
+		views = append(views, view)
 	}
-	// Active incidents, resolved-incident history (last 90 days), and active or
-	// upcoming maintenance across the projects the components draw from.
-	active := make([]domain.Incident, 0)
-	recent := make([]domain.Incident, 0)
-	maints := make([]domain.MaintenanceWindow, 0)
-	historyCutoff := now.Add(-win90.Duration)
+	summary := summarize(comps, resolved)
+
+	// Active incidents, resolved-incident history (last 90 days), and active or upcoming
+	// maintenance — for ALL the page's projects in two statements and one, not per project. The
+	// per-project loop made an unauthenticated render O(projects), which is the same amplification
+	// the component projections had to remove ([318] P1-1).
+	projects := make([]string, 0, len(projSet))
 	for pid := range projSet {
-		open, err := h.store.ListOpenIncidentsByProject(ctx, pid)
-		if err != nil {
-			h.serverError(w, "list_open_incidents", err)
-			return
-		}
-		active = append(active, open...)
-		incs, err := h.store.ListIncidentsByProject(ctx, pid)
-		if err != nil {
-			h.serverError(w, "list_incidents", err)
-			return
-		}
-		for _, in := range incs {
-			if in.Status == domain.IncidentResolved && in.ResolvedAt != nil && in.ResolvedAt.After(historyCutoff) {
-				recent = append(recent, in)
-			}
-		}
-		mws, err := h.store.ListMaintenanceWindowsByProject(ctx, pid)
-		if err != nil {
-			h.serverError(w, "list_maintenance", err)
-			return
-		}
-		for _, mw := range mws {
-			// Archived windows left active inventory: a status page showing "upcoming
-			// maintenance" an operator cancelled announces downtime that will not happen.
-			if mw.ArchivedAt != nil {
-				continue
-			}
-			if mw.EndsAt.After(now) { // active or scheduled
-				maints = append(maints, mw)
-			}
-		}
+		projects = append(projects, pid)
 	}
-	sort.Slice(recent, func(i, j int) bool { return recent[i].ResolvedAt.After(*recent[j].ResolvedAt) })
-	sort.Slice(maints, func(i, j int) bool { return maints[i].StartsAt.Before(maints[j].StartsAt) })
+	sort.Strings(projects) // deterministic argument order, so two identical pages issue identical SQL
+	historyCutoff := now.Add(-win90.Duration)
+	incidents, err := h.store.IncidentsForPage(ctx, projects, historyCutoff)
+	if err != nil {
+		h.serverError(w, "page_incidents", err)
+		return
+	}
+	active, recent := incidents.Active, incidents.Recent
+	maints, err := h.store.MaintenanceForPage(ctx, projects, now)
+	if err != nil {
+		h.serverError(w, "page_maintenance", err)
+		return
+	}
+
+	// Both lists arrive ordered from SQL (resolved DESC, starts_at ASC); re-sorting here would be
+	// a second ordering owner that could drift from the one the query states.
 
 	// Enrich incidents so each can expand: active ones show their timeline
 	// (latest update inline), past ones their timeline + postmortem.
@@ -509,7 +584,9 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 		Slug:            sp.Slug,
 		Title:           sp.Title,
 		Visibility:      sp.Visibility,
-		Summary:         domain.SummaryStatus(statuses),
+		Summary:         summary.Status,
+		SummaryState:    summary.State,
+		Unmeasured:      summary.UnmeasuredCount,
 		Components:      views,
 		ActiveIncidents: activeViews,
 		RecentIncidents: recentViews,

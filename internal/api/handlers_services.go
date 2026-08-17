@@ -99,6 +99,22 @@ type serviceDetailView struct {
 	// Dependencies is the phase-3 impact-graph block (§14.4): both directions
 	// with the two-layer neighbour health from ONE batched snapshot.
 	Dependencies *serviceGraphView `json:"dependencies,omitempty"`
+	// Supersedes is the OTHER end of the phase-4 composite link (§15.5), read from the same
+	// single column `monitors.superseded_by_service_id` — there is no second fact to keep in step.
+	// A converted composite appears here at full strength: still probing, still alerting, and
+	// carrying its own retirement state so the operator sees which of the two is doing the work.
+	Supersedes []supersededMonitorView `json:"supersedes"`
+}
+
+// supersededMonitorView is a composite this service now expresses. `retired_at` is present so the
+// UI never has to infer a lifecycle from `enabled`, which an afternoon's disable also clears.
+type supersededMonitorView struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Slug      string     `json:"slug,omitempty"`
+	Type      string     `json:"type"`
+	Enabled   bool       `json:"enabled"`
+	RetiredAt *time.Time `json:"retired_at,omitempty"`
 }
 
 func (h *Handler) writeServiceError(w http.ResponseWriter, err error) bool {
@@ -309,6 +325,20 @@ func (h *Handler) getService(w http.ResponseWriter, r *http.Request) {
 		out.Dependencies = &gv
 	} else {
 		h.logEvent(r, "service_dependencies_read_failed", "error", err.Error())
+	}
+	// The composite link, presented from this end. Best-effort like the graph block above: a read
+	// failure leaves the list EMPTY and logs, because an annotation that fails to load must not
+	// take the service's real numbers down with it.
+	out.Supersedes = []supersededMonitorView{}
+	if sup, err := h.store.ListMonitorsSupersededBy(r.Context(), proj.ID, detail.Service.ID); err == nil {
+		for _, m := range sup {
+			out.Supersedes = append(out.Supersedes, supersededMonitorView{
+				ID: m.ID, Name: m.Name, Slug: m.Slug, Type: string(m.Type),
+				Enabled: m.Enabled, RetiredAt: m.RetiredAt,
+			})
+		}
+	} else {
+		h.logEvent(r, "service_supersedes_read_failed", "error", err.Error())
 	}
 	writeJSON(w, http.StatusOK, out)
 }

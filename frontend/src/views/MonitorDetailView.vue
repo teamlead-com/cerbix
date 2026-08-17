@@ -171,6 +171,11 @@ async function load() {
     }
   }
   loading.value = false;
+  // Services back the §15.5 successor picker. Loaded only when this monitor can have one, so a
+  // plain HTTP monitor's page does not pay for a list it will never show.
+  if (monitor.value && (monitor.value.type === "composite" || monitor.value.superseded_by_service_id)) {
+    await loadServices();
+  }
 }
 
 async function togglePause() {
@@ -186,6 +191,114 @@ async function togglePause() {
     pausing.value = false;
   }
 }
+// ── FR-021 §15.5: the composite lifecycle ─────────────────────────────────────────────────
+//
+// Three separate acts, on purpose. Recording a successor changes nothing; retiring changes both
+// the lifecycle statement and execution; converting builds a service and leaves the composite
+// running. Collapsing any two of them into one button is how an operator ends up stopping a
+// monitor they only meant to annotate.
+const services = ref<components["schemas"]["Service"][]>([]);
+const lifecycleBusy = ref(false);
+const lifecycleError = ref("");
+const confirmingRetire = ref(false);
+const successorChoice = ref("");
+const isComposite = computed(() => monitor.value?.type === "composite");
+const retired = computed(() => !!monitor.value?.retired_at);
+const successorName = computed(
+  () => services.value.find((sv) => sv.id === monitor.value?.superseded_by_service_id)?.name ?? "",
+);
+
+async function loadServices() {
+  if (!ws.projectId) return;
+  const res = await api.GET("/api/v1/projects/{projectID}/services", {
+    params: { path: { projectID: ws.projectId } },
+  });
+  services.value = (res.data as components["schemas"]["Service"][] | undefined) ?? [];
+}
+
+async function lifecycle(run: () => Promise<{ data?: unknown; error?: unknown }>) {
+  lifecycleBusy.value = true;
+  lifecycleError.value = "";
+  try {
+    const res = await run();
+    if (res.error || !res.data) {
+      lifecycleError.value = (res.error as { error?: string })?.error || "The action did not complete.";
+      return false;
+    }
+    return true;
+  } finally {
+    lifecycleBusy.value = false;
+  }
+}
+
+async function saveSuccessor() {
+  const ok = await lifecycle(async () => {
+    const res = await api.PUT("/api/v1/monitors/{monitorID}/successor", {
+      params: { path: { monitorID: id } },
+      body: { service_id: successorChoice.value } as never,
+    });
+    if (res.data) monitor.value = res.data;
+    return res;
+  });
+  if (ok) successorChoice.value = "";
+}
+
+async function retire() {
+  await lifecycle(async () => {
+    const res = await api.POST("/api/v1/monitors/{monitorID}/retire", { params: { path: { monitorID: id } } });
+    if (res.data) monitor.value = res.data;
+    return res;
+  });
+  confirmingRetire.value = false;
+}
+
+async function reactivate() {
+  await lifecycle(async () => {
+    const res = await api.POST("/api/v1/monitors/{monitorID}/reactivate", { params: { path: { monitorID: id } } });
+    if (res.data) monitor.value = res.data;
+    return res;
+  });
+}
+
+// The SLI is the operator's STATEMENT, never inferred (§15.5): the children are always the
+// operational context, but which of them MEASURE availability is a declaration. So the dialog
+// starts with every child pre-selected — the common intent — and requires the operator to confirm
+// it, rather than sending a selection nobody looked at.
+const convertOpen = ref(false);
+const childChoices = ref<{ id: string; name: string; chosen: boolean }[]>([]);
+const chosenSLI = computed(() => childChoices.value.filter((c) => c.chosen).map((c) => c.id));
+
+async function openConvert() {
+  lifecycleError.value = "";
+  const children = (monitor.value?.config?.children ?? "").split(",").map((c) => c.trim()).filter(Boolean);
+  if (!ws.projectId) return;
+  const res = await api.GET("/api/v1/projects/{projectID}/monitors", {
+    params: { path: { projectID: ws.projectId } },
+  });
+  const byID = new Map((res.data ?? []).map((m) => [m.id, m.name]));
+  childChoices.value = children.map((cid) => ({ id: cid, name: byID.get(cid) ?? cid, chosen: true }));
+  convertOpen.value = true;
+}
+
+async function convertToService() {
+  if (!chosenSLI.value.length) {
+    lifecycleError.value = "Choose at least one child as a reliability input.";
+    return;
+  }
+  const ok = await lifecycle(async () => {
+    const res = await api.POST("/api/v1/monitors/{monitorID}/convert-to-service", {
+      params: { path: { monitorID: id } },
+      body: { sli: chosenSLI.value },
+    });
+    if (res.data) {
+      monitor.value = (res.data as { monitor: Monitor }).monitor;
+      await loadServices();
+    }
+    return res;
+  });
+  if (ok) convertOpen.value = false;
+}
+
 async function remove() {
   deleting.value = true;
   try {
@@ -221,7 +334,13 @@ watch(
             <h1 class="font-mono text-[22px] font-semibold tracking-tight">{{ monitor.name }}</h1>
             <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ monitor.type }}</span>
             <StatusPill :status="statusPill()" />
-            <span v-if="!monitor.enabled" class="rounded-full bg-pending-weak px-[9px] py-px text-[11.5px] font-medium text-ink-3">Paused</span>
+            <!-- Retired is its OWN badge, not "Paused": conflating an afternoon's pause with
+                 "superseded forever" is the distinction §15.5 exists to keep. -->
+            <span v-if="retired" class="rounded-full border border-border px-[9px] py-px text-[11.5px] font-medium text-ink-3" data-testid="monitor-retired">Retired</span>
+            <span v-else-if="!monitor.enabled" class="rounded-full bg-pending-weak px-[9px] py-px text-[11.5px] font-medium text-ink-3">Paused</span>
+            <span v-if="monitor.superseded_by_service_id" class="rounded-full border border-border px-[9px] py-px text-[11.5px] font-medium text-ink-3" data-testid="monitor-superseded">
+              superseded by {{ successorName || "a service" }}
+            </span>
           </div>
           <div class="mt-[7px] flex flex-wrap items-center gap-x-[10px] gap-y-1 text-[13px] text-ink-3">
             <span class="font-mono text-ink-2">{{ monitor.type === "http" ? (monitor.method || "GET") + " " : "" }}{{ monitor.target || "push heartbeat" }}</span>
@@ -257,6 +376,9 @@ watch(
               <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z" /></svg>
               Edit
             </RouterLink>
+            <button v-if="isComposite && !monitor.superseded_by_service_id" type="button" class="inline-flex h-[34px] items-center rounded-sm border border-border bg-surface px-[13px] text-[13px] text-ink hover:border-accent hover:text-accent disabled:opacity-50" :disabled="lifecycleBusy" data-testid="convert-to-service" @click="openConvert">Build a service from this</button>
+            <button v-if="!retired" type="button" class="inline-flex h-[34px] items-center rounded-sm border border-border bg-surface px-[13px] text-[13px] text-ink-2 hover:border-border-strong disabled:opacity-50" :disabled="lifecycleBusy" data-testid="retire-monitor" @click="confirmingRetire = true">Retire</button>
+            <button v-else type="button" class="inline-flex h-[34px] items-center rounded-sm border border-border bg-surface px-[13px] text-[13px] text-ink hover:border-accent hover:text-accent disabled:opacity-50" :disabled="lifecycleBusy" data-testid="reactivate-monitor" @click="reactivate">Reactivate</button>
             <button type="button" class="inline-flex h-[34px] items-center rounded-sm border border-border bg-surface px-[13px] text-[13px] text-ink-2 hover:border-down/60 hover:text-down" @click="confirmingDelete = true">Delete</button>
           </template>
           <template v-else>
@@ -266,6 +388,66 @@ watch(
           </template>
         </div>
       </div>
+
+      <!-- The retire confirmation states BOTH consequences, because retiring is two facts and an
+           operator who reads only "removed from the active list" would be surprised by the second. -->
+      <div v-if="confirmingRetire" class="mb-4 rounded border border-border bg-surface-2 px-4 py-3 text-[13px]" data-testid="retire-confirm">
+        <div class="font-medium">Retire “{{ monitor?.name }}”?</div>
+        <p class="mt-1 leading-snug text-ink-2">
+          It stops probing and stops paging on-call, and it leaves the active list. Nothing is deleted —
+          its heartbeats, incidents and past numbers stay, and you can reactivate it at any time.
+        </p>
+        <div class="mt-3 flex gap-2">
+          <button type="button" class="h-[34px] rounded-sm border border-border bg-surface px-[13px] text-[13px] hover:border-border-strong disabled:opacity-50" :disabled="lifecycleBusy" data-testid="retire-confirm-yes" @click="retire">{{ lifecycleBusy ? "Retiring…" : "Retire" }}</button>
+          <button type="button" class="h-[34px] rounded-sm border border-border px-[13px] text-[13px] text-ink-2 hover:border-border-strong" @click="confirmingRetire = false">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Converting a composite: the operator states the SLI. Every child stays in the operational
+           context; the checkboxes decide which ones MEASURE availability, and unticking one changes
+           what the service's number means — so the consequence is written next to them. -->
+      <div v-if="convertOpen" class="mb-4 rounded border border-border bg-surface-2 px-4 py-3 text-[13px]" data-testid="convert-dialog">
+        <div class="font-medium">Build a service from “{{ monitor?.name }}”</div>
+        <p class="mt-1 leading-snug text-ink-2">
+          This composite keeps probing and alerting. Every child below joins the new service's
+          operational context; the ones you tick become its <b>reliability inputs</b> — what its
+          availability number is computed from.
+        </p>
+        <ul class="mt-3 flex flex-col gap-1">
+          <li v-for="c in childChoices" :key="c.id" class="flex items-center gap-2">
+            <input :id="'sli-' + c.id" v-model="c.chosen" type="checkbox" class="h-[14px] w-[14px]" :data-testid="'sli-choice'" />
+            <label :for="'sli-' + c.id" class="text-[13px]">{{ c.name }}</label>
+          </li>
+          <li v-if="!childChoices.length" class="text-[12.5px] text-ink-3">This composite has no children to declare.</li>
+        </ul>
+        <p v-if="!chosenSLI.length && childChoices.length" class="mt-2 text-[12.5px] text-degraded" data-testid="sli-empty-warning">
+          With nothing ticked the service would report no availability at all — pick at least one.
+        </p>
+        <div class="mt-3 flex gap-2">
+          <button type="button" class="h-[34px] rounded-sm border border-accent px-[13px] text-[13px] text-accent hover:bg-accent-weak disabled:opacity-50" :disabled="lifecycleBusy || !chosenSLI.length" data-testid="convert-confirm" @click="convertToService">{{ lifecycleBusy ? "Building…" : "Build the service" }}</button>
+          <button type="button" class="h-[34px] rounded-sm border border-border px-[13px] text-[13px] text-ink-2 hover:border-border-strong" @click="convertOpen = false">Cancel</button>
+        </div>
+      </div>
+
+      <!-- The composite link, from the monitor's end. It is an ANNOTATION: this block never claims
+           the monitor stopped working, because it did not. -->
+      <div v-if="monitor && (isComposite || monitor.superseded_by_service_id)" class="mb-4 rounded border border-border bg-surface px-4 py-3 text-[13px]" data-testid="successor-block">
+        <div class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Superseded by</div>
+        <p v-if="monitor.superseded_by_service_id" class="mt-2 leading-snug text-ink-2">
+          <RouterLink :to="{ name: 'service', params: { id: monitor.superseded_by_service_id } }" class="text-accent hover:underline">{{ successorName || "the linked service" }}</RouterLink>
+          now expresses what this monitor expresses. This monitor keeps probing and alerting until you retire it.
+        </p>
+        <p v-else class="mt-2 leading-snug text-ink-3">Nothing yet. Naming a successor changes nothing about this monitor — it is a note that says where the same question is now answered.</p>
+        <div v-if="canWrite && !fileManaged" class="mt-3 flex flex-wrap items-end gap-2">
+          <select v-model="successorChoice" class="h-[34px] w-[200px] rounded-sm border border-border bg-surface-2 px-3 text-[13px] outline-none focus:border-accent" data-testid="successor-select">
+            <option value="">— none —</option>
+            <option v-for="sv in services" :key="sv.id" :value="sv.id">{{ sv.name }}</option>
+          </select>
+          <button type="button" class="h-[34px] rounded-sm border border-border px-[13px] text-[13px] hover:border-accent hover:text-accent disabled:opacity-50" :disabled="lifecycleBusy" data-testid="successor-save" @click="saveSuccessor">Save</button>
+        </div>
+      </div>
+
+      <p v-if="lifecycleError" class="mb-4 text-[12.5px] text-down" data-testid="lifecycle-error">{{ lifecycleError }}</p>
 
       <div v-if="monitor?.last_probe_error_reason" data-testid="monitor-probe-error" class="mb-4 rounded border border-degraded/50 bg-degraded-weak px-4 py-3 text-[13px] text-ink-2">
         <div class="font-semibold text-degraded">Executor could not run the latest credentialed probe</div>

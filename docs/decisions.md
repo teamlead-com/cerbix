@@ -3382,3 +3382,135 @@ iter-0146 implemented, the load-bearing decisions of the service impact graph:
 Review chain: implementation round 1/2 [276] (1 P0 + 5 P1 + 1 P2, all closed), fix pass
 [281], FINAL 2/2 [283] (one residual P1 — witness scoping — closed under the [263]-delegated
 disposition recorded in iter-0146 §9; per the two-round contract no third review round ran).
+
+## D-0167 — FR-021 phase 4: the status-page service projection, `no_data`, and the composite lifecycle (iter-0150)
+
+Phase 4's §15.0/§15.5 amendment (design gate cleared [310], owner-approved mock
+`design/mock-status-projection.html`) chose, and iter-0150 implemented, the following:
+
+- **The third component source is a DISCRIMINATOR, not a second populated column.**
+  `components.source ∈ {monitor, service, manual}` decides what the line renders from; the
+  inactive binding stays DORMANT so a conversion is revertible without re-choosing what it
+  replaced. An exclusivity CHECK over "which column is set" cannot coexist with reversibility,
+  so the CHECK asserts only that the ACTIVE binding exists. Consequence: every read path must
+  branch on the discriminator — the shipped renderer branched on `monitor_id != ""` and would
+  have kept publishing the OLD monitor of a converted component, and its
+  `if ManualStatus != ""` override would have let a dormant manual status beat a live service.
+- **`no_data` is a public status that is deliberately OUTSIDE the severity ladder.** Whether
+  "we do not know" is better or worse than declared maintenance is a false comparison, so the
+  page summary is **worst-of-MEASURED plus an unmeasured COUNT** (`summary`, `summary_state`,
+  `unmeasured_count`) rather than a single ordered value. `severity()`'s unknown default moved
+  from 0 (operational) to worst-measured, so a future enum value can never silently mean fine.
+  `no_data` is never operator-settable: refused by CHECK and by both write paths.
+- **Three inherited public statements are changed on purpose (§17).** A `pending` monitor
+  component, a manual component with no status, and an EMPTY page all used to publish
+  `operational`. They now publish `no_data` / `no_data` / `summary_state: empty`. The unit tests
+  that pinned the old answers were REWRITTEN and each additionally asserts the old answer is
+  gone, so a regression fails loudly instead of passing quietly.
+- **Conversion is explicit in both directions, previewed, and structurally CAS-fenced.** Consent
+  binds `components.revision` AND `status_pages.component_generation`, the latter bumped by ANY
+  component mutation on the page — a NEIGHBOUR's edit invalidates a preview, because the preview
+  showed the page SUMMARY. Mismatch is `409 page_configuration_stale` (first committer wins);
+  confirming without the tokens is `400`. Preview and confirm share ONE validator, so a preview
+  cannot promise what the confirmation then refuses, and the preview renders through the SAME
+  resolver as the public page, so it cannot predict a page the server would not produce.
+- **Deletion is specified per case, and the refusals are typed.** An actively-bound service is
+  `RESTRICT` → a conflict naming the page and the component (`SET NULL` would be the automatic
+  conversion this decision forbids; `CASCADE` would delete a customer-visible row for an internal
+  reason). A DORMANT service binding is swept in the same transaction with both counters bumped,
+  which is what makes `RESTRICT` mean *rendered* rather than *ever mentioned*. The monitor keeps
+  its shipped `SET NULL (monitor_id)` — an inherited automatic exception, recorded as one.
+- **The page-scope rule is a DEFERRED CONSTRAINT TRIGGER on both sides.** "A project-scoped page
+  admits only that project's components" must read `status_pages`, which a CHECK cannot, and the
+  `(status_page_id, org_id)` FK proves only the org. One trigger refuses a foreign component;
+  the other refuses NARROWING a page's scope while it holds one. Deferred, so a legitimate
+  multi-statement rearrangement is judged at COMMIT on its final state.
+- **The public render is bounded in ROWS, not merely in statements.** One batched projection with
+  a constant statement count, a per-page ceiling persisted as `max(50, current)` that may only
+  SHRINK, and an absolute fail-closed public ceiling of 500 in code above which the page returns
+  `status_page_over_safe_limit` naming the count and the limit — never a truncated subset posing
+  as the whole page, while the authenticated view still lists everything.
+- **Absence carries its reason, and a failed read is not absence.** The 90-day strip is built
+  from SEALED buckets only and ends at `sealed_through`, never at "now"; `sealed_in_window`, not
+  "any fact exists", decides whether a strip is drawn; days with zero decidable time are ABSENT
+  rather than 0%. An ACTIVE service the projection cannot find degrades the component with a
+  logged, named failure (`service_unreadable`) instead of publishing the calm statement
+  `no_data`, which would present a bug as a fact.
+- **The composite stays visible and active; retiring is a separate, explicit act** (owner
+  decision). The link is ONE stored fact (`monitors.superseded_by_service_id`, tenant-composite
+  FK, `SET NULL` on service deletion) rendered from BOTH ends, so there is no pair to fall out of
+  sync. Recording it bumps no `execution_revision` — an annotation must not force a re-probe.
+  `retire` is ONE transaction setting `retired_at` (lifecycle) **and** `enabled = false`
+  (execution), with the config fence, the `state_sequence` advance that makes a queued transition
+  stale at delivery, and the epoch fan-out for every referencing service; `retired_at` alone
+  would leave a "retired" monitor probing and paging. Reversible, audited, refused for a
+  file-managed monitor. Composite→service conversion is one serialized transaction (composite
+  `FOR UPDATE` → service → declaration → link → audit), idempotent on the link column, and a slug
+  collision is a conflict naming the existing slug rather than a suffixed twin.
+- **The `quorum` translation refuses rather than approximates.** A composite states its threshold
+  as a DOWN-vote count and a service as a minimum GOOD count, so the arithmetic is
+  `degraded_min = n − M + 1`; transcribing the number would invert the meaning. A flat "M of N
+  children" is not expressible as per-region quorum plus a region rollup, so a quorum composite
+  whose children span regions is refused with a named reason. A conversion that quietly changes
+  what "down" means on a customer-facing page is worse than no conversion tool.
+- **`RetiredAt` and `SupersededByServiceID` are classified SemanticPresentation.** `RetiredAt`
+  does accompany an execution change, but `enabled` is the field that CARRIES it and is already
+  SemanticEvaluation; listing both would hash the same fact twice and would let a future path
+  that set only `retired_at` register as a semantic change while the monitor kept probing.
+
+- **The tenant rule keys on the PRESENCE OF A BINDING, and the page-scope guard holds a LOCK.**
+  Two corrections from review round 1/2 [314] that the first implementation got wrong in ways worth
+  recording: a composite FK is MATCH SIMPLE, so `(monitor_id, source_project)` with a NULL project
+  is not enforced at all — keying the CHECK on `source` therefore left a dormant foreign binding
+  unconstrained on both sides. And `DEFERRABLE INITIALLY DEFERRED` is not a lock: each transaction
+  validates at COMMIT against its OWN snapshot, so an insert and a page-narrowing could both commit
+  a state neither would have accepted. The guard takes the page row `FOR UPDATE`; the narrowing side
+  already row-locks it.
+- **Deleting a monitor that a page RENDERS is a DB-level transition.** `ON DELETE SET NULL
+  (monitor_id)` clears the binding and leaves `source='monitor'`, which the active-binding CHECK
+  rejects — so the first implementation broke an ordinary monitor delete outright. The transition
+  (source → manual, binding cleared, `source_project` kept only while another binding needs it) is a
+  `BEFORE DELETE` trigger on `monitors`, because the D-0150 project cascade deletes monitors through
+  FK actions with NO application on the path. For the same reason both counters — the page generation
+  and each component's revision — are DB-owned: "any component mutation bumps the generation" cannot
+  be application discipline while FK actions are part of the contract.
+- **The ceiling's rule is "no write may create headroom", not monotonicity.** It is LOWERED by every
+  removal and may never exceed `max(50, current count)`, which is by construction a value at which
+  an oversized page is still full. A flat no-increase rule could not express the legacy state the
+  backfill itself creates.
+- **The projection is PAGE-scoped, and the withholding rule has ONE owner.** An org-level page spans
+  projects, so a per-project batch is neither one snapshot nor a constant statement count. And
+  `uptime_90d` with its `withheld_reason` comes from `decideServiceWindow`, EXTRACTED from the
+  authenticated report so the page cannot quote what the report withholds; the page mirrors the
+  report's branch order for the no-watermark and no-SLI pre-checks. The monitor half is batched too:
+  amplification left in place is amplification claimed gone. A short-TTL render cache keyed to page +
+  access shape + unlisted token is the RATE bound the ceiling cannot provide.
+- **A failed read is PUBLICLY distinguishable and counted.** An active service the projection cannot
+  find carries `unavailable: true` on the public payload and increments
+  `cerbix_status_page_component_unreadable_total`. Bytes identical to a calm `no_data` were the
+  confusion invariant 71a exists to forbid; the marker says something about cerbix, not about the
+  customer's topology.
+- **Converting a composite REQUIRES an explicit `sli[]`, and refuses partial child loss.** §15.5 says
+  explicit confirmation and never a silent "all children", so there is no default anywhere in the
+  stack. Every live child joins the operational CONTEXT regardless. A composite whose declared
+  children are not all live is refused by name, since `all` over 2 is not `all` over 3. The quorum
+  translation is `degraded_min = n − M + 1` with `healthy_min` EQUAL to it — the exact binary mapping,
+  because a composite has two states and adding a degraded band would report more than it did on a
+  customer-facing page. Widening that vocabulary is a later owner decision with a preview.
+- **The lifecycle actions are COMPOSITE-only, and §15.1's "may MUTATE a resource" means
+  DECLARATION authority — not every column of the row.** This narrowing is the substance of the
+  [316] disposition and it is what makes the file-ownership split coherent: `retire`/`reactivate`
+  and the conversion refuse for a file-managed composite because they write `enabled` or create a
+  declaration, both of which a reapply would restate; the `superseded_by_service_id` annotation is
+  PERMITTED there because it is not in bundle format 2, enters no canonical hash or generation, and
+  cannot be contradicted by any reconcile. Refusing it would remove the only way to annotate a
+  file-managed composite while protecting nothing.
+
+Impact links stay NON-PUBLIC (phase 4 declined projecting them): a status page would publish the
+dependency graph, and that needs its own owner decision in a later phase.
+
+Review chain: round 1/2 [314] REJECTED with 2 P0 + 7 P1 + 2 P2; the disposition on the single
+contested item is [315]/[316] (split accepted, with §15.1 narrowed as above). Round 2 carries a
+direct regression for every finding — including the two-session page-scope race in both commit
+orders, the rendered-monitor delete under API and cascade, a MEASURED statement count, and
+page-versus-report agreement on the withheld reason.

@@ -104,6 +104,9 @@ type serviceDetailView struct {
 	// defaulted) when it could not be read, for the same reason `reliability` is null here: a
 	// declaration a UI renders as "pages for down" because the read failed is worse than none.
 	Alerting *serviceAlertingView `json:"alerting,omitempty"`
+	// AlertingState is that declaration's CURRENT coverage per signal (§16.1). It carries no latch,
+	// lease-owner or generation: what an operator can act on is armed/not and why.
+	AlertingState *serviceAlertingStateView `json:"alerting_state,omitempty"`
 	// Supersedes is the OTHER end of the phase-4 composite link (§15.5), read from the same
 	// single column `monitors.superseded_by_service_id` — there is no second fact to keep in step.
 	// A converted composite appears here at full strength: still probing, still alerting, and
@@ -331,6 +334,16 @@ func (h *Handler) getService(w http.ResponseWriter, r *http.Request) {
 		out.Alerting = &av
 	} else {
 		h.logEvent(r, "service_alerting_read_failed", "error", err.Error())
+	}
+	// ...and what that declaration is actually producing right now. Separate from the block above
+	// because they answer different questions: one is what was asked for, the other is whether it
+	// is replacing anything. Best-effort on the same terms — a failed read leaves it absent rather
+	// than reporting a coverage nobody measured.
+	if cs, err := h.store.ServiceAlertingState(r.Context(), proj.ID, detail.Service.ID); err == nil {
+		sv := newServiceAlertingStateView(cs)
+		out.AlertingState = &sv
+	} else {
+		h.logEvent(r, "service_alerting_state_read_failed", "error", err.Error())
 	}
 	// The phase-3 impact-graph block (§14.4). Best-effort presentation: a graph
 	// read failure degrades the block to absent rather than failing the detail.

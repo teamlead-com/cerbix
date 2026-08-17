@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -45,6 +46,36 @@ type serviceAlertingView struct {
 	PageOn             []string `json:"page_on"`
 	PageOnUnknown      bool     `json:"page_on_unknown"`
 	ConfirmEvaluations int      `json:"confirm_evaluations"`
+}
+
+// serviceSignalStateView is one signal's COVERAGE, which is a different question from the
+// declaration above: `owns_paging` says what an operator asked for, this says whether it is actually
+// replacing anything right now. Latch and lease columns are absent — `evaluated_at`, `lease_until`
+// and the reason are what an operator can act on, and a latch is not.
+type serviceSignalStateView struct {
+	Armed bool `json:"armed"`
+	// Reason names the first unsatisfied clause, from a fixed vocabulary, and is empty when armed.
+	Reason      string     `json:"reason,omitempty"`
+	EvaluatedAt *time.Time `json:"evaluated_at,omitempty"`
+	LeaseUntil  *time.Time `json:"lease_until,omitempty"`
+	LastError   string     `json:"last_error,omitempty"`
+}
+
+// serviceAlertingStateView is both signals. They are reported separately because they are armed
+// separately: a service can be replacing DOWN pages while its budget signal is held.
+type serviceAlertingStateView struct {
+	Live serviceSignalStateView `json:"live"`
+	Burn serviceSignalStateView `json:"burn"`
+}
+
+func newServiceAlertingStateView(s store.ServiceAlertingState) serviceAlertingStateView {
+	sig := func(v store.ServiceSignalState) serviceSignalStateView {
+		return serviceSignalStateView{
+			Armed: v.Armed, Reason: v.Reason,
+			EvaluatedAt: v.EvaluatedAt, LeaseUntil: v.LeaseUntil, LastError: v.LastError,
+		}
+	}
+	return serviceAlertingStateView{Live: sig(s.Live), Burn: sig(s.Burn)}
 }
 
 func newServiceAlertingView(p domain.ServiceAlertPolicy) serviceAlertingView {

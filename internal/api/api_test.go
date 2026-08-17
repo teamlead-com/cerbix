@@ -2617,6 +2617,24 @@ func (f *fakeStore) ServiceAlertPolicy(_ context.Context, projectID, serviceID s
 	return fs.alertPolicy(), nil
 }
 
+// The fake mirrors the real read's SHAPE, not its arming logic: the HTTP layer only passes it
+// through, and the agreement between a badge and the delivery gate is pinned where it lives, against
+// a real database.
+func (f *fakeStore) ServiceAlertingState(
+	_ context.Context, projectID, serviceID string,
+) (store.ServiceAlertingState, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return store.ServiceAlertingState{}, store.ErrNotFound
+	}
+	p := fs.alertPolicy()
+	live := store.ServiceSignalState{Armed: p.OwnsPaging}
+	if !p.OwnsPaging {
+		live.Reason = store.AlertReasonNotOwned
+	}
+	return store.ServiceAlertingState{Live: live, Burn: live}, nil
+}
+
 func (f *fakeStore) UpdateServiceAlertPolicy(
 	_ context.Context, projectID, serviceID string, p domain.ServiceAlertPolicy, actor store.AlertActor,
 ) (domain.ServiceAlertPolicy, error) {

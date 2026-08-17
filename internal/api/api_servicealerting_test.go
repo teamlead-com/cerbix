@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/authz"
@@ -510,5 +511,54 @@ func TestSLATargetStillRefusesBurnFields(t *testing.T) {
 	if rec := do(h, p1Editor, http.MethodPut, "/api/v1/projects/p1/services/"+id+"/sla-target",
 		`{"window":"30d","objective":99.9}`); rec.Code != http.StatusOK {
 		t.Errorf("objective-only sla-target = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The detail carries what the declaration is PRODUCING, not just what it says — and it carries no
+// server-owned field, because a read that could return a latch is a read somebody eventually sends
+// back as a write.
+func TestServiceDetailCarriesCoverageWithoutServerOwnedState(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+	id := seedAlertingService(fs, "p1", nil, false)
+
+	rec := do(h, p1Editor, http.MethodGet, "/api/v1/projects/p1/services/"+id, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		AlertingState *struct {
+			Live struct {
+				Armed       bool   `json:"armed"`
+				Reason      string `json:"reason"`
+				EvaluatedAt string `json:"evaluated_at"`
+			} `json:"live"`
+			Burn struct {
+				Armed bool `json:"armed"`
+			} `json:"burn"`
+		} `json:"alerting_state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.AlertingState == nil {
+		t.Fatal("the detail carries no coverage block")
+	}
+	if body.AlertingState.Live.Armed {
+		t.Fatalf("a service that owns no paging reported armed coverage: %+v", body.AlertingState)
+	}
+	if body.AlertingState.Live.Reason == "" {
+		t.Fatal("coverage is not armed and does not say why; `not armed` has eleven causes")
+	}
+
+	// No latch, lease-owner, generation or episode field may appear anywhere in the block.
+	raw := rec.Body.String()
+	for _, forbidden := range []string{
+		"alert_config_generation", "alert_generation", "live_firing", "emitted_state",
+		"emitted_seq", "last_verdict", "episode_id", "rule_key",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("the service detail exposes the server-owned field %q", forbidden)
+		}
 	}
 }

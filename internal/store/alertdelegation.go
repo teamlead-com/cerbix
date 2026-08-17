@@ -114,14 +114,20 @@ func (s *Store) ActiveDelegation(
 // with at least one target, or its project has at least one ENABLED notification channel. Both halves
 // are live reads: a channel disabled after arming must dis-arm immediately, which a generation stamped
 // on the service cannot see.
-const routableClause = `
-		AND (
+const routablePredicate = `(
 		    EXISTS (SELECT 1 FROM oncall_schedules os
 		             WHERE os.id = s.oncall_schedule_id AND os.project_id = s.project_id
 		               AND jsonb_array_length(os.participants) > 0)
 		    OR EXISTS (SELECT 1 FROM notification_channels nc
 		                WHERE nc.project_id = s.project_id AND nc.enabled)
 		)`
+
+// routableClause is that predicate as a WHERE conjunct. Both spellings exist so the badge read
+// (`ServiceAlertingState`) and this lookup share the PREDICATE TEXT itself rather than two copies of
+// it: a badge that decided "routable" its own way is exactly how a UI comes to say ARMED while
+// delivery says otherwise.
+const routableClause = `
+		AND ` + routablePredicate
 
 // THE definition of "the revision that governs right now", written once and shared by every arming
 // clause. Two spellings of this question is how a membership check and a revision stamp come to
@@ -195,41 +201,51 @@ const burnRuleCoversSQL = `
 // An enabled target with NO latch row at all (never evaluated, or no rules) also dis-arms: absence of
 // evidence is not coverage. The consequence is a monitor burn page that may be redundant; the
 // alternative is a burn page that never happens, and §16.1 does not trade the second for the first.
-var activeBurnDelegationSQL = `
-	SELECT s.id, s.slug, s.name
-	  FROM services s
-	 WHERE s.project_id = $2
-	   AND s.owns_paging
-	   AND EXISTS (
+// burnReplacementExistsSQL is the FIRST half of burn coverage as a standalone predicate over `s`:
+// a replacement exists at all. Named so the badge read can ask the same question in the same words.
+const burnReplacementExistsSQL = `EXISTS (
 	       SELECT 1
 	         FROM sla_targets t
 	         JOIN service_burn_alert_state bs
 	           ON bs.service_id = s.id AND bs.project_id = s.project_id AND bs.sla_target_id = t.id
 	        WHERE t.service_id = s.id AND t.burn_alert_enabled
-	          AND (` + burnRuleCoversSQL + `))
-	   AND NOT EXISTS (
+	          AND (` + burnRuleCoversSQL + `))`
+
+// burnNothingBlindSQL is the SECOND half: nothing the service owns is unable to speak. It walks the
+// rows that EXIST, and an enabled target with no row at all fails it through the LEFT JOIN.
+const burnNothingBlindSQL = `NOT EXISTS (
 	       SELECT 1
 	         FROM sla_targets t
 	         LEFT JOIN service_burn_alert_state bs
 	           ON bs.service_id = s.id AND bs.project_id = s.project_id AND bs.sla_target_id = t.id
 	        WHERE t.service_id = s.id AND t.burn_alert_enabled
-	          AND (bs.sla_target_id IS NULL OR NOT (` + burnRuleCoversSQL + `)))
-	   -- ...and a latch for EVERY declared rule, not merely for the rules that happen to have one.
-	   -- The clause above walks the rows that EXIST, so a rule declared with no row at all is
-	   -- invisible to it: adding a second rule to an armed target left coverage armed while the new
-	   -- rule had never been evaluated, and deleting one of two latch rows did the same. Cardinality
-	   -- is the honest test here because the write path rejects duplicate canonical keys and prunes
-	   -- the rows of rules that no longer exist, so a declared rule and its latch row are one to one.
-	   -- Counting is also the only spelling that does not re-implement the canonical key in SQL —
-	   -- a second owner of that format is how a latch and a page come to disagree about identity.
-	   AND NOT EXISTS (
+	          AND (bs.sla_target_id IS NULL OR NOT (` + burnRuleCoversSQL + `)))`
+
+// burnEveryRuleLatchedSQL is the THIRD: a latch for EVERY declared rule, not merely for the rules
+// that happen to have one. The clause above cannot see a rule declared with no row at all — adding a
+// second rule to an armed target left coverage armed while the new rule had never been evaluated,
+// and deleting one of two latch rows did the same. Cardinality is the honest test because the write
+// path rejects duplicate canonical keys and prunes the rows of rules that no longer exist, so a
+// declared rule and its latch row are one to one. Counting is also the only spelling that does not
+// re-implement the canonical key in SQL — a second owner of that format is how a latch and a page
+// come to disagree about identity.
+const burnEveryRuleLatchedSQL = `NOT EXISTS (
 	       SELECT 1
 	         FROM sla_targets t
 	        WHERE t.service_id = s.id AND t.burn_alert_enabled
 	          AND (SELECT count(*)
 	                 FROM service_burn_alert_state bs
 	                WHERE bs.service_id = s.id AND bs.project_id = s.project_id
-	                  AND bs.sla_target_id = t.id) <> jsonb_array_length(t.burn_rules))` +
+	                  AND bs.sla_target_id = t.id) <> jsonb_array_length(t.burn_rules))`
+
+var activeBurnDelegationSQL = `
+	SELECT s.id, s.slug, s.name
+	  FROM services s
+	 WHERE s.project_id = $2
+	   AND s.owns_paging
+	   AND ` + burnReplacementExistsSQL + `
+	   AND ` + burnNothingBlindSQL + `
+	   AND ` + burnEveryRuleLatchedSQL +
 	effectiveSLIClause + routableClause + `
 	 ORDER BY s.slug`
 

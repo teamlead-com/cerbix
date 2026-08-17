@@ -3343,6 +3343,52 @@ components:
         window: { type: string, enum: [24h, 7d, 30d, 90d], default: 30d }
         objective: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 100 }
 
+    ServiceSignalState:
+      type: object
+      description: >
+        One signal's COVERAGE right now (FR-021 §16.1). A different question from the
+        declaration: `owns_paging` says what an operator asked for, this says whether it is
+        actually replacing anything. Read from the delivery gate's own predicates, so a badge
+        rendered from it cannot disagree with what suppression decides.
+      required: [armed]
+      additionalProperties: false
+      properties:
+        armed:
+          type: boolean
+          description: >
+            True only while a replacement for THIS signal is demonstrably able to fire and reach
+            somebody. Everything ambiguous is false, because the member monitor keeps paging.
+        reason:
+          type: string
+          description: >
+            The FIRST unsatisfied clause, absent when armed. Fixed vocabulary — these are
+            rendered and they name what to do about it.
+          enum: [not_owned, policy_pages_nothing, never_evaluated, generation_changed,
+                 revision_changed, evaluation_error, stale_lease, no_enabled_target, held,
+                 rule_unevaluated, unroutable]
+        evaluated_at:
+          type: string
+          format: date-time
+          description: The last SUCCESSFUL evaluation; absent when there has never been one.
+        lease_until:
+          type: string
+          format: date-time
+          description: >
+            The DB-clock instant that verdict stops speaking for now. Freshness is the server's
+            answer and is never re-derived by a client.
+        last_error:
+          type: string
+          description: The evaluator's own message, surfaced rather than summarized.
+    ServiceAlertingState:
+      type: object
+      description: >
+        Both signals' coverage. They are reported separately because they are ARMED separately —
+        a service can be replacing DOWN pages while its budget signal is held.
+      required: [live, burn]
+      additionalProperties: false
+      properties:
+        live: { $ref: '#/components/schemas/ServiceSignalState' }
+        burn: { $ref: '#/components/schemas/ServiceSignalState' }
     ServiceAlerting:
       type: object
       description: >
@@ -3537,6 +3583,11 @@ components:
             Always null in this release. SLO, error budget and burn rate are phase 2; a zero
             a client could render as a number would be exactly the confident falsehood this
             feature exists to prevent.
+        alerting_state:
+          allOf: [ { $ref: '#/components/schemas/ServiceAlertingState' } ]
+          description: >
+            What the declaration is currently producing. Absent when the read could not be
+            served — a coverage nobody measured is not reported as absent coverage.
         alerting:
           allOf: [ { $ref: '#/components/schemas/ServiceAlerting' } ]
           description: >

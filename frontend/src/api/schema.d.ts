@@ -6469,6 +6469,33 @@ export interface components {
             window: "24h" | "7d" | "30d" | "90d";
             objective: number;
         };
+        /** @description One signal's COVERAGE right now (FR-021 §16.1). A different question from the declaration: `owns_paging` says what an operator asked for, this says whether it is actually replacing anything. Read from the delivery gate's own predicates, so a badge rendered from it cannot disagree with what suppression decides. */
+        ServiceSignalState: {
+            /** @description True only while a replacement for THIS signal is demonstrably able to fire and reach somebody. Everything ambiguous is false, because the member monitor keeps paging. */
+            armed: boolean;
+            /**
+             * @description The FIRST unsatisfied clause, absent when armed. Fixed vocabulary — these are rendered and they name what to do about it.
+             * @enum {string}
+             */
+            reason?: "not_owned" | "policy_pages_nothing" | "never_evaluated" | "generation_changed" | "revision_changed" | "evaluation_error" | "stale_lease" | "no_enabled_target" | "held" | "rule_unevaluated" | "unroutable";
+            /**
+             * Format: date-time
+             * @description The last SUCCESSFUL evaluation; absent when there has never been one.
+             */
+            evaluated_at?: string;
+            /**
+             * Format: date-time
+             * @description The DB-clock instant that verdict stops speaking for now. Freshness is the server's answer and is never re-derived by a client.
+             */
+            lease_until?: string;
+            /** @description The evaluator's own message, surfaced rather than summarized. */
+            last_error?: string;
+        };
+        /** @description Both signals' coverage. They are reported separately because they are ARMED separately — a service can be replacing DOWN pages while its budget signal is held. */
+        ServiceAlertingState: {
+            live: components["schemas"]["ServiceSignalState"];
+            burn: components["schemas"]["ServiceSignalState"];
+        };
         /** @description The paging DECLARATION of FR-021 §16.6a, and only the declaration. Latch, lease, generation and episode state have no field here by construction, so no future edit can leak one by forgetting to redact it. */
         ServiceAlerting: {
             /**
@@ -6596,6 +6623,8 @@ export interface components {
             materialization: components["schemas"]["ServiceMaterialization"];
             /** @description Always null in this release. SLO, error budget and burn rate are phase 2; a zero a client could render as a number would be exactly the confident falsehood this feature exists to prevent. */
             reliability: unknown;
+            /** @description What the declaration is currently producing. Absent when the read could not be served — a coverage nobody measured is not reported as absent coverage. */
+            alerting_state?: components["schemas"]["ServiceAlertingState"];
             /** @description The §16.6a paging declaration. ABSENT (rather than defaulted) when the alerting read degraded: a declaration a UI renders as "pages for down" because a read failed is worse than no block at all. Write it at `PATCH …/services/{serviceID}/alerting`. */
             alerting?: components["schemas"]["ServiceAlerting"];
             /** @description The phase-3 impact-graph block: both directions with batched neighbour health. Absent when the graph read degraded. */

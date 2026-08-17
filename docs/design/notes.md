@@ -203,3 +203,22 @@ Watermark numbers in the mock are coherent on purpose: a healthy service sits at
 `bucket 60s + late_arrival_grace 120s`, roughly three minutes behind `as_of`, and the detail
 screen shows that delta beside `sealed_through`. An operator needs to have seen a healthy lag
 once, or a stalled one carries no information.
+
+## FR-021 phase 3 — Service impact (design track — APPROVED 2026-08-17)
+
+Mock produced **before** any frontend code and **approved by the owner**, per the standing
+gate. Source: `docs/design/mock-service-impact.html`
+(artifact `20874f09-1c14-41b1-bcee-bc778c761ab0`). Implement 1:1 from it. Tokens and shell are
+1:1 with `mock-service-reliability.html`; the feature adds **no new colour and no new motif**
+— the impact graph is lists, pills and chips the language already has. The one new glyph is
+**🕸** on system timeline notes, joining the ⚡/⏸ idempotency-marker family (text, not colour).
+
+Four screens: Service detail — dependencies (Depends on / Depended on by with the phase-2
+two-layer health, edge count vs the 20 bound, file-pin chip, blocked 409 delete in Danger
+zone) · Edit dependencies (project-service multiselect minus self; honesty states rendered
+verbatim: cycle 400, stale `graph_generation` 409 with Reload, limit 400) · Incident — impact
+(🕸 probable-root chips with root-first "via …" paths for EVERY candidate, ranked by path
+depth in presentation only; affected chips; the 🕸 system note beside ⚡/⏸) · Incidents list —
+deliberately WITHOUT impacts (the §14.7 read bound made visible; a designed absence).
+
+The **Spec notes** toggle is again a review affordance overlaying §14 rules and does not ship.

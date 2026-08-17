@@ -1,0 +1,555 @@
+<title>Cerbix Service Impact</title>
+
+<style>
+/* ─────────────────────────────────────────────────────────────────────────────
+   Tokens — copied 1:1 from docs/design/notes.md / mock-service-reliability.html.
+   Phase 3 adds NO colour and NO new motif: the impact graph is lists, pills and
+   chips the language already has. The one new glyph is 🕸 on system notes,
+   joining the ⚡/⏸ idempotency-marker family — text, not a colour.
+   ───────────────────────────────────────────────────────────────────────── */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c;       --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f;     --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5;    --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d;  --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f;       --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64;     --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff;    --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e;  --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f;       --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64;     --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff;    --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e;  --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+/* ── base (1:1 with the approved mock) ────────────────────────────────────── */
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+a{color:inherit}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+
+.app{display:grid; grid-template-columns:240px minmax(0,1fr); min-height:100vh}
+.side{
+  position:sticky; top:0; height:100vh; align-self:start;
+  border-right:1px solid var(--border); background:var(--surface);
+  display:flex; flex-direction:column; gap:18px; padding:16px 12px;
+}
+.brand{display:flex; align-items:center; gap:9px; padding:4px 8px 0}
+.brand .wm{font-size:15px; letter-spacing:-.01em; font-weight:600}
+.switcher{
+  margin:0 4px; width:calc(100% - 8px); border:1px solid var(--border); border-radius:6px;
+  background:var(--surface-2); padding:8px 10px; display:flex; align-items:center; gap:8px; text-align:left;
+}
+.switcher:hover{border-color:var(--border-strong)}
+.switcher .ava{
+  flex:none; width:22px; height:22px; border-radius:6px; display:grid; place-items:center;
+  background:linear-gradient(135deg, var(--accent), var(--accent-2));
+  color:#fff; font-size:11px; font-weight:700;
+}
+.switcher .names{display:flex; flex-direction:column; min-width:0; line-height:1.25}
+.switcher .names b{font-size:13px; font-weight:600}
+.switcher .proj{font-size:11px; color:var(--ink-3)}
+.switcher .chev{margin-left:auto; flex:none; color:var(--ink-3)}
+.navsec{display:flex; flex-direction:column; gap:2px}
+.navsec > .lbl{padding:0 10px 6px}
+.nav{display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:6px; color:var(--ink-2); font-size:13.5px}
+.nav svg{flex:none; opacity:.85}
+.nav.on{background:var(--accent-weak); color:var(--accent); font-weight:550}
+
+.main{min-width:0; display:flex; flex-direction:column}
+.top{
+  position:sticky; top:0; z-index:20; height:56px; display:flex; align-items:center; gap:12px;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.crumb{display:flex; align-items:center; gap:8px; font-size:13.5px; color:var(--ink-3)}
+.crumb b{font-weight:550; color:var(--ink)}
+.top .spacer{flex:1}
+.tbtn{border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:12.5px; color:var(--ink-2); background:var(--surface)}
+.tbtn:hover{border-color:var(--border-strong); color:var(--ink)}
+.tbtn.on{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.avatar{width:26px; height:26px; border-radius:50%; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:11px; font-weight:600}
+
+.screens{
+  position:sticky; top:56px; z-index:19; display:flex; gap:2px; overflow-x:auto;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.screens button{
+  padding:10px 12px 9px; font-size:13px; color:var(--ink-3); border-bottom:2px solid transparent; white-space:nowrap;
+}
+.screens button:hover{color:var(--ink-2)}
+.screens button.on{color:var(--ink); border-bottom-color:var(--accent); font-weight:550}
+.screens .n{font-size:10.5px; color:var(--ink-3); margin-right:5px}
+
+.wrap{padding:22px; max-width:1180px; width:100%}
+.stack{display:flex; flex-direction:column; gap:16px}
+.row{display:flex; align-items:center; gap:10px}
+.head{display:flex; align-items:flex-start; gap:14px; flex-wrap:wrap}
+.head h1{font-size:21px; font-weight:650; letter-spacing:-.015em}
+.sub{font-size:13px; color:var(--ink-3)}
+
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow)}
+.card > header{display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card > header h2{font-size:14px; font-weight:600}
+.card > header .spacer{flex:1}
+.pad{padding:16px}
+.grid{display:grid; gap:12px}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+
+.pill{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px 0 7px; border-radius:999px; font-size:12px; font-weight:500}
+.pill .dot{width:7px; height:7px; border-radius:50%; position:relative; flex:none}
+.pill .dot::after{content:""; position:absolute; inset:0; border-radius:50%; background:inherit; animation:ping 1.9s cubic-bezier(0,0,.2,1) infinite}
+.pill:not(.up) .dot::after{display:none}
+@keyframes ping{75%,100%{transform:scale(2); opacity:0}}
+@media (prefers-reduced-motion:reduce){.pill .dot::after{display:none}}
+.pill.up{color:var(--up); background:var(--up-weak)}              .pill.up .dot{background:var(--up)}
+.pill.down{color:var(--down); background:var(--down-weak)}        .pill.down .dot{background:var(--down)}
+.pill.deg{color:var(--degraded); background:var(--degraded-weak)} .pill.deg .dot{background:var(--degraded)}
+.pill.unk{color:var(--ink-2); background:var(--pending-weak); border:1px dashed var(--border-strong)} .pill.unk .dot{background:var(--pending)}
+
+.chip{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:11.5px; color:var(--ink-2); background:var(--surface-2)}
+.chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.chip.down{border-color:var(--down); color:var(--down); background:var(--down-weak)}
+
+/* impact chips on the incident header: role + service, click → the service */
+.imp{display:inline-flex; align-items:center; gap:7px; border:1px solid var(--border); border-radius:6px; padding:4px 9px; font-size:12.5px; background:var(--surface-2)}
+.imp:hover{border-color:var(--border-strong)}
+.imp .role{font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; font-weight:600}
+.imp.root .role{color:var(--down)}
+.imp.aff .role{color:var(--degraded)}
+.imp .svc{font-weight:550}
+.imp .via{font-size:11px; color:var(--ink-3)}
+
+/* dependency rows on the service detail */
+.dep{display:flex; align-items:center; gap:10px; border:1px solid var(--border); border-radius:6px; padding:9px 12px; background:var(--surface)}
+.dep:hover{border-color:var(--border-strong)}
+.dep .nm{font-weight:550; font-size:13.5px}
+.dep .spacer{flex:1}
+.dep.ghost{border-style:dashed; color:var(--ink-3); justify-content:center; font-size:12.5px; background:transparent; box-shadow:none}
+
+/* multiselect rows in the editor */
+.mlist{display:flex; flex-direction:column; gap:6px}
+.mrow{display:flex; align-items:center; gap:9px; border:1px solid var(--border); border-radius:6px; padding:8px 10px; background:var(--surface)}
+.mrow .nm{font-size:13px}
+.mrow .spacer{flex:1}
+.mrow.sel{border-color:var(--accent); background:var(--accent-weak)}
+.mrow.off{opacity:.55}
+.cbx{width:15px; height:15px; border-radius:4px; border:1.5px solid var(--border-strong); display:grid; place-items:center; flex:none}
+.cbx.on{background:var(--accent); border-color:var(--accent); color:var(--accent-ink)}
+
+.field{display:flex; flex-direction:column; gap:6px}
+.inp{border:1px solid var(--border); border-radius:6px; background:var(--surface); padding:8px 10px; font-size:13px; color:var(--ink)}
+.hint{font-size:11.5px; color:var(--ink-3)}
+.err{
+  border:1px solid var(--down); background:var(--down-weak); color:var(--down);
+  border-radius:6px; padding:10px 12px; font-size:12.5px; display:flex; gap:9px; align-items:flex-start;
+}
+.err b{font-weight:600}
+.err .fix{margin-left:auto; flex:none; border:1px solid var(--down); border-radius:5px; padding:2px 8px; font-size:11.5px; color:var(--down); background:var(--surface)}
+.btn{border:1px solid var(--border); border-radius:6px; padding:7px 12px; font-size:13px; background:var(--surface); color:var(--ink-2)}
+.btn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:550}
+.btn.danger{border-color:var(--down); color:var(--down)}
+
+/* incident timeline (1:1 with IncidentDetailView's vocabulary) */
+.tl{display:flex; flex-direction:column}
+.tlrow{display:flex; gap:12px; padding:12px 0; border-bottom:1px solid var(--border)}
+.tlrow:last-child{border-bottom:0}
+.tlrow .t{flex:none; width:74px; font-size:11.5px; color:var(--ink-3); padding-top:2px}
+.tlrow .b{min-width:0; font-size:13px}
+.tlrow .who{font-size:11.5px; color:var(--ink-3); margin-top:3px}
+.tlrow.sys .b{color:var(--ink-2)}
+.tlrow.sys .b .sysnote{
+  border:1px solid var(--border); border-left:3px solid var(--accent); border-radius:6px;
+  background:var(--surface-2); padding:8px 11px; display:block;
+}
+
+table{width:100%; border-collapse:collapse; font-size:13px}
+.tbl-wrap{overflow-x:auto}
+th{text-align:left; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3); padding:9px 16px; border-bottom:1px solid var(--border); white-space:nowrap}
+td{padding:11px 16px; border-bottom:1px solid var(--border); vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--surface-2)}
+
+.note{
+  border:1px dashed var(--note-border); border-left-width:3px; border-left-style:solid; border-left-color:var(--note);
+  background:var(--note-bg); border-radius:6px; padding:10px 12px; font-size:12.5px; color:var(--ink-2);
+  display:flex; gap:10px; align-items:flex-start;
+}
+.note .ref{
+  flex:none; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:11px; color:var(--note);
+  border:1px solid var(--note-border); border-radius:4px; padding:1px 5px; background:var(--surface);
+}
+.note b{color:var(--ink); font-weight:600}
+body.hide-notes .note{display:none}
+
+.foot{padding:22px; border-top:1px solid var(--border); color:var(--ink-3); font-size:12.5px; max-width:1180px}
+
+@media (max-width:900px){
+  .app{grid-template-columns:1fr}
+  .side{display:none}
+  .g2{grid-template-columns:1fr}
+}
+</style>
+
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.2-2.8 7.6-7 9-4.2-1.4-7-4.8-7-9V6z"/><path d="M8.5 12.5l2.2 2.2 4.8-5"/></svg>
+      <span class="wm mono">cerbix</span>
+    </div>
+    <button class="switcher" type="button">
+      <span class="ava">G</span>
+      <span class="names">
+        <b>Globex</b>
+        <span class="proj">Payments</span>
+      </span>
+      <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 9l4 4 4-4"/></svg>
+    </button>
+    <nav class="navsec">
+      <div class="lbl">Project</div>
+      <span class="nav"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Dashboard</span>
+      <span class="nav on"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.8l8 4.2v9.9l-8 4.3-8-4.3V7z"/><path d="M4 7l8 4.3L20 7"/><path d="M12 11.3V21"/></svg>Services</span>
+      <span class="nav"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>Monitors</span>
+      <span class="nav"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l3-4 3 3 5-7"/></svg>SLA &amp; SLO</span>
+      <span class="nav"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9L2.5 18a1.7 1.7 0 001.5 2.6h16a1.7 1.7 0 001.5-2.6L13.7 3.9a1.7 1.7 0 00-3 0z"/></svg>Incidents</span>
+      <span class="nav"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>Status pages</span>
+    </nav>
+  </aside>
+
+  <div class="main">
+    <header class="top">
+      <div class="crumb">Payments <span>/</span> <b id="crumb">checkout</b></div>
+      <div class="spacer"></div>
+      <button class="tbtn on" id="notesBtn" aria-pressed="true">Spec notes</button>
+      <button class="tbtn" id="themeBtn">Theme</button>
+      <span class="avatar">SM</span>
+    </header>
+
+    <nav class="screens" id="screens" aria-label="Mocked screens"></nav>
+
+    <div class="wrap stack" id="view"></div>
+
+    <footer class="foot">
+      FR-021 <b>phase 3</b> design track · mock for approval before any frontend code ·
+      tokens from <span class="mono">docs/design/notes.md</span> · behavior follows
+      <span class="mono">func-service-reliability.md §14</span> (design APPROVED [269]).
+    </footer>
+  </div>
+</div>
+
+<script>
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const pill = (s, label) => {
+  const cls = { up: "up", down: "down", deg: "deg", unk: "unk" }[s];
+  const txt = label || { up: "Operational", down: "Down", deg: "Degraded", unk: "Unknown" }[s];
+  return `<span class="pill ${cls}"><span class="dot"></span>${esc(txt)}</span>`;
+};
+const note = (ref, html) => `<div class="note"><span class="ref">${esc(ref)}</span><div>${html}</div></div>`;
+
+/* ── screen 1: service detail — dependencies ──────────────────────────────── */
+function sDetail() {
+  return `
+  <div class="head">
+    <div>
+      <h1>checkout</h1>
+      <p class="sub">Service · <span class="mono">svc-checkout</span> · owned by UI</p>
+    </div>
+    <div class="spacer" style="flex:1"></div>
+    ${pill("deg")}
+  </div>
+
+  ${note("§14.3", `Health on this screen is the phase-2 two-layer signal, reused verbatim; the whole
+    neighbour set below is fetched as <b>ONE batched snapshot query</b> — never a per-service loop (invariant 60).`)}
+
+  <div class="grid g2">
+    <div class="card">
+      <header><h2>Depends on</h2><span class="spacer"></span><span class="chip mono">2 / 20 edges</span></header>
+      <div class="pad" style="display:flex; flex-direction:column; gap:8px">
+        <a class="dep" href="#payments">
+          <span class="nm">payments</span>
+          <span class="chip mono">svc-payments</span>
+          <span class="spacer"></span>
+          ${pill("down")}
+        </a>
+        <a class="dep" href="#redis">
+          <span class="nm">session-redis</span>
+          <span class="chip mono">svc-session-redis</span>
+          <span class="spacer"></span>
+          ${pill("up")}
+        </a>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>Depended on by</h2></header>
+      <div class="pad" style="display:flex; flex-direction:column; gap:8px">
+        <a class="dep" href="#storefront">
+          <span class="nm">storefront</span>
+          <span class="chip mono">svc-storefront</span>
+          <span class="chip">file · shop.yaml</span>
+          <span class="spacer"></span>
+          ${pill("deg")}
+        </a>
+        <div class="dep ghost">edges are declared by each dependent service's owner</div>
+      </div>
+    </div>
+  </div>
+
+  ${note("§14.2", `The <b>storefront → checkout</b> edge is declared in a bundle, so <b>checkout is pinned</b>:
+    deleting it returns 409 naming the provider until <span class="mono">shop.yaml</span> drops the slug
+    (screen 2 shows the error). Edges create no definition revision and no epoch — this card can change
+    freely without touching any sealed number (invariant 49).`)}
+
+  <div class="card">
+    <header><h2>Danger zone</h2></header>
+    <div class="pad" style="display:flex; flex-direction:column; gap:10px">
+      <div class="row">
+        <button class="btn danger">Delete service</button>
+        <span class="hint">Heartbeats and facts cascade; incident history keeps a name snapshot.</span>
+      </div>
+      <div class="err"><span>⛔</span><div><b>Blocked (409):</b> <span class="mono">storefront</span> (provider
+        <span class="mono">file:shop.yaml</span>) declares <span class="mono">depends_on: [checkout]</span>.
+        Remove the reference from the bundle, then delete.</div></div>
+    </div>
+  </div>`;
+}
+
+/* ── screen 2: edit dependencies (multiselect + honesty states) ───────────── */
+function sEdit() {
+  return `
+  <div class="head">
+    <div>
+      <h1>checkout — dependencies</h1>
+      <p class="sub">Replace-set · concurrency token <span class="mono">graph_generation 7</span></p>
+    </div>
+  </div>
+
+  ${note("§14.2", `The token is the edge set's own CAS — edges live outside definition revisions, so
+    <span class="mono">expected_revision</span> cannot protect them. A stale token is a <b>409</b>, shown below.
+    Every non-no-op save writes an audit row (actor, added, removed) in the same transaction.`)}
+
+  <div class="grid g2">
+    <div class="card">
+      <header><h2>Depends on</h2><span class="spacer"></span><span class="chip mono">2 / 20</span></header>
+      <div class="pad stack" style="gap:10px">
+        <div class="field">
+          <input class="inp" placeholder="Search services in Payments…" aria-label="Search services">
+          <span class="hint">Project services, excluding checkout itself. Max 20 direct edges.</span>
+        </div>
+        <div class="mlist">
+          <label class="mrow sel"><span class="cbx on">✓</span><span class="nm">payments</span><span class="spacer"></span>${pill("down")}</label>
+          <label class="mrow sel"><span class="cbx on">✓</span><span class="nm">session-redis</span><span class="spacer"></span>${pill("up")}</label>
+          <label class="mrow"><span class="cbx"></span><span class="nm">subscriptions</span><span class="spacer"></span>${pill("up")}</label>
+          <label class="mrow off"><span class="cbx"></span><span class="nm">storefront</span><span class="spacer"></span><span class="chip">would create a cycle</span></label>
+        </div>
+        <div class="row" style="justify-content:flex-end; gap:8px">
+          <button class="btn">Cancel</button>
+          <button class="btn pri">Save dependencies</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <header><h2>States the form must render honestly</h2></header>
+      <div class="pad stack" style="gap:10px">
+        <div class="err"><span>↻</span><div><b>Cycle (400):</b> <span class="mono">storefront → checkout →
+          storefront</span>. The graph is a DAG; pick a direction and keep it.</div></div>
+        <div class="err"><span>⏱</span><div><b>Stale set (409):</b> dependencies changed while you edited
+          (<span class="mono">graph_generation 7 ≠ 9</span>). Reload to see the current set — your edit was
+          not applied.</div><button class="fix">Reload</button></div>
+        <div class="err"><span>▤</span><div><b>Limit (400):</b> a service takes at most
+          <span class="mono">20</span> direct dependencies.</div></div>
+        ${note("§14.1", `Cycle and depth are validated under the per-project <b>service_graph lock</b>, so two
+          concurrent saves cannot compose a cycle. Depth cap 10 — the API rejects, it never truncates.`)}
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ── screen 3: incident detail — impact chips + 🕸 note ───────────────────── */
+function sIncident() {
+  return `
+  <div class="head">
+    <div>
+      <h1>checkout-http is down</h1>
+      <p class="sub"><span class="mono">INC-482</span> · auto · monitor <span class="mono">checkout-http</span> · opened 10:14:07Z</p>
+    </div>
+    <div class="spacer" style="flex:1"></div>
+    ${pill("down", "Investigating")}
+  </div>
+
+  <div class="row" style="flex-wrap:wrap; gap:8px">
+    <a class="imp root" href="#payments" title="payments → checkout">
+      <span class="role">🕸 probable root</span>
+      <span class="svc">payments</span>
+      <span class="via mono">via payments → checkout</span>
+    </a>
+    <a class="imp root" href="#pg" title="billing-db → payments → checkout">
+      <span class="role">🕸 probable root</span>
+      <span class="svc">billing-db</span>
+      <span class="via mono">via billing-db → payments → checkout</span>
+    </a>
+    <a class="imp aff" href="#storefront" title="checkout → storefront">
+      <span class="role">affected</span>
+      <span class="svc">storefront</span>
+    </a>
+  </div>
+
+  ${note("§14.3", `Chips are the structured relation, not parsed prose. <b>Every</b> impacted upstream
+    service on a path is a probable-root candidate — the relation never elects one culprit; the UI ranks by
+    path depth (nearest first is <b>payments</b>, then <b>billing-db</b>). The path is stored root-first and
+    endpoint-inclusive, so “via …” is the stored array verbatim (invariants 53, 55).`)}
+
+  <div class="card">
+    <header><h2>Timeline</h2></header>
+    <div class="pad tl">
+      <div class="tlrow">
+        <span class="t mono">10:14:07Z</span>
+        <div class="b">Opened: <b>checkout-http is down</b> — [STATUS] == 200 failed (connect timeout).
+          <div class="who">auto · impact major</div></div>
+      </div>
+      <div class="tlrow sys">
+        <span class="t mono">10:14:11Z</span>
+        <div class="b"><span class="sysnote">⚡ Context: 4 monitors of this project went down within ±5m
+          (payments-api, billing-pg, checkout-http, checkout-synthetic); dominant error: connection refused;
+          all in region core.</span><div class="who">system</div></div>
+      </div>
+      <div class="tlrow sys">
+        <span class="t mono">10:14:12Z</span>
+        <div class="b"><span class="sysnote">🕸 Impact: probable root — payments (via payments → checkout),
+          billing-db (via billing-db → payments → checkout); affected — storefront.</span>
+          <div class="who">system</div></div>
+      </div>
+      <div class="tlrow sys">
+        <span class="t mono">10:16:03Z</span>
+        <div class="b"><span class="sysnote">⏸ Suppressed: alerts muted — depends on payments-api which is down.</span>
+          <div class="who">system</div></div>
+      </div>
+    </div>
+  </div>
+
+  ${note("§14.3", `One 🕸 note per batch of <b>newly inserted</b> links: a redelivery inserts zero rows and
+    writes zero notes; a late root earns a second note — a new fact at a new time. Prose is bounded at 8 names
+    per role, then “+N more”; the chips above stay complete. The note rides its own durable outbox topic —
+    webhook death never blocks it, and its failure never blocks the alert (invariant 52).`)}`;
+}
+
+/* ── screen 4: incidents list — deliberately WITHOUT impacts ──────────────── */
+function sList() {
+  const r = (id, title, st, when, monitor) => `<tr>
+    <td class="mono">${esc(id)}</td>
+    <td><b style="font-weight:550">${esc(title)}</b><div class="hint mono">${esc(monitor)}</div></td>
+    <td>${st}</td>
+    <td class="mono">${esc(when)}</td>
+  </tr>`;
+  return `
+  <div class="head">
+    <div>
+      <h1>Incidents</h1>
+      <p class="sub">Payments · 4 open</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Incident</th><th>Status</th><th>Opened</th></tr></thead>
+        <tbody>
+          ${r("INC-480", "billing-pg is down", pill("down", "Investigating"), "10:12:41Z", "billing-pg")}
+          ${r("INC-481", "payments-api is down", pill("down", "Investigating"), "10:13:29Z", "payments-api")}
+          ${r("INC-482", "checkout-http is down", pill("down", "Investigating"), "10:14:07Z", "checkout-http")}
+          ${r("INC-483", "storefront synthetic timeout", pill("deg", "Identified"), "10:15:52Z", "storefront-synthetic")}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  ${note("§14.4 / §14.7", `This screen is mocked to show what it does <b>not</b> gain: no impact chips, no
+    per-row impact queries. The list is unbounded project history, and list × impacts is unbounded² —
+    impacts live on the incident <b>detail</b> only (invariants 59, 60). The row you click tells the story
+    one screen later, where it is bounded.`)}`;
+}
+
+/* ── shell mechanics (1:1 with the approved mock) ─────────────────────────── */
+const SCREENS = [
+  ["detail", "Service detail — dependencies", sDetail, "checkout"],
+  ["edit", "Edit dependencies", sEdit, "checkout"],
+  ["incident", "Incident — impact", sIncident, "INC-482"],
+  ["list", "Incidents list — no impacts", sList, "Incidents"],
+];
+let active = "detail";
+const nav = document.getElementById("screens");
+const view = document.getElementById("view");
+nav.innerHTML = SCREENS.map(([k, t], i) =>
+  `<button data-k="${k}" class="${k === active ? "on" : ""}"><span class="n">${i + 1}</span>${esc(t)}</button>`).join("");
+
+function render() {
+  const [, , fn, crumb] = SCREENS.find(([k]) => k === active);
+  view.innerHTML = fn();
+  document.getElementById("crumb").textContent = crumb;
+  nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.k === active));
+  window.scrollTo(0, 0);
+}
+nav.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-k]");
+  if (!b) return;
+  active = b.dataset.k;
+  render();
+});
+
+document.getElementById("themeBtn").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = getComputedStyle(root).getPropertyValue("--bg").trim() === "#0b0b0f";
+  root.setAttribute("data-theme", dark ? "light" : "dark");
+});
+
+const notesBtn = document.getElementById("notesBtn");
+notesBtn.addEventListener("click", () => {
+  const off = document.body.classList.toggle("hide-notes");
+  notesBtn.classList.toggle("on", !off);
+  notesBtn.setAttribute("aria-pressed", String(!off));
+});
+
+render();
+</script>

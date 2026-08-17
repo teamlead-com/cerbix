@@ -97,6 +97,21 @@ func TestDeletingAFiringServiceClosesItsAnnouncementOnce(t *testing.T) {
 			nulled, kept, reason, name, recipients)
 	}
 
+	// BOTH rows must be in the fenced claim class. `service_alert` is a fenced topic, and a close
+	// enqueued as legacy 'pending' would be claimable by a pre-fence binary in a rolling fleet —
+	// the ending of an announcement is exactly the row that must not be attempt-burned by a worker
+	// that cannot dispatch it.
+	var legacy int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM outbox_events
+		 WHERE topic = 'service_alert' AND NOT (status = 'pending_fenced' AND fenced)`).
+		Scan(&legacy); err != nil {
+		t.Fatalf("read outbox classes: %v", err)
+	}
+	if legacy != 0 {
+		t.Fatalf("%d service_alert rows are not in the fenced class", legacy)
+	}
+
 	// Delivery must let it through. The latch cascaded away with the service, and a close whose
 	// latch is gone is exactly the case the fence answers with ErrNotFound so the ending is still
 	// announced.

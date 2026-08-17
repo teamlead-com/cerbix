@@ -111,10 +111,12 @@ func closeServiceEpisodesTx(
 		if err != nil {
 			return 0, fmt.Errorf("store: marshal lifecycle close: %w", err)
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO outbox_events (topic, payload) VALUES ($1, $2)`,
-			domain.TopicServiceAlert, payload); err != nil {
-			return 0, fmt.Errorf("store: enqueue lifecycle close: %w", err)
+		// Through the ONE enqueue owner, never a raw INSERT: `service_alert` is a FENCED topic
+		// (§14.3), and a raw insert defaults to the legacy 'pending' class. The onset would then be
+		// invisible to pre-fence binaries while its close was claimable by one — in a rolling fleet
+		// the ending of an announcement would be the row that gets attempt-burned and dead-lettered.
+		if err := enqueueOutboxTx(ctx, tx, domain.TopicServiceAlert, payload); err != nil {
+			return 0, err
 		}
 
 		// The LEVEL follows the announcement. A latch left FIRING with no open episode would let a

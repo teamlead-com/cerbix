@@ -1369,3 +1369,72 @@ func TestServiceAlertStallMarksSchedulerNotReadyOnly(t *testing.T) {
 		t.Fatalf("a recovered evaluator did not restore readiness: %q", sched.LastError())
 	}
 }
+
+// FR-021 invariant 91 — a stalled evaluator marks the SCHEDULER not-ready, and an arm that fails
+// every cadence is the most stalled it can be.
+//
+// The earlier shape derived readiness from the last reported LAG, which only a pass that READ the
+// state can report. So an arm erroring every cadence kept the last successful pass's lag forever and
+// read as healthy — while every lease it should have refreshed expired and every service it covers
+// dis-armed. The measure is the AGE of the last success.
+func TestAPersistentlyFailingArmMarksTheSchedulerNotReady(t *testing.T) {
+	reg := metrics.New(buildinfo.Info{}, "scheduler")
+	reg.SetReady(true, "")
+	s := New(&fakeStore{}, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(reg)
+
+	now := time.Unix(1_700_000_000, 0)
+	s.now = func() time.Time { return now }
+	s.startAlertBaseline(now)
+
+	// One good pass, then failures. Inside the bound nothing is wedged: a single missed cadence is
+	// not a stall, and treating it as one would flap readiness on every transient error.
+	s.observeServiceAlertPass(serviceAlertPass{
+		signal: "health", cadence: serviceAlertEvery, lag: time.Second,
+	})
+	now = now.Add(serviceAlertEvery)
+	s.recordServiceAlertArmError("health", serviceAlertEvery)
+	if !reg.Ready() {
+		t.Fatalf("one failed cadence made the scheduler not-ready: %q", reg.LastError())
+	}
+
+	// Past the lease bound the arm has demonstrably stopped covering anything.
+	now = now.Add(serviceAlertStallThreshold(serviceAlertEvery) + time.Second)
+	s.recordServiceAlertArmError("health", serviceAlertEvery)
+	if reg.Ready() {
+		t.Fatal("an arm failing past its lease bound left the scheduler ready; every service it " +
+			"covers has dis-armed and nothing says so")
+	}
+	if !strings.Contains(reg.LastError(), "failing") {
+		t.Fatalf("the reason does not name a failing evaluator: %q", reg.LastError())
+	}
+
+	// A successful pass clears it — the stall is a statement about now, not a scar.
+	s.observeServiceAlertPass(serviceAlertPass{
+		signal: "health", cadence: serviceAlertEvery, lag: time.Second,
+	})
+	if !reg.Ready() {
+		t.Fatalf("a recovered evaluator did not restore readiness: %q", reg.LastError())
+	}
+}
+
+// The first-ever pass failing must NOT wedge a scheduler that has only just acquired the lock: it
+// has not stalled, it has started. It must still wedge once the bound has passed with no success.
+func TestAnArmThatNeverSucceedsWedgesOnlyAfterTheBound(t *testing.T) {
+	reg := metrics.New(buildinfo.Info{}, "scheduler")
+	reg.SetReady(true, "")
+	s := New(&fakeStore{}, dispatch.NewInProc(1), testLogger()).WithServiceMetrics(reg)
+
+	now := time.Unix(1_700_000_000, 0)
+	s.now = func() time.Time { return now }
+	s.startAlertBaseline(now)
+
+	s.recordServiceAlertArmError("burn", serviceBurnEvery)
+	if !reg.Ready() {
+		t.Fatalf("a first-cadence failure wedged a scheduler that had just started: %q", reg.LastError())
+	}
+	now = now.Add(serviceAlertStallThreshold(serviceBurnEvery) + time.Second)
+	s.recordServiceAlertArmError("burn", serviceBurnEvery)
+	if reg.Ready() {
+		t.Fatal("an arm that has never succeeded left the scheduler ready past its bound")
+	}
+}

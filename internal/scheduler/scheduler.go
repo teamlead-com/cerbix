@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
@@ -275,12 +276,21 @@ type Scheduler struct {
 	pullMetrics            PullStatsSink
 	serviceMetrics         ServiceStatsSink
 	statsEvery             time.Duration // test override for the stats cadence
-	leaderState            LeaderStateSink
-	confirmCh              <-chan string      // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
-	configCh               <-chan struct{}    // execution-config changes (LISTEN monitor_config_changed) → force a snapshot reload
-	reconciler             *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
-	credentialEnvelopes    bool
-	secretResolution       SecretResolutionSink
+	// alertSuccess is when each alerting arm last SUCCEEDED, and it is what makes a persistently
+	// failing evaluator visible. Readiness cannot be derived from lag alone: a pass that rolled
+	// back reports no lag at all, so an arm erroring every cadence would keep the last successful
+	// pass's lag forever and read as healthy while every lease it should refresh expired.
+	alertSuccess   map[string]time.Time
+	alertSuccessMu sync.Mutex
+	// now is the clock, injectable so a readiness test can age a stall deterministically instead
+	// of sleeping through three cadences.
+	now                 func() time.Time
+	leaderState         LeaderStateSink
+	confirmCh           <-chan string      // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
+	configCh            <-chan struct{}    // execution-config changes (LISTEN monitor_config_changed) → force a snapshot reload
+	reconciler          *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
+	credentialEnvelopes bool
+	secretResolution    SecretResolutionSink
 }
 
 // WithCredentialEnvelopes switches the scheduler to the decrypt-free snapshot plus
@@ -325,6 +335,8 @@ func New(store Store, dispatcher dispatch.Dispatcher, logger *slog.Logger) *Sche
 		retry:         5 * time.Second,
 		leaderKey:     advisoryLockKey,
 		retentionDays: defaultRetentionDays,
+		alertSuccess:  map[string]time.Time{},
+		now:           time.Now,
 	}
 }
 
@@ -461,7 +473,9 @@ func (s *Scheduler) observeServiceAlertPass(p serviceAlertPass) {
 	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "skipped", p.skipped)
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "onset", p.onsets)
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "close", p.closes)
-	s.serviceMetrics.SetServiceAlertPass(p.signal, time.Now().Unix(), p.lag.Seconds())
+	now := s.clock()
+	s.markAlertSuccess(p.signal, now)
+	s.serviceMetrics.SetServiceAlertPass(p.signal, now.Unix(), p.lag.Seconds())
 
 	threshold := serviceAlertStallThreshold(p.cadence)
 	if p.lag > threshold {
@@ -479,14 +493,69 @@ func (s *Scheduler) observeServiceAlertPass(p serviceAlertPass) {
 // items, but a slice that failed evaluated NONE of them, and an arm erroring every cadence with no
 // series moving at all would be invisible in a family that only counts successes.
 //
-// It deliberately does NOT set the stall verdict: §16.6b's readiness predicate is lag, and lag is
-// only measurable from a pass that read the state. A failed pass also wrote no lease, so every
-// affected row dis-arms on its own — the fail-open direction, where members page for themselves.
-func (s *Scheduler) recordServiceAlertArmError(signal string) {
+// It also decides readiness, which an earlier revision left to the success path alone. That was
+// wrong: lag is only measurable from a pass that READ the state, so an arm erroring every cadence
+// kept the last successful pass's lag forever and read as healthy — while every lease it should
+// have refreshed expired and every service it covers dis-armed. Invariant 91 asks for the opposite:
+// a stalled evaluator marks the scheduler not-ready.
+//
+// The measure is therefore the AGE of the last success, not the last reported lag. With no success
+// yet, it ages from when this leadership began — a process that has just acquired the lock is not
+// stalled, it is starting.
+func (s *Scheduler) recordServiceAlertArmError(signal string, cadence time.Duration) {
 	if s.serviceMetrics == nil {
 		return
 	}
 	s.serviceMetrics.RecordServiceAlertEvaluations(signal, "error", 1)
+
+	age := s.sinceAlertSuccess(signal, s.clock())
+	threshold := serviceAlertStallThreshold(cadence)
+	if age <= threshold {
+		return
+	}
+	reason := fmt.Sprintf("service %s alert evaluation failing for %ds (bound %ds)",
+		signal, int(age.Seconds()), int(threshold.Seconds()))
+	s.serviceMetrics.SetServiceAlertStalled(signal, true, reason)
+	s.logger.Warn("service_alert_evaluator_failing", "signal", signal,
+		"age_seconds", int(age.Seconds()), "bound_seconds", int(threshold.Seconds()))
+}
+
+// clock is the injectable now, so a readiness test can age a stall instead of sleeping.
+func (s *Scheduler) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// markAlertSuccess records that an arm completed a pass, and startAlertBaseline records that this
+// leadership began — the point failures age from before any pass has succeeded.
+func (s *Scheduler) markAlertSuccess(signal string, at time.Time) {
+	s.alertSuccessMu.Lock()
+	defer s.alertSuccessMu.Unlock()
+	if s.alertSuccess == nil {
+		s.alertSuccess = map[string]time.Time{}
+	}
+	s.alertSuccess[signal] = at
+}
+
+func (s *Scheduler) startAlertBaseline(at time.Time) {
+	for _, signal := range []string{"health", "burn"} {
+		s.markAlertSuccess(signal, at)
+	}
+}
+
+func (s *Scheduler) sinceAlertSuccess(signal string, now time.Time) time.Duration {
+	s.alertSuccessMu.Lock()
+	defer s.alertSuccessMu.Unlock()
+	last, ok := s.alertSuccess[signal]
+	if !ok {
+		// No baseline at all: treat it as starting now rather than as infinitely stale, so a
+		// process that has not yet run a cycle cannot declare itself wedged.
+		s.alertSuccess[signal] = now
+		return 0
+	}
+	return now.Sub(last)
 }
 
 // serviceStatsLoop samples the bounded service-reliability snapshot on its own cadence and
@@ -621,6 +690,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 		if s.serviceMetrics != nil {
 			s.serviceMetrics.SetServiceWedged(true, "service reliability state unknown (no sample yet)")
 		}
+		// The alerting arms age their failures from HERE. A process that has just acquired the
+		// lock has not stalled, it has started, and a baseline taken at the epoch would make it
+		// declare itself not-ready before its first cadence.
+		s.startAlertBaseline(s.clock())
 		s.setLeaderState(true)
 		lost := s.lead(ctx, session)
 		session.Release()
@@ -851,7 +924,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
 					ev, err := session.EvaluateServiceAlerts(c, serviceAlertEvery)
 					if err != nil {
-						s.recordServiceAlertArmError(string(domain.ServiceSignalHealth))
+						s.recordServiceAlertArmError(string(domain.ServiceSignalHealth), serviceAlertEvery)
 						s.logger.Error("service_alert_eval_failed", "error", err.Error())
 						return
 					}
@@ -878,7 +951,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
 					ev, err := session.EvaluateServiceBurnAlerts(c, serviceBurnEvery)
 					if err != nil {
-						s.recordServiceAlertArmError(string(domain.ServiceSignalBurn))
+						s.recordServiceAlertArmError(string(domain.ServiceSignalBurn), serviceBurnEvery)
 						s.logger.Error("service_burn_eval_failed", "error", err.Error())
 						return
 					}

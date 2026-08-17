@@ -2,7 +2,13 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current iteration (iter-0146 — DONE; FR-021 phase 3 changeset 1: schema/store core. Review chain [276]→[281]→[283]; the [283] residual closed under the [263]-delegated disposition, iter-0146 §9)
+## Current iteration (iter-0147 — DONE; FR-021 phase 3 changeset 2: the API surface. Review chain [288]→[290]→[292]; the [292] residual closed under the [263]-delegated disposition, iter-0147 §9)
+
+| ID | Requirement | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0147-1 | The §14.4 API surface exists on the wire: dedicated `GET/PUT …/services/{id}/dependencies` (one-snapshot read with `graph_generation`; CAS 409 `graph_generation_stale`; cycle/foreign/depth/limit as named 400s; typed actor attribution from the principal); create-with-edges through ONE atomic store path sharing the edge mutator; the service detail gains `dependencies` with neighbour health from EXACTLY ONE batched snapshot call (invariant 60, pinned by a call-count test); the authenticated incident DETAIL carries `impacts` while the shared incident model, the incident LIST and the raw unauthenticated status-page JSON carry none (invariant 59, proven over an incident that HAS links); openapi 0.20.0 + regenerated `schema.d.ts` as the contract of record; edge writes obey OWNERSHIP (a file-owned service is 409 `managed_by_file`, active or orphaned); the request contract is strict and presence-aware with ONE transport UUID fence shared by the PUT and create-with-edges; neighbour health is a CONSTANT four set-wise statements for any neighbour count (pgx tracer proof at 1 vs 30 neighbours + verdict parity with the single-service owner); a failed impact read is `impacts: null` + `impacts_unavailable`, never a lying `[]`. | DONE | [`handlers_servicegraph.go`](../internal/api/handlers_servicegraph.go), [`handlers_incidents.go`](../internal/api/handlers_incidents.go) (`authedIncidentView`), store additions (`applyServiceDependenciesTx` extraction, `CreateServiceWithDependencies`, `ServiceNeighbourHealth`); 11 regressions (6 in [`api_servicegraph_test.go`](../internal/api/api_servicegraph_test.go), 5 real-PG in the store incl. the fixed-statement-count proof and the atomic create rollback); [iter-0147](iterations/iter-0147.md); review chain [288]→[290]→[292]+§9 disposition. |
+
+## Previous iteration (iter-0146 — DONE; FR-021 phase 3 changeset 1: schema/store core. Review chain [276]→[281]→[283]; the [283] residual closed under the [263]-delegated disposition, iter-0146 §9)
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |

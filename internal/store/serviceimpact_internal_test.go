@@ -3,10 +3,14 @@ package store
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -669,5 +673,129 @@ func TestCorrelateUnrelatedServiceNeverCountsOverflow(t *testing.T) {
 	}
 	if len(links) != 0 {
 		t.Fatalf("links = %+v, want none", links)
+	}
+}
+
+// countingTracer counts pgx query executions on a connection.
+type countingTracer struct{ n int }
+
+func (t *countingTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	t.n++
+	return ctx
+}
+func (t *countingTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// The neighbour-health read issues a CONSTANT number of SQL statements
+// regardless of the neighbour count ([288] P1-2, invariant 60). The old
+// per-neighbour loop issued up to five EACH, and downstream fan-in is bounded
+// only by the project service cap — this test would have caught ~995
+// statements for one detail read.
+func TestNeighbourHealthFixedStatementCount(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	dsn := os.Getenv("CERBIX_TEST_DATABASE_DSN")
+
+	// A 30-neighbour set: one hub with many downstream dependents, each with its
+	// own declared monitor, so every neighbour has real epoch/observation inputs.
+	names := make([]string, 0, 31)
+	names = append(names, "hub")
+	for i := 0; i < 30; i++ {
+		names = append(names, fmt.Sprintf("dep%02d", i))
+	}
+	f := seedImpact(t, st, ctx, names...)
+	neighbours := make([]string, 0, 30)
+	for i := 0; i < 30; i++ {
+		n := fmt.Sprintf("dep%02d", i)
+		f.edge(t, st, ctx, n, "hub", 0)
+		neighbours = append(neighbours, f.svc[n])
+	}
+
+	measure := func(ids []string) int {
+		t.Helper()
+		cfg, err := pgxpool.ParseConfig(dsn)
+		if err != nil {
+			t.Fatalf("parse dsn: %v", err)
+		}
+		tracer := &countingTracer{}
+		cfg.ConnConfig.Tracer = tracer
+		cfg.MaxConns = 2
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			t.Fatalf("pool: %v", err)
+		}
+		defer pool.Close()
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck // read-only
+		var asOf time.Time
+		if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&asOf); err != nil {
+			t.Fatalf("clock: %v", err)
+		}
+		start := tracer.n
+		if _, err := serviceNeighbourHealthTx(ctx, tx, f.projectID, ids, asOf.UTC()); err != nil {
+			t.Fatalf("neighbour health: %v", err)
+		}
+		return tracer.n - start
+	}
+
+	one := measure(neighbours[:1])
+	thirty := measure(neighbours)
+	if one != thirty {
+		t.Fatalf("statement count grew with the neighbour set: 1 neighbour = %d, 30 neighbours = %d — this is the N+1 invariant 60 forbids", one, thirty)
+	}
+	if thirty > 6 {
+		t.Fatalf("neighbour health issued %d statements; the batched contract is four set-wise reads", thirty)
+	}
+}
+
+// The batched verdicts must be IDENTICAL to the single-service owner's
+// (serviceHealthNowTx) — one semantics owner, only the loading is batched.
+func TestNeighbourHealthMatchesSingleServiceOwner(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := seedImpact(t, st, ctx, "hub", "a", "b", "c")
+	f.edge(t, st, ctx, "a", "hub", 0)
+	f.edge(t, st, ctx, "b", "hub", 0)
+	f.edge(t, st, ctx, "c", "hub", 0)
+	// Give the set a mix: one down monitor, one up, one never-confirmed.
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET status = 'down' WHERE id = $1`, f.mon["a"]); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET status = 'up' WHERE id = $1`, f.mon["b"]); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	ids := []string{f.svc["a"], f.svc["b"], f.svc["c"]}
+	batch, err := st.ServiceNeighbourHealth(ctx, f.projectID, ids)
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	for _, id := range ids {
+		single, err := st.ServiceHealthNow(ctx, f.projectID, id)
+		if err != nil {
+			t.Fatalf("single %s: %v", id, err)
+		}
+		got := batch[id]
+		if got.SLI != single.SLI || got.Diagnostics != single.Diagnostics ||
+			!reflect.DeepEqual(got.FailingMonitors, single.FailingMonitors) {
+			t.Fatalf("service %s: batched %+v != single-owner %+v", id, got, single)
+		}
+	}
+	// A service outside the project is absent from the map, never a guessed entry.
+	org2, _ := st.CreateOrganization(ctx, "other", "Other")
+	proj2, err := st.CreateProject(ctx, org2.ID, "other", "Other")
+	if err != nil {
+		t.Fatalf("project2: %v", err)
+	}
+	alien, err := st.CreateService(ctx, domain.Service{ProjectID: proj2.ID, Slug: "alien", Name: "alien"})
+	if err != nil {
+		t.Fatalf("alien: %v", err)
+	}
+	m, err := st.ServiceNeighbourHealth(ctx, f.projectID, []string{alien.ID})
+	if err != nil {
+		t.Fatalf("foreign: %v", err)
+	}
+	if len(m) != 0 {
+		t.Fatalf("a foreign service produced a health entry: %+v", m)
 	}
 }

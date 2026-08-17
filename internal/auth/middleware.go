@@ -89,6 +89,9 @@ func (a *Authenticator) principalFromToken(ctx context.Context, presented string
 		UserID:      authz.SyntheticTokenActorPrefix + t.ID,
 		Memberships: []domain.Membership{{OrgID: t.OrgID, ProjectID: t.ProjectID, Role: t.Role}},
 		ViaToken:    true,
+		// The token's NAME is what an operator recognizes in an audit row; the id
+		// stays in UserID for the typed columns ([288] P1-3).
+		AuditLabel: "token:" + t.Name,
 	}, nil
 }
 

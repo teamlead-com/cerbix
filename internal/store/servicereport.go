@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -421,6 +422,200 @@ func (s *Store) ServiceHealthNow(ctx context.Context, projectID, serviceID strin
 		return h, err
 	}
 	return h, tx.Commit(ctx)
+}
+
+// ServiceNeighbourHealth evaluates the two-layer health of a whole neighbour
+// set in ONE report snapshot with a CONSTANT number of SQL statements (§14.4,
+// invariant 60): four set-wise reads — scope+epoch, observations, maintenance
+// spans, diagnostics — regardless of how many neighbours are asked for, then
+// the SHARED pure evaluator (reliability.StateAt, the same one
+// serviceHealthNowTx uses) applied per service. The per-neighbour loop this
+// replaces issued up to five statements EACH, and the downstream fan-in is
+// bounded only by the project service cap — 199 neighbours meant ~995
+// statements for one detail GET ([288] P1-2).
+//
+// Semantics have ONE owner: the inputs are the same four relations
+// serviceHealthNowTx reads, at the same instant, and the verdict is the same
+// pure function; only the loading is batched. A neighbour that does not exist
+// in the project is absent from the map rather than failing it.
+func (s *Store) ServiceNeighbourHealth(ctx context.Context, projectID string, serviceIDs []string) (map[string]domain.ServiceHealthNow, error) {
+	if len(serviceIDs) == 0 {
+		return map[string]domain.ServiceHealthNow{}, nil
+	}
+	tx, asOf, err := s.beginReportSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only; no-op after commit
+	out, err := serviceNeighbourHealthTx(ctx, tx, projectID, dedupe(serviceIDs), asOf)
+	if err != nil {
+		return nil, err
+	}
+	return out, tx.Commit(ctx)
+}
+
+// serviceNeighbourHealthTx is the batched body under an injectable snapshot and
+// instant (the seam the fixed-statement-count regression drives).
+func serviceNeighbourHealthTx(
+	ctx context.Context, tx pgx.Tx, projectID string, ids []string, asOf time.Time,
+) (map[string]domain.ServiceHealthNow, error) {
+	out := make(map[string]domain.ServiceHealthNow, len(ids))
+
+	// (1) Scope + the epoch in force at as_of, for every requested service at once.
+	// The LATERAL mirrors epochAt's ordering exactly, so the resolved epoch is the
+	// same row that owner would pick.
+	type svcEpoch struct {
+		members  []reliability.Member
+		policies domain.ServicePolicies
+		hasEpoch bool
+	}
+	perService := make(map[string]*svcEpoch, len(ids))
+	rows, err := tx.Query(ctx, `
+		SELECT s.id, e.id, e.snapshot, e.policies
+		  FROM services s
+		  LEFT JOIN LATERAL (
+		      SELECT ep.id, ep.snapshot, r.policies
+		        FROM service_evaluation_epochs ep
+		        JOIN service_definition_revisions r ON r.id = ep.revision_id
+		       WHERE ep.service_id = s.id AND ep.state = 'effective' AND ep.effective_at <= $3
+		       ORDER BY ep.effective_at DESC, ep.epoch_seq DESC
+		       LIMIT 1
+		  ) e ON true
+		 WHERE s.id = ANY($1) AND s.project_id = $2`, ids, projectID, asOf)
+	if err != nil {
+		return nil, fmt.Errorf("store: neighbour health scope: %w", err)
+	}
+	var allMembers []reliability.Member
+	for rows.Next() {
+		var sid string
+		var epochID *string
+		var snapshot, policyJSON []byte
+		if err := rows.Scan(&sid, &epochID, &snapshot, &policyJSON); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: scan neighbour epoch: %w", err)
+		}
+		se := &svcEpoch{}
+		perService[sid] = se
+		if epochID == nil {
+			continue
+		}
+		var snap []domain.EpochMember
+		if err := json.Unmarshal(snapshot, &snap); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: decode neighbour epoch snapshot: %w", err)
+		}
+		if err := json.Unmarshal(policyJSON, &se.policies); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: decode neighbour policies: %w", err)
+		}
+		se.hasEpoch = true
+		for _, m := range snap {
+			member := reliability.Member{
+				MonitorID:  m.MonitorID,
+				Type:       m.Semantics.Type,
+				Region:     m.Semantics.Region,
+				Enabled:    m.Semantics.Enabled,
+				StaleAfter: m.StaleAfter,
+				ArmedAt:    m.ArmedAt,
+			}
+			se.members = append(se.members, member)
+			allMembers = append(allMembers, member)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(perService) == 0 {
+		return out, nil
+	}
+
+	// (2)+(3) The evaluator inputs, once for the UNION of every neighbour's members.
+	// Extra rows are harmless: the pure evaluator indexes observations by monitor and
+	// applies a span only to the members it names (or project-wide), so a neighbour
+	// never sees another's data.
+	end := asOf.Add(time.Microsecond)
+	var observations []reliability.Observation
+	var spans []reliability.MaintenanceSpan
+	if len(allMembers) > 0 {
+		if observations, err = observationsFor(ctx, tx, allMembers, asOf, end); err != nil {
+			return nil, err
+		}
+		if spans, err = maintenanceSpansFor(ctx, tx, projectID, allMembers, asOf, end); err != nil {
+			return nil, err
+		}
+	}
+
+	// (4) Diagnostics: monitors[] current statuses for every requested service at once.
+	type diag struct {
+		failing   []string
+		members   int
+		undecided int
+	}
+	diags := make(map[string]*diag, len(perService))
+	rows, err = tx.Query(ctx, `
+		SELECT DISTINCT ref.service_id, m.name, m.status
+		  FROM service_member_refs ref
+		  JOIN monitors m ON m.id = ref.monitor_id
+		 WHERE ref.service_id = ANY($1) AND ref.project_id = $2
+		 ORDER BY ref.service_id, m.name`, ids, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: neighbour health members: %w", err)
+	}
+	for rows.Next() {
+		var sid, name, status string
+		if err := rows.Scan(&sid, &name, &status); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: scan neighbour member: %w", err)
+		}
+		d := diags[sid]
+		if d == nil {
+			d = &diag{}
+			diags[sid] = d
+		}
+		d.members++
+		switch status {
+		case string(domain.StatusDown):
+			d.failing = append(d.failing, name)
+		case string(domain.StatusUp):
+		default:
+			d.undecided++
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// The verdicts: the SAME pure evaluator and the SAME two-layer rules as
+	// serviceHealthNowTx, per service, over the batched inputs.
+	for sid, se := range perService {
+		h := domain.ServiceHealthNow{Unstable: true, AsOf: asOf, SLI: "unknown", Diagnostics: "unknown"}
+		if se.hasEpoch && len(se.members) > 0 {
+			switch reliability.StateAt(se.members, observations, spans, se.policies, asOf).Health {
+			case reliability.HealthDown:
+				h.SLI = "down"
+			case reliability.HealthDegraded:
+				h.SLI = "degraded"
+			case reliability.HealthHealthy:
+				h.SLI = "healthy"
+			}
+		}
+		if d := diags[sid]; d != nil {
+			h.FailingMonitors = d.failing
+			sort.Strings(h.FailingMonitors)
+			switch {
+			case len(h.FailingMonitors) > 0:
+				h.Diagnostics = "failing"
+			case d.undecided > 0 || d.members == 0:
+				h.Diagnostics = "unknown"
+			default:
+				h.Diagnostics = "ok"
+			}
+		}
+		out[sid] = h
+	}
+	return out, nil
 }
 
 // serviceHealthNowTx is the body under an injectable snapshot and instant — the explicit

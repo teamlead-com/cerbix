@@ -1805,9 +1805,26 @@ complete, only the prose truncates, and the truncation names its remainder.
   handler's `incidentAccess` check remains on top. The §16 negative tests cover this store
   boundary directly.
 - The service detail payload gains `dependencies: {upstream: [{service, health}],
-  downstream: [...]}` with health from the phase-2 two-layer signal — fetched as **one batched
-  snapshot query for the whole neighbour set**, never a per-service `ServiceHealthNow` loop
-  (§14.7).
+  downstream: [...]}` with health from the phase-2 two-layer signal — read in **one snapshot
+  with a CONSTANT number of set-wise statements** (scope+epoch, observations, maintenance
+  spans, diagnostics), never a per-service `ServiceHealthNow` loop (§14.7). Semantics keep
+  ONE owner: the batched read feeds the same four relations to the same pure evaluator; only
+  the loading is set-wise. *(The neighbour set is bounded by the direct-edge cap upstream but
+  by the project service cap DOWNSTREAM — a popular upstream can be depended on by every
+  other service — so "bounded by 2× the edge cap" is false and the statement count, not the
+  set size, is what the bound has to be about: [288] P1-2.)*
+- **The UI/API edge write obeys ownership** (§14.2): the replace-set path refuses a
+  file-owned service with `managed_by_file` — active or orphaned — exactly as
+  `PutServiceDeclaration` does, so a UI PUT can never overwrite a provider's applied desired
+  edges. The provider track calls the shared mutator directly under its own authority.
+- **The edge request contract is strict**: `depends_on` and `graph_generation` are both
+  REQUIRED and presence-checked (an omitted array is not an empty replace-set, an omitted
+  token is not a passing zero), `[]` is the legitimate way to clear the set, and every id in
+  the path or the body is validated at transport — a malformed uuid is a 400, never a store
+  cast that surfaces as 500.
+- **A failed impact read is disclosed, not disguised**: the authenticated detail returns
+  `impacts: null` with `impacts_unavailable: true`, because an empty array is the honest
+  statement "this incident has no links" and a degraded read must not borrow it ([288] P1-4).
 - `openapi.yaml` bump + regenerated `schema.d.ts`, per the standing contract.
 
 ### 14.5 UI (phase-3 scope: lists and badges — no visual graph)

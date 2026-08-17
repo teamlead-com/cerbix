@@ -108,7 +108,23 @@ func (h *Handler) createIncident(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
-// getIncident returns one incident.
+// authedIncidentView is the AUTHENTICATED incident detail (FR-021 §14.4):
+// the incident plus its impact links. Impacts are deliberately NOT a field of
+// domain.Incident — the public status-page serializer embeds that model and
+// redacts by reverse allowlist, so a shared field would ride into
+// unauthenticated JSON the moment one future redactor forgot it (invariant 59).
+type authedIncidentView struct {
+	domain.Incident
+	// Impacts is null — never [] — when the links could not be READ ([288] P1-4):
+	// an empty array is the honest statement "this incident has no links", and a
+	// failed read must not borrow it. impacts_unavailable says which one happened,
+	// so a client can render "unknown" instead of "none".
+	Impacts            []domain.ServiceImpactLink `json:"impacts"`
+	ImpactsUnavailable bool                       `json:"impacts_unavailable,omitempty"`
+}
+
+// getIncident returns one incident with its impact links (authenticated detail
+// only; the incident LIST carries no impacts — §14.7, invariant 60).
 func (h *Handler) getIncident(w http.ResponseWriter, r *http.Request) {
 	inc, ok := h.incidentAccess(w, r, authz.ActionProjectRead)
 	if !ok {
@@ -123,7 +139,20 @@ func (h *Handler) getIncident(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, inc)
+	out := authedIncidentView{Incident: inc, Impacts: []domain.ServiceImpactLink{}}
+	// The incident itself must still render when the impact read fails — but the
+	// failure is DISCLOSED, not disguised as "no impacts" ([288] P1-4).
+	// Tenant-scoped at the store boundary on top of incidentAccess ([276] P0-1).
+	impacts, err := h.store.ListIncidentImpacts(r.Context(), inc.ProjectID, inc.ID)
+	switch {
+	case err != nil:
+		h.logEvent(r, "incident_impacts_read_failed", "incident_id", inc.ID, "error", err.Error())
+		out.Impacts = nil
+		out.ImpactsUnavailable = true
+	case impacts != nil:
+		out.Impacts = impacts
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // listIncidentUpdates returns an incident's timeline (chronological).

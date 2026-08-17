@@ -1632,6 +1632,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/services/{serviceID}/dependencies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The service's impact-graph edges (phase 3)
+         * @description Both directions with the two-layer neighbour health (evaluated for the whole neighbour set in one snapshot) and `graph_generation` — the edge set's own concurrency token. Edges live OUTSIDE the declaration axes: reading or writing them never touches definition revisions, epochs or sealed facts (spec 14.1-14.2). The token and the sets come from one SQL snapshot, so the token always names the returned set.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ServiceGraph"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /**
+         * Replace the service's upstream dependencies (editor+)
+         * @description A replace-set under the per-project graph lock. `graph_generation` is required and CAS-checked — a stale token is 409 `graph_generation_stale` and first-committer-wins. The graph stays a same-project DAG: a cycle, a foreign service, a chain beyond 10 edges or more than 20 direct dependencies are 400s. Every non-no-op delta writes a typed-actor audit row in the same transaction; an identical set changes nothing.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PutServiceDependenciesRequest"];
+                };
+            };
+            responses: {
+                /** @description The new edge set under its new token. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ServiceGraph"];
+                    };
+                };
+                /** @description `dependency_cycle`, `dependency_not_in_project`, `dependency_depth` (chains are capped at 10 edges), `too_many_dependencies` (at most 20 direct), a missing `depends_on` (send `[]` to clear the set — omission is never a silent delete) or `graph_generation`, or a malformed UUID in the path or the array. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description `graph_generation_stale` (the set changed concurrently — reload and retry) or `managed_by_file` (a file provider owns this service; its bundle, not the UI, is where its edges are declared). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/services/{serviceID}/reliability": {
         parameters: {
             query?: never;
@@ -2667,7 +2763,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get an incident */
+        /**
+         * Get an incident (with its impact links)
+         * @description The AUTHENTICATED detail carries `impacts` — the structured incident-service links of the phase-3 impact graph (spec 14.3-14.4). The incident LIST carries no impacts, and no public or internal status-page projection does either: impacts are an authenticated-detail enrichment, never a field of the shared incident model.
+         */
         get: {
             parameters: {
                 query?: never;
@@ -2685,7 +2784,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Incident"];
+                        "application/json": components["schemas"]["AuthedIncident"];
                     };
                 };
                 404: components["responses"]["NotFound"];
@@ -5621,6 +5720,51 @@ export interface components {
             escalation_policy_id?: string;
             /** Format: uuid */
             oncall_schedule_id?: string;
+            /** @description Create-with-edges (phase 3): the service and its upstream edges commit atomically under the same validator and lock as the dependencies PUT. */
+            depends_on?: string[];
+        };
+        ServiceGraphEdge: {
+            /** Format: uuid */
+            id: string;
+            slug: string;
+            name: string;
+            /** @description The phase-2 two-layer signal, evaluated for the WHOLE neighbour set in one snapshot. Absent when the health read degraded — never a guessed pill. */
+            health?: components["schemas"]["ServiceHealthNow"] | null;
+        };
+        ServiceGraph: {
+            /**
+             * Format: int64
+             * @description The edge set's concurrency token; echo it back on PUT.
+             */
+            graph_generation: number;
+            depends_on: components["schemas"]["ServiceGraphEdge"][] | null;
+            depended_on_by: components["schemas"]["ServiceGraphEdge"][] | null;
+        };
+        PutServiceDependenciesRequest: {
+            depends_on: string[];
+            /** Format: int64 */
+            graph_generation: number;
+        };
+        ServiceImpactLink: {
+            /** Format: uuid */
+            service_id: string;
+            slug: string;
+            name: string;
+            /**
+             * @description probable_root marks EVERY upstream service on a path with an open incident — the relation records candidates, it never elects a single culprit; ranking (by path depth) is presentation.
+             * @enum {string}
+             */
+            role: "probable_root" | "affected";
+            /** @description The canonical ROOT-FIRST, endpoint-inclusive slug path (shortest, then lexicographic tie-break). The same array appears on a probable_root row and its affected counterpart; the role says which endpoint is the row's own service. */
+            path: string[];
+            /** Format: date-time */
+            computed_at: string;
+        };
+        AuthedIncident: components["schemas"]["Incident"] & {
+            /** @description The incident's impact links. An EMPTY array means "no links"; `null` with `impacts_unavailable: true` means the links could not be read — a failed read never borrows the honest empty answer. */
+            impacts: components["schemas"]["ServiceImpactLink"][] | null;
+            /** @description Present and true when the impact read degraded. */
+            impacts_unavailable?: boolean;
         };
         AggregationPolicy: {
             /** @enum {string} */
@@ -5880,6 +6024,8 @@ export interface components {
             materialization: components["schemas"]["ServiceMaterialization"];
             /** @description Always null in this release. SLO, error budget and burn rate are phase 2; a zero a client could render as a number would be exactly the confident falsehood this feature exists to prevent. */
             reliability: unknown;
+            /** @description The phase-3 impact-graph block: both directions with batched neighbour health. Absent when the graph read degraded. */
+            dependencies?: components["schemas"]["ServiceGraph"] | null;
         };
         PutDeclarationRequest: {
             /**

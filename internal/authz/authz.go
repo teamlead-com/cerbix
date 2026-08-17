@@ -67,6 +67,22 @@ type Principal struct {
 	IsGlobalAdmin bool
 	Memberships   []domain.Membership
 	ViaToken      bool
+	// AuditLabel is the TRUSTED human-readable name of the acting subject, set by
+	// the auth layer alongside the identity it authenticated: a user's email (or
+	// display name), an API token's name, or a client-credential subject. Audit
+	// rows carry it beside the typed columns so a reader sees WHO acted without
+	// resolving a uuid ([288] P1-3). Never client-supplied.
+	AuditLabel string
+}
+
+// AuditActorLabel returns the label to record for this principal, falling back
+// to the identity when the auth layer set none — an audit row is never
+// actorless, even for a path that predates the label.
+func (p Principal) AuditActorLabel() string {
+	if p.AuditLabel != "" {
+		return p.AuditLabel
+	}
+	return p.UserID
 }
 
 // SyntheticTokenActorPrefix marks a Principal.UserID that is NOT a real user uuid but a

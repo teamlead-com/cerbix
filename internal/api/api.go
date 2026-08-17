@@ -173,6 +173,12 @@ type Store interface {
 	ServiceHealthNow(ctx context.Context, projectID, serviceID string) (domain.ServiceHealthNow, error)
 	ServiceReliabilitySeries(ctx context.Context, projectID, serviceID string, from, to time.Time, step time.Duration) ([]domain.ReliabilitySeriesPoint, error)
 	UpsertServiceSLATarget(ctx context.Context, projectID, serviceID, window string, objective float64) error
+	// Service impact graph + correlation reads (FR-021 phase 3, iter-0147).
+	GetServiceDependencies(ctx context.Context, projectID, serviceID string) (store.ServiceGraphView, error)
+	ReplaceServiceDependencies(ctx context.Context, projectID, serviceID string, parents []string, expectedGeneration int64, actor store.GraphActor) (store.ServiceGraphView, error)
+	CreateServiceWithDependencies(ctx context.Context, svc domain.Service, parents []string, actor store.GraphActor) (domain.Service, error)
+	ServiceNeighbourHealth(ctx context.Context, projectID string, serviceIDs []string) (map[string]domain.ServiceHealthNow, error)
+	ListIncidentImpacts(ctx context.Context, projectID, incidentID string) ([]domain.ServiceImpactLink, error)
 
 	ListProjectSecrets(ctx context.Context, projectID string) ([]store.ProjectSecret, error)
 }
@@ -453,6 +459,8 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}", h.getService)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/declaration", h.putServiceDeclaration)
 	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/services/{serviceID}", h.deleteService)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/dependencies", h.getServiceDependencies)
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/dependencies", h.putServiceDependencies)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/reliability", h.serviceReliability)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/health", h.serviceHealth)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/reliability/series", h.serviceReliabilitySeries)

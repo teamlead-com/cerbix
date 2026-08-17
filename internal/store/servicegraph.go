@@ -138,10 +138,6 @@ func (s *Store) ReplaceServiceDependencies(
 	ctx context.Context, projectID, serviceID string, parents []string,
 	expectedGeneration int64, actor GraphActor,
 ) (ServiceGraphView, error) {
-	parents = dedupe(parents)
-	if len(parents) > domain.MaxServiceDependencies {
-		return ServiceGraphView{}, ErrServiceGraphLimit
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ServiceGraphView{}, fmt.Errorf("store: begin replace service dependencies: %w", err)
@@ -164,24 +160,58 @@ func (s *Store) ReplaceServiceDependencies(
 	if gen != expectedGeneration {
 		return ServiceGraphView{}, ErrServiceGraphStale
 	}
+	// Mutation authority is the service's OWNER (§14.2): the UI/API path may edit
+	// UI-owned edges only. Without this the PUT would silently overwrite a
+	// provider's APPLIED desired edges, and the database would stop representing
+	// the file's last-known-good — the same rule PutServiceDeclaration enforces
+	// for declarations ([288] P0). An orphaned managed service is still file-owned,
+	// and assertServiceNotFileManagedTx already blocks regardless of orphan state.
+	// The future format-2 track calls applyServiceDependenciesTx directly, under
+	// its own authority, and never through this wrapper.
+	if err := assertServiceNotFileManagedTx(ctx, tx, serviceID); err != nil {
+		return ServiceGraphView{}, err
+	}
+	if _, err := applyServiceDependenciesTx(ctx, tx, projectID, serviceID, parents, actor); err != nil {
+		return ServiceGraphView{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ServiceGraphView{}, fmt.Errorf("store: commit replace service dependencies: %w", err)
+	}
+	return s.GetServiceDependencies(ctx, projectID, serviceID)
+}
 
+// applyServiceDependenciesTx is the ONE edge mutator (§14.2): validation,
+// replace-set, generation bump and the delta audit, inside a transaction that
+// already holds the service_graph lock and the service row. The UI replace,
+// create-with-edges and the format-2 edge track all come through here. A
+// no-op (identical set) changes nothing and reports changed=false.
+func applyServiceDependenciesTx(
+	ctx context.Context, tx pgx.Tx, projectID, serviceID string, parents []string, actor GraphActor,
+) (bool, error) {
+	// Normalization and the DOMAIN cap live HERE, in the shared owner, not in each
+	// caller ([288] P2): a future format-2 caller that forgot them would
+	// duplicate-insert or exceed the bound. Transport keeps only shape rules.
+	parents = dedupe(parents)
+	if len(parents) > domain.MaxServiceDependencies {
+		return false, ErrServiceGraphLimit
+	}
 	// Current set, for the no-op decision and the audit delta.
 	current := map[string]bool{}
 	rows, err := tx.Query(ctx, `SELECT depends_on_id FROM service_dependencies WHERE service_id = $1`, serviceID)
 	if err != nil {
-		return ServiceGraphView{}, fmt.Errorf("store: read current dependencies: %w", err)
+		return false, fmt.Errorf("store: read current dependencies: %w", err)
 	}
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return ServiceGraphView{}, fmt.Errorf("store: scan current dependency: %w", err)
+			return false, fmt.Errorf("store: scan current dependency: %w", err)
 		}
 		current[id] = true
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return ServiceGraphView{}, fmt.Errorf("store: iterate current dependencies: %w", err)
+		return false, fmt.Errorf("store: iterate current dependencies: %w", err)
 	}
 	next := map[string]bool{}
 	for _, p := range parents {
@@ -198,10 +228,7 @@ func (s *Store) ReplaceServiceDependencies(
 	}
 	if noop {
 		// Identical set: no generation bump, no audit, nothing to validate.
-		if err := tx.Commit(ctx); err != nil {
-			return ServiceGraphView{}, fmt.Errorf("store: commit no-op graph write: %w", err)
-		}
-		return s.GetServiceDependencies(ctx, projectID, serviceID)
+		return false, nil
 	}
 
 	if len(parents) > 0 {
@@ -212,10 +239,10 @@ func (s *Store) ReplaceServiceDependencies(
 		if err := tx.QueryRow(ctx,
 			`SELECT count(*) FROM services WHERE project_id = $1 AND id = ANY($2) AND id <> $3`,
 			projectID, parents, serviceID).Scan(&n); err != nil {
-			return ServiceGraphView{}, fmt.Errorf("store: check dependency services: %w", err)
+			return false, fmt.Errorf("store: check dependency services: %w", err)
 		}
 		if n != len(parents) {
-			return ServiceGraphView{}, ErrServiceGraphForeign
+			return false, ErrServiceGraphForeign
 		}
 		// Cycle: the child reachable walking UP from any new parent. The capped walk
 		// is EXHAUSTIVE, not truncated: the depth invariant below holds at every
@@ -234,10 +261,10 @@ func (s *Store) ReplaceServiceDependencies(
 			)
 			SELECT EXISTS (SELECT 1 FROM anc WHERE depends_on_id = $2)`,
 			parents, serviceID, domain.ServiceGraphDepthCap).Scan(&cyclic); err != nil {
-			return ServiceGraphView{}, fmt.Errorf("store: service cycle check: %w", err)
+			return false, fmt.Errorf("store: service cycle check: %w", err)
 		}
 		if cyclic {
-			return ServiceGraphView{}, ErrServiceGraphCycle
+			return false, ErrServiceGraphCycle
 		}
 		// Depth: the longest chain THROUGH this write must stay within the cap —
 		// longest ancestor chain above any new parent, plus the new edge, plus the
@@ -255,7 +282,7 @@ func (s *Store) ReplaceServiceDependencies(
 			)
 			SELECT COALESCE(max(depth), 0) FROM up`,
 			parents, domain.ServiceGraphDepthCap).Scan(&maxUp); err != nil {
-			return ServiceGraphView{}, fmt.Errorf("store: service depth check (up): %w", err)
+			return false, fmt.Errorf("store: service depth check (up): %w", err)
 		}
 		if err := tx.QueryRow(ctx, `
 			WITH RECURSIVE down AS (
@@ -268,28 +295,28 @@ func (s *Store) ReplaceServiceDependencies(
 			)
 			SELECT COALESCE(max(depth), 0) FROM down`,
 			serviceID, domain.ServiceGraphDepthCap).Scan(&maxDown); err != nil {
-			return ServiceGraphView{}, fmt.Errorf("store: service depth check (down): %w", err)
+			return false, fmt.Errorf("store: service depth check (down): %w", err)
 		}
 		if maxUp+1+maxDown > domain.ServiceGraphDepthCap {
-			return ServiceGraphView{}, ErrServiceGraphDepth
+			return false, ErrServiceGraphDepth
 		}
 	}
 
 	if _, err := tx.Exec(ctx, `DELETE FROM service_dependencies WHERE service_id = $1`, serviceID); err != nil {
-		return ServiceGraphView{}, fmt.Errorf("store: clear service dependencies: %w", err)
+		return false, fmt.Errorf("store: clear service dependencies: %w", err)
 	}
 	for _, p := range parents {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO service_dependencies (service_id, depends_on_id, project_id, created_by)
 			SELECT $1, $2, project_id, $3 FROM services WHERE id = $1`,
 			serviceID, p, actor.Label); err != nil {
-			return ServiceGraphView{}, fmt.Errorf("store: insert service dependency: %w", err)
+			return false, fmt.Errorf("store: insert service dependency: %w", err)
 		}
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE services SET graph_generation = graph_generation + 1, updated_at = now() WHERE id = $1`,
 		serviceID); err != nil {
-		return ServiceGraphView{}, fmt.Errorf("store: bump graph generation: %w", err)
+		return false, fmt.Errorf("store: bump graph generation: %w", err)
 	}
 
 	// The delta audit, in this same transaction (§14.2). Slugs, sorted, bounded by
@@ -297,7 +324,7 @@ func (s *Store) ReplaceServiceDependencies(
 	added, removed := diffIDs(current, next)
 	slugs, err := slugsFor(ctx, tx, append(append([]string{}, added...), removed...))
 	if err != nil {
-		return ServiceGraphView{}, err
+		return false, err
 	}
 	target := "service=" + serviceID + " actor=" + actor.Label +
 		" added=[" + strings.Join(mapSlugs(added, slugs), ",") + "]" +
@@ -311,13 +338,10 @@ func (s *Store) ReplaceServiceDependencies(
 		 SELECT p.org_id, $2, $3, 'service.dependencies.replaced', $4
 		   FROM projects p WHERE p.id = $1`,
 		projectID, actorUserID, actor.ViaToken, target); err != nil {
-		return ServiceGraphView{}, fmt.Errorf("store: audit service dependencies: %w", err)
+		return false, fmt.Errorf("store: audit service dependencies: %w", err)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return ServiceGraphView{}, fmt.Errorf("store: commit replace service dependencies: %w", err)
-	}
-	return s.GetServiceDependencies(ctx, projectID, serviceID)
+	return true, nil
 }
 
 // assertServiceNotPinnedByFileEdgesTx blocks deleting a service that an applied

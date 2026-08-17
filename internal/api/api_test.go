@@ -41,6 +41,16 @@ type fakeStore struct {
 	rep *fakeReporting
 	// deleteServiceErr injects a store-level delete failure (e.g. the §14.2 file pin).
 	deleteServiceErr error
+	// FR-021 phase-3 fakes: the impact graph + correlation reads.
+	graphs               map[string]*fakeGraph
+	graphErr             error
+	impacts              map[string][]domain.ServiceImpactLink
+	impactsErr           error
+	graphActors          []store.GraphActor
+	serviceSeq           int
+	neighbourHealth      map[string]domain.ServiceHealthNow
+	neighbourHealthErr   error
+	neighbourHealthCalls int
 	// previews and sealedThrough model the retroactive-maintenance gate.
 	previews           map[string]store.MaintenancePreview
 	sealedThrough      time.Time
@@ -2093,7 +2103,11 @@ func (f *fakeStore) CreateService(_ context.Context, svc domain.Service) (domain
 			return domain.Service{}, store.ErrConflict
 		}
 	}
-	svc.ID = "svc-" + svc.Slug
+	// A REAL uuid shape: transport now validates service ids (the graph routes'
+	// 400 contract), so a fake id like "svc-checkout" would make every handler
+	// test fail at the boundary instead of exercising the handler.
+	f.serviceSeq++
+	svc.ID = fmt.Sprintf("00000000-0000-4000-8000-%012d", f.serviceSeq)
 	svc.CreatedAt, svc.UpdatedAt = time.Now().UTC(), time.Now().UTC()
 	f.serviceStore()[svc.ID] = &fakeService{svc: svc}
 	return svc, nil
@@ -2222,4 +2236,126 @@ func (f *fakeStore) UpsertServiceSLATarget(_ context.Context, projectID, service
 	r := f.reporting()
 	r.slaWindow, r.slaObj = window, objective
 	return nil
+}
+
+// ── FR-021 phase 3 fakes: the impact graph + correlation reads ──────────────
+
+func (f *fakeStore) graphStore() map[string]*fakeGraph {
+	if f.graphs == nil {
+		f.graphs = map[string]*fakeGraph{}
+	}
+	return f.graphs
+}
+
+type fakeGraph struct {
+	generation int64
+	parents    []string
+}
+
+func (f *fakeStore) GetServiceDependencies(_ context.Context, projectID, serviceID string) (store.ServiceGraphView, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return store.ServiceGraphView{}, store.ErrNotFound
+	}
+	g := f.graphStore()[serviceID]
+	v := store.ServiceGraphView{}
+	if g != nil {
+		v.GraphGeneration = g.generation
+		for _, p := range g.parents {
+			if ps, ok := f.serviceStore()[p]; ok {
+				v.DependsOn = append(v.DependsOn, store.ServiceEdge{ID: p, Slug: ps.svc.Slug, Name: ps.svc.Name})
+			}
+		}
+	}
+	for id, og := range f.graphStore() {
+		if id == serviceID {
+			continue
+		}
+		for _, p := range og.parents {
+			if p == serviceID {
+				if cs, ok := f.serviceStore()[id]; ok {
+					v.DependedOnBy = append(v.DependedOnBy, store.ServiceEdge{ID: id, Slug: cs.svc.Slug, Name: cs.svc.Name})
+				}
+			}
+		}
+	}
+	return v, nil
+}
+
+func (f *fakeStore) ReplaceServiceDependencies(_ context.Context, projectID, serviceID string, parents []string, expectedGeneration int64, actor store.GraphActor) (store.ServiceGraphView, error) {
+	f.graphActors = append(f.graphActors, actor)
+	if f.graphErr != nil {
+		return store.ServiceGraphView{}, f.graphErr
+	}
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return store.ServiceGraphView{}, store.ErrNotFound
+	}
+	g := f.graphStore()[serviceID]
+	if g == nil {
+		g = &fakeGraph{}
+		f.graphStore()[serviceID] = g
+	}
+	if g.generation != expectedGeneration {
+		return store.ServiceGraphView{}, store.ErrServiceGraphStale
+	}
+	for _, p := range parents {
+		ps, ok := f.serviceStore()[p]
+		if !ok || ps.svc.ProjectID != projectID || p == serviceID {
+			return store.ServiceGraphView{}, store.ErrServiceGraphForeign
+		}
+	}
+	g.parents = append([]string(nil), parents...)
+	g.generation++
+	return f.GetServiceDependencies(context.Background(), projectID, serviceID)
+}
+
+// CreateServiceWithDependencies models the ATOMIC store contract: the fake
+// validates the edges BEFORE the service exists, so a caller that ever commits
+// the service first would fail this fake too. (The real transactional proof is
+// the real-PG regression in the store package.)
+func (f *fakeStore) CreateServiceWithDependencies(ctx context.Context, svc domain.Service, parents []string, actor store.GraphActor) (domain.Service, error) {
+	if f.graphErr != nil {
+		return domain.Service{}, f.graphErr
+	}
+	for _, p := range parents {
+		ps, ok := f.serviceStore()[p]
+		if !ok || ps.svc.ProjectID != svc.ProjectID {
+			return domain.Service{}, store.ErrServiceGraphForeign
+		}
+	}
+	out, err := f.CreateService(ctx, svc)
+	if err != nil {
+		return domain.Service{}, err
+	}
+	if _, err := f.ReplaceServiceDependencies(ctx, svc.ProjectID, out.ID, parents, 0, actor); err != nil {
+		delete(f.serviceStore(), out.ID)
+		return domain.Service{}, err
+	}
+	return out, nil
+}
+
+func (f *fakeStore) ServiceNeighbourHealth(_ context.Context, projectID string, ids []string) (map[string]domain.ServiceHealthNow, error) {
+	f.neighbourHealthCalls++
+	if f.neighbourHealthErr != nil {
+		return nil, f.neighbourHealthErr
+	}
+	out := map[string]domain.ServiceHealthNow{}
+	for _, id := range ids {
+		if h, ok := f.neighbourHealth[id]; ok {
+			out[id] = h
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) ListIncidentImpacts(_ context.Context, projectID, incidentID string) ([]domain.ServiceImpactLink, error) {
+	if f.impactsErr != nil {
+		return nil, f.impactsErr
+	}
+	inc, ok := f.incidents[incidentID]
+	if !ok || inc.ProjectID != projectID {
+		return nil, nil // tenant-scoped: a foreign scope reads nothing
+	}
+	return f.impacts[incidentID], nil
 }

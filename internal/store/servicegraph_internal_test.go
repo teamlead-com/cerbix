@@ -514,3 +514,134 @@ func TestServiceGraphAuditActorAttribution(t *testing.T) {
 		}
 	}
 }
+
+// A file-owned service's edges are not UI-mutable ([288] P0): the UI wrapper
+// refuses with ErrServiceManagedByFile — active AND orphaned, since an orphan
+// is still the provider's last-known-good — while the internal mutator the
+// provider track uses stays available.
+func TestReplaceServiceDependenciesRefusesFileOwned(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := seedGraph(t, st, ctx, 2)
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO managed_services (service_id, provider_id, org_id, project_id, source_uid)
+		SELECT $1, 'file:shop.yaml', p.org_id, p.id, 's0' FROM projects p WHERE p.id = $2`,
+		f.svc["s0"], f.projectID); err != nil {
+		t.Fatalf("manage: %v", err)
+	}
+	for _, phase := range []string{"active", "orphaned"} {
+		if phase == "orphaned" {
+			if _, err := st.pool.Exec(ctx,
+				`UPDATE managed_services SET orphaned_at = now() WHERE service_id = $1`, f.svc["s0"]); err != nil {
+				t.Fatalf("orphan: %v", err)
+			}
+		}
+		_, err := st.ReplaceServiceDependencies(ctx, f.projectID, f.svc["s0"],
+			[]string{f.svc["s1"]}, 0, GraphActor{Label: "ui-editor"})
+		if !errors.Is(err, ErrServiceManagedByFile) {
+			t.Fatalf("%s file-owned UI write error = %v, want ErrServiceManagedByFile", phase, err)
+		}
+		var edges int
+		if err := st.pool.QueryRow(ctx,
+			`SELECT count(*) FROM service_dependencies WHERE service_id = $1`, f.svc["s0"]).Scan(&edges); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if edges != 0 {
+			t.Fatalf("%s: a refused UI write still mutated the graph (%d edges)", phase, edges)
+		}
+	}
+	// A UI-owned sibling is unaffected — the guard is per service, not per project.
+	if _, err := st.ReplaceServiceDependencies(ctx, f.projectID, f.svc["s1"],
+		[]string{f.svc["s0"]}, 0, GraphActor{Label: "ui-editor"}); err != nil {
+		t.Fatalf("UI-owned sibling write: %v", err)
+	}
+}
+
+// Create-with-edges is ATOMIC ([288] P1-5): an invalid parent leaves no
+// service, no edge, no generation residue and no audit row — proven against
+// real PG, where the fake's shape cannot stand in for a transaction.
+func TestCreateServiceWithDependenciesIsAtomic(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := seedGraph(t, st, ctx, 1)
+	org2, _ := st.CreateOrganization(ctx, "other", "Other")
+	proj2, err := st.CreateProject(ctx, org2.ID, "other", "Other")
+	if err != nil {
+		t.Fatalf("project2: %v", err)
+	}
+	alien, err := st.CreateService(ctx, domain.Service{ProjectID: proj2.ID, Slug: "alien", Name: "alien"})
+	if err != nil {
+		t.Fatalf("alien: %v", err)
+	}
+
+	before := func() (services, edges, audits int) {
+		t.Helper()
+		if err := st.pool.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM services WHERE project_id = $1),
+			       (SELECT count(*) FROM service_dependencies WHERE project_id = $1),
+			       (SELECT count(*) FROM audit_logs WHERE action = 'service.dependencies.replaced')`,
+			f.projectID).Scan(&services, &edges, &audits); err != nil {
+			t.Fatalf("counts: %v", err)
+		}
+		return services, edges, audits
+	}
+	s0, e0, a0 := before()
+
+	// (a) a foreign parent must abort the whole thing.
+	if _, err := st.CreateServiceWithDependencies(ctx,
+		domain.Service{ProjectID: f.projectID, Slug: "checkout", Name: "checkout"},
+		[]string{alien.ID}, GraphActor{Label: "t"}); !errors.Is(err, ErrServiceGraphForeign) {
+		t.Fatalf("foreign-parent create error = %v, want ErrServiceGraphForeign", err)
+	}
+	if s1, e1, a1 := before(); s1 != s0 || e1 != e0 || a1 != a0 {
+		t.Fatalf("failed create left residue: services %d→%d edges %d→%d audits %d→%d", s0, s1, e0, e1, a0, a1)
+	}
+	var orphan int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM services WHERE project_id = $1 AND slug = 'checkout'`, f.projectID).Scan(&orphan); err != nil {
+		t.Fatalf("orphan check: %v", err)
+	}
+	if orphan != 0 {
+		t.Fatal("the service row survived a failed edge validation — create-with-edges is not atomic")
+	}
+
+	// (b) the success path lands both, with the audit, in one go.
+	svc, err := st.CreateServiceWithDependencies(ctx,
+		domain.Service{ProjectID: f.projectID, Slug: "checkout", Name: "checkout"},
+		[]string{f.svc["s0"]}, GraphActor{Label: "t"})
+	if err != nil {
+		t.Fatalf("create-with-edges: %v", err)
+	}
+	v, err := st.GetServiceDependencies(ctx, f.projectID, svc.ID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(v.DependsOn) != 1 || v.GraphGeneration != 1 {
+		t.Fatalf("created state = %+v", v)
+	}
+	if s2, e2, a2 := before(); s2 != s0+1 || e2 != e0+1 || a2 != a0+1 {
+		t.Fatalf("success counts = services %d edges %d audits %d", s2, e2, a2)
+	}
+}
+
+// The domain cap lives in the SHARED mutator ([288] P2): a caller that skips
+// the wrapper's normalization still cannot exceed it, and duplicates in the
+// request collapse instead of double-inserting.
+func TestSharedMutatorNormalizesAndCaps(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := seedGraph(t, st, ctx, 2)
+	// Duplicates collapse: one edge, generation 1.
+	v, err := st.ReplaceServiceDependencies(ctx, f.projectID, f.svc["s0"],
+		[]string{f.svc["s1"], f.svc["s1"], f.svc["s1"]}, 0, GraphActor{Label: "t"})
+	if err != nil {
+		t.Fatalf("duplicate parents: %v", err)
+	}
+	if len(v.DependsOn) != 1 || v.GraphGeneration != 1 {
+		t.Fatalf("duplicates did not collapse: %+v", v)
+	}
+	// The cap is enforced inside the mutator, so create-with-edges hits it too.
+	big := seedGraphMany(t, st, ctx, f.projectID, domain.MaxServiceDependencies+1)
+	if _, err := st.CreateServiceWithDependencies(ctx,
+		domain.Service{ProjectID: f.projectID, Slug: "over-cap", Name: "over-cap"},
+		big, GraphActor{Label: "t"}); !errors.Is(err, ErrServiceGraphLimit) {
+		t.Fatalf("create-with-edges over cap = %v, want ErrServiceGraphLimit", err)
+	}
+}

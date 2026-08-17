@@ -96,6 +96,9 @@ type serviceDetailView struct {
 	// Reliability is absent in phase 1 and the field says so explicitly, rather than
 	// shipping zeros a client might render as a number.
 	Reliability *struct{} `json:"reliability"`
+	// Dependencies is the phase-3 impact-graph block (§14.4): both directions
+	// with the two-layer neighbour health from ONE batched snapshot.
+	Dependencies *serviceGraphView `json:"dependencies,omitempty"`
 }
 
 func (h *Handler) writeServiceError(w http.ResponseWriter, err error) bool {
@@ -188,6 +191,9 @@ type createServiceRequest struct {
 	Description        string `json:"description"`
 	EscalationPolicyID string `json:"escalation_policy_id"`
 	OncallScheduleID   string `json:"oncall_schedule_id"`
+	// DependsOn is create-with-edges (§14.4): the service row and its upstream
+	// edges commit atomically under the same validator and lock as the PUT.
+	DependsOn []string `json:"depends_on"`
 }
 
 // createService adds a Service with no declaration.
@@ -211,11 +217,24 @@ func (h *Handler) createService(w http.ResponseWriter, r *http.Request) {
 	if req.Name == "" {
 		req.Name = req.Slug
 	}
-	svc, err := h.store.CreateService(r.Context(), domain.Service{
+	// Create-with-edges crosses the SAME transport fence as the replace-set PUT
+	// ([292]): the shared store mutator reaches a uuid-typed query, so a malformed
+	// id here would be a 500 instead of the promised 400.
+	if !validDependsOn(w, req.DependsOn) {
+		return
+	}
+	toCreate := domain.Service{
 		ProjectID: proj.ID, Slug: req.Slug, Name: req.Name, Description: req.Description,
 		EscalationPolicyID: req.EscalationPolicyID, OncallScheduleID: req.OncallScheduleID,
-	})
-	if h.writeServiceError(w, err) {
+	}
+	var svc domain.Service
+	var err error
+	if len(req.DependsOn) > 0 {
+		svc, err = h.store.CreateServiceWithDependencies(r.Context(), toCreate, req.DependsOn, h.graphActor(r))
+	} else {
+		svc, err = h.store.CreateService(r.Context(), toCreate)
+	}
+	if h.writeServiceGraphError(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, serviceView{
@@ -282,6 +301,14 @@ func (h *Handler) getService(w http.ResponseWriter, r *http.Request) {
 			v.Cursor = &c
 		}
 		out.Materialization.Repairing = append(out.Materialization.Repairing, v)
+	}
+	// The phase-3 impact-graph block (§14.4). Best-effort presentation: a graph
+	// read failure degrades the block to absent rather than failing the detail.
+	if g, err := h.store.GetServiceDependencies(r.Context(), proj.ID, detail.Service.ID); err == nil {
+		gv := h.buildServiceGraphView(r, proj.ID, g)
+		out.Dependencies = &gv
+	} else {
+		h.logEvent(r, "service_dependencies_read_failed", "error", err.Error())
 	}
 	writeJSON(w, http.StatusOK, out)
 }

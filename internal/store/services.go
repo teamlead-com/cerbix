@@ -73,6 +73,20 @@ func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.S
 		return domain.Service{}, err
 	}
 
+	out, err := createServiceCoreTx(ctx, s, tx, svc)
+	if err != nil {
+		return domain.Service{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Service{}, fmt.Errorf("store: commit create service: %w", err)
+	}
+	return out, nil
+}
+
+// createServiceCoreTx is the shared create body (plain create and
+// create-with-edges): owner reference check, project cap, insert — inside a
+// transaction that already holds the membership lock.
+func createServiceCoreTx(ctx context.Context, s *Store, tx pgx.Tx, svc domain.Service) (domain.Service, error) {
 	// The owner is a REFERENCE to this project's routing primitives. The composite FK added
 	// in 00069 makes a cross-tenant owner impossible in the schema; this turns the resulting
 	// constraint violation into an answer the caller can act on, and takes the rows in the
@@ -103,8 +117,47 @@ func (s *Store) CreateService(ctx context.Context, svc domain.Service) (domain.S
 	if err != nil {
 		return domain.Service{}, err
 	}
+	return out, nil
+}
+
+// CreateServiceWithDependencies is create-with-edges (§14.1/§14.4): the service
+// row and its upstream edge set commit atomically, under membership→graph locks
+// in the §15.4 order, through the ONE edge mutator — a create followed by a
+// separate replace could leave a service without its declared edges when the
+// edge validation fails.
+func (s *Store) CreateServiceWithDependencies(
+	ctx context.Context, svc domain.Service, parents []string, actor GraphActor,
+) (domain.Service, error) {
+	// Normalization and the edge cap belong to the shared edge mutator ([288] P2);
+	// this path only carries the request through.
+	if svc.ProjectID == "" || svc.Name == "" {
+		return domain.Service{}, fmt.Errorf("store: service requires project_id and name")
+	}
+	if !domain.ValidServiceSlug(svc.Slug) {
+		return domain.Service{}, fmt.Errorf("store: service slug must match %s", domain.MonitorSlugPattern())
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Service{}, fmt.Errorf("store: begin create service with edges: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	if err := lockServiceMembership(ctx, tx, svc.ProjectID); err != nil {
+		return domain.Service{}, err
+	}
+	if err := lockServiceGraph(ctx, tx, svc.ProjectID); err != nil {
+		return domain.Service{}, err
+	}
+	out, err := createServiceCoreTx(ctx, s, tx, svc)
+	if err != nil {
+		return domain.Service{}, err
+	}
+	// The fresh row belongs to this transaction; no separate row lock is needed
+	// before the edge mutator.
+	if _, err := applyServiceDependenciesTx(ctx, tx, svc.ProjectID, out.ID, parents, actor); err != nil {
+		return domain.Service{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
-		return domain.Service{}, fmt.Errorf("store: commit create service: %w", err)
+		return domain.Service{}, fmt.Errorf("store: commit create service with edges: %w", err)
 	}
 	return out, nil
 }

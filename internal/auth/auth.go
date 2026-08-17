@@ -323,10 +323,18 @@ func (a *Authenticator) loadPrincipal(ctx context.Context, userID string) (authz
 	if err != nil {
 		return authz.Principal{}, err
 	}
+	// The audit label is the human-readable identity the auth layer just
+	// authenticated: email first (stable and unique), display name only as a
+	// fallback ([288] P1-3).
+	label := user.Email
+	if label == "" {
+		label = user.DisplayName
+	}
 	return authz.Principal{
 		UserID:        user.ID,
 		IsGlobalAdmin: user.IsGlobalAdmin,
 		Memberships:   memberships,
+		AuditLabel:    label,
 	}, nil
 }
 

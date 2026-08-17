@@ -87,6 +87,8 @@ type Store interface {
 	DeleteExpiredAuthFlows(ctx context.Context) (int64, error)
 	PullQueueStats(ctx context.Context) ([]metrics.PullStat, error)
 	ServiceReliabilityStats(ctx context.Context) (metrics.ServiceReliabilityStat, error)
+	EvaluateServiceAlerts(ctx context.Context, cadence time.Duration) (store.ServiceAlertEvaluation, error)
+	EvaluateServiceBurnAlerts(ctx context.Context, cadence time.Duration) (store.ServiceBurnEvaluation, error)
 }
 
 // PullStatsSink receives the leader's per-region pull-queue gauge snapshot.
@@ -170,6 +172,15 @@ const (
 	renotifyEvery = 15 * time.Second
 	// burnEvery is how often the leader evaluates SLO burn-rate alerts.
 	burnEvery = time.Minute
+	// serviceAlertEvery is the LIVE service signal's fixed cadence (FR-021 §16.3). It is passed
+	// to the evaluator rather than assumed by it, because the freshness lease is a multiple of
+	// this number: a leader that evaluated on one cadence and armed on another would either
+	// dis-arm a healthy evaluator or keep coverage armed after it stopped.
+	serviceAlertEvery = 30 * time.Second
+	// serviceBurnEvery is the SEALED service signal's cadence. It trails the seal watermark by
+	// construction (§16.4), so evaluating it faster than facts are sealed buys nothing; it shares
+	// the minute the monitor burn path already uses.
+	serviceBurnEvery = time.Minute
 	// reportEvery is how often the leader checks for due weekly SLA reports (the
 	// 7-day watermark gates the actual send).
 	reportEvery = time.Hour
@@ -577,7 +588,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 	// signal — a recovery stops the signals, so acceleration decays on its own;
 	// the snapshot refresh prunes it authoritatively).
 	confirmFast := map[string]time.Time{}
-	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk, lastServiceSlice time.Time
+	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk, lastServiceSlice, lastServiceAlert, lastServiceBurn time.Time
 	ticker := time.NewTicker(s.tick)
 	defer ticker.Stop()
 	for {
@@ -725,6 +736,43 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						s.logger.Error("burn_eval_failed", "error", err.Error())
 					} else if fired > 0 || resolved > 0 {
 						s.logger.Info("burn_alerts_evaluated", "fired", fired, "resolved", resolved)
+					}
+				})
+			}
+			// FR-021 §16.3/§16.4. Both arms are LEADER-ONLY and session-fenced: `session != nil`
+			// is the same guard the service slices use, because an evaluation writes the arming
+			// state that silences other people's alerts, and a deposed leader must not.
+			if session != nil && (lastServiceAlert.IsZero() || now.Sub(lastServiceAlert) >= serviceAlertEvery) {
+				lastServiceAlert = now
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					ev, err := s.store.EvaluateServiceAlerts(c, serviceAlertEvery)
+					if err != nil {
+						s.logger.Error("service_alert_eval_failed", "error", err.Error())
+						return
+					}
+					// Logged whenever anything happened OR anything is behind: a stalled evaluator
+					// has to read as lag rather than as an absence of alerts, which is
+					// indistinguishable from "nothing is wrong" (§16.7).
+					if ev.Onsets > 0 || ev.Closes > 0 || ev.Errors > 0 || ev.Lag > serviceAlertEvery {
+						s.logger.Info("service_alerts_evaluated", "evaluated", ev.Evaluated,
+							"onsets", ev.Onsets, "closes", ev.Closes, "errors", ev.Errors,
+							"lag_seconds", int(ev.Lag.Seconds()))
+					}
+				})
+			}
+			if session != nil && (lastServiceBurn.IsZero() || now.Sub(lastServiceBurn) >= serviceBurnEvery) {
+				lastServiceBurn = now
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					ev, err := s.store.EvaluateServiceBurnAlerts(c, serviceBurnEvery)
+					if err != nil {
+						s.logger.Error("service_burn_eval_failed", "error", err.Error())
+						return
+					}
+					if ev.Onsets > 0 || ev.Closes > 0 || ev.Holds > 0 || ev.Errors > 0 || ev.Lag > serviceBurnEvery {
+						s.logger.Info("service_burn_alerts_evaluated", "targets", ev.Targets,
+							"rules", ev.Rules, "onsets", ev.Onsets, "closes", ev.Closes,
+							"holds", ev.Holds, "errors", ev.Errors,
+							"lag_seconds", int(ev.Lag.Seconds()))
 					}
 				})
 			}

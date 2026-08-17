@@ -37,6 +37,12 @@ type fakeStore struct {
 	// query does.
 	statsFn     func(context.Context) (metrics.ServiceReliabilityStat, error)
 	materialize func([]string) ([]store.MaterializedExecution, error)
+	// alertCadence / burnCadence record the cadence each service-alert arm was called with, and
+	// the counters record whether it was called at all. Both matter: the cadence IS the freshness
+	// lease's basis (§16.5a), so a leader that evaluates on one number and arms on another either
+	// dis-arms a healthy evaluator or keeps coverage armed after it stopped.
+	alertCalls, burnCalls   int32
+	alertCadence, burnCadns int64 // nanoseconds, atomically stored
 }
 
 type staticCredentialRegions map[string]bool
@@ -163,8 +169,21 @@ func (f *fakeStore) PurgeOldHeartbeats(_ context.Context, _ time.Time) (int, err
 }
 
 func (f *fakeStore) EnqueueRenotifyReminders(context.Context) (int, error) { return 0, nil }
-func (f *fakeStore) EvaluateBurnAlerts(context.Context) (int, int, error)  { return 0, 0, nil }
-func (f *fakeStore) EnqueueDueSLAReports(context.Context) (int, error)     { return 0, nil }
+
+func (f *fakeStore) EvaluateServiceAlerts(_ context.Context, cadence time.Duration) (store.ServiceAlertEvaluation, error) {
+	atomic.AddInt32(&f.alertCalls, 1)
+	atomic.StoreInt64(&f.alertCadence, int64(cadence))
+	return store.ServiceAlertEvaluation{}, nil
+}
+
+func (f *fakeStore) EvaluateServiceBurnAlerts(_ context.Context, cadence time.Duration) (store.ServiceBurnEvaluation, error) {
+	atomic.AddInt32(&f.burnCalls, 1)
+	atomic.StoreInt64(&f.burnCadns, int64(cadence))
+	return store.ServiceBurnEvaluation{}, nil
+}
+
+func (f *fakeStore) EvaluateBurnAlerts(context.Context) (int, int, error) { return 0, 0, nil }
+func (f *fakeStore) EnqueueDueSLAReports(context.Context) (int, error)    { return 0, nil }
 func (f *fakeStore) EvaluateRegionWorkerAlerts(context.Context, map[string]bool, int) (int, int, error) {
 	return 0, 0, nil
 }
@@ -1069,5 +1088,58 @@ func TestStepDownJoinsAndClearsThroughRealLead(t *testing.T) {
 			t.Fatalf("step-down never cleared: %v", sink.snapshot())
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// FR-021 §16.3/§16.4 — both service-alert arms belong to the LEADER, and each must be handed the
+// cadence it is evaluated on. The cadence is not decoration: the freshness lease is a multiple of
+// it (§16.5a), so a leader evaluating on one number while the store leases on another either
+// dis-arms a healthy evaluator or leaves coverage armed after the evaluator stopped.
+func TestLeaderEvaluatesBothServiceAlertArms(t *testing.T) {
+	fs := &fakeStore{leader: true}
+	s := New(fs, dispatch.NewInProc(1), testLogger())
+	s.tick = 15 * time.Millisecond
+	s.retry = 15 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&fs.alertCalls) == 0 || atomic.LoadInt32(&fs.burnCalls) == 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("leader did not evaluate both arms (live=%d burn=%d)",
+				atomic.LoadInt32(&fs.alertCalls), atomic.LoadInt32(&fs.burnCalls))
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+	cancel()
+
+	if got := time.Duration(atomic.LoadInt64(&fs.alertCadence)); got != serviceAlertEvery {
+		t.Fatalf("live arm evaluated with cadence %s, want the cadence it is scheduled on (%s)",
+			got, serviceAlertEvery)
+	}
+	if got := time.Duration(atomic.LoadInt64(&fs.burnCadns)); got != serviceBurnEvery {
+		t.Fatalf("burn arm evaluated with cadence %s, want %s", got, serviceBurnEvery)
+	}
+}
+
+// A standby must never evaluate: an evaluation writes the arming state that silences OTHER
+// monitors' alerts, so two nodes doing it would let a node that lost the lock keep deciding who
+// gets paged.
+func TestStandbyEvaluatesNeitherServiceAlertArm(t *testing.T) {
+	fs := &fakeStore{leader: false}
+	s := New(fs, dispatch.NewInProc(1), testLogger())
+	s.tick = 15 * time.Millisecond
+	s.retry = 15 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Run(ctx)
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	if a, b := atomic.LoadInt32(&fs.alertCalls), atomic.LoadInt32(&fs.burnCalls); a != 0 || b != 0 {
+		t.Fatalf("a standby evaluated service alerts (live=%d burn=%d)", a, b)
 	}
 }

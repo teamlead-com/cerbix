@@ -47,7 +47,7 @@ func setMemberHealth(t *testing.T, st *Store, ctx context.Context, f alertFixtur
 
 func evalOnce(t *testing.T, st *Store, ctx context.Context) ServiceAlertEvaluation {
 	t.Helper()
-	got, err := st.EvaluateServiceAlerts(ctx, evalCadence)
+	got, err := st.evaluateServiceAlertsOn(ctx, st.pool, evalCadence)
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}

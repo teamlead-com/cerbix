@@ -92,13 +92,15 @@ type burnRuleLatch struct {
 // The state write and the outbox row commit in ONE transaction (invariant 80): a delivered burn alert
 // can never be forgotten and a forgotten one can never be delivered twice. Ordering is the per-rule
 // sequence in the payload, which is what keeps an at-least-once duplicate from being a LIE.
-func (s *Store) EvaluateServiceBurnAlerts(ctx context.Context, cadence time.Duration) (ServiceBurnEvaluation, error) {
+func (s *Store) evaluateServiceBurnAlertsOn(
+	ctx context.Context, db alertConn, cadence time.Duration,
+) (ServiceBurnEvaluation, error) {
 	var out ServiceBurnEvaluation
 
 	// A READ-WRITE snapshot: every window in this slice is judged against ONE instant, because
 	// §11.3's staleness test compares the watermark to it and two instants would let two rules of one
 	// target disagree about whether the service is quotable at all.
-	tx, asOf, err := s.beginAlertSnapshot(ctx)
+	tx, asOf, err := s.beginAlertSnapshot(ctx, db)
 	if err != nil {
 		return out, err
 	}

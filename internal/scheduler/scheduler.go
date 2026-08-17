@@ -31,6 +31,13 @@ type LeaderSession interface {
 	// RunServiceSlice works the service-reliability queue until the deadline, on the
 	// lock-owning connection. It reports whether it found anything to do.
 	RunServiceSlice(ctx context.Context, deadline time.Time) (bool, error)
+	// EvaluateServiceAlerts and EvaluateServiceBurnAlerts run the two FR-021 §16 alert slices on
+	// that same connection. They belong here rather than on Store because an evaluation writes
+	// the arming state that silences OTHER monitors' alerts and publishes pages: a deposed leader
+	// committing one behind its successor could tell people an alert ended while the real leader
+	// keeps it firing.
+	EvaluateServiceAlerts(ctx context.Context, cadence time.Duration) (store.ServiceAlertEvaluation, error)
+	EvaluateServiceBurnAlerts(ctx context.Context, cadence time.Duration) (store.ServiceBurnEvaluation, error)
 }
 
 // StoreAdapter widens *store.Store to the Store interface.
@@ -87,8 +94,6 @@ type Store interface {
 	DeleteExpiredAuthFlows(ctx context.Context) (int64, error)
 	PullQueueStats(ctx context.Context) ([]metrics.PullStat, error)
 	ServiceReliabilityStats(ctx context.Context) (metrics.ServiceReliabilityStat, error)
-	EvaluateServiceAlerts(ctx context.Context, cadence time.Duration) (store.ServiceAlertEvaluation, error)
-	EvaluateServiceBurnAlerts(ctx context.Context, cadence time.Duration) (store.ServiceBurnEvaluation, error)
 }
 
 // PullStatsSink receives the leader's per-region pull-queue gauge snapshot.
@@ -745,7 +750,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			if session != nil && (lastServiceAlert.IsZero() || now.Sub(lastServiceAlert) >= serviceAlertEvery) {
 				lastServiceAlert = now
 				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
-					ev, err := s.store.EvaluateServiceAlerts(c, serviceAlertEvery)
+					ev, err := session.EvaluateServiceAlerts(c, serviceAlertEvery)
 					if err != nil {
 						s.logger.Error("service_alert_eval_failed", "error", err.Error())
 						return
@@ -763,7 +768,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			if session != nil && (lastServiceBurn.IsZero() || now.Sub(lastServiceBurn) >= serviceBurnEvery) {
 				lastServiceBurn = now
 				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
-					ev, err := s.store.EvaluateServiceBurnAlerts(c, serviceBurnEvery)
+					ev, err := session.EvaluateServiceBurnAlerts(c, serviceBurnEvery)
 					if err != nil {
 						s.logger.Error("service_burn_eval_failed", "error", err.Error())
 						return

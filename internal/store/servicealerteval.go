@@ -47,12 +47,14 @@ type ServiceAlertEvaluation struct {
 // The state write and the outbox row commit in ONE transaction (invariant 80), so a delivered alert
 // can never be forgotten and a forgotten one can never be delivered twice. Everything else about
 // delivery is at-least-once and the payload's sequence is what keeps a duplicate from being a lie.
-func (s *Store) EvaluateServiceAlerts(ctx context.Context, cadence time.Duration) (ServiceAlertEvaluation, error) {
+func (s *Store) evaluateServiceAlertsOn(
+	ctx context.Context, db alertConn, cadence time.Duration,
+) (ServiceAlertEvaluation, error) {
 	var out ServiceAlertEvaluation
 
 	// A READ-WRITE snapshot: this path both evaluates (which the read-only report snapshot was built
 	// for) and writes its verdicts, and the two must see one instant.
-	tx, asOf, err := s.beginAlertSnapshot(ctx)
+	tx, asOf, err := s.beginAlertSnapshot(ctx, db)
 	if err != nil {
 		return out, err
 	}
@@ -465,10 +467,20 @@ func resolveServiceRecipientsTx(
 	return out, rows.Err()
 }
 
+// alertConn is what an evaluator needs from the thing it runs on: the ability to open its OWN
+// snapshot transaction. Both a pool and a single pooled CONNECTION satisfy it, which is the whole
+// point — the leader passes its LOCK-OWNING connection (§16.7), so losing the lock kills the
+// in-flight evaluation instead of letting a deposed leader commit episodes and outbox rows behind
+// its successor. A generation/lease CAS cannot cover that on its own: the episode and the outbox
+// row are written BEFORE the latch upsert, so a stale evaluator would have already published.
+type alertConn interface {
+	BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error)
+}
+
 // beginAlertSnapshot opens the evaluator's transaction: one instant for the whole slice, and
 // read-write because the verdicts are written under the same snapshot that produced them.
-func (s *Store) beginAlertSnapshot(ctx context.Context) (pgx.Tx, time.Time, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+func (s *Store) beginAlertSnapshot(ctx context.Context, db alertConn) (pgx.Tx, time.Time, error) {
+	tx, err := db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("store: begin alert snapshot: %w", err)
 	}

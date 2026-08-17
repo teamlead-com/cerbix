@@ -137,6 +137,20 @@ func (s fakeLeaderSession) RunServiceSlice(context.Context, time.Time) (bool, er
 	return false, nil
 }
 
+// The two alert arms hang off the SESSION, not the store: that is where the real ones live, so a
+// scheduler that went back to calling pool-backed evaluators would not compile.
+func (s fakeLeaderSession) EvaluateServiceAlerts(_ context.Context, cadence time.Duration) (store.ServiceAlertEvaluation, error) {
+	atomic.AddInt32(&s.owner.alertCalls, 1)
+	atomic.StoreInt64(&s.owner.alertCadence, int64(cadence))
+	return store.ServiceAlertEvaluation{}, nil
+}
+
+func (s fakeLeaderSession) EvaluateServiceBurnAlerts(_ context.Context, cadence time.Duration) (store.ServiceBurnEvaluation, error) {
+	atomic.AddInt32(&s.owner.burnCalls, 1)
+	atomic.StoreInt64(&s.owner.burnCadns, int64(cadence))
+	return store.ServiceBurnEvaluation{}, nil
+}
+
 func (f *fakeStore) TryBecomeLeaderSession(_ context.Context, _ int64) (LeaderSession, bool, error) {
 	atomic.AddInt32(&f.elections, 1)
 	if !f.leader {
@@ -169,18 +183,6 @@ func (f *fakeStore) PurgeOldHeartbeats(_ context.Context, _ time.Time) (int, err
 }
 
 func (f *fakeStore) EnqueueRenotifyReminders(context.Context) (int, error) { return 0, nil }
-
-func (f *fakeStore) EvaluateServiceAlerts(_ context.Context, cadence time.Duration) (store.ServiceAlertEvaluation, error) {
-	atomic.AddInt32(&f.alertCalls, 1)
-	atomic.StoreInt64(&f.alertCadence, int64(cadence))
-	return store.ServiceAlertEvaluation{}, nil
-}
-
-func (f *fakeStore) EvaluateServiceBurnAlerts(_ context.Context, cadence time.Duration) (store.ServiceBurnEvaluation, error) {
-	atomic.AddInt32(&f.burnCalls, 1)
-	atomic.StoreInt64(&f.burnCadns, int64(cadence))
-	return store.ServiceBurnEvaluation{}, nil
-}
 
 func (f *fakeStore) EvaluateBurnAlerts(context.Context) (int, int, error) { return 0, 0, nil }
 func (f *fakeStore) EnqueueDueSLAReports(context.Context) (int, error)    { return 0, nil }

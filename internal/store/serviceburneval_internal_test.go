@@ -83,7 +83,7 @@ func plantBurn(t *testing.T, st *Store, ctx context.Context, f burnFixture, minu
 
 func burnEvalOnce(t *testing.T, st *Store, ctx context.Context) ServiceBurnEvaluation {
 	t.Helper()
-	got, err := st.EvaluateServiceBurnAlerts(ctx, burnCadence)
+	got, err := st.evaluateServiceBurnAlertsOn(ctx, st.pool, burnCadence)
 	if err != nil {
 		t.Fatalf("evaluate burn: %v", err)
 	}

@@ -50,12 +50,19 @@ func armedService(t *testing.T, st *Store, ctx context.Context) armFixture {
 	}, 0, DeclarationOptions{CreatedBy: "test"}); err != nil {
 		t.Fatalf("declaration: %v", err)
 	}
-	// The declaration takes effect at the next bucket boundary, which §16.2 makes load-bearing:
-	// backdating puts the fixture in the state the arming question presupposes.
+	// A declaration and its EPOCH both take effect at the next bucket boundary, which §16.2 makes
+	// load-bearing. Backdating both puts the fixture in the state the arming question presupposes:
+	// the revision is what delegation reads, and the epoch is what the EVALUATOR reads, so moving
+	// only one produced a service that armed but could never be evaluated.
 	if _, err := st.pool.Exec(ctx, `
 		UPDATE service_definition_revisions SET effective_at = now() - interval '1 hour'
 		 WHERE service_id = $1`, svc.ID); err != nil {
 		t.Fatalf("backdate revision: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE service_evaluation_epochs SET effective_at = now() - interval '1 hour'
+		 WHERE service_id = $1`, svc.ID); err != nil {
+		t.Fatalf("backdate epoch: %v", err)
 	}
 
 	f := armFixture{orgID: org.ID, projectID: proj.ID, serviceID: svc.ID, monitorID: mon.ID}
@@ -85,15 +92,22 @@ func armedService(t *testing.T, st *Store, ctx context.Context) armFixture {
 
 func armLive(t *testing.T, st *Store, ctx context.Context, f armFixture) {
 	t.Helper()
+	// The fixture stands in for a SUCCESSFUL evaluation, so it stamps what an evaluation stamps:
+	// the declaration that governs now. Leaving revision_id NULL would arm a service whose verdict
+	// came from no declaration at all (§16.1).
 	if _, err := st.pool.Exec(ctx, `
 		INSERT INTO service_alert_state
 		  (service_id, project_id, observed_state, candidate_state, streak, live_firing,
-		   config_generation, evaluated_at, lease_until)
-		SELECT id, project_id, 'healthy', 'healthy', 3, false, alert_config_generation,
+		   config_generation, revision_id, evaluated_at, lease_until)
+		SELECT s.id, s.project_id, 'healthy', 'healthy', 3, false, s.alert_config_generation,
+		       (SELECT r.id FROM service_definition_revisions r
+		         WHERE r.service_id = s.id AND r.state = 'effective' AND r.effective_at <= now()
+		         ORDER BY r.effective_at DESC, r.revision DESC LIMIT 1),
 		       now(), now() + interval '90 seconds'
-		  FROM services WHERE id = $1
+		  FROM services s WHERE s.id = $1
 		ON CONFLICT (service_id) DO UPDATE SET
 		   config_generation = EXCLUDED.config_generation,
+		   revision_id = EXCLUDED.revision_id,
 		   evaluated_at = EXCLUDED.evaluated_at, lease_until = EXCLUDED.lease_until,
 		   last_error = NULL`, f.serviceID); err != nil {
 		t.Fatalf("arm live: %v", err)
@@ -315,8 +329,57 @@ func TestDelegationUsesTheEffectiveRevision(t *testing.T) {
 		 WHERE service_id = $1 AND revision = 2`, f.serviceID); err != nil {
 		t.Fatalf("make effective: %v", err)
 	}
+	// Crossing the boundary is NOT coverage: the only successful evaluation on record was computed
+	// from revision 1, which never looked at this monitor. Arming requires an evaluation OF the
+	// revision that governs now (§16.1), so the member keeps paging for itself until then.
+	if delegated(t, st, ctx, future, DelegationLive) {
+		t.Fatal("a member of the NEW revision was suppressed by a verdict computed from the OLD " +
+			"one — the service cannot replace a page it has never evaluated")
+	}
+	armLive(t, st, ctx, f) // re-evaluated under revision 2
 	if !delegated(t, st, ctx, future, DelegationLive) {
-		t.Fatal("the monitor is still not covered after its revision became effective")
+		t.Fatal("re-evaluating under the effective revision did not re-arm")
+	}
+}
+
+// The revision half of the arming conjunction, stated on its own: an evaluation is coverage only for
+// the declaration it was computed from. Membership is not enough — the original member is an SLI of
+// BOTH revisions here, so only the stamp can tell the two verdicts apart.
+func TestRevisionChangeDisarmsUntilReevaluated(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	armLive(t, st, ctx, f)
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("the fixture is wrong: an evaluated, routable owner should be armed")
+	}
+
+	// A new declaration keeping the SAME SLI set: membership cannot distinguish the revisions, so a
+	// stamp is the only thing that can.
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, f.serviceID, domain.ServiceDeclaration{
+		Monitors: []string{f.monitorID}, SLI: []string{f.monitorID},
+	}, 1, DeclarationOptions{CreatedBy: "test"}); err != nil {
+		t.Fatalf("second declaration: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE service_definition_revisions SET effective_at = now() - interval '1 minute'
+		 WHERE service_id = $1 AND revision = 2`, f.serviceID); err != nil {
+		t.Fatalf("make effective: %v", err)
+	}
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a verdict computed from the superseded revision still suppressed")
+	}
+	armLive(t, st, ctx, f)
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("re-evaluating the new revision did not re-arm")
+	}
+
+	// A row that names no declaration at all is not evidence of coverage either.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_alert_state SET revision_id = NULL WHERE service_id = $1`, f.serviceID); err != nil {
+		t.Fatalf("clear stamp: %v", err)
+	}
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("an unstamped evaluation suppressed: absence of evidence is not coverage")
 	}
 }
 

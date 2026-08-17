@@ -123,21 +123,38 @@ const routableClause = `
 		                WHERE nc.project_id = s.project_id AND nc.enabled)
 		)`
 
+// THE definition of "the revision that governs right now", written once and shared by every arming
+// clause. Two spellings of this question is how a membership check and a revision stamp come to
+// disagree about which declaration is in force, so there is only one. The ordering matches the epoch
+// resolver (`serviceepochs.go`): the latest boundary that has passed, and the highest revision when
+// two share it.
+const effectiveRevisionSQL = `
+		    SELECT r.id
+		      FROM service_definition_revisions r
+		     WHERE r.service_id = s.id AND r.state = 'effective' AND r.effective_at <= now()
+		     ORDER BY r.effective_at DESC, r.revision DESC
+		     LIMIT 1`
+
 // The effective-membership clause. `service_definition_revisions` is the declaration axis; the
 // EFFECTIVE one is the latest revision whose boundary has passed, and its members are the SLI of that
 // revision. Anything else would suppress on an authored-but-not-yet-effective declaration.
 const effectiveSLIClause = `
 		AND EXISTS (
-		    SELECT 1
-		      FROM service_definition_revisions r
-		      JOIN service_definition_members m ON m.revision_id = r.id
-		     WHERE r.service_id = s.id AND r.state = 'effective' AND r.effective_at <= now()
+		    SELECT 1 FROM service_definition_members m
+		     WHERE m.revision_id = (` + effectiveRevisionSQL + `)
 		       AND m.monitor_id = $1 AND m.role = 'sli'
-		       AND r.revision = (
-		           SELECT max(r2.revision) FROM service_definition_revisions r2
-		            WHERE r2.service_id = s.id AND r2.state = 'effective' AND r2.effective_at <= now()
-		       )
 		)`
+
+// The revision half of the LIVE arming conjunction (§16.1): the successful evaluation must be OF the
+// declaration that governs now, not merely fresh under the current config generation. Membership
+// alone is not that check — it asks whether the monitor is an SLI of the current revision, while this
+// asks whether the SERVICE'S VERDICT was computed from it. Without it a service still measuring the
+// PREVIOUS definition suppresses a member of the NEW one it has never looked at, which is a page
+// nobody sends. `revision_id IS NULL` (a pre-stamp row, or an evaluation that found no governing
+// declaration) dis-arms, because absence of evidence is not coverage.
+const evaluatedCurrentRevisionClause = `
+		AND st.revision_id IS NOT NULL
+		AND st.revision_id = (` + effectiveRevisionSQL + `)`
 
 // LIVE coverage: a policy that can page something, a fresh successful evaluation of the CURRENT
 // generation and effective revision, no evaluation error, and a route.
@@ -150,7 +167,8 @@ var activeLiveDelegationSQL = `
 	   AND (cardinality(s.page_on) > 0 OR s.page_on_unknown)
 	   AND st.config_generation = s.alert_config_generation
 	   AND st.last_error IS NULL
-	   AND now() < st.lease_until` + effectiveSLIClause + routableClause + `
+	   AND now() < st.lease_until` +
+	evaluatedCurrentRevisionClause + effectiveSLIClause + routableClause + `
 	 ORDER BY s.slug`
 
 // BURN coverage: an enabled target with at least one rule whose LAST VERDICT WAS QUOTABLE — a HOLD

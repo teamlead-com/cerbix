@@ -185,9 +185,16 @@ watch(() => ws.projectId, load);
         </div>
       </section>
 
-      <p class="mt-3 text-[12px] text-ink-3">
-        Availability, error budget and burn rate arrive with the next iteration. This release declares what they
-        will measure and how far materialization has got — no number is shown that nothing has computed.
+      <!-- This line is the LIST's whole claim about the numbers, so it has to stay true as
+           phases land. Phase 2 shipped availability, error budget and burn rate; the honest
+           statement is now about WHERE they live and WHEN they appear, not that they are
+           still coming. The list itself deliberately shows the watermark rather than a
+           percentage: `sealed_through` is the one number that cannot flatter a stalled
+           service (mock rule, docs/design/notes.md). -->
+      <p class="mt-3 text-[12px] text-ink-3" data-testid="services-numbers-note">
+        Availability, error budget and burn rate live on each service's own page, and they appear as its buckets
+        seal — this list shows how far materialization has got, because a watermark cannot flatter a service that
+        stopped materializing. No number is shown that nothing has computed.
       </p>
     </div>
 

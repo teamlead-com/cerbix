@@ -28,7 +28,7 @@ DEV_E2E_ARGS ?=
 DISTRIBUTED_E2E_ARGS ?= tests/file-providers.spec.ts tests/monitors.spec.ts tests/probers.spec.ts
 GEO_E2E_ARGS ?= tests/topology-geo.spec.ts tests/monitors.spec.ts tests/probers.spec.ts
 
-.PHONY: build test race lint version clean \
+.PHONY: build spa-snapshot test race lint version clean \
 	dev-init geo-init dev-compose-check geo-compose-check \
 	dev-build dev-build-single dev-build-distributed geo-build \
 	dev-up dev-up-single dev-up-distributed geo-up geo-up-all \
@@ -114,6 +114,22 @@ endef
 build:
 	@mkdir -p bin $(GOCACHE) $(GOMODCACHE)
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/cerbix
+
+## spa-snapshot: rebuild the committed SPA snapshot that `go build`/`go install` embed
+##
+## The Docker image builds the SPA itself and REPLACES this snapshot, so a stale snapshot
+## is invisible on every `make dev-*` path — and then `go install .../cmd/cerbix@latest`
+## serves whatever UI was last committed here. The snapshot went three weeks stale exactly
+## because refreshing it was a manual step with no command; this is that command.
+##
+## `assets/placeholder.txt` is a FIXTURE, not build output: internal/web/web_test.go asserts
+## the embedded asset route through it, so it is restored after every refresh.
+spa-snapshot:
+	docker run --rm --network=host -v "$(CURDIR)/frontend":/app -w /app node:22-alpine sh -c "npm ci && npm run build"
+	rm -rf internal/web/dist
+	cp -r frontend/dist internal/web/dist
+	printf 'cerbix SPA asset placeholder\n' > internal/web/dist/assets/placeholder.txt
+	@echo "SPA snapshot refreshed — commit internal/web/dist/ with the change that produced it"
 
 test:
 	@mkdir -p $(GOCACHE) $(GOMODCACHE)

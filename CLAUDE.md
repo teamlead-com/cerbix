@@ -33,6 +33,13 @@ docker run --rm -v "$PWD":/app -w /app node:22-alpine sh -c "npm run build"   # 
 docker run --rm -v "$PWD":/app -v "$PWD/../openapi.yaml":/openapi.yaml -w /app node:22-alpine npm run gen:api
 ```
 
+**After ANY frontend change, from the repo root: `make spa-snapshot`.** The Docker image builds
+the SPA itself and REPLACES the committed `internal/web/dist`, so a stale snapshot is invisible
+on every `make dev-*` path — but `go build` / `go install .../cmd/cerbix@latest` embed exactly
+what is committed there, and it silently served a three-week-old UI until iter-0149. The target
+restores `assets/placeholder.txt` (a fixture `internal/web/web_test.go` asserts through, not
+build output).
+
 ### E2E (from repo root) — Playwright in docker, against a LIVE stack
 
 ```bash

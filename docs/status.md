@@ -2,7 +2,13 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current iteration (iter-0148 — DONE; FR-021 phase 3 changeset 3: the SPA surface. Review chain [298]→[299]→[301]; four residuals closed under the [263]-delegated disposition, iter-0148 §9. **FR-021 phase 3 COMPLETE**)
+## Current iteration (iter-0149 — DONE; two honesty fixes surfaced by looking at the running stack)
+
+| ID | Requirement | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0149-1 | The product no longer says two untrue things: (1) the services list claimed availability/error budget/burn rate "arrive with the next iteration" — false since iter-0140, and the numbers were visible on the adjacent service page; it now states where they live and when they appear, keeping the watermark rationale; (2) the committed `internal/web/dist` snapshot — what `go build` / `go install .../cmd/cerbix@latest` embed — was three weeks stale (no phase 2, no phase 3) and NO gate could have caught it, because the Docker image rebuilds the SPA and discards that directory. Root cause was a manual refresh with no command: `make spa-snapshot` now performs it (restoring the `placeholder.txt` fixture the web test asserts through) and CLAUDE.md states the rule. | DONE | [`ServicesView.vue`](../frontend/src/views/ServicesView.vue) note, [`Makefile`](../Makefile) `spa-snapshot`, refreshed `internal/web/dist` (50 files, now carrying phases 2–3), [`CLAUDE.md`](../CLAUDE.md) rule; `internal/web` 3/3 incl. `TestServesRealAsset`, frontend 76/76, -race 33 ok, lint 0; [iter-0149](iterations/iter-0149.md). |
+
+## Previous iteration (iter-0148 — DONE; FR-021 phase 3 changeset 3: the SPA surface. Review chain [298]→[299]→[301]; four residuals closed under the [263]-delegated disposition, iter-0148 §9. **FR-021 phase 3 COMPLETE**)
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |

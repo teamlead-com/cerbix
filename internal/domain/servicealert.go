@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -68,6 +69,33 @@ func DefaultServiceAlertPolicy() ServiceAlertPolicy {
 		PageOn:             []ServiceAlertState{ServiceAlertDown},
 		ConfirmEvaluations: 2,
 	}
+}
+
+// Canonical returns the policy in the ONE form that is stored, hashed and compared: `page_on`
+// deduplicated and sorted, never nil.
+//
+// It lives here, beside Validate, because §16.6a gives the API and the MaC apply ONE validator and
+// canonical order is half of what that validator owes them. Normalizing in the store instead would
+// let a bundle whose `page_on` was written in a different order re-apply forever, and would make
+// "did the policy change?" — the question every close decision below turns on — depend on the
+// author's typing order rather than on the declaration.
+//
+// Nil becomes an EMPTY slice rather than staying nil, because `page_on: []` is a legal declaration
+// with its own meaning (§16.6a: "explicitly page for no state", which dis-arms LIVE) and the two
+// must round-trip to the same `text[]` value.
+func (p ServiceAlertPolicy) Canonical() ServiceAlertPolicy {
+	seen := make(map[ServiceAlertState]bool, len(p.PageOn))
+	out := make([]ServiceAlertState, 0, len(p.PageOn))
+	for _, s := range p.PageOn {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	p.PageOn = out
+	return p
 }
 
 // Validate enforces the policy's bounds. `page_on` may not name `unknown` or `excluded`: the first

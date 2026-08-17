@@ -234,3 +234,76 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// Canonical form: §16.6a's "canonical order (`page_on` sorted, deduped)". The table is the contract
+// the MaC hash and the store's "did the policy change?" comparison both rest on — an unstable
+// spelling of one declaration would make a bundle re-apply forever and would make a no-op edit look
+// like a policy change that closes a firing announcement.
+func TestServiceAlertPolicyCanonical(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []ServiceAlertState
+		want []ServiceAlertState
+	}{
+		{"nil becomes an empty list, not a nil one",
+			nil, []ServiceAlertState{}},
+		{"an explicitly empty list stays empty — it is a legal declaration",
+			[]ServiceAlertState{}, []ServiceAlertState{}},
+		{"already canonical is unchanged",
+			[]ServiceAlertState{ServiceAlertDegraded, ServiceAlertDown},
+			[]ServiceAlertState{ServiceAlertDegraded, ServiceAlertDown}},
+		{"authoring order does not survive",
+			[]ServiceAlertState{ServiceAlertDown, ServiceAlertDegraded},
+			[]ServiceAlertState{ServiceAlertDegraded, ServiceAlertDown}},
+		{"duplicates collapse",
+			[]ServiceAlertState{ServiceAlertDown, ServiceAlertDown},
+			[]ServiceAlertState{ServiceAlertDown}},
+		{"duplicates collapse and the rest still sorts",
+			[]ServiceAlertState{ServiceAlertDown, ServiceAlertDegraded, ServiceAlertDown},
+			[]ServiceAlertState{ServiceAlertDegraded, ServiceAlertDown}},
+	}
+	for _, c := range cases {
+		got := ServiceAlertPolicy{OwnsPaging: true, PageOn: c.in, ConfirmEvaluations: 2}.Canonical()
+		if got.PageOn == nil {
+			t.Errorf("%s: page_on is nil, want a list — `[]` and nil must store as one value", c.name)
+			continue
+		}
+		if len(got.PageOn) != len(c.want) {
+			t.Errorf("%s: page_on = %v, want %v", c.name, got.PageOn, c.want)
+			continue
+		}
+		for i := range c.want {
+			if got.PageOn[i] != c.want[i] {
+				t.Errorf("%s: page_on = %v, want %v", c.name, got.PageOn, c.want)
+				break
+			}
+		}
+	}
+
+	// Canonicalization touches page_on and NOTHING else: it is a spelling rule, not a policy edit.
+	// Silently repairing an out-of-range confirm_evaluations here would let an invalid declaration
+	// reach the database through a validator that never saw it.
+	in := ServiceAlertPolicy{OwnsPaging: true, PageOn: []ServiceAlertState{ServiceAlertDown},
+		PageOnUnknown: true, ConfirmEvaluations: 99}
+	got := in.Canonical()
+	if got.OwnsPaging != in.OwnsPaging || got.PageOnUnknown != in.PageOnUnknown ||
+		got.ConfirmEvaluations != in.ConfirmEvaluations {
+		t.Fatalf("Canonical() edited a field that is not page_on: %+v", got)
+	}
+	if got.Validate() == nil {
+		t.Fatal("canonicalization made an out-of-range confirm_evaluations valid")
+	}
+
+	// It is idempotent, which is what makes it usable as a hash input.
+	twice := got.Canonical()
+	if len(twice.PageOn) != len(got.PageOn) {
+		t.Fatalf("Canonical() is not idempotent: %v then %v", got.PageOn, twice.PageOn)
+	}
+
+	// And the canonical form of the default is the default: an undeclared service must not look
+	// edited the first time somebody saves the form unchanged.
+	def := DefaultServiceAlertPolicy()
+	if c := def.Canonical(); len(c.PageOn) != 1 || c.PageOn[0] != ServiceAlertDown {
+		t.Fatalf("the default policy is not canonical: %+v", c)
+	}
+}

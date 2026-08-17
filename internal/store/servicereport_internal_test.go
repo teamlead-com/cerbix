@@ -610,6 +610,30 @@ func TestServiceScopedBurnAlertIsRejectedEverywhere(t *testing.T) {
 	}
 }
 
+// iter-0144: the objective is a CURRENT-VIEW parameter, visible before the first bucket
+// seals — an operator who just set a target must see it on the nothing-sealed report (no
+// budget, no burn: there is nothing to compute them from).
+func TestNothingSealedReportStillStatesItsObjective(t *testing.T) {
+	st, ctx := declStore(t)
+	f := reportService(t, st, ctx) // declared SLI, watermark row exists, nothing sealed yet
+	if err := st.UpsertServiceSLATarget(ctx, f.projectID, f.serviceID, "30d", 99.9); err != nil {
+		t.Fatalf("target: %v", err)
+	}
+	rep, err := st.ServiceReliabilityReport(ctx, f.projectID, f.serviceID, sla.Window{Name: "30d", Duration: 30 * 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if rep.Status != domain.ServiceReportInsufficientSealed || rep.Reason != domain.ServiceReportReasonNothingSealed {
+		t.Fatalf("status=%s/%s, want the nothing-sealed reason", rep.Status, rep.Reason)
+	}
+	if rep.Objective == nil || *rep.Objective != 99.9 || rep.ObjectiveUpdatedAt == nil {
+		t.Fatalf("objective %v/%v — a stored target is invisible before sealing", rep.Objective, rep.ObjectiveUpdatedAt)
+	}
+	if rep.Budget != nil || rep.Burn != nil || rep.Availability != nil {
+		t.Fatal("numbers were computed from nothing")
+	}
+}
+
 // Invariant 41: a service with an empty sli[] has NO SLO — the report says so instead of
 // inventing 100%.
 func TestReportWithoutSLIHasNoSLO(t *testing.T) {

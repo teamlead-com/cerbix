@@ -134,6 +134,14 @@ func (s *Store) serviceReliabilityReportTx(ctx context.Context, tx pgx.Tx, proje
 	rep.RetractedAt, rep.RetractedTo = retractedAt, retractedTo
 	if sealed == nil {
 		rep.Status, rep.Reason = domain.ServiceReportInsufficientSealed, domain.ServiceReportReasonNothingSealed
+		// The objective is a CURRENT-VIEW parameter (§11.3), orthogonal to sealed data: an
+		// operator who just set a target must be able to see it before the first bucket
+		// seals (iter-0144 — without this, a stored objective was invisible until sealing
+		// began, because no other read exposes service targets). No budget and no burn are
+		// computed here: there is nothing to compute them FROM.
+		if err := reportObjective(ctx, tx, serviceID, window.Name, &rep); err != nil {
+			return rep, err
+		}
 		return rep, nil
 	}
 	rep.SealedThrough = sealed
@@ -208,16 +216,11 @@ func (s *Store) serviceReliabilityReportTx(ctx context.Context, tx pgx.Tx, proje
 	// Objective, budget, burn: only from a SERVICE-scoped target for THIS window — never
 	// defaulted, never borrowed from monitor or project scope. The budget always states
 	// which objective produced it (§11.3).
-	var objective *float64
-	var objectiveAt *time.Time
-	if err := tx.QueryRow(ctx, `
-		SELECT objective::float8, updated_at FROM sla_targets
-		 WHERE service_id = $1 AND window_name = $2`,
-		serviceID, window.Name).Scan(&objective, &objectiveAt); err != nil && !noRows(err) {
-		return rep, fmt.Errorf("store: report objective: %w", err)
+	if err := reportObjective(ctx, tx, serviceID, window.Name, &rep); err != nil {
+		return rep, err
 	}
-	if objective != nil {
-		rep.Objective, rep.ObjectiveUpdatedAt = objective, objectiveAt
+	if rep.Objective != nil {
+		objective, objectiveAt := rep.Objective, rep.ObjectiveUpdatedAt
 		if quotable {
 			b := sla.ErrorBudget(*objective, rep.Durations.GoodUs, measured)
 			rep.Budget = &domain.ServiceBudget{
@@ -261,6 +264,22 @@ func (s *Store) serviceReliabilityReportTx(ctx context.Context, tx pgx.Tx, proje
 		rep.Repairing = append(rep.Repairing, iv)
 	}
 	return rep, rows.Err()
+}
+
+// reportObjective loads the SERVICE-scoped target for the window into the report — never
+// defaulted, never borrowed from another scope. It is called on the sealed path AND the
+// nothing-sealed path: the objective is a current-view parameter, not a derived number.
+func reportObjective(ctx context.Context, tx pgx.Tx, serviceID, window string, rep *domain.ServiceWindowReport) error {
+	var objective *float64
+	var objectiveAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT objective::float8, updated_at FROM sla_targets
+		 WHERE service_id = $1 AND window_name = $2`,
+		serviceID, window).Scan(&objective, &objectiveAt); err != nil && !noRows(err) {
+		return fmt.Errorf("store: report objective: %w", err)
+	}
+	rep.Objective, rep.ObjectiveUpdatedAt = objective, objectiveAt
+	return nil
 }
 
 // reportSegments aggregates sealed facts grouped by (epoch × reconstruction-part), ordered

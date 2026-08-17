@@ -7,6 +7,7 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
+import ServiceReliability from "@/components/ServiceReliability.vue";
 import { humanDuration, lagExact, sealedLabel } from "@/lib/services";
 
 type Detail = components["schemas"]["ServiceDetail"];
@@ -143,6 +144,15 @@ watch(() => [route.params.id, ws.projectId], load);
           Owned by the file provider <span class="font-mono">{{ managed }}</span>. Its declaration is edited in the
           source file — a change made here would be restated by the very next reconcile.
         </p>
+
+        <!-- Phase 2 (iter-0144): the reporting surface — live health, the window report
+             with every honesty state, the timeline, segments, the objective editor. -->
+        <ServiceReliability
+          :project-id="ws.projectId"
+          :service-id="serviceId"
+          :can-write="canWrite"
+          :has-sli="sli.size > 0"
+        />
 
         <!-- Declaration: two lists, side by side, separated by the rule that is the whole
              point of the model. Adding a monitor on the left never adds it on the right. -->

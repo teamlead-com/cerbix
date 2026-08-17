@@ -147,4 +147,61 @@ test.describe("services", () => {
     await expect(page.getByTestId("service-save-error")).toBeVisible();
     await expect(page.getByTestId("service-save-error")).toContainText("changed this declaration");
   });
+
+  test("the reliability surface states its honesty and the objective rule holds end to end", async ({ page }) => {
+    await page.goto("/");
+    const { projectID } = await ensureE2EWorkspace(page);
+    const created = await apiSend(page, "post", `/api/v1/projects/${projectID}/services`, {
+      slug: `${SLUG}-report`, name: "E2E Report",
+    });
+    expect(created.status()).toBe(201);
+    const svc = await created.json();
+
+    // A fresh service: the live signal is honestly unknown, and the report is a REASON with
+    // a dash — never a number.
+    await page.goto(`/services/${svc.id}`);
+    await expect(page.getByTestId("svc-health-sli")).toHaveText("unknown");
+    await expect(page.getByTestId("svc-report-reason")).toContainText("No reliability inputs");
+    await expect(page.getByTestId("svc-kpi-availability")).toContainText("—");
+
+    // Declare one SLI member so an objective becomes meaningful; the report moves to the
+    // nothing-sealed reason (still a dash, still never 100%).
+    const mon = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+      name: `${SLUG}-report-http`, type: "http", target: "http://cerbix:8080/healthz",
+      interval_seconds: 30, region: "core", enabled: false,
+    });
+    expect(mon.status()).toBe(201);
+    const monitor = await mon.json();
+    const decl = await apiSend(page, "put", `/api/v1/projects/${projectID}/services/${svc.id}/declaration`,
+      { expected_revision: 0, monitors: [monitor.id], sli: [monitor.id] });
+    expect(decl.status()).toBe(200);
+
+    await page.reload();
+    await expect(page.getByTestId("svc-report-reason")).toContainText("Nothing is sealed yet");
+
+    // The objective editor enforces the D-0165 rule in the browser (no request leaves for
+    // an inadmissible value) and the server round-trip stores the canonical number.
+    await page.getByTestId("svc-objective-open").click();
+    await page.getByTestId("svc-objective-input").fill("100");
+    await page.getByTestId("svc-objective-save").click();
+    await expect(page.getByTestId("svc-objective-error")).toContainText("below 100");
+
+    await page.getByTestId("svc-objective-input").fill("99.9");
+    await page.getByTestId("svc-objective-save").click();
+    await expect(page.getByTestId("svc-objective-editor")).toHaveCount(0);
+    await expect(page.getByTestId("svc-kpi-availability")).toContainText("objective 99.9%");
+
+    // A STORED objective stays mutable (§11.3): the editor reopens prefilled with the
+    // canonical current value and the update round-trips.
+    await page.getByTestId("svc-objective-open").click();
+    await expect(page.getByTestId("svc-objective-input")).toHaveValue("99.9");
+    await page.getByTestId("svc-objective-input").fill("99.99");
+    await page.getByTestId("svc-objective-save").click();
+    await expect(page.getByTestId("svc-objective-editor")).toHaveCount(0);
+    await expect(page.getByTestId("svc-kpi-availability")).toContainText("objective 99.99%");
+
+    // Cleanup: the service and its monitor.
+    await apiSend(page, "delete", `/api/v1/projects/${projectID}/services/${svc.id}`);
+    await apiSend(page, "delete", `/api/v1/monitors/${monitor.id}`);
+  });
 });

@@ -188,3 +188,37 @@ func TestAFailedDeletionAnnouncesNothing(t *testing.T) {
 		t.Fatalf("a refused deletion left episode_open=%v latch_firing=%v, want both intact", open, firing)
 	}
 }
+
+// FR-021 invariant 83 — `service_alert` is a FENCED topic, and this is the mixed old/new fleet
+// regression stated in behaviour rather than in column values: an OLD binary's claim SQL (no topic
+// predicate, `status = 'pending'`) must see neither the onset nor its close, and must burn no
+// attempts on either. Attempts matter as much as visibility: a pre-fence worker that claimed and
+// failed these rows would walk them to dead-letter, and the announcement's ENDING is the one row
+// nobody can afford to lose.
+func TestAnOldWorkerNeitherClaimsNorBurnsAServiceAlert(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+	plantBurn(t, st, ctx, f, 5, minute/60)
+	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
+		t.Fatalf("onsets = %d, want the rule to fire", got.Onsets)
+	}
+	if err := st.DeleteService(ctx, f.projectID, f.serviceID); err != nil {
+		t.Fatalf("delete service: %v", err)
+	}
+	if events := allServiceAlerts(t, st, ctx); len(events) != 2 {
+		t.Fatalf("%d events, want the onset and its close before the old worker runs", len(events))
+	}
+
+	if n := legacyClaimShape(t, st); n != 0 {
+		t.Fatalf("a pre-fence claim selected %d service_alert rows", n)
+	}
+	var maxAttempts int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT COALESCE(max(attempts), 0) FROM outbox_events WHERE topic = 'service_alert'`).
+		Scan(&maxAttempts); err != nil {
+		t.Fatalf("read attempts: %v", err)
+	}
+	if maxAttempts != 0 {
+		t.Fatalf("a pre-fence claim burned %d attempts on a fenced service alert", maxAttempts)
+	}
+}

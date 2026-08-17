@@ -2400,6 +2400,34 @@ type fakeService struct {
 	rev    *domain.DefinitionRevision
 	epoch  *domain.EvaluationEpoch
 	detail store.ServiceDetail
+
+	// FR-021 phase-5 alerting state (§16.6a). `alerting` is nil until something declares one, so
+	// the fake reproduces the SCHEMA defaults rather than a zero struct: an undeclared service
+	// pages for `down` only, not for unknown, confirmed over two evaluations. A zero value would
+	// have been confirm_evaluations=0 — an invalid policy — and every merge assertion below would
+	// then have passed for the wrong reason.
+	alerting    *domain.ServiceAlertPolicy
+	fileManaged bool
+	// burnTargets is keyed by window name. A window with no objective is absent, because the
+	// real store answers ErrNotFound for a burn write against a target nobody declared.
+	burnTargets map[string]*fakeBurnTarget
+	// alertWrites / burnWrites count writes that were actually ATTEMPTED against the store, so a
+	// test can assert that a refusal wrote nothing rather than only that it returned a status.
+	alertWrites int
+	burnWrites  int
+	alertActors []store.AlertActor
+}
+
+type fakeBurnTarget struct {
+	enabled bool
+	rules   []domain.BurnRule
+}
+
+func (fs *fakeService) alertPolicy() domain.ServiceAlertPolicy {
+	if fs.alerting == nil {
+		return domain.DefaultServiceAlertPolicy()
+	}
+	return *fs.alerting
 }
 
 func (f *fakeStore) serviceStore() map[string]*fakeService {
@@ -2570,6 +2598,76 @@ func (f *fakeStore) UpsertServiceSLATarget(_ context.Context, projectID, service
 	}
 	r := f.reporting()
 	r.slaWindow, r.slaObj = window, objective
+	return nil
+}
+
+// ── FR-021 phase 5 fakes: the alerting-ownership write surface (§16.6a) ─────
+//
+// These mirror the real store's REFUSALS, in its order, so the HTTP tests are not run against a
+// mock that agrees with whatever it is told: a foreign or unknown id is ErrNotFound before
+// anything else is looked at, a file-managed service is ErrServiceManagedByFile, and the ONE
+// domain validator decides what is storable. `UpdateServiceAlertPolicy` returns the CANONICAL
+// policy it stored, which is what lets the handler echo the stored value rather than the request.
+
+func (f *fakeStore) ServiceAlertPolicy(_ context.Context, projectID, serviceID string) (domain.ServiceAlertPolicy, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return domain.ServiceAlertPolicy{}, store.ErrNotFound
+	}
+	return fs.alertPolicy(), nil
+}
+
+func (f *fakeStore) UpdateServiceAlertPolicy(
+	_ context.Context, projectID, serviceID string, p domain.ServiceAlertPolicy, actor store.AlertActor,
+) (domain.ServiceAlertPolicy, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return domain.ServiceAlertPolicy{}, store.ErrNotFound
+	}
+	if fs.fileManaged {
+		return domain.ServiceAlertPolicy{}, store.ErrServiceManagedByFile
+	}
+	next := p.Canonical()
+	if err := next.Validate(); err != nil {
+		return domain.ServiceAlertPolicy{}, err
+	}
+	fs.alertWrites++
+	fs.alertActors = append(fs.alertActors, actor)
+	fs.alerting = &next
+	return next, nil
+}
+
+func (f *fakeStore) SetServiceBurnAlerting(
+	_ context.Context, projectID, serviceID, window string, enabled bool,
+	rules []domain.BurnRule, actor store.AlertActor,
+) error {
+	if err := domain.ValidateBurnRules(rules); err != nil {
+		return err
+	}
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return store.ErrNotFound
+	}
+	if fs.fileManaged {
+		return store.ErrServiceManagedByFile
+	}
+	t, ok := fs.burnTargets[window]
+	if !ok {
+		// No objective for this window: the real store reaches sla_targets THROUGH the service and
+		// answers ErrNotFound, because enabling burn alerting on an undeclared objective would page
+		// against a number that does not exist.
+		return store.ErrNotFound
+	}
+	fs.burnWrites++
+	fs.alertActors = append(fs.alertActors, actor)
+	t.enabled = enabled
+	t.rules = make([]domain.BurnRule, 0, len(rules))
+	for _, r := range rules {
+		// The latch is server-owned: the store zeroes `firing` on the way in, so the fake does too.
+		r.Firing = false
+		t.rules = append(t.rules, r)
+	}
+	sort.Slice(t.rules, func(i, j int) bool { return t.rules[i].Key() < t.rules[j].Key() })
 	return nil
 }
 

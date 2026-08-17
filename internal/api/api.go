@@ -192,6 +192,14 @@ type Store interface {
 	ServiceHealthNow(ctx context.Context, projectID, serviceID string) (domain.ServiceHealthNow, error)
 	ServiceReliabilitySeries(ctx context.Context, projectID, serviceID string, from, to time.Time, step time.Duration) ([]domain.ReliabilitySeriesPoint, error)
 	UpsertServiceSLATarget(ctx context.Context, projectID, serviceID, window string, objective float64) error
+	// Alerting ownership (FR-021 phase 5, §16.6a). Both are transactional, audit inside the
+	// transaction and enqueue the §16.4a lifecycle closes their edit orphans. The READ half is
+	// asserted separately (see serviceAlertPolicyReader) because the store does not offer it yet.
+	// The paging declaration (FR-021 §16.6a): the read is what a PATCH merges onto, and a merge
+	// whose base was invented is how "leave ownership alone" becomes a silent disowning.
+	ServiceAlertPolicy(ctx context.Context, projectID, serviceID string) (domain.ServiceAlertPolicy, error)
+	UpdateServiceAlertPolicy(ctx context.Context, projectID, serviceID string, p domain.ServiceAlertPolicy, actor store.AlertActor) (domain.ServiceAlertPolicy, error)
+	SetServiceBurnAlerting(ctx context.Context, projectID, serviceID, window string, enabled bool, rules []domain.BurnRule, actor store.AlertActor) error
 	// Service impact graph + correlation reads (FR-021 phase 3, iter-0147).
 	GetServiceDependencies(ctx context.Context, projectID, serviceID string) (store.ServiceGraphView, error)
 	ReplaceServiceDependencies(ctx context.Context, projectID, serviceID string, parents []string, expectedGeneration int64, actor store.GraphActor) (store.ServiceGraphView, error)
@@ -496,6 +504,13 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/health", h.serviceHealth)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/reliability/series", h.serviceReliabilitySeries)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/sla-target", h.setServiceSLATarget)
+	// Phase 5 (§16.6a): the alerting-ownership write surface. The LIVE paging declaration and one
+	// SLA target's burn declaration are separate routes because they are separate transactions
+	// with separate audit actions and separate lifecycle closes — and because the objective write
+	// above must stay exactly what it was.
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/alerting", h.getServiceAlerting)
+	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/services/{serviceID}/alerting", h.patchServiceAlerting)
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting", h.setServiceBurnAlerting)
 
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/secrets", h.listSecrets)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/secrets", h.createSecret)

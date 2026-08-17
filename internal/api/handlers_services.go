@@ -99,6 +99,11 @@ type serviceDetailView struct {
 	// Dependencies is the phase-3 impact-graph block (§14.4): both directions
 	// with the two-layer neighbour health from ONE batched snapshot.
 	Dependencies *serviceGraphView `json:"dependencies,omitempty"`
+	// Alerting is the §16.6a paging DECLARATION — who gets paged for a live state, and nothing
+	// server-owned: no generation, no latch, no lease, no episode. It is absent (rather than
+	// defaulted) when it could not be read, for the same reason `reliability` is null here: a
+	// declaration a UI renders as "pages for down" because the read failed is worse than none.
+	Alerting *serviceAlertingView `json:"alerting,omitempty"`
 	// Supersedes is the OTHER end of the phase-4 composite link (§15.5), read from the same
 	// single column `monitors.superseded_by_service_id` — there is no second fact to keep in step.
 	// A converted composite appears here at full strength: still probing, still alerting, and
@@ -317,6 +322,15 @@ func (h *Handler) getService(w http.ResponseWriter, r *http.Request) {
 			v.Cursor = &c
 		}
 		out.Materialization.Repairing = append(out.Materialization.Repairing, v)
+	}
+	// The phase-5 paging declaration (§16.6a), on the same best-effort terms as the two blocks
+	// below: an alerting read that cannot be served leaves the block ABSENT, never a synthesized
+	// default that would tell an operator this service pages for `down` when nobody knows.
+	if p, err := h.store.ServiceAlertPolicy(r.Context(), proj.ID, detail.Service.ID); err == nil {
+		av := newServiceAlertingView(p)
+		out.Alerting = &av
+	} else {
+		h.logEvent(r, "service_alerting_read_failed", "error", err.Error())
 	}
 	// The phase-3 impact-graph block (§14.4). Best-effort presentation: a graph
 	// read failure degrades the block to absent rather than failing the detail.

@@ -934,10 +934,16 @@ paths:
       tags: [services]
       summary: Set the service-scoped objective for one standard window (editor+)
       description: >
-        The body is `{window, objective}` and NOTHING else. Service burn alerting is phase 5
-        (spec 13, invariant 47): any burn field is rejected at the decoder, the store offers
-        no burn parameter, and the schema CHECK is the final fence. Reporting always states
-        which objective produced a budget, and a change is annotated via its timestamp.
+        The body is `{window, objective}` and NOTHING else, and it stays that way now that
+        phase 5 has landed. Service burn alerting IS expressible — on its own route,
+        `…/sla-target/burn-alerting` — because the objective and the burn declaration are two
+        store transactions with two audit actions and two families of lifecycle close;
+        accepting both here would make one request no layer can commit atomically. A burn
+        field in THIS body is still a 400, now meaning "wrong endpoint".
+
+
+        Reporting always states which objective produced a budget, and a change is annotated
+        via its timestamp.
       requestBody:
         required: true
         content:
@@ -958,6 +964,118 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/alerting:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+    get:
+      tags: [services]
+      summary: The service's paging declaration
+      description: >
+        WHO gets paged for a live state, and nothing server-owned: no
+        `alert_config_generation`, no latch, no lease, no episode. Ownership is DECLARED and
+        defaults to off, so a service that has never been touched reads as
+        `{owns_paging: false, page_on: [down], page_on_unknown: false, confirm_evaluations: 2}`
+        — the quiet, non-surprising value in every field.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceAlerting' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [services]
+      summary: Change the service's paging declaration (editor+)
+      description: >
+        PATCH semantics, strictly: an OMITTED field is unchanged. Every field is therefore
+        optional and `false` is a real edit — a body that never mentions `owns_paging` must
+        not disown the service, which would close every announcement it has open on both
+        signals with `ownership_disabled`.
+
+
+        `page_on: []` is LEGAL and means "page for no state" (it dis-arms live coverage). It
+        is not the same statement as omitting the field.
+
+
+        Server-owned fields are REFUSED, not ignored: `alert_config_generation` and every
+        latch, lease and episode column are absent from this schema and rejected by the
+        decoder, so a bundle whose hash moved because an alert fired cannot exist.
+
+
+        The response is the CANONICAL stored declaration — `page_on` sorted and deduplicated
+        — not the request as sent. None of these fields bumps a definition revision or an
+        evaluation epoch; all of them bump `alert_config_generation`, which dis-arms
+        delegation until the new generation has been evaluated (the safe direction: dis-armed
+        means members page for themselves).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchServiceAlertingRequest' }
+      responses:
+        '200':
+          description: The canonical stored declaration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceAlerting' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >
+            The service is owned by a file provider (`managed_by_file`). These fields are part
+            of the desired state, so the bundle owns them and the UI renders them read-only.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+    put:
+      tags: [services]
+      summary: Declare which error-budget burns page, for one window (editor+)
+      description: >
+        A full REPLACE of one SLA target's burn declaration, not a patch: rules that are no
+        longer declared have their announcements closed (`rule_removed`) and their latch rows
+        deleted, and a partial body could not say which those are. `burn_rules` is the
+        complete set and omitting it declares none.
+
+
+        `window` names the target and defaults to 30d. A window with no declared objective is
+        a 404: enabling burn alerting on an objective nobody set would page against a number
+        that does not exist, so `PUT …/sla-target` is the prerequisite.
+
+
+        A rule's `firing` latch is SERVER-owned and rejected on the wire — never silently
+        zeroed, because a request that says "this rule is firing" and receives a 200 has been
+        told it was believed. Rules are stored and echoed in canonical key order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetServiceBurnAlertingRequest' }
+      responses:
+        '200':
+          description: The stored burn declaration, in canonical key order.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceBurnAlerting' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such service in this project, or no objective declared for `window`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: The service is owned by a file provider (`managed_by_file`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/projects/{projectID}/sla:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
@@ -3225,6 +3343,99 @@ components:
         window: { type: string, enum: [24h, 7d, 30d, 90d], default: 30d }
         objective: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 100 }
 
+    ServiceAlerting:
+      type: object
+      description: >
+        The paging DECLARATION of FR-021 §16.6a, and only the declaration. Latch, lease,
+        generation and episode state have no field here by construction, so no future edit can
+        leak one by forgetting to redact it.
+      required: [owns_paging, page_on, page_on_unknown, confirm_evaluations]
+      additionalProperties: false
+      properties:
+        owns_paging:
+          type: boolean
+          default: false
+          description: >
+            While true, the service's SLI members stop DELIVERING their own alerts — they keep
+            probing, flipping, recording and opening incidents. Suppression additionally
+            requires ARMED coverage, so this switch alone silences nothing.
+        page_on:
+          type: array
+          description: >
+            The subset of {down, degraded} that notifies. Never null: `[]` is a legal
+            declaration meaning "page for no state", which dis-arms live coverage.
+          items: { type: string, enum: [down, degraded] }
+        page_on_unknown:
+          type: boolean
+          default: false
+          description: >
+            "Tell me when you cannot SEE this service" — a different statement from "it is
+            down", which is why unknown has its own switch and cannot appear in `page_on`.
+        confirm_evaluations:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 2
+          description: Consecutive evaluations a new state needs before it notifies.
+
+    PatchServiceAlertingRequest:
+      type: object
+      description: >
+        Every field is OPTIONAL and an omitted one is UNCHANGED. `false` is a real edit, not
+        absence. Server-owned fields — `alert_config_generation` and every latch, lease and
+        episode column — are absent here and rejected by the decoder.
+      additionalProperties: false
+      properties:
+        owns_paging: { type: boolean }
+        page_on:
+          type: array
+          description: '`[]` explicitly pages for no state; omitting the field leaves it unchanged.'
+          items: { type: string, enum: [down, degraded] }
+        page_on_unknown: { type: boolean }
+        confirm_evaluations: { type: integer, minimum: 1, maximum: 10 }
+
+    BurnRuleDeclaration:
+      type: object
+      description: >
+        A burn rule as a CLIENT may state it: the four declared fields and nothing else. The
+        `firing` latch of `BurnRule` is deliberately missing — it is server-owned (§16.4b) and
+        a body carrying it is a 400. Two rules with the same canonical key (severity, both
+        windows, threshold) are also a 400: one latch cannot answer for two rules.
+      required: [long_window_seconds, short_window_seconds, threshold, severity]
+      additionalProperties: false
+      properties:
+        long_window_seconds: { type: integer, description: 'Noise-filtering window, must exceed the short one (max 7d).' }
+        short_window_seconds: { type: integer, minimum: 60, description: 'Confirmation window ("still burning right now").' }
+        threshold: { type: number, format: double, exclusiveMinimum: 0, description: 'Burn-rate multiple that trips the rule (e.g. 14.4).' }
+        severity: { type: string, enum: [page, ticket] }
+
+    SetServiceBurnAlertingRequest:
+      type: object
+      description: >
+        A full replace of one service SLA target's burn declaration. `burn_rules` is the
+        complete set; omitting it declares none.
+      required: [burn_alert_enabled]
+      additionalProperties: false
+      properties:
+        window: { type: string, enum: [24h, 7d, 30d, 90d], default: 30d }
+        burn_alert_enabled: { type: boolean }
+        burn_rules:
+          type: array
+          maxItems: 4
+          items: { $ref: '#/components/schemas/BurnRuleDeclaration' }
+
+    ServiceBurnAlerting:
+      type: object
+      required: [window, burn_alert_enabled, burn_rules]
+      additionalProperties: false
+      properties:
+        window: { type: string }
+        burn_alert_enabled: { type: boolean }
+        burn_rules:
+          type: array
+          description: The stored rule set, in canonical key order.
+          items: { $ref: '#/components/schemas/BurnRule' }
+
     ServiceDeclaration:
       type: object
       description: What a human declared availability to MEAN, as of `effective_at`.
@@ -3326,6 +3537,13 @@ components:
             Always null in this release. SLO, error budget and burn rate are phase 2; a zero
             a client could render as a number would be exactly the confident falsehood this
             feature exists to prevent.
+        alerting:
+          allOf: [ { $ref: '#/components/schemas/ServiceAlerting' } ]
+          description: >
+            The §16.6a paging declaration. ABSENT (rather than defaulted) when the alerting
+            read degraded: a declaration a UI renders as "pages for down" because a read
+            failed is worse than no block at all. Write it at
+            `PATCH …/services/{serviceID}/alerting`.
         dependencies:
           allOf: [ { $ref: '#/components/schemas/ServiceGraph' } ]
           nullable: true

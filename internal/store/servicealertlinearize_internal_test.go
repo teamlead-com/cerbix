@@ -171,3 +171,59 @@ func TestLiveEvaluationCannotPublishUnderANarrowedPolicy(t *testing.T) {
 	}
 	assertEmpty(t, st, ctx, "service_alert_episodes")
 }
+
+// The writer's clock is read AFTER it stops waiting, not when its transaction began.
+//
+// `now()` is transaction-START time, so a writer that queued behind an evaluation would stamp its
+// close with an instant from before the wait — potentially before the episode that evaluation opened
+// while it waited. An announcement whose ending precedes its beginning is not a record anybody can
+// read, and it is the kind of defect that only ever appears under contention.
+func TestAWaitingWriterStampsTheCloseAfterItsWait(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+	plantBurn(t, st, ctx, f, 5, minute/60)
+	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
+		t.Fatalf("onsets = %d, want a firing rule to close", got.Onsets)
+	}
+
+	// Hold the service row, so the writer's transaction starts and then WAITS.
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	if _, err := blocker.Exec(ctx,
+		`SELECT 1 FROM services WHERE id = $1 FOR UPDATE`, f.serviceID); err != nil {
+		t.Fatalf("blocker lock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", false, nil, AlertActor{})
+	}()
+	waitForLockWait(t, st, ctx)
+
+	// The instant the wait ends. Anything the writer stamps must be at or after this.
+	var released time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&released); err != nil {
+		t.Fatalf("read clock: %v", err)
+	}
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatalf("release blocker: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("disable burn: %v", err)
+	}
+
+	var started, closed time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT started_at, closed_at FROM service_alert_episodes`).Scan(&started, &closed); err != nil {
+		t.Fatalf("read episode: %v", err)
+	}
+	if closed.Before(started) {
+		t.Fatalf("the announcement was closed at %s, BEFORE it opened at %s", closed, started)
+	}
+	if closed.Before(released) {
+		t.Fatalf("the close is stamped %s, before the writer's wait even ended at %s: the clock was "+
+			"read at transaction start rather than after the locks", closed, released)
+	}
+}

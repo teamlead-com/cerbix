@@ -81,10 +81,9 @@ func (s *Store) UpdateServiceAlertPolicy(
 	var slug string
 	var asOf time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, slug, now()
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, slug
 		  FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`, serviceID, projectID).
-		Scan(&before.OwnsPaging, &pageOn, &before.PageOnUnknown, &before.ConfirmEvaluations,
-			&slug, &asOf)
+		Scan(&before.OwnsPaging, &pageOn, &before.PageOnUnknown, &before.ConfirmEvaluations, &slug)
 	if noRows(err) || isInvalidTextRepresentation(err) {
 		// Wrong tenant, unknown id, or an id that is not even a uuid: one answer for all three, so
 		// existence never leaks across a tenant boundary.
@@ -92,6 +91,13 @@ func (s *Store) UpdateServiceAlertPolicy(
 	}
 	if err != nil {
 		return domain.ServiceAlertPolicy{}, fmt.Errorf("store: lock service for alert policy: %w", err)
+	}
+	// The clock is read AFTER the lock is held, and it is `statement_timestamp()` rather than
+	// `now()`. `now()` is transaction-START time: a writer that queued behind an evaluation would
+	// stamp its close with an instant BEFORE the episode that evaluation had just opened, and an
+	// announcement that ends before it begins is not a record anybody can read.
+	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&asOf); err != nil {
+		return domain.ServiceAlertPolicy{}, fmt.Errorf("store: alert policy clock: %w", err)
 	}
 	for _, state := range pageOn {
 		before.PageOn = append(before.PageOn, domain.ServiceAlertState(state))
@@ -210,8 +216,8 @@ func (s *Store) SetServiceBurnAlerting(
 	var slug string
 	var asOf time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT slug, now() FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`,
-		serviceID, projectID).Scan(&slug, &asOf)
+		`SELECT slug FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`,
+		serviceID, projectID).Scan(&slug)
 	if noRows(err) || isInvalidTextRepresentation(err) {
 		return ErrNotFound
 	}
@@ -234,6 +240,12 @@ func (s *Store) SetServiceBurnAlerting(
 	}
 	if err != nil {
 		return fmt.Errorf("store: lock burn target: %w", err)
+	}
+	// The clock, AFTER both rows are held. See the note in UpdateServiceAlertPolicy: a writer that
+	// waited behind an evaluation would otherwise close, with a transaction-start timestamp, an
+	// episode that evaluation had opened later.
+	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&asOf); err != nil {
+		return fmt.Errorf("store: burn alerting clock: %w", err)
 	}
 	// The old rules are needed for the audit's before-set and for "did the rules change?" — never
 	// for deciding WHICH episodes and latches to end: those are addressed by the keys the rows

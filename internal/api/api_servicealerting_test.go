@@ -562,3 +562,27 @@ func TestServiceDetailCarriesCoverageWithoutServerOwnedState(t *testing.T) {
 		}
 	}
 }
+
+// The burn echo must not contain the word `firing` at all. For a SERVICE target the latch lives in
+// the normalized per-rule row, which this endpoint never reads — so echoing `"firing": false` would
+// be a claim about state it did not look at, and one that a genuinely firing rule contradicts.
+func TestBurnAlertingEchoCarriesNoLatch(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+	id := seedAlertingService(fs, "p1", nil, true) // the objective for 30d exists
+
+	rec := do(h, p1Editor, http.MethodPut, burnPath("p1", id), `{
+		"window":"30d","burn_alert_enabled":true,
+		"burn_rules":[{"long_window_seconds":3600,"short_window_seconds":300,
+		               "threshold":14.4,"severity":"page"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "firing") {
+		t.Fatalf("the burn echo carries the server-owned latch: %s", rec.Body.String())
+	}
+	// ...while still echoing the declaration itself.
+	if !strings.Contains(rec.Body.String(), `"threshold":14.4`) {
+		t.Fatalf("the echo lost the declaration: %s", rec.Body.String())
+	}
+}

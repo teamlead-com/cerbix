@@ -3479,8 +3479,12 @@ components:
         burn_alert_enabled: { type: boolean }
         burn_rules:
           type: array
-          description: The stored rule set, in canonical key order.
-          items: { $ref: '#/components/schemas/BurnRule' }
+          description: >
+            The stored rule set, in canonical key order, as DECLARATIONS. Not `BurnRule`: that
+            schema carries `firing`, which for a service target is not even in this JSON — the
+            latch is the normalized per-rule row — so echoing it would be a statement about
+            state this endpoint never read.
+          items: { $ref: '#/components/schemas/BurnRuleDeclaration' }
 
     ServiceDeclaration:
       type: object

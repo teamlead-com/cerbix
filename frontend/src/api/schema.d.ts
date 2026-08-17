@@ -6551,8 +6551,8 @@ export interface components {
         ServiceBurnAlerting: {
             window: string;
             burn_alert_enabled: boolean;
-            /** @description The stored rule set, in canonical key order. */
-            burn_rules: components["schemas"]["BurnRule"][];
+            /** @description The stored rule set, in canonical key order, as DECLARATIONS. Not `BurnRule`: that schema carries `firing`, which for a service target is not even in this JSON — the latch is the normalized per-rule row — so echoing it would be a statement about state this endpoint never read. */
+            burn_rules: components["schemas"]["BurnRuleDeclaration"][];
         };
         /** @description What a human declared availability to MEAN, as of `effective_at`. */
         ServiceDeclaration: {

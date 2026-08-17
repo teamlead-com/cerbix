@@ -541,6 +541,29 @@ func TestBurnSequenceIsScopedToItsTarget(t *testing.T) {
 	}
 }
 
+// declareTwoBurnRules makes the target DECLARE two rules, for tests that latch two of them. The
+// canonical keys of the declaration and of the latch rows need not match for these tests — arming
+// compares how MANY verdicts exist against how many rules are declared, and the identity half is the
+// target generation — but a target that latches more rules than it declares is not a configuration
+// any write path can produce.
+func declareTwoBurnRules(t *testing.T, st *Store, ctx context.Context, f armFixture) {
+	t.Helper()
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE sla_targets SET burn_rules = '[
+		    {"long_window_seconds":3600,"short_window_seconds":300,"threshold":14,"severity":"page"},
+		    {"long_window_seconds":21600,"short_window_seconds":1800,"threshold":6,"severity":"ticket"}
+		]'::jsonb WHERE id = $1`, f.targetID); err != nil {
+		t.Fatalf("declare two rules: %v", err)
+	}
+	// The declaration change bumps the target generation, so the existing latch rows have to be
+	// re-stamped exactly as a fresh evaluation would stamp them.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE service_burn_alert_state bs SET target_generation = t.alert_generation
+		  FROM sla_targets t WHERE t.id = bs.sla_target_id AND t.id = $1`, f.targetID); err != nil {
+		t.Fatalf("restamp latches: %v", err)
+	}
+}
+
 // armBurnRule writes ONE rule's latch, for tests about services that own more than one rule.
 func armBurnRule(t *testing.T, st *Store, ctx context.Context, f armFixture,
 	targetID, ruleKey, verdict string) {
@@ -576,6 +599,10 @@ func TestOneHoldingRuleAmongManyDisarmsBurnCoverage(t *testing.T) {
 
 	// A SECOND rule on the SAME target, also quotable. The negative control: without it, the test
 	// would pass for the trivial reason that any second row dis-arms.
+	//
+	// DECLARED as well as latched: arming requires a verdict for every rule the target declares, so
+	// a latch row for a rule nobody declares is an inconsistency in its own right and dis-arms.
+	declareTwoBurnRules(t, st, ctx, f)
 	armBurnRule(t, st, ctx, f, f.targetID, "rule-2", "clear")
 	if !delegated(t, st, ctx, f, DelegationBurn) {
 		t.Fatal("a second QUOTABLE rule dis-armed burn coverage")
@@ -622,5 +649,126 @@ func TestEnabledTargetWithNoVerdictDisarmsBurnCoverage(t *testing.T) {
 	armBurnRule(t, st, ctx, f, second, "rule-1", "clear")
 	if !delegated(t, st, ctx, f, DelegationBurn) {
 		t.Fatal("two targets, both quotable, fresh and current, did not arm burn coverage")
+	}
+}
+
+// FR-021 §16.1 — a rule that has never been evaluated is not coverage, and neither is a target
+// whose latch rows do not account for every rule it declares.
+//
+// The clause that walks existing latch rows cannot see this: with rules {A} armed and fresh, adding
+// B leaves A's row quotable, fresh and generation-matched, so "nothing is blind" was satisfied by a
+// configuration in which half the replacement had never once run. The member monitor's own burn
+// alert stayed suppressed the whole time.
+func TestAddingARuleDisarmsUntilItHasBeenEvaluated(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("fixture is not armed for burn")
+	}
+
+	// A SECOND rule, declared through the product write path.
+	rules := []domain.BurnRule{
+		{LongWindowSeconds: 3600, ShortWindowSeconds: 300, Threshold: 14, Severity: domain.BurnSeverityPage},
+		{LongWindowSeconds: 21600, ShortWindowSeconds: 1800, Threshold: 6, Severity: domain.BurnSeverityTicket},
+	}
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true, rules,
+		AlertActor{}); err != nil {
+		t.Fatalf("declare a second rule: %v", err)
+	}
+	if delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("burn coverage stayed armed after a rule was added: the member's own burn alert is " +
+			"suppressed while the new rule has never been evaluated")
+	}
+
+	// Once every declared rule has a current, quotable verdict, coverage returns.
+	for _, key := range []string{"page/3600/300/14", "ticket/21600/1800/6"} {
+		armBurnRule(t, st, ctx, f, f.targetID, key, "clear")
+	}
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("a fully evaluated two-rule target did not re-arm burn coverage")
+	}
+
+	// And the same hole from the other side: a latch row deleted directly leaves a declared rule
+	// with no verdict at all, which the generation cannot see because no configuration changed.
+	if _, err := st.pool.Exec(ctx,
+		`DELETE FROM service_burn_alert_state WHERE rule_key = 'ticket/21600/1800/6'`); err != nil {
+		t.Fatalf("delete one latch: %v", err)
+	}
+	if delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("a declared rule with no latch row at all left burn coverage armed")
+	}
+}
+
+// The generation bump must be SEMANTIC: reordering the same rules is not a change, and treating it
+// as one would dis-arm a service — and page its members — for an edit nobody made.
+func TestReorderingRulesIsNotAConfigurationChange(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	rules := []domain.BurnRule{
+		{LongWindowSeconds: 3600, ShortWindowSeconds: 300, Threshold: 14, Severity: domain.BurnSeverityPage},
+		{LongWindowSeconds: 21600, ShortWindowSeconds: 1800, Threshold: 6, Severity: domain.BurnSeverityTicket},
+	}
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true, rules,
+		AlertActor{}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	var before int64
+	if err := st.pool.QueryRow(ctx,
+		`SELECT alert_generation FROM sla_targets WHERE id = $1`, f.targetID).Scan(&before); err != nil {
+		t.Fatalf("read generation: %v", err)
+	}
+
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true,
+		[]domain.BurnRule{rules[1], rules[0]}, AlertActor{}); err != nil {
+		t.Fatalf("reorder: %v", err)
+	}
+	var after int64
+	if err := st.pool.QueryRow(ctx,
+		`SELECT alert_generation FROM sla_targets WHERE id = $1`, f.targetID).Scan(&after); err != nil {
+		t.Fatalf("read generation: %v", err)
+	}
+	if after != before {
+		t.Fatalf("a reorder bumped the target generation %d→%d: the service would dis-arm and its "+
+			"members would page for a change nobody made", before, after)
+	}
+}
+
+// Cardinality answers "is a rule missing a verdict"; it cannot answer "is this verdict ABOUT the
+// rule that is declared". Swapping a rule's threshold in place keeps the count identical while every
+// latch row now describes a rule nobody declares — and this is reachable without the product write
+// path, which prunes such rows itself. The target generation is what closes that gap: the trigger
+// bumps it on any semantic change to the declared rules, and a verdict for an older generation is
+// not coverage.
+func TestReplacingARuleInPlaceDisarmsDespiteMatchingCardinality(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("fixture is not armed for burn")
+	}
+
+	// A DIRECT edit, one rule replaced by another: still exactly one declared rule, still exactly
+	// one latch row, and that row is fresh, error-free and quotable.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE sla_targets
+		   SET burn_rules = '[{"long_window_seconds":3600,"short_window_seconds":300,
+		                       "threshold":25,"severity":"page"}]'::jsonb
+		 WHERE id = $1`, f.targetID); err != nil {
+		t.Fatalf("replace the rule: %v", err)
+	}
+	var declared, latches int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT jsonb_array_length(burn_rules),
+		       (SELECT count(*) FROM service_burn_alert_state b WHERE b.sla_target_id = $1)
+		  FROM sla_targets WHERE id = $1`, f.targetID).Scan(&declared, &latches); err != nil {
+		t.Fatalf("read counts: %v", err)
+	}
+	if declared != latches {
+		t.Fatalf("the fixture no longer isolates the identity gap: %d declared, %d latches",
+			declared, latches)
+	}
+
+	if delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("burn coverage stayed armed on a verdict about a rule that is no longer declared: " +
+			"the counts match, so only the target generation can tell these apart")
 	}
 }

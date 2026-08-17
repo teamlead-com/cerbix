@@ -109,12 +109,20 @@ ALTER TABLE sla_targets ADD COLUMN alert_generation bigint NOT NULL DEFAULT 0;
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION sla_target_alert_generation_bump() RETURNS trigger AS $$
 BEGIN
-    -- Only the DECLARED fields count. `burn_rules` carries the MONITOR path's latch inside its JSON,
-    -- so a monitor alert firing must not look like a configuration change.
+    -- Only the DECLARED fields count — and for a SERVICE target the rules are declared fields.
+    -- `burn_rules` carries the MONITOR path's latch inside its JSON, which is why a bump on it would
+    -- be wrong there; monitor rows are already excluded by `service_id IS NOT NULL`, and the service
+    -- write path stores the array with `firing` zeroed and the rules in canonical key order, so for
+    -- these rows a textual difference IS a semantic one and a reorder is not a change.
+    --
+    -- Omitting it left the hole this trigger exists to close: adding a rule to an armed target
+    -- changed nothing any arming clause could see, so burn coverage stayed armed — and a member's
+    -- own burn alert stayed suppressed — while the new rule had never once been evaluated.
     IF NEW.service_id IS NOT NULL
        AND (NEW.burn_alert_enabled IS DISTINCT FROM OLD.burn_alert_enabled
             OR NEW.objective IS DISTINCT FROM OLD.objective
-            OR NEW.window_name IS DISTINCT FROM OLD.window_name) THEN
+            OR NEW.window_name IS DISTINCT FROM OLD.window_name
+            OR NEW.burn_rules IS DISTINCT FROM OLD.burn_rules) THEN
         NEW.alert_generation := OLD.alert_generation + 1;
     END IF;
     RETURN NEW;

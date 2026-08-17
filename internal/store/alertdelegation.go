@@ -213,7 +213,23 @@ var activeBurnDelegationSQL = `
 	         LEFT JOIN service_burn_alert_state bs
 	           ON bs.service_id = s.id AND bs.project_id = s.project_id AND bs.sla_target_id = t.id
 	        WHERE t.service_id = s.id AND t.burn_alert_enabled
-	          AND (bs.sla_target_id IS NULL OR NOT (` + burnRuleCoversSQL + `)))` +
+	          AND (bs.sla_target_id IS NULL OR NOT (` + burnRuleCoversSQL + `)))
+	   -- ...and a latch for EVERY declared rule, not merely for the rules that happen to have one.
+	   -- The clause above walks the rows that EXIST, so a rule declared with no row at all is
+	   -- invisible to it: adding a second rule to an armed target left coverage armed while the new
+	   -- rule had never been evaluated, and deleting one of two latch rows did the same. Cardinality
+	   -- is the honest test here because the write path rejects duplicate canonical keys and prunes
+	   -- the rows of rules that no longer exist, so a declared rule and its latch row are one to one.
+	   -- Counting is also the only spelling that does not re-implement the canonical key in SQL —
+	   -- a second owner of that format is how a latch and a page come to disagree about identity.
+	   AND NOT EXISTS (
+	       SELECT 1
+	         FROM sla_targets t
+	        WHERE t.service_id = s.id AND t.burn_alert_enabled
+	          AND (SELECT count(*)
+	                 FROM service_burn_alert_state bs
+	                WHERE bs.service_id = s.id AND bs.project_id = s.project_id
+	                  AND bs.sla_target_id = t.id) <> jsonb_array_length(t.burn_rules))` +
 	effectiveSLIClause + routableClause + `
 	 ORDER BY s.slug`
 

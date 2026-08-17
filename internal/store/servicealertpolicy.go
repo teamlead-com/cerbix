@@ -291,11 +291,17 @@ func (s *Store) SetServiceBurnAlerting(
 	// `Firing` is zeroed on the way in. For a SERVICE target the latch is the normalized
 	// `service_burn_alert_state` row (§16.4b) and the JSON's copy is read by nothing; storing a
 	// caller's value there would leave a second, editable statement about what is currently firing.
+	//
+	// The array is also stored in canonical KEY ORDER, and that is what makes the generation trigger
+	// honest: it compares the stored JSON, so without a canonical order a pure reorder would bump
+	// the generation, dis-arm the service and page its members for a change nobody made — while with
+	// one, a textual difference IS a semantic difference.
 	stored := make([]domain.BurnRule, 0, len(rules))
 	for _, r := range rules {
 		r.Firing = false
 		stored = append(stored, r)
 	}
+	sort.Slice(stored, func(i, j int) bool { return stored[i].Key() < stored[j].Key() })
 	payload, err := json.Marshal(stored)
 	if err != nil {
 		return fmt.Errorf("store: marshal burn rules: %w", err)

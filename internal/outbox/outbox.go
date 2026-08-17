@@ -38,6 +38,10 @@ type Store interface {
 	AppendSuppressionNote(ctx context.Context, monitorID, rootName string) (bool, error)
 	// Maintenance suppression: is the monitor inside an active window right now.
 	MonitorInMaintenance(ctx context.Context, monitorID string) (bool, error)
+	// Service impact correlation (FR-021 §14.3): the one-transaction attempt.
+	// Returns the NEWLY inserted links plus the witness-overflow count of the
+	// [278] bound; a redelivery inserts none.
+	CorrelateIncident(ctx context.Context, incidentID string) ([]domain.ServiceImpactLink, int, error)
 }
 
 // WebhookDeliverer delivers an incident event to a project's webhooks.
@@ -63,6 +67,13 @@ type MailSender interface {
 type Metrics interface {
 	RecordOutboxDelivered()
 	RecordOutboxDead()
+	// Impact correlation (FR-021 §14.6): links counted on INSERTED rows only;
+	// failures count failed attempts (each also rides the outbox retry);
+	// witness overflow counts incidents beyond the [278] per-service bound —
+	// a durable-fact omission that must never be silent.
+	RecordImpactLinks(role string, n int)
+	RecordImpactFailure()
+	RecordImpactWitnessOverflow(n int)
 }
 
 // Worker polls the outbox and delivers due events.
@@ -223,6 +234,46 @@ func (w *Worker) attachIncidentContext(ctx context.Context, inc domain.Incident)
 // deliver dispatches one event by topic. A nil error means the event is done.
 func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 	switch e.Topic {
+	case domain.TopicIncidentCorrelation:
+		// FR-021 §14.3: the impact-graph correlation attempt, on its OWN topic —
+		// never a rider on incident_event, so webhook death never blocks it and
+		// its failure never blocks incident delivery. The store method is one
+		// transaction (locks, open recheck, links + 🕸 notes) and fully idempotent,
+		// so the outbox's at-least-once redelivery is safe. NOTE: this topic is
+		// FENCED (domain.FencedTopic) — see the claim fence in store.ClaimDueOutbox.
+		var corr domain.IncidentCorrelation
+		if err := json.Unmarshal(e.Payload, &corr); err != nil {
+			return err
+		}
+		links, overflow, err := w.store.CorrelateIncident(ctx, corr.IncidentID)
+		if err != nil {
+			if w.metrics != nil {
+				w.metrics.RecordImpactFailure()
+			}
+			return err
+		}
+		if overflow > 0 {
+			// The [278] bound bit: incidents beyond the per-service witness cap were
+			// deterministically not selected. Counted and logged — never silent.
+			if w.metrics != nil {
+				w.metrics.RecordImpactWitnessOverflow(overflow)
+			}
+			w.logger.Warn("incident_impact_witness_overflow", "incident", corr.IncidentID, "dropped", overflow)
+		}
+		if len(links) > 0 {
+			perRole := map[string]int{}
+			for _, l := range links {
+				perRole[l.Role]++
+			}
+			if w.metrics != nil {
+				for role, n := range perRole {
+					w.metrics.RecordImpactLinks(role, n)
+				}
+			}
+			w.logger.Info("incident_impact_linked", "incident", corr.IncidentID, "links", len(links))
+		}
+		return nil
+
 	case domain.TopicIncidentEvent:
 		if w.webhooks == nil {
 			return errors.New("no webhook deliverer configured")

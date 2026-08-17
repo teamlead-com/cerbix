@@ -114,6 +114,20 @@ func (s *Store) CreateIncident(ctx context.Context, inc domain.Incident, opening
 	if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentEvent, payload); err != nil {
 		return domain.Incident{}, err
 	}
+	// A monitor-anchored open also enqueues its correlation attempt (FR-021 §14.3)
+	// in this same transaction — its OWN topic, so webhook death never blocks
+	// correlation and a correlation failure never blocks incident delivery. The
+	// topic is fenced: an old delivery owner in a mixed-version fleet cannot claim
+	// it (enqueueOutboxTx sets the class from domain.FencedTopic).
+	if created.MonitorID != "" {
+		corr, err := json.Marshal(domain.IncidentCorrelation{IncidentID: created.ID})
+		if err != nil {
+			return domain.Incident{}, fmt.Errorf("store: marshal incident correlation: %w", err)
+		}
+		if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentCorrelation, corr); err != nil {
+			return domain.Incident{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.Incident{}, fmt.Errorf("store: commit create incident: %w", err)
 	}

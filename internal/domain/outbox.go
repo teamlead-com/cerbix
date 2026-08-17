@@ -27,7 +27,48 @@ const (
 	// subscription double-opt-in email, sent off the request path so a slow or
 	// failing SMTP never blocks (or errors) the subscribe call.
 	TopicSubscriberConfirm = "subscriber_confirm"
+	// TopicIncidentCorrelation carries an IncidentCorrelation: the service-graph
+	// impact computation for a freshly-opened monitor-anchored incident. Its own
+	// topic — never a rider on incident_event — so webhook death never blocks
+	// correlation and a correlation failure never blocks incident delivery
+	// (FR-021 §14.3). FENCED: see FencedTopic.
+	TopicIncidentCorrelation = "incident_correlation"
 )
+
+// FencedTopic reports whether a topic's rows use the fenced claimable class
+// ('pending_fenced'): a status the legacy claim shape (status = 'pending', no
+// topic predicate) cannot select, so an old delivery owner in a mixed-version
+// fleet can neither claim, attempt-burn nor dead-letter them. EVERY topic
+// introduced after phase 2 is fenced; the pre-fence topics stay legacy forever
+// because every deployed owner already dispatches them. This map is the ONE
+// source of truth for enqueue class, capable claim, retry and replay
+// (FR-021 §14.3, invariant 61) — a test pins it against the worker's dispatch
+// switch so the two cannot drift.
+func FencedTopic(topic string) bool {
+	for _, t := range FencedTopics() {
+		if t == topic {
+			return true
+		}
+	}
+	return false
+}
+
+// FencedTopics enumerates every fenced topic THIS BINARY knows how to
+// dispatch. The capable claim selects 'pending_fenced' rows for exactly this
+// set — so a binary never claims a fenced row of a topic a newer release
+// introduced (the same protection the fence gives against pre-fence binaries,
+// carried forward automatically).
+func FencedTopics() []string {
+	return []string{TopicIncidentCorrelation}
+}
+
+// IncidentCorrelation is the payload for a TopicIncidentCorrelation outbox
+// event: the incident whose impact links are to be computed. The attempt
+// re-reads everything else authoritatively under locks (§14.3), so the payload
+// carries identity only.
+type IncidentCorrelation struct {
+	IncidentID string `json:"incident_id"`
+}
 
 // SubscriberConfirm is the payload for a TopicSubscriberConfirm outbox event: a
 // rendered confirmation email for a new status-page subscriber. The subscribe

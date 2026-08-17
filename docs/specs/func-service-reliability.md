@@ -1554,10 +1554,14 @@ the same position for the declaration axis:
   token: a mismatch is a **409** and the two-operators lost-update (`[A]` read twice,
   `[A,B]` and `[A,C]` submitted) resolves as first-committer-wins, second told so. A no-op
   replace-set (identical set) bumps nothing and audits nothing.
-- **Every non-no-op delta writes a tenant-scoped audit row in the SAME transaction** — actor,
-  service, added edges, removed edges (bounded lists) — because `created_by` on surviving
-  rows cannot testify about a removal: deleting an edge deletes the only row that knew who
-  made it. The audit row is what remains.
+- **Every non-no-op delta writes a tenant-scoped audit row in the SAME transaction** — TYPED
+  actor attribution in the canonical columns (`actor_user_id` for humans and token
+  principals, `via_token`, and a human-readable label — an email, a token name, or the
+  provider id — in the target), plus added and removed edges (bounded lists) — because
+  `created_by` on surviving rows cannot testify about a removal: deleting an edge deletes
+  the only row that knew who made it. The audit row is what remains. *(Attribution typed per
+  review [276] P1-4: an opaque string in the target would leave a human edit actorless in
+  the audit API.)*
 - **Bundle format 2** gains an optional per-service key `depends_on: [service-slug]` —
   references are service slugs, tenant-scoped, and MAY point at a UI-owned service (the
   cross-owner reference rule of §15.2 for monitors, applied unchanged). Edges reconcile as a
@@ -1578,8 +1582,11 @@ the same position for the declaration axis:
   cross-provider dangling references. (An earlier draft allowed the delete and let the
   provider "freeze with last-known-good" — incoherent, since the cascaded edge's target no
   longer exists and no good state remains to keep; the guard is the version of this rule that
-  can be true.) Deletion tests observe graph state immediately after the delete attempt and
-  after the next reconcile, not merely the apply verdict.
+  can be true.) **An ORPHANED managed service still pins** ([276] P1-2): MaC deliberately
+  preserves an absent-from-bundle service as file-owned last-known-good, so its desired edges
+  are exactly the state the pin keeps restorable — excluding orphans would let a target
+  delete break LKG literally. Deletion tests observe graph state immediately after the delete
+  attempt and after the next reconcile, not merely the apply verdict.
 - Deleting a service (when permitted by the rule above) cascades its edges (both directions)
   and its impact links (§14.3); already-written 🕸 timeline notes are immutable text and
   remain. UI-owned edges never block anything: only an applied file desired-state pins.
@@ -1622,6 +1629,35 @@ background writer bypasses the API. Required negative tests at BOTH layers: a di
 attempt to link an incident in project A to a service or monitor in project B fails on the
 constraint, and the API never exposes another project's slug, name or path inside an
 authorized incident payload. These tables and the correlation query join §16's enumeration.
+
+**The attempt snapshot.** Membership, the graph and the witness set are read under the
+project's `service_membership` → `service_graph` advisory locks (the §15.4 order; the
+incident row locks below come later, the same direction on every path), so every fact an
+attempt encodes existed together in ONE committed state — separate READ COMMITTED reads
+could mix an already-deleted edge with a witness that only committed after the deletion.
+*(Added during phase-3 implementation, review [276] P1-1; proven by two barrier
+regressions: a graph replace and a membership change each committing while the attempt
+demonstrably waits on the lock, with the attempt then seeing the post-commit state.)*
+
+**The witness bound.** Witnesses are bounded per REACHABLE ENDPOINT SERVICE — the anchor's
+ancestors and descendants in the locked snapshot, and nothing else: the oldest
+`max_correlation_witnesses_per_service` = **5, fixed** open monitor-anchored incidents by
+ascending `(started_at, id)` — a deterministic function of the committed state at attempt
+time, so a redelivery against unchanged state selects the identical set. Selection is per
+endpoint (one incident may be within the bound for one of its services and beyond it for
+another); the ANCHOR is the attempt's subject, never a witness, never counted. The witness
+READ is scoped to those endpoints and capped IN SQL (per-endpoint `LIMIT`, totals from an
+aggregate), so an attempt's row transfer is bounded by `endpoints × cap` and never by the
+project's open-incident count; an attempt with no reachable endpoint reads no witnesses at
+all. SERVICE-level completeness is unchanged — a reachable service with any open incident
+still gets its probable_root row; the bound truncates witness LISTS, capping the attempt's
+lock and write set by construction (≤ 1 + 5 × reachable services). Overflow counts ONLY
+omitted witnesses of reachable endpoints — an unrelated service's incident pile is neither
+an omission nor telemetry — and is returned by the attempt, logged by the worker and counted
+(`§14.6`), never silent. *(Added during phase-3 implementation, review [276] P1-3 under the
+[278] conditions accepted [280]; reachable-endpoint scoping per the [283] final-round
+disposition — project-wide witness reads were both an unbounded read and false omission
+telemetry.)*
 
 **When — a dedicated durable topic, not a rider.** Correlation gets its own outbox topic,
 `incident_correlation`, enqueued in the SAME transaction that creates a monitor-anchored
@@ -1683,7 +1719,11 @@ producer.
 **What.** On the correlation attempt for incident `I` with own services `S`:
 
 - *upward*: every service `A` reachable upstream from `S` (cap 10) that has an OPEN
-  monitor-anchored incident right now → insert `(I, A, probable_root, path)`.
+  monitor-anchored incident `J` right now → insert `(I, A, probable_root, path)` **and the
+  mirror back-fill `(J, S', affected, path)`** for the `S' ∈ S` the path ascends from.
+  *(Added during phase-3 implementation: without the mirror, the child-first interleaving
+  leaves the parent incident without its affected row, making relation CONTENT depend on
+  opening order — the symmetry of this section is about content, not merely observation.)*
 - *downward*: every open incident `J` on a service `D` reachable downstream from some
   `S' ∈ S` → insert `(I, D, affected, path)`, **and** back-fill `(J, S', probable_root,
   path)` for that same `S'` — the service the path to `D` descends from, carrying the SAME
@@ -1756,7 +1796,14 @@ complete, only the prose truncates, and the truncation names its remainder.
   no impact service ids, slugs, names or paths.
 - Edge reads and writes use the dedicated `/dependencies` routes of §14.2 (with
   `graph_generation`); service create additionally accepts `depends_on` for create-with-edges
-  under the same validator and lock.
+  under the same validator and lock. The edge READ returns the token and both directions from
+  ONE SQL snapshot, so the token always names the returned set — split reads could straddle a
+  concurrent replace and earn the next PUT a spurious 409 ([276] P2-1).
+- **Every impact read is tenant-scoped at the owning data boundary** ([276] P0-1): the store's
+  impact listing takes the project id and predicates on the LINK rows' own `project_id`, so a
+  foreign incident id yields nothing even under a buggy handler-level access check; the
+  handler's `incidentAccess` check remains on top. The §16 negative tests cover this store
+  boundary directly.
 - The service detail payload gains `dependencies: {upstream: [{service, health}],
   downstream: [...]}` with health from the phase-2 two-layer signal — fetched as **one batched
   snapshot query for the whole neighbour set**, never a per-service `ServiceHealthNow` loop
@@ -1773,9 +1820,11 @@ renders through the existing system-update mechanism, unchanged.
 
 ### 14.6 Observability
 
-`cerbix_service_impact_links_total{role}` (counter, incremented on INSERTED rows only) and
+`cerbix_service_impact_links_total{role}` (counter, incremented on INSERTED rows only),
 `cerbix_service_impact_correlation_failures_total` (best-effort failures — the WARN path made
-countable). No gauge: the relation is queryable and bounded.
+countable), and `cerbix_service_impact_witness_overflow_total` (open incidents beyond the
+per-service witness bound — a deterministic durable-fact omission that must be visible; plain
+counter, NO tenant/project/service labels). No gauge: the relation is queryable and bounded.
 
 ### 14.7 Bounds (§21 discipline)
 
@@ -1784,6 +1833,7 @@ countable). No gauge: the relation is queryable and bounded.
 | `max_service_dependencies` | 20 direct edges | no (phase 3) | a graph a human can still read |
 | traversal depth cap | 10 | no | mirrors monitor graph; cap hit rejects, never truncates; pinned at 9/10/11 |
 | stored `path` length | ≤ depth cap + 1 = 11 slugs, endpoint-inclusive, root-first | no | a depth-10 chain has 11 endpoints; a 10-slug bound would drop one silently |
+| `max_correlation_witnesses_per_service` | 5 open anchored incidents, oldest by (started_at, id) | no | caps the attempt's lock/write set; overflow returned, logged and counted — never silent |
 | 🕸 note names per role | 8 + `+N more` | no | bounded prose over a complete relation |
 | impacts on incident LIST | none (detail only) | no | the list is unbounded history; list × impacts is unbounded² |
 | dependency health on service detail | ONE batched snapshot query | no | per-neighbour `ServiceHealthNow` is an N+1 at the project service cap |
@@ -2285,10 +2335,16 @@ is a reliability-domain object; if it fails, Service is still a grouping abstrac
     🕸 notes for newly gained rows inserted in that same transaction — link-without-note and
     note-without-link are both unrepresentable, and a resolve racing the attempt loses to the
     barrier, never to check-then-act;
-54. symmetry, qualified to the mechanism: for two incidents both still open when either's
-    attempt commits, at least one attempt observes the other — proven for both interleavings;
-    an incident resolved before any attempt reaches it is skipped by design; a redelivery
-    inserts zero rows and zero notes, and relation content is byte-identical across redelivery;
+54. symmetry, qualified to the mechanism AND the witness bound: for two incidents both still
+    open when either's attempt commits, at least one attempt observes the other — proven for
+    both interleavings; relation content is complete over the BOUNDED selected witness set
+    (per REACHABLE endpoint service, the oldest `max_correlation_witnesses_per_service` by
+    `(started_at, id)` — deterministic, SQL-capped and endpoint-scoped reads, anchor never
+    counted, overflow counted and logged for reachable endpoints only, service-level marking
+    unaffected); an incident resolved before any attempt reaches it is skipped by design; a
+    redelivery inserts zero rows and zero notes, and relation content is byte-identical
+    across redelivery; the attempt reads membership, graph and witnesses under the
+    membership→graph advisory locks, so every row encodes ONE committed state;
 55. `probable_root` marks EVERY upstream service on a path with an open incident and
     `affected` every downstream one; each row carries `computed_at` and its CANONICAL path —
     shortest, then lexicographic slug tie-break, endpoint-inclusive and root-first, bounded

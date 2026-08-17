@@ -161,6 +161,11 @@ func (s *Store) DeleteService(ctx context.Context, projectID, id string) error {
 	if err := lockServiceMembership(ctx, tx, projectID); err != nil {
 		return err
 	}
+	// membership → graph, never the other way (§14.1): the delete's cascade removes
+	// edges, so it is an edge-mutating path and serializes with every other one.
+	if err := lockServiceGraph(ctx, tx, projectID); err != nil {
+		return err
+	}
 
 	// Then the row, so a file apply claiming ownership serializes behind this check rather
 	// than racing it. Absence of the row is ErrNotFound before ownership is consulted.
@@ -174,6 +179,12 @@ func (s *Store) DeleteService(ctx context.Context, projectID, id string) error {
 		return fmt.Errorf("store: lock service: %w", err)
 	}
 	if err := assertServiceNotFileManagedTx(ctx, tx, id); err != nil {
+		return err
+	}
+	// A desired file edge pins its target (§14.2): while an applied file-owned service
+	// names this one in depends_on, deletion is a 409 naming the provider — the guard
+	// that keeps the provider's last-known-good literally true.
+	if err := assertServiceNotPinnedByFileEdgesTx(ctx, tx, id); err != nil {
 		return err
 	}
 	// A preview whose affected set included this service goes stale on its own: the stored

@@ -32,15 +32,21 @@ type Registry struct {
 	incidentsOpened     uint64
 	outboxDelivered     uint64
 	outboxDead          uint64
-	pullStats           []PullStat
-	serviceStats        *ServiceReliabilityStat
-	serviceSlices       map[string]uint64 // outcome → count (worked|empty|error)
-	serviceWedgedSet    bool
-	serviceWedged       bool
-	serviceWedgedReason string
-	factMaintTracked    bool
-	factMaintFailing    bool
-	factMaintLastOKUnix int64
+	// Impact correlation (FR-021 §14.6): links counted on INSERTED rows only
+	// (role → count, fixed two-role cardinality); failures are failed correlation
+	// attempts (each also rides the outbox retry envelope).
+	impactLinks           map[string]uint64
+	impactFailures        uint64
+	impactWitnessOverflow uint64
+	pullStats             []PullStat
+	serviceStats          *ServiceReliabilityStat
+	serviceSlices         map[string]uint64 // outcome → count (worked|empty|error)
+	serviceWedgedSet      bool
+	serviceWedged         bool
+	serviceWedgedReason   string
+	factMaintTracked      bool
+	factMaintFailing      bool
+	factMaintLastOKUnix   int64
 	// Service-reliability EVENT counters (§21): fan-out, terminal rejections, lifecycle
 	// outcomes, late-excluded arrivals. Monotonic — unlike a gauge over a table sum, they
 	// cannot decrease when a service (and its rows) is deleted.
@@ -339,6 +345,40 @@ func (r *Registry) RecordOutboxDead() {
 	r.outboxDead++
 }
 
+// RecordImpactLinks counts NEWLY inserted incident-service impact links by role
+// (FR-021 §14.6) — redeliveries insert nothing and therefore count nothing.
+func (r *Registry) RecordImpactLinks(role string, n int) {
+	if n <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.impactLinks == nil {
+		r.impactLinks = map[string]uint64{}
+	}
+	r.impactLinks[role] += uint64(n)
+}
+
+// RecordImpactFailure counts a failed correlation attempt (the WARN path made
+// countable; the attempt itself retries through the outbox).
+func (r *Registry) RecordImpactFailure() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.impactFailures++
+}
+
+// RecordImpactWitnessOverflow counts incidents beyond the per-service witness
+// bound of a correlation attempt ([278]) — a deterministic durable-fact
+// omission that must be visible. Plain counter, no tenant/project labels.
+func (r *Registry) RecordImpactWitnessOverflow(n int) {
+	if n <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.impactWitnessOverflow += uint64(n)
+}
+
 // SetPullStats replaces the per-region pull-queue gauge snapshot (leader-sampled).
 // SetServiceFactMaintenance records the fact-partition maintenance pass outcome: the [142]
 // stuck-month signal, low-cardinality by construction — one boolean and one timestamp, never
@@ -492,6 +532,9 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	incidentsOpened := r.incidentsOpened
 	outboxDelivered := r.outboxDelivered
 	outboxDead := r.outboxDead
+	impactLinks := copyCounts(r.impactLinks)
+	impactFailures := r.impactFailures
+	impactWitnessOverflow := r.impactWitnessOverflow
 	pullStats := r.pullStats
 	serviceStats := r.serviceStats
 	serviceWedgedSet, serviceWedged := r.serviceWedgedSet, r.serviceWedged
@@ -604,6 +647,25 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	out.println("# HELP cerbix_outbox_dead_total Total outbox events parked as dead after exhausting retries.")
 	out.println("# TYPE cerbix_outbox_dead_total counter")
 	out.printf("cerbix_outbox_dead_total %d\n", outboxDead)
+
+	if len(impactLinks) > 0 || impactFailures > 0 || impactWitnessOverflow > 0 {
+		out.println("# HELP cerbix_service_impact_links_total Newly inserted incident-service impact links, by role (FR-021 §14).")
+		out.println("# TYPE cerbix_service_impact_links_total counter")
+		roles := make([]string, 0, len(impactLinks))
+		for role := range impactLinks {
+			roles = append(roles, role)
+		}
+		sort.Strings(roles)
+		for _, role := range roles {
+			out.printf("cerbix_service_impact_links_total{role=%q} %d\n", role, impactLinks[role])
+		}
+		out.println("# HELP cerbix_service_impact_correlation_failures_total Failed impact-correlation attempts (each retries via the outbox).")
+		out.println("# TYPE cerbix_service_impact_correlation_failures_total counter")
+		out.printf("cerbix_service_impact_correlation_failures_total %d\n", impactFailures)
+		out.println("# HELP cerbix_service_impact_witness_overflow_total Open incidents beyond the per-service correlation witness bound (deterministically not selected; never silent).")
+		out.println("# TYPE cerbix_service_impact_witness_overflow_total counter")
+		out.printf("cerbix_service_impact_witness_overflow_total %d\n", impactWitnessOverflow)
+	}
 
 	if leaderTracked {
 		out.println("# HELP cerbix_scheduler_leader Whether this process currently holds scheduler leadership (1) or is on standby (0).")

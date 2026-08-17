@@ -3343,3 +3343,42 @@ stays as robustness.
 "any down second is a breach", a finite wire verdict instead of ∞×) is a legitimate future
 feature and needs its own cross-scope specification; admitting the value without those
 semantics is how the P0 happened.
+
+## D-0166 — FR-021 phase 3: the impact graph outside the declaration, the fenced correlation topic, the bounded one-transaction attempt (iter-0146)
+
+Phase 3's §14 amendment (design APPROVED [269] after rounds [260]/[265]/[267]) chose, and
+iter-0146 implemented, the load-bearing decisions of the service impact graph:
+
+- **Edges live OUTSIDE both reliability axes.** A `service_dependencies` edge creates no
+  definition revision and no epoch, enters no canonical hash, and moves no sealed fact —
+  §6.2/6.3 already classified dependency wiring as delivery, not measurement. Consequence:
+  the edge set needs its OWN concurrency token (`graph_generation`, 409 on stale,
+  first-committer-wins) and its own per-delta audit rows with typed actor attribution
+  (canonical `actor_user_id`/`via_token` + a machine label for the file track), because the
+  declaration CAS and `created_by` cannot testify for it.
+- **One deletion contract, the §15.1 shape.** A desired file edge pins its target: an
+  unresolvable `depends_on` slug rejects the bundle keeping a last-known-good that stays
+  literally true; deleting a pinned target is a 409 naming the provider; an ORPHANED managed
+  service still pins (orphans ARE file-owned LKG).
+- **Correlation is a dedicated FENCED outbox topic** (`incident_correlation`), enqueued in
+  the incident's opening transaction — never a rider on webhook delivery. The claim fence is
+  schema, not runbook: an immutable `fenced` column plus `CHECK (NOT fenced OR status <>
+  'pending')` make the legacy-claimable state unrepresentable for the row's whole lifetime
+  (enqueue, retry, dead, both replays), so a mixed-version fleet can neither claim,
+  attempt-burn nor dead-letter a topic it cannot dispatch. Every post-phase-2 topic inherits
+  this by the one topic→class map (`domain.FencedTopic`).
+- **The attempt is ONE bounded transaction.** membership→graph advisory locks give it a
+  single committed snapshot; incident rows lock FOR UPDATE ascending with the open state
+  rechecked under the lock; links and 🕸 notes commit together or not at all; the canonical
+  path is endpoint-inclusive, root-first, shortest-then-lexicographic, ≤ 11 slugs. Witnesses
+  are bounded per REACHABLE endpoint service (5, oldest by `(started_at, id)`, SQL-capped
+  and endpoint-scoped reads per the [283] disposition), with overflow returned, logged and
+  counted (`cerbix_service_impact_witness_overflow_total`) — never silent, and never counted
+  for services the anchor cannot reach.
+- **Impacts are an authenticated-detail enrichment**, tenant-scoped at the store boundary
+  (the link rows' own `project_id`), absent from the incident list and from every public and
+  internal status-page projection until phase 4 opts in.
+
+Review chain: implementation round 1/2 [276] (1 P0 + 5 P1 + 1 P2, all closed), fix pass
+[281], FINAL 2/2 [283] (one residual P1 — witness scoping — closed under the [263]-delegated
+disposition recorded in iter-0146 §9; per the two-round contract no third review round ran).

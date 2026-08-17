@@ -99,6 +99,7 @@ type serviceDetailView struct {
 }
 
 func (h *Handler) writeServiceError(w http.ResponseWriter, err error) bool {
+	var pinned store.ErrServicePinnedByFile
 	switch {
 	case err == nil:
 		return false
@@ -122,6 +123,11 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusBadRequest, "sli_not_in_monitors")
 	case errors.Is(err, store.ErrRetroactiveNotFirstRevision):
 		writeError(w, http.StatusBadRequest, "retroactive_not_first_revision")
+	case errors.As(err, &pinned):
+		// §14.2: a desired file edge pins its target. The 409 names the provider and
+		// the referencing service, so the operator knows which bundle to edit.
+		writeError(w, http.StatusConflict,
+			"pinned_by_file: "+pinned.Provider+" declares this service in depends_on of "+pinned.Service)
 	default:
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}

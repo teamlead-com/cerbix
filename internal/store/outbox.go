@@ -12,11 +12,16 @@ import (
 
 // enqueueOutboxTx inserts a pending outbox event inside an existing transaction,
 // so the event is durable iff the state change that produced it commits. Payload
-// must be valid JSON.
+// must be valid JSON. The claimable class comes from domain.FencedTopic — the
+// one topic→class source of truth (FR-021 §14.3): a fenced topic's rows are
+// 'pending_fenced', invisible to the legacy claim shape, and the fenced column
+// is immutable from here on (the demotion CHECK forbids legacy 'pending' for
+// them through every later transition).
 func enqueueOutboxTx(ctx context.Context, tx pgx.Tx, topic string, payload []byte) error {
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO outbox_events (topic, payload) VALUES ($1, $2)`,
-		topic, string(payload)); err != nil {
+		`INSERT INTO outbox_events (topic, payload, status, fenced)
+		 VALUES ($1, $2, CASE WHEN $3 THEN 'pending_fenced' ELSE 'pending' END, $3)`,
+		topic, string(payload), domain.FencedTopic(topic)); err != nil {
 		return fmt.Errorf("store: enqueue outbox: %w", err)
 	}
 	return nil
@@ -25,11 +30,13 @@ func enqueueOutboxTx(ctx context.Context, tx pgx.Tx, topic string, payload []byt
 // EnqueueOutbox queues a standalone outbound event that isn't tied to a store
 // mutation (so it can't ride an existing transaction) — e.g. a subscriber
 // confirmation email queued straight from an API handler. Payload must be valid
-// JSON; delivery is handled by the outbox worker with retry/backoff.
+// JSON; delivery is handled by the outbox worker with retry/backoff. Same
+// topic→class rule as enqueueOutboxTx.
 func (s *Store) EnqueueOutbox(ctx context.Context, topic string, payload []byte) error {
 	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO outbox_events (topic, payload) VALUES ($1, $2)`,
-		topic, string(payload)); err != nil {
+		`INSERT INTO outbox_events (topic, payload, status, fenced)
+		 VALUES ($1, $2, CASE WHEN $3 THEN 'pending_fenced' ELSE 'pending' END, $3)`,
+		topic, string(payload), domain.FencedTopic(topic)); err != nil {
 		return fmt.Errorf("store: enqueue outbox: %w", err)
 	}
 	return nil
@@ -42,6 +49,11 @@ func (s *Store) EnqueueOutbox(ctx context.Context, topic string, payload []byte)
 // a worker that crashes mid-delivery leaves the row to become due again on its
 // own. The delivery itself happens outside any row lock.
 func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error) {
+	// Two claimable classes (FR-021 §14.3): legacy 'pending' rows unconditionally
+	// (every deployed owner dispatches those topics), and 'pending_fenced' rows
+	// only for topics THIS binary's worker dispatches — so a fenced row enqueued
+	// by a newer producer is never claimed, attempt-burned or dead-lettered by an
+	// owner that cannot handle it. It just waits for a capable one.
 	rows, err := s.pool.Query(ctx, `
 		UPDATE outbox_events
 		   SET attempts = attempts + 1,
@@ -52,11 +64,12 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		       updated_at = now()
 		 WHERE id IN (
 		     SELECT id FROM outbox_events
-		      WHERE status = 'pending' AND next_attempt_at <= now()
+		      WHERE (status = 'pending' OR (status = 'pending_fenced' AND topic = ANY($2)))
+		        AND next_attempt_at <= now()
 		      ORDER BY next_attempt_at
 		      FOR UPDATE SKIP LOCKED
 		      LIMIT $1)
-		 RETURNING id, topic, payload, attempts, claim_token`, limit)
+		 RETURNING id, topic, payload, attempts, claim_token`, limit, domain.FencedTopics())
 	if err != nil {
 		return nil, fmt.Errorf("store: claim outbox: %w", err)
 	}
@@ -144,9 +157,13 @@ func (s *Store) ListDeadOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 // cleared attempt count so the worker delivers it again. ErrNotFound if there is
 // no dead event with that id.
 func (s *Store) ReplayDeadOutbox(ctx context.Context, id string) error {
+	// The claimable class is restored from the IMMUTABLE fenced column — a fenced
+	// row replays as 'pending_fenced', never legacy 'pending' (the demotion CHECK
+	// would reject that anyway; this is the write that stays inside the contract).
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE outbox_events
-		   SET status = 'pending', attempts = 0, next_attempt_at = now(), last_error = '', updated_at = now()
+		   SET status = CASE WHEN fenced THEN 'pending_fenced' ELSE 'pending' END,
+		       attempts = 0, next_attempt_at = now(), last_error = '', updated_at = now()
 		 WHERE id = $1 AND status = 'dead'`, id)
 	if err != nil {
 		return fmt.Errorf("store: replay dead outbox: %w", err)
@@ -159,9 +176,11 @@ func (s *Store) ReplayDeadOutbox(ctx context.Context, id string) error {
 
 // ReplayAllDeadOutbox requeues every dead event and returns how many were reset.
 func (s *Store) ReplayAllDeadOutbox(ctx context.Context) (int, error) {
+	// Same class restoration as ReplayDeadOutbox, for every dead row at once.
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE outbox_events
-		   SET status = 'pending', attempts = 0, next_attempt_at = now(), last_error = '', updated_at = now()
+		   SET status = CASE WHEN fenced THEN 'pending_fenced' ELSE 'pending' END,
+		       attempts = 0, next_attempt_at = now(), last_error = '', updated_at = now()
 		 WHERE status = 'dead'`)
 	if err != nil {
 		return 0, fmt.Errorf("store: replay all dead outbox: %w", err)
@@ -178,7 +197,9 @@ func (s *Store) FailOutbox(ctx context.Context, id, claimToken, lastErr string, 
 	// regress a row another worker already delivered (or re-claimed).
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE outbox_events
-		    SET status = CASE WHEN attempts >= $4 THEN 'dead' ELSE 'pending' END,
+		    SET status = CASE WHEN attempts >= $4 THEN 'dead'
+		                      WHEN fenced THEN 'pending_fenced'
+		                      ELSE 'pending' END,
 		        last_error = $3,
 		        updated_at = now()
 		  WHERE id = $1 AND claim_token = $2`,

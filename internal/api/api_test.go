@@ -39,6 +39,8 @@ type fakePullTest struct {
 
 type fakeStore struct {
 	rep *fakeReporting
+	// deleteServiceErr injects a store-level delete failure (e.g. the §14.2 file pin).
+	deleteServiceErr error
 	// previews and sealedThrough model the retroactive-maintenance gate.
 	previews           map[string]store.MaintenancePreview
 	sealedThrough      time.Time
@@ -2153,6 +2155,9 @@ func (f *fakeStore) DeleteService(_ context.Context, projectID, serviceID string
 	fs, ok := f.serviceStore()[serviceID]
 	if !ok || fs.svc.ProjectID != projectID {
 		return store.ErrNotFound
+	}
+	if f.deleteServiceErr != nil {
+		return f.deleteServiceErr
 	}
 	delete(f.serviceStore(), serviceID)
 	return nil

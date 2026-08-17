@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 // Service reliability, phase 1 (spec func-service-reliability §21).
@@ -298,5 +300,25 @@ func TestServicesListIsAnArrayWhenEmpty(t *testing.T) {
 	h := newHandler(seededStore())
 	if got := strings.TrimSpace(do(h, p1Viewer, http.MethodGet, "/api/v1/projects/p1/services", "").Body.String()); got != "[]" {
 		t.Fatalf("body = %q, want []", got)
+	}
+}
+
+// §14.2: deleting a service that an applied file-owned service names in
+// depends_on is a 409 naming the provider and the referencing service — the
+// store's typed pin error must reach the wire as an actionable conflict, not
+// as a 500.
+func TestDeleteServicePinnedByFileIs409(t *testing.T) {
+	fs := seededStore()
+	fs.deleteServiceErr = store.ErrServicePinnedByFile{Provider: "file:shop.yaml", Service: "storefront"}
+	h := newHandler(fs)
+	id := createSvc(t, h, "checkout")
+	rec := do(h, p1Editor, http.MethodDelete, "/api/v1/projects/p1/services/"+id, "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("pinned delete = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"pinned_by_file", "file:shop.yaml", "storefront"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("409 body %q misses %q", rec.Body.String(), want)
+		}
 	}
 }

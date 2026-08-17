@@ -46,6 +46,20 @@ type fakeStore struct {
 	// maintenance-suppression fakes
 	inMaintenance    map[string]bool
 	inMaintenanceErr error
+
+	// impact-correlation fakes (FR-021 §14.3)
+	correlated        []string // incident ids passed to CorrelateIncident
+	correlateLinks    []domain.ServiceImpactLink
+	correlateOverflow int
+	correlateErr      error
+}
+
+func (f *fakeStore) CorrelateIncident(_ context.Context, incidentID string) ([]domain.ServiceImpactLink, int, error) {
+	f.correlated = append(f.correlated, incidentID)
+	if f.correlateErr != nil {
+		return nil, 0, f.correlateErr
+	}
+	return f.correlateLinks, f.correlateOverflow, nil
 }
 
 func (f *fakeStore) IncidentContext(_ context.Context, _ domain.Incident) (domain.IncidentContext, error) {
@@ -161,10 +175,21 @@ func (f *fakeNotify) DeliverChannels(_ context.Context, channelIDs []string, tex
 	return f.err
 }
 
-type fakeMetrics struct{ delivered, dead int }
+type fakeMetrics struct {
+	delivered, dead, impactFailures, impactOverflow int
+	impactLinks                                     map[string]int
+}
 
 func (m *fakeMetrics) RecordOutboxDelivered() { m.delivered++ }
 func (m *fakeMetrics) RecordOutboxDead()      { m.dead++ }
+func (m *fakeMetrics) RecordImpactLinks(role string, n int) {
+	if m.impactLinks == nil {
+		m.impactLinks = map[string]int{}
+	}
+	m.impactLinks[role] += n
+}
+func (m *fakeMetrics) RecordImpactFailure()              { m.impactFailures++ }
+func (m *fakeMetrics) RecordImpactWitnessOverflow(n int) { m.impactOverflow += n }
 
 func incidentEvent(t *testing.T, typ, project string) []byte {
 	t.Helper()
@@ -691,4 +716,96 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled: Run must return promptly
 	newWorker(&fakeStore{}, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).Run(ctx)
+}
+
+// The correlation topic delivers through its own case: the store attempt runs,
+// newly inserted links are counted per role, and the event is marked delivered.
+func TestDeliversIncidentCorrelation(t *testing.T) {
+	fs := &fakeStore{
+		pending: []domain.OutboxEvent{
+			{ID: "e1", Topic: domain.TopicIncidentCorrelation, Payload: []byte(`{"incident_id":"i1"}`), Attempts: 1},
+		},
+		correlateOverflow: 2,
+		correlateLinks: []domain.ServiceImpactLink{
+			{ServiceID: "s1", Slug: "payments", Role: domain.ImpactProbableRoot, Path: []string{"payments", "checkout"}},
+			{ServiceID: "s2", Slug: "storefront", Role: domain.ImpactAffected, Path: []string{"checkout", "storefront"}},
+			{ServiceID: "s3", Slug: "billing", Role: domain.ImpactProbableRoot, Path: []string{"billing", "checkout"}},
+		},
+	}
+	m := &fakeMetrics{}
+	newWorker(fs, &fakeWebhook{}, &fakeNotify{}, m).drain(context.Background())
+
+	if len(fs.correlated) != 1 || fs.correlated[0] != "i1" {
+		t.Fatalf("correlated = %v, want [i1]", fs.correlated)
+	}
+	if len(fs.delivered) != 1 || len(fs.failed) != 0 {
+		t.Fatalf("delivered=%v failed=%v", fs.delivered, fs.failed)
+	}
+	if m.impactLinks[domain.ImpactProbableRoot] != 2 || m.impactLinks[domain.ImpactAffected] != 1 {
+		t.Fatalf("impact link metrics = %v", m.impactLinks)
+	}
+	if m.impactOverflow != 2 {
+		t.Fatalf("witness overflow metric = %d, want the returned 2 ([283]: the count must reach RecordImpactWitnessOverflow)", m.impactOverflow)
+	}
+}
+
+// The two failure envelopes are independent (invariant 52): a dead webhook
+// never blocks correlation, and a failing correlation never blocks the
+// incident webhook — each event fails or delivers on its own.
+func TestCorrelationAndWebhookFailIndependently(t *testing.T) {
+	// (a) webhook dead, correlation delivers.
+	fs := &fakeStore{
+		pending: []domain.OutboxEvent{
+			{ID: "wh", Topic: domain.TopicIncidentEvent, Payload: incidentEvent(t, domain.EventIncidentOpened, "p1"), Attempts: 1},
+			{ID: "corr", Topic: domain.TopicIncidentCorrelation, Payload: []byte(`{"incident_id":"i1"}`), Attempts: 1},
+		},
+	}
+	m := &fakeMetrics{}
+	newWorker(fs, &fakeWebhook{err: errors.New("endpoint dead")}, &fakeNotify{}, m).drain(context.Background())
+	if len(fs.delivered) != 1 || fs.delivered[0] != "corr" {
+		t.Fatalf("want correlation delivered despite the dead webhook, got delivered=%v failed=%v", fs.delivered, fs.failed)
+	}
+	if len(fs.correlated) != 1 {
+		t.Fatalf("correlate not attempted: %v", fs.correlated)
+	}
+
+	// (b) correlation failing, webhook delivers; the failure is counted.
+	fs2 := &fakeStore{
+		pending: []domain.OutboxEvent{
+			{ID: "wh", Topic: domain.TopicIncidentEvent, Payload: incidentEvent(t, domain.EventIncidentOpened, "p1"), Attempts: 1},
+			{ID: "corr", Topic: domain.TopicIncidentCorrelation, Payload: []byte(`{"incident_id":"i1"}`), Attempts: 1},
+		},
+		correlateErr: errors.New("correlation bug"),
+	}
+	m2 := &fakeMetrics{}
+	newWorker(fs2, &fakeWebhook{}, &fakeNotify{}, m2).drain(context.Background())
+	if len(fs2.delivered) != 1 || fs2.delivered[0] != "wh" {
+		t.Fatalf("want the webhook delivered despite the correlation failure, got delivered=%v failed=%v", fs2.delivered, fs2.failed)
+	}
+	if len(fs2.failed) != 1 || fs2.failed[0] != "corr" {
+		t.Fatalf("want the correlation event on the retry path, got failed=%v", fs2.failed)
+	}
+	if m2.impactFailures != 1 {
+		t.Fatalf("impact failures = %d, want 1", m2.impactFailures)
+	}
+}
+
+// The fence pin (invariant 61): every topic domain.FencedTopics() names must be
+// dispatchable by THIS binary's worker — a fenced topic the switch does not
+// know would wait forever, because no other owner may claim it either.
+func TestFencedTopicsAreDispatchable(t *testing.T) {
+	payloads := map[string][]byte{
+		domain.TopicIncidentCorrelation: []byte(`{"incident_id":"i1"}`),
+	}
+	for _, topic := range domain.FencedTopics() {
+		payload, ok := payloads[topic]
+		if !ok {
+			t.Fatalf("fenced topic %q has no test payload — add it here AND make sure the worker dispatches it", topic)
+		}
+		fs := &fakeStore{pending: []domain.OutboxEvent{{ID: "e", Topic: topic, Payload: payload, Attempts: 1}}}
+		newWorker(fs, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).drain(context.Background())
+		if len(fs.delivered) != 1 {
+			t.Fatalf("fenced topic %q not dispatched: delivered=%v failed=%v", topic, fs.delivered, fs.failed)
+		}
+	}
 }

@@ -143,6 +143,11 @@ func (s *Store) PoolMaxConns() int32 {
 type Store struct {
 	pool   *pgxpool.Pool
 	cipher *secret.Cipher // nil = secrets stored/read as plaintext
+	// correlateNoteFault is a TEST-ONLY fault injection point for the §14.3
+	// links+notes atomicity proof ([276] P1-5a): when set (in-package tests
+	// only), CorrelateIncident fails at the 🕸-note insert so the regression can
+	// assert the link batch rolled back with it. Always nil in production.
+	correlateNoteFault func() error
 	// secretsEnabled is the authoritative persistence-boundary feature gate for
 	// project inventory references. API handlers also gate the public surface, but
 	// MaC and future internal writers must fail closed here rather than bypass it.

@@ -273,6 +273,21 @@ func (s *Store) DeleteService(ctx context.Context, projectID, id string) error {
 		SELECT count(*) FROM swept`, id); err != nil {
 		return fmt.Errorf("store: clear dormant service bindings: %w", err)
 	}
+	// FR-021 §16.4a: a FIRING announcement must end when the thing that fired is deleted, and the
+	// close is enqueued HERE, inside the deletion's own transaction. After the commit there is no
+	// service row for any evaluator to notice, and refusing the deletion instead would make an open
+	// alert a lock on an operator's own configuration. The episode carries the onset's recipients,
+	// so the ending reaches the people who heard the beginning.
+	var asOf time.Time
+	var slug string
+	if err := tx.QueryRow(ctx,
+		`SELECT now(), slug FROM services WHERE id = $1`, id).Scan(&asOf, &slug); err != nil {
+		return fmt.Errorf("store: read service for close: %w", err)
+	}
+	if _, err := closeServiceEpisodesTx(ctx, tx, asOf, id, projectID, slug,
+		episodeCloseFilter{}, domain.CloseServiceDeleted); err != nil {
+		return err
+	}
 	// A preview whose affected set included this service goes stale on its own: the stored
 	// set is a snapshot the deletion cannot edit (00068 dropped that cascade), so the set
 	// comparison in confirmPreviewTx sees a member the current set no longer has.

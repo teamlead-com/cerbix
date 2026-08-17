@@ -751,3 +751,80 @@ func TestStoreCapIsDefenseNotReinterpretation(t *testing.T) {
 		t.Fatalf("defaults resolved to %+v", def)
 	}
 }
+
+// FR-021 §16.6a — a paging edit from a FILE changes who is paged, and nothing else.
+//
+// "None of these fields bumps a definition revision or an evaluation epoch" is the whole reason the
+// declaration hash excludes them: the update branch of the apply creates a revision AND its epoch
+// unconditionally, so an `owns_paging` toggle riding that hash would re-segment reliability history
+// for an alerting edit. The apply reconciles paging on every branch against the row instead.
+func TestFileAlertingEditWritesNoRevisionAndNoEpoch(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	applyServiceBundle(t, st, ctx, svcBundle)
+
+	var serviceID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM services WHERE project_id = $1`, projID).Scan(&serviceID); err != nil {
+		t.Fatalf("read service: %v", err)
+	}
+	countRevisions := func() (revisions, epochs int64, generation int64) {
+		t.Helper()
+		if err := st.pool.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM service_definition_revisions WHERE service_id = $1),
+			       (SELECT count(*) FROM service_evaluation_epochs WHERE service_id = $1),
+			       (SELECT alert_config_generation FROM services WHERE id = $1)`,
+			serviceID).Scan(&revisions, &epochs, &generation); err != nil {
+			t.Fatalf("counts: %v", err)
+		}
+		return
+	}
+	revBefore, epochBefore, genBefore := countRevisions()
+
+	// The SAME declaration, now also declaring paging.
+	withAlerting := svcBundle + `    alerting:
+      owns_paging: true
+      page_on: [down, degraded]
+      page_on_unknown: true
+      confirm_evaluations: 4
+`
+	applyServiceBundle(t, st, ctx, withAlerting)
+
+	revAfter, epochAfter, genAfter := countRevisions()
+	if revAfter != revBefore {
+		t.Fatalf("a paging edit created %d definition revision(s): it re-segments reliability "+
+			"history for a change to who gets woken", revAfter-revBefore)
+	}
+	if epochAfter != epochBefore {
+		t.Fatalf("a paging edit created %d evaluation epoch(s)", epochAfter-epochBefore)
+	}
+	// It DOES dis-arm, which is the safe direction and the trigger's job.
+	if genAfter <= genBefore {
+		t.Fatalf("alert_config_generation stayed at %d: the edit did not dis-arm delegation", genAfter)
+	}
+
+	var policy domain.ServiceAlertPolicy
+	var pageOn []string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations
+		  FROM services WHERE id = $1`, serviceID).
+		Scan(&policy.OwnsPaging, &pageOn, &policy.PageOnUnknown, &policy.ConfirmEvaluations); err != nil {
+		t.Fatalf("read policy: %v", err)
+	}
+	if !policy.OwnsPaging || !policy.PageOnUnknown || policy.ConfirmEvaluations != 4 ||
+		len(pageOn) != 2 {
+		t.Fatalf("the declaration did not reach the row: %+v page_on=%v", policy, pageOn)
+	}
+
+	// And re-applying the identical bundle changes nothing at all — the reconcile is a read when
+	// the row already says what the file says, so a file provider does not fight the evaluators
+	// for row locks on every scan.
+	res := applyServiceBundle(t, st, ctx, withAlerting)
+	if res.Services.Updated != 0 {
+		t.Fatalf("re-applying an unchanged bundle reported %d service updates", res.Services.Updated)
+	}
+	if _, _, gen := countRevisions(); gen != genAfter {
+		t.Fatalf("a re-apply bumped alert_config_generation %d→%d, dis-arming for no change",
+			genAfter, gen)
+	}
+}

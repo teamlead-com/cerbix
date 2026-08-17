@@ -1338,7 +1338,13 @@ func TestServiceAlertStallMarksSchedulerNotReadyOnly(t *testing.T) {
 	}}
 	sched := metrics.New(buildinfo.Info{}, "scheduler")
 	sched.SetReady(true, "")
-	got := leadUntilMetrics(t, fs, sched, func(string) bool { return !sched.Ready() })
+	// The predicate reads the RENDER, not the live registry: the helper hands back the snapshot
+	// that satisfied it, so a condition phrased against `sched.Ready()` could return a buffer
+	// captured a moment BEFORE the flip and then assert on it. That race only ever loses under
+	// load, which is the worst way to find out.
+	got := leadUntilMetrics(t, fs, sched, func(got string) bool {
+		return strings.Contains(got, "cerbix_ready 0")
+	})
 
 	if sched.Ready() {
 		t.Fatal("§16.6b: a stalled evaluator left the scheduler ready")

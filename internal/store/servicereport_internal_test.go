@@ -566,21 +566,20 @@ func TestReportBurnIsBoundedBySealedCoverage(t *testing.T) {
 
 // Invariant 47 + §13: a service-scoped burn alert is impossible at the schema, the
 // application layer offers no knob, and the three-way scope exclusivity holds.
-func TestServiceScopedBurnAlertIsRejectedEverywhere(t *testing.T) {
+// SUPERSEDED BY PHASE 5 (§16.4): a service-scoped burn target used to be rejected outright
+// (`sla_targets_service_no_burn_chk`), because a service had no burn signal to own. Migration 00082
+// drops that check deliberately — the sealed burn signal is now a service's, with its LATCH
+// normalized into `service_burn_alert_state` (§16.4b) rather than kept in the target's JSON. What
+// remains guarded here is the part that did NOT change: three-way scope exclusivity and the
+// objective-upsert contract.
+func TestServiceScopedBurnTargetIsSupported(t *testing.T) {
 	st, ctx := declStore(t)
 	f := reportService(t, st, ctx)
 
 	if _, err := st.pool.Exec(ctx,
-		`INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled)
-		 VALUES ($1, '30d', 99.9, true)`, f.serviceID); err == nil ||
-		!strings.Contains(err.Error(), "sla_targets_service_no_burn_chk") {
-		t.Fatalf("a service-scoped burn alert passed the schema: %v", err)
-	}
-	if _, err := st.pool.Exec(ctx,
-		`INSERT INTO sla_targets (service_id, window_name, objective, burn_rules)
-		 VALUES ($1, '30d', 99.9, '[{"threshold":1}]')`, f.serviceID); err == nil ||
-		!strings.Contains(err.Error(), "sla_targets_service_no_burn_chk") {
-		t.Fatalf("service-scoped burn rules passed the schema: %v", err)
+		`INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled, burn_rules)
+		 VALUES ($1, '90d', 99.9, true, '[{"threshold":1}]')`, f.serviceID); err != nil {
+		t.Fatalf("a service burn target must now be accepted (§16.4): %v", err)
 	}
 	if _, err := st.pool.Exec(ctx,
 		`INSERT INTO sla_targets (service_id, project_id, window_name, objective)

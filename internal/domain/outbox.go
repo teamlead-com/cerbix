@@ -40,6 +40,20 @@ const (
 	TopicServiceAlert = "service_alert"
 )
 
+// AllTopics enumerates every topic this binary can ENQUEUE. It exists because the database keeps
+// its own copy of that list in `outbox_events_topic_check`, and a whitelist rewritten by hand is
+// how three live topics (`region_worker_alert`, `escalation_step`, `subscriber_confirm`) were
+// silently dropped while a fourth was being added — every escalation, region alert and subscriber
+// confirmation would have failed its insert in production. A store test pins this list against the
+// constraint, so the two lists can no longer drift in either direction.
+func AllTopics() []string {
+	return []string{
+		TopicIncidentEvent, TopicMonitorTransition, TopicSLOBurnAlert, TopicSLAReport,
+		TopicRegionWorkerAlert, TopicEscalationStep, TopicSubscriberConfirm,
+		TopicIncidentCorrelation, TopicServiceAlert,
+	}
+}
+
 // FencedTopic reports whether a topic's rows use the fenced claimable class
 // ('pending_fenced'): a status the legacy claim shape (status = 'pending', no
 // topic predicate) cannot select, so an old delivery owner in a mixed-version

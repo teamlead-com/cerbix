@@ -237,13 +237,20 @@ CREATE INDEX alert_suppressions_purge_idx ON alert_suppressions (suppressed_at);
 -- `domain.FencedTopics()`.
 ALTER TABLE outbox_events DROP CONSTRAINT IF EXISTS outbox_events_topic_check;
 ALTER TABLE outbox_events ADD CONSTRAINT outbox_events_topic_check
+    -- CUMULATIVE: this list REPLACES the constraint, so it must name every topic the binary can
+    -- still enqueue, not only the ones this phase cares about. Dropping a live topic here does not
+    -- fail a migration or a build — it fails every INSERT of that topic at runtime, which is how an
+    -- escalation ladder, a region-worker alert and a subscriber confirmation stop silently.
     CHECK (topic IN ('incident_event', 'monitor_transition', 'slo_burn_alert', 'sla_report',
+                     'region_worker_alert', 'escalation_step', 'subscriber_confirm',
                      'incident_correlation', 'service_alert'));
 
 -- +goose Down
 ALTER TABLE outbox_events DROP CONSTRAINT IF EXISTS outbox_events_topic_check;
 ALTER TABLE outbox_events ADD CONSTRAINT outbox_events_topic_check
+    -- The pre-phase-5 list, exactly as 00080 left it.
     CHECK (topic IN ('incident_event', 'monitor_transition', 'slo_burn_alert', 'sla_report',
+                     'region_worker_alert', 'escalation_step', 'subscriber_confirm',
                      'incident_correlation'));
 DROP TABLE IF EXISTS alert_suppressions;
 DROP TABLE IF EXISTS service_alert_episodes;

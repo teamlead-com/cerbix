@@ -1862,7 +1862,7 @@ constant query count at the maximum neighbour set.
 ### 14.8 Out of phase 3
 
 Recommending monitor `depends_on` from service edges ("may recommend", deliberately unbuilt);
-any visual graph rendering; status-page projection of impact (phase 4); alerting on impact
+any visual graph rendering; status-page projection of impact (phase 4 DECLINED it — §15.0 keeps impact links non-public; a later phase would need its own owner decision); alerting on impact
 (phase 5); any retrospective annotation of resolved incidents; cross-project edges.
 
 ## 15. Coexistence and migration
@@ -1872,6 +1872,314 @@ components remain first-class** (the "third-party provider: degraded" case that 
 monitor). Existing components are never converted automatically: an explicit "convert to
 Service-backed component" action with a preview of the resulting public change — status pages
 are customer-visible artifacts.
+
+*Specified to implementable depth in the phase-4 spec cycle (2026-08-17); until then this was
+intent only. Decision record reserved: D-0167.*
+
+### 15.0 The status-page projection (phase 4)
+
+**Tenancy first: `components` currently carries NO tenant column at all.** It reaches its org
+only through `status_pages`, so a `service_id` alone would bind service→project and leave
+component→org unbound: a direct writer could hang an org-B service on an org-A page. Migration
+therefore gives the row its own tenant identity, mirroring `status_pages` (org-level page ⇒
+`project_id IS NULL`):
+
+```
+components
+├── org_id          uuid NOT NULL      (backfilled from status_pages)
+├── source_project  uuid NULL          the project of the BINDINGS — not of the page
+├── source          text NOT NULL      'monitor' | 'service' | 'manual'
+├── monitor_id      uuid NULL          the monitor binding, retained while dormant
+├── service_id      uuid NULL          the service binding, retained while dormant
+├── manual_status   text NOT NULL DEFAULT ''
+FK (status_page_id, org_id)     → status_pages (id, org_id)
+FK (source_project, org_id)     → projects (id, org_id)
+FK (monitor_id, source_project) → monitors (id, project_id)   ON DELETE SET NULL (monitor_id)
+FK (service_id, source_project) → services (id, project_id)   ON DELETE RESTRICT
+CHECK  the ACTIVE source's binding is present:
+       source='monitor' ⇒ monitor_id IS NOT NULL
+       source='service' ⇒ service_id IS NOT NULL
+       source='manual'  ⇒ (nothing required)
+CHECK  source <> 'manual' ⇒ source_project IS NOT NULL
+CHECK  manual_status <> 'no_data'
+CONSTRAINT TRIGGER (deferred, on components and on status_pages.project_id):
+       a PROJECT-SCOPED page admits only components whose source_project is that project;
+       an ORG-LEVEL page admits any project of the org
+```
+
+Three corrections the reviewer was right to force, each of which I had conflated:
+
+- **Page scope and source project are different things.** An org-level page legitimately holds
+  components from several projects, so the row's project column describes its BINDINGS
+  (`source_project`), never the page. A manual component has no binding and therefore no
+  project — hence nullable, with the CHECK making it non-null exactly when a binding is active.
+- **"A project-scoped page's component carries that project" is not expressible as a CHECK** —
+  a CHECK cannot read `status_pages`, and the `(status_page_id, org_id)` FK proves org only. It
+  is a DEFERRED CONSTRAINT TRIGGER, on both sides (inserting a foreign component, and narrowing
+  a page's scope afterwards), and it is named as such so implementation cannot quietly downgrade
+  it to an application check.
+- **Both dormant bindings live in ONE project, so conversion is same-project by rule.** A
+  component may not be converted from a monitor in project A to a service in project B; the
+  operator creates a different component instead. Per-binding project identity was the
+  alternative and it buys nothing: a component IS one thing on a page, and a cross-project
+  "revert" would restore a binding the page's audience never saw. Direct-SQL negatives cover
+  all three: cross-org component, foreign component on a project-scoped page, and cross-project
+  dormant binding.
+
+**The source is a DISCRIMINATOR, not the presence of a field.** An exclusivity CHECK over
+"which column is populated" cannot coexist with the reversibility this section promises: a
+revert has to restore the binding it replaced, so the binding must survive being inactive.
+`source` names the active one; the other columns keep their bindings **dormant**. That single
+mechanism makes every transition reversible without a second staging table:
+
+| From | To | What happens | Revert restores |
+|---|---|---|---|
+| manual | service | `source='service'`, `manual_status` untouched | the same manual status |
+| monitor | service | `source='service'`, `monitor_id` retained dormant | the same monitor binding |
+| service | manual | `source='manual'` | — |
+| service | monitor | `source='monitor'` (only if a dormant `monitor_id` survives) | — |
+| monitor | manual / manual | monitor | unchanged from today | — |
+
+Backfill for shipped rows is total and deterministic: `monitor_id IS NOT NULL ⇒ 'monitor'`,
+otherwise `'manual'` — including rows with neither binding nor status, which are manual
+components an operator has not set yet (they render exactly as they do today).
+
+**One inherited behaviour is kept, and one is refused.** A monitor-backed component whose
+`manual_status` is set currently renders the manual value as an override (D-0021); that stays,
+because changing it would alter shipped public output for no reason this phase needs. A
+**service-backed component takes no manual override**: a service is the measured unit, and
+letting an operator hand-paint its public status would publish the unmeasured as measured —
+the one thing this whole feature exists to prevent. Operators express judgement through
+incidents, which is what incidents are for. `manual_status = 'no_data'` is likewise refused by
+CHECK: `no_data` is a COMPUTED statement that measurement is absent, never an assertion someone
+types.
+
+**Only the SLI layer is projected.** The two-layer signal of §12.2 exists because a
+diagnostics-only failure must never touch the customer-facing layer; publishing the
+diagnostics layer would also publish monitor NAMES, which is internal topology. So the public
+projection reads the SLI layer alone, and **the impact links of §14 stay non-public** —
+invariant 59 allowed phase 4 to opt in explicitly, and phase 4 explicitly declines: a public
+page naming a probable-root service would publish the dependency graph to customers.
+
+**The projection needs an input the live signal does not currently expose.**
+`ServiceHealthNow` deliberately collapses "excluded by a maintenance window" and "genuinely
+unknown" into one `sli: unknown` — the four declared categories, nothing invented (§12.2). A
+projection that maps `excluded → maintenance` cannot read that; inventing a second evaluator
+would give the hardest-reviewed rule of phase 2 a second owner. So phase 4 adds ONE authoritative
+batched projection read, at ONE database `as_of`, over the whole page's service components:
+
+```
+ServiceStatusProjection      (ONE report snapshot per page render; CONSTANT statement count
+                              regardless of component count — not necessarily one statement)
+├── service_id
+├── sli            healthy | degraded | down | unknown
+├── excluded       true when a maintenance exclusion is in force AT as_of
+├── reason         the payload's own reason for a non-measured sli (never prose invented here)
+├── sealed_through the service's watermark (the 90-day window ends HERE, not at as_of)
+└── sealed_in_window  whether a sealed fact exists INSIDE the 90-day window
+```
+
+`sealed_in_window`, not "any fact exists": a single ancient fact would otherwise claim history
+the strip cannot show. And the window ends at `sealed_through`, matching the internal report
+(§11.3) — ending it at the page's `as_of` would invent an unsealed tail nobody measured.
+
+**A missing service is an ERROR, not an honest `no_data`.** With the tenant FK and `RESTRICT`,
+an active service source CANNOT be absent; if the projection comes back without it, the read is
+wrong — a query omission, a tenancy bug, corruption. So that case degrades the render (the
+component reports unavailable and the failure is logged and counted), and never converts into
+the calm public statement "we have no data about this". Absence of a row and absence of
+measurement are different facts.
+
+It reuses the existing evaluator (`reliability.StateAt` over the same four relations,
+`serviceNeighbourHealthTx`'s set-wise loading shape) and returns the excluded flag the internal
+card folds away — the same numbers, one extra bit, no second semantics owner.
+
+**Precedence is total and stated in order.** The first matching row wins:
+
+| # | Condition | Public component status |
+|---|---|---|
+| 1 | `excluded` (maintenance window in force at `as_of`) | `maintenance` |
+| 2 | `sli = down` | `major_outage` |
+| 3 | `sli = degraded` | `degraded` |
+| 4 | `sli = healthy` | `operational` |
+| 5 | `sli = unknown` · no `sli[]` declared · service absent | **`no_data`** (new) |
+
+Two consequences the reviewer was right to demand in writing:
+
+- **`has_sealed` does not affect the STATUS.** A service that is live-healthy before its first
+  bucket seals is `operational` — its current state IS measured — while its 90-day strip is
+  absent, because its history is not. Conflating the two would have made a healthy new service
+  publish `no_data`, which is false in the opposite direction.
+- **Maintenance outranks absence.** A service inside a declared window publishes `maintenance`
+  even if nothing is sealed and even if the SLI is unknown: the operator declared that window,
+  and it is the more specific true statement.
+
+**`no_data` is a first-class public status, and it does NOT join the severity ladder.** The
+existing order is `operational(0) < maintenance(1) < degraded(2) < partial_outage(3) <
+major_outage(4)`, and squeezing absence into it forces a false comparison — is not-knowing
+better or worse than declared maintenance? Neither: it is a different KIND of statement. So the
+summary is computed as two values instead of one:
+
+```
+summary            ComponentStatus   worst-of over MEASURED components; `operational` when
+                                     none are worse; `no_data` when NOTHING is measured
+                                     (all-no_data page, or empty page)
+unmeasured_count   integer           components whose status is no_data
+summary_state      enum              operational | impaired | no_data | empty
+                                     (the headline discriminator; `impaired` covers every
+                                      measured status worse than operational)
+```
+
+`summary` stays a `ComponentStatus` so existing clients keep parsing the field they already
+read; `summary_state` and `unmeasured_count` are additive. The summarizer is ONE total function
+and it is **fail-closed by construction**: it classifies each component as measured-with-a-known
+status or unmeasured, and an unrecognized enum value counts as UNMEASURED — never as severity 0.
+That replaces the "`severity()`'s default becomes no_data" phrasing, which was not implementable
+(the function returns an int); the ordering function keeps its five measured values and the
+unknown case never reaches it.
+
+The headline contract, total over every case:
+
+| Page contents | Headline |
+|---|---|
+| all measured, worst = operational | *All systems operational* |
+| measured worst = X (≠ operational), any `unmeasured` | X's own headline, **plus** "data missing for N components" |
+| measured worst = operational, `unmeasured` > 0 | *Operational, with no data for N components* — never plain "all systems operational" |
+| every component `no_data` | *No data* — not operational |
+| **no components at all** | *No components configured* — not operational |
+
+**Phase 4 changes public output in THREE places, and all three are inherited lies of the same
+shape.** §17 enumerates them; none is a side effect of a new feature:
+
+1. a `pending` monitor component rendered `operational` → renders `no_data`;
+2. an EMPTY page rendered `operational` (`SummaryStatus(nil)`) → reports "no components
+   configured";
+3. a MANUAL component whose `manual_status` is empty rendered `operational` (the handler's
+   `status := domain.CompOperational` default) → renders `no_data`. An operator who has not
+   stated a status has not stated health, and the page must not state it for them.
+
+The third is the one an existing installation is most likely to notice, which is precisely why
+it is named rather than shipped quietly: an operator who wants the old appearance sets the
+manual status explicitly to `operational`, which is now the only way to say it.
+
+A `no_data` component is always LISTED and named. Hiding it would be the same lie by omission
+this feature rejects for composites (§15.5).
+
+**This corrects an existing FR-012 defect, deliberately and visibly.**
+`domain.ComponentStatusFromMonitor` maps `pending` — a monitor that has never been confirmed
+either way — to `operational`, so today's public pages already present the unknown as healthy.
+Phase 4 maps it to `no_data`. That is a CHANGE IN PUBLIC BEHAVIOUR of a shipped feature, so it
+is recorded here, in §17, and in D-0167 rather than slipped in as a detail of a new one.
+
+**The 90-day history: both fields, both bounded.** The existing `ComponentView` publishes
+`uptime_90d` AND `daily[]`, so specifying only the strip would leave the aggregate to be
+improvised:
+
+- **`daily[]`** — UTC days aggregated from SEALED `service_reliability_buckets` (provisional
+  excluded), over `[sealed_through − 90d, sealed_through)`, at most 90 points. Each point
+  carries `date`, `uptime`, and `decidable_fraction` — DECIDABLE coverage, the §11.2 axis, not
+  storage continuity, because that is the axis that says whether the number may be quoted at
+  all. A day with no sealed bucket is **absent from the array**, never a zero and never an
+  interpolation; a partially decidable day is present with its fraction, so a reader can tell a
+  quiet day from a half-measured one. No sealed data in the window → no array and the
+  `no data yet` label.
+- **`uptime_90d`** — follows the internal report's honesty rules verbatim (§11.2/§11.3): below
+  `min_decidable_coverage` it is **withheld**, and a window spanning definition revisions is
+  withheld too, because a single number across two definitions of availability is the confident
+  lie §12.1 forbids. Withholding is expressed on the wire as `uptime_90d: null` plus
+  `uptime_withheld_reason` (`insufficient_decidable_coverage` | `spans_definition_revisions` |
+  `no_sealed_data`) — a null with no reason would be indistinguishable from a serialization
+  slip. It is never synthesized to fill the field.
+- **Bounds are load-bearing here, not hygiene — and "keep rendering + log" is not a bound.**
+  The public render is unauthenticated and already N+1 over components; a service component
+  multiplies that by 90 days of facts. A create-time cap does nothing about a page that is
+  already enormous, so the contract has three layers instead of one:
+
+  1. **Constant statement count** per render under ONE snapshot, regardless of component count
+     (the §14-proven shape) — necessary, not sufficient: statements are bounded while rows,
+     memory and time are not.
+  2. **A per-page ceiling that can only shrink.** `status_pages.component_ceiling` is persisted
+     as `max(50, current component count)` at migration. New components are refused above it, so
+     an oversized page cannot grow, and every remediation lowers the ceiling permanently.
+  3. **An absolute fail-closed safety ceiling** of `500` components for the PUBLIC render. Above
+     it the page does not render a truncated subset — a partial page pretending to be the whole
+     one is the lie this section exists to prevent — it returns an explicit
+     `status_page_over_safe_limit` response naming the count and the limit, while the
+     AUTHENTICATED management view still lists everything so the operator can fix it. Plus a
+     short-TTL render cache as the rate bound.
+
+  Acceptance requires evidence of bounded ROWS, MEMORY and TIME at the ceiling — not only a
+  constant SQL statement count — and nothing is ever silently truncated or hidden.
+
+Same owner of truth as the internal report throughout: a customer and an operator can never be
+shown two different availabilities for one service.
+
+**Public incidents and maintenance: the existing scope, stated rather than assumed.** A
+monitor-backed component today adds its project to the page's set, and the page then publishes
+that project's incidents and maintenance windows. A service-backed component does **exactly the
+same** — its project joins the same set, nothing narrower and nothing wider. This is written
+down because "impact links stay non-public" does not answer it: an unrelated incident in that
+project appears on the page, as it already does for monitor components, and an operator adding
+a service component must know that. A raw unauthenticated JSON regression pins it, so the
+boundary cannot drift silently in either direction.
+
+**Conversion is explicit, previewed, audited and REVERSIBLE.**
+
+```
+Convert  manual  → service:  source='service', service_id = X,  manual_status PRESERVED
+Revert   service → manual:   source='manual',  service_id RETAINED (dormant),
+                             the same manual_status returns
+```
+
+The revert does NOT clear `service_id` — that would contradict the dormant-binding model above
+and throw away the affordance to convert back without re-choosing the service.
+
+The preview states, per affected component and for the page summary, what customers see now
+and what they would see after — because a status page is a customer-visible artifact and an
+operator who cannot see the delta cannot consent to it. Both directions write an audit row
+with the actor **in the mutating transaction**. Nothing is ever converted automatically: not on
+upgrade, not when a service is created, not by a reconcile.
+
+**Consent needs a linearization point, or it is consent to something else.** Between preview
+and confirm, another admin can change a component's source, edit a manual status, add, remove or
+reorder components — and the confirm would then apply to a page the operator never saw. So the
+preview carries a **structural CAS**, and the confirm recomputes inside its own transaction and
+compares:
+
+```
+components.revision                 bigint, bumped by ANY mutation of THAT component
+status_pages.component_generation   bigint, bumped by ANY component mutation on the page —
+                                    add, remove, reorder, source change, manual status, name
+```
+
+The page generation deliberately bumps on neighbour edits too: the preview shows the page
+SUMMARY, so an admin who changes a different component's manual status changes what admin A
+consented to, while leaving A's target row untouched. Bumping only on add/remove/reorder would
+let that race through — the reviewer's exact scenario, and the required regression.
+
+A mismatch on either is **409 `page_configuration_stale`** with the same first-committer-wins
+semantics as `graph_generation` (§14.2) — the operator re-previews rather than applying a stale
+consent. What is deliberately NOT locked is live health: a service can legitimately change state
+between preview and confirm, so the preview stamps its `as_of` and discloses that the *structure*
+is what was agreed, not the momentary status. Two-admin stale-preview regressions are required
+in both directions (source change and component-set change).
+
+**Deletion, stated per case instead of per FK.** Three different deletions reach a component,
+and pretending one rule covers them is how the first draft contradicted itself:
+
+| Deleted | Component behaviour |
+|---|---|
+| a **service** bound as the ACTIVE source | `ON DELETE RESTRICT` → **409 naming the page and the component**. `SET NULL` would BE the automatic conversion invariant 70 forbids; `CASCADE` would silently delete a row customers can see. |
+| a **monitor** bound as the ACTIVE source | the SHIPPED behaviour is kept: `SET NULL (monitor_id)`, and — because the CHECK requires an active binding — the same statement sets `source='manual'`. This IS an automatic conversion, it exists today (a deleted monitor's component already renders as manual), and it is recorded here as an **inherited exception** rather than being either denied or silently changed. |
+| a **dormant** binding of either kind | cleared, no source change, no public effect: a dormant binding is a revert affordance, not a statement. |
+
+**Project and org deletion keep their single-statement cascade (D-0150/FR-019).** `RESTRICT`
+governs the deletion of an INDIVIDUAL service only. A project cascade removes its services and,
+with them, any component bound to one — including components on ORG-LEVEL pages, which is
+exactly the case the reviewer identified as blocked. Those components are therefore enumerated
+in the project-deletion PREVIEW ("N status-page components will disappear from M pages"), so the
+cascade stays one statement and the operator still consents to the public consequence. Tests
+cover both a project-scoped page and an org-level page holding that project's service.
 
 **Composite.** After Service exists, `composite` narrows to what it actually is: a logical
 monitor. Conversion is explicit and non-destructive:
@@ -1885,6 +2193,54 @@ Convert composite → Service
 ```
 
 No historical data is migrated or reinterpreted in v1.
+
+### 15.5 After conversion, a composite stays visible until its owner retires it (phase 4)
+
+A converted composite **keeps running**: it still probes, still holds its SLO, and can still
+open an incident and deliver an alert. So it stays in the monitor list, at full strength. A
+monitor that pages someone while being absent from the list is the same
+system-does-one-thing-shows-another defect §14 and §11 exist to prevent — the on-call would get
+the alert and fail to find its source. Saving a list row is not worth that.
+
+- **The link is stored once and rendered from BOTH ends.** One nullable column on the monitor,
+  `superseded_by_service_id`, with the composite tenant FK `(superseded_by_service_id,
+  project_id) → services (id, project_id)` and `ON DELETE SET NULL` — losing the successor is a
+  lost annotation, not a corrupted monitor. It is not unique: two composites may legitimately be
+  superseded by one service. The service side derives `converted from →` by reading the same
+  column, so there is ONE fact and no pair to fall out of sync. Deleting the composite leaves the
+  service untouched; deleting the service clears the annotation and nothing else.
+- **Nothing is hidden by default.** A "hide superseded" filter is legitimate as an operator's
+  CHOICE, off initially. A default that hides a working monitor is a false statement about what
+  the installation is checking.
+- **Retiring is a lifecycle MARKER on top of the existing execution switch, and one
+  transaction.** `retired_at` alone stops nothing: the scheduler, the dead-man evaluator, result
+  ingest, incident and SLO paths all key on `enabled`, revisions and state sequences. So
+  `retire` is ONE transaction that sets **both**: `retired_at = now()` (the lifecycle statement,
+  which is what removes it from the active list and invites nothing) **and** `enabled = false`
+  (the existing, already-proven execution semantics). Reusing `enabled` alone would conflate an
+  afternoon's disable with "superseded forever"; using `retired_at` alone would leave a retired
+  monitor probing and paging. The same transaction carries the fences the disable path already
+  owns — the `execution_revision` bump and its epoch fan-out for every service that references
+  the composite (§6.2), the `state_sequence` advance so queued transition deliveries are
+  recognized as stale at delivery time (the existing #2 gate), and the audit row. Re-activation
+  is the explicit inverse (`retired_at = NULL`, `enabled = true`), audited, so a mistaken retire
+  is recoverable; a file-managed composite refuses both through the ownership rule that already
+  governs its `enabled`. A retired composite keeps its history, incidents and past numbers, and
+  still renders under the "superseded" filter.
+- **Composite conversion is one serialized transaction, not a read-then-create.** It takes the
+  composite row `FOR UPDATE`, then creates the service, writes the link and the audit row
+  atomically; two simultaneous confirms therefore cannot create two services with
+  last-writer-wins on the non-unique successor column. The service slug is derived from the
+  composite's, and a collision is a **409 naming the existing slug** rather than a
+  silently-suffixed second service; a re-confirm of an already-converted composite is a no-op
+  returning the existing service (idempotent by the link column). A file-managed composite may
+  be converted only by its provider's authority, per §15.1.
+
+Retire is available for ANY composite, whether or not it was converted: an operator who built
+the service by hand is in the same position as one who used the conversion tool.
+
+The moment a composite stops being a source of alerts is therefore the same moment it leaves
+the list, which is the only arrangement in which its absence from the list is not a lie.
 
 ### 15.1 Ownership matrix — declarations only
 
@@ -2166,6 +2522,23 @@ member, the ingress handshake of §10.4 writes no rows and the leader schedules 
 Service-aware UX begins only after explicit adoption. Upgrade day must not present an empty
 "Services" screen as the product's new front door.
 
+**Phase 4 keeps every line above, with THREE deliberate exceptions, enumerated here rather than
+discovered by a customer.** All three are the same inherited defect — the unknown shipped as
+health — and each is the point of the change, not a regression:
+
+1. a **`pending`** monitor component rendered `operational` (`ComponentStatusFromMonitor`) →
+   renders `no_data`;
+2. an **EMPTY page** rendered `operational` (`SummaryStatus(nil)`) → reports "no components
+   configured";
+3. a **MANUAL component with an empty `manual_status`** rendered `operational` (the render's
+   default) → renders `no_data`; an operator who wants the previous appearance sets the status
+   explicitly to `operational`, which is now the only way to assert it.
+
+Everything else holds: manual components stay first-class, service projection is opt-in per
+component, no component's source changes without an explicit previewed action (with the one
+inherited exception of a deleted active monitor, §15.0), composites keep behaviour and
+visibility (§15.5), and no historical number is recomputed or reinterpreted.
+
 ## 18. Delivery phases
 
 | Phase | Content |
@@ -2173,12 +2546,13 @@ Service-aware UX begins only after explicit adoption. Upgrade day must not prese
 | 1 | Domain + storage foundation: Service resource, definition revisions and evaluation epochs, the evaluation-semantics projection, effective-state model and piecewise reducer, duration-weighted fact schema, seal/ingest handshake, durable ranges, maintenance mutation contract, monitor slug, bundle format 2, bounds. No alerting, no status projection, no correlation. |
 | 2 | Reliability reporting: service SLO, error budget, burn-rate computation, both coverage axes, revision and epoch segmentation, insufficient-history UX, two-layer health card. |
 | 3 | Dependency impact graph: same-project service DAG (schema-enforced tenancy, bounded, outside the declaration — no revisions, no epochs), symmetric open-time incident correlation into structured incident-service links with 🕸 annotations, list+badge UI. Annotates and links; never suppresses, merges or hides. Specified in §14. |
-| 4 | *Intent only.* Status-page service projection, manual-component coexistence, composite conversion tooling. |
+| 4 | Status-page service projection: a third component source (`service_id` under ONE active discriminator, dormant bindings retained), the SLI layer alone projected into the public vocabulary plus the new `no_data` status, sealed-facts-only 90-day strips, explicit previewed reversible conversion in both directions, the corrected `pending` mapping, and composite retire tooling with two-ended links. Impact links stay non-public. Specified in §15.0/§15.5. |
 | 5 | *Intent only.* Alerting ownership: service burn alerts and monitor delegation/suppression rules. |
 
-Phases 3–5 are **deliberately not specified**. Their UX depends on facts phase 1/2 will produce
-— real `UNKNOWN` density, late-arrival behavior, recompute cost — and specifying them now would
-encode assumptions that the data may refute.
+Phase 5 is **deliberately not specified** (phases 3 and 4 now are, in §14 and §15.0/§15.5). Its
+UX depends on facts phases 1–4 produce — real `UNKNOWN` density, late-arrival behaviour,
+recompute cost, and how often a service's public state actually differs from its monitors' —
+and specifying it now would encode assumptions the data may refute.
 
 ## 19. Acceptance invariants
 
@@ -2396,6 +2770,82 @@ is a reliability-domain object; if it fails, Service is still a grouping abstrac
     pinned by test; proven by the mixed-owner, forced-failure, replay-both-paths,
     legacy-replay-rejected and legacy-topic-unchanged regressions.
 
+**Phase 4** adds:
+
+62. every component row carries its OWN tenant identity — `org_id NOT NULL`, nullable
+    `project_id`, composite FKs to the page, the project, the monitor and the service — so a
+    cross-org or cross-project component is unrepresentable to a DIRECT SQL writer, not merely
+    unreachable through the API; a project-scoped page's components carry that project;
+63. the source is an explicit discriminator (`source`), never the presence of a column: the
+    active binding is required by CHECK, inactive bindings stay DORMANT, and every transition in
+    the §15.0 matrix is therefore reversible without a staging table; the backfill of shipped
+    rows is total (`monitor_id` present ⇒ monitor, else manual) and changes no rendered output;
+64. a monitor-backed component keeps its inherited `manual_status` override (D-0021), a
+    service-backed component refuses one, and `manual_status = 'no_data'` is refused by CHECK —
+    `no_data` is computed, never typed;
+65. the public projection reads the SLI layer ALONE — the diagnostics layer and the §14 impact
+    links never appear on any public or internal status-page projection, proven by a raw
+    unauthenticated JSON regression over a page whose service has BOTH failing diagnostics and
+    impact links; a service component's project joins the page's incident/maintenance scope
+    exactly as a monitor component's does, and that too is pinned by a raw-JSON regression;
+66. the projection reads ONE authoritative batched DTO at ONE `as_of` carrying `sli`, `excluded`,
+    `reason` and `has_sealed`, over the existing evaluator — no second semantics owner — and the
+    §15.0 precedence is TOTAL: maintenance outranks absence, `has_sealed` governs the STRIP and
+    never the status, so a live-healthy service before its first seal publishes `operational`
+    with no strip; required tests: active maintenance, generic unknown, no `sli[]`,
+    healthy-before-first-seal, first seal;
+67. `no_data` does not join the severity ladder: the summary is `worst-of MEASURED` plus an
+    `unmeasured` count, and the §15.0 headline table is total — operational+unmeasured never
+    reads "all systems operational", all-`no_data` is not operational, an EMPTY page reports
+    "no components configured" instead of today's `operational`, and `severity()`'s unknown
+    default becomes `no_data` instead of `operational`;
+68. `pending` monitor components render `no_data`, not `operational` — the one intentional change
+    to existing public output, recorded in §15.0, §17 and D-0167, with a regression that pins the
+    OLD behaviour as removed;
+69. the 90-day history is bounded and honest: `daily[]` is UTC days from SEALED buckets only,
+    at most 90 points, days without data ABSENT (never zeros, never interpolation) and partial
+    days carrying their covered fraction; `uptime_90d` follows §11.2/§11.3 — withheld with its
+    reason below decidable coverage and withheld across a revision boundary, never synthesized;
+    ONE batched snapshot per page with a constant statement count, and `max_components_per_page`
+    = 50 fixed, with over-bound pages still rendering, refusing new components and logging the
+    overage;
+70. conversion is explicit in BOTH directions, previewed, audited in the MUTATING transaction,
+    and structurally CAS-guarded: `components.revision` and `status_pages.component_generation`
+    — the latter bumped by ANY component mutation on the page, neighbours included — are compared
+    inside the confirm transaction and a mismatch is 409 `page_configuration_stale`
+    (first-committer-wins), while live health is disclosed via `as_of` rather than locked;
+    two-admin stale-preview regressions cover a source change, a component-set change and a
+    NEIGHBOUR component's edit;
+71. deletion is specified per case: an actively-bound SERVICE is `RESTRICT` → 409 naming the page
+    and the component; an actively-bound MONITOR keeps the shipped `SET NULL (monitor_id)` and
+    the same statement sets `source='manual'` — an inherited automatic exception, recorded as one
+    rather than denied; a dormant binding is cleared with no source change; and project/org
+    cascade (D-0150/FR-019) stays ONE statement, with affected components enumerated in its
+    deletion preview and covered by tests on both a project-scoped and an org-level page;
+71a. the projection's inputs are window-scoped and error-honest: the 90-day window ends at
+    `sealed_through` (never at the page's `as_of`), `sealed_in_window` — not "any fact" — decides
+    whether a strip exists, and an ACTIVE service that the projection cannot find degrades the
+    render with a logged, counted failure instead of publishing the calm statement `no_data`;
+71b. the public render is bounded in ROWS, MEMORY and TIME, not merely in statement count: a
+    per-page ceiling persisted as `max(50, current)` that can only shrink, and an absolute
+    fail-closed public ceiling of 500 above which the page returns
+    `status_page_over_safe_limit` naming the count and the limit — never a truncated subset
+    posing as the whole page — while the authenticated view still lists everything;
+72. a converted composite keeps probing, keeps its SLO, stays listed at full strength and is
+    never hidden by default; the link is ONE stored fact (`monitors.superseded_by_service_id`,
+    tenant-composite FK, `SET NULL` on service deletion) rendered from both ends;
+73. `retire` is ONE transaction setting BOTH `retired_at` (the lifecycle statement) and
+    `enabled = false` (the existing execution semantics), together with the `execution_revision`
+    bump and its epoch fan-out for referencing services and the `state_sequence` advance that
+    makes queued transition deliveries stale — a retired monitor therefore stops probing, paging
+    and materializing, which `retired_at` alone would not achieve; it is audited, reversible, and
+    refused for a file-managed composite except by its provider's authority;
+74. composite conversion is one serialized transaction (`FOR UPDATE` on the composite, then
+    service + link + audit atomically), so two simultaneous confirms cannot create two services;
+    a slug collision is a 409 naming the existing slug rather than a silently suffixed twin, and
+    re-confirming an already-converted composite is an idempotent no-op returning the existing
+    service.
+
 ## 20. Adversarial cases — answered
 
 The FR-020 audit found that two of its three blockers were holes in the SPECIFICATION,
@@ -2507,8 +2957,8 @@ both are reproducible, and neither is ever inferred at read time.
 |---|---|
 | **Zero Services after upgrade** | Nothing changes: no service rows, no facts, no ingest handshake rows, no scheduler work, and monitor-level SLO behaviour is untouched (invariant 46). The feature costs nothing until a service exists. |
 | **Format-1 bundle after the upgrade** | Still valid, declares no services, and its monitors receive server-assigned slugs (§15.3). |
-| **Composite converted to Service** | Phase 4 intent. Phase 1 offers no conversion and the two coexist; a composite remains a monitor and may itself be an SLI member. |
-| **Existing manual status component preserved** | Phase 4 intent. Phase 1 does not project services onto status pages at all. |
+| **Composite converted to Service** | Phase 4 (§15.5): conversion creates the service and CHANGES NOTHING about the composite — it keeps probing, keeps its SLO, stays listed at full strength, and carries a two-ended link. Only an explicit `retire` disables it, behind a warning naming the loss of its SLO and alerts. A composite remains a monitor and may itself be an SLI member. |
+| **Existing manual status component preserved** | Phase 4 (§15.0): manual stays first-class; a component's source changes only through an explicit previewed action, and `manual_status` is preserved so the revert restores exactly what customers saw before. |
 | **Service dependency cycle** | Does not arise in phase 1/2: dependency edges are phase 3 (§14) and no edge type exists yet. Cycle rejection is a precondition of that phase, not an afterthought. |
 
 ## 21. Resource and write contract (phase 1)
@@ -2556,6 +3006,16 @@ maintenance archive versus annul, leader fencing on the lock-owning connection, 
 with the monitor slug, the native-RANGE storage decision and the TSDB boundary) → iteration
 report `docs/iterations/iter-NNNN.md` → a row in `docs/traceability.md` → `docs/overview.md` when
 behavior or stack changes.
+
+**Phase 4 process** (commissioned 2026-08-17): this §15.0/§15.5 amendment reviewed as a DESIGN
+round → UI mock approval for the component-source picker, the conversion preview dialog and the
+composite links **before** any frontend code → implementation → `-race` in both storage modes →
+E2E on a live stack including the PUBLIC page rendering `no_data` → decision record **D-0167**
+(the third component source and its exclusivity; the SLI-only projection with impacts staying
+non-public; `no_data` as a public status and its summary semantics; the corrected `pending`
+mapping as an intentional change to shipped public behaviour; sealed-facts-only strips;
+reversible previewed conversion; composite retire) → iteration report + status + traceability
+rows at completion.
 
 **Phase 3 process** (commissioned 2026-08-17): this §14 amendment reviewed as a DESIGN round →
 UI mock approval for the §14.5 surface **before** any frontend code → implementation on

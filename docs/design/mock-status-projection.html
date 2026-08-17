@@ -1,0 +1,585 @@
+<title>Cerbix Status Projection</title>
+
+<style>
+/* Tokens 1:1 from docs/design/notes.md — the phase-4 surface adds ONE public status and no new
+   colour: `no_data` is the --pending hue plus a DASHED outline, the same "deficient evidence
+   reads as deficient" motif phase 2 used for UNKNOWN ticks. A second hue would invite a reader
+   to rank absence against maintenance, which §15.0 explicitly refuses to do. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+
+.top{
+  position:sticky; top:0; z-index:20; height:56px; display:flex; align-items:center; gap:12px;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.brand{display:flex; align-items:center; gap:9px}
+.brand .wm{font-size:15px; font-weight:600; letter-spacing:-.01em}
+.top .spacer{flex:1}
+.tbtn{border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:12.5px; color:var(--ink-2); background:var(--surface)}
+.tbtn.on{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+
+.screens{
+  position:sticky; top:56px; z-index:19; display:flex; gap:2px; overflow-x:auto;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.screens button{padding:10px 12px 9px; font-size:13px; color:var(--ink-3); border-bottom:2px solid transparent; white-space:nowrap}
+.screens button.on{color:var(--ink); border-bottom-color:var(--accent); font-weight:550}
+.screens .n{font-size:10.5px; color:var(--ink-3); margin-right:5px}
+
+.wrap{padding:22px; max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+.head h1{font-size:21px; font-weight:650; letter-spacing:-.015em}
+.head .sub{margin-top:3px; font-size:13px; color:var(--ink-3)}
+
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.card > header{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card > header h2{font-size:14px; font-weight:600}
+.card .body{padding:16px}
+.card .spacer{flex:1}
+
+.pill{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px 0 7px; border-radius:999px; font-size:12px; font-weight:500}
+.pill .dot{width:7px; height:7px; border-radius:50%; flex:none}
+.pill.up{color:var(--up); background:var(--up-weak)} .pill.up .dot{background:var(--up)}
+.pill.down{color:var(--down); background:var(--down-weak)} .pill.down .dot{background:var(--down)}
+.pill.deg{color:var(--degraded); background:var(--degraded-weak)} .pill.deg .dot{background:var(--degraded)}
+.pill.mnt{color:var(--maint); background:var(--maint-weak)} .pill.mnt .dot{background:var(--maint)}
+/* no_data: pending hue + DASHED ring. Never green, never a second hue. */
+.pill.nd{color:var(--ink-2); background:var(--pending-weak); border:1px dashed var(--border-strong)}
+.pill.nd .dot{background:var(--pending)}
+
+.chip{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:11.5px; color:var(--ink-2); background:var(--surface-2)}
+.chip.mono{font-family:ui-monospace,Menlo,monospace; font-size:10.5px}
+.chip.file{background:var(--inset)}
+.chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.chip.dorm{border-style:dashed; color:var(--ink-3)}
+
+.row{display:flex; flex-wrap:wrap; align-items:center; gap:9px; padding:11px 16px; border-bottom:1px solid var(--border)}
+.row:last-child{border-bottom:0}
+.row .nm{font-weight:550; font-size:13.5px}
+.row .spacer{flex:1}
+.src{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden}
+.src span{padding:3px 9px; font-size:11.5px; color:var(--ink-3)}
+.src span.on{background:var(--accent-weak); color:var(--accent); font-weight:600}
+
+/* 90-day strip: discrete ticks, gaps are GAPS (absent days), never zeros. */
+.strip{display:flex; gap:1px; align-items:flex-end; height:26px}
+.strip i{flex:1; border-radius:1px}
+.strip i.up{background:var(--up); height:100%}
+.strip i.deg{background:var(--degraded); height:100%}
+.strip i.down{background:var(--down); height:100%}
+.strip i.part{background:var(--up); height:60%; opacity:.55}
+.strip i.gap{background:var(--inset); height:36%}
+.axis{display:flex; justify-content:space-between; font-size:11px; color:var(--ink-3); padding-top:6px}
+
+.diff{display:grid; grid-template-columns:1fr auto 1fr; gap:0; align-items:stretch; border:1px solid var(--border); border-radius:8px; overflow:hidden}
+.diff > div{padding:13px 15px}
+.diff .mid{display:grid; place-items:center; padding:0 12px; background:var(--surface-2); border-left:1px solid var(--border); border-right:1px solid var(--border); color:var(--ink-3)}
+.diff .lbl{margin-bottom:8px}
+
+.err{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--down); background:var(--down-weak); color:var(--down); border-radius:6px; padding:10px 12px; font-size:12.5px}
+.err b{font-weight:650}
+.err .fix{margin-left:auto; flex:none; border:1px solid var(--down); border-radius:5px; padding:2px 8px; font-size:11.5px; background:var(--surface)}
+.warn{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--degraded); background:var(--degraded-weak); color:var(--degraded); border-radius:6px; padding:10px 12px; font-size:12.5px}
+.btn{display:inline-flex; align-items:center; height:30px; border:1px solid var(--border); border-radius:6px; padding:0 12px; font-size:13px; color:var(--ink-2); background:var(--surface)}
+.btn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:550}
+.btn.danger{border-color:var(--down); color:var(--down)}
+.btn.sm{height:26px; font-size:12.5px; padding:0 10px}
+
+.note{
+  border:1px dashed var(--note-border); border-left:3px solid var(--note);
+  background:var(--note-bg); border-radius:6px; padding:10px 12px; font-size:12.5px; color:var(--ink-2);
+  display:flex; gap:10px; align-items:flex-start;
+}
+.note .ref{flex:none; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--note); border:1px solid var(--note-border); border-radius:4px; padding:1px 5px; background:var(--surface)}
+.note b{color:var(--ink); font-weight:600}
+body.hide-notes .note{display:none}
+
+/* Public page replica — deliberately plainer than the app chrome. */
+.public{border:1px solid var(--border); border-radius:10px; background:var(--surface); overflow:hidden}
+.public .banner{padding:18px 20px; border-bottom:1px solid var(--border)}
+.public .banner h3{font-size:17px; font-weight:620}
+.public .banner .sub{margin-top:4px; font-size:13px; color:var(--ink-3)}
+.public .comp{padding:14px 20px; border-bottom:1px solid var(--border)}
+.public .comp:last-child{border-bottom:0}
+.public .comp .line{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.public .comp .nm{font-weight:550}
+.public .comp .num{margin-left:auto; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:var(--ink-2)}
+.public .comp .withheld{margin-left:auto; font-size:11.5px; color:var(--ink-3)}
+
+.tbl-wrap{overflow-x:auto}
+table{width:100%; border-collapse:collapse; font-size:13px; min-width:520px}
+th{text-align:left; font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3); padding:8px 16px; border-bottom:1px solid var(--border)}
+td{padding:10px 16px; border-bottom:1px solid var(--border); vertical-align:top}
+tbody tr:last-child td{border-bottom:0}
+
+.foot{padding:22px; border-top:1px solid var(--border); color:var(--ink-3); font-size:12.5px; max-width:1080px; margin:0 auto}
+@media (max-width:760px){ .diff{grid-template-columns:1fr} .diff .mid{border:0; border-top:1px solid var(--border); border-bottom:1px solid var(--border); padding:6px} }
+</style>
+
+<header class="top">
+  <div class="brand">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.2-2.8 7.6-7 9-4.2-1.4-7-4.8-7-9V6z"/><path d="M8.5 12.5l2.2 2.2 4.8-5"/></svg>
+    <span class="wm mono">cerbix</span>
+  </div>
+  <span class="chip mono">FR-021 phase 4 · status projection</span>
+  <div class="spacer"></div>
+  <button class="tbtn on" id="notesBtn" aria-pressed="true">Spec notes</button>
+  <button class="tbtn" id="themeBtn">Theme</button>
+</header>
+
+<nav class="screens" id="screens" aria-label="Mocked screens"></nav>
+<div class="wrap" id="view"></div>
+<footer class="foot">
+  FR-021 <b>phase 4</b> design track · mock for approval BEFORE any frontend code · tokens from
+  <span class="mono">docs/design/notes.md</span> · behaviour follows
+  <span class="mono">func-service-reliability.md §15.0/§15.5</span> (design gate cleared at [310]).
+</footer>
+
+<script>
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const note = (ref, html) => `<div class="note"><span class="ref">${esc(ref)}</span><div>${html}</div></div>`;
+const pill = (k, t) => `<span class="pill ${k}"><span class="dot"></span>${esc(t)}</span>`;
+
+/* A 90-day strip where ABSENT days are gaps, partial days are short, and nothing is
+   interpolated — the §15.0 rule made visible. */
+function strip(spec) {
+  const cls = { u: "up", d: "down", g: "deg", p: "part", x: "gap" };
+  return `<div class="strip">${spec.split("").map((c) => `<i class="${cls[c]}"></i>`).join("")}</div>`;
+}
+const S90 = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxuuuuuuuuuuuupuuuuuuudguuuuuuuuuuuuuuxxuuuuuuuuuuuuuuuuuuuuuuuu";
+
+/* ── screen 1: the component source picker ─────────────────────────────────── */
+function sSource() {
+  return `
+  <div class="head">
+    <h1>Status page · components</h1>
+    <p class="sub">Globex status · <span class="mono">acme-status</span> · org-level page</p>
+  </div>
+
+  ${note("§15.0", `A component has ONE ACTIVE source chosen by a discriminator — monitor, service or
+    manual — and its other bindings stay <b>dormant</b> rather than being cleared. That is what makes
+    every conversion reversible without a staging table, and why the dashed chips below are not
+    clutter: they are the affordance to convert back without re-choosing.`)}
+
+  <div class="card">
+    <header><h2>Components</h2><span class="chip mono">4 / 50</span><span class="spacer"></span>
+      <span class="btn sm">Add component</span></header>
+    <div>
+      <div class="row">
+        <span class="nm">Checkout</span>
+        <span class="src"><span>monitor</span><span class="on">service</span><span>manual</span></span>
+        <span class="chip mono acc">svc · checkout</span>
+        <span class="chip mono dorm">dormant monitor · checkout-http</span>
+        <span class="spacer"></span>
+        ${pill("up", "Operational")}
+        <span class="btn sm">Change source</span>
+      </div>
+      <div class="row">
+        <span class="nm">Search</span>
+        <span class="src"><span>monitor</span><span>service</span><span class="on">manual</span></span>
+        <span class="chip mono dorm">dormant service · search</span>
+        <span class="spacer"></span>
+        ${pill("nd", "No data")}
+        <span class="btn sm">Change source</span>
+      </div>
+      <div class="row">
+        <span class="nm">Payments API</span>
+        <span class="src"><span class="on">monitor</span><span>service</span><span>manual</span></span>
+        <span class="chip mono">mon · payments-http</span>
+        <span class="spacer"></span>
+        ${pill("nd", "No data")}
+        <span class="btn sm">Change source</span>
+      </div>
+      <div class="row">
+        <span class="nm">Third-party CDN</span>
+        <span class="src"><span>monitor</span><span>service</span><span class="on">manual</span></span>
+        <span class="chip">operator-declared</span>
+        <span class="spacer"></span>
+        ${pill("deg", "Degraded")}
+        <span class="btn sm">Change source</span>
+      </div>
+    </div>
+  </div>
+
+  ${note("§17", `Two of those rows changed appearance in this release, and both were inherited lies:
+    <b>Payments API</b> is a monitor that has never been confirmed either way — it used to render
+    <i>Operational</i>; <b>Search</b> is a manual component whose status was never set — it also used
+    to render <i>Operational</i>. Neither was ever measured. An operator who wants the old look now
+    has to <b>say</b> operational, which is the only honest way to assert it.`)}
+
+  <div class="card">
+    <header><h2>Same-project rule</h2></header>
+    <div class="body">
+      <p style="font-size:13px; color:var(--ink-2)">
+        A component's bindings live in ONE project. Converting Checkout from a monitor in
+        <span class="mono">payments</span> to a service in <span class="mono">search</span> is refused —
+        create a separate component instead.
+      </p>
+      <div class="err" style="margin-top:10px"><span>⛔</span><div><b>component_cross_project:</b>
+        the service <span class="mono">search/checkout</span> is in a different project from this
+        component's bindings (<span class="mono">payments</span>).</div></div>
+    </div>
+  </div>`;
+}
+
+/* ── screen 2: conversion preview + the stale-consent refusal ──────────────── */
+function sPreview() {
+  return `
+  <div class="head">
+    <h1>Convert component → service-backed</h1>
+    <p class="sub">Search · manual → service <span class="mono">search</span></p>
+  </div>
+
+  ${note("§15.0", `A status page is a CUSTOMER-VISIBLE artifact, so consent needs the delta: the
+    preview states what customers see now and what they would see after, per component AND for the
+    page summary. The <b>structure</b> is what is agreed — live health may legitimately change between
+    preview and confirm, so the preview stamps its <code>as_of</code> instead of freezing it.`)}
+
+  <div class="diff">
+    <div>
+      <div class="lbl">Customers see now</div>
+      <div style="display:flex; flex-direction:column; gap:8px">
+        <div style="display:flex; align-items:center; gap:8px"><span style="font-weight:550">Search</span>${pill("nd", "No data")}</div>
+        <div style="font-size:12px; color:var(--ink-3)">no history strip · manual status never set</div>
+        <div style="margin-top:6px; padding-top:8px; border-top:1px solid var(--border); font-size:12.5px">
+          <b>Page summary:</b> Operational, with no data for 2 components
+        </div>
+      </div>
+    </div>
+    <div class="mid">→</div>
+    <div>
+      <div class="lbl">Customers would see</div>
+      <div style="display:flex; flex-direction:column; gap:8px">
+        <div style="display:flex; align-items:center; gap:8px"><span style="font-weight:550">Search</span>${pill("up", "Operational")}</div>
+        <div style="font-size:12px; color:var(--ink-3)">history from sealed facts · 62 of 90 days measured</div>
+        <div style="margin-top:6px; padding-top:8px; border-top:1px solid var(--border); font-size:12.5px">
+          <b>Page summary:</b> Operational, with no data for 1 component
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>What this write carries</h2></header>
+    <div class="body" style="display:flex; flex-direction:column; gap:10px">
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <span class="chip mono">component.revision 4</span>
+        <span class="chip mono">page.component_generation 11</span>
+        <span class="chip mono">as_of 2026-08-17T14:20:05Z</span>
+      </div>
+      <p style="font-size:12.5px; color:var(--ink-3)">
+        The manual status is PRESERVED, so reverting restores exactly what customers saw before.
+      </p>
+      <div style="display:flex; gap:8px; justify-content:flex-end">
+        <span class="btn">Cancel</span><span class="btn pri">Convert — customers will see the change</span>
+      </div>
+    </div>
+  </div>
+
+  ${note("§15.0", `Between preview and confirm another admin can edit ANY component on this page —
+    including a neighbour — and the page summary in the preview would then be describing a page that
+    no longer exists. Both counters are re-read inside the confirm transaction; a mismatch is the
+    refusal below, not a silent apply.`)}
+
+  <div class="err"><span>⏱</span><div><b>page_configuration_stale:</b> this page changed while you
+    were reviewing (<span class="mono">component_generation 11 ≠ 13</span>). Nothing was applied.</div>
+    <span class="fix">Re-preview</span></div>`;
+}
+
+/* ── screen 3: the public page ─────────────────────────────────────────────── */
+function sPublic() {
+  return `
+  <div class="head">
+    <h1>The public page</h1>
+    <p class="sub">Unauthenticated render · <span class="mono">/status/acme-status</span></p>
+  </div>
+
+  ${note("§15.0", `<b>no_data</b> is a first-class public status and it does NOT join the severity
+    ladder: comparing "we do not know" with "declared maintenance" is a false comparison. The summary
+    is therefore two values — worst-of MEASURED plus an unmeasured count — and the headline says both.`)}
+
+  <div class="public">
+    <div class="banner">
+      <h3>Operational, with no data for 1 component</h3>
+      <p class="sub">Never plain "all systems operational" while something on this page was not measured.</p>
+    </div>
+
+    <div class="comp">
+      <div class="line"><span class="nm">Checkout</span>${pill("up", "Operational")}<span class="num">99.94% · 90 days</span></div>
+      <div style="margin-top:9px">${strip(S90)}</div>
+      <div class="axis"><span>90 days ago</span><span>sealed through 14:17Z</span></div>
+      <p style="margin-top:6px; font-size:11.5px; color:var(--ink-3)">
+        Gaps are days with no sealed measurement — not zero-availability days. Short bars are partially
+        decidable days. The window ends at the watermark, never at "now".
+      </p>
+    </div>
+
+    <div class="comp">
+      <div class="line"><span class="nm">Search</span>${pill("up", "Operational")}<span class="withheld">availability withheld · spans_definition_revisions</span></div>
+      <div style="margin-top:9px">${strip("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu")}</div>
+      <div class="axis"><span>90 days ago</span><span>sealed through 14:17Z</span></div>
+      <p style="margin-top:6px; font-size:11.5px; color:var(--ink-3)">
+        The current state is measured, so the pill is honest. One number across two definitions of
+        availability would not be, so it is withheld with its reason.
+      </p>
+    </div>
+
+    <div class="comp">
+      <div class="line"><span class="nm">Payments API</span>${pill("nd", "No data")}</div>
+      <p style="margin-top:6px; font-size:11.5px; color:var(--ink-3)">
+        Listed and named — hiding it would be the same lie by omission. No strip, because there is no
+        measured history to draw.
+      </p>
+    </div>
+
+    <div class="comp">
+      <div class="line"><span class="nm">Database</span>${pill("mnt", "Maintenance")}</div>
+      <p style="margin-top:6px; font-size:11.5px; color:var(--ink-3)">
+        A declared window outranks absence: the operator said this, so it is the more specific true
+        statement even when nothing is sealed.
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>The two other honest edges</h2></header>
+    <div>
+      <div class="row">
+        <span class="nm">Every component unmeasured</span>
+        <span class="spacer"></span>${pill("nd", "No data")}
+        <span class="chip mono">summary_state: no_data</span>
+      </div>
+      <div class="row">
+        <span class="nm">Page with no components at all</span>
+        <span class="spacer"></span><span class="chip">“No components configured”</span>
+        <span class="chip mono">summary_state: empty</span>
+      </div>
+    </div>
+  </div>
+
+  ${note("§17", `An empty page used to report <b>operational</b> — it asserted that everything was
+    fine while measuring nothing. That is the second of the three inherited lies this phase corrects.`)}
+
+  <div class="card">
+    <header><h2>Over the safe limit</h2></header>
+    <div class="body">
+      <div class="warn"><span>▲</span><div><b>status_page_over_safe_limit:</b> this page has 812
+        components; the public render is limited to 500. The page is not rendered publicly until an
+        operator reduces it. The management view still lists all 812.</div></div>
+      <p style="margin-top:9px; font-size:12.5px; color:var(--ink-3)">
+        Fail-closed on purpose: rendering the first 500 would publish a partial page pretending to be
+        the whole one. The per-page ceiling can only shrink, so an oversized page cannot grow.
+      </p>
+    </div>
+  </div>`;
+}
+
+/* ── screen 4: composite links and retire ─────────────────────────────────── */
+function sComposite() {
+  return `
+  <div class="head">
+    <h1>Composite · checkout-composite</h1>
+    <p class="sub">Logical monitor · superseded by a service, still running</p>
+  </div>
+
+  ${note("§15.5", `A converted composite keeps probing, keeps its SLO and can still page someone —
+    so it stays in the list at full strength. A monitor that pages while being absent from the list is
+    the same defect the impact graph exists to prevent: the on-call gets the alert and cannot find the
+    source.`)}
+
+  <div class="card">
+    <header><h2>checkout-composite</h2>
+      <span class="chip mono acc">superseded by → checkout</span>
+      <span class="spacer"></span>${pill("up", "Up")}</header>
+    <div class="body" style="display:flex; flex-direction:column; gap:10px">
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <span class="chip mono">SLO 99.9% · active</span>
+        <span class="chip mono">alerts · active</span>
+        <span class="chip mono">children 4</span>
+      </div>
+      <p style="font-size:12.5px; color:var(--ink-2)">
+        Conversion created the service and changed nothing here. The link is ONE stored fact, so the
+        service's page shows <span class="chip mono">converted from → checkout-composite</span> without
+        a second row to fall out of sync.
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Retire this composite</h2></header>
+    <div class="body" style="display:flex; flex-direction:column; gap:10px">
+      <div class="warn"><span>▲</span><div>Retiring stops its <b>SLO</b> and its <b>alerts</b>, and
+        removes it from the active list. History, incidents and past numbers stay. Reversible.</div></div>
+      <p style="font-size:12.5px; color:var(--ink-3)">
+        Retire is a lifecycle statement, not the ordinary on/off switch — a monitor disabled for an
+        afternoon invites re-enabling, a retired one invites nothing. One transaction sets both, so a
+        retired composite genuinely stops probing rather than merely looking retired.
+      </p>
+      <div style="display:flex; gap:8px; justify-content:flex-end">
+        <span class="btn">Cancel</span><span class="btn danger">Retire composite</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Monitors list · superseded filter</h2>
+      <span class="spacer"></span><span class="chip">show superseded · <b>off</b></span></header>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Monitor</th><th>Lifecycle</th><th>Visible in list</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">checkout-composite</td><td>superseded, active</td><td>yes — it still probes and alerts</td></tr>
+        <tr><td class="mono">legacy-composite</td><td>retired 2026-08-10</td><td>only with the filter on</td></tr>
+        <tr><td class="mono">payments-http</td><td>disabled by operator</td><td>yes, as disabled — different statement, different affordance</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  ${note("§15.5", `Nothing is hidden by default. The filter is the operator's CHOICE, off initially —
+    a default that hides a working monitor is a false statement about what the installation checks.`)}`;
+}
+
+/* ── screen 5: deletion refusals ──────────────────────────────────────────── */
+function sDeletion() {
+  return `
+  <div class="head">
+    <h1>Deletion, per case</h1>
+    <p class="sub">Three different deletions reach a component; one rule for all three would lie</p>
+  </div>
+
+  <div class="card">
+    <header><h2>Service bound as the ACTIVE source</h2></header>
+    <div class="body">
+      <div class="err"><span>⛔</span><div><b>service_in_use_by_status_page:</b> the service
+        <span class="mono">checkout</span> backs the component <b>Checkout</b> on the page
+        <span class="mono">acme-status</span>. Detach or convert that component first.</div></div>
+      <p style="margin-top:9px; font-size:12.5px; color:var(--ink-3)">
+        The alternatives both lie: nulling the reference would silently convert a customer-visible
+        component to manual, and cascading would silently delete it.
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Monitor bound as the ACTIVE source</h2></header>
+    <div class="body">
+      <p style="font-size:13px; color:var(--ink-2)">
+        The shipped behaviour is kept: the binding is cleared and the component becomes
+        <b>manual</b> in the same statement. This IS an automatic conversion — it already happens
+        today — and it is recorded as an inherited exception rather than denied or silently changed.
+      </p>
+      <div style="margin-top:10px; display:flex; align-items:center; gap:9px">
+        <span class="chip mono">before: monitor · payments-http</span><span style="color:var(--ink-3)">→</span>
+        <span class="chip mono">after: manual</span>${pill("nd", "No data")}
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Whole project deleted</h2></header>
+    <div class="body">
+      <p style="font-size:13px; color:var(--ink-2)">
+        The cascade stays one statement, and the components it will remove — including those on
+        ORG-LEVEL pages — are enumerated in the deletion preview, so the operator consents to the
+        public consequence.
+      </p>
+      <div style="margin-top:10px" class="warn"><span>▲</span><div>Deleting project
+        <span class="mono">payments</span> will remove <b>3 status-page components</b> from
+        <b>2 pages</b>, including <span class="mono">acme-status</span> (org-level).</div></div>
+    </div>
+  </div>
+
+  ${note("§15.0", `A dormant binding is different from both: it is a revert affordance, not a public
+    statement, so losing it clears the column and changes nothing customers can see.`)}`;
+}
+
+const SCREENS = [
+  ["source", "Component source", sSource],
+  ["preview", "Conversion preview", sPreview],
+  ["public", "Public page", sPublic],
+  ["composite", "Composite · retire", sComposite],
+  ["deletion", "Deletion cases", sDeletion],
+];
+let active = "source";
+const nav = document.getElementById("screens");
+const view = document.getElementById("view");
+nav.innerHTML = SCREENS.map(([k, t], i) =>
+  `<button data-k="${k}" class="${k === active ? "on" : ""}"><span class="n">${i + 1}</span>${esc(t)}</button>`).join("");
+function render() {
+  const [, , fn] = SCREENS.find(([k]) => k === active);
+  view.innerHTML = fn();
+  nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.k === active));
+  window.scrollTo(0, 0);
+}
+nav.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-k]");
+  if (!b) return;
+  active = b.dataset.k;
+  render();
+});
+document.getElementById("themeBtn").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = getComputedStyle(root).getPropertyValue("--bg").trim() === "#0b0b0f";
+  root.setAttribute("data-theme", dark ? "light" : "dark");
+});
+const notesBtn = document.getElementById("notesBtn");
+notesBtn.addEventListener("click", () => {
+  const off = document.body.classList.toggle("hide-notes");
+  notesBtn.classList.toggle("on", !off);
+  notesBtn.setAttribute("aria-pressed", String(!off));
+});
+render();
+</script>

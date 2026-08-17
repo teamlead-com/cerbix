@@ -222,3 +222,35 @@ depth in presentation only; affected chips; the 🕸 system note beside ⚡/⏸)
 deliberately WITHOUT impacts (the §14.7 read bound made visible; a designed absence).
 
 The **Spec notes** toggle is again a review affordance overlaying §14 rules and does not ship.
+
+## FR-021 phase 4 — Status projection (design track — APPROVED 2026-08-17)
+
+Mock produced **before** any frontend code and **approved by the owner**, per the standing gate.
+Source: `docs/design/mock-status-projection.html`
+(artifact `7a555bda-8b0d-4389-987b-60518061384a`). Implement 1:1 from it. Tokens and shell are
+1:1 with the earlier mocks; the feature adds **one public status and no new colour**.
+
+Five screens: Component source (the discriminator with DORMANT bindings shown dashed, the
+same-project refusal, and the two rows whose appearance changed) · Conversion preview
+(now → would-see per component AND for the page summary, both CAS counters with `as_of`, and the
+`page_configuration_stale` refusal) · Public page (the two-part headline, gaps-not-zeros strip,
+withheld availability with its reason, all-`no_data` and empty-page edges, and the fail-closed
+over-limit response) · Composite · retire (one stored link rendered both ways, the warning naming
+the loss of SLO and alerts, and the list distinguishing superseded / retired / disabled) ·
+Deletion cases (three deletions, three honest answers).
+
+### The one addition to the design language (approved)
+
+**`no_data` is the `--pending` hue plus a DASHED ring — not a new colour.** A sixth hue would
+invite the reader to rank "we do not know" against "declared maintenance", and §15.0 explicitly
+refuses that comparison: the summary keeps them apart as measured-vs-unmeasured instead of
+ordering them. This is the same motif phase 2 used for UNKNOWN ticks — deficient evidence reads
+as deficient at any size, in both themes.
+
+### Fidelity notes for implementation
+
+The public page's strip must render ABSENT days as gaps and partially decidable days as short
+bars. A zero-height day and a zero-availability day would look identical, which is the exact
+confusion `daily[]` omitting absent days exists to prevent. The window label reads
+`sealed through …`, never "now" — the mock says so on the axis because an implementation that
+ended the window at page load would be silently wrong.

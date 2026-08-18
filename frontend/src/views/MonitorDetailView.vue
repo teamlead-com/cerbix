@@ -24,6 +24,19 @@ const canWrite = computed(() => !!monitor.value && session.canProjectWrite(ws.or
 // FR-017: a file-managed monitor's declarative fields are read-only through the UI/API; edit/
 // delete/pause are disabled with an explanation (the file provider owns the desired state).
 const fileManaged = computed(() => monitor.value?.management?.source === "file");
+
+// Every service actively covering ANY of this monitor's signals, by name and deduplicated: the chip
+// says who pages instead, and one service usually covers both signals.
+const delegatedOwners = computed(() => {
+  const d = monitor.value?.delegation;
+  if (!d) return [];
+  const names = new Set<string>();
+  for (const sig of [d.live, d.burn]) {
+    if (!sig?.delegated) continue;
+    for (const o of sig.owners ?? []) names.add(o.name);
+  }
+  return [...names];
+});
 const id = route.params.id as string;
 
 const loading = ref(true);
@@ -338,10 +351,39 @@ watch(
                  "superseded forever" is the distinction §15.5 exists to keep. -->
             <span v-if="retired" class="rounded-full border border-border px-[9px] py-px text-[11.5px] font-medium text-ink-3" data-testid="monitor-retired">Retired</span>
             <span v-else-if="!monitor.enabled" class="rounded-full bg-pending-weak px-[9px] py-px text-[11.5px] font-medium text-ink-3">Paused</span>
+            <!-- FR-021 §16.1: a delegated monitor is NEVER greyed out. It keeps its real pill —
+                 DOWN reads as DOWN — and gains a dashed chip naming who pages instead of it.
+                 Dimming it would make the system show something other than what it knows. -->
+            <span
+              v-if="delegatedOwners.length"
+              class="rounded-full border border-dashed border-accent px-[9px] py-px text-[11.5px] font-medium text-accent"
+              data-testid="monitor-delegated"
+            >paging delegated → {{ delegatedOwners.join(", ") }}</span>
             <span v-if="monitor.superseded_by_service_id" class="rounded-full border border-border px-[9px] py-px text-[11.5px] font-medium text-ink-3" data-testid="monitor-superseded">
               superseded by {{ successorName || "a service" }}
             </span>
           </div>
+          <!-- WHICH signals are delegated and which are not, because they are delegated apart:
+               a monitor whose DOWN transitions are covered while its own budget alerts are not is
+               the ordinary case, and "delegated" without saying which would be worse than silence. -->
+          <ul v-if="monitor.delegation" class="mt-[7px] space-y-px text-[12.5px]" data-testid="monitor-delegation">
+            <li
+              v-for="sig in [
+                { key: 'live', d: monitor.delegation.live, what: 'DOWN transitions and escalation' },
+                { key: 'burn', d: monitor.delegation.burn, what: 'Burn alerts' },
+              ]"
+              :key="sig.key"
+              :data-testid="`monitor-delegation-${sig.key}`"
+            >
+              <span class="text-ink-3">{{ sig.what }}:</span>
+              <span v-if="sig.d.delegated" class="text-accent">
+                delegated to {{ (sig.d.owners ?? []).map((o) => o.name).join(", ") }}
+              </span>
+              <span v-else class="text-ink-2">
+                this monitor still alerts for itself<span v-if="sig.d.reason" class="text-ink-3"> ({{ sig.d.reason }})</span>
+              </span>
+            </li>
+          </ul>
           <div class="mt-[7px] flex flex-wrap items-center gap-x-[10px] gap-y-1 text-[13px] text-ink-3">
             <span class="font-mono text-ink-2">{{ monitor.type === "http" ? (monitor.method || "GET") + " " : "" }}{{ monitor.target || "push heartbeat" }}</span>
             <template v-if="!isPush">

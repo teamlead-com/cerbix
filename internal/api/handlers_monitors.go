@@ -110,6 +110,46 @@ type managementDTO struct {
 type monitorWithMgmt struct {
 	domain.Monitor
 	Management managementDTO `json:"management"`
+	// Delegation is FR-021 §16.1 seen from the monitor's side: which of its own alerts are being
+	// delivered by a service instead, and who that service is. Present only on the detail, and
+	// best-effort — a lookup that cannot conclude leaves it absent rather than claiming the monitor
+	// pages for itself, which is a different statement from "we could not check".
+	Delegation *monitorDelegationView `json:"delegation,omitempty"`
+}
+
+// monitorDelegationView keeps the two signals apart, because they are delegated apart: a service can
+// be replacing this monitor's DOWN transitions while its budget signal is held, and a monitor page
+// that said "delegated" without saying WHICH would be worse than saying nothing.
+type monitorDelegationView struct {
+	Live monitorSignalDelegationView `json:"live"`
+	Burn monitorSignalDelegationView `json:"burn"`
+}
+
+type monitorSignalDelegationView struct {
+	// Delegated is true only while this monitor's alerts for that signal are actually withheld.
+	Delegated bool `json:"delegated"`
+	// Owners are the services covering it, by slug and name — the chip's text.
+	Owners []delegationOwnerView `json:"owners,omitempty"`
+	// Reason says why NOT, and it is never empty when Delegated is false: "why is this monitor
+	// still paging" is the question this block exists to answer.
+	Reason string `json:"reason,omitempty"`
+}
+
+type delegationOwnerView struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+func newMonitorDelegationView(d store.MonitorDelegation) monitorDelegationView {
+	sig := func(v store.DelegationVerdict) monitorSignalDelegationView {
+		out := monitorSignalDelegationView{Delegated: v.Suppress(), Reason: v.FailOpenReason}
+		for _, o := range v.Owners {
+			out.Owners = append(out.Owners, delegationOwnerView{ID: o.ServiceID, Slug: o.Slug, Name: o.Name})
+		}
+		return out
+	}
+	return monitorDelegationView{Live: sig(d.Live), Burn: sig(d.Burn)}
 }
 
 // mgmtFor builds the provenance block: a provider row means file-managed/read-only; its
@@ -450,7 +490,16 @@ func (h *Handler) getMonitor(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "get_monitor_provenance", perr)
 		return
 	}
-	writeJSON(w, http.StatusOK, monitorWithMgmt{Monitor: out, Management: mgmtFor(fm, ok)})
+	detail := monitorWithMgmt{Monitor: out, Management: mgmtFor(fm, ok)}
+	// Best-effort, like the service detail's own blocks: a failed lookup leaves the block absent
+	// rather than reporting "not delegated", which would be a claim rather than an absence.
+	if d, derr := h.store.MonitorDelegation(r.Context(), mon.ID, proj.ID); derr == nil {
+		dv := newMonitorDelegationView(d)
+		detail.Delegation = &dv
+	} else {
+		h.logEvent(r, "monitor_delegation_read_failed", "error", derr.Error())
+	}
+	writeJSON(w, http.StatusOK, detail)
 }
 
 // updateMonitor applies a partial update to a monitor (editor+). Type and

@@ -1031,6 +1031,27 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/v1/projects/{projectID}/services/{serviceID}/alerting/state:
+    parameters:
+      - { name: projectID, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: serviceID, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [services]
+      summary: What the paging declaration is producing right now, per signal
+      description: >
+        A route of its own, and small on purpose: a badge that renders arming must be able to
+        re-ask cheaply and often. Rendering coverage once at page load and leaving it there is
+        the failure FR-021 §16 spends a section on — a badge saying ARMED while delivery has
+        already dis-armed, which an operator reads as "my monitors are covered" while every one
+        of them is paging for itself.
+      responses:
+        '200':
+          description: Both signals' coverage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceAlertingState' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting:
     parameters:
       - { $ref: '#/components/parameters/ProjectID' }
@@ -3343,6 +3364,42 @@ components:
         window: { type: string, enum: [24h, 7d, 30d, 90d], default: 30d }
         objective: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 100 }
 
+    MonitorDelegation:
+      type: object
+      description: >
+        FR-021 §16.1 from the MONITOR's side: which of its own alerts a service is delivering
+        instead, and who. The two signals are kept apart because they are delegated apart — a
+        service can be replacing DOWN transitions while its budget signal is held, and a monitor
+        page that said "delegated" without saying WHICH would be worse than saying nothing.
+      required: [live, burn]
+      additionalProperties: false
+      properties:
+        live: { $ref: '#/components/schemas/MonitorSignalDelegation' }
+        burn: { $ref: '#/components/schemas/MonitorSignalDelegation' }
+    MonitorSignalDelegation:
+      type: object
+      required: [delegated]
+      additionalProperties: false
+      properties:
+        delegated:
+          type: boolean
+          description: True only while this monitor's alerts for that signal are actually withheld.
+        owners:
+          type: array
+          description: The services covering it — the chip's text.
+          items:
+            type: object
+            required: [id, slug, name]
+            additionalProperties: false
+            properties:
+              id: { type: string, format: uuid }
+              slug: { type: string }
+              name: { type: string }
+        reason:
+          type: string
+          description: >
+            Why NOT, never empty when `delegated` is false: "why is this monitor still paging" is
+            the question this block exists to answer.
     ServiceSignalState:
       type: object
       description: >
@@ -3908,6 +3965,11 @@ components:
           description: 'Server time of the latest credential-envelope diagnostic.'
         management:
           $ref: '#/components/schemas/MonitorManagement'
+        delegation:
+          allOf: [ { $ref: '#/components/schemas/MonitorDelegation' } ]
+          description: >
+            Detail only, and best-effort: a lookup that cannot conclude leaves this ABSENT rather
+            than reporting "not delegated", which would be a claim rather than an absence.
         superseded_by_service_id: { type: string, format: uuid, description: 'The service that now expresses what this monitor expresses (FR-021 §15.5). An ANNOTATION — the monitor keeps probing, alerting and holding its own history.' }
         retired_at: { type: string, format: date-time, nullable: true, description: 'Set when an operator ended this monitor''s working life. ALWAYS accompanied by enabled=false, because retired_at alone stops nothing: the scheduler, dead-man, ingest and SLO paths key on enabled.' }
         created_at: { type: string, format: date-time }

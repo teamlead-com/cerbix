@@ -201,6 +201,9 @@ type Store interface {
 	// The COVERAGE that declaration is currently producing, per signal (§16.1/§16.6b). Read from
 	// the delegation lookup's own predicates, so a badge cannot disagree with the delivery gate.
 	ServiceAlertingState(ctx context.Context, projectID, serviceID string) (store.ServiceAlertingState, error)
+	// The same question from the MONITOR's side: which of its own alerts a service is delivering
+	// instead, and who. Read through the delivery gate's own lookup, never re-derived.
+	MonitorDelegation(ctx context.Context, monitorID, projectID string) (store.MonitorDelegation, error)
 	UpdateServiceAlertPolicy(ctx context.Context, projectID, serviceID string, patch store.ServiceAlertPolicyPatch, actor store.AlertActor) (domain.ServiceAlertPolicy, error)
 	SetServiceBurnAlerting(ctx context.Context, projectID, serviceID, window string, enabled bool, rules []domain.BurnRule, actor store.AlertActor) error
 	// Service impact graph + correlation reads (FR-021 phase 3, iter-0147).
@@ -512,6 +515,7 @@ func (h *Handler) Router() *http.ServeMux {
 	// with separate audit actions and separate lifecycle closes — and because the objective write
 	// above must stay exactly what it was.
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/alerting", h.getServiceAlerting)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/alerting/state", h.getServiceAlertingState)
 	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/services/{serviceID}/alerting", h.patchServiceAlerting)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting", h.setServiceBurnAlerting)
 

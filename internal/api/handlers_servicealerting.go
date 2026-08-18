@@ -146,6 +146,28 @@ func (h *Handler) getServiceAlerting(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newServiceAlertingView(p))
 }
 
+// getServiceAlertingState answers what the declaration is PRODUCING right now.
+//
+// It is a route of its own, and small on purpose: a UI badge that renders arming has to be able to
+// re-ask cheaply and often. Rendering coverage once at page load and leaving it there is the exact
+// failure §16 spends a section on — a badge saying ARMED while delivery has already dis-armed, which
+// an operator would read as "my monitors are covered" while every one of them is paging for itself.
+func (h *Handler) getServiceAlertingState(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectRead)
+	if !ok {
+		return
+	}
+	serviceID, ok := serviceIDParam(w, r)
+	if !ok {
+		return
+	}
+	st, err := h.store.ServiceAlertingState(r.Context(), proj.ID, serviceID)
+	if h.writeServiceError(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, newServiceAlertingStateView(st))
+}
+
 // patchServiceAlerting merges the fields the body actually carried onto the CURRENT declaration and
 // writes the result.
 //

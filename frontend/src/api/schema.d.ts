@@ -2027,6 +2027,52 @@ export interface paths {
         };
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/services/{serviceID}/alerting/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: string;
+                serviceID: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * What the paging declaration is producing right now, per signal
+         * @description A route of its own, and small on purpose: a badge that renders arming must be able to re-ask cheaply and often. Rendering coverage once at page load and leaving it there is the failure FR-021 §16 spends a section on — a badge saying ARMED while delivery has already dis-armed, which an operator reads as "my monitors are covered" while every one of them is paging for itself.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: string;
+                    serviceID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Both signals' coverage. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ServiceAlertingState"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting": {
         parameters: {
             query?: never;
@@ -6469,6 +6515,24 @@ export interface components {
             window: "24h" | "7d" | "30d" | "90d";
             objective: number;
         };
+        /** @description FR-021 §16.1 from the MONITOR's side: which of its own alerts a service is delivering instead, and who. The two signals are kept apart because they are delegated apart — a service can be replacing DOWN transitions while its budget signal is held, and a monitor page that said "delegated" without saying WHICH would be worse than saying nothing. */
+        MonitorDelegation: {
+            live: components["schemas"]["MonitorSignalDelegation"];
+            burn: components["schemas"]["MonitorSignalDelegation"];
+        };
+        MonitorSignalDelegation: {
+            /** @description True only while this monitor's alerts for that signal are actually withheld. */
+            delegated: boolean;
+            /** @description The services covering it — the chip's text. */
+            owners?: {
+                /** Format: uuid */
+                id: string;
+                slug: string;
+                name: string;
+            }[];
+            /** @description Why NOT, never empty when `delegated` is false: "why is this monitor still paging" is the question this block exists to answer. */
+            reason?: string;
+        };
         /** @description One signal's COVERAGE right now (FR-021 §16.1). A different question from the declaration: `owns_paging` says what an operator asked for, this says whether it is actually replacing anything. Read from the delivery gate's own predicates, so a badge rendered from it cannot disagree with what suppression decides. */
         ServiceSignalState: {
             /** @description True only while a replacement for THIS signal is demonstrably able to fire and reach somebody. Everything ambiguous is false, because the member monitor keeps paging. */
@@ -6945,6 +7009,8 @@ export interface components {
              */
             readonly last_probe_error_at?: string;
             management?: components["schemas"]["MonitorManagement"];
+            /** @description Detail only, and best-effort: a lookup that cannot conclude leaves this ABSENT rather than reporting "not delegated", which would be a claim rather than an absence. */
+            delegation?: components["schemas"]["MonitorDelegation"];
             /**
              * Format: uuid
              * @description The service that now expresses what this monitor expresses (FR-021 §15.5). An ANNOTATION — the monitor keeps probing, alerting and holding its own history.

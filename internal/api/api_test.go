@@ -41,6 +41,9 @@ type fakeStore struct {
 	rep *fakeReporting
 	// deleteServiceErr injects a store-level delete failure (e.g. the §14.2 file pin).
 	deleteServiceErr error
+	// FR-021 phase-5 fakes: which monitors a service is covering, and an injected lookup failure.
+	delegatedMonitors map[string][]store.DelegationOwner
+	delegationErr     error
 	// FR-021 phase-3 fakes: the impact graph + correlation reads.
 	graphs               map[string]*fakeGraph
 	graphErr             error
@@ -2620,6 +2623,26 @@ func (f *fakeStore) ServiceAlertPolicy(_ context.Context, projectID, serviceID s
 // The fake mirrors the real read's SHAPE, not its arming logic: the HTTP layer only passes it
 // through, and the agreement between a badge and the delivery gate is pinned where it lives, against
 // a real database.
+// delegatedMonitors lets a test say "this monitor's live alerts are covered by that service", which
+// is the only thing the HTTP layer does with the answer — the arming itself is pinned against a real
+// database, where it lives.
+func (f *fakeStore) MonitorDelegation(
+	_ context.Context, monitorID, projectID string,
+) (store.MonitorDelegation, error) {
+	if f.delegationErr != nil {
+		return store.MonitorDelegation{}, f.delegationErr
+	}
+	out := store.MonitorDelegation{
+		Live: store.DelegationVerdict{FailOpenReason: "no_active_owner"},
+		Burn: store.DelegationVerdict{FailOpenReason: "no_active_owner"},
+	}
+	if owners, ok := f.delegatedMonitors[monitorID]; ok {
+		out.Live = store.DelegationVerdict{Owners: owners}
+	}
+	_ = projectID
+	return out, nil
+}
+
 func (f *fakeStore) ServiceAlertingState(
 	_ context.Context, projectID, serviceID string,
 ) (store.ServiceAlertingState, error) {

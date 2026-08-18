@@ -368,3 +368,32 @@ func (s *Store) ServiceAlertSequence(ctx context.Context, a domain.ServiceAlert)
 	}
 	return seq, nil
 }
+
+// MonitorDelegation is what BOTH signals conclude for one monitor, which is what a monitor's own
+// page has to show: FR-021's approved design keeps a delegated monitor at full strength — its real
+// status pill, plus a chip naming who pages instead of it — and that sentence needs the owner and
+// the per-signal answer, not a boolean.
+type MonitorDelegation struct {
+	Live DelegationVerdict
+	Burn DelegationVerdict
+}
+
+// MonitorDelegation resolves both signals through the SAME lookup delivery uses.
+//
+// Two queries rather than one on purpose: the two conjunctions are genuinely different (a service
+// can replace DOWN transitions while its budget signal is held), and merging them into one statement
+// would mean a third spelling of arming — which is precisely how a page and a badge come to
+// disagree.
+func (s *Store) MonitorDelegation(
+	ctx context.Context, monitorID, projectID string,
+) (MonitorDelegation, error) {
+	var out MonitorDelegation
+	var err error
+	if out.Live, err = s.ActiveDelegation(ctx, monitorID, projectID, DelegationLive); err != nil {
+		return MonitorDelegation{}, err
+	}
+	if out.Burn, err = s.ActiveDelegation(ctx, monitorID, projectID, DelegationBurn); err != nil {
+		return MonitorDelegation{}, err
+	}
+	return out, nil
+}

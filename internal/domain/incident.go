@@ -114,6 +114,11 @@ type Incident struct {
 func (i Incident) PublicRedacted() Incident {
 	i.ProjectID = ""
 	i.MonitorID = ""
+	// The OTHER anchor is an internal id of exactly the same class as MonitorID (FR-022
+	// invariant 11): a status page names its components by slug and name, and an
+	// unauthenticated viewer has no use for the service's UUID. Adding an anchor without
+	// adding it here is how a redaction list silently stops being complete.
+	i.ServiceID = ""
 	i.ExternalKey = ""
 	i.AcknowledgedBy = ""
 	i.AcknowledgedByName = ""

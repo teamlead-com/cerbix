@@ -332,3 +332,70 @@ func TestPublicRenderVisibilityGate(t *testing.T) {
 		t.Fatalf("unlisted correct token = %d, want 200", rec.Code)
 	}
 }
+
+// FR-022 invariant 11, over the RAW unauthenticated bytes: a status page carries a
+// SERVICE incident like any other, and carries no impact links at all.
+//
+// Two different promises are checked here because they fail differently. The anchor is
+// an internal id of the same class as `monitor_id`: a page names its components by slug
+// and an unauthenticated viewer has no use for the service's UUID, so the redaction list
+// must have grown with the second anchor. The impact LINKS are absent for a different
+// reason — §14.7 makes them a detail-only enrichment, so an unbounded public list never
+// multiplies by them.
+//
+// The 🕸 note in the timeline is NOT a link: it is an ordinary system update, which
+// §14.5 approved as rendering "through the existing system-update mechanism, unchanged".
+// It has been public for monitor incidents since phase 3, and this test pins that a
+// service incident inherits exactly that treatment rather than a new one.
+func TestPublicRenderCarriesAServiceIncidentAndNoImpactLinks(t *testing.T) {
+	fs := seededStore()
+	inc := fs.incidents["inc1"]
+	inc.MonitorID = ""
+	inc.ServiceID = "svc-uuid-SENTINEL"
+	inc.Source = domain.SourceAuto
+	inc.Title = "checkout is degraded"
+	fs.incidents["inc1"] = inc
+	fs.incUpdates["inc1"] = append(fs.incUpdates["inc1"], domain.IncidentUpdate{
+		ID: "iu-impact", IncidentID: "inc1", Status: domain.IncidentInvestigating,
+		Body: domain.ImpactMarker + " probable root — db (via db → checkout).",
+	})
+
+	pub := newPublicHandler(fs)
+	rec := do(pub, outsider, http.MethodGet, "/api/v1/public/status-pages/acme-status", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("public render = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "checkout is degraded") {
+		t.Fatalf("the public page dropped the SERVICE incident entirely: %s", body)
+	}
+	if strings.Contains(body, "svc-uuid-SENTINEL") {
+		t.Fatalf("the public render LEAKED the incident's service UUID — the second anchor is an "+
+			"internal id of the same class as monitor_id and PublicRedacted must clear it "+
+			"(FR-022 invariant 11): %s", body)
+	}
+	if strings.Contains(body, `"service_id"`) {
+		t.Fatalf("the public render carries a service_id key at all: %s", body)
+	}
+	for _, k := range []string{`"probable_root"`, `"impacts"`, `"impact_links"`, `"path"`} {
+		if strings.Contains(body, k) {
+			t.Fatalf("the public render carries impact links (%s) — §14.7 makes them a detail-only "+
+				"enrichment, never part of an unbounded public list: %s", k, body)
+		}
+	}
+	if !strings.Contains(body, domain.ImpactMarker) {
+		t.Errorf("the 🕸 timeline note vanished from the public page: §14.5 approved it rendering " +
+			"through the unchanged system-update mechanism, and a service incident inherits that")
+	}
+
+	// The authenticated preview KEEPS the anchor, which is what makes the redaction targeted
+	// rather than a blanket drop an operator would then have to work around.
+	authed := newHandler(fs)
+	arec := do(authed, o1Admin, http.MethodGet, "/api/v1/status-pages/sp1/render", "")
+	if arec.Code != http.StatusOK {
+		t.Fatalf("authed render = %d, want 200 (%s)", arec.Code, arec.Body.String())
+	}
+	if !strings.Contains(arec.Body.String(), "svc-uuid-SENTINEL") {
+		t.Fatalf("the authenticated render lost the service anchor: %s", arec.Body.String())
+	}
+}

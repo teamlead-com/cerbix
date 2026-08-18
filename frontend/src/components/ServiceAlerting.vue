@@ -55,20 +55,44 @@ const liveState = ref<AlertingState | null>(props.state ?? null);
 // outlive the coverage indefinitely on nothing but a broken refresh. The last payload is kept as a
 // signature — what the server said the last time it answered — but it no longer speaks for now.
 const unavailable = ref(false);
+// A read that never answers is the third failure shape, and the nastiest: it neither throws nor
+// resolves, so an error branch never runs and the last ARMED badge simply stays on screen forever
+// while requests pile up behind it. A blackholed network is exactly that. So every read carries a
+// DEADLINE shorter than the cadence — there is never more than one in flight — and the deadline is a
+// race rather than only an abort, because a transport that ignores its signal must not be able to
+// hold this panel hostage either.
+const REFRESH_TIMEOUT_MS = 10_000;
 let stateGeneration = 0;
 let timer: ReturnType<typeof setInterval> | undefined;
+let inflight: AbortController | undefined;
 
 async function refreshState() {
+  // Whatever is still running is already too late to be useful: the answer it would give describes
+  // an instant the next read is about to replace.
+  inflight?.abort();
+  const controller = new AbortController();
+  inflight = controller;
   const mine = ++stateGeneration;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
-    const res = (await api.GET("/api/v1/projects/{projectID}/services/{serviceID}/alerting/state", {
-      params: { path: { projectID: props.projectId, serviceID: props.serviceId } },
-    })) as { data?: AlertingState; error?: unknown };
+    const timeout = new Promise<never>((_, reject) => {
+      deadline = setTimeout(() => {
+        controller.abort();
+        reject(new Error("alerting state refresh timed out"));
+      }, REFRESH_TIMEOUT_MS);
+    });
+    const res = (await Promise.race([
+      api.GET("/api/v1/projects/{projectID}/services/{serviceID}/alerting/state", {
+        params: { path: { projectID: props.projectId, serviceID: props.serviceId } },
+        signal: controller.signal,
+      }),
+      timeout,
+    ])) as { data?: AlertingState; error?: unknown };
     // A stale response from a service the operator has already navigated away from must never land.
     if (mine !== stateGeneration) return;
-    // Both failure shapes count: a transport that threw, and a response that resolved carrying an
-    // error instead of a body. Treating the second as "nothing to do" is how a 500 every cadence
-    // reads as a healthy green badge.
+    // Both settled failure shapes count too: a transport that threw, and a response that resolved
+    // carrying an error instead of a body. Treating the second as "nothing to do" is how a 500 every
+    // cadence reads as a healthy green badge.
     if (res.error || !res.data) {
       unavailable.value = true;
       return;
@@ -76,7 +100,12 @@ async function refreshState() {
     liveState.value = res.data;
     unavailable.value = false;
   } catch {
+    // Thrown, aborted or timed out — all three mean the same thing to an operator: this panel
+    // cannot vouch for coverage right now, and it says so instead of showing the last green badge.
     if (mine === stateGeneration) unavailable.value = true;
+  } finally {
+    if (deadline) clearTimeout(deadline);
+    if (inflight === controller) inflight = undefined;
   }
 }
 
@@ -87,11 +116,16 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stateGeneration++;
   if (timer) clearInterval(timer);
+  // Clearing the interval stops the NEXT read; it does nothing about the one already in flight.
+  inflight?.abort();
 });
 watch(
   () => [props.projectId, props.serviceId],
   () => {
+    // A read for the service the operator just left must not land on the one they are looking at.
+    inflight?.abort();
     liveState.value = null;
+    unavailable.value = false;
     void refreshState();
   },
 );

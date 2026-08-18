@@ -232,3 +232,67 @@ describe("ServiceAlerting coverage is the server's, and it is CURRENT", () => {
     }
   });
 });
+
+describe("ServiceAlerting under a network blackhole", () => {
+  // The third failure shape, and the one the two tests above cannot reach: a read that NEITHER
+  // resolves NOR rejects. No error branch runs, so an earlier revision kept the last ARMED badge on
+  // screen indefinitely while a new request piled up behind it every fifteen seconds.
+  it("stops claiming ARMED when a refresh HANGS, and recovers on the next answer", async () => {
+    vi.useFakeTimers();
+    try {
+      const armed = { live: { armed: true }, burn: { armed: true } };
+      const w = mountWith({ alerting: owning, state: armed });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(w.find('[data-testid="alerting-badge-live"]').text()).toContain("armed");
+
+      // Every later read hangs forever, and the signal is deliberately ignored — a transport that
+      // does not honour the abort must not be able to hold the panel hostage either.
+      apiMock.GET.mockImplementation(() => new Promise(() => {}));
+      await vi.advanceTimersByTimeAsync(15_000); // the cadence fires the hung read
+      expect(w.find('[data-testid="alerting-badge-live"]').text(),
+        "before its deadline the panel may still show the last answer").toContain("armed");
+
+      await vi.advanceTimersByTimeAsync(10_000); // ...and its deadline expires
+      expect(w.find('[data-testid="alerting-badge-live"]').text()).not.toContain("armed");
+      expect(w.find('[data-testid="alerting-state-unavailable"]').exists()).toBe(true);
+
+      // The next cadence answers: unavailable is a statement about now, not a scar.
+      apiMock.GET.mockImplementation(async () => ({ data: armed }));
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(w.find('[data-testid="alerting-badge-live"]').text()).toContain("armed");
+      expect(w.find('[data-testid="alerting-state-unavailable"]').exists()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // One read in flight at a time: the deadline is shorter than the cadence, and each read aborts
+  // whatever the last one left running. A blackhole must not turn into a queue.
+  it("never leaves more than one read in flight, and aborts on unmount", async () => {
+    vi.useFakeTimers();
+    try {
+      // mountWith installs its own implementation, so the collecting one goes in AFTER the mount
+      // read — which is what we want anyway: the reads under test are the cadence reads.
+      const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
+      await vi.advanceTimersByTimeAsync(0);
+
+      const signals: AbortSignal[] = [];
+      apiMock.GET.mockImplementation((_p: string, req: { signal?: AbortSignal }) => {
+        if (req?.signal) signals.push(req.signal);
+        return new Promise(() => {}) as never;
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      expect(signals.length, "every read must carry a signal").toBeGreaterThanOrEqual(2);
+      const live = signals.filter((s) => !s.aborted);
+      expect(live.length, "at most one read may still be in flight").toBeLessThanOrEqual(1);
+
+      w.unmount();
+      expect(signals.every((s) => s.aborted),
+        "unmount must abort the read still running, not only the next one").toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

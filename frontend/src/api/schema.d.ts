@@ -6488,6 +6488,21 @@ export interface components {
             impacts: components["schemas"]["ServiceImpactLink"][] | null;
             /** @description Present and true when the impact read degraded. */
             impacts_unavailable?: boolean;
+            /** @description The member set the incident's SERVICE had AT OPEN TIME (FR-022). Three answers stay distinguishable: the key is ABSENT when there is no snapshot at all (a monitor or project-level incident), an EMPTY array when the service genuinely had no members, and absent with `members_unavailable: true` when the read degraded. A snapshot, not a live join — it keeps naming a member deleted since. */
+            members?: components["schemas"]["IncidentMember"][];
+            /** @description Present and true when the member-snapshot read degraded. */
+            members_unavailable?: boolean;
+        };
+        IncidentMember: {
+            /**
+             * Format: uuid
+             * @description The member as of the open instant; the monitor may no longer exist.
+             */
+            monitor_id: string;
+            /** @description The member name AS OF the effective declaration — not re-read from the monitor, which may be renamed or gone. */
+            name: string;
+            /** @description Every role this member held, aggregated — the declaration stores a row per (monitor, role) and a postmortem must show the member once. */
+            roles: ("context" | "sli")[];
         };
         AggregationPolicy: {
             /** @enum {string} */
@@ -7511,6 +7526,11 @@ export interface components {
              * @description Set for auto-incidents opened from a monitor going down.
              */
             monitor_id?: string;
+            /**
+             * Format: uuid
+             * @description The OTHER anchor (FR-022): set when the incident's subject is a SERVICE. At most one anchor is set, enforced by a CHECK; a manual project-level incident carries neither. Absent from public status-page renders, like every internal id. Cleared — and the incident kept — when the service is deleted.
+             */
+            service_id?: string;
             /** @description Correlation key for externally-sourced incidents (e.g. an Alertmanager fingerprint). */
             external_key?: string;
             title?: string;

@@ -49,6 +49,8 @@ type fakeStore struct {
 	graphErr             error
 	impacts              map[string][]domain.ServiceImpactLink
 	impactsErr           error
+	memberSnapshots      map[string][]domain.IncidentMember // FR-022: present iff the key exists
+	memberSnapshotErr    error
 	graphActors          []store.GraphActor
 	serviceSeq           int
 	neighbourHealth      map[string]domain.ServiceHealthNow
@@ -2868,6 +2870,18 @@ func (f *fakeStore) ServiceNeighbourHealth(_ context.Context, projectID string, 
 		}
 	}
 	return out, nil
+}
+
+// IncidentMemberSnapshot mirrors the store's three-way answer: an error, a present
+// snapshot (possibly empty), or no snapshot at all. Presence is KEY EXISTENCE, not a
+// non-empty slice, because "this service had no members" and "this incident has no
+// snapshot" are different facts (FR-022 invariant 13).
+func (f *fakeStore) IncidentMemberSnapshot(_ context.Context, incidentID string) ([]domain.IncidentMember, bool, error) {
+	if f.memberSnapshotErr != nil {
+		return nil, false, f.memberSnapshotErr
+	}
+	ms, ok := f.memberSnapshots[incidentID]
+	return ms, ok, nil
 }
 
 func (f *fakeStore) ListIncidentImpacts(_ context.Context, projectID, incidentID string) ([]domain.ServiceImpactLink, error) {

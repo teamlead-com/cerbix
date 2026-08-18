@@ -220,6 +220,7 @@ type Store interface {
 	CreateServiceWithDependencies(ctx context.Context, svc domain.Service, parents []string, actor store.GraphActor) (domain.Service, error)
 	ServiceNeighbourHealth(ctx context.Context, projectID string, serviceIDs []string) (map[string]domain.ServiceHealthNow, error)
 	ListIncidentImpacts(ctx context.Context, projectID, incidentID string) ([]domain.ServiceImpactLink, error)
+	IncidentMemberSnapshot(ctx context.Context, incidentID string) ([]domain.IncidentMember, bool, error)
 
 	ListProjectSecrets(ctx context.Context, projectID string) ([]store.ProjectSecret, error)
 }

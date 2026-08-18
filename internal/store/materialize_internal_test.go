@@ -330,3 +330,67 @@ func TestCarrierComesFromTheAuthoritativeRegion(t *testing.T) {
 		t.Fatalf("generation-3 carrier must seal envelope v2: %+v", e)
 	}
 }
+
+// Every materialized job carries its own identity (func-result-protocol §9, iter-0155): an id and the
+// instant the CORE issued it, both from the database in the statement that materialized the job.
+//
+// Why the database and not the scheduler's clock: the ordering check compares an executor's
+// `observed_at` against this instant, so it has to come from the one clock the core trusts. And why
+// per JOB rather than per monitor: a monitor probed every 30 seconds produces a new job each time, and
+// an id that repeated would make "which dispatch does this result answer" unanswerable exactly when it
+// matters — a retry, a duplicate delivery, a slow region.
+func TestEveryMaterializedJobCarriesItsOwnIdentity(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	var ids []string
+	for _, name := range []string{"a", "b"} {
+		m, err := st.CreateMonitor(ctx, domain.Monitor{
+			ProjectID: proj.ID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
+			IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
+		})
+		if err != nil {
+			t.Fatalf("monitor %s: %v", name, err)
+		}
+		ids = append(ids, m.ID)
+	}
+
+	before := time.Now().UTC().Add(-time.Minute)
+	items, err := st.MaterializeExecutionConfigs(ctx, ids, nil)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	batch := map[string]MaterializedExecution{}
+	for _, it := range items {
+		batch[it.MonitorID] = it
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		entry, ok := batch[id]
+		if !ok || entry.Reason != "" {
+			t.Fatalf("monitor %s not materialized: %+v", id, entry)
+		}
+		if entry.Job.JobID == "" {
+			t.Fatalf("monitor %s got a job with no id — a result answering it could never be correlated "+
+				"with the dispatch that asked for it", id)
+		}
+		if seen[entry.Job.JobID] {
+			t.Fatalf("two jobs in one batch share the id %s — an id must identify a JOB, not a monitor",
+				entry.Job.JobID)
+		}
+		seen[entry.Job.JobID] = true
+		if entry.Job.IssuedAt.IsZero() || entry.Job.IssuedAt.Before(before) {
+			t.Fatalf("job %s issued at %s, want the database clock of this materialization — a zero or "+
+				"stale instant makes the ordering check compare against nothing", entry.Job.JobID, entry.Job.IssuedAt)
+		}
+	}
+
+	// A second materialization of the SAME monitor is a different job.
+	againItems, err := st.MaterializeExecutionConfigs(ctx, ids[:1], nil)
+	if err != nil || len(againItems) != 1 {
+		t.Fatalf("re-materialize: %v (%d items)", err, len(againItems))
+	}
+	if againItems[0].Job.JobID == batch[ids[0]].Job.JobID {
+		t.Error("the same monitor materialized twice produced the same job id — every dispatch is its own job")
+	}
+}

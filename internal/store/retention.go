@@ -633,6 +633,8 @@ func (s *Store) ServiceReliabilityStats(ctx context.Context) (metrics.ServiceRel
 			st.LateArrivalsTotal = value
 		case metricEventLateOverflow:
 			st.LateOverflowTotal = value
+		case metricEventObservedBeforeIssue:
+			st.ObservedBeforeIssueTotal = value
 		}
 	}
 	return st, rows.Err()

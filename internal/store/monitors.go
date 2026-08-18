@@ -998,10 +998,16 @@ const (
 	ReasonMissingTimestamp = "missing_timestamp"
 	ReasonFutureTimestamp  = "future_timestamp"
 	ReasonOutsideRetention = "outside_retention"
-	ReasonOutOfOrder       = "out_of_order"
-	ReasonDuplicate        = "duplicate"
-	ReasonStaleRevision    = "stale_revision"
-	ReasonMissingRevision  = "missing_revision"
+	// ReasonObservedBeforeIssue rejects a scheduled result whose observation instant precedes the
+	// instant the core issued its job by more than `result.allowed_skew`. Inside the tolerance the
+	// result is ACCEPTED and counted: a region's clock trailing the core's by seconds is ordinary,
+	// and dropping those results would lose real measurements to fix a bookkeeping detail. Beyond it
+	// the result cannot be about the job it claims to answer.
+	ReasonObservedBeforeIssue = "observed_before_issue"
+	ReasonOutOfOrder          = "out_of_order"
+	ReasonDuplicate           = "duplicate"
+	ReasonStaleRevision       = "stale_revision"
+	ReasonMissingRevision     = "missing_revision"
 )
 
 // ResultOutcome is what a scheduled/push result did. Applied = live status/counters/outbox
@@ -1129,6 +1135,22 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	}
 	if s.resultRetention > 0 && ts.Before(dbNow.Add(-s.resultRetention)) {
 		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonOutsideRetention}.withMissing(missingObserved))
+	}
+	// Step 4b — a result cannot have been observed before the job that asked for it was issued
+	// (func-result-protocol §9, deferred there with "not here"). `job_issued_at` comes from the
+	// core's own clock at materialization, so this compares an executor's clock against the core's.
+	// The owner's decision for the boundary: reject beyond `result.allowed_skew`, and inside it
+	// ACCEPT and COUNT — a region trailing the core by seconds is ordinary, and dropping those
+	// results would lose real measurements to fix a bookkeeping detail. Zero means the executor
+	// carried no job identity (push, or a fleet older than this field), and then nothing is checked
+	// rather than everything being rejected.
+	if !hb.JobIssuedAt.IsZero() && ts.Before(hb.JobIssuedAt) {
+		if ts.Before(hb.JobIssuedAt.Add(-skew)) {
+			return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonObservedBeforeIssue}.withMissing(missingObserved))
+		}
+		if err := bumpMetricEventTx(ctx, tx, metricEventObservedBeforeIssue, 1); err != nil {
+			return ResultOutcome{}, err
+		}
 	}
 
 	// Step 5 — insert; observed_at == ts for a scheduled result.

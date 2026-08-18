@@ -128,6 +128,11 @@ type ServiceReliabilityStat struct {
 	EpochFanoutTotal  int64
 	LateArrivalsTotal int64
 	LateOverflowTotal int64
+	// ObservedBeforeIssueTotal counts scheduled results ACCEPTED despite an observation instant
+	// before their job's issue instant — inside `result.allowed_skew`. A region's clock trailing
+	// the core's is ordinary one at a time and worth watching before it grows past the tolerance,
+	// where results start being rejected (func-result-protocol §9, iter-0155).
+	ObservedBeforeIssueTotal int64
 }
 
 // ServiceAlertStat is the alerting evaluator's sampled snapshot (FR-021 §16.6b), exported as
@@ -1083,6 +1088,9 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		out.println("# HELP cerbix_service_late_arrival_overflow_total Late-arrival example slots that overflowed their bound.")
 		out.println("# TYPE cerbix_service_late_arrival_overflow_total counter")
 		out.printf("cerbix_service_late_arrival_overflow_total %d\n", serviceStats.LateOverflowTotal)
+		out.println("# HELP cerbix_result_observed_before_issue_total Scheduled results accepted with observed_at before job_issued_at, inside result.allowed_skew; a region clock trailing the core's.")
+		out.println("# TYPE cerbix_result_observed_before_issue_total counter")
+		out.printf("cerbix_result_observed_before_issue_total %d\n", serviceStats.ObservedBeforeIssueTotal)
 	}
 	if factMaintTracked {
 		out.println("# HELP cerbix_service_fact_maintenance_failing Whether the last fact-partition maintenance pass failed (1) — repeated 1s with an aging last-success is a stuck month.")

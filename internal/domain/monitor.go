@@ -468,6 +468,15 @@ type Heartbeat struct {
 	// the prober from the job's monitor). RecordScheduledResult rejects a result whose
 	// revision no longer matches the monitor's current one. 0 = not carried (push/legacy).
 	ExecutionRevision int64 `json:"execution_revision,omitempty"`
+	// JobID and JobIssuedAt are the job this result answers, carried back so a result can be
+	// correlated with the dispatch that asked for it (func-result-protocol §9, deferred there with
+	// "not here" and delivered in iter-0155). Both are stamped by the CORE — the id and the issue
+	// instant come from the database in the same statement that materializes the job — so
+	// `observed_at >= job_issued_at` compares an executor's clock against the core's, which is the
+	// only comparison that can detect a skewed region. Empty/zero on a push or legacy result, and
+	// then the ordering check does not apply.
+	JobID       string    `json:"job_id,omitempty"`
+	JobIssuedAt time.Time `json:"job_issued_at,omitempty"`
 	// ProbeError is the typed non-liveness result member used when an executor cannot
 	// authenticate/materialize a credential envelope. When set, the ingest path records
 	// diagnostics only: no heartbeat, status, SLA, incident, or transition mutation.

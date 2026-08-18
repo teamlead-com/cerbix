@@ -314,7 +314,8 @@ func (a *Agent) poll(ctx context.Context) {
 		if materialized.UsedCredential {
 			a.recordCredentialSuccess()
 		}
-		results = append(results, a.runner.Run(ctx, materialized.Monitor))
+		// Same stamp as the AMQP worker, through the same owner: the result carries the job it answers.
+		results = append(results, dispatch.StampResult(a.runner.Run(ctx, materialized.Monitor), job))
 		materialized.Cleanup()
 		if i < len(tokens) {
 			ackTokens = append(ackTokens, tokens[i])

@@ -214,3 +214,39 @@ func TestFeatureOffCredentialJobReachesTheProber(t *testing.T) {
 		t.Fatalf("legacy job moved credential readiness: %+v", readiness.calls[callsAtStartup:])
 	}
 }
+
+// The result an executor publishes carries the job it answers (func-result-protocol §9, iter-0155).
+// Found by mutation rather than by design: removing the stamp from the worker left every test green,
+// which means the correlation the whole feature exists for was resting on nothing.
+func TestPublishedResultCarriesTheJobItAnswers(t *testing.T) {
+	disp := dispatch.NewInProc(8)
+	p := New(disp, fakeRunner{}, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	issued := time.Now().UTC().Add(-2 * time.Second).Truncate(time.Millisecond)
+	job := dispatch.CheckJob{
+		Monitor:  domain.Monitor{ID: "m1", Type: domain.MonitorHTTP},
+		JobID:    "job-42",
+		IssuedAt: issued,
+	}
+	if err := disp.PublishJob(ctx, job); err != nil {
+		t.Fatalf("publish job: %v", err)
+	}
+	select {
+	case hb := <-disp.Results():
+		if hb.JobID != "job-42" {
+			t.Fatalf("result job id = %q, want job-42 — without it the core cannot tell which dispatch "+
+				"this result answers, which is the whole point of the id", hb.JobID)
+		}
+		if !hb.JobIssuedAt.Equal(issued) {
+			t.Fatalf("result issue instant = %s, want the core's %s — the ordering check compares an "+
+				"executor's clock against THIS instant, so a dropped stamp disables the check silently",
+				hb.JobIssuedAt, issued)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not produce a result")
+	}
+}

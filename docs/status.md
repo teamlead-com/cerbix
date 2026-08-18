@@ -2,21 +2,25 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current iteration (iter-0152 — FR-021 phase 5, the POST-CLOSE correction arc. iter-0151 closed at `475a0d3` and is immutable from that commit; the rounds that followed it are [380], [384], [392], [395], [399], [401] and [403] — and recording the first of them by editing that closed report was itself a finding ([401]). Everything after the closure lives in [iter-0152](iterations/iter-0152.md))
+## Current iteration (iter-0153 — FR-021 phase 5: reconciling the living documents with the frozen ones. Predecessors [iter-0151](iterations/iter-0151.md), CLOSED at `475a0d3`, and [iter-0152](iterations/iter-0152.md), CLOSED at `cc247ce` — both immutable from those commits, so the arc in progress is [iter-0153](iterations/iter-0153.md))
 
-**No lifetime review scoreboard lives here, on purpose.** An earlier revision kept a cumulative
-"reviewer findings" total in this document, and every review OF that total produced a finding that
-changed it — a recursion that cannot converge while the number is live. Requirement status does not
-need a self-referential lifetime count. The per-round finding IDs are evidence and they live where
-evidence belongs: enumerated in [iter-0152](iterations/iter-0152.md) §0/§2 and in the party record.
+**No lifetime review scoreboard lives here, and no list of review rounds either — on purpose.** An
+earlier revision kept a cumulative "reviewer findings" total in this document, and every review OF
+that total produced a finding that changed it: a recursion that cannot converge while the number is
+live. A list of round IDs is the same shape more slowly — it grows with every round while nothing here
+forces it to, and it was found stale twice. Round IDs are per-arc evidence and they live in the report
+for that arc, which freezes: [iter-0151](iterations/iter-0151.md) §0/§2,
+[iter-0152](iterations/iter-0152.md) §0/§2, [iter-0153](iterations/iter-0153.md) §2, and the party
+record.
 
-One counter remains, because it is mechanically stable and freezes when its report closes:
+One counter remains, because it is mechanically stable and each term freezes when its report closes:
 
-- **§2 finding sections — 25.** 15 in [iter-0151](iterations/iter-0151.md) and 10 in
-  [iter-0152](iterations/iter-0152.md), CLOSED at `cc247ce` and immutable from it. Named after exactly what its checker counts,
-  `grep -c '^### 2\.'` — it is SECTIONS, not individual defects (§2.7 of iter-0152 carries two
-  honesty gaps under one heading), and it INCLUDES the review's governance and documentation findings
-  (§2.8 is [401], §2.9 is [403], §2.10 is [405]/[407]).
+- **§2 finding sections in the FROZEN reports — 15 in [iter-0151](iterations/iter-0151.md) and 10 in
+  [iter-0152](iterations/iter-0152.md).** Named after exactly what its checker counts,
+  `grep -c '^### 2\.'` — it is SECTIONS, not individual defects (§2.7 of iter-0152 carries two honesty
+  gaps under one heading), and it INCLUDES the review's governance and documentation findings. An OPEN
+  report's own count is stated in that report when it closes and added here then, so nothing in this
+  bullet moves while an iteration is in progress.
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
@@ -25,7 +29,7 @@ One counter remains, because it is mechanically stable and freezes when its repo
 | AC-0151-3 | Every removal path closes a firing episode in the SAME transaction as the removal, with its named reason, and the close survives what it names (§16.4a, invariant 89). | DONE | [`store/servicealertlifecycle.go`](../internal/store/servicealertlifecycle.go) (one closing path, from the episode's own snapshot, through the FENCED enqueue owner), [`store/servicealertpolicy.go`](../internal/store/servicealertpolicy.go); the deletion close, its atomicity proof (a refused DELETE publishes nothing), and the mixed old/new fleet regression of invariant 83. |
 | AC-0151-4 | The write surface is one validator shared by API and MaC, server-owned fields are refused structurally, a file-managed service refuses UI edits with 409, and the file is DECLARATIVE — the same bundle converges to the same database whatever it used to say (§16.6a, §15.2, invariant 87). | DONE | [`api/handlers_servicealerting.go`](../internal/api/handlers_servicealerting.go) (pointer patch merged in the STORE's transaction; `firing` and the generations unknown-field 400s), [`fileprovider/service.go`](../internal/fileprovider/service.go) (an absent `alerting:` block is the DEFAULT, and the declaration is outside the canonical hash so a paging edit creates no revision and no epoch). |
 | AC-0151-5 | The operator can read what is ACTUALLY happening: per-signal coverage from the server with its reason, re-read rather than cached, and a delegated monitor keeping its real status pill beside a chip naming who pages instead (§16.6b and the approved mock). | DONE | [`store/servicealertstate.go`](../internal/store/servicealertstate.go) (composed from the delegation lookup's own predicates; the agreement table pins badge == delivery for every cause), [`ServiceAlerting.vue`](../frontend/src/components/ServiceAlerting.vue), [`MonitorDetailView.vue`](../frontend/src/views/MonitorDetailView.vue); 19 component/view tests + `e2e/tests/alerting.spec.ts`. |
-| DoD-0151 | Every fix is proven against the code it fixes, and every claim here is backed by the run that was actually made. | DONE | `go test -race -count=1 ./...` — 30 packages, BOTH storage modes, fresh containers behind a real SQL-connection/migration barrier; `go vet` clean; `gofmt -l` empty; 110 frontend tests; `vue-tsc` + SPA build; `make dev-test` 44 passed / 1 known skip on an image built from this branch, including the new alerting spec. Every recorded defect carries a mutation that failed BEHAVIOURALLY; the cumulative totals are stated once, at the top of this document, because a frozen iteration report cannot own a number that keeps changing; the harness readiness failure recorded as a HARNESS defect, not product evidence. |
+| DoD-0151 | Every fix is proven against the code it fixes, and every claim here is backed by the run that was actually made. | DONE | `go test -race -count=1 ./...` — 30 packages, BOTH storage modes, fresh containers behind a real SQL-connection/migration barrier; `go vet` clean; `gofmt -l` empty; 110 frontend tests; `vue-tsc` + SPA build; `make dev-test` 44 passed / 1 known skip on an image built from this branch, including the new alerting spec. Every recorded defect carries a mutation that failed BEHAVIOURALLY; cumulative review totals are stated NOWHERE — a frozen report cannot own a number that keeps changing, and a living one cannot own a number that every review of it changes ([iter-0153](iterations/iter-0153.md) §2.1 is the correction of record); the harness readiness failure recorded as a HARNESS defect, not product evidence. |
 
 ## Previous iteration (iter-0150 — DONE at [319]; FR-021 phase 4: the status-page service projection and the composite lifecycle. Design gate cleared [310], mock approved; review round 1/2 [314] REJECTED 2 P0 + 7 P1 + 2 P2 with the contested item disposed [315]/[316]; FINAL round 2/2 [318] REJECTED 2 P0 + 3 P1 + P2 — no third reviewer round, so disposition and closure were the implementer's under owner authority)
 

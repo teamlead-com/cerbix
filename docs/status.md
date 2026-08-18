@@ -2,7 +2,14 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current iteration (iter-0155 — the four commissioned candidates: instance audit, project-level SLO objective, `job_id` correlation, and the §16.9 design input. Opened 2026-08-18 after the backlog sweep; see [iter-0155](iterations/iter-0155.md))
+## Current iteration (iter-0156 — FR-022 service incidents: the schema and the store landed; the evaluator, correlation, the public projection and the SPA deltas remain. See [iter-0156](iterations/iter-0156.md))
+
+| ID | Requirement | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0156-1 | An incident's subject is unambiguous at the schema and stays true after the subject is gone: at most ONE anchor (`monitor_id` / `service_id`) by CHECK — *at most*, so a manual project-level incident with neither keeps working — a COMPOSITE tenant-safe FK whose PG15 column-list `ON DELETE SET NULL (service_id)` clears the anchor and not the tenant key, one OPEN auto-incident per service by partial unique index, and a member snapshot a postmortem can still name after a member is deleted. | DONE | [migration 00084](../internal/store/migrations/00084_service_incidents.sql), [`store/serviceincidents.go`](../internal/store/serviceincidents.go); `TestAnIncidentHasAtMostOneAnchor`, `TestDeletingAServiceClearsTheAnchorAndKeepsTheIncident`, `TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers`; five mutants, four behavioural and one named as weaker ([iter-0156](iterations/iter-0156.md) §3). |
+| DoD-0156 | FR-022 closes when the requirement does — schema, store, evaluator, correlation, public projection, SPA deltas — or when the remainder is handed back with what blocks it. FR-021 invariant 86 is superseded IN THE SAME CHANGE as the evaluator, not after it. | IN_PROGRESS | [iter-0156](iterations/iter-0156.md) §0 (state per task) and §4 (the supersession obligation). |
+
+## Previous iteration (iter-0155 — the four commissioned candidates: instance audit, project-level SLO objective, `job_id` correlation, and the §16.9 design input. Opened 2026-08-18 after the backlog sweep; see [iter-0155](iterations/iter-0155.md))
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |

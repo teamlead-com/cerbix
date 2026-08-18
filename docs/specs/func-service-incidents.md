@@ -104,7 +104,7 @@ CREATE UNIQUE INDEX incidents_service_open_auto_idx ON incidents (service_id)
 CREATE TABLE incident_member_snapshots (   -- D6
     incident_id uuid PRIMARY KEY REFERENCES incidents (id) ON DELETE CASCADE,
     project_id  uuid NOT NULL,
-    members     jsonb NOT NULL,            -- [{monitor_id, name, slug, role}] as of the open instant
+    members     jsonb NOT NULL,            -- [{monitor_id, name, roles[]}] as of the open instant
     created_at  timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT incident_member_snapshots_tenant_fk
         FOREIGN KEY (incident_id, project_id) REFERENCES incidents (id, project_id) ON DELETE CASCADE

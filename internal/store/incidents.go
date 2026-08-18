@@ -13,19 +13,20 @@ import (
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
-const incidentColumns = "id, project_id, monitor_id, title, status, impact, source, external_key, started_at, resolved_at, acknowledged_at, acknowledged_by, escalation_step, last_escalated_at, created_at, updated_at"
+const incidentColumns = "id, project_id, monitor_id, service_id, title, status, impact, source, external_key, started_at, resolved_at, acknowledged_at, acknowledged_by, escalation_step, last_escalated_at, created_at, updated_at"
 
 func scanIncident(row pgx.Row) (domain.Incident, error) {
 	var (
 		inc         domain.Incident
 		monitorID   *string
+		serviceID   *string
 		externalKey *string
 		resolved    *time.Time
 		ackedAt     *time.Time
 		ackedBy     *string
 		lastEsc     *time.Time
 	)
-	if err := row.Scan(&inc.ID, &inc.ProjectID, &monitorID, &inc.Title, &inc.Status, &inc.Impact,
+	if err := row.Scan(&inc.ID, &inc.ProjectID, &monitorID, &serviceID, &inc.Title, &inc.Status, &inc.Impact,
 		&inc.Source, &externalKey, &inc.StartedAt, &resolved, &ackedAt, &ackedBy,
 		&inc.EscalationStep, &lastEsc, &inc.CreatedAt, &inc.UpdatedAt); err != nil {
 		return domain.Incident{}, err
@@ -33,6 +34,9 @@ func scanIncident(row pgx.Row) (domain.Incident, error) {
 	inc.LastEscalatedAt = lastEsc
 	if monitorID != nil {
 		inc.MonitorID = *monitorID
+	}
+	if serviceID != nil {
+		inc.ServiceID = *serviceID
 	}
 	if externalKey != nil {
 		inc.ExternalKey = *externalKey
@@ -79,17 +83,22 @@ func (s *Store) CreateIncident(ctx context.Context, inc domain.Incident, opening
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-	var monitorID, externalKey *string
+	var monitorID, serviceID, externalKey *string
 	if inc.MonitorID != "" {
 		monitorID = &inc.MonitorID
+	}
+	// The OTHER anchor (FR-022). Nothing here decides exclusivity: `incidents_one_anchor_chk` does, so a
+	// caller that sets both is refused by the database rather than by whichever branch happens to run.
+	if inc.ServiceID != "" {
+		serviceID = &inc.ServiceID
 	}
 	if inc.ExternalKey != "" {
 		externalKey = &inc.ExternalKey
 	}
 	row := tx.QueryRow(ctx,
-		`INSERT INTO incidents (project_id, monitor_id, title, status, impact, source, external_key)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING `+incidentColumns,
-		inc.ProjectID, monitorID, inc.Title, inc.Status, inc.Impact, inc.Source, externalKey)
+		`INSERT INTO incidents (project_id, monitor_id, service_id, title, status, impact, source, external_key)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING `+incidentColumns,
+		inc.ProjectID, monitorID, serviceID, inc.Title, inc.Status, inc.Impact, inc.Source, externalKey)
 	created, err := scanIncident(row)
 	if err != nil {
 		// The partial unique index rejects a second open auto-incident for the same

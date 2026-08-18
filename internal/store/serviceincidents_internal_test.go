@@ -1,0 +1,173 @@
+package store
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
+)
+
+// FR-022's schema half: the anchor is exclusive, tenant-safe, and survives the deletion of what it points
+// at. All three are asserted with DIRECT SQL where the point is what ANY writer can do — the store not
+// offering a way to set two anchors proves only what this code does today.
+func TestAnIncidentHasAtMostOneAnchor(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// (1) at most one anchor: both at once is unrepresentable (FR-022 invariant 1).
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO incidents (project_id, monitor_id, service_id, title, source)
+		 VALUES ($1, $2, $3, 'both anchors', 'manual')`, f.projectID, f.monitorID, f.serviceID); err == nil {
+		t.Error("an incident naming BOTH a monitor and a service was accepted — the discriminator every read " +
+			"path branches on must be unambiguous at the schema (incidents_one_anchor_chk)")
+	}
+	// ...and NEITHER stays legal, because a manual project-level incident has always had neither.
+	var projectLevel string
+	if err := st.pool.QueryRow(ctx,
+		`INSERT INTO incidents (project_id, title, source) VALUES ($1, 'project level', 'manual') RETURNING id::text`,
+		f.projectID).Scan(&projectLevel); err != nil {
+		t.Fatalf("a project-level incident must keep working: %v", err)
+	}
+
+	// (2) the anchor cannot cross tenants (FR-022 invariant 2), even by direct SQL.
+	otherOrg, _ := st.CreateOrganization(ctx, "globex", "Globex")
+	otherProj, _ := st.CreateProject(ctx, otherOrg.ID, "other", "Other")
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO incidents (project_id, service_id, title, source) VALUES ($1, $2, 'cross tenant', 'manual')`,
+		otherProj.ID, f.serviceID); err == nil {
+		t.Error("a service anchor crossed a project boundary — the FK is composite exactly so that a " +
+			"same-project guarantee does not live in application code (FR-021 invariant 48's rule)")
+	}
+}
+
+// Deleting the service CLEARS the anchor and not the tenant key (FR-022 invariant 3). This is the trap
+// iter-0125 hit with a bare ON DELETE SET NULL: Postgres applies it to EVERY referencing column, including
+// the NOT NULL project_id, and the delete then fails outright — or worse, the incident loses its tenant.
+func TestDeletingAServiceClearsTheAnchorAndKeepsTheIncident(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "checkout degraded",
+		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opened", "tester")
+	if err != nil {
+		t.Fatalf("create service incident: %v", err)
+	}
+	if inc.ServiceID != f.serviceID || inc.MonitorID != "" {
+		t.Fatalf("stored anchors = service %q / monitor %q", inc.ServiceID, inc.MonitorID)
+	}
+
+	if err := st.DeleteService(ctx, f.projectID, f.serviceID); err != nil {
+		t.Fatalf("delete service: %v", err)
+	}
+	after, err := st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatalf("the incident did not survive its service's deletion: %v — a timeline is a record of what "+
+			"happened, and deleting the subject does not unhappen it", err)
+	}
+	if after.ServiceID != "" {
+		t.Errorf("anchor after delete = %q, want cleared", after.ServiceID)
+	}
+	if after.ProjectID != f.projectID {
+		t.Errorf("project after delete = %q, want %q — a column-list SET NULL clears the ANCHOR; a bare one "+
+			"would take the tenant key with it", after.ProjectID, f.projectID)
+	}
+}
+
+// One OPEN auto-incident per service (FR-022 invariant 4), and the opening is one transaction with whatever
+// the caller does alongside it (invariant 7). A flapping service must not accumulate incidents, and under
+// concurrent evaluators only the database can promise that.
+func TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	open := func() (domain.Incident, bool) {
+		t.Helper()
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout degraded", 2)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		return inc, created
+	}
+
+	first, created := open()
+	if !created {
+		t.Fatal("the first open reported created=false")
+	}
+	second, createdAgain := open()
+	if createdAgain {
+		t.Fatal("a second open created ANOTHER incident — a flapping service would accumulate them " +
+			"(incidents_service_open_auto_idx)")
+	}
+	if second.ID != first.ID {
+		t.Fatalf("the second open returned %s, want the already-open %s: a caller told 'not created' must be "+
+			"able to annotate the incident that IS open", second.ID, first.ID)
+	}
+	// The property, asserted behaviourally and not only through the code path: after two opens the service
+	// has ONE open auto-incident. (Dropping the index makes the ON CONFLICT above fail loudly instead of
+	// letting rows accumulate — correct behaviour, but it means that mutation proves the code DEPENDS on the
+	// index rather than proving this count, which is why the count is asserted here too.)
+	var openCount int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM incidents WHERE service_id = $1 AND source = 'auto' AND status <> 'resolved'`,
+		f.serviceID).Scan(&openCount); err != nil {
+		t.Fatalf("count open: %v", err)
+	}
+	if openCount != 1 {
+		t.Fatalf("%d open auto-incidents for one service — a flapping service must not accumulate them", openCount)
+	}
+
+	// The opening note states what confirmed it — an operator who finds an incident nobody typed needs the
+	// machine's reason, and the number is the one that governs paging.
+	var body string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT body FROM incident_updates WHERE incident_id = $1 ORDER BY created_at LIMIT 1`, first.ID).Scan(&body); err != nil {
+		t.Fatalf("read opening note: %v", err)
+	}
+	if body == "" || !strings.Contains(body, "confirmed over 2") {
+		t.Errorf("opening note = %q, want it to state what confirmed the open", body)
+	}
+
+	// The member snapshot exists and names the member, and it KEEPS naming it after the monitor is gone.
+	members, ok, err := st.IncidentMemberSnapshot(ctx, first.ID)
+	if err != nil || !ok {
+		t.Fatalf("snapshot: %v (present=%v)", err, ok)
+	}
+	// One ROW per monitor, roles aggregated: the declaration stores a row per (monitor, role) and this
+	// member is both context and SLI, which a postmortem must show once rather than twice.
+	if len(members) != 1 || members[0].MonitorID != f.monitorID {
+		t.Fatalf("snapshot = %+v, want the one declared member once", members)
+	}
+	if len(members[0].Roles) < 1 || members[0].Name == "" {
+		t.Fatalf("snapshot member = %+v, want its name and at least one role", members[0])
+	}
+	if err := st.DeleteMonitor(ctx, f.monitorID); err != nil {
+		t.Fatalf("delete monitor: %v", err)
+	}
+	after, ok, err := st.IncidentMemberSnapshot(ctx, first.ID)
+	if err != nil || !ok || len(after) != 1 || after[0].MonitorID != f.monitorID {
+		t.Fatalf("snapshot after the member was deleted = %+v (present=%v, err=%v) — a postmortem is read "+
+			"after the world moved, which is the whole reason it is a snapshot", after, ok, err)
+	}
+
+	// A monitor or project-level incident has NO snapshot, and that is a different answer from an empty one.
+	other, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: f.projectID, Title: "manual", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMinor, Source: domain.SourceManual,
+	}, "", "tester")
+	if err != nil {
+		t.Fatalf("create manual incident: %v", err)
+	}
+	if _, present, err := st.IncidentMemberSnapshot(ctx, other.ID); err != nil || present {
+		t.Errorf("a project-level incident reported a snapshot (present=%v, err=%v)", present, err)
+	}
+}

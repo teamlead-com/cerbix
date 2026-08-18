@@ -8,6 +8,7 @@ import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import ServiceReliability from "@/components/ServiceReliability.vue";
+import ServiceAlerting from "@/components/ServiceAlerting.vue";
 import ServiceDependencies from "@/components/ServiceDependencies.vue";
 import { humanDuration, lagExact, sealedLabel } from "@/lib/services";
 
@@ -153,6 +154,19 @@ watch(() => [route.params.id, ws.projectId], load);
           :service-id="serviceId"
           :can-write="canWrite"
           :has-sli="sli.size > 0"
+        />
+
+        <!-- Phase 5 (§16.6a): the paging declaration, and — separately — what it is actually
+             producing. The two are different answers: the switch is what an operator asked for,
+             the badge is whether members' alerts are being replaced right now. -->
+        <ServiceAlerting
+          :project-id="ws.projectId"
+          :service-id="serviceId"
+          :can-write="canWrite"
+          :alerting="detail.alerting ?? null"
+          :state="detail.alerting_state ?? null"
+          :managed-by="managed"
+          @saved="(value) => detail && (detail.alerting = value)"
         />
 
         <!-- Phase 3 (iter-0148): the impact graph — both edge directions with the two-layer

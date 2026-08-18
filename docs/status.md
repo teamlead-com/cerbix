@@ -2,17 +2,18 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current iteration (iter-0152 — FR-021 phase 5, the POST-CLOSE correction arc. iter-0151 closed at `475a0d3` and is immutable from that commit; five review rounds followed it, and recording them by editing that closed report was itself a finding ([401]). Everything after the closure lives in [iter-0152](iterations/iter-0152.md))
+## Current iteration (iter-0152 — FR-021 phase 5, the POST-CLOSE correction arc. iter-0151 closed at `475a0d3` and is immutable from that commit; the rounds that followed it are [380], [384], [392], [395], [399], [401] and [403] — and recording the first of them by editing that closed report was itself a finding ([401]). Everything after the closure lives in [iter-0152](iterations/iter-0152.md))
 
 **Cumulative counters for the FR-021 phase-5 arc live HERE**, because this document is long-lived and
 an iteration report is a frozen snapshot — that is finding [401] in one sentence. Two totals, two
 different sets, never a cross-check of each other:
 
-- **Reviewer findings — 24, across eight rounds.** [358] 2 P0 + 3 P1 · [371] 5 P1 + 1 P2 · [380] 5 P1 ·
-  [384] 1 P1 + 1 P2 · [392] 1 P1 + 1 P2 · [395] 2 P2 · [399] 1 P2 · [401] 1 P1 governance. All
-  corrected, none contested.
-- **Defects recorded in the reports — 23.** 15 in [iter-0151](iterations/iter-0151.md) §2, frozen at
-  its closure commit, and 8 in [iter-0152](iterations/iter-0152.md) §2. This set INCLUDES the ones I found myself and EXCLUDES
+- **Reviewer findings — 25.** Per round, which is the only spelling that can be checked: [358] 2 P0 +
+  3 P1 · [371] 5 P1 + 1 P2 · [380] 5 P1 · [384] 1 P1 + 1 P2 · [392] 1 P1 + 1 P2 · [395] 2 P2 ·
+  [399] 1 P2 · [401] 1 P1 governance · [403] 1 P2. Two rounds before iter-0151 closed, seven after.
+  All corrected, none contested.
+- **Defects recorded in the reports — 24.** 15 in [iter-0151](iterations/iter-0151.md) §2, frozen at
+  its closure commit, and 9 in [iter-0152](iterations/iter-0152.md) §2, which is still OPEN. This set INCLUDES the ones I found myself and EXCLUDES
   the review's documentation and counting findings, which were never product defects.
 
 | ID | Requirement | Status | Evidence |

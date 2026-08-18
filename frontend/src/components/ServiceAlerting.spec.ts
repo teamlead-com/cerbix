@@ -266,9 +266,14 @@ describe("ServiceAlerting under a network blackhole", () => {
     }
   });
 
-  // One read in flight at a time: the deadline is shorter than the cadence, and each read aborts
-  // whatever the last one left running. A blackhole must not turn into a queue.
-  it("never leaves more than one read in flight, and aborts on unmount", async () => {
+  // At most one NON-ABORTED read, and unmount cancels the one still running.
+  //
+  // The claim is deliberately narrow. A transport that ignores its signal cannot be cancelled by
+  // anybody, so its underlying promise stays pending however many times it is aborted — what the
+  // deadline bounds is the UI's truth, asserted by the test above. What THIS test pins is that the
+  // component leaves at most one signal un-aborted, which is the whole of what it controls, and that
+  // unmount aborts rather than abandoning.
+  it("leaves at most one non-aborted read, and aborts the running one on unmount", async () => {
     vi.useFakeTimers();
     try {
       // mountWith installs its own implementation, so the collecting one goes in AFTER the mount
@@ -286,7 +291,7 @@ describe("ServiceAlerting under a network blackhole", () => {
 
       expect(signals.length, "every read must carry a signal").toBeGreaterThanOrEqual(2);
       const live = signals.filter((s) => !s.aborted);
-      expect(live.length, "at most one read may still be in flight").toBeLessThanOrEqual(1);
+      expect(live.length, "at most one signal may still be un-aborted").toBeLessThanOrEqual(1);
 
       w.unmount();
       expect(signals.every((s) => s.aborted),
@@ -295,4 +300,39 @@ describe("ServiceAlerting under a network blackhole", () => {
       vi.useRealTimers();
     }
   });
+});
+
+// The abort at the TOP of refreshState has its own test, because the cadence cannot reach it: the
+// deadline (10s) fires before the next cadence (15s), so a cadence read is always already aborted by
+// the time the following one starts. The line matters for the OTHER caller — a save, which refreshes
+// immediately — and without it a successful PATCH would fire a second read while a hung cadence read
+// was still outstanding.
+it("a forced refresh after a save cancels the cadence read it replaces", async () => {
+  vi.useFakeTimers();
+  try {
+    const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const signals: AbortSignal[] = [];
+    apiMock.GET.mockImplementation((_p: string, req: { signal?: AbortSignal }) => {
+      if (req?.signal) signals.push(req.signal);
+      return new Promise(() => {}) as never;
+    });
+    await vi.advanceTimersByTimeAsync(15_000); // a cadence read starts and hangs
+    expect(signals.length, "the cadence read must have started").toBe(1);
+    const cadenceRead = signals[0];
+    expect(cadenceRead.aborted, "and it must still be running when the save happens").toBe(false);
+
+    // The save's own refresh starts EARLY — before that read's deadline — so it is the one caller
+    // for which "abort whatever is still running" is not already true.
+    await w.find('[data-testid="alerting-confirm"]').setValue("6");
+    await w.find('[data-testid="alerting-save"]').trigger("click");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(signals.length, "the save must trigger its own read").toBeGreaterThan(1);
+    expect(cadenceRead.aborted,
+      "the forced refresh must cancel the cadence read it replaces").toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
 });

@@ -79,6 +79,7 @@ DISCHARGE_DOC = 'docs/traceability.md'
 INV_HEADING = '### Invariants (§19 for 1–74, §16.8 for 75–91)'
 MATRIX_HEADING = '### Required test matrix (§16.10, written before the phase-5 code)'
 FR022_HEADING = '### FR-022 invariants (§6 of func-service-incidents.md)'
+FR022_MATRIX_HEADING = '### FR-022 required test matrix (§7, written before the code)'
 
 
 def discharge_rows(text, heading):
@@ -145,7 +146,8 @@ def check_discharge(src):
     bad = []
     text = open(DISCHARGE_DOC, encoding='utf-8').read()
     for heading, count, label in ((INV_HEADING, 91, 'invariant'), (MATRIX_HEADING, 24, 'scenario'),
-                                  (FR022_HEADING, 16, 'FR-022 invariant')):
+                                  (FR022_HEADING, 16, 'FR-022 invariant'),
+                                  (FR022_MATRIX_HEADING, 16, 'FR-022 scenario')):
         rows = discharge_rows(text, heading)
         if rows is None:
             bad.append((DISCHARGE_DOC, 0, 'discharge', f'the {label} table is missing entirely'))
@@ -193,7 +195,7 @@ def main():
     bad += check_row_statuses()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
-              'and all 91 FR-021 invariants + 24 required scenarios + 16 FR-022 invariants are discharged; '
+              'and all 91 FR-021 invariants + 24 scenarios + 16 FR-022 invariants + 16 FR-022 scenarios are discharged; '
               'every requirement row states one of the three statuses')
         return 0
     print(f'docs references: {len(bad)} unresolved citation(s) in living documents\n')

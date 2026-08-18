@@ -73,6 +73,18 @@ func TestDeletingAServiceClearsTheAnchorAndKeepsTheIncident(t *testing.T) {
 		t.Errorf("project after delete = %q, want %q — a column-list SET NULL clears the ANCHOR; a bare one "+
 			"would take the tenant key with it", after.ProjectID, f.projectID)
 	}
+	// And the TIMELINE stands (§7's matrix line). The row surviving is not the claim — the claim is that
+	// what people wrote and what the machine wrote about this outage are still readable after its subject
+	// is gone, which is the whole reason the incident is kept rather than cascaded away.
+	var updates int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM incident_updates WHERE incident_id = $1`, inc.ID).Scan(&updates); err != nil {
+		t.Fatalf("count timeline: %v", err)
+	}
+	if updates == 0 {
+		t.Errorf("the incident survived its service but its TIMELINE did not — an incident with no timeline " +
+			"is a row, not a record")
+	}
 }
 
 // One OPEN auto-incident per service (FR-022 invariant 4), and the opening is one transaction with whatever

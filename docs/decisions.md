@@ -3655,3 +3655,33 @@ invariant 47's history: a spec asserting the opposite of what its own code does,
 approved; the spec carries fourteen numbered acceptance invariants and a required test matrix written
 before the code, because iter-0155 established that an unmapped invariant list is worth nothing and that
 `make docs-check` is what keeps a mapped one true.
+
+## D-0171 — FR-022 closes against its own enforced discharge map, and one of its invariants was corrected rather than implemented (2026-08-19)
+
+**Context.** FR-021 closed against a map of 91 invariants and 24 scenarios that `make docs-check` refuses to
+let go stale (D-0169), after that arc found 36 invariant numbers cited nowhere. FR-022 was written with
+sixteen numbered invariants and a sixteen-line test matrix BEFORE the code, so the same instrument applies
+to it — and applying it before closing, rather than after, is the whole point.
+
+**Decision.** FR-022 and NFR-017 are DONE, closed against the map in `traceability.md`: every one of the
+sixteen §6 invariants and the sixteen §7 scenarios has a row naming a test that exists, enforced by the gate
+(now 91 + 24 + 16 + 16). Two consequences are recorded as part of the closure rather than left implicit:
+
+1. **Invariant 14 was CORRECTED, not implemented.** As written — "every write is audited with its actor and
+   tenant, in the mutating transaction" — it was false of the product, not merely unimplemented: incident
+   writes carry no audit row for EITHER anchor. Implementing it would have meant changing the monitor path
+   inside a requirement forbidden from touching it. The spec keeps the number, quotes the original, states
+   what FR-022 does promise (the absence of asymmetry, pinned by a test), and **an audit trail for incident
+   writes is hereby recorded as an open gap needing its own requirement**, where it can be designed for both
+   anchors at once. It is NOT in this repository yet and nothing in FR-022 provides it.
+2. **Invariant 8's discharge is honest about what rests on judgement.** "Byte-identical" is discharged by the
+   unchanged suite plus the surfaces named by me as reachable — my judgement — plus the browser suite on a
+   live stack, which is not. The row says which half is which.
+
+**Consequence.** The FR-022 obligation toward FR-021 invariant 86 is discharged: the note, the discharge row,
+§16.10's scenario 24 and the rewritten test all moved in the change that made them necessary. §16.9's other
+items (escalation policies for services, retroactive alerting, cross-project delegation, per-member severity,
+suppression beyond three topics) remain non-goals and still open their own requirements. What FR-022 does NOT
+add, deliberately: a way to open a service incident BY HAND (the create API takes no service anchor), a
+webhook `incident.opened` event for a service incident, and any UI for the member snapshot the API serves.
+

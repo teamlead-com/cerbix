@@ -407,6 +407,18 @@ func TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident(t *testing.T) {
 	if resolved.Status != domain.IncidentResolved || resolved.ResolvedAt == nil {
 		t.Fatalf("incident after recovery = %s (resolved_at %v), want resolved", resolved.Status, resolved.ResolvedAt)
 	}
+	// ...and it SAYS SO on the timeline (§7's matrix line, which asks for the update and not only the
+	// status). An incident that flips to resolved with nothing written is a machine's conclusion with no
+	// stated reason, in the one place a human reads afterwards to find out what happened.
+	var closing string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT body FROM incident_updates WHERE incident_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		inc.ID).Scan(&closing); err != nil {
+		t.Fatalf("read closing note: %v", err)
+	}
+	if !strings.Contains(closing, "Resolved automatically") {
+		t.Errorf("last timeline entry = %q, want the machine to state that IT resolved this and why", closing)
+	}
 
 	// ...and a SECOND failure opens a SECOND incident (invariant 16) — which is only possible because the
 	// first was resolved, so the per-service unique index no longer blocks it.

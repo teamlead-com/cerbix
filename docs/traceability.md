@@ -240,6 +240,28 @@ any of the sixteen has no row or cites a test the tree lacks.
 | 16 | a service that recovers and fails again gets a SECOND incident | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` |
 
 
+### FR-022 required test matrix (§7, written before the code)
+
+| # | Scenario | Discharged by |
+| --- | --- | --- |
+| 1 | DOWN under armed coverage after `confirm_evaluations`: one incident, one announcement, one transaction | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` |
+| 2 | it RECOVERS: the incident resolves in the close's transaction, with an update that SAYS so | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` — the closing note is asserted, not just the status; the mutant that resolves silently fails it |
+| 3 | it fails AGAIN: a second incident, because the first was resolved | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` |
+| 4 | a human resolved it while the service was still down: the machine leaves it alone | `TestTheMachineLeavesAHumanIncidentAlone` |
+| 5 | DOWN while coverage is DISARMED: no incident, and the member still pages | `TestADisarmedServiceOpensNoIncidentAndItsMembersKeepPaging` |
+| 6 | a burn breach: no incident | `TestABurnBreachOpensNoIncidentEver` |
+| 7 | a flapping service: ONE open auto-incident | `TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers` — the count is asserted behaviourally, not only the code path |
+| 8 | a member's incident open beside the service's: both exist, unchanged | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` |
+| 9 | resolving the service's: the member's stays open | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` |
+| 10 | delete the service: anchor cleared, tenant key kept, timeline standing | `TestDeletingAServiceClearsTheAnchorAndKeepsTheIncident` — the timeline is counted, because a row without its updates is a record of nothing |
+| 11 | a cross-tenant anchor by DIRECT SQL: refused | `TestAnIncidentHasAtMostOneAnchor` |
+| 12 | correlation over a service-anchored incident: no self-link, other links unchanged | `TestAServiceIncidentIsCorrelatedAndNamesEveryServiceButItsOwn`, `TestNoSelfLinkEvenWhenTheStoredGraphHasACycle`, `TestCorrelateBothInterleavings` (the unchanged half) |
+| 13 | the public JSON: incident present, impact links absent | `TestPublicRenderCarriesAServiceIncidentAndNoImpactLinks` |
+| 14 | the `⏸` note after a suppressed member delivery: written once, on the MONITOR's incident | `TestTheSuppressionNoteKeepsOneHomeWhenBothIncidentsAreOpen`, `TestRecordSuppressionIsIdempotent` (the "once" half) |
+| 15 | a postmortem read after a member is deleted: still names it | `TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers`, `TestIncidentDetailNamesTheMembersTheServiceHadAtOpenTime` |
+| 16 | every monitor-incident regression in the suite, unchanged and green | the whole pre-FR-022 suite plus the browser suite on a live stack (47 passed, 1 known skip); the named surfaces are in FR-022 invariant 8's row above — `TestPublicRenderRedactsInternalIDs`, `TestCorrelateBothInterleavings`, `TestIncidentContextAttached` |
+
+
 ## FR-021 acceptance discharge — §19 invariants 1–74, §16.8 invariants 75–91, §16.10 matrix
 
 The spec states 91 numbered acceptance invariants and a 24-scenario required test matrix, and until

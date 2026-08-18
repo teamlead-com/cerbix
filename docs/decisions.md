@@ -3588,3 +3588,37 @@ Review chain: design round 1/2 [324] REJECTED before code (4 P0 + 10 P1 + 2 P2),
 FINAL round 2/2 [326] REJECTED with a closed authority ledger and no third round. The P0/P1 items of
 [326] are amended in §16.1/§16.4/§16.4a/§16.4b/§16.5a/§16.6a/§16.6b with invariants 75–91 and the
 §16.10 test matrix; implementation proceeds under that record.
+
+## D-0169 — FR-021 closes at a measured boundary, and §16.9 becomes an explicit non-goal (iter-0153)
+
+Phases 1–5 of `func-service-reliability.md` are shipped and reviewed, and the question this decision
+answers is not "is there more to build" — there always is — but **what "FR-021 is done" is allowed to
+mean**. Until iter-0153 it meant a chain of review verdicts: nothing in the repository mapped the
+spec's 91 numbered acceptance invariants (§19 for phases 1–4, §16.8 for phase 5) or its 24-scenario
+required matrix (§16.10) to a test, 36 invariant numbers appeared in no document at all, and the only
+way to audit the claim was to re-read thirty immutable iteration reports.
+
+**The requirement closes against a discharge map, not against a memory.** `docs/traceability.md`
+carries one row per invariant and per required scenario, naming the test that holds it, and
+`make docs-check` fails when a row cites a test the tree lacks or when any of the 116 numbers has no
+row. Building the map found seven properties that were specified, believed and unpinned — invariants
+1, 25, 27, 35, 37, 78 and 86 — none of them a product defect, each now carrying a test that fails
+behaviourally when the property is broken (iter-0153 §2.7). Invariant 86 is the sharpest evidence for
+why the map is the boundary rather than a formality: the spec's own required matrix demanded that
+regression, and it did not exist.
+
+**§16.9 is an explicit NON-GOAL of FR-021, not unfinished work inside it.** Service incidents (owner
+decision 3), escalation POLICIES for services (owner decision 5 — which first needs a durable
+non-incident occurrence carrying started/resolved/ack/progress/repeat state, a subsystem and not a
+refinement), retroactive alerting, cross-project delegation, per-member severity inside a service page,
+and suppression beyond the three named topics are all deliberately outside this requirement. They stay
+described in §16.9 so the reasoning survives; when any of them is commissioned it opens its OWN
+requirement with its own acceptance invariants, rather than reopening a closed one. A requirement that
+stays open for everything it could have been never closes, and the checklist stops meaning anything —
+which this repository had already demonstrated: 28 status rows sat at `IN_PROGRESS` for eight
+iterations after the verdict that closed them (iter-0153 §2.6).
+
+**Consequence.** `FR-021` and `NFR-016` are `DONE` in `docs/status.md`; the discharge tables are the
+evidence and the gate keeps them true; the deferred set is a stated non-goal with a named owner
+decision behind each item. Invariant 47 is superseded rather than deleted (§16.4 lifts the phase-2
+rejection it asserted), because other documents cite invariants by number.

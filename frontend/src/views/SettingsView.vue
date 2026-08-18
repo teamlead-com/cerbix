@@ -6,6 +6,7 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import AgentTokensPanel from "@/components/settings/AgentTokensPanel.vue";
 import DangerZonePanel from "@/components/settings/DangerZonePanel.vue";
+import InstanceAuditPanel from "@/components/settings/InstanceAuditPanel.vue";
 import MembersPanel from "@/components/settings/MembersPanel.vue";
 import OrgDangerZonePanel from "@/components/settings/OrgDangerZonePanel.vue";
 import SecretsPanel from "@/components/settings/SecretsPanel.vue";
@@ -37,6 +38,7 @@ type Tab =
   | "email"
   | "users"
   | "agenttokens"
+  | "instanceaudit"
   | "members"
   | "tokens"
   | "webhooks"
@@ -51,6 +53,7 @@ const instanceTabs: { key: Tab; label: string; scope: string }[] = [
   { key: "monitordefaults", label: "Monitor defaults", scope: "instance" },
   { key: "email", label: "Email", scope: "instance" },
   { key: "agenttokens", label: "Agent tokens", scope: "instance" },
+  { key: "instanceaudit", label: "Instance audit", scope: "instance" },
 ];
 const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
   { key: "channels", label: "Notification channels", scope: "project" },
@@ -1173,6 +1176,9 @@ watch(tab, loadActive);
 
       <!-- ── Agent tokens (instance-wide, global admin, self-loading panel) ── -->
       <AgentTokensPanel v-else-if="tab === 'agenttokens'" />
+
+      <!-- ── Instance audit (instance-wide, global admin: the installation's own history) ── -->
+      <InstanceAuditPanel v-else-if="tab === 'instanceaudit'" />
 
       <!-- ── Secrets (project-scoped, self-loading panel) ── -->
       <SecretsPanel v-else-if="tab === 'secrets'" />

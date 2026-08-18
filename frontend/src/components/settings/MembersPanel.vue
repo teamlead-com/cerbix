@@ -4,6 +4,7 @@ import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
+import AuditRows from "@/components/settings/AuditRows.vue";
 import { relTime } from "@/lib/incident";
 
 type Member = components["schemas"]["Member"];
@@ -173,7 +174,6 @@ const actionLabel: Record<string, string> = {
   "token.create": "created an API token",
   "token.delete": "revoked an API token",
 };
-const auditActor = (e: AuditEntry) => (e.via_token ? "a service token" : e.actor_name || e.actor_email || "someone");
 
 // Invite by email — the user must have signed in at least once so it resolves to a real account.
 const showInvite = ref(false);
@@ -381,23 +381,13 @@ watch(() => ws.orgId, load);
         <h3 class="text-[13px] font-semibold">Audit log</h3>
         <span class="font-mono text-[12px] text-ink-3">member & token changes</span>
       </div>
-      <section class="rounded border border-border bg-surface shadow-card">
-        <ul>
-          <li v-for="e in audit" :key="e.id" class="flex items-center gap-3 border-b border-border px-4 py-[11px] last:border-b-0">
-            <span class="h-[7px] w-[7px] flex-none rounded-full" :class="e.action?.startsWith('member.remove') || e.action?.startsWith('token.delete') ? 'bg-down' : 'bg-accent'"></span>
-            <span class="min-w-0 text-[13px]">
-              <b class="font-medium">{{ auditActor(e) }}</b> {{ actionLabel[e.action ?? ""] || e.action }}<span v-if="e.target" class="text-ink-3"> · <span class="font-mono text-[12px]">{{ e.target }}</span></span>
-            </span>
-            <span class="ml-auto flex-none font-mono text-[11.5px] text-ink-3">{{ relTime(e.created_at) }}</span>
-          </li>
-          <li v-if="!audit.length" class="px-4 py-6 text-center text-[13px] text-ink-3">No recorded changes yet.</li>
-          <li v-if="auditHasMore" class="flex justify-center px-4 py-[10px]">
-            <button type="button" class="h-[32px] rounded-sm border border-border-strong px-[14px] text-[12.5px] text-ink-2 hover:border-accent hover:text-accent" @click="moreAudit">
-              Show more ({{ audit.length }} shown)
-            </button>
-          </li>
-        </ul>
-      </section>
+      <AuditRows
+        :entries="audit"
+        :labels="actionLabel"
+        :destructive="['member.remove', 'token.delete']"
+        :has-more="auditHasMore"
+        @more="moreAudit"
+      />
     </div>
   </div>
 </template>

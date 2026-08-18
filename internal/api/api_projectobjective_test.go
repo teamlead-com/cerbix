@@ -131,3 +131,42 @@ func TestProjectReportStatesTheObjectiveOnlyWhenSet(t *testing.T) {
 		t.Fatalf("the 30d window was not found in the report")
 	}
 }
+
+// Clear (the mock's own control) is a statement about a promise that exists: a window with no
+// objective is a 404, not a quiet success, so a mis-typed window cannot read as "cleared". And the
+// budget goes with the objective — it is derived, never stored, so the report returns to silence rather
+// than to 100%.
+func TestClearingTheProjectObjectiveTakesTheBudgetWithIt(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+
+	if rec := do(h, o1Admin, http.MethodDelete, "/api/v1/projects/p1/sla-target?window=30d", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("clearing an unset window = %d, want 404 — a quiet success would read as 'cleared' to "+
+			"the operator who mis-typed the window", rec.Code)
+	}
+	if rec := do(h, o1Admin, http.MethodPut, "/api/v1/projects/p1/sla-target", `{"window":"30d","objective":99.9}`); rec.Code != http.StatusOK {
+		t.Fatalf("set = %d", rec.Code)
+	}
+	if rec := do(h, p1Viewer, http.MethodDelete, "/api/v1/projects/p1/sla-target?window=30d", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer clear = %d, want 403", rec.Code)
+	}
+	if rec := do(h, o1Admin, http.MethodDelete, "/api/v1/projects/p1/sla-target?window=30d", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("clear = %d, want 204", rec.Code)
+	}
+
+	// The report goes back to SILENCE, not to a zero budget — which would read as "you have spent it".
+	rec := do(h, p1Viewer, http.MethodGet, "/api/v1/projects/p1/sla", "")
+	var after struct {
+		Windows []map[string]any `json:"windows"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &after)
+	for _, w := range after.Windows {
+		if _, ok := w["objective"]; ok {
+			t.Errorf("window %v still states an objective after Clear", w["window"])
+		}
+		if _, ok := w["error_budget"]; ok {
+			t.Errorf("window %v still states a budget after Clear — the budget is derived from the "+
+				"objective and must vanish with it", w["window"])
+		}
+	}
+}

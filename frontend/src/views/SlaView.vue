@@ -39,6 +39,69 @@ const savingSlo = ref(false);
 const rowError = ref("");
 const savedId = ref<string | null>(null); // row that just saved, for a brief ✓ flash
 
+// ---- project objective (iter-0155, mock-project-objective.html) -----------
+// A project objective is the promise about the WHOLE, and the existing budget card is a MEAN across
+// monitors that happen to have one. Two numbers that could be mistaken for each other, so each says
+// which question it answers.
+//
+// The current objective is read from the project SLA REPORT rather than through a second GET: the
+// report already states the objective and the budget for a window that has one (and says nothing for a
+// window that does not), so a separate read could only disagree with it.
+const projDraft = ref("");
+const projErr = ref("");
+const projSaving = ref(false);
+const projWindow = "30d"; // the approved mock's window; other windows show dashes until they have one
+const projTarget = computed(() => projectWindows.value.find((w) => w.window === projWindow));
+const projObjective = computed(() => projTarget.value?.objective ?? null);
+const projBudgetLeft = computed(() => {
+  const eb = projTarget.value?.error_budget;
+  return eb ? Math.max(0, 100 - (eb.burned_percent ?? 0)) : null;
+});
+
+async function saveProjectObjective() {
+  const raw = String(projDraft.value ?? "").trim();
+  // The same ONE rule as every other scope, mirrored client-side (D-0165) so the operator reads why
+  // instead of a 400: the open interval (0,100), four decimals, half-up.
+  const objective = raw ? canonicalObjective(Number(raw)) : null;
+  if (objective === null) {
+    projErr.value = "Enter a target above 0 and below 100 (max 99.9999, e.g. 99.9).";
+    return;
+  }
+  projErr.value = "";
+  projSaving.value = true;
+  try {
+    const res = await api.PUT("/api/v1/projects/{projectID}/sla-target", {
+      params: { path: { projectID: ws.projectId } },
+      body: { window: projWindow, objective },
+    });
+    if (res.error) {
+      projErr.value = "Could not save the project objective.";
+      return;
+    }
+    await load();
+  } finally {
+    projSaving.value = false;
+  }
+}
+
+async function clearProjectObjective() {
+  projErr.value = "";
+  projSaving.value = true;
+  try {
+    const res = await api.DELETE("/api/v1/projects/{projectID}/sla-target", {
+      params: { path: { projectID: ws.projectId }, query: { window: projWindow } },
+    });
+    if (res.error) {
+      projErr.value = "Could not clear the project objective.";
+      return;
+    }
+    projDraft.value = "";
+    await load();
+  } finally {
+    projSaving.value = false;
+  }
+}
+
 // ---- burn-rate rules editor (multi-window, Google SRE) --------------------
 // A rule fires when the burn is ≥ threshold in BOTH windows. Burn alerting is
 // on iff at least one rule exists; the SRE default pair seeds new configs.
@@ -590,6 +653,55 @@ watch(() => ws.projectId, () => {
               <span class="font-mono text-[24px] font-medium leading-none tracking-tight tnum" :class="burnCls(burnAvg)">{{ burnFmt(burnAvg) }}</span>
               <span class="text-[12px] text-ink-3">{{ burnAvg != null && burnAvg > 1 ? "elevated — burning faster than budget" : "steady within budget" }}</span>
             </div>
+          </div>
+
+          <!-- project objective: the promise about the whole, next to the mean across its parts -->
+          <div class="mb-[14px] flex flex-col gap-[10px] rounded border border-border bg-surface p-[14px_16px] shadow-card" data-testid="project-objective">
+            <div class="flex items-baseline gap-[10px]">
+              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Project objective · 30d</span>
+              <span class="ml-auto font-mono text-[12px] text-ink-3" title="A project objective cannot page: the schema refuses burn alerting at this scope.">reporting only</span>
+            </div>
+            <div class="flex items-end gap-[14px]">
+              <span v-if="projObjective != null" class="font-mono text-[32px] font-medium leading-none tracking-tight tnum" data-testid="project-objective-value">
+                {{ projObjective }}<small class="text-[16px] text-ink-3">%</small>
+              </span>
+              <span v-else class="font-mono text-[15px] text-ink-3" data-testid="project-objective-unset">not set</span>
+              <span v-if="projBudgetLeft != null" class="pb-1 text-[12px] text-ink-3" data-testid="project-objective-budget">
+                {{ Math.round(projBudgetLeft) }}% of the project's own budget left
+              </span>
+              <span v-else class="pb-1 text-[12px] text-ink-3">the card below is a mean across monitors — not a promise about the project</span>
+            </div>
+            <div v-if="canWrite" class="flex items-center gap-[10px]">
+              <input
+                v-model="projDraft"
+                type="number"
+                step="0.0001"
+                :placeholder="projObjective != null ? String(projObjective) : '99.9'"
+                class="h-[32px] w-[110px] rounded-sm border border-border-strong bg-surface px-[10px] text-right font-mono text-[13px] text-ink"
+                aria-label="Project objective"
+                data-testid="project-objective-input"
+              />
+              <button
+                type="button"
+                class="h-[32px] rounded-sm border border-accent bg-accent px-[14px] text-[12.5px] text-accent-ink disabled:opacity-60"
+                :disabled="projSaving"
+                data-testid="project-objective-save"
+                @click="saveProjectObjective"
+              >
+                Save
+              </button>
+              <button
+                v-if="projObjective != null"
+                type="button"
+                class="h-[32px] rounded-sm border border-border-strong px-[12px] text-[12.5px] text-ink-2 hover:border-accent hover:text-accent disabled:opacity-60"
+                :disabled="projSaving"
+                data-testid="project-objective-clear"
+                @click="clearProjectObjective"
+              >
+                Clear
+              </button>
+            </div>
+            <p v-if="projErr" class="text-[12.5px] text-down" data-testid="project-objective-error">{{ projErr }}</p>
           </div>
 
           <div class="flex flex-col rounded border border-border bg-surface p-[14px_16px] shadow-card">

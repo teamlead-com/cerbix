@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: cerbix API
-  version: 0.22.0
+  version: 0.23.0
   description: >
     Internal uptime & SLA monitoring API. Authentication is via a server-side
     session cookie established by an OIDC provider (`/auth/login` → `/auth/callback`)
@@ -1157,6 +1157,19 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SLATarget' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [sla]
+      summary: Clear the project's SLO objective for a window (editor+)
+      description: >
+        404 when that window has no objective — Clear is a statement about a promise that exists, and a
+        quiet success on a mis-typed window would read as "cleared". Clearing the objective clears the
+        budget with it: the budget is derived, never stored, so the window returns to dashes rather than
+        to 100%.
+      responses:
+        '204': { description: Cleared }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }

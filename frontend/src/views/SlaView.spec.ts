@@ -260,3 +260,93 @@ describe("SlaView objective rule (D-0165, iter-0143)", () => {
     expect(putArgs[1].body.objective).toBe(99.9999);
   });
 });
+
+// The project objective (iter-0155, mock approved by the owner). What is worth pinning is what the mock
+// decided, not the markup: the card states the promise about the WHOLE and is distinct from the mean
+// across monitors; a project without one shows "not set" and no invented number; the client rejects a
+// value the server would refuse, so the operator reads why instead of a 400; and Clear takes the budget
+// with it.
+describe("SlaView project objective", () => {
+  const projectSla = (objective?: number) => ({
+    project_id: "project-a",
+    sla_report_weekly: false,
+    windows: [
+      { window: "24h", total: 100, up: 100, uptime_percent: 100, avg_latency_ms: 5, p95_latency_ms: 9 },
+      {
+        window: "30d",
+        total: 1000,
+        up: 999,
+        uptime_percent: 99.9,
+        avg_latency_ms: 5,
+        p95_latency_ms: 9,
+        ...(objective != null
+          ? { objective, error_budget: { met: true, burned_percent: 26, allowed_downtime_seconds: 100, actual_downtime_seconds: 26 } }
+          : {}),
+      },
+    ],
+  });
+
+  function wire(objective?: number) {
+    apiMock.GET.mockReset();
+    apiMock.PUT.mockReset();
+    apiMock.DELETE.mockReset();
+    apiMock.GET.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/projects/{projectID}/sla") return { data: projectSla(objective) };
+      if (path === "/api/v1/projects/{projectID}/monitors") return { data: [] };
+      if (path === "/api/v1/projects/{projectID}/maintenance") return { data: [] };
+      return { data: [] };
+    });
+    apiMock.PUT.mockResolvedValue({ data: { objective: 99.9, window: "30d" } });
+    apiMock.DELETE.mockResolvedValue({ data: undefined });
+  }
+
+  it("states the project's own promise, and says nothing when there is none", async () => {
+    wire();
+    const { wrapper } = mountView();
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="project-objective-unset"]').text()).toBe("not set");
+    // No budget without an objective: a percentage here would be a promise nobody made.
+    expect(wrapper.find('[data-testid="project-objective-budget"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="project-objective-clear"]').exists()).toBe(false);
+
+    wire(99.9);
+    const second = mountView();
+    await flushPromises();
+    expect(second.wrapper.find('[data-testid="project-objective-value"]').text()).toContain("99.9");
+    expect(second.wrapper.find('[data-testid="project-objective-budget"]').text()).toContain("74%");
+  });
+
+  it("rejects an impossible objective before sending it", async () => {
+    wire();
+    const { wrapper } = mountView();
+    await flushPromises();
+
+    await wrapper.find('[data-testid="project-objective-input"]').setValue("100");
+    await wrapper.find('[data-testid="project-objective-save"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="project-objective-error"]').text()).toContain("below 100");
+    // Nothing was sent: the client mirrors the server's one rule so the operator reads why, not a 400.
+    expect(apiMock.PUT).not.toHaveBeenCalled();
+  });
+
+  it("sends the canonical value and clears through the API", async () => {
+    wire(99.9);
+    const { wrapper } = mountView();
+    await flushPromises();
+
+    await wrapper.find('[data-testid="project-objective-input"]').setValue("99.99994");
+    await wrapper.find('[data-testid="project-objective-save"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.PUT).toHaveBeenCalled();
+    const body = apiMock.PUT.mock.calls[0][1].body;
+    expect(body.objective).toBe(99.9999);
+    expect(body.window).toBe("30d");
+
+    await wrapper.find('[data-testid="project-objective-clear"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.DELETE).toHaveBeenCalled();
+    expect(apiMock.DELETE.mock.calls[0][1].params.query.window).toBe("30d");
+  });
+});

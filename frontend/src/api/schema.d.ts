@@ -2272,7 +2272,35 @@ export interface paths {
             };
         };
         post?: never;
-        delete?: never;
+        /**
+         * Clear the project's SLO objective for a window (editor+)
+         * @description 404 when that window has no objective — Clear is a statement about a promise that exists, and a quiet success on a mis-typed window would read as "cleared". Clearing the objective clears the budget with it: the budget is derived, never stored, so the window returns to dashes rather than to 100%.
+         */
+        delete: {
+            parameters: {
+                query?: {
+                    window?: string;
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Cleared */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;

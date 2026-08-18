@@ -2190,6 +2190,15 @@ func (f *fakeStore) ListAuditByOrg(_ context.Context, orgID string, limit int) (
 	return out, nil
 }
 
+func (f *fakeStore) DeleteProjectSLATarget(_ context.Context, projectID, window string) error {
+	key := projectID + "|" + window
+	if _, ok := f.projectTargets[key]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.projectTargets, key)
+	return nil
+}
+
 func (f *fakeStore) GetProjectSLATarget(_ context.Context, projectID, window string) (domain.SLATarget, error) {
 	if t, ok := f.projectTargets[projectID+"|"+window]; ok {
 		return t, nil

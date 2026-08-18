@@ -181,6 +181,7 @@ type Store interface {
 	// on this scope, so neither method takes a burn argument.
 	GetProjectSLATarget(ctx context.Context, projectID, window string) (domain.SLATarget, error)
 	UpsertProjectSLATarget(ctx context.Context, projectID, window string, objective float64) (domain.SLATarget, error)
+	DeleteProjectSLATarget(ctx context.Context, projectID, window string) error
 	ListAuditByOrg(ctx context.Context, orgID string, limit int) ([]domain.AuditEntry, error)
 	// ListGlobalAudit reads the INSTANCE-level entries (org_id IS NULL) — a global admin's own
 	// history, which no org listing may widen into.
@@ -503,6 +504,7 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla", h.projectSLA)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla-target", h.getProjectSLATarget)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-target", h.putProjectSLATarget)
+	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/sla-target", h.deleteProjectSLATarget)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-report", h.setProjectSLAReport)
 	// Service reliability (FR-021). Phase 1: the resource, its declaration and the state of
 	// materialization. Phase 2 (iter-0141): the reporting endpoints below — the detail still

@@ -149,6 +149,25 @@ func (s *Store) UpsertProjectSLATarget(ctx context.Context, projectID, window st
 	return t, nil
 }
 
+// DeleteProjectSLATarget removes a project's objective for a window. It is NOT idempotent by
+// accident: an absent target answers ErrNotFound, because the UI's Clear is a statement about a
+// promise that exists, and silently succeeding on a window that never had one would let a mis-typed
+// window read as "cleared".
+//
+// Deleting the objective deletes the budget with it — there is no stored budget, it is derived — which
+// is why the row returns to dashes rather than to 100%.
+func (s *Store) DeleteProjectSLATarget(ctx context.Context, projectID, window string) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM sla_targets WHERE project_id = $1 AND window_name = $2`, projectID, window)
+	if err != nil {
+		return fmt.Errorf("store: delete project sla target: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // UpsertMonitorSLATarget sets (or replaces) a monitor's SLO objective for a
 // window and its burn-rate alerting. Rules semantics: enabling burn alerts with
 // no rules provided keeps the target's existing rules (or seeds the SRE default

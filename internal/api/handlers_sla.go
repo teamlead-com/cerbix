@@ -486,3 +486,31 @@ func (h *Handler) putProjectSLATarget(w http.ResponseWriter, r *http.Request) {
 	h.audit(r, proj.OrgID, "project.sla_target", proj.Slug+" "+body.Window)
 	writeJSON(w, http.StatusOK, target)
 }
+
+// deleteProjectSLATarget clears a project's objective for a window (editor+). A window that has no
+// objective is a 404 rather than a quiet success: Clear is a statement about a promise that exists, and
+// succeeding on a mis-typed window would read as "cleared" to the operator who typed it.
+func (h *Handler) deleteProjectSLATarget(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectWrite)
+	if !ok {
+		return
+	}
+	window := r.URL.Query().Get("window")
+	if window == "" {
+		window = "30d"
+	}
+	if _, valid := sla.WindowByName(window); !valid {
+		writeError(w, http.StatusBadRequest, "unknown window")
+		return
+	}
+	if err := h.store.DeleteProjectSLATarget(r.Context(), proj.ID, window); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		h.serverError(w, "delete_project_sla_target", err)
+		return
+	}
+	h.audit(r, proj.OrgID, "project.sla_target_clear", proj.Slug+" "+window)
+	w.WriteHeader(http.StatusNoContent)
+}

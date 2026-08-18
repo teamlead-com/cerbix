@@ -41,4 +41,40 @@ test.describe("SLA editor", () => {
     expect(rtw?.burn_rules?.length).toBe(2);
     expect(rtw?.burn_alert).toBeTruthy();
   });
+
+  // The project objective (iter-0155, mock approved): a promise about the WHOLE project, distinct from
+  // the mean across its monitors. Round-trip through the browser, then Clear — because "clearing takes
+  // the budget with it" is the decision that is easiest to implement halfway.
+  test("project objective round-trips and clearing takes the budget with it", async ({ page }) => {
+    const { projectID } = await firstProject(page);
+
+    // Start clean: an unset window answers 404, and Clear on it must too.
+    await apiSend(page, "delete", `/api/v1/projects/${projectID}/sla-target?window=30d`);
+
+    await page.goto("/sla");
+    await expect(page.getByTestId("project-objective")).toBeVisible();
+    await expect(page.getByTestId("project-objective-unset")).toHaveText("not set");
+
+    await page.getByTestId("project-objective-input").fill("99.9");
+    await page.getByTestId("project-objective-save").click();
+    await expect(page.getByTestId("project-objective-value")).toContainText("99.9");
+    // The report is what states the budget, so its presence proves the server derived it.
+    await expect(page.getByTestId("project-objective-budget")).toBeVisible();
+
+    const stated = await apiGet(page, `/api/v1/projects/${projectID}/sla`);
+    const w30 = (stated as { windows: { window: string; objective?: number; error_budget?: unknown }[] }).windows.find(
+      (w) => w.window === "30d",
+    );
+    expect(w30?.objective).toBe(99.9);
+    expect(w30?.error_budget).toBeTruthy();
+
+    await page.getByTestId("project-objective-clear").click();
+    await expect(page.getByTestId("project-objective-unset")).toHaveText("not set");
+    const after = await apiGet(page, `/api/v1/projects/${projectID}/sla`);
+    const w30after = (after as { windows: { window: string; objective?: number; error_budget?: unknown }[] }).windows.find(
+      (w) => w.window === "30d",
+    );
+    expect(w30after?.objective).toBeUndefined();
+    expect(w30after?.error_budget).toBeUndefined();
+  });
 });

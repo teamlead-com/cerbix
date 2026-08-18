@@ -343,3 +343,25 @@ What the mock decides:
 - **Clear is explicit**, and clearing takes the budget with it: the row returns to dashes, never to 100%.
 - **Not shown on purpose:** a project-level burn history (cannot exist without paging semantics) and a
   per-monitor breakdown of the project budget (that is the objectives table directly below).
+
+## FR-022 — service incidents, SPA deltas only (AWAITING OWNER APPROVAL)
+
+Source: `docs/design/mock-service-incidents.html`. **Not approved yet.** Per the owner's instruction the
+mock covers ONLY what changes in the SPA: four surfaces gain something and nothing else moves. Backend work
+proceeds without it; no Vue file is touched until it is signed off.
+
+- **The subject is a CHIP**, not a column and not a title prefix. Chips are already how phases 4 and 5 say
+  "this row is a different KIND of thing"; a column would reshape every existing row, and a prefix would put
+  the discriminator inside the text people search. A project-level incident carries no chip — which is what
+  makes the chip a discriminator rather than decoration.
+- **A monitor incident is untouched, visibly.** Every panel shows the monitor case beside the service case,
+  because NFR-017 is a promise the UI has to keep too.
+- **"opened automatically" is stated with what confirmed it** — "service DOWN confirmed over 2 evaluations",
+  the same number that governs paging. An operator who finds an incident nobody typed must be able to see
+  the machine that opened it and why.
+- **Impact chips stay on the authenticated detail only.** They already do for monitors (§14); the public page
+  gets the incident and NOT the graph, because §15.0 keeps internal topology unpublished and phase 4 declined
+  to opt in (FR-021 invariant 59).
+- **The service page links, it does not embed.** One timeline, one owner; two renderings of one timeline drift.
+- **Not shown and not built:** a resolve-all control, per-member severity, or escalation progress on a service
+  incident (D5 defers the ladder). A control for a feature that does not exist is a promise the backend refuses.

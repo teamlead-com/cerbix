@@ -37,6 +37,12 @@ type ServiceAlertEvaluation struct {
 	Onsets    int
 	Closes    int
 	Errors    int
+	// IncidentsOpened / IncidentsResolved count the FR-022 incidents this slice opened and resolved. They
+	// are separate from Onsets/Closes on purpose: an onset whose service already had an open auto-incident
+	// announces but opens nothing, and the difference between the two numbers is exactly the flapping the
+	// per-service unique index absorbs.
+	IncidentsOpened   int
+	IncidentsResolved int
 	// Lag is how far behind the oldest evaluated service was, so a stalled evaluator reads as lag
 	// rather than as an absence of alerts — which is indistinguishable from "nothing is wrong".
 	Lag time.Duration
@@ -218,10 +224,33 @@ func (s *Store) evaluateServiceAlertsOn(
 			}); err != nil {
 				return out, err
 			}
+			// FR-022: the incident rides the SAME transaction as the announcement, so an incident without
+			// its announcement — or an announcement without its incident — is unrepresentable (FR-022
+			// invariant 7). This SUPERSEDES FR-021 invariant 86, which said a service alert touches no
+			// incident table; §16.8 carries the note and iter-0156 §4 records why the note, the discharge
+			// row and the test had to move in this same change.
 			if decision.Close {
 				out.Closes++
+				resolved, rerr := s.ResolveServiceIncidentTx(ctx, tx, c.serviceID,
+					"Resolved automatically: the service is no longer in a pageable state.")
+				if rerr != nil {
+					return out, rerr
+				}
+				if resolved {
+					out.IncidentsResolved++
+				}
 			} else {
 				out.Onsets++
+				// Only a LIVE onset opens one, and never a burn breach (spec D1): a budget signal is not an
+				// outage. This evaluator is the live one, so being here is already that guarantee.
+				_, created, ierr := s.OpenServiceIncidentTx(ctx, tx, c.serviceID, c.projectID,
+					c.name+" — service "+string(candidateState), streak)
+				if ierr != nil {
+					return out, ierr
+				}
+				if created {
+					out.IncidentsOpened++
+				}
 			}
 		}
 		tag, err := tx.Exec(ctx, `

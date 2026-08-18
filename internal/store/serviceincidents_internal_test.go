@@ -171,3 +171,57 @@ func TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers(t *testing.T)
 		t.Errorf("a project-level incident reported a snapshot (present=%v, err=%v)", present, err)
 	}
 }
+
+// The machine does not touch what a person owns (spec D1b). Two shapes, and both matter because the
+// resolve is a blind UPDATE by service: a HUMAN-opened service incident must survive the evaluator's
+// close, and a human's resolution of a machine's incident must not be re-annotated.
+//
+// Written after a mutation showed the gap: widening the resolve's WHERE from `source = 'auto'` to any
+// open incident left every test green, which means "a machine must not overwrite a person's conclusion"
+// was resting on nothing.
+func TestTheMachineLeavesAHumanIncidentAlone(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	human, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "checkout — investigating by hand",
+		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opened by a person", "ada@example.com")
+	if err != nil {
+		t.Fatalf("human incident: %v", err)
+	}
+
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "Resolved automatically.")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if resolved {
+		t.Error("the machine resolved a HUMAN's incident — an auto-resolve must name `source = 'auto'`, or " +
+			"every operator-opened incident closes itself the moment the service recovers")
+	}
+
+	after, err := st.GetIncident(ctx, human.ID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if after.Status != domain.IncidentInvestigating || after.ResolvedAt != nil {
+		t.Fatalf("the human's incident became %s (resolved_at %v) — a machine must not draw a conclusion a "+
+			"person is still working on", after.Status, after.ResolvedAt)
+	}
+	var updates int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM incident_updates WHERE incident_id = $1`, human.ID).Scan(&updates); err != nil {
+		t.Fatalf("count updates: %v", err)
+	}
+	if updates != 1 {
+		t.Errorf("the human's incident gained %d updates, want only its own — a machine note on a person's "+
+			"timeline is a second author nobody asked for", updates)
+	}
+}

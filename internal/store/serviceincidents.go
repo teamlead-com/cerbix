@@ -148,3 +148,33 @@ func (s *Store) IncidentMemberSnapshot(ctx context.Context, incidentID string) (
 	}
 	return out, true, nil
 }
+
+// ResolveServiceIncidentTx resolves the service's OPEN auto-incident inside the caller's transaction, and
+// reports whether it resolved one. It is the other half of `OpenServiceIncidentTx` and the two exist as a
+// pair for a reason spelled out in the spec's D1b: an incident that opens by machine and closes only by
+// hand is a trap with two edges — the operator reads "investigating" on a service that recovered hours ago,
+// and because at most one auto-incident may be open per service, the NEXT outage cannot open one, so the
+// second failure is invisible in the timeline.
+//
+// `source = 'auto'` and `status <> 'resolved'` are both in the WHERE: an incident a HUMAN resolved, or one a
+// human opened, is left alone. A machine must not reopen or re-annotate a conclusion a person drew.
+func (s *Store) ResolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body string) (bool, error) {
+	var incidentID string
+	err := tx.QueryRow(ctx,
+		`UPDATE incidents
+		    SET status = 'resolved', resolved_at = now(), updated_at = now()
+		  WHERE service_id = $1 AND source = 'auto' AND status <> 'resolved'
+		 RETURNING id::text`, serviceID).Scan(&incidentID)
+	if err != nil {
+		if noRows(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("store: resolve service incident: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO incident_updates (incident_id, status, body, author) VALUES ($1, 'resolved', $2, 'system')`,
+		incidentID, body); err != nil {
+		return false, fmt.Errorf("store: resolve service incident note: %w", err)
+	}
+	return true, nil
+}

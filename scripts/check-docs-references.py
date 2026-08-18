@@ -49,7 +49,7 @@ def expand(tok):
     return list(itertools.chain.from_iterable(
         expand(tok[:m.start()] + part + tok[m.end():]) for part in m.group(1).split(',')))
 
-GONE_RE = re.compile(r'\b(deleted|removed|retired|renamed|replaced|superseded|never existed|dropped)\b', re.I)
+GONE_RE = re.compile(r'\b(deleted|removed|retired|renamed|rewritten|became|replaced|superseded|never existed|dropped)\b', re.I)
 
 def excused(line, end):
     """A citation is fine when the sentence around it says the artifact is gone.

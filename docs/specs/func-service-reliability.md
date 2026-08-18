@@ -3041,9 +3041,15 @@ dispatch. Phase 5 uses the shape the reliability slices already use:
     count per slice, per-project maintenance scoping, generation/lease CAS against a deposed
     evaluator, and telemetry for last success, lag and backlog; zero alerting services costs one
     query;
-86. no service alert opens, resolves or annotates an INCIDENT, with the single explicit exception of
-    the §16.1 suppression note on a MONITOR's incident — a regression asserts the incident tables
-    are otherwise untouched by an alerting cycle;
+86. **SUPERSEDED by FR-022 (`func-service-incidents.md`, D-0170), kept at its number because other
+    documents cite it.** As written for phase 5: "no service alert opens, resolves or annotates an
+    INCIDENT, with the single explicit exception of the §16.1 suppression note on a MONITOR's incident —
+    a regression asserts the incident tables are otherwise untouched by an alerting cycle". FR-022 makes
+    service incidents the feature: a LIVE onset under armed coverage OPENS one and its close RESOLVES it,
+    in the same transaction as the announcement. What SURVIVES is the half FR-022 does not touch — a
+    service alert still does nothing to a MONITOR's incident (FR-022 NFR-017) — held by
+    `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident`, which REWRITES the phase-5 test rather than
+    deleting it, so the record that this rule changed survives its change;
 87. paging configuration has one domain validator (canonical order, dedupe, bounds, rule-key
     collisions) shared by the API and the MaC apply; server-owned generation/latch/lease fields are
     rejected in request bodies and excluded from the canonical hash; a file-managed service refuses

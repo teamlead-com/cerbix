@@ -38,6 +38,17 @@ timeline disagreeing. It rides the machinery that already exists: `confirm_evalu
 signal, and the DB-clock lease. It does NOT open on a burn breach — a budget signal is not an outage, and
 §16.4's own text calls the burn pair a reporting signal that trails the watermark.
 
+**D1b — an auto-opened incident auto-RESOLVES on the close that ends its announcement. DECIDED, and it is a
+correction of D1 rather than an addition to it.**
+Writing the evaluator exposed the hole: D1 said "auto-open" and said nothing about closing, and an incident
+that opens by machine and only closes by hand is a trap with two edges. The operator sees "investigating"
+on a service that recovered hours ago, and — because at most one auto-incident may be open per service —
+the NEXT outage cannot open one, so the second failure is invisible in the timeline. The monitor path has
+always resolved its auto-incident on recovery (`FindOpenAutoIncidentByMonitor` + the ingest's resolve), so
+this is the precedent rather than a new idea. Rules: the resolve happens in the SAME transaction as the
+close announcement; it writes a `resolved` update saying the service recovered; and an incident a HUMAN
+already resolved is left alone, because a machine must not reopen or re-annotate a conclusion a person drew.
+
 **D2 — ONE table, with an exclusive anchor. DECIDED (delegated).**
 `incidents` gains `service_id` under a composite tenant-safe FK `(service_id, project_id)`, and a CHECK
 that at most ONE anchor is set — `at most`, not exactly one, because a manual project-level incident
@@ -71,18 +82,21 @@ reason: a postmortem that renders "3 members" and cannot name them is a document
 ## 4. What this changes about FR-021 — stated, not discovered later
 
 **FR-022 SUPERSEDES FR-021 invariant 86** ("no service alert opens, resolves or annotates an INCIDENT,
-with the single explicit exception of the §16.1 suppression note on a MONITOR's incident"). That invariant
-is true today and is held by `TestAServiceAlertNeverTouchesTheIncidentTables`, written in iter-0155.
+with the single explicit exception of the §16.1 suppression note on a MONITOR's incident"). It was true
+until this requirement's evaluator slice, held by a phase-5 test that has since been renamed as it was
+rewritten — see below.
 
-When FR-022 lands, three things must move IN THE SAME CHANGE, or this repository repeats invariant 47's
-history — an invariant asserting the opposite of what the code does, left standing for a phase:
+Three things had to move IN THE SAME CHANGE as that slice, or this repository repeats invariant 47's
+history — an invariant asserting the opposite of what the code does, left standing for a phase. They did:
 
-1. FR-021 §16.8's invariant 86 gains a SUPERSEDED note pointing at FR-022, keeping its number because
-   other documents cite it;
-2. the discharge row for 86 in `docs/traceability.md` moves to the test that holds the NEW rule (a service
-   alert opens an incident only under armed coverage, and only on a live onset);
-3. `TestAServiceAlertNeverTouchesTheIncidentTables` is REWRITTEN rather than deleted — the way phase 5
-   rewrote the phase-2 rejection test when it inverted (`TestServiceScopedBurnTargetIsSupported`).
+1. FR-021 §16.8's invariant 86 gained a SUPERSEDED note pointing at FR-022, keeping its number because
+   other documents cite it — DONE in iter-0156;
+2. the discharge row for 86 in `docs/traceability.md` moved to the test that holds the NEW rule, and so
+   did §16.10's scenario 24 — DONE in iter-0156;
+3. the phase-5 test is REWRITTEN rather than deleted — `TestAServiceAlertNeverTouchesTheIncidentTables`
+   became `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident`, which asserts the new rule AND the half
+   that survives, the way phase 5 rewrote the phase-2 rejection test when it inverted
+   (`TestServiceScopedBurnTargetIsSupported`).
 
 The habit that makes this cheap: when a phase lands, grep the spec for its own number before closing it
 (iter-0154 §2.1).
@@ -144,12 +158,19 @@ unique target that already exists.
     single outage is never annotated twice;
 13. a postmortem names the members the service had AT OPEN TIME, and keeps naming them after a member is
     deleted;
-14. every write is audited with its actor and tenant, in the mutating transaction.
+14. every write is audited with its actor and tenant, in the mutating transaction;
+15. an auto-opened service incident RESOLVES in the same transaction as the close that ends its
+    announcement, with an update saying so — and an incident a human already resolved is untouched, because
+    a machine must not reopen or re-annotate a person's conclusion (D1b);
+16. a service that recovers and fails again gets a SECOND incident: the first was resolved, so the partial
+    unique index no longer blocks the next open. This is the property invariant 15 exists to protect.
 
 ## 7. Required test matrix (written before the code)
 
 a service DOWN under armed coverage after `confirm_evaluations`: ONE incident, ONE announcement, in one
-transaction · the same service DOWN while coverage is DISARMED: no incident, the member pages ·
+transaction · the service RECOVERS: the incident resolves in the same transaction as the close, with an
+update that says so · it fails AGAIN: a second incident opens, because the first is resolved ·
+an incident a human resolved while the service was still down: the machine leaves it alone · the same service DOWN while coverage is DISARMED: no incident, the member pages ·
 a burn breach: no incident · a flapping service: one open auto-incident, not four ·
 a member's incident opened while the service's is open: both exist, unchanged (NFR-017) ·
 resolve a service incident: the member's stays open · delete the service: the anchor clears, the tenant key

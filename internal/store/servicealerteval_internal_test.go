@@ -339,59 +339,104 @@ func TestEvaluatorSliceIsBoundedAndFair(t *testing.T) {
 	}
 }
 
-// Invariant 86 (§16.8) and the last line of the §16.10 matrix: a service alert NEVER opens,
-// resolves or annotates an incident. The single exception is the §16.1 suppression note on a
-// MONITOR's incident, which is written by the outbox worker and not by this evaluator.
+// FR-022 REWRITES what FR-021 invariant 86 asserted, and the rewrite rather than a deletion is the point.
 //
-// The reason this needs a regression rather than a reading of the code: a service that pages looks
-// exactly like a thing that should open an incident, and every future change to this evaluator will
-// be written by someone who has just read §14 (where incidents ARE the correlation subject). Owner
-// decision 3 defers service incidents entirely — so the pager may fire, and the incident timeline
-// must stay a MONITOR story until a later phase says otherwise.
-func TestAServiceAlertNeverTouchesTheIncidentTables(t *testing.T) {
+// Invariant 86 said a service alert opens, resolves or annotates NO incident, with the single exception of
+// the §16.1 suppression note on a MONITOR's incident. That was true and tested until FR-022 (D-0170) made
+// service incidents the feature. The invariant is now marked SUPERSEDED at its number in §16.8 and its
+// discharge row points here — the same treatment phase 5 gave the phase-2 burn-rejection test when it
+// inverted (`TestServiceScopedBurnTargetIsSupported`). Deleting this test would have removed the record
+// that the rule ever changed.
+//
+// What survives of 86 is the half FR-022 does NOT touch: a service alert still does nothing to a MONITOR's
+// incident. That half is asserted here too, because it is the one an implementer is most likely to break
+// while adding the other.
+func TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := alertingService(t, st, ctx)
 
-	counts := func(what string) (incidents, updates int64) {
-		t.Helper()
-		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM incidents`).Scan(&incidents); err != nil {
-			t.Fatalf("%s: count incidents: %v", what, err)
-		}
-		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM incident_updates`).Scan(&updates); err != nil {
-			t.Fatalf("%s: count incident_updates: %v", what, err)
-		}
-		return incidents, updates
+	// A MONITOR's incident, opened before anything else happens. Nothing the evaluator does may touch it.
+	monitorIncident, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: f.projectID, MonitorID: f.monitorID, Title: "checkout-http down",
+		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opened by hand", "tester")
+	if err != nil {
+		t.Fatalf("monitor incident: %v", err)
 	}
 
 	setMemberHealth(t, st, ctx, f, true)
 	evalOnce(t, st, ctx)
-	beforeIncidents, beforeUpdates := counts("before")
 
-	// A confirmed outage: the service announces, which is the whole point of phase 5.
+	// A confirmed outage opens ONE incident, anchored to the SERVICE, in the same pass that announces.
 	setMemberHealth(t, st, ctx, f, false)
 	evalOnce(t, st, ctx)
-	if got := evalOnce(t, st, ctx); got.Onsets != 1 {
-		t.Fatalf("no onset announced (%+v) — this test would then pass vacuously", got)
+	got := evalOnce(t, st, ctx)
+	if got.Onsets != 1 || got.IncidentsOpened != 1 {
+		t.Fatalf("onset pass = %+v, want one onset and one incident opened", got)
 	}
-	// ...and the recovery closes it.
-	setMemberHealth(t, st, ctx, f, true)
-	evalOnce(t, st, ctx)
-	if got := evalOnce(t, st, ctx); got.Closes != 1 {
-		t.Fatalf("no close announced (%+v) — this test would then pass vacuously", got)
+	inc, err := st.FindOpenAutoIncidentByService(ctx, st.pool, f.serviceID)
+	if err != nil {
+		t.Fatalf("no open service incident after an announced onset: %v — the incident and the announcement "+
+			"are one transaction (FR-022 invariant 7)", err)
 	}
-	if len(alertEvents(t, st, ctx)) != 2 {
-		t.Fatalf("expected an onset and a close on the wire, got %d events", len(alertEvents(t, st, ctx)))
+	if inc.ServiceID != f.serviceID || inc.MonitorID != "" {
+		t.Fatalf("anchors = service %q / monitor %q, want the service alone", inc.ServiceID, inc.MonitorID)
+	}
+	var opening string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT body FROM incident_updates WHERE incident_id = $1 ORDER BY created_at LIMIT 1`, inc.ID).Scan(&opening); err != nil {
+		t.Fatalf("read opening note: %v", err)
+	}
+	if !strings.Contains(opening, "confirmed over") {
+		t.Errorf("opening note = %q, want it to state what confirmed the open — an operator who finds an "+
+			"incident nobody typed needs the machine's reason", opening)
 	}
 
-	afterIncidents, afterUpdates := counts("after")
-	if afterIncidents != beforeIncidents {
-		t.Errorf("incidents %d → %d: a service alert opened or resolved an incident (invariant 86). "+
-			"Service incidents are deferred by owner decision 3; the pager fires, the incident timeline "+
-			"stays a MONITOR story", beforeIncidents, afterIncidents)
+	// The recovery RESOLVES it, in the same pass that closes the announcement (invariant 15). Without this
+	// the operator reads "investigating" on a recovered service and the next outage cannot open one.
+	setMemberHealth(t, st, ctx, f, true)
+	evalOnce(t, st, ctx)
+	closed := evalOnce(t, st, ctx)
+	if closed.Closes != 1 || closed.IncidentsResolved != 1 {
+		t.Fatalf("close pass = %+v, want one close and one incident resolved", closed)
 	}
-	if afterUpdates != beforeUpdates {
-		t.Errorf("incident_updates %d → %d: a service alert annotated an incident timeline (invariant 86). "+
-			"The only permitted note is the outbox worker's ⏸ suppression note on a MONITOR's incident",
-			beforeUpdates, afterUpdates)
+	resolved, err := st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatalf("read incident: %v", err)
+	}
+	if resolved.Status != domain.IncidentResolved || resolved.ResolvedAt == nil {
+		t.Fatalf("incident after recovery = %s (resolved_at %v), want resolved", resolved.Status, resolved.ResolvedAt)
+	}
+
+	// ...and a SECOND failure opens a SECOND incident (invariant 16) — which is only possible because the
+	// first was resolved, so the per-service unique index no longer blocks it.
+	setMemberHealth(t, st, ctx, f, false)
+	evalOnce(t, st, ctx)
+	again := evalOnce(t, st, ctx)
+	if again.IncidentsOpened != 1 {
+		t.Fatalf("second outage = %+v, want a new incident: a service that recovers and fails again must be "+
+			"visible in the timeline", again)
+	}
+	second, err := st.FindOpenAutoIncidentByService(ctx, st.pool, f.serviceID)
+	if err != nil || second.ID == inc.ID {
+		t.Fatalf("second incident = %s (err %v), want a new one", second.ID, err)
+	}
+
+	// The surviving half of invariant 86: the MONITOR's incident is untouched throughout — same status, same
+	// timeline length. This is the half an implementer is most likely to break while adding the other.
+	mon, err := st.GetIncident(ctx, monitorIncident.ID)
+	if err != nil {
+		t.Fatalf("read monitor incident: %v", err)
+	}
+	if mon.Status != domain.IncidentInvestigating || mon.ResolvedAt != nil {
+		t.Errorf("the monitor's incident changed to %s — a service alert must do nothing to it (NFR-017)", mon.Status)
+	}
+	var monUpdates int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM incident_updates WHERE incident_id = $1`, monitorIncident.ID).Scan(&monUpdates); err != nil {
+		t.Fatalf("count monitor updates: %v", err)
+	}
+	if monUpdates != 1 {
+		t.Errorf("the monitor's incident gained %d updates, want only its own opening one", monUpdates)
 	}
 }

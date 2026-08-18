@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  push:
   pull_request:
   workflow_dispatch:
 
@@ -41,6 +42,12 @@ jobs:
         run: go vet ./...
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: Docs references and FR-021 discharge (make docs-check)
+        # D-0169 closes FR-021 "against the discharge tables … and the gate keeps them true". A gate
+        # that only runs when a human types it is a checklist, so it runs here: every path and Test*
+        # name cited by a LIVING document must resolve, and all 91 invariants + 24 required scenarios
+        # must have a row.
+        run: make docs-check
       - name: Tests (-race, DB-gated suites against the service container)
         env:
           CERBIX_TEST_DATABASE_DSN: postgres://test:test@localhost:5432/cerbixtest?sslmode=disable

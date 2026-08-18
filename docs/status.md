@@ -4,22 +4,19 @@ Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and 
 
 ## Current iteration (iter-0152 — FR-021 phase 5, the POST-CLOSE correction arc. iter-0151 closed at `475a0d3` and is immutable from that commit; the rounds that followed it are [380], [384], [392], [395], [399], [401] and [403] — and recording the first of them by editing that closed report was itself a finding ([401]). Everything after the closure lives in [iter-0152](iterations/iter-0152.md))
 
-**Cumulative counters for the FR-021 phase-5 arc live HERE**, because this document is long-lived and
-an iteration report is a frozen snapshot — that is finding [401] in one sentence. Two totals, two
-different sets, never a cross-check of each other:
+**No lifetime review scoreboard lives here, on purpose.** An earlier revision kept a cumulative
+"reviewer findings" total in this document, and every review OF that total produced a finding that
+changed it — a recursion that cannot converge while the number is live. Requirement status does not
+need a self-referential lifetime count. The per-round finding IDs are evidence and they live where
+evidence belongs: enumerated in [iter-0152](iterations/iter-0152.md) §0/§2 and in the party record.
 
-- **Reviewer findings — 25.** Per round, which is the only spelling that can be checked: [358] 2 P0 +
-  3 P1 · [371] 5 P1 + 1 P2 · [380] 5 P1 · [384] 1 P1 + 1 P2 · [392] 1 P1 + 1 P2 · [395] 2 P2 ·
-  [399] 1 P2 · [401] 1 P1 governance · [403] 1 P2. Two rounds before iter-0151 closed, seven after.
-  All corrected, none contested. Every total here is backed by the IDs beside it, so it can be checked
-  rather than believed.
-- **§2 finding sections — 24.** 15 in [iter-0151](iterations/iter-0151.md), frozen at its closure
-  commit, and 9 in [iter-0152](iterations/iter-0152.md), which is still OPEN. Named after exactly what
-  its checker counts — `grep -c '^### 2\.'` — because the previous name promised something else: it is
-  SECTIONS, not individual defects (§2.7 of iter-0152 carries two honesty gaps under one heading), and
-  it INCLUDES the review's governance and documentation findings (§2.8 is [401], §2.9 is [403]) rather
-  than excluding them. This set INCLUDES the ones I found myself and EXCLUDES
-  the review's documentation and counting findings, which were never product defects.
+One counter remains, because it is mechanically stable and freezes when its report closes:
+
+- **§2 finding sections — 25.** 15 in [iter-0151](iterations/iter-0151.md) and 10 in
+  [iter-0152](iterations/iter-0152.md). Named after exactly what its checker counts,
+  `grep -c '^### 2\.'` — it is SECTIONS, not individual defects (§2.7 of iter-0152 carries two
+  honesty gaps under one heading), and it INCLUDES the review's governance and documentation findings
+  (§2.8 is [401], §2.9 is [403], §2.10 is [405]/[407]).
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |

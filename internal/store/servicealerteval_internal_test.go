@@ -338,3 +338,60 @@ func TestEvaluatorSliceIsBoundedAndFair(t *testing.T) {
 		t.Fatalf("%d owning services were never reached after two passes", unevaluated)
 	}
 }
+
+// Invariant 86 (§16.8) and the last line of the §16.10 matrix: a service alert NEVER opens,
+// resolves or annotates an incident. The single exception is the §16.1 suppression note on a
+// MONITOR's incident, which is written by the outbox worker and not by this evaluator.
+//
+// The reason this needs a regression rather than a reading of the code: a service that pages looks
+// exactly like a thing that should open an incident, and every future change to this evaluator will
+// be written by someone who has just read §14 (where incidents ARE the correlation subject). Owner
+// decision 3 defers service incidents entirely — so the pager may fire, and the incident timeline
+// must stay a MONITOR story until a later phase says otherwise.
+func TestAServiceAlertNeverTouchesTheIncidentTables(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := alertingService(t, st, ctx)
+
+	counts := func(what string) (incidents, updates int64) {
+		t.Helper()
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM incidents`).Scan(&incidents); err != nil {
+			t.Fatalf("%s: count incidents: %v", what, err)
+		}
+		if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM incident_updates`).Scan(&updates); err != nil {
+			t.Fatalf("%s: count incident_updates: %v", what, err)
+		}
+		return incidents, updates
+	}
+
+	setMemberHealth(t, st, ctx, f, true)
+	evalOnce(t, st, ctx)
+	beforeIncidents, beforeUpdates := counts("before")
+
+	// A confirmed outage: the service announces, which is the whole point of phase 5.
+	setMemberHealth(t, st, ctx, f, false)
+	evalOnce(t, st, ctx)
+	if got := evalOnce(t, st, ctx); got.Onsets != 1 {
+		t.Fatalf("no onset announced (%+v) — this test would then pass vacuously", got)
+	}
+	// ...and the recovery closes it.
+	setMemberHealth(t, st, ctx, f, true)
+	evalOnce(t, st, ctx)
+	if got := evalOnce(t, st, ctx); got.Closes != 1 {
+		t.Fatalf("no close announced (%+v) — this test would then pass vacuously", got)
+	}
+	if len(alertEvents(t, st, ctx)) != 2 {
+		t.Fatalf("expected an onset and a close on the wire, got %d events", len(alertEvents(t, st, ctx)))
+	}
+
+	afterIncidents, afterUpdates := counts("after")
+	if afterIncidents != beforeIncidents {
+		t.Errorf("incidents %d → %d: a service alert opened or resolved an incident (invariant 86). "+
+			"Service incidents are deferred by owner decision 3; the pager fires, the incident timeline "+
+			"stays a MONITOR story", beforeIncidents, afterIncidents)
+	}
+	if afterUpdates != beforeUpdates {
+		t.Errorf("incident_updates %d → %d: a service alert annotated an incident timeline (invariant 86). "+
+			"The only permitted note is the outbox worker's ⏸ suppression note on a MONITOR's incident",
+			beforeUpdates, afterUpdates)
+	}
+}

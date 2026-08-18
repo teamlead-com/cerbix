@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1288,4 +1289,64 @@ func TestDelegationOutcomesAreCountedPerSignal(t *testing.T) {
 			t.Fatal("an ambiguous delegation lookup did not FAIL OPEN: the page was withheld")
 		}
 	})
+}
+
+// Invariant 78 (§16, §19): suppression touches DELIVERY ONLY. Facts, status flips,
+// auto-incidents, escalation rows and progress, and the SLO history are what they would have been
+// with no delegation at all — the only differences are the page that was not sent and the
+// suppression record that says so.
+//
+// This is the invariant that makes delegation safe to turn on: an operator who disowns a service
+// tomorrow must find the same history they would have had, not a gap. Run one identical event
+// through an ARMED worker and a DISARMED one and compare everything the worker did to the store.
+func TestDelegationChangesDeliveryAndNothingElse(t *testing.T) {
+	build := func(armed bool) (*fakeStore, *fakeNotify) {
+		fs := &fakeStore{
+			monitors: map[string]domain.Monitor{
+				"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusDown},
+			},
+			ictx: domain.IncidentContext{CoFailures: []string{"api-http"}, CoFailureTotal: 1, DominantClass: "timeout"},
+			pending: []domain.OutboxEvent{
+				{ID: "e-down", Topic: domain.TopicMonitorTransition,
+					Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 0, false)},
+			},
+		}
+		if armed {
+			fs.delegation = armedFor("m1", store.DelegationLive)
+		}
+		nf := &fakeNotify{}
+		newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+		return fs, nf
+	}
+
+	armed, armedNotify := build(true)
+	open, openNotify := build(false)
+
+	// The page is the ONLY thing that differs.
+	if armedNotify.called != 0 || openNotify.called == 0 {
+		t.Fatalf("delivery: armed called=%d (want 0), disarmed called=%d (want >0)",
+			armedNotify.called, openNotify.called)
+	}
+	if len(armed.suppressRecords) != 1 || len(open.suppressRecords) != 0 {
+		t.Fatalf("suppression records: armed=%v, disarmed=%v", armed.suppressRecords, open.suppressRecords)
+	}
+
+	// Everything else the worker did to the store is identical. The event is CONSUMED either way:
+	// a suppressed row that stayed pending would be redelivered forever, and a suppressed row that
+	// FAILED would poison the queue with a decision that was deliberate.
+	if !reflect.DeepEqual(armed.delivered, open.delivered) {
+		t.Fatalf("delivered rows differ: armed=%v, disarmed=%v — suppression must consume the event, "+
+			"not change the queue's history (invariant 78)", armed.delivered, open.delivered)
+	}
+	if !reflect.DeepEqual(armed.failed, open.failed) || len(armed.failed) != 0 {
+		t.Fatalf("failure rows differ: armed=%v, disarmed=%v — a deliberate suppression is not a "+
+			"delivery failure (invariant 78)", armed.failed, open.failed)
+	}
+	if !reflect.DeepEqual(armed.appended, open.appended) {
+		t.Fatalf("incident context differs: armed=%v, disarmed=%v — the ⚡ context note is a FACT about "+
+			"the outage and does not depend on who pages (invariant 78)", armed.appended, open.appended)
+	}
+	if !reflect.DeepEqual(armed.correlated, open.correlated) {
+		t.Fatalf("correlation differs: armed=%v, disarmed=%v (invariant 78)", armed.correlated, open.correlated)
+	}
 }

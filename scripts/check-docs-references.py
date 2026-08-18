@@ -75,6 +75,54 @@ def source_text():
             parts.append(open(f, encoding='utf-8', errors='ignore').read())
     return '\n'.join(parts)
 
+DISCHARGE_DOC = 'docs/traceability.md'
+INV_HEADING = '### Invariants (§19 for 1–74, §16.8 for 75–91)'
+MATRIX_HEADING = '### Required test matrix (§16.10, written before the phase-5 code)'
+
+
+def discharge_rows(text, heading):
+    """Rows of the numbered table that follows `heading`, as {number: discharge cell}."""
+    i = text.find(heading)
+    if i < 0:
+        return None
+    out = {}
+    for line in text[i:].split('\n')[1:]:
+        if line.startswith('### ') or line.startswith('## '):
+            break
+        cells = [c.strip() for c in line.split('|')]
+        if len(cells) < 5 or not cells[1].isdigit():
+            continue
+        out[int(cells[1])] = cells[3]
+    return out
+
+
+def check_discharge(src):
+    """FR-021 states 91 acceptance invariants and 24 required scenarios. Every one must have a row,
+    and every row must name a test that exists or an INSPECTION: reason — that is what makes "done"
+    a checkable claim instead of a memory of thirty iteration reports."""
+    bad = []
+    text = open(DISCHARGE_DOC, encoding='utf-8').read()
+    for heading, count, label in ((INV_HEADING, 91, 'invariant'), (MATRIX_HEADING, 24, 'scenario')):
+        rows = discharge_rows(text, heading)
+        if rows is None:
+            bad.append((DISCHARGE_DOC, 0, 'discharge', f'the {label} table is missing entirely'))
+            continue
+        for n in range(1, count + 1):
+            cell = rows.get(n)
+            if cell is None:
+                bad.append((DISCHARGE_DOC, 0, 'discharge', f'{label} {n} has no row'))
+                continue
+            names = re.findall(r'`(Test[A-Za-z0-9_]+)`', cell)
+            if names:
+                for name in names:
+                    if not (re.search(r'\bfunc\s+' + re.escape(name) + r'\b', src) or name in src):
+                        bad.append((DISCHARGE_DOC, 0, 'discharge', f'{label} {n} cites missing {name}'))
+            elif 'INSPECTION:' not in cell and 'spec.ts' not in cell:
+                bad.append((DISCHARGE_DOC, 0, 'discharge',
+                            f'{label} {n} names neither a test nor an INSPECTION: reason'))
+    return bad
+
+
 def main():
     src = source_text()
     bad = []
@@ -98,8 +146,10 @@ def main():
                 if excused(line, line.find(name) + len(name)):
                     continue
                 bad.append((doc, n, 'test', name))
+    bad += check_discharge(src)
     if not bad:
-        print('docs references: OK — every path and Test* name in the living documents resolves')
+        print('docs references: OK — every path and Test* name in the living documents resolves, '
+              'and all 91 invariants + 24 required scenarios are discharged')
         return 0
     print(f'docs references: {len(bad)} unresolved citation(s) in living documents\n')
     for doc, n, kind, tok in bad:

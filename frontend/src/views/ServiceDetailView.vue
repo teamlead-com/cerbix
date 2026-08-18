@@ -24,6 +24,9 @@ const loading = ref(true);
 const error = ref("");
 const detail = ref<Detail | null>(null);
 const monitors = ref<Monitor[]>([]);
+// The service's OPEN incident, if it has one (FR-022; mock panel 3). A LINK, never an embedded
+// timeline: the incident detail owns that, and two renderings of one timeline drift.
+const openIncident = ref<{ id?: string; title?: string } | null>(null);
 
 const serviceId = computed(() => String(route.params.id || ""));
 const managed = computed(() => detail.value?.service.managed_by ?? "");
@@ -49,11 +52,26 @@ async function load() {
     }
     detail.value = svc.data;
     monitors.value = mons.data ?? [];
+    loadOpenIncident().catch(() => {});
   } catch {
     error.value = "Could not load the service.";
   } finally {
     loading.value = false;
   }
+}
+
+// Best-effort, and it fails CLOSED into showing nothing: a link that cannot be resolved is worse
+// than no link, and the service page's own job — what this service IS and how it is doing — must
+// not depend on the incident query.
+async function loadOpenIncident() {
+  openIncident.value = null;
+  const projectID = ws.projectId;
+  if (!projectID || !serviceId.value) return;
+  const res = await api.GET("/api/v1/projects/{projectID}/incidents", {
+    params: { path: { projectID } },
+  });
+  const open = (res.data ?? []).find((i) => i.service_id === serviceId.value && i.status !== "resolved");
+  openIncident.value = open ? { id: open.id, title: open.title } : null;
 }
 
 // The declaration stores monitor ids; a reader needs the slug, which is what a bundle would
@@ -137,6 +155,14 @@ watch(() => [route.params.id, ws.projectId], load);
             </span>
           </div>
           <p class="mt-[3px] font-mono text-[12.5px] text-ink-3">{{ detail.service.slug }}</p>
+          <RouterLink
+            v-if="openIncident?.id"
+            :to="{ name: 'incident', params: { id: openIncident.id } }"
+            class="mt-[7px] inline-flex items-center gap-[6px] rounded-full border border-down/40 bg-down-weak px-[10px] py-[3px] text-[12.5px] text-down hover:border-down/60"
+            data-testid="service-open-incident"
+          >
+            open incident → <span class="font-medium">{{ openIncident.title }}</span>
+          </RouterLink>
           <p v-if="detail.service.description" class="mt-[6px] text-[13px] text-ink-2">{{ detail.service.description }}</p>
         </div>
 

@@ -346,9 +346,11 @@ What the mock decides:
 
 ## FR-022 — service incidents, SPA deltas only (AWAITING OWNER APPROVAL)
 
-Source: `docs/design/mock-service-incidents.html`. **Not approved yet.** Per the owner's instruction the
-mock covers ONLY what changes in the SPA: four surfaces gain something and nothing else moves. Backend work
-proceeds without it; no Vue file is touched until it is signed off.
+Source: `docs/design/mock-service-incidents.html`. **APPROVED by the owner on 2026-08-19** ("мок ок"), and
+built in iter-0156 §2.10. Per the owner's instruction the mock covers ONLY what changes in the SPA: four
+surfaces gain something and nothing else moves. Backend work proceeded without it and no Vue file was touched
+until the sign-off — including through a round in which a REVIEWER wrote "approved on behalf of the owner",
+which is not the owner and did not unblock anything.
 
 - **The subject is a CHIP**, not a column and not a title prefix. Chips are already how phases 4 and 5 say
   "this row is a different KIND of thing"; a column would reshape every existing row, and a prefix would put

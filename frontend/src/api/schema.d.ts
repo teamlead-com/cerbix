@@ -2187,6 +2187,97 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/sla-target": {
+        parameters: {
+            query?: {
+                window?: string;
+            };
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The project's SLO objective for a window (viewer+)
+         * @description 404 when the project has no objective for that window. Absent is the answer: a project without an objective has no error budget, and returning 99.9 would be a number nobody chose.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    window?: string;
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SLATarget"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /**
+         * Set the project's SLO objective for a window (editor+)
+         * @description REPORTING ONLY. The body is `{window, objective}` and nothing else — `burn_alert` or `burn_rules` are a 400 rather than a silently dropped hope, and the schema refuses a paging project target as well (`sla_targets_project_no_burn_chk`), so the three layers agree. The objective goes through the one canonical rule shared by every scope: the open interval (0,100), rounded half-up at four decimals (D-0165).
+         */
+        put: {
+            parameters: {
+                query?: {
+                    window?: string;
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @default 30d */
+                        window?: string;
+                        /**
+                         * Format: double
+                         * @example 99.9
+                         */
+                        objective: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SLATarget"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/sla-report": {
         parameters: {
             query?: never;

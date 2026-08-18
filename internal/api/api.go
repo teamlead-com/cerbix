@@ -177,6 +177,10 @@ type Store interface {
 	DeleteSubscriberByToken(ctx context.Context, token string) error
 	EnqueueOutbox(ctx context.Context, topic string, payload []byte) error
 	RecordAudit(ctx context.Context, e domain.AuditEntry) error
+	// Project-scoped SLO objective (iter-0155). REPORTING ONLY — the schema refuses burn alerting
+	// on this scope, so neither method takes a burn argument.
+	GetProjectSLATarget(ctx context.Context, projectID, window string) (domain.SLATarget, error)
+	UpsertProjectSLATarget(ctx context.Context, projectID, window string, objective float64) (domain.SLATarget, error)
 	ListAuditByOrg(ctx context.Context, orgID string, limit int) ([]domain.AuditEntry, error)
 	// ListGlobalAudit reads the INSTANCE-level entries (org_id IS NULL) — a global admin's own
 	// history, which no org listing may widen into.
@@ -497,6 +501,8 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/monitors/{monitorID}/convert-to-service", h.convertCompositeToService)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/availability", h.projectAvailability)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla", h.projectSLA)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla-target", h.getProjectSLATarget)
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-target", h.putProjectSLATarget)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-report", h.setProjectSLAReport)
 	// Service reliability (FR-021). Phase 1: the resource, its declaration and the state of
 	// materialization. Phase 2 (iter-0141): the reporting endpoints below — the detail still

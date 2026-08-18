@@ -126,6 +126,8 @@ type fakeStore struct {
 	secretRefs     map[string]int                    // "projectID/name" → UI-managed ref count
 	secretFileRefs map[string]int                    // "projectID/name" → file-managed ref count
 	secretSeq      int
+	// project-scoped SLO objective (iter-0155)
+	projectTargets map[string]domain.SLATarget
 	// global audit (iter-0155)
 	globalAudit    []domain.AuditEntry
 	globalAuditErr error
@@ -2186,6 +2188,22 @@ func (f *fakeStore) ListAuditByOrg(_ context.Context, orgID string, limit int) (
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeStore) GetProjectSLATarget(_ context.Context, projectID, window string) (domain.SLATarget, error) {
+	if t, ok := f.projectTargets[projectID+"|"+window]; ok {
+		return t, nil
+	}
+	return domain.SLATarget{}, store.ErrNotFound
+}
+
+func (f *fakeStore) UpsertProjectSLATarget(_ context.Context, projectID, window string, objective float64) (domain.SLATarget, error) {
+	if f.projectTargets == nil {
+		f.projectTargets = map[string]domain.SLATarget{}
+	}
+	t := domain.SLATarget{ProjectID: projectID, Window: window, Objective: objective}
+	f.projectTargets[projectID+"|"+window] = t
+	return t, nil
 }
 
 func (f *fakeStore) ListGlobalAudit(_ context.Context, limit int) ([]domain.AuditEntry, error) {

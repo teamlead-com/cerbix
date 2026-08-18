@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: cerbix API
-  version: 0.21.0
+  version: 0.22.0
   description: >
     Internal uptime & SLA monitoring API. Authentication is via a server-side
     session cookie established by an OIDC provider (`/auth/login` → `/auth/callback`)
@@ -1109,6 +1109,56 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProjectSLA' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/sla-target:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - in: query
+        name: window
+        required: false
+        schema: { type: string, default: "30d" }
+    get:
+      tags: [sla]
+      summary: The project's SLO objective for a window (viewer+)
+      description: >
+        404 when the project has no objective for that window. Absent is the answer: a project without
+        an objective has no error budget, and returning 99.9 would be a number nobody chose.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SLATarget' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [sla]
+      summary: Set the project's SLO objective for a window (editor+)
+      description: >
+        REPORTING ONLY. The body is `{window, objective}` and nothing else — `burn_alert` or
+        `burn_rules` are a 400 rather than a silently dropped hope, and the schema refuses a paging
+        project target as well (`sla_targets_project_no_burn_chk`), so the three layers agree. The
+        objective goes through the one canonical rule shared by every scope: the open interval (0,100),
+        rounded half-up at four decimals (D-0165).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                window: { type: string, default: "30d" }
+                objective: { type: number, format: double, example: 99.9 }
+              required: [objective]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SLATarget' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/projects/{projectID}/sla-report:

@@ -130,10 +130,24 @@ func (h *Handler) projectSLA(w http.ResponseWriter, r *http.Request) {
 			h.serverError(w, "project_sli", err)
 			return
 		}
-		windows = append(windows, windowSLA{
+		ws := windowSLA{
 			Window: win.Name, Total: c.Total, Up: c.Up,
 			UptimePercent: sla.Uptime(c.Up, c.Total), AvgLatencyMS: c.AvgLatencyMS, P95LatencyMS: c.P95LatencyMS,
-		})
+		}
+		// A project objective is REPORTING ONLY (iter-0155): state it and the budget it produces when
+		// the project has one, and say nothing when it does not. The burn fields stay absent because
+		// the schema refuses burn alerting at this scope — an omitted field is the honest rendering of
+		// "this cannot page", where `burn_alert: false` would read as "not yet".
+		if target, terr := h.store.GetProjectSLATarget(r.Context(), proj.ID, win.Name); terr == nil {
+			obj := target.Objective
+			budget := sla.ErrorBudget(obj, c.Up, c.Total)
+			ws.Objective = &obj
+			ws.Budget = &budget
+		} else if !errors.Is(terr, store.ErrNotFound) {
+			h.serverError(w, "get_project_sla_target", terr)
+			return
+		}
+		windows = append(windows, ws)
 	}
 	reportEnabled, err := h.store.ProjectSLAReportEnabled(r.Context(), proj.ID)
 	if err != nil {
@@ -395,4 +409,80 @@ func (h *Handler) deleteMaintenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// getProjectSLATarget returns the project's objective for a window, or 404 when it has none. Absent
+// is a real answer here: a project without an objective has no error budget, and inventing 99.9 would
+// be a number nobody chose.
+func (h *Handler) getProjectSLATarget(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectRead)
+	if !ok {
+		return
+	}
+	window := r.URL.Query().Get("window")
+	if window == "" {
+		window = "30d"
+	}
+	if _, valid := sla.WindowByName(window); !valid {
+		writeError(w, http.StatusBadRequest, "unknown window")
+		return
+	}
+	target, err := h.store.GetProjectSLATarget(r.Context(), proj.ID, window)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		h.serverError(w, "get_project_sla_target", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, target)
+}
+
+// putProjectSLATarget sets a project's objective for a window (editor+). REPORTING ONLY by owner
+// decision (iter-0155): the body carries `{window, objective}` and nothing else, a burn field is a 400
+// rather than a silently dropped hope, and the schema refuses a paging project target anyway — so the
+// three layers agree instead of one of them being the only thing standing between an operator and an
+// alert nobody designed.
+func (h *Handler) putProjectSLATarget(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectWrite)
+	if !ok {
+		return
+	}
+	var body struct {
+		Window    string   `json:"window"`
+		Objective float64  `json:"objective"`
+		BurnAlert *bool    `json:"burn_alert"`
+		BurnRules *[]any   `json:"burn_rules"`
+		Extra     *float64 `json:"-"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	// A project objective cannot page. Saying so with a 400 is the difference between a promise and
+	// a field that looks configurable and is ignored.
+	if body.BurnAlert != nil || body.BurnRules != nil {
+		writeError(w, http.StatusBadRequest, "a project objective is reporting only: burn alerting is not configurable at project scope")
+		return
+	}
+	if body.Window == "" {
+		body.Window = "30d"
+	}
+	if _, valid := sla.WindowByName(body.Window); !valid {
+		writeError(w, http.StatusBadRequest, "unknown window")
+		return
+	}
+	// The same ONE objective rule as every other scope (D-0165).
+	objective, cerr := domain.CanonicalObjective(body.Objective)
+	if cerr != nil {
+		writeError(w, http.StatusBadRequest, cerr.Error())
+		return
+	}
+	target, err := h.store.UpsertProjectSLATarget(r.Context(), proj.ID, body.Window, objective)
+	if err != nil {
+		h.serverError(w, "upsert_project_sla_target", err)
+		return
+	}
+	h.audit(r, proj.OrgID, "project.sla_target", proj.Slug+" "+body.Window)
+	writeJSON(w, http.StatusOK, target)
 }

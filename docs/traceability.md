@@ -212,6 +212,34 @@ Mapping from requirements to code, tests, and metrics. Updated every iteration.
 | Service incidents commissioned as FR-022 (iter-0155, D-0170), and IN PROGRESS since iter-0156 | [`func-service-incidents.md`](specs/func-service-incidents.md) — the six decisions resolved and recorded as DELEGATED (D1b added after the code exposed that auto-open without auto-resolve is a trap), the schema (exclusive anchor CHECK, composite tenant FK with the PG15 column-list `SET NULL`, a per-service open-auto index, a member snapshot), SIXTEEN numbered invariants and a required test matrix written before the code; `FR-022`/`NFR-017` in [status.md](status.md), AC-0156-1…4 | schema and store: `TestAnIncidentHasAtMostOneAnchor`, `TestDeletingAServiceClearsTheAnchorAndKeepsTheIncident`, `TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers`, `TestTheMachineLeavesAHumanIncidentAlone`; the evaluator: `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident`; correlation: `TestAServiceIncidentIsCorrelatedAndNamesEveryServiceButItsOwn`, `TestAServiceIncidentWitnessesJustLikeAMonitorOne`, `TestNoSelfLinkEvenWhenTheStoredGraphHasACycle`; the public projection: `TestPublicRenderCarriesAServiceIncidentAndNoImpactLinks`; the member snapshot on the detail: `TestIncidentDetailNamesTheMembersTheServiceHadAtOpenTime` | the SPA deltas only — the mock is published and NOT yet approved, and no frontend code exists until it is (the owner's instruction: a mock for SPA changes, nothing else) | process — D-0169 opened it as its OWN requirement; the spec's §4 obligation (FR-022 supersedes FR-021 invariant 86, and the note, the discharge row AND §16.10's scenario 24 move in the same change) was DISCHARGED in that change, so this repository does not repeat invariant 47's history |
 
 
+## FR-022 acceptance discharge — the sixteen invariants of `func-service-incidents.md` §6
+
+The same rule as FR-021's map above, and for the same reason: a requirement closes against a table where
+every number names a test that EXISTS, not against a memory of what was reviewed. `make docs-check` fails if
+any of the sixteen has no row or cites a test the tree lacks.
+
+### FR-022 invariants (§6 of func-service-incidents.md)
+
+| # | What it requires | Discharged by |
+| --- | --- | --- |
+| 1 | at most one anchor, by CHECK; a manual project-level incident with neither keeps working | `TestAnIncidentHasAtMostOneAnchor` |
+| 2 | a service anchor cannot cross tenants, proven by DIRECT SQL | `TestAnIncidentHasAtMostOneAnchor` |
+| 3 | deleting a service clears the anchor and NOT the tenant key; the timeline stands | `TestDeletingAServiceClearsTheAnchorAndKeepsTheIncident` |
+| 4 | at most one OPEN auto-incident per service (partial unique index) | `TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers` |
+| 5 | opens only on a LIVE onset, only while ARMED, only after `confirm_evaluations` | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` (live + confirmed), `TestADisarmedServiceOpensNoIncidentAndItsMembersKeepPaging` (armed, and the member still pages) |
+| 6 | a burn breach opens NO incident, ever | `TestABurnBreachOpensNoIncidentEver` — the premise (the burn DID fire) is asserted first, so the test cannot pass against an evaluator that announced nothing |
+| 7 | the open and the alert are ONE transaction | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` |
+| 8 | a monitor incident is byte-identical to before FR-022 (NFR-017) | the pre-FR-022 suite unchanged and green is the regression; the places FR-022 could plausibly have reached are pinned by name — `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` (its lifecycle and timeline length), `TestTheSuppressionNoteKeepsOneHomeWhenBothIncidentsAreOpen` (its notes), `TestPublicRenderRedactsInternalIDs` (its rendering), `TestCorrelateBothInterleavings` (its links) |
+| 9 | no link names the incident's own subject; the path algorithm is unchanged for every other pair | `TestAServiceIncidentIsCorrelatedAndNamesEveryServiceButItsOwn`, `TestNoSelfLinkEvenWhenTheStoredGraphHasACycle`, `TestAServiceIncidentWitnessesJustLikeAMonitorOne` |
+| 10 | the §15.0 precedence table is untouched: a service incident moves no component STATUS | `TestAnOpenServiceIncidentMovesNoComponentStatus` |
+| 11 | the public projection carries the incident and NO impact links | `TestPublicRenderCarriesAServiceIncidentAndNoImpactLinks` |
+| 12 | the `⏸` and `⚡` notes keep exactly one home each — the MONITOR's incident | `TestTheSuppressionNoteKeepsOneHomeWhenBothIncidentsAreOpen` (⏸), `TestIncidentContextAttached` (⚡, extended with the service-anchored case) |
+| 13 | a postmortem names the members the service had AT OPEN time, after a member is deleted | `TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers` (the durable half), `TestIncidentDetailNamesTheMembersTheServiceHadAtOpenTime` (the readable half) |
+| 14 | **CORRECTED in iter-0156 §2.8** — as written ("every write audited with actor and tenant, in the mutating transaction") it was false of the PRODUCT, not merely unimplemented: incident writes carry no audit row today for EITHER anchor. What FR-022 promises and keeps is the absence of asymmetry | `TestAServiceIncidentUsesTheSameOperatorSurfacesAsAMonitorOne` — ack, annotate, resolve and the outsider's 404, through the same handlers; the audit gap is named as its own future requirement |
+| 15 | the auto-resolve rides the close's transaction, and a human's incident is untouched | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident`, `TestTheMachineLeavesAHumanIncidentAlone` |
+| 16 | a service that recovers and fails again gets a SECOND incident | `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident` |
+
+
 ## FR-021 acceptance discharge — §19 invariants 1–74, §16.8 invariants 75–91, §16.10 matrix
 
 The spec states 91 numbered acceptance invariants and a 24-scenario required test matrix, and until

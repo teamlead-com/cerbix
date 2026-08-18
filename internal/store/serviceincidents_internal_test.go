@@ -225,3 +225,144 @@ func TestTheMachineLeavesAHumanIncidentAlone(t *testing.T) {
 			"timeline is a second author nobody asked for", updates)
 	}
 }
+
+// FR-022 invariant 5, the ARMED half: the three gates that decide whether a service PAGES are the
+// same three that decide whether it opens an incident. A service that does not own paging is not
+// covering anybody, so its members page for themselves — and nothing may open an incident on their
+// behalf, because an incident nobody was told about is worse than no incident at all.
+func TestADisarmedServiceOpensNoIncidentAndItsMembersKeepPaging(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := alertingService(t, st, ctx)
+	if _, err := st.pool.Exec(ctx, `UPDATE services SET owns_paging = false WHERE id = $1`, f.serviceID); err != nil {
+		t.Fatalf("disarm: %v", err)
+	}
+
+	setMemberHealth(t, st, ctx, f, true)
+	evalOnce(t, st, ctx)
+	setMemberHealth(t, st, ctx, f, false)
+	evalOnce(t, st, ctx)
+	got := evalOnce(t, st, ctx)
+
+	if got.Onsets != 0 || got.IncidentsOpened != 0 {
+		t.Fatalf("a DISARMED service announced %+v — it covers nobody, so it speaks for nobody", got)
+	}
+	var incidents int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM incidents WHERE service_id = $1`, f.serviceID).Scan(&incidents); err != nil {
+		t.Fatalf("count incidents: %v", err)
+	}
+	if incidents != 0 {
+		t.Fatalf("%d incident(s) opened for a service that does not page — an incident opened without an "+
+			"announcement is one nobody was told about (FR-022 invariant 5)", incidents)
+	}
+	// The other side of the same coin, and the reason this is safe: the member is NOT delegated, so
+	// its own alert is delivered. Silence on both sides would be the actual outage of the alerting.
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationLive)
+	if err != nil {
+		t.Fatalf("delegation: %v", err)
+	}
+	if v.Suppress() {
+		t.Fatalf("the member's own alert is suppressed by a service that is not paging (owners %+v): "+
+			"nobody would be told anything", v.Owners)
+	}
+}
+
+// FR-022 invariant 12: the ⏸ note keeps exactly ONE home — the MONITOR's incident — so a single
+// outage is never annotated twice. Both incidents are open here, which is the normal state during a
+// service outage: the members are down and so is the service.
+func TestTheSuppressionNoteKeepsOneHomeWhenBothIncidentsAreOpen(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	monitorInc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: f.projectID, MonitorID: f.monitorID, Title: "checkout-http is down",
+		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+	}, "monitor reported down", "system")
+	if err != nil {
+		t.Fatalf("monitor incident: %v", err)
+	}
+	serviceInc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "Checkout — service down",
+		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+	}, "opened automatically", "system")
+	if err != nil {
+		t.Fatalf("service incident: %v", err)
+	}
+	var eventID string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO outbox_events (topic, payload) VALUES ('monitor_transition','{}') RETURNING id`).
+		Scan(&eventID); err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if err := st.RecordSuppression(ctx, eventID, f.monitorID, f.projectID,
+		domain.TopicMonitorTransition, []DelegationOwner{
+			{ServiceID: f.serviceID, Slug: "checkout", Name: "Checkout"},
+		}); err != nil {
+		t.Fatalf("record suppression: %v", err)
+	}
+
+	count := func(incidentID string) int {
+		t.Helper()
+		var n int
+		if err := st.pool.QueryRow(ctx, `
+			SELECT count(*) FROM incident_updates
+			 WHERE incident_id = $1 AND author = 'system' AND body LIKE $2`,
+			incidentID, domain.SuppressionMarker+"%").Scan(&n); err != nil {
+			t.Fatalf("count notes: %v", err)
+		}
+		return n
+	}
+	if got := count(monitorInc.ID); got != 1 {
+		t.Fatalf("the MONITOR's incident carries %d ⏸ notes, want exactly 1 — it is the one whose "+
+			"delivery was withheld", got)
+	}
+	if got := count(serviceInc.ID); got != 0 {
+		t.Fatalf("the SERVICE's incident carries %d ⏸ notes: one outage would be explained twice, and "+
+			"the second explanation is on the incident that did the suppressing (FR-022 invariant 12)", got)
+	}
+}
+
+// FR-022 invariant 10: an open service incident changes NO component status. The §15.0 precedence
+// table decides what a page renders from the SERVICE's evaluated health, and an incident is rendered
+// AS an incident — a second, independent statement. If an incident could also move the status, the
+// table would stop being total (FR-021 invariants 66–68) and two sources would disagree about the
+// same component.
+func TestAnOpenServiceIncidentMovesNoComponentStatus(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := alertingService(t, st, ctx)
+	setMemberHealth(t, st, ctx, f, true)
+
+	refs := []ServiceRef{{ProjectID: f.projectID, ServiceID: f.serviceID}}
+	before, err := st.ServicePageProjections(ctx, refs, true)
+	if err != nil {
+		t.Fatalf("projection before: %v", err)
+	}
+	b := before[f.serviceID]
+	if b.SLI == "" {
+		t.Fatalf("the fixture produced no projection at all: %+v", b)
+	}
+
+	if _, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "Checkout — service down",
+		Status: domain.IncidentInvestigating, Impact: domain.ImpactCritical, Source: domain.SourceAuto,
+	}, "opened automatically", "system"); err != nil {
+		t.Fatalf("service incident: %v", err)
+	}
+
+	after, err := st.ServicePageProjections(ctx, refs, true)
+	if err != nil {
+		t.Fatalf("projection after: %v", err)
+	}
+	a := after[f.serviceID]
+	switch {
+	case a.SLI != b.SLI:
+		t.Fatalf("component status moved from %q to %q because an incident opened — the precedence "+
+			"table reads the service's HEALTH, and an incident is rendered as an incident", b.SLI, a.SLI)
+	case a.Reason != b.Reason || a.UptimeWithheld != b.UptimeWithheld:
+		t.Fatalf("the projection's reasons changed with an incident open: %+v vs %+v", b, a)
+	case (a.Uptime == nil) != (b.Uptime == nil):
+		t.Fatalf("the quoted number appeared or vanished with an incident open: %v vs %v", b.Uptime, a.Uptime)
+	case a.Excluded != b.Excluded:
+		t.Fatalf("maintenance exclusion changed with an incident open: %v vs %v", b.Excluded, a.Excluded)
+	}
+}

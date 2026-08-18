@@ -190,3 +190,51 @@ func TestIncidentDetailNamesTheMembersTheServiceHadAtOpenTime(t *testing.T) {
 		t.Fatalf("degraded read = members %v / unavailable %v, want absent + true", got.Members, got.MembersUnavailable)
 	}
 }
+
+// FR-022 §2: an operator acknowledges, annotates and RESOLVES a service incident through the SAME
+// surfaces a monitor incident uses. Nothing proved that before this test — the handlers resolve
+// tenancy from `project_id`, which the composite FK keeps correct even after the service is gone,
+// but "it should work" and "it works" are different claims and only one of them is checkable.
+//
+// This is also where FR-022 invariant 14 gets corrected rather than quietly dropped. It asked for
+// every write to be AUDITED with its actor and tenant in the mutating transaction. Incident writes
+// are not audited today — for EITHER anchor, and never were; `handlers_incidents.go` writes no audit
+// row at all. FR-022 therefore introduces no asymmetry, which is the promise it can actually make;
+// an audit trail for incident writes is a real gap and belongs to its own requirement, not to a
+// clause smuggled in beside a schema change (iter-0156 §2.8).
+func TestAServiceIncidentUsesTheSameOperatorSurfacesAsAMonitorOne(t *testing.T) {
+	fs := seededStore()
+	inc := fs.incidents["inc1"]
+	inc.MonitorID = ""
+	inc.ServiceID = "svc1"
+	inc.Source = domain.SourceAuto
+	fs.incidents["inc1"] = inc
+	h := newHandler(fs)
+
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/incidents/inc1/acknowledge", ""); rec.Code != http.StatusOK {
+		t.Fatalf("acknowledge a SERVICE incident = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/incidents/inc1/updates",
+		`{"status":"identified","body":"the upstream is the cause"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("annotate a SERVICE incident = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/incidents/inc1/updates",
+		`{"status":"resolved","body":"recovered"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("resolve a SERVICE incident = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	if got := fs.incidents["inc1"]; got.Status != domain.IncidentResolved {
+		t.Fatalf("status after the resolving update = %q, want resolved", got.Status)
+	}
+
+	// The anchor changes NOTHING about who may touch it: tenancy comes from the project, and an
+	// outsider is refused exactly as they are on a monitor incident.
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/v1/incidents/inc1", ""},
+		{http.MethodPost, "/api/v1/incidents/inc1/acknowledge", ""},
+		{http.MethodPost, "/api/v1/incidents/inc1/updates", `{"body":"x"}`},
+	} {
+		if rec := do(h, outsider, c.method, c.path, c.body); rec.Code != http.StatusNotFound {
+			t.Errorf("outsider %s %s = %d, want 404", c.method, c.path, rec.Code)
+		}
+	}
+}

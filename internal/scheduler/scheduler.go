@@ -125,6 +125,7 @@ type ServiceStatsSink interface {
 	// each successful pass, the stats from the out-of-band sample.
 	RecordServiceAlertEvaluations(signal, outcome string, n int)
 	RecordServiceAlertEmitted(signal, edge string, n int)
+	RecordServiceIncidents(action string, n int)
 	SetServiceAlertPass(signal string, lastSuccessUnix int64, lagSeconds float64)
 	SetServiceAlertStats(st metrics.ServiceAlertStat)
 	SetServiceAlertStalled(signal string, stalled bool, reason string)
@@ -457,6 +458,10 @@ type serviceAlertPass struct {
 	// successful evaluation that cannot speak, which is neither an error nor an answer.
 	ok, skipped, errors int
 	onsets, closes      int
+	// FR-022: incidents this pass OPENED and RESOLVED by machine. Counted apart from the edges
+	// because they are not the same event — an onset for a service whose incident is already open
+	// announces and opens nothing, and that difference is the interesting one.
+	incidentsOpened, incidentsResolved int
 }
 
 // observeServiceAlertPass publishes ONE successful evaluation pass: the per-outcome counters, the
@@ -473,6 +478,8 @@ func (s *Scheduler) observeServiceAlertPass(p serviceAlertPass) {
 	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "skipped", p.skipped)
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "onset", p.onsets)
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "close", p.closes)
+	s.serviceMetrics.RecordServiceIncidents("opened", p.incidentsOpened)
+	s.serviceMetrics.RecordServiceIncidents("resolved", p.incidentsResolved)
 	now := s.clock()
 	s.markAlertSuccess(p.signal, now)
 	s.serviceMetrics.SetServiceAlertPass(p.signal, now.Unix(), p.lag.Seconds())
@@ -935,6 +942,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						signal: string(domain.ServiceSignalHealth), cadence: serviceAlertEvery,
 						lag: ev.Lag, ok: ev.Evaluated, errors: ev.Errors,
 						onsets: ev.Onsets, closes: ev.Closes,
+						incidentsOpened: ev.IncidentsOpened, incidentsResolved: ev.IncidentsResolved,
 					})
 					// Logged whenever anything happened OR anything is behind: a stalled evaluator
 					// has to read as lag rather than as an absence of alerts, which is
@@ -942,6 +950,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					if ev.Onsets > 0 || ev.Closes > 0 || ev.Errors > 0 || ev.Lag > serviceAlertEvery {
 						s.logger.Info("service_alerts_evaluated", "evaluated", ev.Evaluated,
 							"onsets", ev.Onsets, "closes", ev.Closes, "errors", ev.Errors,
+							"incidents_opened", ev.IncidentsOpened, "incidents_resolved", ev.IncidentsResolved,
 							"lag_seconds", int(ev.Lag.Seconds()))
 					}
 				})

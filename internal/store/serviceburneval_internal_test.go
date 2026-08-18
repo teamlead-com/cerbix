@@ -561,3 +561,32 @@ func TestBurnEvaluatorSliceIsBoundedAndFair(t *testing.T) {
 		t.Fatalf("%d burn targets were never reached after two passes", unevaluated)
 	}
 }
+
+// FR-022 invariant 6: a burn breach opens NO incident, ever. A budget signal is not an outage —
+// §16.4's own text calls the burn pair a reporting signal that trails the watermark — and an
+// incident is a claim that something is happening NOW.
+//
+// The premise is asserted first: this burn really did fire. Without that line the test would pass
+// just as happily against an evaluator that announced nothing at all.
+func TestABurnBreachOpensNoIncidentEver(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+	plantBurn(t, st, ctx, f, 5, minute/60)
+
+	got := burnEvalOnce(t, st, ctx)
+	if got.Onsets != 1 {
+		t.Fatalf("the burn did not fire (%+v) — this test's premise is gone and it would pass for the "+
+			"wrong reason", got)
+	}
+	var incidents, snapshots int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM incidents`).Scan(&incidents); err != nil {
+		t.Fatalf("count incidents: %v", err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM incident_member_snapshots`).Scan(&snapshots); err != nil {
+		t.Fatalf("count snapshots: %v", err)
+	}
+	if incidents != 0 || snapshots != 0 {
+		t.Fatalf("a burn breach opened %d incident(s) and %d snapshot(s): a budget signal trails the "+
+			"watermark and says nothing about now (FR-022 invariant 6)", incidents, snapshots)
+	}
+}

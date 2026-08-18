@@ -50,6 +50,7 @@ type Registry struct {
 	// target, no rule, no tenant.
 	serviceAlertEvals   map[string]map[string]uint64 // signal → outcome → count (ok|error|skipped)
 	serviceAlertEmitted map[string]map[string]uint64 // signal → edge → count (onset|close)
+	serviceIncidents    map[string]uint64            // action → count (opened|resolved), FR-022
 	// The DELIVERY side of §16.6b: what delegation concluded per signal, and the two ways an
 	// announcement can fail to reach anybody without failing to deliver.
 	serviceDelegation       map[string]map[string]uint64 // signal → state → count
@@ -549,6 +550,25 @@ func (r *Registry) RecordServiceAlertEmitted(signal, edge string, n int) {
 	r.serviceAlertEmitted[signal][edge] += uint64(n)
 }
 
+// RecordServiceIncidents counts incidents a MACHINE opened or resolved (FR-022). It is separate from
+// the alert-edge counter on purpose: an onset that found an incident already open announces without
+// opening one, so `emitted{edge="onset"}` and `incidents{action="opened"}` legitimately differ, and a
+// single counter would hide exactly the case worth seeing — a service whose incident keeps failing to
+// open. No project or service label: a counter per tenant is the cardinality rule §21 forbids.
+func (r *Registry) RecordServiceIncidents(action string, n int) {
+	// A ZERO is recorded, not skipped — the same rule the evaluation counters state: the series must
+	// exist from the first healthy pass, or an alert on it has to survive a missing series first.
+	if n < 0 {
+		n = 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.serviceIncidents == nil {
+		r.serviceIncidents = map[string]uint64{}
+	}
+	r.serviceIncidents[action] += uint64(n)
+}
+
 // SetServiceAlertPass records one SUCCESSFUL evaluation pass of a signal: when it happened and how
 // far behind the stalest verdict it found was. Both are gauges of the LAST success — a failed pass
 // leaves them untouched on purpose, so an aging last-success next to a live process is exactly the
@@ -787,6 +807,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	serviceRecipientMissing := r.serviceRecipientMissing
 	serviceAlertEvals := copyCounts2(r.serviceAlertEvals)
 	serviceAlertEmitted := copyCounts2(r.serviceAlertEmitted)
+	serviceIncidents := copyCounts(r.serviceIncidents)
 	serviceAlertLastSuccess := maps.Clone(r.serviceAlertLastSuccess)
 	serviceAlertLag := maps.Clone(r.serviceAlertLag)
 	serviceAlertStats := r.serviceAlertStats
@@ -1000,6 +1021,13 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 				out.printf("cerbix_service_alert_emitted_total{signal=%q,edge=%q} %d\n",
 					signal, edge, serviceAlertEmitted[signal][edge])
 			}
+		}
+	}
+	if len(serviceIncidents) > 0 {
+		out.println("# HELP cerbix_service_incidents_total Incidents a machine opened or resolved for a SERVICE (FR-022). Distinct from the alert edges: an onset whose incident is already open announces without opening one.")
+		out.println("# TYPE cerbix_service_incidents_total counter")
+		for _, action := range sortedKeys(serviceIncidents) {
+			out.printf("cerbix_service_incidents_total{action=%q} %d\n", action, serviceIncidents[action])
 		}
 	}
 	if serviceAlertStats != nil {

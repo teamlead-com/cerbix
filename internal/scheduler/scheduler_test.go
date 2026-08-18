@@ -812,6 +812,7 @@ func (r *recordingServiceSink) RecordServiceSlice(string) {}
 // rewrite what those assertions are reading.
 func (r *recordingServiceSink) RecordServiceAlertEvaluations(string, string, int) {}
 func (r *recordingServiceSink) RecordServiceAlertEmitted(string, string, int)     {}
+func (r *recordingServiceSink) RecordServiceIncidents(string, int)                {}
 func (r *recordingServiceSink) SetServiceAlertPass(string, int64, float64)        {}
 func (r *recordingServiceSink) SetServiceAlertStats(metrics.ServiceAlertStat)     {}
 func (r *recordingServiceSink) SetServiceAlertStalled(string, bool, string)       {}
@@ -1219,6 +1220,10 @@ func TestLeaderPublishesServiceAlertTelemetry(t *testing.T) {
 		leader: true,
 		alertEval: store.ServiceAlertEvaluation{
 			Evaluated: 2, Onsets: 1, Closes: 1, Errors: 1, Lag: 12500 * time.Millisecond,
+			// FR-022. Deliberately NOT equal to Onsets/Closes: an onset for a service whose incident
+			// is already open announces and opens nothing, so the two families must be readable
+			// apart. Equal numbers here would let a wiring that published the edges twice pass.
+			IncidentsOpened: 3, IncidentsResolved: 2,
 		},
 		// Rules 3 with 1 HOLD: two rules could speak, one evaluated successfully and could not.
 		burnEval: store.ServiceBurnEvaluation{
@@ -1249,6 +1254,11 @@ func TestLeaderPublishesServiceAlertTelemetry(t *testing.T) {
 		`cerbix_service_alert_emitted_total{signal="health",edge="close"} 1`,
 		`cerbix_service_alert_emitted_total{signal="burn",edge="onset"} 2`,
 		`cerbix_service_alert_emitted_total{signal="burn",edge="close"} 0`,
+		// FR-022: incidents a MACHINE opened and resolved. These were computed by the evaluator and
+		// consumed by nothing at all until this test — the same dead-fact shape as the member
+		// snapshot: recorded, and invisible to whoever has to answer for it at 3am.
+		`cerbix_service_incidents_total{action="opened"} 3`,
+		`cerbix_service_incidents_total{action="resolved"} 2`,
 		`cerbix_service_alert_lag_seconds{signal="health"} 12.500`,
 		`cerbix_service_alert_lag_seconds{signal="burn"} 3.000`,
 		// The sampled half: what the slice cannot see.

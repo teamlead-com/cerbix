@@ -571,6 +571,27 @@ func TestIncidentContextAttached(t *testing.T) {
 	if len(fs4.delivered) != 1 {
 		t.Fatalf("context failure must not fail the event: delivered=%v", fs4.delivered)
 	}
+
+	// A SERVICE-anchored auto-incident gets NO ⚡ context (FR-022 invariant 12). The note's whole
+	// content is about a MONITOR — co-failing monitors, a dominant error class, a single region —
+	// and the ⚡/⏸ family keeps exactly one home each so a single outage is never explained twice.
+	// The source is `auto` here, which is what makes this a real gate rather than the manual case
+	// two blocks up passing again under a new name.
+	openedService, _ := json.Marshal(domain.IncidentEvent{
+		Type: domain.EventIncidentOpened,
+		Incident: domain.Incident{
+			ID: "inc3", ProjectID: "p1", ServiceID: "svc1", Source: domain.SourceAuto,
+		},
+	})
+	fs5 := &fakeStore{pending: []domain.OutboxEvent{{ID: "e6", Topic: domain.TopicIncidentEvent, Payload: openedService, Attempts: 1}}, ictx: ictx}
+	newWorker(fs5, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).drain(context.Background())
+	if len(fs5.delivered) != 1 {
+		t.Fatalf("a service incident's event was not delivered: %v", fs5.delivered)
+	}
+	if len(fs5.appended) != 0 {
+		t.Fatalf("a SERVICE incident got a ⚡ context note (%+v) — its content describes a monitor, and "+
+			"the outage would then be explained twice (FR-022 invariant 12)", fs5.appended)
+	}
 }
 
 func TestDeliversSubscriberConfirm(t *testing.T) {

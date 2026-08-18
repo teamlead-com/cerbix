@@ -158,7 +158,16 @@ unique target that already exists.
     single outage is never annotated twice;
 13. a postmortem names the members the service had AT OPEN TIME, and keeps naming them after a member is
     deleted;
-14. every write is audited with its actor and tenant, in the mutating transaction;
+14. **CORRECTED in iter-0156 (§2.8), number kept because other documents cite it.** Original text:
+    *"every write is audited with its actor and tenant, in the mutating transaction"*. That was false of
+    the PRODUCT, not merely unimplemented: incident writes carry no audit row today for EITHER anchor —
+    `internal/api/handlers_incidents.go` has never written one — so the clause asked FR-022 to fix a gap
+    that has nothing to do with the second anchor, inside a change forbidden from touching the first.
+    What FR-022 promises and keeps is the ABSENCE OF ASYMMETRY: an operator acknowledges, annotates and
+    resolves a service incident through the same handlers, under the same tenancy check (`project_id`,
+    which survives the service's deletion), with the same 404 for a foreigner. **An audit trail for
+    incident writes is a real gap and is recorded as such** — it belongs to its own requirement, where it
+    can be designed for both anchors at once, rather than to a clause smuggled in beside a schema change;
 15. an auto-opened service incident RESOLVES in the same transaction as the close that ends its
     announcement, with an update saying so — and an incident a human already resolved is untouched, because
     a machine must not reopen or re-annotate a person's conclusion (D1b);

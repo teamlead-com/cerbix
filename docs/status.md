@@ -11,9 +11,14 @@ different sets, never a cross-check of each other:
 - **Reviewer findings — 25.** Per round, which is the only spelling that can be checked: [358] 2 P0 +
   3 P1 · [371] 5 P1 + 1 P2 · [380] 5 P1 · [384] 1 P1 + 1 P2 · [392] 1 P1 + 1 P2 · [395] 2 P2 ·
   [399] 1 P2 · [401] 1 P1 governance · [403] 1 P2. Two rounds before iter-0151 closed, seven after.
-  All corrected, none contested.
-- **Defects recorded in the reports — 24.** 15 in [iter-0151](iterations/iter-0151.md) §2, frozen at
-  its closure commit, and 9 in [iter-0152](iterations/iter-0152.md) §2, which is still OPEN. This set INCLUDES the ones I found myself and EXCLUDES
+  All corrected, none contested. Every total here is backed by the IDs beside it, so it can be checked
+  rather than believed.
+- **§2 finding sections — 24.** 15 in [iter-0151](iterations/iter-0151.md), frozen at its closure
+  commit, and 9 in [iter-0152](iterations/iter-0152.md), which is still OPEN. Named after exactly what
+  its checker counts — `grep -c '^### 2\.'` — because the previous name promised something else: it is
+  SECTIONS, not individual defects (§2.7 of iter-0152 carries two honesty gaps under one heading), and
+  it INCLUDES the review's governance and documentation findings (§2.8 is [401], §2.9 is [403]) rather
+  than excluding them. This set INCLUDES the ones I found myself and EXCLUDES
   the review's documentation and counting findings, which were never product defects.
 
 | ID | Requirement | Status | Evidence |

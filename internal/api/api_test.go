@@ -126,6 +126,9 @@ type fakeStore struct {
 	secretRefs     map[string]int                    // "projectID/name" → UI-managed ref count
 	secretFileRefs map[string]int                    // "projectID/name" → file-managed ref count
 	secretSeq      int
+	// global audit (iter-0155)
+	globalAudit    []domain.AuditEntry
+	globalAuditErr error
 }
 
 // fakeSecret backs the project secret inventory in memory. The value is kept
@@ -2183,6 +2186,19 @@ func (f *fakeStore) ListAuditByOrg(_ context.Context, orgID string, limit int) (
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeStore) ListGlobalAudit(_ context.Context, limit int) ([]domain.AuditEntry, error) {
+	if f.globalAuditErr != nil {
+		return nil, f.globalAuditErr
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if len(f.globalAudit) > limit {
+		return f.globalAudit[:limit], nil
+	}
+	return f.globalAudit, nil
 }
 
 func (f *fakeStore) totpState() map[string]struct {

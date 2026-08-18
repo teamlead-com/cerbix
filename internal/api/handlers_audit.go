@@ -49,3 +49,25 @@ func (h *Handler) listAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, entries)
 }
+
+// listGlobalAudit returns the instance-level audit entries — what a global admin's own actions
+// leave behind (`user.global_admin`, `user.delete`, provider and outbox operations). Global admin
+// only, and a separate store read from the org listing: the org view must not be widenable into
+// this one by a parameter.
+func (h *Handler) listGlobalAudit(w http.ResponseWriter, r *http.Request) {
+	if !h.requireGlobalAdmin(w, r) {
+		return
+	}
+	limit := 100
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil {
+			limit = n
+		}
+	}
+	entries, err := h.store.ListGlobalAudit(r.Context(), limit)
+	if err != nil {
+		h.serverError(w, "list_global_audit", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}

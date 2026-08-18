@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: cerbix API
-  version: 0.20.0
+  version: 0.21.0
   description: >
     Internal uptime & SLA monitoring API. Authentication is via a server-side
     session cookie established by an OIDC provider (`/auth/login` → `/auth/callback`)
@@ -2692,6 +2692,29 @@ paths:
       summary: Public branding (unauthenticated) for the login page and status pages
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PublicBranding' } } } }
+
+  /api/v1/admin/audit:
+    parameters:
+      - in: query
+        name: limit
+        required: false
+        schema: { type: integer, default: 100, maximum: 500 }
+    get:
+      tags: [admin]
+      summary: Instance-level audit entries (global admin)
+      description: >
+        The entries a GLOBAL admin's own actions leave — `user.global_admin`, `user.delete`,
+        file-provider and outbox operations. They carry no organization (`org_id` is empty),
+        which is exactly what separates them from `/organizations/{orgID}/audit`: an org admin
+        must never read the installation's history, so this is a distinct read rather than the
+        org listing with a wider filter. `limit` is clamped server-side (default 100, max 500).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AuditEntry' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/admin/users:
     get:

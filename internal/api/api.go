@@ -178,6 +178,9 @@ type Store interface {
 	EnqueueOutbox(ctx context.Context, topic string, payload []byte) error
 	RecordAudit(ctx context.Context, e domain.AuditEntry) error
 	ListAuditByOrg(ctx context.Context, orgID string, limit int) ([]domain.AuditEntry, error)
+	// ListGlobalAudit reads the INSTANCE-level entries (org_id IS NULL) — a global admin's own
+	// history, which no org listing may widen into.
+	ListGlobalAudit(ctx context.Context, limit int) ([]domain.AuditEntry, error)
 	CreateProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name, value string) (store.ProjectSecret, error)
 	UpdateProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error)
 	DeleteProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string) error
@@ -600,6 +603,7 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("PUT /api/v1/settings/monitor-defaults", h.putMonitorDefaults)
 	mux.HandleFunc("GET /api/v1/settings/mail", h.getMail)
 	mux.HandleFunc("PUT /api/v1/settings/mail", h.putMail)
+	mux.HandleFunc("GET /api/v1/admin/audit", h.listGlobalAudit)
 	mux.HandleFunc("GET /api/v1/admin/users", h.listAllUsers)
 	mux.HandleFunc("PATCH /api/v1/admin/users/{userID}", h.updateAdminUser)
 	mux.HandleFunc("DELETE /api/v1/admin/users/{userID}", h.deleteAdminUser)

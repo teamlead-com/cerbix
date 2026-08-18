@@ -5873,6 +5873,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/audit": {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Instance-level audit entries (global admin)
+         * @description The entries a GLOBAL admin's own actions leave — `user.global_admin`, `user.delete`, file-provider and outbox operations. They carry no organization (`org_id` is empty), which is exactly what separates them from `/organizations/{orgID}/audit`: an org admin must never read the installation's history, so this is a distinct read rather than the org listing with a wider filter. `limit` is clamped server-side (default 100, max 500).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AuditEntry"][];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/users": {
         parameters: {
             query?: never;

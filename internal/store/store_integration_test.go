@@ -1830,3 +1830,61 @@ func TestDeleteOrganization(t *testing.T) {
 		t.Fatalf("file-managed org must survive a refused delete: %v", err)
 	}
 }
+
+// The instance-level audit listing (iter-0155): `RecordAudit` stores an empty OrgID as NULL, and
+// those rows are a GLOBAL admin's own history. Both directions of the isolation are asserted here,
+// because each one alone would leave a real leak available: an org listing that swept in instance
+// rows would show one tenant the installation's history, and an instance listing that swept in org
+// rows would do the reverse.
+func TestGlobalAuditIsSeparateFromEveryOrgListing(t *testing.T) {
+	st, ctx := testStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	actor, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sub-ga", "ga@x.com", "Grace")
+
+	// Two instance-level entries (no org) and one org-scoped entry.
+	if err := st.RecordAudit(ctx, domain.AuditEntry{ActorUserID: actor.ID, Action: "user.global_admin", Target: "u2"}); err != nil {
+		t.Fatalf("record global 1: %v", err)
+	}
+	if err := st.RecordAudit(ctx, domain.AuditEntry{Action: "user.delete", Target: "u3"}); err != nil {
+		t.Fatalf("record global 2 (machine actor): %v", err)
+	}
+	if err := st.RecordAudit(ctx, domain.AuditEntry{OrgID: org.ID, ActorUserID: actor.ID, Action: "member.add", Target: "viewer"}); err != nil {
+		t.Fatalf("record org: %v", err)
+	}
+
+	global, err := st.ListGlobalAudit(ctx, 100)
+	if err != nil {
+		t.Fatalf("list global: %v", err)
+	}
+	if len(global) != 2 {
+		t.Fatalf("instance entries = %d, want 2 — an org-scoped row reached the instance listing, or a "+
+			"NULL org broke the scan", len(global))
+	}
+	for _, e := range global {
+		if e.OrgID != "" {
+			t.Errorf("instance entry %s carries org %q: this listing is org_id IS NULL only", e.Action, e.OrgID)
+		}
+	}
+	// Newest first, and the actor is enriched from the users table exactly as in the org listing.
+	if global[0].Action != "user.delete" {
+		t.Errorf("first entry = %q, want the newest (user.delete)", global[0].Action)
+	}
+	var enriched bool
+	for _, e := range global {
+		if e.Action == "user.global_admin" {
+			enriched = e.ActorEmail == "ga@x.com" && e.ActorName == "Grace"
+		}
+	}
+	if !enriched {
+		t.Error("the instance listing did not enrich its actor — the shared read shape was not used")
+	}
+
+	// ...and the org's own listing still sees only its own row.
+	byOrg, err := st.ListAuditByOrg(ctx, org.ID, 100)
+	if err != nil {
+		t.Fatalf("list by org: %v", err)
+	}
+	if len(byOrg) != 1 || byOrg[0].Action != "member.add" {
+		t.Fatalf("org listing = %+v, want exactly its own entry — an instance row leaked into an org view", byOrg)
+	}
+}

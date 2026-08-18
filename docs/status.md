@@ -2,7 +2,14 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## No active iteration — FR-021 and NFR-016 are CLOSED (iter-0153, closed at `d390e90` and immutable from it; D-0169)
+## Current iteration (iter-0155 — the four commissioned candidates: instance audit, project-level SLO objective, `job_id` correlation, and the §16.9 design input. Opened 2026-08-18 after the backlog sweep; see [iter-0155](iterations/iter-0155.md))
+
+| ID | Requirement | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0155-1 | The instance's own audit history is readable by the only role it belongs to. A global admin's actions are stored with `org_id IS NULL` and, until this arc, appeared in no listing: `ListAuditByOrg` is org-scoped by construction. `ListGlobalAudit` is a SEPARATE read (`org_id IS NULL`) rather than the org listing with a widened filter — a filter that can be widened by a parameter is one authz slip away from showing a tenant admin the whole installation — and both listings now share one read shape so they cannot drift. `GET /api/v1/admin/audit`, global admin only, limit clamped server-side. | IN_PROGRESS | [`store/audit.go`](../internal/store/audit.go), [`api/handlers_audit.go`](../internal/api/handlers_audit.go), `openapi.yaml` 0.21.0 + regenerated `schema.d.ts`; `TestGlobalAuditIsSeparateFromEveryOrgListing` (real PG, both directions of the isolation), `TestGlobalAuditIsGlobalAdminOnly`, `TestGlobalAuditLimitIsBounded`; three mutants fatal ([iter-0155](iterations/iter-0155.md) §4). UI pending the mock approval logged in [notes.md](design/notes.md). |
+| DoD-0155 | Each of the four commissioned items is either delivered with its gates, or handed back with the decision that blocks it named. No item is reported done while its UI surface is unbuilt. | IN_PROGRESS | [iter-0155](iterations/iter-0155.md) §0 (state per item) and §3 (the decisions asked for). |
+
+## Previous — FR-021 and NFR-016 are CLOSED (iter-0153, closed at `d390e90` and immutable from it; D-0169)
 
 [iter-0154](iterations/iter-0154.md) followed it as a three-sentence arc, closed at `cae4b4f` and immutable from it, opened and closed in one commit: the spec and one code comment still said "until phase 5" and "until phase 4 opts in" after both phases had landed — one having changed nothing, the other having declined. No behaviour moved.
 

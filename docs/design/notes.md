@@ -288,3 +288,30 @@ The per-signal badge must render the SERVER's arming reason, never a client reco
 timestamp: two implementations of "fresh" is how a badge says armed while delivery suppresses nothing.
 Screen 1's held-burn warning is the mandatory case — a green ownership toggle beside a dis-armed burn
 signal is the exact confusion the badges exist to remove.
+
+## Instance audit — the global admin's own history (iter-0155, AWAITING OWNER APPROVAL)
+
+Source: `docs/design/mock-instance-audit.html`. **Not approved yet** — the backend of this item is
+landed and tested, and no Vue file is touched until the owner signs the mock off, per the process gate.
+
+`RecordAudit` stores an empty `OrgID` as NULL, and those rows are what a GLOBAL admin's actions leave
+behind (`user.global_admin`, `user.delete`, file-provider and outbox operations). They have been
+written since D-0109 and shown nowhere: the audit list in `MembersPanel` is org-scoped by construction,
+so the installation's own history is invisible in the product that records it.
+
+What the mock decides, so the implementation invents nothing:
+
+- **Placement** — Settings → Administration, a tab beside Users / File providers / Outbox. That group
+  already means "instance, not tenant"; the feature adds no navigation.
+- **Row grammar is the org audit's, unchanged** — dot, actor, action prose, monospace target, relative
+  time, "Show more". One reader learns one shape.
+- **One new device: a dashed `instance` chip**, reusing the dashed grammar phases 4 and 5 gave to "a
+  different KIND of thing" (a dormant binding, a delegated monitor). It says these rows have no
+  organization — not that an organization is missing.
+- **A machine actor renders as "machine"**, exactly as the org list renders a NULL actor. An audit row
+  whose actor cannot be resolved must never borrow a human's name.
+- **Nothing is deletable or editable.** An audit trail with a delete button is not an audit trail.
+- **Org-scoped rows are NOT mixed in** — deliberately. That would make this the "everything" view and
+  answer, in one glance, a question this panel is not allowed to answer: who did what inside a tenant.
+  The API enforces the same split: `GET /api/v1/admin/audit` is a distinct read (`org_id IS NULL`),
+  not the org listing with a wider filter, so no authz slip can widen one into the other.

@@ -49,6 +49,12 @@ let generation = 0;
 // successful save.
 const REFRESH_MS = 15_000;
 const liveState = ref<AlertingState | null>(props.state ?? null);
+// unavailable is its own PRESENTATION state, and it is the whole point of this block. "We could not
+// ask" is neither armed nor not-armed, so the panel stops CLAIMING coverage the moment a refresh
+// fails: an earlier revision kept the last answer on screen, which meant a green ARMED badge could
+// outlive the coverage indefinitely on nothing but a broken refresh. The last payload is kept as a
+// signature — what the server said the last time it answered — but it no longer speaks for now.
+const unavailable = ref(false);
 let stateGeneration = 0;
 let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -57,13 +63,20 @@ async function refreshState() {
   try {
     const res = (await api.GET("/api/v1/projects/{projectID}/services/{serviceID}/alerting/state", {
       params: { path: { projectID: props.projectId, serviceID: props.serviceId } },
-    })) as { data?: AlertingState };
+    })) as { data?: AlertingState; error?: unknown };
     // A stale response from a service the operator has already navigated away from must never land.
     if (mine !== stateGeneration) return;
-    if (res.data) liveState.value = res.data;
+    // Both failure shapes count: a transport that threw, and a response that resolved carrying an
+    // error instead of a body. Treating the second as "nothing to do" is how a 500 every cadence
+    // reads as a healthy green badge.
+    if (res.error || !res.data) {
+      unavailable.value = true;
+      return;
+    }
+    liveState.value = res.data;
+    unavailable.value = false;
   } catch {
-    // A failed refresh keeps the last SERVER answer rather than inventing one: "we could not ask"
-    // is not "not armed", and neither is it "armed".
+    if (mine === stateGeneration) unavailable.value = true;
   }
 }
 
@@ -114,7 +127,9 @@ const REASONS: Record<string, string> = {
 // (the phase-4 dormant grammar), `degraded` the DEGRADED hue. Alerting introduces no colour of its
 // own, because who is paged is not a new state of a thing.
 function badge(signal?: SignalState | null): { label: string; tone: string; detail: string } {
-  if (!signal) return { label: "unknown", tone: "pending", detail: "coverage could not be read" };
+  if (!signal) {
+    return { label: "unknown", tone: "pending", detail: "coverage could not be read just now" };
+  }
   if (signal.armed) return { label: "armed", tone: "up", detail: "members' alerts are delegated" };
   // NOT armed is the safe state, not an error state: the members are paging for themselves. The two
   // labels separate "it will arm by itself" from "somebody has to do something about it".
@@ -127,8 +142,9 @@ function badge(signal?: SignalState | null): { label: string; tone: string; deta
   };
 }
 
-const live = computed(() => badge(liveState.value?.live));
-const burn = computed(() => badge(liveState.value?.burn));
+// While the answer cannot be refreshed, BOTH badges read `unknown` — never the last armed value.
+const live = computed(() => (unavailable.value ? badge(null) : badge(liveState.value?.live)));
+const burn = computed(() => (unavailable.value ? badge(null) : badge(liveState.value?.burn)));
 const liveSignal = computed(() => liveState.value?.live ?? null);
 const burnSignal = computed(() => liveState.value?.burn ?? null);
 
@@ -211,6 +227,16 @@ async function save() {
     </div>
 
     <div v-else class="space-y-3 px-4 py-3 text-[12.5px]">
+      <!-- A refresh that failed is SAID, not hidden behind the last green badge. -->
+      <p
+        v-if="unavailable"
+        class="rounded border border-dashed border-pending bg-pending/5 px-2 py-1 text-[12px] text-pending"
+        data-testid="alerting-state-unavailable"
+      >
+        Coverage could not be re-read just now, so this panel is not claiming any. It will say so
+        again as soon as the server answers.
+      </p>
+
       <!-- Coverage, PER SIGNAL and always with its reason. One armed signal must never hide the
            other's explanation: a green ownership toggle beside a dis-armed burn signal is the exact
            confusion these badges exist to remove. -->

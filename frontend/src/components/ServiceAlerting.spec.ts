@@ -187,11 +187,48 @@ describe("ServiceAlerting coverage is the server's, and it is CURRENT", () => {
     expect(w.find('[data-testid="alerting-error-live"]').text()).toContain("epoch 7 missing");
   });
 
-  it("keeps the last server answer when a refresh fails, rather than inventing one", async () => {
-    const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
-    await flushPromises();
-    apiMock.GET.mockRejectedValueOnce(new Error("network"));
-    await flushPromises();
-    expect(w.find('[data-testid="alerting-badge-live"]').text()).toContain("armed");
+  // A refresh that FAILS must stop the panel claiming coverage, and this test drives the cadence
+  // itself: the earlier version queued a rejection and never advanced the timer, so the rejection
+  // was never consumed and deleting the interval left every test green.
+  it("stops claiming ARMED when the cadence refresh fails, and recovers on the next success", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(w.find('[data-testid="alerting-badge-live"]').text()).toContain("armed");
+      const callsAtMount = apiMock.GET.mock.calls.length;
+
+      // The next cadence read fails. Delivery may already have dis-armed on an expiry or an error,
+      // so continuing to show green would be an assertion nobody can back.
+      apiMock.GET.mockRejectedValueOnce(new Error("network"));
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(apiMock.GET.mock.calls.length,
+        "the cadence must actually fire — without it this whole test is vacuous").toBeGreaterThan(callsAtMount);
+      expect(w.find('[data-testid="alerting-badge-live"]').text()).not.toContain("armed");
+      expect(w.find('[data-testid="alerting-state-unavailable"]').exists()).toBe(true);
+
+      // ...and the next successful answer restores it: unavailable is a statement about now.
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(w.find('[data-testid="alerting-badge-live"]').text()).toContain("armed");
+      expect(w.find('[data-testid="alerting-state-unavailable"]').exists()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The OTHER failure shape: a response that resolved carrying an error instead of a body. Treating
+  // it as "nothing to do" is how a 500 every cadence reads as a healthy green badge.
+  it("treats a resolved error response as a failed refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
+      await vi.advanceTimersByTimeAsync(0);
+      apiMock.GET.mockResolvedValueOnce({ error: { error: "not found" } });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(w.find('[data-testid="alerting-badge-live"]').text()).not.toContain("armed");
+      expect(w.find('[data-testid="alerting-state-unavailable"]').exists()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

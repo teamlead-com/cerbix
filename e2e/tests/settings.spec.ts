@@ -107,3 +107,40 @@ test.describe("settings", () => {
     await expect(row.getByText(/revoked/)).toBeVisible();
   });
 });
+
+  // The instance audit trail (iter-0155): a global admin's own actions were recorded for months and
+  // shown nowhere. Two things are worth a browser: that the panel exists where the mock put it and
+  // renders real rows from the server, and that the endpoint behind it is a DISTINCT read — the split
+  // the whole design rests on, and the one an authz slip would erase.
+  test("the instance audit panel shows the installation's own history", async ({ page }) => {
+    // Make sure there IS an instance-level entry to render: toggling global admin on a user writes
+    // `user.global_admin` with org_id NULL, which is exactly what this panel is for.
+    const users = await apiGet(page, "/api/v1/admin/users");
+    const other = (users as { id: string; email: string; is_global_admin?: boolean }[]).find(
+      (u) => !u.email.startsWith("admin@"),
+    );
+    if (other) {
+      await apiSend(page, "patch", `/api/v1/admin/users/${other.id}`, { is_global_admin: false });
+    }
+
+    const entries = (await apiGet(page, "/api/v1/admin/audit?limit=30")) as { org_id?: string; action?: string }[];
+    // The PATCH above wrote `user.global_admin` with no organization, so this assertion is not
+    // conditional: there IS an instance entry, and an "or the empty state" escape hatch here would
+    // make the test pass on a panel that renders nothing.
+    expect(entries.length).toBeGreaterThan(0);
+    // Instance entries carry no organization — an org-scoped row reaching this listing is the leak the
+    // whole split exists to prevent.
+    for (const e of entries) {
+      expect(e.org_id ?? "").toBe("");
+    }
+
+    await page.goto("/settings?tab=instanceaudit");
+    await expect(page.getByTestId("instance-chip")).toHaveText("instance");
+    await expect(page.getByTestId("audit-row").first()).toBeVisible();
+    await expect(page.getByTestId("audit-empty")).toHaveCount(0);
+    // The row reads as prose about an actor and an action, not as a raw action key.
+    await expect(page.getByTestId("audit-row").first()).toContainText(/granted or revoked global admin|deleted a user|replayed/);
+
+    // The tab lives in the Administration group, where "instance, not tenant" already means something.
+    await expect(page.locator("text=Administration").first()).toBeVisible();
+  });

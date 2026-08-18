@@ -2,7 +2,7 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## No active iteration — FR-021 and NFR-016 are CLOSED (iter-0153, D-0169)
+## No active iteration — FR-021 and NFR-016 are CLOSED (iter-0153, closed at `d390e90` and immutable from it; D-0169)
 
 [iter-0153](iterations/iter-0153.md) closed the requirement against the discharge tables in [traceability.md](traceability.md): every one of the spec's 91 acceptance invariants and all 24 §16.10 scenarios name the test that holds them, and `make docs-check` fails if that stops being true. §16.9 is an explicit NON-GOAL of FR-021 — service incidents, escalation policies for services, retroactive alerting, cross-project delegation, per-member severity inside a service page and suppression beyond the three named topics each open their OWN requirement when commissioned. Predecessors [iter-0151](iterations/iter-0151.md) (`475a0d3`) and [iter-0152](iterations/iter-0152.md) (`cc247ce`) are closed and immutable from those commits. The next commissioned work opens `iter-0154`.
 

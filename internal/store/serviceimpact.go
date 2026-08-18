@@ -52,19 +52,23 @@ func (s *Store) CorrelateIncident(ctx context.Context, incidentID string) ([]dom
 	// The anchor row identifies the project; its identity fields are immutable,
 	// so this single-row read may precede the snapshot locks.
 	var projectID string
-	var monitorID *string
+	var monitorID, serviceID *string
 	var status string
 	err = tx.QueryRow(ctx,
-		`SELECT project_id, monitor_id, status FROM incidents WHERE id = $1`,
-		incidentID).Scan(&projectID, &monitorID, &status)
+		`SELECT project_id, monitor_id, service_id, status FROM incidents WHERE id = $1`,
+		incidentID).Scan(&projectID, &monitorID, &serviceID, &status)
 	if noRows(err) {
 		return nil, 0, nil // deleted since enqueue — nothing to annotate
 	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: correlate read incident: %w", err)
 	}
-	if status == string(domain.IncidentResolved) || monitorID == nil {
-		return nil, 0, nil // resolved before any attempt / not monitor-anchored: skipped by design
+	if status == string(domain.IncidentResolved) || (monitorID == nil && serviceID == nil) {
+		// Resolved before any attempt, or anchored to nothing — a manual project-level
+		// incident, or a service incident whose service was deleted between enqueue and
+		// delivery (the FK clears the anchor and keeps the tenant key). Skipped by
+		// design, delivered.
+		return nil, 0, nil
 	}
 
 	// ── the attempt snapshot: membership → graph locks, THEN every read ──────
@@ -78,12 +82,23 @@ func (s *Store) CorrelateIncident(ctx context.Context, incidentID string) ([]dom
 		return nil, 0, err
 	}
 
-	own, err := servicesOfMonitorTx(ctx, tx, *monitorID)
-	if err != nil {
-		return nil, 0, err
-	}
-	if len(own) == 0 {
-		return nil, 0, nil // a monitor in no service's monitors[] writes nothing
+	// The anchor's OWN services — where the walk starts. A monitor resolves through
+	// monitors[] membership (role 'context', never 'sli'); a SERVICE anchor is its own,
+	// and exactly one. That singleton is what makes FR-022 invariant 9 structural
+	// instead of a check: walk() never returns its own start node, so an endpoint set
+	// built by walking away from that one service cannot contain it, and no link on a
+	// service incident can name the service it is an incident OF.
+	var own []string
+	if monitorID != nil {
+		own, err = servicesOfMonitorTx(ctx, tx, *monitorID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(own) == 0 {
+			return nil, 0, nil // a monitor in no service's monitors[] writes nothing
+		}
+	} else {
+		own = []string{*serviceID}
 	}
 
 	g, err := loadProjectGraphTx(ctx, tx, projectID)
@@ -329,12 +344,21 @@ type projectGraph struct {
 }
 
 // boundedWitnessesTx selects, for each REACHABLE endpoint service, the oldest
-// domain.MaxCorrelationWitnessesPerService open monitor-anchored incidents by
+// domain.MaxCorrelationWitnessesPerService open ANCHORED incidents by
 // ascending (started_at, id) — the deterministic [278] selection, scoped and
 // CAPPED in SQL ([283]): the row transfer is at most endpoints × cap, never
 // O(project open incidents), and the exact per-endpoint totals come from an
 // aggregate so overflow counts ONLY omitted witnesses of reachable endpoints.
 // The anchor is the attempt's subject, never a witness, never counted.
+//
+// BOTH anchor kinds witness (FR-022): a monitor incident through its service
+// membership, a service incident through its own anchor. Counting only monitors
+// would make the relation's CONTENT depend on opening order — the mirror
+// back-fill would give a monitor incident `affected` when the service incident
+// opened second, and nothing at all when it opened first — which is the exact
+// asymmetry §14.3's symmetry rule and the mirror exist to prevent. In a world
+// with no service incidents the second branch matches nothing, which is how
+// NFR-017 stays true by construction rather than by promise.
 func boundedWitnessesTx(
 	ctx context.Context, tx pgx.Tx, projectID, anchorID string, endpoints []string,
 ) (map[string][]string, int, error) {
@@ -343,13 +367,18 @@ func boundedWitnessesTx(
 		SELECT e.sid, w.id
 		  FROM unnest($3::uuid[]) AS e(sid)
 		  JOIN LATERAL (
-		      SELECT i.id
+		      SELECT i.id, i.started_at
 		        FROM incidents i
 		        JOIN service_member_refs r
 		          ON r.monitor_id = i.monitor_id AND r.role = 'context' AND r.service_id = e.sid
 		       WHERE i.project_id = $1 AND i.status <> 'resolved'
 		         AND i.monitor_id IS NOT NULL AND i.id <> $2
-		       ORDER BY i.started_at, i.id
+		      UNION ALL
+		      SELECT i.id, i.started_at
+		        FROM incidents i
+		       WHERE i.project_id = $1 AND i.status <> 'resolved'
+		         AND i.service_id = e.sid AND i.id <> $2
+		       ORDER BY started_at, id
 		       LIMIT $4
 		  ) w ON true
 		 ORDER BY e.sid, w.id`,
@@ -374,14 +403,21 @@ func boundedWitnessesTx(
 	// the worker logs "dropped N" and the counter advances by N ([279]/[280]).
 	overflow := 0
 	rows, err = tx.Query(ctx, `
-		SELECT r.service_id, count(*)
-		  FROM incidents i
-		  JOIN service_member_refs r
-		    ON r.monitor_id = i.monitor_id AND r.role = 'context'
-		 WHERE i.project_id = $1 AND i.status <> 'resolved'
-		   AND i.monitor_id IS NOT NULL AND i.id <> $2
-		   AND r.service_id = ANY($3::uuid[])
-		 GROUP BY r.service_id`,
+		SELECT sid, count(*) FROM (
+		    SELECT r.service_id AS sid
+		      FROM incidents i
+		      JOIN service_member_refs r
+		        ON r.monitor_id = i.monitor_id AND r.role = 'context'
+		     WHERE i.project_id = $1 AND i.status <> 'resolved'
+		       AND i.monitor_id IS NOT NULL AND i.id <> $2
+		       AND r.service_id = ANY($3::uuid[])
+		    UNION ALL
+		    SELECT i.service_id AS sid
+		      FROM incidents i
+		     WHERE i.project_id = $1 AND i.status <> 'resolved'
+		       AND i.id <> $2 AND i.service_id = ANY($3::uuid[])
+		) w
+		 GROUP BY sid`,
 		projectID, anchorID, endpoints)
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: witness counts: %w", err)
@@ -498,6 +534,11 @@ func (g projectGraph) walk(start string, up bool) map[string][]string {
 			base := frontier[n]
 			for _, nb := range edges[n] {
 				if nb == start {
+					// The walk never returns its own start. This one line is what makes
+					// FR-022 invariant 9 true — a service incident's links can never name
+					// the service it is an incident OF — and it is also the only defence if
+					// a cycle ever exists in the stored graph, which the write-side check
+					// forbids but a restore or a direct INSERT does not.
 					continue
 				}
 				if _, done := best[nb]; done {

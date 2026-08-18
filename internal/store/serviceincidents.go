@@ -62,6 +62,18 @@ func (s *Store) OpenServiceIncidentTx(
 		inc.ID, body); err != nil {
 		return domain.Incident{}, false, fmt.Errorf("store: open service incident note: %w", err)
 	}
+	// The correlation attempt, enqueued in this same transaction on its own fenced topic
+	// (FR-021 §14.3, the shape `CreateIncident` uses). FR-022 promises a service incident
+	// its impact links, and the enqueue belongs HERE rather than in the evaluator: an
+	// incident that exists without its correlation event is the dual-write this outbox
+	// exists to make impossible.
+	corr, err := json.Marshal(domain.IncidentCorrelation{IncidentID: inc.ID})
+	if err != nil {
+		return domain.Incident{}, false, fmt.Errorf("store: marshal service incident correlation: %w", err)
+	}
+	if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentCorrelation, corr); err != nil {
+		return domain.Incident{}, false, err
+	}
 	return inc, true, nil
 }
 

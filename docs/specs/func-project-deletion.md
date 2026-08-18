@@ -1,6 +1,6 @@
 # func-project-deletion — Delete a project (FR-018)
 
-Status: TODO (spec) · Owner rule: application (tenant lifecycle) / transport (RBAC) ·
+Status: IMPLEMENTED (FR-018 is DONE in `docs/status.md`; this document is the contract it was built to) · Owner rule: application (tenant lifecycle) / transport (RBAC) ·
 Decision: D-0150 · Iteration: iter-0111
 
 ## 1. Context & motivation

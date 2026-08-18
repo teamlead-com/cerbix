@@ -25,25 +25,45 @@ part of the system. Unlike `docs/checks/` (immutable snapshots) and `docs/iterat
 
 ## Current contents
 
-| File | Area | Status |
-| --- | --- | --- |
-| `func-monitoring-checks.md` | Check types, `Prober`, conditions engine, scheduler/worker | skeleton |
-| `func-tenancy-rbac.md` | Organization/Project, membership, roles, isolation | skeleton |
-| `func-sla-sli.md` | SLI/SLO/SLA, windows, error budget, maintenance windows | skeleton |
-| `func-status-pages-incidents.md` | Status pages, components, incidents, postmortems, feeds | skeleton |
-| `func-notifications.md` | Notification channels, binding to monitors, webhooks | skeleton |
-| `func-incident-context.md` | Heuristic RCA context for auto-incidents (iter-0037) | implemented |
-| `func-burn-rate-windows.md` | Multi-window multi-burn-rate alerts, SRE canon (iter-0038) | implemented |
-| `func-confirm-phase.md` | Confirm phase: accelerated down confirmation (iter-0039) | implemented |
-| `func-monitor-dependencies.md` | Dependency graph + cascading alert suppression (iter-0040) | implemented |
-| `func-multi-region-quorum.md` | Multi-region quorum via composite, variant B (iter-0041) | implemented |
-| `func-result-protocol.md` | Result ingest: typed origins, timestamp hygiene, `execution_revision` (P0a/P0b, D-0142) | spec |
-| `func-monitoring-as-code.md` | Hot-reconciled, tenant-scoped Monitoring as Code file provider (FR-017, D-0145) | spec |
-| `func-secret-inventory.md` | Project-scoped write-only secrets, typed refs and encrypted dispatch (FR-020/NFR-015, D-0155) | implemented |
-| `sec-authn-authz.md` | OIDC (any issuer), local login, sessions, API tokens, client-credentials | implemented |
-| `ops-keycloak-oidc.md` | Setup and integration guide for Keycloak and any OIDC providers | implemented |
-| `ops-logging.md` | slog, levels, format, ban on logging secrets | skeleton |
-| `ops-monitoring.md` | `cerbix_` metrics, health/readiness, alerts | skeleton |
+Two axes, deliberately separate. **Spec** is how deep the DOCUMENT is written; **Feature** is what
+exists in the product. They diverge in both directions — an area can ship on top of a thin document
+(the early features did), and a document can be written to implementable depth before any code
+(everything since FR-017 does). One column would have to lie about one of them.
 
-> Skeletons are filled in during the corresponding iterations before implementing a feature
-> (specification before code). Each spec lists its own `FR`/`NFR`, which are reflected in `docs/status.md`.
+| File | Area | Spec | Feature |
+| --- | --- | --- | --- |
+| `func-service-reliability.md` | Service as a reliability-domain resource: two axes, sealed facts, impact graph, status-page projection, alerting ownership (FR-021/NFR-016, D-0159/0166/0167/0168) | full (91 invariants) | phases 1–5 shipped; §16.9 items deferred by owner decision |
+| `func-secret-inventory.md` | Project-scoped write-only secrets, typed refs, encrypted dispatch (FR-020/NFR-015, D-0155) | full | shipped |
+| `func-monitoring-as-code.md` | Hot-reconciled, tenant-scoped Monitoring-as-Code file provider (FR-017, D-0145) | full | shipped |
+| `func-result-protocol.md` | Result ingest: typed origins, timestamp hygiene, `execution_revision` (D-0142) | full | shipped |
+| `func-oncall-synthetic-pull.md` | On-call/escalations, synthetic checks, HTTP-pull agent | full | shipped |
+| `func-project-deletion.md` | Delete a project (FR-018) | full | shipped |
+| `func-org-deletion.md` | Delete an organization (FR-019) | full | shipped |
+| `func-geo-worker-pools.md` | Geo-distributed probers, region-aware worker pools | written | shipped |
+| `func-admin-users.md` | Instance-wide Users administration for the Global Admin | written | shipped |
+| `func-settings-members.md` | Members moved into Settings, the Administration group | written | shipped |
+| `func-hardening.md` | Hardening package from the 2026-08 deep audit | written | shipped |
+| `func-audit-gaps.md` | Audit gap package: saved-but-never-used functionality | written | shipped |
+| `func-audit-gaps-2.md` | Audit gap package 2, the second layer | written | shipped |
+| `func-e2e-coverage.md` | E2E coverage expansion beyond the D-0124 smoke suite | written | shipped |
+| `func-transport-resilience.md` | SSE and transport-level survivability gaps | written | shipped |
+| `func-observability-logging.md` | Operational logging expansion beyond failures | written | shipped |
+| `func-incident-context.md` | Heuristic RCA context for auto-incidents (iter-0037) | written | shipped |
+| `func-burn-rate-windows.md` | Multi-window multi-burn-rate alerts, SRE canon (iter-0038) | written | shipped |
+| `func-confirm-phase.md` | Confirm phase: accelerated down confirmation (iter-0039) | written | shipped |
+| `func-monitor-dependencies.md` | Dependency graph + cascading alert suppression (iter-0040) | written | shipped |
+| `func-multi-region-quorum.md` | Multi-region quorum via composite, variant B (iter-0041) | written | shipped |
+| `func-monitoring-checks.md` | Check types, `Prober`, conditions engine, scheduler/worker | skeleton | shipped |
+| `func-tenancy-rbac.md` | Organization/Project, membership, roles, isolation | skeleton | shipped |
+| `func-sla-sli.md` | SLI/SLO/SLA, windows, error budget, maintenance windows | skeleton | shipped |
+| `func-status-pages-incidents.md` | Status pages, components, incidents, postmortems, feeds | skeleton | shipped |
+| `func-notifications.md` | Notification channels, binding to monitors, webhooks | skeleton | shipped |
+| `sec-authn-authz.md` | OIDC (any issuer), local login, sessions, API tokens, client credentials | written | shipped |
+| `ops-keycloak-oidc.md` | Setup and integration guide for Keycloak and any OIDC provider | full | shipped |
+| `ops-logging.md` | slog, levels, format, the ban on logging secrets | skeleton | shipped |
+| `ops-monitoring.md` | `cerbix_` metrics, health/readiness, alerts | skeleton | shipped |
+
+> A `skeleton` beside a shipped feature is a real debt, not a formality: those five areas were built
+> before this project adopted specification-before-code, so the document does not yet describe what
+> the code does. Everything from FR-017 onward was written to implementable depth FIRST, which is why
+> its `Spec` column says `full`. Each spec names its own `FR`/`NFR`, reflected in `docs/status.md`.

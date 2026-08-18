@@ -33,8 +33,10 @@ keeps its effective span. The owner decisions stand unchanged: duration-weighted
 microseconds, archive separated from annul, bundle format 2 with a project-unique monitor slug,
 and native RANGE partitions in both storage modes.
 
-Phases 1–2 are specified to implementable depth; phases 3–5 are intent only. No code exists
-and none will until this text passes.
+All five phases are now specified to implementable depth AND shipped — 1–2 in the original cycle,
+then 3 (§14, D-0166), 4 (§15.0/§15.5, D-0167) and 5 (§16, D-0168), each specified in its own cycle
+before its code existed. What remains unbuilt is deferred by owner decision and named where it is
+declined: §16.9 for alerting, §15.0 for public impact links.
 
 > **Terminology.** A Cerbix **Service** is a reliability-domain resource representing an
 > operational unit. It is not a monitor, not a status-page component and not a catalog entry.
@@ -1477,8 +1479,8 @@ signal is ARMED and FRESH — ownership alone silences nothing, and every ambigu
 
 ## 14. Dependencies and incident correlation (phase 3)
 
-*Specified to implementable depth in the phase-3 spec cycle (2026-08-17); until then this
-section was intent only. Decision record reserved: D-0166.*
+*Specified to implementable depth in the phase-3 spec cycle (2026-08-17); until then this section
+was intent only. Shipped across iter-0146…0148; decision record **D-0166**.*
 
 Three behaviors must never be conflated:
 
@@ -1877,8 +1879,8 @@ monitor). Existing components are never converted automatically: an explicit "co
 Service-backed component" action with a preview of the resulting public change — status pages
 are customer-visible artifacts.
 
-*Specified to implementable depth in the phase-4 spec cycle (2026-08-17); until then this was
-intent only. Decision record reserved: D-0167.*
+*Specified to implementable depth in the phase-4 spec cycle (2026-08-17); until then this was intent
+only. Shipped in iter-0150; decision record **D-0167**.*
 
 ### 15.0 The status-page projection (phase 4)
 
@@ -2540,7 +2542,8 @@ leader work does not make a cross-project reference safe; it makes it invisible.
 ## 16. Alerting ownership (phase 5)
 
 *Design cycle 2026-08-17. Round 1/2 REJECTED BEFORE CODE (4 P0 + 10 P1 + 2 P2); this is the revised
-design. Decision record reserved: **D-0168**, to be written only after the design round closes.*
+design, which the second round closed. Decision record **D-0168**; shipped in iter-0151 through four
+implementation-review rounds whose nineteen findings are recorded there.*
 
 ### 16.0 The owner decisions
 

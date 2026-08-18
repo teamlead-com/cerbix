@@ -589,6 +589,7 @@ rule label: this surface is reachable by anyone who can create a service.
 | --- | --- |
 | `cerbix_service_alert_evaluations_total{signal,outcome}` (counter) | Units of work by outcome, `ok`\|`error`\|`skipped`. The unit is what gets a verdict: a SERVICE for `health`, a burn RULE for `burn`. `skipped` is where the burn arm's HOLDs land — a successful evaluation that cannot be quoted. A pass that failed wholesale counts one `error`. |
 | `cerbix_service_alert_emitted_total{signal,edge}` (counter) | Alert edges ENQUEUED (`onset`\|`close`) — not deliveries; the outbox owns those. |
+| `cerbix_service_incidents_total{action}` (counter) | Incidents a MACHINE opened or resolved for a SERVICE (`opened`\|`resolved`, FR-022). Deliberately NOT folded into the edge counter: an onset for a service whose incident is already open announces WITHOUT opening one, so a persistent gap between `emitted{edge="onset"}` and `incidents{action="opened"}` is a real signal — the open is being refused by the per-service index because something older never resolved. |
 | `cerbix_service_alert_active{signal}` (gauge) | Open (unclosed) alert episodes, sampled, saturating at 1000. |
 | `cerbix_service_alert_backlog{signal}` (gauge) | Owning services (`health`) and enabled burn targets (`burn`) DUE for evaluation — DB-clock lease expired, or never evaluated. Saturates at 1000. |
 | `cerbix_service_alert_last_success_seconds{signal}` (gauge) | Unix time of the last SUCCESSFUL pass. A failed pass leaves it aging on purpose. |

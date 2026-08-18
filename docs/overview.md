@@ -153,11 +153,32 @@ only while a replacement for THAT signal is demonstrably ARMED: a policy that ca
 state, a quotable last verdict for every declared rule, the current generations and effective
 revision, a fresh DB-clock lease, and a recipient that resolves right now. Anything ambiguous FAILS
 OPEN — the member pages — because a page that was not needed is noise and a page that was owed and
-never sent is the failure the design exists to prevent. Facts, status flips, incidents and history
-are untouched by all of this: suppression applies to DELIVERY only. An announcement that ends
+never sent is the failure the design exists to prevent. Facts, status flips and history are
+untouched by all of this: suppression applies to DELIVERY only. (This sentence used to say
+"incidents" too, and FR-022 made that half false — see below. What stays true is the part
+suppression is about: a member's incident is neither opened, resolved nor annotated differently
+because a service covered its page.) An announcement that ends
 carries WHY it ended, and only a genuine return to health is called `recovered`; ownership turned
 off, a policy that no longer covers the state, a target disabled, a rule removed and a service
 deleted each say so in their own words, from a durable episode that outlives what fired.
+
+**Service incidents (FR-022).** A `Service` can be the SUBJECT of an incident, not merely a thing
+that pages. An incident has AT MOST ONE anchor — a monitor or a service, enforced by a CHECK so the
+discriminator every read path branches on cannot be ambiguous, while a manual project-level incident
+with neither keeps working. A live service alert OPENS one automatically, in the SAME transaction as
+the announcement, under the same three gates that decide whether it pages at all (a LIVE onset,
+ARMED coverage, `confirm_evaluations`); the close RESOLVES it in the transaction that ends the
+announcement. A burn breach opens none, ever — a budget signal trails the seal and says nothing about
+now. At most one open auto-incident per service, so a flapping service cannot accumulate them; a
+service that recovers and fails again gets a second one, which is what the resolve exists to make
+possible. `source = 'auto'` is in the resolve's WHERE, so a machine never overwrites a conclusion a
+person drew. It carries its impact links through the same service graph and a snapshot of the
+members the service had AT OPEN time, which keeps naming a member deleted since. Deleting the service
+clears the anchor and NOT the tenant key: the incident survives as a project-level record with its
+timeline intact. What does NOT change: a monitor incident's lifecycle, notes, escalation, rendering
+and postmortem (NFR-017); the `⚡` and `⏸` system notes keep their one home, the MONITOR's incident;
+and an open service incident moves no component STATUS on a status page — it is rendered as an
+incident, next to a status the §15.0 precedence table still derives from health alone.
 
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
 `mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `push` (dead-man's-switch).

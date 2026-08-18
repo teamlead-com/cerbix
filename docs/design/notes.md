@@ -315,3 +315,31 @@ What the mock decides, so the implementation invents nothing:
   answer, in one glance, a question this panel is not allowed to answer: who did what inside a tenant.
   The API enforces the same split: `GET /api/v1/admin/audit` is a distinct read (`org_id IS NULL`),
   not the org listing with a wider filter, so no authz slip can widen one into the other.
+
+## Project objective — the promise about the whole, not the mean of its parts (iter-0155, AWAITING OWNER APPROVAL)
+
+Source: `docs/design/mock-project-objective.html`. **Not approved yet** — the backend and migration 00083
+are landed and tested, and no Vue file is touched until the owner signs it off.
+
+The SLA page already shows an "Error budget remaining · 30d" card that is a MEAN across monitors which
+happen to have objectives. That answers "how are my monitors doing". A project objective answers a
+different question — "what did we promise for this project" — and until now it had nowhere to live even
+though `sla_targets` has carried the project scope since migration 00077.
+
+What the mock decides:
+
+- **The two cards sit side by side and each says which question it answers.** "mean across SLO monitors"
+  beside "Project objective". Two numbers that could be mistaken for one another must be labelled, not
+  separated by hoping the reader notices.
+- **An objective is per WINDOW; only a window that has one shows numbers.** Other windows show a dash,
+  never 30d's objective borrowed — a budget without the promise it was measured against is a number
+  nobody made.
+- **The Burn column is always a dash at this scope, and there is NO burn control at all** — not a
+  disabled one. A disabled switch says "not yet"; an absent one says "not here". Paging at project scope
+  needs an arming rule, a routing answer and close semantics, and until those exist the database refuses
+  the row (`sla_targets_project_no_burn_chk`).
+- **Rejection happens before the request**, mirroring the server's rule client-side (`lib/objective.ts`,
+  D-0165): the open interval (0,100), four decimals, half-up. The operator reads why, not a 400.
+- **Clear is explicit**, and clearing takes the budget with it: the row returns to dashes, never to 100%.
+- **Not shown on purpose:** a project-level burn history (cannot exist without paging semantics) and a
+  per-monitor breakdown of the project budget (that is the objectives table directly below).

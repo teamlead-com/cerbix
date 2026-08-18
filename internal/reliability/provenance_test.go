@@ -69,3 +69,46 @@ func TestProvenanceCauseSetsAreBoundedAndCountTheirOverflow(t *testing.T) {
 		t.Fatalf("under the bound: overflow = %d, want 0", under.Provenance.Overflow)
 	}
 }
+
+// Invariant 4's tail (§8.1, §9.4): provenance distinguishes an IGNORE-weakened quorum from a
+// DECLARATION-weakened one.
+//
+// The clamp record already existed and was tested for the maintenance case only, which hid the
+// distinction the invariant is actually about. It matters when someone asks why a service reported
+// GOOD on fewer members than it declares: "an operator excluded one" and "policy dropped an
+// unknown one" are different answers, and only one of them is a reason to change the declaration.
+// `Weakened` carries `Ignored`, `ExcludedMaintenance` and `ExcludedDisabled` as separate counts —
+// this pins that they are populated apart rather than summed into one "missing" number.
+func TestProvenanceTellsAnIgnoredMemberFromAnExcludedOne(t *testing.T) {
+	members := []Member{httpMember("a", "core"), httpMember("b", "core"), httpMember("c", "core")}
+	// `a` is UP, `b` has no observation at all (UNKNOWN → ignored by policy), `c` is disabled.
+	members[2].Enabled = false
+	obs := []Observation{{MonitorID: "a", Ts: bucketStart.Add(-time.Second), Up: true}}
+	p := domain.ApplyServicePolicyDefaults(Policies{
+		Aggregation: domain.AggregationPolicy{Mode: domain.AggQuorum, DegradedMin: 3, HealthyMin: 3},
+		MissingData: domain.MissingIgnore,
+		Maintenance: domain.MaintenanceExclude,
+	}, map[string]int{"core": 3}, 3)
+
+	b := reduce(t, Input{Start: bucketStart, End: bucketEnd, Members: members, Observations: obs, Policies: p})
+	if len(b.Provenance.Weakened) != 1 {
+		t.Fatalf("weakened records = %d, want 1 — the clamp bit and must be recorded", len(b.Provenance.Weakened))
+	}
+	w := b.Provenance.Weakened[0]
+	if w.Ignored != 1 {
+		t.Errorf("Ignored = %d, want 1 — a member dropped by `missing_data: ignore` must be counted as "+
+			"IGNORED, not folded into an exclusion (invariant 4)", w.Ignored)
+	}
+	if w.ExcludedDisabled != 1 {
+		t.Errorf("ExcludedDisabled = %d, want 1 — a disabled member is a DECLARATION-side exclusion and "+
+			"must stay distinguishable from an ignored one (invariant 4)", w.ExcludedDisabled)
+	}
+	if w.ExcludedMaintenance != 0 {
+		t.Errorf("ExcludedMaintenance = %d, want 0 — nothing here was in maintenance, and a summed "+
+			"\"missing\" count would show one", w.ExcludedMaintenance)
+	}
+	if w.DeclaredDegradedMin != 3 || w.EffectiveDegraded != 1 {
+		t.Errorf("declared/effective degraded = %d/%d, want 3/1 — the clamp must state both numbers so a "+
+			"reader can see how far the threshold fell", w.DeclaredDegradedMin, w.EffectiveDegraded)
+	}
+}

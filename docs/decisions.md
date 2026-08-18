@@ -3600,7 +3600,7 @@ way to audit the claim was to re-read thirty immutable iteration reports.
 
 **The requirement closes against a discharge map, not against a memory.** `docs/traceability.md`
 carries one row per invariant and per required scenario, naming the test that holds it, and
-`make docs-check` fails when a row cites a test the tree lacks or when any of the 116 numbers has no
+`make docs-check` fails when a row cites a test the tree lacks or when any of the 115 numbers has no
 row. Building the map found seven properties that were specified, believed and unpinned — invariants
 1, 25, 27, 35, 37, 78 and 86 — none of them a product defect, each now carrying a test that fails
 behaviourally when the property is broken (iter-0153 §2.7). Invariant 86 is the sharpest evidence for

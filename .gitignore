@@ -24,3 +24,7 @@ frontend/tsconfig.tsbuildinfo
 node_modules/
 
 .party-contract.md
+
+# Python bytecode from docs/verification scripts
+__pycache__/
+*.pyc

@@ -96,6 +96,46 @@ def discharge_rows(text, heading):
     return out
 
 
+ROW_STATUS_DOCS = ['docs/status.md']
+STATUSES = {'TODO', 'IN_PROGRESS', 'DONE'}
+
+
+def split_row(line):
+    """Split a markdown table row on UNESCAPED pipes.
+
+    A `\\|` inside a cell is a literal pipe (a shell pipeline in an evidence cell, a route list in a
+    requirement), and splitting on it would report a false break. Splitting on the raw character
+    instead is how this checker's first version accused four correct rows and missed the one that was
+    actually broken.
+    """
+    return re.split(r'(?<!\\)\|', line)
+
+
+def check_row_statuses():
+    """Every requirement row states one of AGENTS' three statuses and nothing else.
+
+    Two ways a row goes wrong, both seen in this repository: a status cell written as
+    `IN_PROGRESS (UI pending a mock)` — a status plus a parenthetical, which is prose in a field the
+    process defines as an enum — and an unescaped pipe earlier in the row, which silently shifts every
+    later cell so the status column holds a fragment of the requirement text.
+    """
+    bad = []
+    for doc in ROW_STATUS_DOCS:
+        if not os.path.exists(doc):
+            continue
+        for n, line in enumerate(open(doc, encoding='utf-8'), 1):
+            if not re.match(r'\| (AC|DoD|FR|NFR)-', line):
+                continue
+            cells = split_row(line.rstrip('\n'))
+            if len(cells) < 5:
+                bad.append((doc, n, 'row', f'{len(cells) - 2} cells, want at least 3'))
+                continue
+            status = cells[3].strip()
+            if status not in STATUSES:
+                bad.append((doc, n, 'status', f'{status!r} is not one of TODO/IN_PROGRESS/DONE'))
+    return bad
+
+
 def check_discharge(src):
     """FR-021 states 91 acceptance invariants and 24 required scenarios. Every one must have a row,
     and every row must name a test that exists or an INSPECTION: reason — that is what makes "done"
@@ -147,9 +187,11 @@ def main():
                     continue
                 bad.append((doc, n, 'test', name))
     bad += check_discharge(src)
+    bad += check_row_statuses()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
-              'and all 91 invariants + 24 required scenarios are discharged')
+              'and all 91 invariants + 24 required scenarios are discharged; '
+              'every requirement row states one of the three statuses')
         return 0
     print(f'docs references: {len(bad)} unresolved citation(s) in living documents\n')
     for doc, n, kind, tok in bad:

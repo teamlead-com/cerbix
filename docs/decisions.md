@@ -3622,3 +3622,36 @@ iterations after the verdict that closed them (iter-0153 §2.6).
 evidence and the gate keeps them true; the deferred set is a stated non-goal with a named owner
 decision behind each item. Invariant 47 is superseded rather than deleted (§16.4 lifts the phase-2
 rejection it asserted), because other documents cite invariants by number.
+
+## D-0170 — FR-022 commissioned: a Service can own an incident, and its six decisions are delegated (iter-0155)
+
+The owner commissioned Service incidents — the first of §16.9's six deferred items — and delegated the six
+decisions the design-gate input had raised to that document's own recommendations. Recording that is the
+point of this entry: each decision below was a JUDGEMENT of mine that the owner adopted, not a fact derived
+from the code, and a later reader deserves to know which is which.
+
+**The six, resolved.** A service alert AUTO-OPENS an incident, on a LIVE onset only and never on a burn
+breach, under the same three gates that decide whether it pages at all (armed coverage, `confirm_evaluations`,
+a fresh DB-clock lease). The incident lives in the EXISTING `incidents` table under an exclusive anchor —
+at most one of `monitor_id` / `service_id`, because a manual project-level incident has neither today —
+rather than a second table, since phase 4 already paid for the alternative when an implicit
+`monitor_id != ""` discriminator published a converted component's old monitor. A service incident does
+NOTHING to its members' incidents: two timelines, both true. It reaches the status page; its §14 impact
+links do not, keeping §15.0's refusal to publish internal topology. The escalation ladder does not ride it
+in this requirement — §16.9's escalation item needs a durable non-incident occurrence first, and bundling
+them would smuggle a subsystem in through a feature. And a postmortem snapshots its member set at open
+time, the same device phase 5 used for an episode's recipients, because a postmortem is read after the
+world moved.
+
+**The consequence that matters more than any of them: FR-022 SUPERSEDES FR-021 invariant 86** — "no service
+alert opens, resolves or annotates an incident". That invariant is true today and held by
+`TestAServiceAlertNeverTouchesTheIncidentTables`, written in iter-0155. So the spec requires three things to
+move IN THE SAME CHANGE as the code: invariant 86 gains a SUPERSEDED note keeping its number, its discharge
+row moves to the test holding the new rule, and that test is REWRITTEN rather than deleted — exactly as
+phase 5 rewrote the phase-2 burn-rejection test when it inverted. Without that, this repository repeats
+invariant 47's history: a spec asserting the opposite of what its own code does, left standing for a phase.
+
+**Consequence.** `FR-022`/`NFR-017` stay `TODO` until the spec is reviewed adversarially and a UI mock is
+approved; the spec carries fourteen numbered acceptance invariants and a required test matrix written
+before the code, because iter-0155 established that an unmapped invariant list is worth nothing and that
+`make docs-check` is what keeps a mapped one true.

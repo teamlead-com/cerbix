@@ -104,7 +104,7 @@ DELETE /api/v1/projects/{projectID}
 
 Mounted in `internal/api/api.go` next to the existing project routes
 (`GET /api/v1/projects/{projectID}` at line 373). Handler `h.deleteProject` in a new or
-existing `handlers_projects.go`, behind the standard session-auth middleware. The
+existing `internal/api/handlers.go` (`deleteProject`), behind the standard session-auth middleware. The
 `{orgID}` is resolved from the project (not taken from the path) so the tenant guard
 uses the project's real owner.
 

@@ -73,7 +73,7 @@ webhook channel, if the admin sets one up themselves.
 
 ### A.3 Affected files (guideline)
 `domain/escalation.go` (Policy/Schedule + Validate + on-call resolve), `domain/incident.go`
-(ack fields), `store/migrations/0003X_escalation.sql` (policies, steps, schedules, incident ack +
+(ack fields), `store/migrations/00035_escalation.sql` (policies, steps, schedules, incident ack +
 escalation_step/next_escalation_at, monitors.escalation_policy_id), `store/escalation.go`
 (CRUD + `AdvanceEscalations` edge-triggered), `store/incidents.go` (ack), `outbox/outbox.go`
 (a new topic `escalation_step` → notify of the selected target), `domain/outbox.go` (payload),
@@ -191,7 +191,7 @@ alongside `Dispatcher` (inproc/amqp), declared "deferred" in the geo spec.
 - **AC-PULL-4** — Token revocation immediately closes the agent's access (401).
 
 ### C.3 Affected files (guideline)
-`store/migrations/0003X_pull_jobs.sql` (+ api_tokens scope), `store/pulljobs.go` (enqueue/claim/expire),
+`store/migrations/00036_pull_agent.sql` (+ api_tokens scope), `store/pulljobs.go` (enqueue/claim/expire),
 `domain/` (agent token scope, region transport), `scheduler/scheduler.go` (for pull regions —
 enqueue into pull_jobs), `api/handlers_agent.go` (jobs/results/heartbeat + token-auth middleware),
 `ingest` (shared result intake — reuse), `cli/cli.go` (`--role agent`, flags

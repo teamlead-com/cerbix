@@ -3280,7 +3280,12 @@ signal trails the watermark and could not have carried outage paging on its own.
 44. segments produced by a first-adoption backfill are labelled as declared reconstructions;
 45. every budget states the objective that produced it, and an objective change is annotated;
 46. existing monitor-level SLO behaviour is unchanged;
-47. service SLOs do not alert, and a service-scoped `burn_alert_enabled` is rejected.
+47. **SUPERSEDED by phase 5 (§16, D-0168), and kept at its number because other documents cite
+    it.** As written for phases 1–2 it read: "service SLOs do not alert, and a service-scoped
+    `burn_alert_enabled` is rejected". §16.4 lifts exactly that rejection — a service SLO now pages
+    per burn RULE, migration 00082 drops `sla_targets_service_no_burn_chk`, and the phase-2
+    regression was rewritten as `TestServiceScopedBurnTargetIsSupported`. What survives of 47 is
+    invariant 46: monitor-level burn behaviour is unchanged. Invariants 75–91 govern the alerting.
 
 Invariant 42 is the single sharpest test of whether this design succeeded: if it holds, Service
 is a reliability-domain object; if it fails, Service is still a grouping abstraction.

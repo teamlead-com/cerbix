@@ -28,7 +28,7 @@ DEV_E2E_ARGS ?=
 DISTRIBUTED_E2E_ARGS ?= tests/file-providers.spec.ts tests/monitors.spec.ts tests/probers.spec.ts
 GEO_E2E_ARGS ?= tests/topology-geo.spec.ts tests/monitors.spec.ts tests/probers.spec.ts
 
-.PHONY: build spa-snapshot test race lint version clean \
+.PHONY: build spa-snapshot test race lint docs-check version clean \
 	dev-init geo-init dev-compose-check geo-compose-check \
 	dev-build dev-build-single dev-build-distributed geo-build \
 	dev-up dev-up-single dev-up-distributed geo-up geo-up-all \
@@ -141,6 +141,15 @@ race:
 
 lint:
 	golangci-lint run ./...
+
+## docs-check: fail when a LIVING document cites a file or Test* name the tree does not have
+##
+## The drift is silent and was found by hand once: `docs/status.md` cited two test names that had
+## never existed, and five renamed tests were cited by `docs/traceability.md` — evidence that reads
+## as runnable and is not. Iteration reports, review snapshots and `docs/decisions.md` are excluded
+## on purpose: they are immutable or historical, and a later rename does not make them wrong.
+docs-check:
+	python3 scripts/check-docs-references.py
 
 version: build
 	$(BINARY) version

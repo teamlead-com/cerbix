@@ -13,7 +13,7 @@ evidence belongs: enumerated in [iter-0152](iterations/iter-0152.md) §0/§2 and
 One counter remains, because it is mechanically stable and freezes when its report closes:
 
 - **§2 finding sections — 25.** 15 in [iter-0151](iterations/iter-0151.md) and 10 in
-  [iter-0152](iterations/iter-0152.md). Named after exactly what its checker counts,
+  [iter-0152](iterations/iter-0152.md), CLOSED at `cc247ce` and immutable from it. Named after exactly what its checker counts,
   `grep -c '^### 2\.'` — it is SECTIONS, not individual defects (§2.7 of iter-0152 carries two
   honesty gaps under one heading), and it INCLUDES the review's governance and documentation findings
   (§2.8 is [401], §2.9 is [403], §2.10 is [405]/[407]).

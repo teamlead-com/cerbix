@@ -31,8 +31,11 @@ import (
 // deliberately not a knob.
 const minDecidableCoverage = 0.95
 
-// serviceBurnWindows is the fixed reporting pair (§12.2's card, D-0163). Service burn is
-// REPORTING ONLY until phase 5 (§13); these windows never alert.
+// serviceBurnWindows is the fixed reporting pair (§12.2's card, D-0163). THIS PAIR never alerts —
+// not "not yet": phase 5 gave services paging through the operator's declared `burn_rules` on
+// `sla_targets` (§16.4), which is a different object with its own windows, latches and generations.
+// The card stayed exactly as it was, so a reader who finds a burn alert in production must look at
+// `burn_rules`, never here.
 var serviceBurnWindows = []sla.Window{
 	{Name: "1h", Duration: time.Hour},
 	{Name: "6h", Duration: 6 * time.Hour},

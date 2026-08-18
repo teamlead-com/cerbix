@@ -4,6 +4,8 @@ Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and 
 
 ## No active iteration — FR-021 and NFR-016 are CLOSED (iter-0153, closed at `d390e90` and immutable from it; D-0169)
 
+[iter-0154](iterations/iter-0154.md) followed it as a three-sentence arc, opened and closed in one commit: the spec and one code comment still said "until phase 5" and "until phase 4 opts in" after both phases had landed — one having changed nothing, the other having declined. No behaviour moved.
+
 [iter-0153](iterations/iter-0153.md) closed the requirement against the discharge tables in [traceability.md](traceability.md): every one of the spec's 91 acceptance invariants and all 24 §16.10 scenarios name the test that holds them, and `make docs-check` fails if that stops being true. §16.9 is an explicit NON-GOAL of FR-021 — service incidents, escalation policies for services, retroactive alerting, cross-project delegation, per-member severity inside a service page and suppression beyond the three named topics each open their OWN requirement when commissioned. Predecessors [iter-0151](iterations/iter-0151.md) (`475a0d3`) and [iter-0152](iterations/iter-0152.md) (`cc247ce`) are closed and immutable from those commits. The next commissioned work opens `iter-0154`.
 
 **No lifetime review scoreboard lives here, and no list of review rounds either — on purpose.** An
@@ -17,8 +19,9 @@ record.
 
 One counter remains, because it is mechanically stable and each term freezes when its report closes:
 
-- **§2 finding sections in the FROZEN reports — 33: 15 in [iter-0151](iterations/iter-0151.md), 10 in
-  [iter-0152](iterations/iter-0152.md) and 8 in [iter-0153](iterations/iter-0153.md).** Named after exactly what its checker counts,
+- **§2 finding sections in the FROZEN reports — 34: 15 in [iter-0151](iterations/iter-0151.md), 10 in
+  [iter-0152](iterations/iter-0152.md), 8 in [iter-0153](iterations/iter-0153.md) and 1 in
+  [iter-0154](iterations/iter-0154.md).** Named after exactly what its checker counts,
   `grep -c '^### 2\.'` — it is SECTIONS, not individual defects (§2.7 of iter-0152 carries two honesty
   gaps under one heading), and it INCLUDES the review's governance and documentation findings. An OPEN
   report's own count is stated in that report when it closes and added here then, so nothing in this
@@ -27,6 +30,8 @@ One counter remains, because it is mechanically stable and each term freezes whe
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
+| AC-0154-1 | No statement in this spec or its code is conditioned on an event that has already been decided. Three were: the §12.2 burn card said "until phase 5 owns alerting" (phase 5 came and left the card alone — paging rides the declared `burn_rules` of §16.4), two places said status-page impacts are absent "until phase 4 opts in" (phase 4 came and DECLINED), and `store/servicereport.go` sent a reader looking for the alerting path to the reporting pair. | DONE | [iter-0154](iterations/iter-0154.md) §2.1; the comment-only production diff shown in its §3; invariant 59 still discharged by `TestIncidentImpactsDetailOnlyAndNeverPublic`. |
+| DoD-0154 | The arc opens and closes in one commit, because it is three sentences and no reviewer round exists; `make docs-check`, `go build`, `go vet` and `gofmt` are green, and no executable behaviour changed — so no test run is claimed. | DONE | [iter-0154](iterations/iter-0154.md) §3. |
 | AC-0153-1 | No living document asserts a contract that has been deleted, and none enumerates this phase's review rounds. The cumulative scoreboard was DELETED at `cc247ce`, not relocated, so a sentence saying where it lives is false wherever it appears; and a list of round IDs in a long-lived document grows with every round while nothing updates it, which is the same recursion at a slower rate — it had already gone stale twice, at different rounds, in the two places it appeared. Round IDs belong to the report for their arc, which freezes. | DONE | [iter-0153](iterations/iter-0153.md) §2.1; the checkers in its §5: no `totals stated once` match in this file or `traceability.md`, and `sed -n '5,20p' docs/status.md \| grep -o '\[[0-9]\{3\}\]'` empty while all three reports stay linked. |
 | AC-0153-2 | A CLOSED iteration report is never the writable current iteration, and a frozen report's mistakes are corrected in its successor BY RECORD rather than by edit. Closing a report without opening its successor leaves the changing facts with nowhere legal to go, and they land back in the frozen one — which is how a post-closure commit ended up described in a closed report's header. | DONE | [iter-0153](iterations/iter-0153.md) §2.2 and §3 (the correction of record for iter-0152's three stale lines, which are deliberately NOT edited); `diff` of both predecessors against `475a0d3` and `cc247ce` — empty. |
 | AC-0153-3 | This live checklist carries the CURRENT iteration's own atomic items, not only the previous arc's `DONE` rows. A current-iteration header with nothing `IN_PROGRESS` under it is a heading, not a status. | DONE | This table; [iter-0153](iterations/iter-0153.md) §2.3. |

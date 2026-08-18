@@ -1396,8 +1396,10 @@ silently reporting a recomputed budget without saying which objective it used is
 **Reporting only in phase 2.** Service SLOs are computed and displayed but do **not** alert
 (§13).
 
-*Amendment (D-0163 / iter-0138):* until phase 5 owns alerting, the displayed burn pair is
+*Amendment (D-0163 / iter-0138; settled by phase 5, iter-0154):* the displayed burn pair is
 **fixed at 1h/6h** (the approved card), each window `[sealed_through − w, sealed_through)`;
+phase 5 did NOT change it — service paging rides the operator's declared `burn_rules` on
+`sla_targets` (§16.4), a different object from this reporting card, and this pair still never alerts;
 a pair whose equivalent real-time window holds no sealed time returns
 `insufficient_sealed_coverage`. Hour/day rollups are computed on read as §10.2's exact
 epoch-keyed sums; no rollup table is stored in phase 2.
@@ -1796,8 +1798,9 @@ complete, only the prose truncates, and the truncation names its remainder.
   where the status-page serializer would inherit it: the public path embeds the incident model
   and redacts by allowlisting-in-reverse (`PublicRedacted`), so a shared field would ride into
   unauthenticated JSON the moment one future redactor forgets it. **Public and internal
-  status-page projections carry no impacts until phase 4 explicitly opts in** (§17: existing
-  status pages unchanged; internal topology is not public data). Required regression: the raw
+  status-page projections carry no impacts** — phase 4 arrived and DECLINED to opt in (§15.0, and
+  the non-goal below), so the rule is unconditional and a later opt-in needs its own decision
+  (§17: existing status pages unchanged; internal topology is not public data). Required regression: the raw
   UNAUTHENTICATED status-page JSON for a page whose project has correlated incidents contains
   no impact service ids, slugs, names or paths.
 - Edge reads and writes use the dedicated `/dependencies` routes of §14.2 (with
@@ -3348,8 +3351,9 @@ is a reliability-domain object; if it fails, Service is still a grouping abstrac
     rejected write);
 59. impacts are an authenticated-detail enrichment: absent from the shared incident model,
     absent from the incident LIST, and absent from every public and internal status-page
-    projection until phase 4 opts in — proven by a raw unauthenticated JSON regression over a
-    project with correlated incidents;
+    projection — unconditionally, since phase 4 DECLINED the opt-in this clause once left open
+    (iter-0154) — proven by a raw unauthenticated JSON regression over a project with correlated
+    incidents;
 60. read-side work is bounded and tested: no per-row impact query on the incident list, and
     the service-detail dependency health is ONE batched snapshot query at the maximum
     neighbour set;

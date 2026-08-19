@@ -173,6 +173,29 @@ Distributed roles run as separate processes over the RabbitMQ dispatcher (`--rol
 types are implemented, including ICMP (`internal/prober/icmp.go`, D-0032; unprivileged-first
 socket) and push (dead-man's-switch, D-0028).
 
+### PostgreSQL 15 is a hard requirement (learned in production)
+
+An upgrade to `v0.1.5-beta.1` on **PostgreSQL 14** applies migrations `00061`…`00069` and then dies on
+`00070` with `syntax error at or near "("` — five migrations (`00070`, `00080`, `00081`, `00082`, `00084`)
+use the column-list `ON DELETE SET NULL (col)` form that arrived in PostgreSQL 15. The plain form cannot
+substitute: on a composite FK it nulls EVERY referencing column including the NOT NULL `project_id`,
+which is the bug `00070` exists to fix.
+
+Nothing is lost when this happens — `00070` is transactional and rolls back, leaving the database at
+`00069` — but the state is a PARTIAL upgrade, and one applied migration matters for it: `00065` sets
+`monitors.slug` NOT NULL with no default, and a pre-`00065` binary does not write that column. So a
+rolled-back-but-partially-migrated system on an OLD binary **cannot create monitors** until either the
+upgrade completes or the constraint is relaxed:
+
+```sql
+-- temporary, only while an old binary must keep creating monitors; 00065 re-applies it later
+ALTER TABLE monitors ALTER COLUMN slug DROP NOT NULL;
+```
+
+`cerbix migrate` now reads `server_version_num` BEFORE the first file and refuses with the version, the
+requirement and the fact that nothing was applied. Upgrade the server to 15+ (16 matches every image and
+CI job here) rather than working around the syntax.
+
 ### RabbitMQ baseline and upgrade
 
 Compose requires `CERBIX_RABBITMQ_IMAGE` on every invocation: no default can safely describe both

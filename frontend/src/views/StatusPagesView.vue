@@ -10,7 +10,7 @@ import { componentMeta, reasonText, sourceLabel, summaryHeadline } from "@/lib/s
 type StatusPage = components["schemas"]["StatusPage"];
 type Component = components["schemas"]["Component"];
 type Monitor = components["schemas"]["Monitor"];
-type Service = components["schemas"]["Service"];
+type ServiceSummary = components["schemas"]["ServiceSummary"];
 type ConversionPreview = components["schemas"]["ConversionPreview"];
 type ComponentSource = "monitor" | "service" | "manual";
 type Visibility = "public" | "internal" | "unlisted";
@@ -23,7 +23,11 @@ const loading = ref(true);
 const error = ref("");
 const pages = ref<StatusPage[]>([]);
 const monitors = ref<Monitor[]>([]);
-const services = ref<Service[]>([]);
+// The list endpoint answers ServiceSummary — the service WRAPPED with its rollup counts — so the
+// identity is nested. This used to be `Service[]` behind an `as` cast, and the cast is what hid the
+// bug: every read of `sv.name`/`sv.id` was undefined, which rendered a blank option AND left it
+// carrying no value, so a service component could not be created at all.
+const services = ref<ServiceSummary[]>([]);
 
 const selected = ref<StatusPage | null>(null);
 const componentsList = ref<Component[]>([]);
@@ -47,11 +51,11 @@ async function loadPages() {
       // build a component the page-scope rule then refuses at write time.
       ws.projectId
         ? api.GET("/api/v1/projects/{projectID}/services", { params: { path: { projectID: ws.projectId } } })
-        : Promise.resolve({ data: [] as Service[] }),
+        : Promise.resolve({ data: [] as ServiceSummary[] }),
     ]);
     pages.value = pg.data ?? [];
     monitors.value = mon.data ?? [];
-    services.value = (svc.data as Service[] | undefined) ?? [];
+    services.value = svc.data ?? [];
     if (selected.value) select(pages.value.find((p) => p.id === selected.value?.id) ?? null);
   } catch {
     error.value = "Could not load status pages.";
@@ -258,7 +262,7 @@ const publicPath = computed(() => {
   return base;
 });
 const monitorName = (id?: string) => monitors.value.find((m) => m.id === id)?.name ?? "—";
-const serviceName = (id?: string) => services.value.find((sv) => sv.id === id)?.name ?? "—";
+const serviceName = (id?: string) => services.value.find((sv) => sv.service.id === id)?.service.name ?? "—";
 
 // What the line REPORTS, from the active source only. The dormant binding is shown separately
 // below it, never mixed in: a component that renders a service while still holding a monitor id is
@@ -532,7 +536,7 @@ watch(() => ws.orgId, loadPages);
                   <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Service</span>
                   <select v-model="convertTarget.service_id" class="w-[190px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" @change="convertPreview = null">
                     <option value="">{{ convertFor.service_id ? "— keep " + serviceName(convertFor.service_id) + " —" : "— choose —" }}</option>
-                    <option v-for="sv in services" :key="sv.id" :value="sv.id">{{ sv.name }}</option>
+                    <option v-for="sv in services" :key="sv.service.id" :value="sv.service.id">{{ sv.service.name }}</option>
                   </select>
                 </label>
                 <label v-else-if="convertTarget.source === 'monitor'" class="flex flex-col gap-[6px]">
@@ -619,7 +623,7 @@ watch(() => ws.orgId, loadPages);
                 <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Service</span>
                 <select v-model="compForm.service_id" class="w-[180px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" data-testid="new-component-service">
                   <option value="">— choose —</option>
-                  <option v-for="sv in services" :key="sv.id" :value="sv.id">{{ sv.name }}</option>
+                  <option v-for="sv in services" :key="sv.service.id" :value="sv.service.id">{{ sv.service.name }}</option>
                 </select>
                 <span v-if="!services.length" class="text-[11px] text-ink-3">No services in this project yet.</span>
               </label>

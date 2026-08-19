@@ -117,6 +117,12 @@ serves the SPA; put Traefik / your ingress in front for TLS.
 
 ## Quickstart
 
+Everything app-side is in the binary. The only external dependency is **PostgreSQL 15 or newer**
+(16 is what every image, compose file and CI job here uses). The schema itself needs 15: five
+migrations use the column-list `ON DELETE SET NULL (col)` form introduced in that release, and on 14
+they are a syntax error. `cerbix migrate` checks the server version before applying anything and
+refuses with that explanation rather than dying halfway through.
+
 Everything app-side is in the binary. The only external dependency is **PostgreSQL**;
 migrations apply themselves on startup and a bootstrap admin is created from config.
 Full step-by-step production guides (Docker Compose and bare binary + systemd) live in

@@ -51,7 +51,17 @@ function mockLoads(component = serviceComponent) {
     if (path.includes("status-pages") && path.includes("components")) return Promise.resolve({ data: [component] });
     if (path.includes("organizations")) return Promise.resolve({ data: [page] });
     if (path.includes("monitors")) return Promise.resolve({ data: [{ id: "mon1", name: "checkout-http" }] });
-    if (path.includes("services")) return Promise.resolve({ data: [{ id: "sv1", name: "Checkout service" }] });
+    // The REAL shape of this endpoint: ServiceSummary WRAPS the service with its rollup counts. The
+    // fixture used to answer the flat shape, which is exactly why no test caught the blank dropdown —
+    // the fake had the same wrong assumption as the code it was checking.
+    if (path.includes("services")) {
+      return Promise.resolve({
+        data: [{
+          service: { id: "sv1", slug: "checkout", name: "Checkout service" },
+          revision: 1, context_members: [], sli_members: [], epoch_seq: 1, repairing_count: 0,
+        }],
+      });
+    }
     if (path.includes("subscribers")) return Promise.resolve({ data: [] });
     return Promise.resolve({ data: [] });
   });
@@ -181,6 +191,24 @@ describe("StatusPagesView conversion", () => {
     // The dead preview is gone, so the same tokens cannot be re-submitted.
     expect(wrapper.find('[data-testid="conversion-result"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="conversion-confirm"]').exists()).toBe(false);
+  });
+
+  // An operator's screenshot showed the SERVICE dropdown rendering a blank option. The label was the
+  // visible half; the invisible half was worse — the option carried no value either, so a service
+  // component could not be created at all. Both halves come from one cause: the list endpoint answers
+  // ServiceSummary (the service wrapped with rollup counts) and the view read `sv.name`/`sv.id`
+  // directly, behind an `as Service[]` cast that stopped the compiler from saying so.
+  it("names each service in the source dropdown, and carries its id as the option value", async () => {
+    mockLoads();
+    const wrapper = await mountAndSelect();
+    // The service picker only exists once the ADD form's source is Service — the same two clicks an
+    // operator makes, and the state the screenshot was taken in.
+    await wrapper.get('[data-testid="new-component-source"]').setValue("service");
+
+    const picker = wrapper.get('[data-testid="new-component-service"]');
+    const opts = picker.findAll("option").filter((o) => o.attributes("value") === "sv1");
+    expect(opts, "no option carries the service id — the dropdown cannot bind a service").toHaveLength(1);
+    expect(opts[0].text()).toBe("Checkout service");
   });
 
   it("does not offer no_data as a manual status an operator can state", async () => {

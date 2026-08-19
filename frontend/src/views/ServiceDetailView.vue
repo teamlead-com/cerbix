@@ -405,8 +405,10 @@ watch(() => [route.params.id, ws.projectId], load);
         </section>
 
         <p class="mt-3 text-[12px] text-ink-3">
-          Availability over a window, the error budget and the burn rate arrive with the next iteration — they read
-          from sealed facts only, which is why the watermark above is shown before any of them.
+          Availability over a window, the error budget and the burn rate read from SEALED facts only, which is why
+          the watermark above is shown before any of them. Until the first buckets seal they stay absent with a
+          reason rather than showing a zero; the budget and the burn rate additionally need an objective declared
+          on the window.
           <span v-if="detail.materialization.sealed_through">
             The seal cadence itself is normal at around {{ humanDuration(3 * 60 * 1000) }}.
           </span>

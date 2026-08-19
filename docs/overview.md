@@ -292,6 +292,7 @@ flowchart TB
   takes over when the leader fails. Not scaled by count (there is one leader).
 - **worker-tier** — M stateless replicas, **grow horizontally with load**; prefetch on the queue
   provides backpressure and even distribution. No DB required.
+- **PostgreSQL 15+ required, 16 used everywhere here** — the schema uses the column-list `ON DELETE SET NULL (col)` form from PG15 in five migrations; `Migrate` refuses an older server before applying anything.
 - **Postgres 16 (TimescaleDB image)** — primary + streaming replica; time series on regular
   RANGE partitions + the `heartbeats_daily` rollup, retention drops old partitions (leader).
 - **RabbitMQ 4.3** — preferred cluster after the staged upgrade; durable regional

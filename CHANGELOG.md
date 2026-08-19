@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **PostgreSQL 15 is now enforced instead of assumed.** A production upgrade to `v0.1.5-beta.1` on
+  PostgreSQL 14 applied `00061`…`00069` and died on `00070` with `syntax error at or near "("`: five
+  migrations use the column-list `ON DELETE SET NULL (col)` form introduced in PG15. Every document, image
+  and CI job already said 16, but nothing checked it and nothing said it out loud. `cerbix migrate` now
+  reads `server_version_num` before the first file and refuses with the version, the requirement and the
+  fact that nothing was applied. README, `runbook.md` and `overview.md` state the requirement; the runbook
+  also carries the recovery note for a system left partially migrated (`00065` makes `monitors.slug` NOT
+  NULL, which an older binary does not write).
+- **A status-page component could not be created from a Service.** The service picker rendered a blank
+  option AND carried no value, because the view read `sv.name`/`sv.id` from a list endpoint that answers
+  `ServiceSummary` (the service wrapped with its rollup counts). An `as Service[]` cast on the load is what
+  stopped the compiler from reporting it, and the test fixture repeated the same wrong shape, so six
+  passing tests never saw it.
+- **A stale claim on the service page.** The footer said availability, the error budget and the burn rate
+  "arrive with the next iteration". They arrived in iter-0144 and the page already renders them; what was
+  actually missing on a fresh service is sealed facts and a declared objective, which is what it says now.
+
+---
+
 ## [v0.1.5-beta.1] - 2026-08-19
 
 242 commits since `v0.1.0-beta.5`. This is the release where a **Service** becomes the object

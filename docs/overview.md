@@ -38,7 +38,7 @@ A single binary; behavior is selected by subcommand and flags.
 | Role | What it runs | Job transport | Needs DB | Needs RabbitMQ |
 |---|---|---|---|---|
 | `all` | Everything in one process: scheduler + worker + ingest + API/SPA + outbox. | `inproc` (channel) | yes | no |
-| `api` | HTTP: REST + SSE + SPA serving; ingest (result consumer → heartbeats/statuses/incidents); outbox delivery. | AMQP | yes | yes |
+| `api` | HTTP: REST + SSE + SPA serving; the check-result consumer (→ heartbeats/statuses/incidents); outbox delivery. | AMQP | yes | yes |
 | `scheduler` | Leader scheduler (Postgres advisory lock): publishes due jobs; rollup/retention; renotify; burn-eval; SLA reports; region-worker-alert; escalation-advance. | AMQP | yes | yes |
 | `worker` | Prober pool: pulls jobs, executes the probe with a timeout, publishes the result. Stateless. | AMQP | no | yes |
 | `agent` | HTTP pull prober for geos without a broker: pulls its region's jobs over HTTPS, probes, posts results. DB-less, broker-less. | HTTP-pull | no | no |
@@ -119,7 +119,7 @@ flowchart LR
 | `scheduler` | Leader (advisory lock), min-heap `next_run`, job publishing; rollup, retention, renotify, burn-eval, SLA reports. |
 | `worker` | Goroutine pool, probe execution with `context.WithTimeout`. |
 | `prober` | `Prober` registry by monitor type + conditions engine; SSRF guard. |
-| `ingest` | Result consumer: heartbeats, status flip (atomic), auto-incidents, transitions into the outbox. |
+| `ingest` | The CHECK-RESULT consumer — heartbeats, status flip (atomic), auto-incidents, transitions into the outbox. The package name is historical: cerbix ingests its OWN probe results and no external telemetry, which is why the product is not an observability backend. |
 | `sla` | SLI/SLO/error-budget/burn-rate for a MONITOR (pure computations). |
 | `reliability` | Reliability of a **service** (FR-021): a piecewise reducer over breakpoints producing duration-weighted facts on two conserved axes. Pure — no I/O, no clock. |
 | `incidents`↔`api`/`store` | Incidents, timeline updates, postmortems, external-key correlation (Alertmanager). |

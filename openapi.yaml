@@ -3812,9 +3812,15 @@ components:
         reliability:
           nullable: true
           description: >
-            Always null in this release. SLO, error budget and burn rate are phase 2; a zero
-            a client could render as a number would be exactly the confident falsehood this
-            feature exists to prevent.
+            ALWAYS NULL, and it stays that way by design — not because the numbers are
+            missing. SLO, error budget and burn rate live on
+            `GET …/services/{serviceID}/reliability`, which carries them together with the
+            honesty they require: the window's status and reason, storage continuity,
+            decidable coverage, per-revision segments and the seal watermark they were
+            computed from. A bare number on THIS object would have none of that context, and
+            a zero a client could render as a number is exactly the confident falsehood this
+            feature exists to prevent. (Phase 2 shipped in iter-0144; this field predates it
+            and is kept so the shape of the detail response does not change.)
         alerting_state:
           allOf: [ { $ref: '#/components/schemas/ServiceAlertingState' } ]
           description: >

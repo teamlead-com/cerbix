@@ -4,10 +4,22 @@
 
 Company teams run ~10 internal projects (each with its own developers and PM) and need
 real-time visibility into whether their applications are up, plus historical SLA/SLI.
-cerbix is an internal, self-hosted uptime monitoring service with SLA/SLI computation,
-provider-agnostic OpenID Connect (OIDC) authentication, org→project multi-tenancy with
-strict isolation, role-based access control (RBAC), and public status pages with
-incident and postmortem communication.
+
+cerbix is a **self-hosted, multi-tenant service reliability platform**: teams DEFINE what
+reliable means for a service — which checks are its SLI, how regions aggregate, what counts
+as pageable — in versioned definitions, cerbix measures that from its own checks, and it
+drives the operational response. Concretely: SLI/SLO with error budget and burn rate,
+GOOD/BAD/UNKNOWN reliability semantics with reasons, incidents anchored to a monitor or a
+Service, dependency impact, public status pages with postmortems, on-call escalation,
+provider-agnostic OIDC, org→project multi-tenancy with strict isolation and RBAC.
+
+**What it is not**, stated here because the boundary shapes every decision below: not a
+telemetry store and not an observability platform. No arbitrary time-series queries, no
+query language, no metrics backend, no trace or log ingestion, no service catalog, no
+automatic root-cause analysis. It reads PromQL as a check source and exports its own
+metrics; your Prometheus/Grafana stack stays where it is. The original framing —
+"uptime monitoring service with SLA/SLI computation" — described the product before FR-021
+made the Service a first-class reliability domain, and is kept here only as history.
 
 ## Constraints
 

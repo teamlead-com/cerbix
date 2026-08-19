@@ -12,28 +12,61 @@
 [![OpenAPI 3.0](https://img.shields.io/badge/OpenAPI-3.0.3-green.svg)](openapi.yaml)
 [![Security Policy](https://img.shields.io/badge/security-policy-informational.svg)](SECURITY.md)
 
-Self-hosted uptime & SLA monitoring for internal infrastructure — heavier-duty and
-multi-tenant. It probes **internal** services from inside the perimeter, with
-SLO/error-budget alerting, incidents & status pages, on-call escalation, and
-geo-distributed probers.
+**Define what reliable means for a service — then measure it and run the response.**
+
+Self-hosted, multi-tenant service reliability platform. A **Service** declares what its
+reliability *is* — which checks are its SLI, how regions aggregate, what counts as
+pageable — in **versioned** definitions, so every number is traceable to the rule that
+produced it. cerbix measures that from its own checks, reports SLO / error budget / burn
+rate **and withholds any number it cannot defend**, then drives the response: incidents,
+dependency impact, status pages, on-call escalation.
 
 ## What is cerbix
 
-cerbix watches your services and tells you — reliably — when they break and how they've
-been doing over time. The whole app ships as **one static Go binary**: the Vue SPA, the
-REST API, and the database migrations are all embedded, so there is **no separate web
-server, no frontend bundle, and no migration scripts** to deploy. Point it at a Postgres,
-give it a config, run it.
+Most tools tell you a service is down. cerbix makes you say what *reliable* means for that
+service, and then holds you to it.
+
+An observation (HTTP, TCP, DNS, TLS, gRPC, SQL, PromQL, a scripted flow, a dead-man's
+switch — taken from inside your perimeter, including private and geo segments) is
+normalized to **GOOD / BAD / UNKNOWN with a reason** and reduced into one duration-weighted
+timeline per Service. The SLO window ends at the **seal watermark, never at `now`**;
+storage continuity and decidable coverage independently govern every aggregate; a number
+that cannot be honestly stated is **absent with a reason instead of rounded to 100%**. The
+same Service then drives suppression, incidents, the status page and the escalation ladder.
+
+The whole app ships as **one static Go binary**: the Vue SPA, the REST API, and the
+database migrations are all embedded, so there is **no separate web server, no frontend
+bundle, and no migration scripts** to deploy. Point it at a Postgres, give it a config,
+run it.
+
+cerbix is a control plane for **reliability definitions and operational response** — not
+for your traffic, deploys or infrastructure. It sits out of band and acts on nothing but
+its own alerts, incidents and pages.
 
 ### Highlights
 
 - **16 check types** — HTTP, TCP, ICMP, DNS, TLS-cert, gRPC, PostgreSQL, MySQL, Redis,
   PromQL, RabbitMQ, WebSocket, SSH, composite (groups), push (dead-man's-switch), and
   **synthetic** (scripted multi-step HTTP flows). All behind an SSRF guard.
-- **SLO & SLA** — error budgets, burn-rate alerts, scheduled weekly SLA reports;
-  maintenance windows excluded from the SLA.
-- **Incidents & status pages** — auto/manual/API incidents, timelines, postmortems,
-  public status pages, inbound Alertmanager webhook receiver.
+- **Service as the reliability object** — explicit SLI membership (and separately
+  declared *context* members that inform without counting), aggregation policies
+  (`all`/`any`/quorum, region-aware), **immutable definition revisions** and evaluation
+  epochs: you can answer "under which definition was this month measured".
+- **Reliability that refuses to guess** — GOOD/BAD/UNKNOWN with reasons, two independent
+  coverage axes, sealed facts, and withheld-with-a-reason instead of a confident 100%.
+- **Service SLO, error budget & burn rate** — per window, quoted against the objective in
+  force, with burn-rate alerting that says which watermark it was computed from. Monitor
+  SLA and weekly SLA reports too; maintenance windows are excluded.
+- **Paging that does not double** — a Service can own paging for its members: suppression
+  is per signal, per polarity, and only while coverage is demonstrably armed. Anything
+  ambiguous **fails open** — a page that was not needed is noise, a page that was owed and
+  never sent is the failure the design exists to prevent.
+- **Incidents & status pages** — auto/manual/API incidents anchored to a **monitor or a
+  Service**, timelines, postmortems, member snapshots, public status pages, inbound
+  Alertmanager webhook receiver.
+- **Dependency impact** — a same-project service graph correlates an incident with its
+  upstreams and downstreams. It records **candidates** and annotates; it never elects a
+  culprit, never suppresses and never hides.
 - **On-call / escalation** — escalation ladders, on-call rotations with vacation
   overrides, and acknowledge-to-stop.
 - **Reliable delivery** — a transactional outbox (retry/backoff/dead-letter),
@@ -46,6 +79,25 @@ give it a config, run it.
 - **Security** — AES-256-GCM secrets at rest with key rotation; distroless, non-root
   image.
 
+## What cerbix is not
+
+Stated plainly, because the boundary is a feature. cerbix does **not** serve arbitrary
+time-series queries, store generic telemetry, support user-defined downsampling, expose a
+query language, act as a metrics backend, or provide a service catalog — those are quoted
+from its own specification's non-goals, not softened for a README. There is no trace or log
+ingestion anywhere in it, and no automatic root-cause analysis: what it offers is
+correlation candidates and a heuristic context note over a dependency graph **you**
+declared.
+
+## Where it fits
+
+| Alongside | The honest relationship |
+| --- | --- |
+| Prometheus, Grafana, Loki, Tempo | **Not a replacement.** cerbix stores none of your telemetry and gives you no query language. It reads **PromQL as a check source** and exports its own `cerbix_*` metrics into your Prometheus. Keep them for *why*; cerbix answers *is this service reliable by our definition, and what are we doing about it*. |
+| Checkly, Pingdom, Uptime Kuma | Synthetic checks overlap, but there a monitor is the final object. Here a monitor is an **observation** and the object is a Service with a versioned definition, a budget and a response — plus probing from **inside** the perimeter, multi-tenancy and self-hosting. |
+| PagerDuty, Opsgenie | cerbix carries on-call rotations and escalation ladders for **its own** incidents. It does not claim to be the incident-response hub for signals from a dozen other systems. |
+| Nobl9, Pyrra, Sloth | Those compute SLOs over **your** metrics. cerbix produces the observations itself, keeps one derived timeline per Service, and versions the *definition* rather than only the threshold. |
+
 ## Architecture
 
 One binary, several **roles** (chosen by `--role`), so it scales from a laptop to a
@@ -54,7 +106,7 @@ distributed deployment:
 | Role | What it does | Needs |
 | --- | --- | --- |
 | `all` | Everything in one process (in-process dispatcher) — the default. | Postgres |
-| `api` | REST + SSE + SPA + ingest + outbox delivery. | Postgres + RabbitMQ |
+| `api` | REST + SSE + SPA + the check-result consumer + outbox delivery. | Postgres + RabbitMQ |
 | `scheduler` | Leader-elected job scheduler; rollups, retention, alerts, escalations. | Postgres + RabbitMQ |
 | `worker` | Stateless prober pool (AMQP). | RabbitMQ |
 | `agent` | HTTP-pull prober for a geo with no broker access (outbound HTTPS only). | — (DB-less/broker-less) |

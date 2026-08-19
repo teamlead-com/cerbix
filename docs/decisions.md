@@ -3750,3 +3750,44 @@ severity are POSITIONS with their reasons, and cross-project delegation and supp
 topics are open questions nobody has asked for. The audit trail for INCIDENT writes stays an open gap from
 D-0171, unaffected by this requirement and still needing its own.
 
+## D-0174 — the product is a service reliability platform, and "control plane" is bounded rather than banned (2026-08-19)
+
+**Context.** The public positioning still described cerbix as "self-hosted uptime & SLA monitoring", written
+before FR-021 made the Service a first-class reliability domain and before FR-022/FR-023 gave it incidents and
+an escalation ladder. The proposal on the table was to relabel the product a **Reliability Control Plane**.
+That was reviewed against the code rather than accepted.
+
+**What the code supports.** Versioned reliability definitions (immutable declaration revisions + evaluation
+epochs), explicit SLI membership separate from context members, region-aware and quorum aggregation,
+GOOD/BAD/UNKNOWN with reasons, one duration-weighted timeline per Service, service SLO / error budget / burn
+rate quoted against a seal watermark with two independent coverage axes, incidents on either anchor,
+dependency-impact candidates, status pages, on-call ladders, and a reconciler that drives all of it from files.
+There is also a genuine control/data-plane split by role: `api`/`scheduler` hold desired state, `worker`/`agent`
+execute probes.
+
+**Decision.** The primary noun is **"service reliability platform"**, and the headline is
+**"Define what reliable means for a service — then measure it and run the response."** "Control plane" is kept
+in the README as a CONCEPT with an explicit boundary — a control plane for reliability DEFINITIONS and
+OPERATIONAL RESPONSE, not for traffic, deploys or infrastructure — because unbounded it promises actuation the
+product does not perform and implies cerbix sits in the request path, which it does not. For SRE-facing text
+the defensible phrase is **"system of record for service reliability"**: it claims ownership of the definition
+and the facts without promising execution.
+
+**Why not "observability".** cerbix ingests its own probe results and no external telemetry. The word is used
+only for its OWN operational surface (`/metrics`, `/healthz`, structured logs) and for the neighbouring stack
+it integrates with (PromQL as a check source). Never as a category the product belongs to.
+
+**Banned claims, recorded so nobody has to re-derive them:** observability platform, APM, distributed
+tracing, traces/spans, single pane for all telemetry, replaces Prometheus/Grafana, metrics backend or TSDB, log
+aggregation, arbitrary queries or a query language, service catalog, **automatic root-cause analysis** (the
+product gives correlation CANDIDATES and a heuristic context note over a dependency graph the operator
+declared — §14 states it "records candidates, it never elects a single culprit"), AIOps/anomaly detection/ML,
+full-stack monitoring, real-time telemetry ingestion, auto-remediation or self-healing, agentless (an agent
+role exists), and any numeric guarantee such as "99.99%" or "zero false positives".
+
+**Consequence.** README, `project-description.md` and the `ingest` wording in `overview.md` are rewritten;
+`openapi.yaml`'s `ServiceDetail.reliability` description said SLO/budget/burn "are phase 2" when phase 2
+shipped in iter-0144 and the numbers live on `…/services/{id}/reliability` — corrected, since a stale API
+description is a false statement about capability, not a wording preference. The non-goals are now stated
+PUBLICLY in the README, quoted from the specification instead of softened.
+

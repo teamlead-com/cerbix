@@ -2,7 +2,16 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current iteration (iter-0159 — the dependency backlog: seven dependabot branches merged in two classes, none of them stale. See [iter-0159](iterations/iter-0159.md))
+## Current iteration (iter-0160 — public positioning reviewed against the code: the product is a service reliability platform, "control plane" bounded rather than banned (D-0174). See [iter-0160](iterations/iter-0160.md))
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0160-1 | The positioning proposal was REVIEWED against the code before any text changed, and one part of it was refused: "Reliability Control Plane" is not the primary noun, because unbounded it promises actuation on the user's infrastructure that cerbix does not perform and implies it sits in the request path, which it does not. The primary noun is "service reliability platform"; control plane survives as a bounded concept in the README; "system of record for service reliability" is the SRE-facing phrase. | DONE | **D-0174**; [README.md](../README.md), [`project-description.md`](project-description.md) ([iter-0160](iterations/iter-0160.md) §1–§2). |
+| AC-0160-2 | The README states the NON-GOALS publicly, quoted from the specification rather than softened: no arbitrary time-series queries, no generic telemetry, no downsampling, no query language, no metrics backend, no service catalog — plus no trace/log ingestion and no automatic root-cause analysis, because the product gives correlation CANDIDATES and a heuristic note over a graph the operator declared. | DONE | [README.md](../README.md) "What cerbix is not" and "Where it fits" ([iter-0160](iterations/iter-0160.md) §3). |
+| AC-0160-3 | A stale API description is corrected, not merely a marketing line: `ServiceDetail.reliability` said SLO, error budget and burn rate "are phase 2" when phase 2 shipped in iter-0144 and the numbers live on `…/services/{id}/reliability` with their honesty context. TS types regenerated; frontend type-check clean. | DONE | [`openapi.yaml`](../openapi.yaml) ([iter-0160](iterations/iter-0160.md) §4). |
+| DoD-0160 | Positioning matches the code, the boundary is public, and the legacy framing is either rewritten or explicitly kept as history. | DONE | §5 of [iter-0160](iterations/iter-0160.md). |
+
+## Previous iteration (iter-0159 — the dependency backlog: seven dependabot branches merged in two classes, none of them stale. See [iter-0159](iterations/iter-0159.md))
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |

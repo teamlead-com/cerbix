@@ -2073,6 +2073,78 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/services/{serviceID}/escalation-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Attach or clear the escalation policy a service escalates its own incident with (editor+)
+         * @description FR-023. A service with a policy escalates its OWN auto-opened incident: the policy's steps fire from the incident's start, progress latches on the incident, and acknowledgement or resolution ends it.
+         *
+         *     An EMPTY string clears the policy — the body states the whole value, which is why this is a PUT and why the field is a plain string rather than a pointer. Re-sending the value already stored is not a write: it produces a 200, no `updated_at` bump and NO audit line, because a trail that records a change nobody made is worse than one line short.
+         *
+         *     Its own route rather than a field on the paging declaration, for the same reason `…/sla-target/burn-alerting` is separate: a distinct transaction with a distinct audit action (`service.escalation_policy`, naming before→after) and distinct consequences. A change here does NOT reset the progress of a ladder already in flight — the monitor path behaves the same way, and rewinding would page everyone again for an edit.
+         *
+         *     A policy belonging to another project is a 400 `owner_not_in_project`: routing decides who is woken, so pointing it across a tenant boundary is the one mistake in this feature that wakes the wrong humans. The composite FK refuses it as well; this answer exists so the refusal is legible.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description The policy id, or an empty string to clear it. */
+                        escalation_policy_id: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description The policy id now stored (empty when cleared) — what the DATABASE holds. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            escalation_policy_id: string;
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description The service is owned by a file provider (`managed_by_file`). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting": {
         parameters: {
             query?: never;

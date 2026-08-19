@@ -133,6 +133,9 @@ type fakeStore struct {
 	// global audit (iter-0155)
 	globalAudit    []domain.AuditEntry
 	globalAuditErr error
+	// FR-023: policies belonging to ANOTHER project, and how many escalation-policy writes landed.
+	foreignPolicies        map[string]bool
+	escalationPolicyWrites int
 }
 
 // fakeSecret backs the project secret inventory in memory. The value is kept
@@ -2759,6 +2762,32 @@ func (f *fakeStore) SetServiceBurnAlerting(
 	}
 	sort.Slice(t.rules, func(i, j int) bool { return t.rules[i].Key() < t.rules[j].Key() })
 	return nil
+}
+
+// SetServiceEscalationPolicy mirrors the store's answers in the order the store gives them: tenancy
+// first (one answer for wrong tenant and unknown id), then file ownership, then the no-op, then the
+// policy's own tenancy. A fake that checked them in a different order would let a handler test pass
+// against a sequence the real store never produces.
+func (f *fakeStore) SetServiceEscalationPolicy(
+	_ context.Context, projectID, serviceID, policyID string, actor store.AlertActor,
+) (string, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return "", store.ErrNotFound
+	}
+	if fs.fileManaged {
+		return "", store.ErrServiceManagedByFile
+	}
+	if fs.svc.EscalationPolicyID == policyID {
+		return policyID, nil // not a write, and no actor recorded
+	}
+	if policyID != "" && f.foreignPolicies[policyID] {
+		return "", store.ErrOwnerNotInProject
+	}
+	fs.svc.EscalationPolicyID = policyID
+	f.escalationPolicyWrites++
+	fs.alertActors = append(fs.alertActors, actor)
+	return policyID, nil
 }
 
 // ── FR-021 phase 3 fakes: the impact graph + correlation reads ──────────────

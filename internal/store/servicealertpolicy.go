@@ -576,3 +576,104 @@ func canonicalJSON(raw []byte) string {
 	}
 	return string(out)
 }
+
+// SetServiceEscalationPolicy attaches — or clears, with an empty id — the escalation policy a
+// SERVICE escalates its own auto-opened incident with (FR-023 D1).
+//
+// This write path exists because FR-023 changed what the column MEANS. It has been on `services`
+// since phase 5 and the evaluator deliberately never read it, so it was reachable only at create
+// time and through a file provider; a service that already existed could not be given one at all.
+// Now it decides who gets woken at 03:00 for that service, which puts it under §16.6a's rule for
+// paging configuration: every change audited, with its actor and what moved, INSIDE the mutating
+// transaction. An audit written after the commit is one a crash can drop.
+//
+// It is a separate route and a separate transaction from the paging declaration for the reason that
+// file already states about the burn declaration: separate audit actions and separate lifecycle
+// consequences do not belong behind one merge.
+//
+// What it deliberately does NOT do is touch the progress of a ladder already in flight. A monitor's
+// policy can be swapped mid-outage today and its `escalation_step` is left where it is; a service
+// behaves identically, because divergent semantics here would be a second rule to learn and this
+// slice has no mandate for one. The consequence is worth stating rather than discovering: swapping
+// to a SHORTER ladder mid-outage can leave the step index already past its end, which fires nothing
+// further — the conservative direction, since the alternative (rewinding to zero) would page
+// everyone again for an edit.
+//
+// Returns the policy id now stored ("" when cleared).
+func (s *Store) SetServiceEscalationPolicy(
+	ctx context.Context, projectID, serviceID, policyID string, actor AlertActor,
+) (string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("store: begin escalation policy write: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	// The service row FIRST, tenant-scoped and locked, exactly as the declaration write does: the
+	// tenancy check, the before-value the audit names and the write itself must see one version of
+	// this row.
+	var before *string
+	var slug string
+	err = tx.QueryRow(ctx,
+		`SELECT escalation_policy_id::text, slug FROM services
+		  WHERE id = $1 AND project_id = $2 FOR UPDATE`, serviceID, projectID).Scan(&before, &slug)
+	if noRows(err) || isInvalidTextRepresentation(err) {
+		// Wrong tenant, unknown id, or not a uuid at all: one answer for all three, so existence
+		// never leaks across a tenant boundary.
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: lock service for escalation policy: %w", err)
+	}
+	if err := assertServiceNotFileManagedTx(ctx, tx, serviceID); err != nil {
+		return "", err
+	}
+
+	current := ""
+	if before != nil {
+		current = *before
+	}
+	// Not a write. The declaration path refuses a no-op for the same reasons: an UPDATE would stamp
+	// `updated_at` and burn an MVCC row version, and the audit trail would gain a line saying
+	// somebody changed the paging routing when nobody did.
+	if current == policyID {
+		return current, tx.Commit(ctx)
+	}
+
+	if policyID != "" {
+		// The composite FK (00069) is the backstop; this check exists so the ANSWER is a 400 that
+		// names the mistake rather than a constraint violation surfacing as a 500.
+		if err := assertOwnerInProjectTx(ctx, tx, projectID, policyID, ""); err != nil {
+			return "", err
+		}
+	}
+	var stored *string
+	if policyID != "" {
+		stored = &policyID
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE services SET escalation_policy_id = $2, updated_at = now() WHERE id = $1`,
+		serviceID, stored); err != nil {
+		return "", fmt.Errorf("store: write escalation policy: %w", err)
+	}
+	// The audit names WHAT MOVED, not just that something did — "attached", "cleared" or "replaced"
+	// are three different operational stories and an operator reading the log after a missed page
+	// needs to tell them apart.
+	if err := insertAlertAudit(ctx, tx, projectID, actor, "service.escalation_policy",
+		"service="+serviceID+" escalation_policy "+auditValue(current)+"→"+auditValue(policyID)); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("store: commit escalation policy: %w", err)
+	}
+	return policyID, nil
+}
+
+// auditValue renders an id for the audit target, so a cleared field reads as a word rather than as
+// an empty gap a reader has to interpret.
+func auditValue(id string) string {
+	if id == "" {
+		return "none"
+	}
+	return id
+}

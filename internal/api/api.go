@@ -220,6 +220,7 @@ type Store interface {
 	CreateServiceWithDependencies(ctx context.Context, svc domain.Service, parents []string, actor store.GraphActor) (domain.Service, error)
 	ServiceNeighbourHealth(ctx context.Context, projectID string, serviceIDs []string) (map[string]domain.ServiceHealthNow, error)
 	ListIncidentImpacts(ctx context.Context, projectID, incidentID string) ([]domain.ServiceImpactLink, error)
+	SetServiceEscalationPolicy(ctx context.Context, projectID, serviceID, policyID string, actor store.AlertActor) (string, error)
 	IncidentMemberSnapshot(ctx context.Context, incidentID string) ([]domain.IncidentMember, bool, error)
 
 	ListProjectSecrets(ctx context.Context, projectID string) ([]store.ProjectSecret, error)
@@ -530,6 +531,9 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/alerting/state", h.getServiceAlertingState)
 	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/services/{serviceID}/alerting", h.patchServiceAlerting)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting", h.setServiceBurnAlerting)
+	// FR-023: the ladder's policy. Until FR-023 this column was inert and reachable only at create
+	// time or through a file provider; it now decides who is woken for this service.
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/escalation-policy", h.setServiceEscalationPolicy)
 
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/secrets", h.listSecrets)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/secrets", h.createSecret)

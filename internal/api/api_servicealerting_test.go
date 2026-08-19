@@ -586,3 +586,114 @@ func TestBurnAlertingEchoCarriesNoLatch(t *testing.T) {
 		t.Fatalf("the echo lost the declaration: %s", rec.Body.String())
 	}
 }
+
+// FR-023: the write surface for the ladder's policy. Until FR-023 the column was inert and had no
+// route at all, so what this pins is not "a handler exists" but the four answers a paging-routing
+// write has to give correctly — and, in every refusal, that NOTHING was written.
+func TestSetServiceEscalationPolicy(t *testing.T) {
+	const policyID = "11111111-2222-4333-8444-555555555555"
+	escPath := func(projectID, serviceID string) string {
+		return "/api/v1/projects/" + projectID + "/services/" + serviceID + "/escalation-policy"
+	}
+	decode := func(t *testing.T, body []byte) string {
+		t.Helper()
+		var out struct {
+			EscalationPolicyID string `json:"escalation_policy_id"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out.EscalationPolicyID
+	}
+
+	t.Run("attach, then clear, echoing what the DATABASE holds", func(t *testing.T) {
+		fs := seededStore()
+		id := seedAlertingService(fs, "p1", nil, false)
+		h := newHandler(fs)
+
+		rec := do(h, p1Editor, http.MethodPut, escPath("p1", id), `{"escalation_policy_id":"`+policyID+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("attach = %d (%s)", rec.Code, rec.Body.String())
+		}
+		if got := decode(t, rec.Body.Bytes()); got != policyID {
+			t.Fatalf("echo = %q, want the stored id", got)
+		}
+		if fs.escalationPolicyWrites != 1 {
+			t.Fatalf("writes = %d, want 1", fs.escalationPolicyWrites)
+		}
+		// An EMPTY string clears it — the whole reason the body is a plain string on a PUT.
+		rec = do(h, p1Editor, http.MethodPut, escPath("p1", id), `{"escalation_policy_id":""}`)
+		if rec.Code != http.StatusOK || decode(t, rec.Body.Bytes()) != "" {
+			t.Fatalf("clear = %d %q", rec.Code, rec.Body.String())
+		}
+		if fs.escalationPolicyWrites != 2 {
+			t.Fatalf("writes after clear = %d, want 2 — clearing the routing IS a change", fs.escalationPolicyWrites)
+		}
+	})
+
+	t.Run("re-sending the same id is NOT a write", func(t *testing.T) {
+		fs := seededStore()
+		id := seedAlertingService(fs, "p1", nil, false)
+		fs.serviceStore()[id].svc.EscalationPolicyID = policyID
+		h := newHandler(fs)
+		rec := do(h, p1Editor, http.MethodPut, escPath("p1", id), `{"escalation_policy_id":"`+policyID+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("no-op = %d (%s)", rec.Code, rec.Body.String())
+		}
+		if fs.escalationPolicyWrites != 0 {
+			t.Fatalf("an unchanged value was written %d time(s) — the audit trail would then claim "+
+				"somebody changed the paging routing when nobody did", fs.escalationPolicyWrites)
+		}
+	})
+
+	t.Run("a policy from ANOTHER project is refused, and writes nothing", func(t *testing.T) {
+		fs := seededStore()
+		id := seedAlertingService(fs, "p1", nil, false)
+		fs.foreignPolicies = map[string]bool{policyID: true}
+		h := newHandler(fs)
+		rec := do(h, p1Editor, http.MethodPut, escPath("p1", id), `{"escalation_policy_id":"`+policyID+`"}`)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "owner_not_in_project") {
+			t.Fatalf("foreign policy = %d %q, want 400 owner_not_in_project — routing across a tenant "+
+				"boundary wakes the wrong humans", rec.Code, rec.Body.String())
+		}
+		if fs.escalationPolicyWrites != 0 {
+			t.Fatalf("a refused request still wrote %d time(s)", fs.escalationPolicyWrites)
+		}
+	})
+
+	t.Run("a file-managed service refuses, and a viewer cannot write at all", func(t *testing.T) {
+		fs := seededStore()
+		id := seedAlertingService(fs, "p1", nil, false)
+		fs.serviceStore()[id].fileManaged = true
+		h := newHandler(fs)
+		rec := do(h, p1Editor, http.MethodPut, escPath("p1", id), `{"escalation_policy_id":"`+policyID+`"}`)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "managed_by_file") {
+			t.Fatalf("file-managed = %d %q, want 409 managed_by_file", rec.Code, rec.Body.String())
+		}
+		fs.serviceStore()[id].fileManaged = false
+		if rec := do(h, p1Viewer, http.MethodPut, escPath("p1", id), `{"escalation_policy_id":"`+policyID+`"}`); rec.Code == http.StatusOK {
+			t.Fatalf("a viewer changed the paging routing: %d", rec.Code)
+		}
+		if rec := do(h, outsider, http.MethodPut, escPath("p1", id), `{"escalation_policy_id":"`+policyID+`"}`); rec.Code != http.StatusNotFound {
+			t.Fatalf("outsider = %d, want 404", rec.Code)
+		}
+		if fs.escalationPolicyWrites != 0 {
+			t.Fatalf("refusals wrote %d time(s)", fs.escalationPolicyWrites)
+		}
+	})
+
+	t.Run("an unknown field is refused rather than silently ignored", func(t *testing.T) {
+		fs := seededStore()
+		id := seedAlertingService(fs, "p1", nil, false)
+		h := newHandler(fs)
+		rec := do(h, p1Editor, http.MethodPut, escPath("p1", id),
+			`{"escalation_policy_id":"`+policyID+`","escalation_step":3}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("unknown field = %d, want 400 — `escalation_step` is server-owned progress, and a "+
+				"body that carries it must be refused rather than have it quietly dropped", rec.Code)
+		}
+		if fs.escalationPolicyWrites != 0 {
+			t.Fatalf("a refused body wrote %d time(s)", fs.escalationPolicyWrites)
+		}
+	})
+}

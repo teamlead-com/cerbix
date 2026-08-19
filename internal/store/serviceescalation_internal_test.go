@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -391,5 +392,121 @@ func TestTheServiceGraphDoesNotPauseAServiceLadder(t *testing.T) {
 	if n, err := st.AdvanceEscalations(ctx); err != nil || n.ServiceSteps != 1 {
 		t.Fatalf("fired=%d err=%v, want 1 — an upstream service's incident must change NOTHING about "+
 			"this ladder (FR-023 invariant 7). If a pause is wanted, it changes what §14 IS.", n, err)
+	}
+}
+
+// FR-023's write path, at the store. The claim is not "a column can be updated": it is that a change
+// to WHO GETS WOKEN is audited with what moved, inside the mutating transaction, and that every
+// refusal writes nothing at all.
+func TestSetServiceEscalationPolicyIsAuditedAndRefusesCarefully(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f, _ := escalatingService(t, st, ctx)
+	// escalatingService already attached one; start from cleared so the first write is an ATTACH.
+	if _, err := st.pool.Exec(ctx, `UPDATE services SET escalation_policy_id = NULL WHERE id = $1`, f.serviceID); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	audits := func() []string {
+		t.Helper()
+		rows, err := st.pool.Query(ctx,
+			`SELECT target FROM audit_logs WHERE action = 'service.escalation_policy' ORDER BY created_at, id`)
+		if err != nil {
+			t.Fatalf("read audit: %v", err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var target string
+			if err := rows.Scan(&target); err != nil {
+				t.Fatalf("scan audit: %v", err)
+			}
+			out = append(out, target)
+		}
+		return out
+	}
+	actor := AlertActor{ViaToken: true} // a machine actor: NULL user id, token attribution
+
+	// ATTACH — audited, naming what moved.
+	got, err := st.SetServiceEscalationPolicy(ctx, f.projectID, f.serviceID, f.policyID, actor)
+	if err != nil || got != f.policyID {
+		t.Fatalf("attach = %q err=%v", got, err)
+	}
+	if a := audits(); len(a) != 1 || !strings.Contains(a[0], "none→"+f.policyID) {
+		t.Fatalf("audit after attach = %v, want one row naming none→the policy — an operator reading "+
+			"the log after a missed page must be able to tell attach from replace from clear", a)
+	}
+
+	// A RE-SEND of the same id is not a write, and writes no audit line either.
+	if _, err := st.SetServiceEscalationPolicy(ctx, f.projectID, f.serviceID, f.policyID, actor); err != nil {
+		t.Fatalf("no-op: %v", err)
+	}
+	if a := audits(); len(a) != 1 {
+		t.Fatalf("audit rows = %d after a no-op, want 1 — the trail would otherwise claim somebody "+
+			"changed the paging routing when nobody did", len(a))
+	}
+
+	// CLEAR — also a change, and it says so.
+	if got, err := st.SetServiceEscalationPolicy(ctx, f.projectID, f.serviceID, "", actor); err != nil || got != "" {
+		t.Fatalf("clear = %q err=%v", got, err)
+	}
+	if a := audits(); len(a) != 2 || !strings.Contains(a[1], f.policyID+"→none") {
+		t.Fatalf("audit after clear = %v, want a second row naming the policy→none", a)
+	}
+
+	// A policy from ANOTHER project: refused by name, and nothing written.
+	otherOrg, err := st.CreateOrganization(ctx, "globex-esc", "Globex Esc")
+	if err != nil {
+		t.Fatalf("other org: %v", err)
+	}
+	otherProj, err := st.CreateProject(ctx, otherOrg.ID, "other", "Other")
+	if err != nil {
+		t.Fatalf("other project: %v", err)
+	}
+	alien, err := st.CreateEscalationPolicy(ctx, domain.EscalationPolicy{
+		ProjectID: otherProj.ID, Name: "theirs", Steps: []domain.EscalationStep{
+			{AfterSeconds: 0, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: f.channelID}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("alien policy: %v", err)
+	}
+	if _, err := st.SetServiceEscalationPolicy(ctx, f.projectID, f.serviceID, alien.ID, actor); !errors.Is(err, ErrOwnerNotInProject) {
+		t.Fatalf("foreign policy err = %v, want ErrOwnerNotInProject — the FK would refuse it too, but "+
+			"as a constraint violation the API could only render as a 500", err)
+	}
+	if a := audits(); len(a) != 2 {
+		t.Fatalf("a refused write left %d audit rows, want 2", len(a))
+	}
+	var stored *string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT escalation_policy_id::text FROM services WHERE id = $1`, f.serviceID).Scan(&stored); err != nil {
+		t.Fatalf("read column: %v", err)
+	}
+	if stored != nil {
+		t.Fatalf("a refused write stored %q", *stored)
+	}
+
+	// WRONG TENANT and a non-uuid id give the same answer, so existence never leaks.
+	if _, err := st.SetServiceEscalationPolicy(ctx, otherProj.ID, f.serviceID, "", actor); !errors.Is(err, ErrNotFound) {
+		t.Errorf("cross-tenant err = %v, want ErrNotFound", err)
+	}
+	if _, err := st.SetServiceEscalationPolicy(ctx, f.projectID, "not-a-uuid", "", actor); !errors.Is(err, ErrNotFound) {
+		t.Errorf("malformed id err = %v, want ErrNotFound (not a 500 from the driver)", err)
+	}
+
+	// A FILE-MANAGED service refuses: its fields are the file's desired state, and a write here
+	// would be restated by the next reconcile.
+	// File ownership lives in `managed_services`, not in a column on the service — the same shape the
+	// graph tests use to claim a service for a provider.
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO managed_services (service_id, provider_id, org_id, project_id, source_uid)
+		SELECT $1, 'file:ops.yaml', p.org_id, p.id, 'checkout' FROM projects p WHERE p.id = $2`,
+		f.serviceID, f.projectID); err != nil {
+		t.Fatalf("mark file-managed: %v", err)
+	}
+	if _, err := st.SetServiceEscalationPolicy(ctx, f.projectID, f.serviceID, f.policyID, actor); !errors.Is(err, ErrServiceManagedByFile) {
+		t.Fatalf("file-managed err = %v, want ErrServiceManagedByFile", err)
+	}
+	if a := audits(); len(a) != 2 {
+		t.Fatalf("a refused file-managed write left %d audit rows, want 2", len(a))
 	}
 }

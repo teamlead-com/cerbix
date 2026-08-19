@@ -333,3 +333,41 @@ func (h *Handler) setServiceBurnAlerting(w http.ResponseWriter, r *http.Request)
 		BurnRules: newBurnRuleViews(rules),
 	})
 }
+
+// setServiceEscalationPolicyRequest carries the id to attach, or an EMPTY STRING to clear. A plain
+// string rather than a pointer, and deliberately: this is a PUT, so the body states the whole value
+// and "absent" has no separate meaning to preserve — unlike the PATCH above, where absence is what
+// keeps an unmentioned field unchanged.
+type setServiceEscalationPolicyRequest struct {
+	EscalationPolicyID string `json:"escalation_policy_id"`
+}
+
+// setServiceEscalationPolicy attaches or clears the escalation policy a SERVICE escalates its own
+// incident with (FR-023).
+//
+// Its own route, for the reason this file already gives about the burn declaration: separate
+// transaction, separate audit action, separate consequences. And a route at all because until FR-023
+// the column was inert — settable only at create time and by a file provider — while it now decides
+// who is woken for this service.
+func (h *Handler) setServiceEscalationPolicy(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectWrite)
+	if !ok {
+		return
+	}
+	serviceID, ok := serviceIDParam(w, r)
+	if !ok {
+		return
+	}
+	var body setServiceEscalationPolicyRequest
+	if !decodeJSONBody(w, r, serviceMaxBody, &body) {
+		return
+	}
+	stored, err := h.store.SetServiceEscalationPolicy(r.Context(), proj.ID, serviceID,
+		body.EscalationPolicyID, h.alertActor(r))
+	if h.writeServiceError(w, err) {
+		return
+	}
+	// The echo is what the DATABASE holds, not what the request said — the two differ for a no-op
+	// and would differ for any future canonicalisation.
+	writeJSON(w, http.StatusOK, setServiceEscalationPolicyRequest{EscalationPolicyID: stored})
+}

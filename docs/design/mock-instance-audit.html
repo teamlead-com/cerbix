@@ -1,0 +1,274 @@
+<title>Cerbix Instance Audit</title>
+
+<style>
+/* Tokens 1:1 from docs/design/notes.md. Phase 5 adds NO colour at all: alerting is a question of
+   who is paged, not of a new state, so every surface here reuses the existing status hues plus one
+   structural device — a DASHED "delegated" chip, the same visual grammar phase 4 used for a
+   dormant binding. Silence must never look like health, so a delegated monitor keeps its own real
+   status pill and gains a chip; it is never greyed out. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+
+.top{
+  position:sticky; top:0; z-index:20; height:56px; display:flex; align-items:center; gap:12px;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.brand{display:flex; align-items:center; gap:9px}
+.brand .wm{font-size:15px; font-weight:600; letter-spacing:-.01em}
+.top .spacer{flex:1}
+.tbtn{border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:12.5px; color:var(--ink-2); background:var(--surface)}
+.tbtn.on{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+
+.screens{
+  position:sticky; top:56px; z-index:19; display:flex; gap:2px; overflow-x:auto;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.screens button{padding:10px 12px 9px; font-size:13px; color:var(--ink-3); border-bottom:2px solid transparent; white-space:nowrap}
+.screens button.on{color:var(--ink); border-bottom-color:var(--accent); font-weight:550}
+.screens .n{font-size:10.5px; color:var(--ink-3); margin-right:5px}
+
+.wrap{padding:22px; max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+.head h1{font-size:21px; font-weight:650; letter-spacing:-.015em}
+.head .sub{margin-top:3px; font-size:13px; color:var(--ink-3)}
+
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.card > header{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card > header h2{font-size:14px; font-weight:600}
+.card .body{padding:16px}
+.card .spacer{flex:1}
+
+.pill{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px 0 7px; border-radius:999px; font-size:12px; font-weight:500}
+.pill .dot{width:7px; height:7px; border-radius:50%; flex:none}
+.pill.up{color:var(--up); background:var(--up-weak)} .pill.up .dot{background:var(--up)}
+.pill.down{color:var(--down); background:var(--down-weak)} .pill.down .dot{background:var(--down)}
+.pill.deg{color:var(--degraded); background:var(--degraded-weak)} .pill.deg .dot{background:var(--degraded)}
+.pill.mnt{color:var(--maint); background:var(--maint-weak)} .pill.mnt .dot{background:var(--maint)}
+/* no_data: pending hue + DASHED ring. Never green, never a second hue. */
+.pill.nd{color:var(--ink-2); background:var(--pending-weak); border:1px dashed var(--border-strong)}
+.pill.nd .dot{background:var(--pending)}
+
+.chip{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:11.5px; color:var(--ink-2); background:var(--surface-2)}
+.chip.mono{font-family:ui-monospace,Menlo,monospace; font-size:10.5px}
+.chip.file{background:var(--inset)}
+.chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.chip.dorm{border-style:dashed; color:var(--ink-3)}
+/* Arming badges. `armed` is the ONLY state in which anything is suppressed, so it is the only one
+   that gets the accent; `pending` and `degraded` both mean "members page for themselves", which is
+   the safe direction and must never read as a failure of the member. */
+.arm{display:inline-flex; align-items:center; gap:6px; border-radius:999px; padding:2px 9px; font-size:11.5px; font-weight:600}
+.arm .dot{width:7px; height:7px; border-radius:50%}
+.arm.on{color:var(--up); background:var(--up-weak)} .arm.on .dot{background:var(--up)}
+.arm.wait{color:var(--ink-2); background:var(--pending-weak); border:1px dashed var(--border-strong)} .arm.wait .dot{background:var(--pending)}
+.arm.bad{color:var(--degraded); background:var(--degraded-weak)} .arm.bad .dot{background:var(--degraded)}
+
+.row{display:flex; flex-wrap:wrap; align-items:center; gap:9px; padding:11px 16px; border-bottom:1px solid var(--border)}
+.row:last-child{border-bottom:0}
+.row .nm{font-weight:550; font-size:13.5px}
+.row .spacer{flex:1}
+.src{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden}
+.src span{padding:3px 9px; font-size:11.5px; color:var(--ink-3)}
+.src span.on{background:var(--accent-weak); color:var(--accent); font-weight:600}
+
+/* 90-day strip: discrete ticks, gaps are GAPS (absent days), never zeros. */
+.strip{display:flex; gap:1px; align-items:flex-end; height:26px}
+.strip i{flex:1; border-radius:1px}
+.strip i.up{background:var(--up); height:100%}
+.strip i.deg{background:var(--degraded); height:100%}
+.strip i.down{background:var(--down); height:100%}
+.strip i.part{background:var(--up); height:60%; opacity:.55}
+.strip i.gap{background:var(--inset); height:36%}
+.axis{display:flex; justify-content:space-between; font-size:11px; color:var(--ink-3); padding-top:6px}
+
+.diff{display:grid; grid-template-columns:1fr auto 1fr; gap:0; align-items:stretch; border:1px solid var(--border); border-radius:8px; overflow:hidden}
+.diff > div{padding:13px 15px}
+.diff .mid{display:grid; place-items:center; padding:0 12px; background:var(--surface-2); border-left:1px solid var(--border); border-right:1px solid var(--border); color:var(--ink-3)}
+.diff .lbl{margin-bottom:8px}
+
+.err{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--down); background:var(--down-weak); color:var(--down); border-radius:6px; padding:10px 12px; font-size:12.5px}
+.err b{font-weight:650}
+.err .fix{margin-left:auto; flex:none; border:1px solid var(--down); border-radius:5px; padding:2px 8px; font-size:11.5px; background:var(--surface)}
+.warn{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--degraded); background:var(--degraded-weak); color:var(--degraded); border-radius:6px; padding:10px 12px; font-size:12.5px}
+.btn{display:inline-flex; align-items:center; height:30px; border:1px solid var(--border); border-radius:6px; padding:0 12px; font-size:13px; color:var(--ink-2); background:var(--surface)}
+.btn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:550}
+.btn.danger{border-color:var(--down); color:var(--down)}
+.btn.sm{height:26px; font-size:12.5px; padding:0 10px}
+
+.note{
+  border:1px dashed var(--note-border); border-left:3px solid var(--note);
+  background:var(--note-bg); border-radius:6px; padding:10px 12px; font-size:12.5px; color:var(--ink-2);
+  display:flex; gap:10px; align-items:flex-start;
+}
+.note .ref{flex:none; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--note); border:1px solid var(--note-border); border-radius:4px; padding:1px 5px; background:var(--surface)}
+.note b{color:var(--ink); font-weight:600}
+body.hide-notes .note{display:none}
+
+/* Public page replica — deliberately plainer than the app chrome. */
+.public{border:1px solid var(--border); border-radius:10px; background:var(--surface); overflow:hidden}
+.public .banner{padding:18px 20px; border-bottom:1px solid var(--border)}
+.public .banner h3{font-size:17px; font-weight:620}
+.public .banner .sub{margin-top:4px; font-size:13px; color:var(--ink-3)}
+.public .comp{padding:14px 20px; border-bottom:1px solid var(--border)}
+.public .comp:last-child{border-bottom:0}
+.public .comp .line{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.public .comp .nm{font-weight:550}
+.public .comp .num{margin-left:auto; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:var(--ink-2)}
+.public .comp .withheld{margin-left:auto; font-size:11.5px; color:var(--ink-3)}
+
+.tbl-wrap{overflow-x:auto}
+table{width:100%; border-collapse:collapse; font-size:13px; min-width:520px}
+th{text-align:left; font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3); padding:8px 16px; border-bottom:1px solid var(--border)}
+td{padding:10px 16px; border-bottom:1px solid var(--border); vertical-align:top}
+tbody tr:last-child td{border-bottom:0}
+
+.foot{padding:22px; border-top:1px solid var(--border); color:var(--ink-3); font-size:12.5px; max-width:1080px; margin:0 auto}
+@media (max-width:760px){ .diff{grid-template-columns:1fr} .diff .mid{border:0; border-top:1px solid var(--border); border-bottom:1px solid var(--border); padding:6px} }
+</style>
+<style>
+.wrap{max-width:940px;margin:0 auto;padding:34px 22px 60px}
+h1{font-size:19px;font-weight:600;letter-spacing:-.2px;margin:0 0 10px}
+.lede{color:var(--ink-2);font-size:13.5px;line-height:1.65;margin:0 0 26px;max-width:78ch}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);margin-bottom:22px;overflow:hidden}
+.phead{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--border)}
+.phead h2{font-size:13px;font-weight:600;margin:0}
+.muted{color:var(--ink-3)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.chip{margin-left:auto;font-size:11.5px;padding:2px 9px;border-radius:999px;color:var(--ink-2);background:var(--surface-2);border:1px solid var(--border-strong)}
+.chip.dashed{border-style:dashed;background:transparent}
+.rows{list-style:none;margin:0;padding:0}
+.rows li{display:flex;align-items:center;gap:12px;padding:11px 16px;border-bottom:1px solid var(--border);font-size:13px}
+.rows li:last-child{border-bottom:0}
+.dot{width:7px;height:7px;border-radius:50%;flex:none}
+.dot.accent{background:var(--accent)} .dot.down{background:var(--down)}
+.txt{min-width:0}
+.when{margin-left:auto;flex:none;font-size:11.5px}
+.empty{justify-content:center;color:var(--ink-3);padding:26px 16px}
+.more{justify-content:center;padding:10px}
+.more button{height:32px;border-radius:6px;border:1px solid var(--border-strong);background:transparent;color:var(--ink-2);padding:0 14px;font-size:12.5px;cursor:pointer}
+.more button:hover{border-color:var(--accent);color:var(--accent)}
+.note{border:1px solid var(--note-border);background:var(--note-bg);border-radius:10px;padding:15px 18px;font-size:13px;line-height:1.6;color:var(--ink-2)}
+.note b{color:var(--ink)}
+.note ul{margin:9px 0 0;padding-left:20px}
+.note li{margin:6px 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--inset);padding:1px 5px;border-radius:4px}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0}
+</style>
+
+<div class="wrap">
+  <h1>Settings → Administration → <b>Instance audit</b></h1>
+  <p class="lede">
+    A GLOBAL admin's own actions carry no organization (<code>org_id IS NULL</code>), so today they are
+    written and never shown: the audit list in Members is org-scoped by construction. This panel is
+    that missing read — and it is deliberately a SEPARATE surface rather than a filter on the org list,
+    because an org admin must never be one query parameter away from the installation's history.
+  </p>
+
+  <section class="panel">
+    <div class="phead">
+      <h2>Instance audit</h2>
+      <span class="mono muted">global-admin actions · no organization</span>
+      <span class="chip dashed">instance</span>
+    </div>
+    <ul class="rows">
+      <li>
+        <span class="dot accent"></span>
+        <span class="txt"><b>Grace Hopper</b> granted global admin <span class="muted">· <span class="mono">ada@example.com</span></span></span>
+        <span class="mono muted when">2 min ago</span>
+      </li>
+      <li>
+        <span class="dot down"></span>
+        <span class="txt"><b>Grace Hopper</b> deleted a user <span class="muted">· <span class="mono">u-8f21</span></span></span>
+        <span class="mono muted when">17 min ago</span>
+      </li>
+      <li>
+        <span class="dot accent"></span>
+        <span class="txt"><b>machine</b> replayed a dead outbox event <span class="muted">· <span class="mono">e-4471</span></span></span>
+        <span class="mono muted when">1 h ago</span>
+      </li>
+      <li>
+        <span class="dot accent"></span>
+        <span class="txt"><b>Grace Hopper</b> reloaded a file provider <span class="muted">· <span class="mono">payments-bundle</span></span></span>
+        <span class="mono muted when">3 h ago</span>
+      </li>
+      <li class="more"><button>Show more (4 shown)</button></li>
+    </ul>
+  </section>
+
+  <section class="panel">
+    <div class="phead"><h2>Empty state</h2><span class="mono muted">a fresh installation</span></div>
+    <ul class="rows"><li class="empty">No instance-level actions recorded yet.</li></ul>
+  </section>
+
+  <div class="note">
+    <b>What this mock decides, so the code has nothing left to invent.</b>
+    <ul>
+      <li><b>Where.</b> Settings → Administration, a tab beside Users / File providers / Outbox — the group
+        that already means "instance, not tenant". No new navigation.</li>
+      <li><b>Row grammar is the org audit's, unchanged</b> — dot, actor, action prose, monospace target,
+        relative time, "Show more". One reader learns one shape; the panel earns no new vocabulary.</li>
+      <li><b>The dashed <code>instance</code> chip</b> is the only new device, and it reuses the dashed
+        grammar phases 4 and 5 gave to "a different KIND of thing" (a dormant binding, a delegated
+        monitor). It says: these rows have no organization — not "the organization is missing".</li>
+      <li><b>A machine actor stays "machine"</b>, exactly as the org list renders a NULL actor: an audit
+        row whose actor cannot be resolved must not silently borrow a human's name.</li>
+      <li><b>Nothing is deletable or editable here.</b> An audit trail with a delete button is not one.</li>
+      <li><b>Not shown, on purpose:</b> org-scoped rows. Mixing them in would make this the "everything"
+        view and quietly answer a question this panel is not allowed to answer (who did what inside a
+        tenant) for someone reading it in one glance.</li>
+    </ul>
+  </div>
+</div>

@@ -121,6 +121,15 @@ type authedIncidentView struct {
 	// so a client can render "unknown" instead of "none".
 	Impacts            []domain.ServiceImpactLink `json:"impacts"`
 	ImpactsUnavailable bool                       `json:"impacts_unavailable,omitempty"`
+	// Members is the member set the incident's SERVICE had AT OPEN TIME (FR-022
+	// invariant 13, spec D6). A POINTER because three states must stay distinguishable
+	// and two of them are empty: no snapshot at all (a monitor or project-level
+	// incident — the key is absent), a snapshot of a service that genuinely had no
+	// members (`[]`), and a snapshot that could not be read (`members_unavailable`).
+	// Collapsing the first two would make a monitor incident claim a service's empty
+	// membership.
+	Members            *[]domain.IncidentMember `json:"members,omitempty"`
+	MembersUnavailable bool                     `json:"members_unavailable,omitempty"`
 }
 
 // getIncident returns one incident with its impact links (authenticated detail
@@ -151,6 +160,19 @@ func (h *Handler) getIncident(w http.ResponseWriter, r *http.Request) {
 		out.ImpactsUnavailable = true
 	case impacts != nil:
 		out.Impacts = impacts
+	}
+	// The member snapshot, on the same terms as the impacts: the incident still renders
+	// when the read fails, and the failure is DISCLOSED rather than served as "no
+	// members". A postmortem is read after the world moved, so this is the only answer
+	// that keeps naming a member deleted since.
+	if members, present, err := h.store.IncidentMemberSnapshot(r.Context(), inc.ID); err != nil {
+		h.logEvent(r, "incident_member_snapshot_read_failed", "incident_id", inc.ID, "error", err.Error())
+		out.MembersUnavailable = true
+	} else if present {
+		if members == nil {
+			members = []domain.IncidentMember{}
+		}
+		out.Members = &members
 	}
 	writeJSON(w, http.StatusOK, out)
 }

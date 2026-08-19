@@ -11,7 +11,7 @@ the **Organization** group, and the global-admin-only tab group formerly labeled
 ## Current state
 
 - Sidebar (`frontend/src/components/AppShell.vue`): section "Manage" contains exactly one
-  item — Members (`/members` route → `views/MembersView.vue`).
+  item — Members (`/members` route → `views/MembersView.vue`, both removed by this change).
 - `MembersView` is already org-scoped: everything keys off `ws.orgId` (workspace store),
   org switch reloads the list. Endpoints used: `GET/POST /organizations/{orgID}/members`,
   `PATCH/DELETE .../members/{membershipID}`, `GET .../audit`.

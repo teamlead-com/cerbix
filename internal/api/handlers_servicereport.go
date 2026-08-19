@@ -146,9 +146,13 @@ func (h *Handler) serviceReliabilitySeries(w http.ResponseWriter, r *http.Reques
 }
 
 // setServiceSLATarget sets the service-scoped objective for one standard window. The body is
-// {window, objective} and NOTHING else: service burn alerting is phase 5 (§13, invariant
-// 47), so DisallowUnknownFields turns any burn field into 400 here, the store offers no burn
-// parameter, and the schema CHECK is the final fence.
+// {window, objective} and NOTHING else, and it stays that way now that phase 5 has landed:
+// service burn alerting is expressible, but on its own route
+// (`PUT …/sla-target/burn-alerting`, handlers_servicealerting.go), because the objective and
+// the burn declaration are two store transactions with two audit actions and two families of
+// lifecycle close. Accepting burn fields HERE would have made a single request that no layer
+// can commit atomically, so `DisallowUnknownFields` still turns any of them into a 400 — the
+// refusal now means "wrong endpoint", not "not implemented".
 func (h *Handler) setServiceSLATarget(w http.ResponseWriter, r *http.Request) {
 	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectWrite)
 	if !ok {

@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -114,5 +115,126 @@ func TestPostmortemRequiresResolved(t *testing.T) {
 	}
 	if rec := do(h, o1Viewer, http.MethodGet, "/api/v1/incidents/inc1/postmortem", ""); rec.Code != http.StatusOK {
 		t.Fatalf("get postmortem = %d, want 200", rec.Code)
+	}
+}
+
+// FR-022 invariant 13: the incident detail names the members the SERVICE had at open
+// time. Three answers must stay distinguishable and two of them are empty, which is the
+// whole reason the field is a pointer:
+//
+//	no snapshot at all    → the key is ABSENT      (a monitor or project-level incident)
+//	a snapshot of nothing → `"members": []`        (a service that genuinely had none)
+//	a failed read         → `members_unavailable`  (never served as "no members")
+//
+// The store proves the durable half — the snapshot keeps naming a member deleted since
+// (TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers). This pins that the
+// distinction survives the JSON, which is where a three-state answer usually dies.
+func TestIncidentDetailNamesTheMembersTheServiceHadAtOpenTime(t *testing.T) {
+	fs := seededStore()
+	inc := fs.incidents["inc1"]
+	inc.ServiceID = "svc1"
+	fs.incidents["inc1"] = inc
+	fs.memberSnapshots = map[string][]domain.IncidentMember{
+		"inc1": {{MonitorID: "mon-gone", Name: "checkout-api", Roles: []string{"context", "sli"}}},
+	}
+	h := newHandler(fs)
+
+	decode := func(t *testing.T) struct {
+		Members            *[]domain.IncidentMember `json:"members"`
+		MembersUnavailable bool                     `json:"members_unavailable"`
+	} {
+		t.Helper()
+		rec := do(h, p1Viewer, http.MethodGet, "/api/v1/incidents/inc1", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("detail = %d: %s", rec.Code, rec.Body.String())
+		}
+		// A FRESH value every time: both fields would otherwise keep a previous answer
+		// and an assertion could pass for the wrong reason.
+		var out struct {
+			Members            *[]domain.IncidentMember `json:"members"`
+			MembersUnavailable bool                     `json:"members_unavailable"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out
+	}
+
+	got := decode(t)
+	if got.Members == nil || len(*got.Members) != 1 || (*got.Members)[0].Name != "checkout-api" {
+		t.Fatalf("service incident members = %v, want the one snapshotted member — the snapshot is "+
+			"written but nothing READS it, so a postmortem cannot name who was in the service", got.Members)
+	}
+	if len((*got.Members)[0].Roles) != 2 {
+		t.Errorf("member roles = %v, want both roles the declaration gave it", (*got.Members)[0].Roles)
+	}
+
+	// A service that genuinely had no members: present, and empty.
+	fs.memberSnapshots["inc1"] = []domain.IncidentMember{}
+	if got := decode(t); got.Members == nil || len(*got.Members) != 0 {
+		t.Fatalf("empty snapshot = %v, want a present-but-empty list: 'this service had no members' is a "+
+			"fact, not a missing answer", got.Members)
+	}
+
+	// No snapshot at all — a monitor or project-level incident. The key must be ABSENT,
+	// or a monitor incident would claim a service's empty membership.
+	delete(fs.memberSnapshots, "inc1")
+	if got := decode(t); got.Members != nil {
+		t.Fatalf("an incident with NO snapshot reported members = %v, which makes 'no snapshot' and "+
+			"'no members' the same answer", got.Members)
+	}
+
+	// A failed read is disclosed, on the same terms as the impacts ([288] P1-4).
+	fs.memberSnapshotErr = errors.New("snapshot read exploded")
+	if got := decode(t); got.Members != nil || !got.MembersUnavailable {
+		t.Fatalf("degraded read = members %v / unavailable %v, want absent + true", got.Members, got.MembersUnavailable)
+	}
+}
+
+// FR-022 §2: an operator acknowledges, annotates and RESOLVES a service incident through the SAME
+// surfaces a monitor incident uses. Nothing proved that before this test — the handlers resolve
+// tenancy from `project_id`, which the composite FK keeps correct even after the service is gone,
+// but "it should work" and "it works" are different claims and only one of them is checkable.
+//
+// This is also where FR-022 invariant 14 gets corrected rather than quietly dropped. It asked for
+// every write to be AUDITED with its actor and tenant in the mutating transaction. Incident writes
+// are not audited today — for EITHER anchor, and never were; `handlers_incidents.go` writes no audit
+// row at all. FR-022 therefore introduces no asymmetry, which is the promise it can actually make;
+// an audit trail for incident writes is a real gap and belongs to its own requirement, not to a
+// clause smuggled in beside a schema change (iter-0156 §2.8).
+func TestAServiceIncidentUsesTheSameOperatorSurfacesAsAMonitorOne(t *testing.T) {
+	fs := seededStore()
+	inc := fs.incidents["inc1"]
+	inc.MonitorID = ""
+	inc.ServiceID = "svc1"
+	inc.Source = domain.SourceAuto
+	fs.incidents["inc1"] = inc
+	h := newHandler(fs)
+
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/incidents/inc1/acknowledge", ""); rec.Code != http.StatusOK {
+		t.Fatalf("acknowledge a SERVICE incident = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/incidents/inc1/updates",
+		`{"status":"identified","body":"the upstream is the cause"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("annotate a SERVICE incident = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, p1Editor, http.MethodPost, "/api/v1/incidents/inc1/updates",
+		`{"status":"resolved","body":"recovered"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("resolve a SERVICE incident = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	if got := fs.incidents["inc1"]; got.Status != domain.IncidentResolved {
+		t.Fatalf("status after the resolving update = %q, want resolved", got.Status)
+	}
+
+	// The anchor changes NOTHING about who may touch it: tenancy comes from the project, and an
+	// outsider is refused exactly as they are on a monitor incident.
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/v1/incidents/inc1", ""},
+		{http.MethodPost, "/api/v1/incidents/inc1/acknowledge", ""},
+		{http.MethodPost, "/api/v1/incidents/inc1/updates", `{"body":"x"}`},
+	} {
+		if rec := do(h, outsider, c.method, c.path, c.body); rec.Code != http.StatusNotFound {
+			t.Errorf("outsider %s %s = %d, want 404", c.method, c.path, rec.Code)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  push:
   pull_request:
   workflow_dispatch:
 
@@ -13,17 +14,31 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (build, vet, gofmt, race tests)
+    # BOTH storage modes, because CLAUDE.md requires it for anything touching heartbeats/retention and
+    # that requirement had been living in a human's checklist: `store.detectTimescale` picks hypertables
+    # when the extension is present and declarative daily partitions when it is absent, and the two
+    # paths are different code. The dev and prod stacks run the timescale image, so testing only the
+    # plain one meant CI never exercised what production uses.
+    name: Backend (${{ matrix.mode }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: declarative partitions
+            image: postgres:16-alpine
+          - mode: timescaledb hypertables
+            image: timescale/timescaledb:latest-pg16
     services:
       postgres:
-        image: postgres:16-alpine
+        image: ${{ matrix.image }}
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
           POSTGRES_DB: cerbixtest
         ports:
           - 5432:5432
+        # Kept as a cheap first filter only. It is NOT the readiness barrier — see the step below.
         options: >-
           --health-cmd "pg_isready -U test"
           --health-interval 5s
@@ -35,12 +50,45 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - name: Wait for a database that can hold a transaction
+        # `pg_isready` is NOT a readiness barrier and this project has paid for learning that: the
+        # entrypoint answers "ready", then RESTARTS the server to apply its own init, killing every open
+        # connection. A suite that starts in that window fails in ways that look like flaky tests. The
+        # barrier is three CONSECUTIVE successful queries a second apart — a restart in between resets
+        # the count — and it is the same barrier the local harness uses.
+        env:
+          PGPASSWORD: test
+        run: |
+          ok=0
+          for i in $(seq 1 90); do
+            if psql -h localhost -U test -d cerbixtest -tAc 'SELECT 1' >/dev/null 2>&1; then
+              ok=$((ok + 1))
+              [ "$ok" -ge 3 ] && break
+            else
+              ok=0
+            fi
+            sleep 1
+          done
+          if [ "$ok" -lt 3 ]; then
+            echo "::error::database never held three consecutive queries — not a flaky test, an unready server"
+            exit 1
+          fi
+          echo "database ready after ${i}s (${ok} consecutive queries)"
+          psql -h localhost -U test -d cerbixtest -tAc \
+            "SELECT 'timescaledb: ' || COALESCE((SELECT extversion FROM pg_extension WHERE extname='timescaledb'), 'absent')"
+
       - name: Build
         run: go build ./...
       - name: Vet
         run: go vet ./...
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: Docs references and FR-021 discharge (make docs-check)
+        # D-0169 closes FR-021 "against the discharge tables … and the gate keeps them true". A gate
+        # that only runs when a human types it is a checklist, so it runs here: every path and Test*
+        # name cited by a LIVING document must resolve, and all 91 invariants + 24 required scenarios
+        # must have a row.
+        run: make docs-check
       - name: Tests (-race, DB-gated suites against the service container)
         env:
           CERBIX_TEST_DATABASE_DSN: postgres://test:test@localhost:5432/cerbixtest?sslmode=disable

@@ -113,6 +113,22 @@ var monitorFieldClass = map[string]SemanticClass{
 	"LastProbeErrorAt":     SemanticRuntime,
 	"LastProbeErrorJobID":  SemanticRuntime,
 
+	// Lifecycle annotations (FR-021 §15.5). Both are OUT of the evaluation semantics, and the
+	// reason matters because getting it wrong in either direction is a real defect.
+	//
+	// `SupersededByServiceID` names the service that now expresses what this monitor expresses.
+	// It changes no endpoint, no operation and no staleness rule — the monitor probes exactly as
+	// before — so classifying it as evaluation would bump every referencing service's epoch for a
+	// pure annotation.
+	//
+	// `RetiredAt` DOES accompany a change in execution, but it is not the field that carries it:
+	// retiring sets `enabled = false` in the same transaction, and `enabled` is already
+	// SemanticEvaluation above. Listing `RetiredAt` as evaluation too would put the same fact in
+	// the hash twice, and a future path that set only `RetiredAt` would then be silently accepted
+	// as a semantic change while the monitor kept probing — the opposite of what §15.5 requires.
+	"SupersededByServiceID": SemanticPresentation,
+	"RetiredAt":             SemanticPresentation,
+
 	// Secret material.
 	"PushToken": SemanticSecretMaterial,
 }

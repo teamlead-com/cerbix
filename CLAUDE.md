@@ -13,6 +13,7 @@ cerbix — self-hosted uptime & SLA monitoring. One static Go binary embeds the 
 ```bash
 go build -buildvcs=false ./...        # -buildvcs=false: repo may be a non-git checkout
 go vet ./...
+make docs-check                       # living docs may not cite a file or Test* name the tree lacks
 
 # Store/integration tests are DB-gated: they SKIP without this env var.
 export CERBIX_TEST_DATABASE_DSN="postgres://cerbix:cerbix@localhost:5432/cerbix_test?sslmode=disable"

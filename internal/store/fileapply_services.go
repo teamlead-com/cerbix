@@ -97,6 +97,13 @@ func (s *Store) applyBundleServicesTx(
 				monitorIDs, sliIDs, svc.Policies, 0, DeclarationOptions{CreatedBy: "file:" + providerID}); err != nil {
 				return counts, err
 			}
+			// §16.6a: the paging declaration is reconciled on EVERY branch, against the row
+			// rather than against the hash. It is deliberately outside the canonical hash —
+			// this branch and the update branch below create a definition revision and its
+			// epoch, and a paging edit must bump neither.
+			if _, err := applyServiceAlertingTx(ctx, tx, projID, id, providerID, svc.Alerting); err != nil {
+				return counts, err
+			}
 			if err := upsertManagedService(ctx, tx, providerID, orgID, projID, id, slug, svc.Hash, sourcePath, generation); err != nil {
 				return counts, err
 			}
@@ -126,6 +133,16 @@ func (s *Store) applyBundleServicesTx(
 			if err := touchManagedService(ctx, tx, existing, sourcePath, generation); err != nil {
 				return counts, err
 			}
+			// An unchanged DECLARATION hash still has to reconcile paging: alerting is not in
+			// that hash, so this is the branch an alerting-only edit arrives on. The apply is a
+			// lock-free read when nothing differs, so a genuinely unchanged bundle stays a
+			// no-op — including for the counters, which describe the declaration.
+			if changed, err := applyServiceAlertingTx(ctx, tx, projID, existing, providerID, svc.Alerting); err != nil {
+				return counts, err
+			} else if changed {
+				counts.Updated++
+				continue
+			}
 			counts.NoOp++
 
 		default:
@@ -141,6 +158,9 @@ func (s *Store) applyBundleServicesTx(
 				return counts, err
 			}
 			if err := updateServiceRowTx(ctx, tx, projID, existing, svc); err != nil {
+				return counts, err
+			}
+			if _, err := applyServiceAlertingTx(ctx, tx, projID, existing, providerID, svc.Alerting); err != nil {
 				return counts, err
 			}
 			if err := upsertManagedService(ctx, tx, providerID, orgID, projID, existing, slug, svc.Hash, sourcePath, generation); err != nil {

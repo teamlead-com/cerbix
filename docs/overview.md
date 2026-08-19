@@ -123,7 +123,7 @@ flowchart LR
 | `sla` | SLI/SLO/error-budget/burn-rate for a MONITOR (pure computations). |
 | `reliability` | Reliability of a **service** (FR-021): a piecewise reducer over breakpoints producing duration-weighted facts on two conserved axes. Pure — no I/O, no clock. |
 | `incidents`↔`api`/`store` | Incidents, timeline updates, postmortems, external-key correlation (Alertmanager). |
-| `statuspage`/`feed`/`subscribe` | Public status pages, RSS/Atom/JSON feeds, subscribers. |
+| `statuspage`/`feed`/`subscribe` | Public status pages, RSS/Atom/JSON feeds, subscribers. A component renders from ONE of three sources under a discriminator (`monitor` / `service` / `manual`, FR-021 §15.0) with the replaced binding kept dormant for revert; the page summary reports worst-of-MEASURED plus an unmeasured count, and measurement ABSENT is the public status `no_data` — never `operational`. |
 | `notify` | Delivery of transitions/alerts to channels (webhook/Slack/Telegram/email). |
 | `webhook` | Outbound incident webhooks (signed). |
 | `outbox` | Transactional outbox: durable event delivery with retry/backoff/dead-letter, `SKIP LOCKED`. |
@@ -144,6 +144,53 @@ bucket by bucket, and the watermark `sealed_through` is defined by **contiguity*
 holds it back instead of being jumped over. Phase 1 ships the declaration, the epoch, the seal
 and the file-provider format-2 surface; availability over a window, the error budget and the
 burn rate are phase 2 and are **absent** from the API rather than returned as zeros.
+
+**Alerting ownership (FR-021, phase 5).** A service can be the thing that pages, and its declared
+SLI members can stop delivering their own alerts for the same failure — but `owns_paging = true`
+silences nothing on its own. Suppression is per SIGNAL (a LIVE health transition, a SEALED burn
+breach), per POLARITY (only onset-like events; a recovery or a burn CLEAR is never suppressed), and
+only while a replacement for THAT signal is demonstrably ARMED: a policy that can page the current
+state, a quotable last verdict for every declared rule, the current generations and effective
+revision, a fresh DB-clock lease, and a recipient that resolves right now. Anything ambiguous FAILS
+OPEN — the member pages — because a page that was not needed is noise and a page that was owed and
+never sent is the failure the design exists to prevent. Facts, status flips and history are
+untouched by all of this: suppression applies to DELIVERY only. (This sentence used to say
+"incidents" too, and FR-022 made that half false — see below. What stays true is the part
+suppression is about: a member's incident is neither opened, resolved nor annotated differently
+because a service covered its page.) An announcement that ends
+carries WHY it ended, and only a genuine return to health is called `recovered`; ownership turned
+off, a policy that no longer covers the state, a target disabled, a rule removed and a service
+deleted each say so in their own words, from a durable episode that outlives what fired.
+
+**Escalation for services (FR-023).** A service with an escalation policy escalates its OWN
+auto-opened incident: the policy's steps fire from the incident's start, progress latches on the
+incident so a step fires once, acknowledgement or resolution ends it, and every step names the
+SERVICE. Two rules are worth knowing before reading the code. The ladder **fails closed** where
+delegation fails open — a missing, stale or unreadable live verdict does not advance a step, because
+ambiguity at delivery time means a page EXISTS while ambiguity in a ladder would mean a page
+MULTIPLIES on a state nobody can currently confirm. And the service GRAPH does **not** pause it,
+against the obvious symmetry with the monitor dependency pause: §14's impact graph annotates and
+links, never suppresses, and a graph sold as advisory does not become a suppression mechanism because
+a second feature found it convenient. A service's own step is never suppressed by delegation either —
+that step IS the page delegation exists to redirect.
+
+**Service incidents (FR-022).** A `Service` can be the SUBJECT of an incident, not merely a thing
+that pages. An incident has AT MOST ONE anchor — a monitor or a service, enforced by a CHECK so the
+discriminator every read path branches on cannot be ambiguous, while a manual project-level incident
+with neither keeps working. A live service alert OPENS one automatically, in the SAME transaction as
+the announcement, under the same three gates that decide whether it pages at all (a LIVE onset,
+ARMED coverage, `confirm_evaluations`); the close RESOLVES it in the transaction that ends the
+announcement. A burn breach opens none, ever — a budget signal trails the seal and says nothing about
+now. At most one open auto-incident per service, so a flapping service cannot accumulate them; a
+service that recovers and fails again gets a second one, which is what the resolve exists to make
+possible. `source = 'auto'` is in the resolve's WHERE, so a machine never overwrites a conclusion a
+person drew. It carries its impact links through the same service graph and a snapshot of the
+members the service had AT OPEN time, which keeps naming a member deleted since. Deleting the service
+clears the anchor and NOT the tenant key: the incident survives as a project-level record with its
+timeline intact. What does NOT change: a monitor incident's lifecycle, notes, escalation, rendering
+and postmortem (NFR-017); the `⚡` and `⏸` system notes keep their one home, the MONITOR's incident;
+and an open service incident moves no component STATUS on a status page — it is rendered as an
+incident, next to a status the §15.0 precedence table still derives from health alone.
 
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
 `mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `push` (dead-man's-switch).

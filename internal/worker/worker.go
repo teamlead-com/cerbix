@@ -114,7 +114,10 @@ func (p *Pool) loop(ctx context.Context) {
 				p.credentialTracker.Success()
 				p.setCredentialReady(true, "")
 			}
-			hb := p.runner.Run(ctx, materialized.Monitor)
+			// The result carries the job it answers (func-result-protocol §9): the core stamped the
+			// id and the issue instant from its own clock, and copying them here is what lets the
+			// core compare `observed_at` against `job_issued_at` instead of against itself.
+			hb := dispatch.StampResult(p.runner.Run(ctx, materialized.Monitor), job)
 			materialized.Cleanup()
 			if err := p.dispatcher.PublishResult(ctx, hb); err != nil {
 				if ctx.Err() != nil {

@@ -66,7 +66,7 @@ func TestAdvanceEscalations(t *testing.T) {
 	count := func() int { return st.countOutbox(ctx, t, domain.TopicEscalationStep, "pending") }
 
 	// Step 0 (after=0) fires on the first pass.
-	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 1 {
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n.MonitorSteps != 1 {
 		t.Fatalf("step0: fired=%d err=%v (want 1)", n, err)
 	}
 	if count() != 1 {
@@ -74,7 +74,7 @@ func TestAdvanceEscalations(t *testing.T) {
 	}
 
 	// Step 1 (after=600s) is not due yet → nothing new (latched).
-	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 0 {
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n.MonitorSteps != 0 {
 		t.Fatalf("not-due: fired=%d err=%v (want 0)", n, err)
 	}
 	if count() != 1 {
@@ -86,7 +86,7 @@ func TestAdvanceEscalations(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `UPDATE incidents SET started_at = now() - interval '20 minutes' WHERE id = $1`, inc.ID); err != nil {
 		t.Fatalf("backdate incident: %v", err)
 	}
-	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 1 {
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n.MonitorSteps != 1 {
 		t.Fatalf("step1: fired=%d err=%v (want 1)", n, err)
 	}
 	if count() != 2 {
@@ -94,7 +94,7 @@ func TestAdvanceEscalations(t *testing.T) {
 	}
 
 	// All steps done, no repeat → nothing further.
-	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 0 {
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n.MonitorSteps != 0 {
 		t.Fatalf("exhausted: fired=%d err=%v (want 0)", n, err)
 	}
 
@@ -105,7 +105,7 @@ func TestAdvanceEscalations(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `UPDATE incidents SET escalation_step = 0, started_at = now() - interval '1 hour' WHERE id = $1`, inc.ID); err != nil {
 		t.Fatalf("reset step: %v", err)
 	}
-	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 0 {
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n.MonitorSteps != 0 {
 		t.Fatalf("acked incident must not escalate: fired=%d err=%v", n, err)
 	}
 	if count() != 2 {
@@ -158,14 +158,14 @@ func TestAdvanceEscalationsSkipsDisabledMonitor(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET enabled = false WHERE id = $1`, mon.ID); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 0 {
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n.MonitorSteps != 0 {
 		t.Fatalf("disabled monitor escalated: fired=%d err=%v (want 0)", n, err)
 	}
 	// Re-enable → the ladder resumes.
 	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET enabled = true WHERE id = $1`, mon.ID); err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}
-	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 1 {
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n.MonitorSteps != 1 {
 		t.Fatalf("re-enabled monitor should escalate: fired=%d err=%v (want 1)", n, err)
 	}
 }
@@ -311,17 +311,17 @@ func TestAdvanceEscalationsRepeatLast(t *testing.T) {
 	}
 	count := func() int { return st.countOutbox(ctx, t, domain.TopicEscalationStep, "pending") }
 
-	if n, _ := st.AdvanceEscalations(ctx); n != 1 { // step0 fires
+	if n, _ := st.AdvanceEscalations(ctx); n.MonitorSteps != 1 { // step0 fires
 		t.Fatalf("step0 fired=%d, want 1", n)
 	}
-	if n, _ := st.AdvanceEscalations(ctx); n != 0 { // within renotify window → no repeat
+	if n, _ := st.AdvanceEscalations(ctx); n.MonitorSteps != 0 { // within renotify window → no repeat
 		t.Fatalf("within window fired=%d, want 0", n)
 	}
 	// Backdate last_escalated_at past the renotify cadence → repeat fires once.
 	if _, err := st.pool.Exec(ctx, `UPDATE incidents SET last_escalated_at = now() - interval '10 minutes' WHERE id = $1`, inc.ID); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
-	if n, _ := st.AdvanceEscalations(ctx); n != 1 {
+	if n, _ := st.AdvanceEscalations(ctx); n.MonitorSteps != 1 {
 		t.Fatalf("repeat fired=%d, want 1", n)
 	}
 	if count() != 2 {
@@ -374,12 +374,12 @@ func TestAdvanceEscalationsRequiresDownStatus(t *testing.T) {
 
 	// Re-arm window: monitor is `pending` with a lingering open incident → NO escalation.
 	setStatus(domain.StatusPending)
-	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 0 {
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n.MonitorSteps != 0 {
 		t.Fatalf("pending monitor escalated: fired=%d err=%v (want 0)", n, err)
 	}
 	// Confirmed down again (dead-man or a real failure) → the ladder resumes.
 	setStatus(domain.StatusDown)
-	if n, err := st.AdvanceEscalations(ctx); err != nil || n != 1 {
+	if n, err := st.AdvanceEscalations(ctx); err != nil || n.MonitorSteps != 1 {
 		t.Fatalf("down monitor should escalate: fired=%d err=%v (want 1)", n, err)
 	}
 }

@@ -129,7 +129,26 @@ type Store interface {
 	ListComponentsByPage(ctx context.Context, pageID string) ([]domain.Component, error)
 	GetComponent(ctx context.Context, id string) (domain.Component, error)
 	DeleteComponent(ctx context.Context, id string) error
+	// FR-021 §15.0/§15.5 — the status-page service projection and the composite lifecycle.
+	UpdateComponent(ctx context.Context, orgID string, c domain.Component) (domain.Component, error)
+	// ONE page-scoped snapshot over (project, service) pairs, plus three set-wise monitor reads:
+	// an org-level page spans projects, so a per-project batch was never one snapshot ([314] P1-3).
+	ServicePageProjections(ctx context.Context, refs []store.ServiceRef, withHistory bool) (map[string]store.ServicePageProjection, error)
+	MonitorPageProjections(ctx context.Context, monitorIDs []string, since time.Time, withHistory bool) (map[string]store.MonitorPageProjection, error)
+	PreviewComponentConversion(ctx context.Context, orgID, componentID string, target store.ComponentConversionTarget) (store.ComponentConversionPlan, error)
+	ConfirmComponentConversion(ctx context.Context, orgID, componentID string, target store.ComponentConversionTarget, revision, pageGeneration int64, actor store.GraphActor) (domain.Component, error)
+	SetMonitorSuccessor(ctx context.Context, projectID, monitorID, serviceID string, actor store.GraphActor) (domain.Monitor, error)
+	RetireMonitor(ctx context.Context, projectID, monitorID string, actor store.GraphActor) (domain.Monitor, error)
+	ReactivateMonitor(ctx context.Context, projectID, monitorID string, actor store.GraphActor) (domain.Monitor, error)
+	ConvertCompositeToService(ctx context.Context, projectID, monitorID string, sli []string, actor store.GraphActor) (store.CompositeConversion, error)
+	ListMonitorsSupersededBy(ctx context.Context, projectID, serviceID string) ([]domain.Monitor, error)
 	ListOpenIncidentsByProject(ctx context.Context, projectID string) ([]domain.Incident, error)
+	// The page's incident/maintenance context, batched across ALL its projects: an org page spans
+	// projects, and a per-project loop made the unauthenticated render O(projects) ([318] P1-1).
+	IncidentsForPage(ctx context.Context, projectIDs []string, since time.Time) (store.PageIncidents, error)
+	MaintenanceForPage(ctx context.Context, projectIDs []string, now time.Time) ([]domain.MaintenanceWindow, error)
+	IncidentTimelines(ctx context.Context, incidentIDs []string) (map[string][]domain.IncidentUpdate, error)
+	PostmortemsForIncidents(ctx context.Context, incidentIDs []string) (map[string]domain.Postmortem, error)
 	CreateApiToken(ctx context.Context, t domain.ApiToken, hash string) (domain.ApiToken, error)
 	ListApiTokensByOrg(ctx context.Context, orgID string) ([]domain.ApiToken, error)
 	GetApiToken(ctx context.Context, id string) (domain.ApiToken, error)
@@ -158,7 +177,15 @@ type Store interface {
 	DeleteSubscriberByToken(ctx context.Context, token string) error
 	EnqueueOutbox(ctx context.Context, topic string, payload []byte) error
 	RecordAudit(ctx context.Context, e domain.AuditEntry) error
+	// Project-scoped SLO objective (iter-0155). REPORTING ONLY — the schema refuses burn alerting
+	// on this scope, so neither method takes a burn argument.
+	GetProjectSLATarget(ctx context.Context, projectID, window string) (domain.SLATarget, error)
+	UpsertProjectSLATarget(ctx context.Context, projectID, window string, objective float64) (domain.SLATarget, error)
+	DeleteProjectSLATarget(ctx context.Context, projectID, window string) error
 	ListAuditByOrg(ctx context.Context, orgID string, limit int) ([]domain.AuditEntry, error)
+	// ListGlobalAudit reads the INSTANCE-level entries (org_id IS NULL) — a global admin's own
+	// history, which no org listing may widen into.
+	ListGlobalAudit(ctx context.Context, limit int) ([]domain.AuditEntry, error)
 	CreateProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name, value string) (store.ProjectSecret, error)
 	UpdateProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string, newName, newValue *string) (renamed, rotated bool, repointed int, err error)
 	DeleteProjectSecret(ctx context.Context, actor store.SecretActor, projectID, name string) error
@@ -173,12 +200,28 @@ type Store interface {
 	ServiceHealthNow(ctx context.Context, projectID, serviceID string) (domain.ServiceHealthNow, error)
 	ServiceReliabilitySeries(ctx context.Context, projectID, serviceID string, from, to time.Time, step time.Duration) ([]domain.ReliabilitySeriesPoint, error)
 	UpsertServiceSLATarget(ctx context.Context, projectID, serviceID, window string, objective float64) error
+	// Alerting ownership (FR-021 phase 5, §16.6a). Both are transactional, audit inside the
+	// transaction and enqueue the §16.4a lifecycle closes their edit orphans. The READ half is
+	// asserted separately (see serviceAlertPolicyReader) because the store does not offer it yet.
+	// The paging declaration (FR-021 §16.6a): the read is what a PATCH merges onto, and a merge
+	// whose base was invented is how "leave ownership alone" becomes a silent disowning.
+	ServiceAlertPolicy(ctx context.Context, projectID, serviceID string) (domain.ServiceAlertPolicy, error)
+	// The COVERAGE that declaration is currently producing, per signal (§16.1/§16.6b). Read from
+	// the delegation lookup's own predicates, so a badge cannot disagree with the delivery gate.
+	ServiceAlertingState(ctx context.Context, projectID, serviceID string) (store.ServiceAlertingState, error)
+	// The same question from the MONITOR's side: which of its own alerts a service is delivering
+	// instead, and who. Read through the delivery gate's own lookup, never re-derived.
+	MonitorDelegation(ctx context.Context, monitorID, projectID string) (store.MonitorDelegation, error)
+	UpdateServiceAlertPolicy(ctx context.Context, projectID, serviceID string, patch store.ServiceAlertPolicyPatch, actor store.AlertActor) (domain.ServiceAlertPolicy, error)
+	SetServiceBurnAlerting(ctx context.Context, projectID, serviceID, window string, enabled bool, rules []domain.BurnRule, actor store.AlertActor) error
 	// Service impact graph + correlation reads (FR-021 phase 3, iter-0147).
 	GetServiceDependencies(ctx context.Context, projectID, serviceID string) (store.ServiceGraphView, error)
 	ReplaceServiceDependencies(ctx context.Context, projectID, serviceID string, parents []string, expectedGeneration int64, actor store.GraphActor) (store.ServiceGraphView, error)
 	CreateServiceWithDependencies(ctx context.Context, svc domain.Service, parents []string, actor store.GraphActor) (domain.Service, error)
 	ServiceNeighbourHealth(ctx context.Context, projectID string, serviceIDs []string) (map[string]domain.ServiceHealthNow, error)
 	ListIncidentImpacts(ctx context.Context, projectID, incidentID string) ([]domain.ServiceImpactLink, error)
+	SetServiceEscalationPolicy(ctx context.Context, projectID, serviceID, policyID string, actor store.AlertActor) (string, error)
+	IncidentMemberSnapshot(ctx context.Context, incidentID string) ([]domain.IncidentMember, bool, error)
 
 	ListProjectSecrets(ctx context.Context, projectID string) ([]store.ProjectSecret, error)
 }
@@ -194,6 +237,10 @@ type Mailer interface {
 // nil-safe: handlers guard on it, so tests and embed-only modes can omit it.
 type Metrics interface {
 	RecordIncidentOpened()
+	// RecordStatusPageUnreadableComponent counts a status-page component whose ACTIVE service could
+	// not be read (§15.0, invariant 71a). It is a FAILED read, not absent measurement, and a log
+	// alone leaves it invisible to anything watching trends.
+	RecordStatusPageUnreadableComponent()
 }
 
 // ResultSink publishes a heartbeat into the ingestion pipeline. Used by the AGENT results
@@ -216,6 +263,7 @@ type PushRecorder interface {
 type Handler struct {
 	store             Store
 	logger            *slog.Logger
+	renderCache       *statusPageCache
 	minPasswordLen    int
 	metrics           Metrics
 	results           ResultSink
@@ -273,7 +321,8 @@ func New(store Store, logger *slog.Logger, minPasswordLen int) *Handler {
 	if minPasswordLen < 1 {
 		minPasswordLen = 8
 	}
-	return &Handler{store: store, logger: logger, minPasswordLen: minPasswordLen}
+	return &Handler{store: store, logger: logger, minPasswordLen: minPasswordLen,
+		renderCache: newStatusPageCache()}
 }
 
 // effectiveMinPasswordLen resolves the live policy value, falling back to the
@@ -447,8 +496,17 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/monitors/{monitorID}/sla", h.monitorSLA)
 	mux.HandleFunc("PUT /api/v1/monitors/{monitorID}/sla-target", h.setMonitorSLATarget)
 	mux.HandleFunc("GET /api/v1/monitors/{monitorID}/availability", h.monitorAvailability)
+	// FR-021 §15.5 composite lifecycle: the annotation, the explicit retire/reactivate pair, and
+	// the composite→service conversion. Each is its own act; none is a side effect of another.
+	mux.HandleFunc("PUT /api/v1/monitors/{monitorID}/successor", h.setMonitorSuccessor)
+	mux.HandleFunc("POST /api/v1/monitors/{monitorID}/retire", h.retireMonitor)
+	mux.HandleFunc("POST /api/v1/monitors/{monitorID}/reactivate", h.reactivateMonitor)
+	mux.HandleFunc("POST /api/v1/monitors/{monitorID}/convert-to-service", h.convertCompositeToService)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/availability", h.projectAvailability)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla", h.projectSLA)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/sla-target", h.getProjectSLATarget)
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-target", h.putProjectSLATarget)
+	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/sla-target", h.deleteProjectSLATarget)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/sla-report", h.setProjectSLAReport)
 	// Service reliability (FR-021). Phase 1: the resource, its declaration and the state of
 	// materialization. Phase 2 (iter-0141): the reporting endpoints below — the detail still
@@ -465,6 +523,17 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/health", h.serviceHealth)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/reliability/series", h.serviceReliabilitySeries)
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/sla-target", h.setServiceSLATarget)
+	// Phase 5 (§16.6a): the alerting-ownership write surface. The LIVE paging declaration and one
+	// SLA target's burn declaration are separate routes because they are separate transactions
+	// with separate audit actions and separate lifecycle closes — and because the objective write
+	// above must stay exactly what it was.
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/alerting", h.getServiceAlerting)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/alerting/state", h.getServiceAlertingState)
+	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/services/{serviceID}/alerting", h.patchServiceAlerting)
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting", h.setServiceBurnAlerting)
+	// FR-023: the ladder's policy. Until FR-023 this column was inert and reachable only at create
+	// time or through a file provider; it now decides who is woken for this service.
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/escalation-policy", h.setServiceEscalationPolicy)
 
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/secrets", h.listSecrets)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/secrets", h.createSecret)
@@ -511,6 +580,11 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/components", h.listComponents)
 	mux.HandleFunc("POST /api/v1/status-pages/{pageID}/components", h.createComponent)
 	mux.HandleFunc("DELETE /api/v1/components/{componentID}", h.deleteComponent)
+	// FR-021 §15.0: a component's presentation is editable; its SOURCE changes only through the
+	// previewed, CAS-fenced conversion below.
+	mux.HandleFunc("PATCH /api/v1/components/{componentID}", h.updateComponent)
+	mux.HandleFunc("POST /api/v1/components/{componentID}/conversion/preview", h.previewComponentConversion)
+	mux.HandleFunc("POST /api/v1/components/{componentID}/conversion", h.confirmComponentConversion)
 	mux.HandleFunc("GET /api/v1/organizations/{orgID}/tokens", h.listApiTokens)
 	mux.HandleFunc("POST /api/v1/organizations/{orgID}/tokens", h.createApiToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{tokenID}", h.deleteApiToken)
@@ -542,6 +616,7 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("PUT /api/v1/settings/monitor-defaults", h.putMonitorDefaults)
 	mux.HandleFunc("GET /api/v1/settings/mail", h.getMail)
 	mux.HandleFunc("PUT /api/v1/settings/mail", h.putMail)
+	mux.HandleFunc("GET /api/v1/admin/audit", h.listGlobalAudit)
 	mux.HandleFunc("GET /api/v1/admin/users", h.listAllUsers)
 	mux.HandleFunc("PATCH /api/v1/admin/users/{userID}", h.updateAdminUser)
 	mux.HandleFunc("DELETE /api/v1/admin/users/{userID}", h.deleteAdminUser)

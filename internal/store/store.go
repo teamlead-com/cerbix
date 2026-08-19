@@ -378,6 +378,11 @@ const (
 	metricEventEpochFanout  = "epoch_fanout"
 	metricEventLateArrivals = "late_arrivals"
 	metricEventLateOverflow = "late_overflow"
+	// metricEventObservedBeforeIssue counts results ACCEPTED despite an observation instant before
+	// their job's issue instant — inside `result.allowed_skew`. It is the signal that a region's
+	// clock trails the core's: harmless one at a time, and worth seeing before it grows past the
+	// tolerance and starts costing real measurements (iter-0155, func-result-protocol §9).
+	metricEventObservedBeforeIssue = "observed_before_issue"
 )
 
 // bumpMetricEventTx increments one persisted event aggregate ATOMICALLY with the event it

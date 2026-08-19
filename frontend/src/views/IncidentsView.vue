@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
+import IncidentSubjectChip from "@/components/IncidentSubjectChip.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { STATUS_ORDER, relTime } from "@/lib/incident";
@@ -38,6 +39,33 @@ const selected = computed(() => incidents.value.find((i) => i.id === selectedID.
 const updates = ref<IncidentUpdate[]>([]);
 const postmortem = ref<Postmortem | null>(null);
 const affected = ref<Monitor | null>(null);
+
+// The SUBJECT names, resolved ONCE per screen rather than per row (FR-022). Two requests at most,
+// and only when some incident actually carries that anchor: a list of N incidents must not become
+// N lookups, and a project with no service incidents pays nothing.
+const serviceSlugs = ref<Record<string, string>>({});
+const monitorNames = ref<Record<string, string>>({});
+async function loadSubjectNames(list: Incident[]) {
+  const projectID = ws.projectId;
+  if (!projectID) return;
+  const wantServices = list.some((i) => i.service_id);
+  const wantMonitors = list.some((i) => i.monitor_id);
+  const [svcs, mons] = await Promise.all([
+    wantServices
+      ? api.GET("/api/v1/projects/{projectID}/services", { params: { path: { projectID } } })
+      : Promise.resolve(null),
+    wantMonitors
+      ? api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID } } })
+      : Promise.resolve(null),
+  ]);
+  const s: Record<string, string> = {};
+  // The list endpoint returns each service WRAPPED with its rollup counts, so the identity is nested.
+  for (const v of svcs?.data ?? []) if (v.service?.id) s[v.service.id] = v.service.slug || v.service.name || "";
+  serviceSlugs.value = s;
+  const m: Record<string, string> = {};
+  for (const v of mons?.data ?? []) if (v.id) m[v.id] = v.name || "";
+  monitorNames.value = m;
+}
 const detailLoading = ref(false);
 
 // --- token-driven badge classes, matching the design system ---
@@ -89,6 +117,9 @@ async function load() {
       params: { path: { projectID: ws.projectId } },
     });
     incidents.value = res.data ?? [];
+    // Best-effort: a failed name lookup leaves the chips stating the KIND alone, which is still
+    // the answer they exist to give. It must never take the incident list down with it.
+    loadSubjectNames(incidents.value).catch(() => {});
     // Auto-select the first incident in the current filter.
     const first = shown.value[0];
     if (first?.id) select(first.id);
@@ -220,6 +251,12 @@ watch(() => ws.projectId, load);
                   <span class="h-[7px] w-[7px] rounded-full" :class="st(inc.status).dot"></span>{{ st(inc.status).label }}
                 </span>
                 <span class="rounded-xs border px-[7px] py-px text-[10.5px] font-bold uppercase tracking-[0.05em]" :class="impactCls(inc.impact)">{{ inc.impact }}</span>
+                <IncidentSubjectChip
+                  :service-id="inc.service_id"
+                  :service-slug="serviceSlugs[inc.service_id ?? '']"
+                  :monitor-id="inc.monitor_id"
+                  :monitor-name="monitorNames[inc.monitor_id ?? '']"
+                />
               </div>
               <div class="text-[13.5px] font-semibold leading-snug">{{ inc.title }}</div>
               <div class="flex items-center">
@@ -240,6 +277,12 @@ watch(() => ws.projectId, load);
                   <span class="h-[7px] w-[7px] rounded-full" :class="st(selected.status).dot"></span>{{ st(selected.status).label }}
                 </span>
                 <span class="rounded-xs border px-[7px] py-px text-[10.5px] font-bold uppercase tracking-[0.05em]" :class="impactCls(selected.impact)">{{ selected.impact }} impact</span>
+                <IncidentSubjectChip
+                  :service-id="selected.service_id"
+                  :service-slug="serviceSlugs[selected.service_id ?? '']"
+                  :monitor-id="selected.monitor_id"
+                  :monitor-name="monitorNames[selected.monitor_id ?? '']"
+                />
                 <div class="ml-auto flex items-center gap-2">
                   <button
                     v-if="selected.status !== 'resolved' && canWrite"

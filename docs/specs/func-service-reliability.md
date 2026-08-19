@@ -33,8 +33,10 @@ keeps its effective span. The owner decisions stand unchanged: duration-weighted
 microseconds, archive separated from annul, bundle format 2 with a project-unique monitor slug,
 and native RANGE partitions in both storage modes.
 
-Phases 1–2 are specified to implementable depth; phases 3–5 are intent only. No code exists
-and none will until this text passes.
+All five phases are now specified to implementable depth AND shipped — 1–2 in the original cycle,
+then 3 (§14, D-0166), 4 (§15.0/§15.5, D-0167) and 5 (§16, D-0168), each specified in its own cycle
+before its code existed. What remains unbuilt is deferred by owner decision and named where it is
+declined: §16.9 for alerting, §15.0 for public impact links.
 
 > **Terminology.** A Cerbix **Service** is a reliability-domain resource representing an
 > operational unit. It is not a monitor, not a status-page component and not a catalog entry.
@@ -1394,8 +1396,10 @@ silently reporting a recomputed budget without saying which objective it used is
 **Reporting only in phase 2.** Service SLOs are computed and displayed but do **not** alert
 (§13).
 
-*Amendment (D-0163 / iter-0138):* until phase 5 owns alerting, the displayed burn pair is
+*Amendment (D-0163 / iter-0138; settled by phase 5, iter-0154):* the displayed burn pair is
 **fixed at 1h/6h** (the approved card), each window `[sealed_through − w, sealed_through)`;
+phase 5 did NOT change it — service paging rides the operator's declared `burn_rules` on
+`sla_targets` (§16.4), a different object from this reporting card, and this pair still never alerts;
 a pair whose equivalent real-time window holds no sealed time returns
 `insufficient_sealed_coverage`. Hour/day rollups are computed on read as §10.2's exact
 epoch-keyed sums; no rollup table is stored in phase 2.
@@ -1469,12 +1473,16 @@ Monitor-level burn alerting already exists and pages through the same channels. 
 service burn alerts without an ownership rule would page twice for one failure — the exact
 noise this specification claims to reduce. Alert ownership (which level is the single source of
 paging semantics, and how a monitor in an SLI delegates or suppresses its own burn alert) is
-phase 5 and is deliberately unspecified here.
+phase 5, and is now specified to implementable depth in **§16** (owner decisions of 2026-08-17,
+D-0168): ownership is DECLARED at the service and defaults to OFF, a service alerts on a live health
+transition AND a sealed burn breach, the alert notifies without opening an incident, and a member
+monitor's alert DELIVERIES are suppressed per SIGNAL only while the service's replacement for that
+signal is ARMED and FRESH — ownership alone silences nothing, and every ambiguity pages.
 
 ## 14. Dependencies and incident correlation (phase 3)
 
-*Specified to implementable depth in the phase-3 spec cycle (2026-08-17); until then this
-section was intent only. Decision record reserved: D-0166.*
+*Specified to implementable depth in the phase-3 spec cycle (2026-08-17); until then this section
+was intent only. Shipped across iter-0146…0148; decision record **D-0166**.*
 
 Three behaviors must never be conflated:
 
@@ -1790,8 +1798,9 @@ complete, only the prose truncates, and the truncation names its remainder.
   where the status-page serializer would inherit it: the public path embeds the incident model
   and redacts by allowlisting-in-reverse (`PublicRedacted`), so a shared field would ride into
   unauthenticated JSON the moment one future redactor forgets it. **Public and internal
-  status-page projections carry no impacts until phase 4 explicitly opts in** (§17: existing
-  status pages unchanged; internal topology is not public data). Required regression: the raw
+  status-page projections carry no impacts** — phase 4 arrived and DECLINED to opt in (§15.0, and
+  the non-goal below), so the rule is unconditional and a later opt-in needs its own decision
+  (§17: existing status pages unchanged; internal topology is not public data). Required regression: the raw
   UNAUTHENTICATED status-page JSON for a page whose project has correlated incidents contains
   no impact service ids, slugs, names or paths.
 - Edge reads and writes use the dedicated `/dependencies` routes of §14.2 (with
@@ -1862,7 +1871,7 @@ constant query count at the maximum neighbour set.
 ### 14.8 Out of phase 3
 
 Recommending monitor `depends_on` from service edges ("may recommend", deliberately unbuilt);
-any visual graph rendering; status-page projection of impact (phase 4); alerting on impact
+any visual graph rendering; status-page projection of impact (phase 4 DECLINED it — §15.0 keeps impact links non-public; a later phase would need its own owner decision); alerting on impact
 (phase 5); any retrospective annotation of resolved incidents; cross-project edges.
 
 ## 15. Coexistence and migration
@@ -1872,6 +1881,314 @@ components remain first-class** (the "third-party provider: degraded" case that 
 monitor). Existing components are never converted automatically: an explicit "convert to
 Service-backed component" action with a preview of the resulting public change — status pages
 are customer-visible artifacts.
+
+*Specified to implementable depth in the phase-4 spec cycle (2026-08-17); until then this was intent
+only. Shipped in iter-0150; decision record **D-0167**.*
+
+### 15.0 The status-page projection (phase 4)
+
+**Tenancy first: `components` currently carries NO tenant column at all.** It reaches its org
+only through `status_pages`, so a `service_id` alone would bind service→project and leave
+component→org unbound: a direct writer could hang an org-B service on an org-A page. Migration
+therefore gives the row its own tenant identity, mirroring `status_pages` (org-level page ⇒
+`project_id IS NULL`):
+
+```
+components
+├── org_id          uuid NOT NULL      (backfilled from status_pages)
+├── source_project  uuid NULL          the project of the BINDINGS — not of the page
+├── source          text NOT NULL      'monitor' | 'service' | 'manual'
+├── monitor_id      uuid NULL          the monitor binding, retained while dormant
+├── service_id      uuid NULL          the service binding, retained while dormant
+├── manual_status   text NOT NULL DEFAULT ''
+FK (status_page_id, org_id)     → status_pages (id, org_id)
+FK (source_project, org_id)     → projects (id, org_id)
+FK (monitor_id, source_project) → monitors (id, project_id)   ON DELETE SET NULL (monitor_id)
+FK (service_id, source_project) → services (id, project_id)   ON DELETE RESTRICT
+CHECK  the ACTIVE source's binding is present:
+       source='monitor' ⇒ monitor_id IS NOT NULL
+       source='service' ⇒ service_id IS NOT NULL
+       source='manual'  ⇒ (nothing required)
+CHECK  source <> 'manual' ⇒ source_project IS NOT NULL
+CHECK  manual_status <> 'no_data'
+CONSTRAINT TRIGGER (deferred, on components and on status_pages.project_id):
+       a PROJECT-SCOPED page admits only components whose source_project is that project;
+       an ORG-LEVEL page admits any project of the org
+```
+
+Three corrections the reviewer was right to force, each of which I had conflated:
+
+- **Page scope and source project are different things.** An org-level page legitimately holds
+  components from several projects, so the row's project column describes its BINDINGS
+  (`source_project`), never the page. A manual component has no binding and therefore no
+  project — hence nullable, with the CHECK making it non-null exactly when a binding is active.
+- **"A project-scoped page's component carries that project" is not expressible as a CHECK** —
+  a CHECK cannot read `status_pages`, and the `(status_page_id, org_id)` FK proves org only. It
+  is a DEFERRED CONSTRAINT TRIGGER, on both sides (inserting a foreign component, and narrowing
+  a page's scope afterwards), and it is named as such so implementation cannot quietly downgrade
+  it to an application check.
+- **Both dormant bindings live in ONE project, so conversion is same-project by rule.** A
+  component may not be converted from a monitor in project A to a service in project B; the
+  operator creates a different component instead. Per-binding project identity was the
+  alternative and it buys nothing: a component IS one thing on a page, and a cross-project
+  "revert" would restore a binding the page's audience never saw. Direct-SQL negatives cover
+  all three: cross-org component, foreign component on a project-scoped page, and cross-project
+  dormant binding.
+
+**The source is a DISCRIMINATOR, not the presence of a field.** An exclusivity CHECK over
+"which column is populated" cannot coexist with the reversibility this section promises: a
+revert has to restore the binding it replaced, so the binding must survive being inactive.
+`source` names the active one; the other columns keep their bindings **dormant**. That single
+mechanism makes every transition reversible without a second staging table:
+
+| From | To | What happens | Revert restores |
+|---|---|---|---|
+| manual | service | `source='service'`, `manual_status` untouched | the same manual status |
+| monitor | service | `source='service'`, `monitor_id` retained dormant | the same monitor binding |
+| service | manual | `source='manual'` | — |
+| service | monitor | `source='monitor'` (only if a dormant `monitor_id` survives) | — |
+| monitor | manual / manual | monitor | unchanged from today | — |
+
+Backfill for shipped rows is total and deterministic: `monitor_id IS NOT NULL ⇒ 'monitor'`,
+otherwise `'manual'` — including rows with neither binding nor status, which are manual
+components an operator has not set yet (they render exactly as they do today).
+
+**One inherited behaviour is kept, and one is refused.** A monitor-backed component whose
+`manual_status` is set currently renders the manual value as an override (D-0021); that stays,
+because changing it would alter shipped public output for no reason this phase needs. A
+**service-backed component takes no manual override**: a service is the measured unit, and
+letting an operator hand-paint its public status would publish the unmeasured as measured —
+the one thing this whole feature exists to prevent. Operators express judgement through
+incidents, which is what incidents are for. `manual_status = 'no_data'` is likewise refused by
+CHECK: `no_data` is a COMPUTED statement that measurement is absent, never an assertion someone
+types.
+
+**Only the SLI layer is projected.** The two-layer signal of §12.2 exists because a
+diagnostics-only failure must never touch the customer-facing layer; publishing the
+diagnostics layer would also publish monitor NAMES, which is internal topology. So the public
+projection reads the SLI layer alone, and **the impact links of §14 stay non-public** —
+invariant 59 allowed phase 4 to opt in explicitly, and phase 4 explicitly declines: a public
+page naming a probable-root service would publish the dependency graph to customers.
+
+**The projection needs an input the live signal does not currently expose.**
+`ServiceHealthNow` deliberately collapses "excluded by a maintenance window" and "genuinely
+unknown" into one `sli: unknown` — the four declared categories, nothing invented (§12.2). A
+projection that maps `excluded → maintenance` cannot read that; inventing a second evaluator
+would give the hardest-reviewed rule of phase 2 a second owner. So phase 4 adds ONE authoritative
+batched projection read, at ONE database `as_of`, over the whole page's service components:
+
+```
+ServiceStatusProjection      (ONE report snapshot per page render; CONSTANT statement count
+                              regardless of component count — not necessarily one statement)
+├── service_id
+├── sli            healthy | degraded | down | unknown
+├── excluded       true when a maintenance exclusion is in force AT as_of
+├── reason         the payload's own reason for a non-measured sli (never prose invented here)
+├── sealed_through the service's watermark (the 90-day window ends HERE, not at as_of)
+└── sealed_in_window  whether a sealed fact exists INSIDE the 90-day window
+```
+
+`sealed_in_window`, not "any fact exists": a single ancient fact would otherwise claim history
+the strip cannot show. And the window ends at `sealed_through`, matching the internal report
+(§11.3) — ending it at the page's `as_of` would invent an unsealed tail nobody measured.
+
+**A missing service is an ERROR, not an honest `no_data`.** With the tenant FK and `RESTRICT`,
+an active service source CANNOT be absent; if the projection comes back without it, the read is
+wrong — a query omission, a tenancy bug, corruption. So that case degrades the render (the
+component reports unavailable and the failure is logged and counted), and never converts into
+the calm public statement "we have no data about this". Absence of a row and absence of
+measurement are different facts.
+
+It reuses the existing evaluator (`reliability.StateAt` over the same four relations,
+`serviceNeighbourHealthTx`'s set-wise loading shape) and returns the excluded flag the internal
+card folds away — the same numbers, one extra bit, no second semantics owner.
+
+**Precedence is total and stated in order.** The first matching row wins:
+
+| # | Condition | Public component status |
+|---|---|---|
+| 1 | `excluded` (maintenance window in force at `as_of`) | `maintenance` |
+| 2 | `sli = down` | `major_outage` |
+| 3 | `sli = degraded` | `degraded` |
+| 4 | `sli = healthy` | `operational` |
+| 5 | `sli = unknown` · no `sli[]` declared · service absent | **`no_data`** (new) |
+
+Two consequences the reviewer was right to demand in writing:
+
+- **`sealed_in_window` does not affect the STATUS.** A service that is live-healthy before its first
+  bucket seals is `operational` — its current state IS measured — while its 90-day strip is
+  absent, because its history is not. Conflating the two would have made a healthy new service
+  publish `no_data`, which is false in the opposite direction.
+- **Maintenance outranks absence.** A service inside a declared window publishes `maintenance`
+  even if nothing is sealed and even if the SLI is unknown: the operator declared that window,
+  and it is the more specific true statement.
+
+**`no_data` is a first-class public status, and it does NOT join the severity ladder.** The
+existing order is `operational(0) < maintenance(1) < degraded(2) < partial_outage(3) <
+major_outage(4)`, and squeezing absence into it forces a false comparison — is not-knowing
+better or worse than declared maintenance? Neither: it is a different KIND of statement. So the
+summary is computed as two values instead of one:
+
+```
+summary            ComponentStatus   worst-of over MEASURED components; `operational` when
+                                     none are worse; `no_data` when NOTHING is measured
+                                     (all-no_data page, or empty page)
+unmeasured_count   integer           components whose status is no_data
+summary_state      enum              operational | impaired | no_data | empty
+                                     (the headline discriminator; `impaired` covers every
+                                      measured status worse than operational)
+```
+
+`summary` stays a `ComponentStatus` so existing clients keep parsing the field they already
+read; `summary_state` and `unmeasured_count` are additive. The summarizer is ONE total function
+and it is **fail-closed by construction**: it classifies each component as measured-with-a-known
+status or unmeasured, and an unrecognized enum value counts as UNMEASURED — never as severity 0.
+That replaces the "`severity()`'s default becomes no_data" phrasing, which was not implementable
+(the function returns an int); the ordering function keeps its five measured values and the
+unknown case never reaches it.
+
+The headline contract, total over every case:
+
+| Page contents | Headline |
+|---|---|
+| all measured, worst = operational | *All systems operational* |
+| measured worst = X (≠ operational), any `unmeasured` | X's own headline, **plus** "data missing for N components" |
+| measured worst = operational, `unmeasured` > 0 | *Operational, with no data for N components* — never plain "all systems operational" |
+| every component `no_data` | *No data* — not operational |
+| **no components at all** | *No components configured* — not operational |
+
+**Phase 4 changes public output in THREE places, and all three are inherited lies of the same
+shape.** §17 enumerates them; none is a side effect of a new feature:
+
+1. a `pending` monitor component rendered `operational` → renders `no_data`;
+2. an EMPTY page rendered `operational` (`SummaryStatus(nil)`) → reports "no components
+   configured";
+3. a MANUAL component whose `manual_status` is empty rendered `operational` (the handler's
+   `status := domain.CompOperational` default) → renders `no_data`. An operator who has not
+   stated a status has not stated health, and the page must not state it for them.
+
+The third is the one an existing installation is most likely to notice, which is precisely why
+it is named rather than shipped quietly: an operator who wants the old appearance sets the
+manual status explicitly to `operational`, which is now the only way to say it.
+
+A `no_data` component is always LISTED and named. Hiding it would be the same lie by omission
+this feature rejects for composites (§15.5).
+
+**This corrects an existing FR-012 defect, deliberately and visibly.**
+`domain.ComponentStatusFromMonitor` maps `pending` — a monitor that has never been confirmed
+either way — to `operational`, so today's public pages already present the unknown as healthy.
+Phase 4 maps it to `no_data`. That is a CHANGE IN PUBLIC BEHAVIOUR of a shipped feature, so it
+is recorded here, in §17, and in D-0167 rather than slipped in as a detail of a new one.
+
+**The 90-day history: both fields, both bounded.** The existing `ComponentView` publishes
+`uptime_90d` AND `daily[]`, so specifying only the strip would leave the aggregate to be
+improvised:
+
+- **`daily[]`** — UTC days aggregated from SEALED `service_reliability_buckets` (provisional
+  excluded), over `[sealed_through − 90d, sealed_through)`, at most 90 points. Each point
+  carries `date`, `uptime`, and `decidable_fraction` — DECIDABLE coverage, the §11.2 axis, not
+  storage continuity, because that is the axis that says whether the number may be quoted at
+  all. A day with no sealed bucket is **absent from the array**, never a zero and never an
+  interpolation; a partially decidable day is present with its fraction, so a reader can tell a
+  quiet day from a half-measured one. No sealed data in the window → no array and the
+  `no data yet` label.
+- **`uptime_90d`** — follows the internal report's honesty rules verbatim (§11.2/§11.3): below
+  `min_decidable_coverage` it is **withheld**, and a window spanning definition revisions is
+  withheld too, because a single number across two definitions of availability is the confident
+  lie §12.1 forbids. Withholding is expressed on the wire as `uptime_90d: null` plus
+  `uptime_withheld_reason` (`insufficient_decidable_coverage` | `spans_definition_revisions` |
+  `no_sealed_data`) — a null with no reason would be indistinguishable from a serialization
+  slip. It is never synthesized to fill the field.
+- **Bounds are load-bearing here, not hygiene — and "keep rendering + log" is not a bound.**
+  The public render is unauthenticated and already N+1 over components; a service component
+  multiplies that by 90 days of facts. A create-time cap does nothing about a page that is
+  already enormous, so the contract has three layers instead of one:
+
+  1. **Constant statement count** per render under ONE snapshot, regardless of component count
+     (the §14-proven shape) — necessary, not sufficient: statements are bounded while rows,
+     memory and time are not.
+  2. **A per-page ceiling that can only shrink.** `status_pages.component_ceiling` is persisted
+     as `max(50, current component count)` at migration. New components are refused above it, so
+     an oversized page cannot grow, and every remediation lowers the ceiling permanently.
+  3. **An absolute fail-closed safety ceiling** of `500` components for the PUBLIC render. Above
+     it the page does not render a truncated subset — a partial page pretending to be the whole
+     one is the lie this section exists to prevent — it returns an explicit
+     `status_page_over_safe_limit` response naming the count and the limit, while the
+     AUTHENTICATED management view still lists everything so the operator can fix it. Plus a
+     short-TTL render cache as the rate bound.
+
+  Acceptance requires evidence of bounded ROWS, MEMORY and TIME at the ceiling — not only a
+  constant SQL statement count — and nothing is ever silently truncated or hidden.
+
+Same owner of truth as the internal report throughout: a customer and an operator can never be
+shown two different availabilities for one service.
+
+**Public incidents and maintenance: the existing scope, stated rather than assumed.** A
+monitor-backed component today adds its project to the page's set, and the page then publishes
+that project's incidents and maintenance windows. A service-backed component does **exactly the
+same** — its project joins the same set, nothing narrower and nothing wider. This is written
+down because "impact links stay non-public" does not answer it: an unrelated incident in that
+project appears on the page, as it already does for monitor components, and an operator adding
+a service component must know that. A raw unauthenticated JSON regression pins it, so the
+boundary cannot drift silently in either direction.
+
+**Conversion is explicit, previewed, audited and REVERSIBLE.**
+
+```
+Convert  manual  → service:  source='service', service_id = X,  manual_status PRESERVED
+Revert   service → manual:   source='manual',  service_id RETAINED (dormant),
+                             the same manual_status returns
+```
+
+The revert does NOT clear `service_id` — that would contradict the dormant-binding model above
+and throw away the affordance to convert back without re-choosing the service.
+
+The preview states, per affected component and for the page summary, what customers see now
+and what they would see after — because a status page is a customer-visible artifact and an
+operator who cannot see the delta cannot consent to it. Both directions write an audit row
+with the actor **in the mutating transaction**. Nothing is ever converted automatically: not on
+upgrade, not when a service is created, not by a reconcile.
+
+**Consent needs a linearization point, or it is consent to something else.** Between preview
+and confirm, another admin can change a component's source, edit a manual status, add, remove or
+reorder components — and the confirm would then apply to a page the operator never saw. So the
+preview carries a **structural CAS**, and the confirm recomputes inside its own transaction and
+compares:
+
+```
+components.revision                 bigint, bumped by ANY mutation of THAT component
+status_pages.component_generation   bigint, bumped by ANY component mutation on the page —
+                                    add, remove, reorder, source change, manual status, name
+```
+
+The page generation deliberately bumps on neighbour edits too: the preview shows the page
+SUMMARY, so an admin who changes a different component's manual status changes what admin A
+consented to, while leaving A's target row untouched. Bumping only on add/remove/reorder would
+let that race through — the reviewer's exact scenario, and the required regression.
+
+A mismatch on either is **409 `page_configuration_stale`** with the same first-committer-wins
+semantics as `graph_generation` (§14.2) — the operator re-previews rather than applying a stale
+consent. What is deliberately NOT locked is live health: a service can legitimately change state
+between preview and confirm, so the preview stamps its `as_of` and discloses that the *structure*
+is what was agreed, not the momentary status. Two-admin stale-preview regressions are required
+in both directions (source change and component-set change).
+
+**Deletion, stated per case instead of per FK.** Three different deletions reach a component,
+and pretending one rule covers them is how the first draft contradicted itself:
+
+| Deleted | Component behaviour |
+|---|---|
+| a **service** bound as the ACTIVE source | `ON DELETE RESTRICT` → **409 naming the page and the component**. `SET NULL` would BE the automatic conversion invariant 70 forbids; `CASCADE` would silently delete a row customers can see. |
+| a **monitor** bound as the ACTIVE source | the SHIPPED behaviour is kept: `SET NULL (monitor_id)`, and — because the CHECK requires an active binding — the same statement sets `source='manual'`. This IS an automatic conversion, it exists today (a deleted monitor's component already renders as manual), and it is recorded here as an **inherited exception** rather than being either denied or silently changed. |
+| a **dormant** binding of either kind | cleared, no source change, no public effect: a dormant binding is a revert affordance, not a statement. |
+
+**Project and org deletion keep their single-statement cascade (D-0150/FR-019).** `RESTRICT`
+governs the deletion of an INDIVIDUAL service only. A project cascade removes its services and,
+with them, any component bound to one — including components on ORG-LEVEL pages, which is
+exactly the case the reviewer identified as blocked. Those components are therefore enumerated
+in the project-deletion PREVIEW ("N status-page components will disappear from M pages"), so the
+cascade stays one statement and the operator still consents to the public consequence. Tests
+cover both a project-scoped page and an org-level page holding that project's service.
 
 **Composite.** After Service exists, `composite` narrows to what it actually is: a logical
 monitor. Conversion is explicit and non-destructive:
@@ -1884,13 +2201,89 @@ Convert composite → Service
   requires: explicit confirmation of sli[] — never silently "all children"
 ```
 
+The SLI is a REQUIRED input with no default, and every live child joins the operational CONTEXT
+regardless — the two lists exist precisely so that keeping a diagnostic visible does not change the
+number. A composite whose declared children are not ALL live is REFUSED, naming the missing ids:
+converting on the survivors would move the aggregation's meaning without anyone stating it, since
+`all` over 2 is not `all` over 3 and a quorum threshold is defined against a specific N. The quorum
+translation is `degraded_min = n − M + 1` with `healthy_min` EQUAL to it — the exact binary mapping,
+because a composite has two states and adding a degraded band would report more than the composite
+did on a page a customer reads. Widening that vocabulary is a separate owner decision with a preview
+that shows the delta.
+
 No historical data is migrated or reinterpreted in v1.
+
+### 15.5 After conversion, a composite stays visible until its owner retires it (phase 4)
+
+A converted composite **keeps running**: it still probes, still holds its SLO, and can still
+open an incident and deliver an alert. So it stays in the monitor list, at full strength. A
+monitor that pages someone while being absent from the list is the same
+system-does-one-thing-shows-another defect §14 and §11 exist to prevent — the on-call would get
+the alert and fail to find its source. Saving a list row is not worth that.
+
+- **The link is stored once and rendered from BOTH ends.** One nullable column on the monitor,
+  `superseded_by_service_id`, with the composite tenant FK `(superseded_by_service_id,
+  project_id) → services (id, project_id)` and `ON DELETE SET NULL` — losing the successor is a
+  lost annotation, not a corrupted monitor. It is not unique: two composites may legitimately be
+  superseded by one service. The service side derives `converted from →` by reading the same
+  column, so there is ONE fact and no pair to fall out of sync. Deleting the composite leaves the
+  service untouched; deleting the service clears the annotation and nothing else.
+- **Nothing is hidden by default.** A "hide superseded" filter is legitimate as an operator's
+  CHOICE, off initially. A default that hides a working monitor is a false statement about what
+  the installation is checking.
+- **Retiring is a lifecycle MARKER on top of the existing execution switch, and one
+  transaction.** `retired_at` alone stops nothing: the scheduler, the dead-man evaluator, result
+  ingest, incident and SLO paths all key on `enabled`, revisions and state sequences. So
+  `retire` is ONE transaction that sets **both**: `retired_at = now()` (the lifecycle statement,
+  which is what removes it from the active list and invites nothing) **and** `enabled = false`
+  (the existing, already-proven execution semantics). Reusing `enabled` alone would conflate an
+  afternoon's disable with "superseded forever"; using `retired_at` alone would leave a retired
+  monitor probing and paging. The same transaction carries the fences the disable path already
+  owns — the `execution_revision` bump and its epoch fan-out for every service that references
+  the composite (§6.2), the `state_sequence` advance so queued transition deliveries are
+  recognized as stale at delivery time (the existing #2 gate), and the audit row. Re-activation
+  is the explicit inverse (`retired_at = NULL`, `enabled = true`), audited, so a mistaken retire
+  is recoverable; a file-managed composite refuses both through the ownership rule that already
+  governs its `enabled`. A retired composite keeps its history, incidents and past numbers, and
+  still renders under the "superseded" filter.
+- **The lifecycle actions are COMPOSITE-only, and file ownership splits by DECLARATION authority,
+  not by row.** `retire`/`reactivate` and the conversion refuse for a file-managed composite,
+  because they write `enabled` or create a declaration — state a reapply would restate. The
+  `superseded_by_service_id` annotation is PERMITTED there: it is not part of bundle format 2, it
+  enters no canonical hash or generation, and no reconcile can contradict it, so refusing it would
+  remove the only way to annotate a file-managed composite while protecting nothing. §15.1's "may
+  MUTATE a resource" therefore means declaration/desired-state authority, not every column of the
+  row.
+- **Composite conversion is one serialized transaction, not a read-then-create.** It takes the
+  composite row `FOR UPDATE`, then creates the service, writes the link and the audit row
+  atomically; two simultaneous confirms therefore cannot create two services with
+  last-writer-wins on the non-unique successor column. The service slug is derived from the
+  composite's, and a collision is a **409 naming the existing slug** rather than a
+  silently-suffixed second service; a re-confirm of an already-converted composite is a no-op
+  returning the existing service (idempotent by the link column). A file-managed composite may
+  be converted only by its provider's authority, per §15.1.
+
+Retire is available for ANY composite, whether or not it was converted: an operator who built
+the service by hand is in the same position as one who used the conversion tool.
+
+The moment a composite stops being a source of alerts is therefore the same moment it leaves
+the list, which is the only arrangement in which its absence from the list is not a lie.
 
 ### 15.1 Ownership matrix — declarations only
 
 ```
 Resource ownership determines who may MUTATE a resource, not who may REFERENCE it.
 ```
+
+**"Mutate" here means DECLARATION and desired-state authority, not every column of the row.** The
+system and the runtime already write non-declarative state on a file-managed monitor — status,
+counters, watermarks, revisions — and no reconcile contradicts them. A presentation-only annotation
+that is absent from the bundle format, enters no canonical hash or generation, and cannot be restated
+by an apply is therefore permitted as well; `superseded_by_service_id` (§15.5) is the one such field
+phase 4 adds. What ownership forbids is a UI write to a DECLARED field, because the very next apply
+would silently overwrite it — which is why `enabled`, and therefore `retire`/`reactivate`, stay
+refused. Without this narrowing the matrix would read as a whole-row prohibition and contradict a
+permission §15.5 grants.
 
 The rule that decides every cell: **a system-authored revision is permitted only when the
 mutating authority may also mutate every affected Service; otherwise the mutation is blocked or
@@ -2149,6 +2542,570 @@ leader work does not make a cross-project reference safe; it makes it invisible.
   background query like every other; and the cross-tenant negative tests extend to the
   direct-SQL/store layer for links and anchors, not only the API.
 
+## 16. Alerting ownership (phase 5)
+
+*Design cycle 2026-08-17. Round 1/2 REJECTED BEFORE CODE (4 P0 + 10 P1 + 2 P2); this is the revised
+design, which the second round closed. Decision record **D-0168**; shipped in iter-0151 through four
+implementation-review rounds whose nineteen findings are recorded there.*
+
+### 16.0 The owner decisions
+
+1. **ownership is DECLARED at the SERVICE and defaults to OFF**;
+2. **a service alerts on TWO signals** — a LIVE health transition and a SEALED burn breach;
+3. **a service alert NOTIFIES; it opens no incident**;
+4. **service burn rules are the SAME `BurnRule` monitors already use**;
+5. **routing is NARROWED** to a directly resolvable target — the service's on-call schedule,
+   otherwise the project's channels. Escalation POLICIES for services are deferred (§16.8);
+6. **`escalation_step` IS suppressed** for a delegated monitor, because that is the topic the real
+   phone call rides;
+7. **losing sight of a paged service CLOSES the alert with a named reason**, never as "recovered".
+
+### 16.1 Delegation is per SIGNAL and must be ARMED — `owns_paging` alone silences nothing
+
+The first draft treated `owns_paging = true` as permission to suppress a member's alerts. That is
+wrong, and the failure is not hypothetical: ownership can be declared while the replacement signal
+does not exist. Three ways, all reachable:
+
+- the service's burn target is disabled, so no service burn rule can ever replace a member's
+  suppressed burn alert;
+- ownership is enabled while the evaluator has never run, is stalled, or has been deposed by a
+  failover, so nothing replaces a suppressed DOWN;
+- the live policy pages for nothing (`page_on = {}` with `page_on_unknown = false`), so live
+  suppression removes a page nobody replaces.
+
+**The rule: a signal may be suppressed only while a replacement for THAT signal is demonstrably
+active and current.** Concretely, delegation state is per signal:
+
+```
+LIVE coverage is ARMED  ⟺  owns_paging
+                        ∧  the live policy can page the CURRENT state
+                           (observed_state ∈ page_on  ∨  (observed_state = unknown ∧ page_on_unknown)
+                            ∨  observed_state is healthy/excluded — nothing to replace yet)
+                        ∧  a SUCCESSFUL live evaluation exists for the CURRENT
+                           (alert_config_generation, effective definition revision)
+                        ∧  that evaluation is FRESH (DB-clock now() < lease_until)
+                        ∧  the service is ROUTABLE (§16.6): at least one enabled, resolvable
+                           recipient exists right now
+
+BURN coverage is ARMED  ⟺  owns_paging
+                        ∧  an enabled service burn target with ≥ 1 rule exists
+                        ∧  the last verdict for that rule was QUOTABLE — FIRE or CLEAR, never HOLD
+                        ∧  that verdict is for the CURRENT (alert_config_generation, target
+                           generation, canonical rule key)
+                        ∧  it is FRESH (DB-clock now() < lease_until)
+                        ∧  the service is ROUTABLE
+```
+
+**QUOTABILITY is part of arming, and it is the P0 the first revision still had.** A `HOLD` is a
+SUCCESSFUL evaluation — no error, fresh, generation-matched — that deliberately emits no edge. So a
+rule sitting at CLEAR whose window returns `nothing_sealed` would have ARMED burn coverage while
+being structurally incapable of ever firing, and a member's real burn alert would be suppressed by a
+replacement that cannot speak. **Any HOLD dis-arms BURN coverage.** The consequence is a monitor
+burn page that may be redundant; the alternative was a burn page that never happens, and this file
+does not trade the second for the first.
+
+**ROUTABILITY is part of arming.** A service with a fresh healthy evaluator, an empty or deleted
+schedule and a project with no channels is "armed" by every other clause and delivers nothing — so a
+member's page would be muted by a replacement with no recipient. Routability is therefore evaluated
+at DELIVERY, not cached in a generation: schedule membership, channel enablement and deletion all
+change it without touching any service column, so a generation stamped on service fields cannot see
+them. A routing lookup error, or a final route that resolves to nobody, DIS-ARMS.
+
+| Monitor event | Suppressed while |
+|---|---|
+| `monitor_transition` with `cur = down` (including reminders) | LIVE coverage armed |
+| `escalation_step` | LIVE coverage armed |
+| `slo_burn_alert` with `firing = true` | BURN coverage armed |
+| **`monitor_transition` with `cur = up`** | **never** |
+| **`slo_burn_alert` with `firing = false`** | **never** |
+
+**Only ONSET-like events are ever suppressed. A recovery or a burn CLEAR is never suppressed, under
+any arming state.** Arming is evaluated at delivery time, and it changes: a monitor's DOWN can
+fail-open and be delivered while coverage is dis-armed, the evaluator can then catch up and arm, and
+the matching UP would be suppressed — leaving a recipient holding a DOWN with no end, forever. The
+burn mirror leaves a FIRING alert nobody can clear. Tracking an episode per monitor per owner per
+generation would be the general fix; refusing to suppress closes is the fix that cannot be got
+wrong, and a duplicate "recovered" is strictly safer than an unmatched "down".
+
+`escalation_step` has no polarity of its own — a ladder step exists only while an incident is open —
+so it is suppressed exactly while LIVE coverage is armed. It is in the list at all because of what
+the code already does: a monitor with an
+escalation policy and `auto_incident` has its flat DOWN `monitor_transition` dropped at delivery
+already, and its real pages are the ladder's `escalation_step` events over the open auto-incident.
+Suppressing only the two topics of the first draft would have left the double page in place for
+exactly the installations that page correctly. The ladder's ROW, progress and incident are
+untouched; only delivery is muted.
+
+**Everything ambiguous FAILS OPEN.** Missing state, a stale lease, a generation mismatch, an
+evaluation that errored, an unreadable owner set — every one of them PAGES, emits
+`cerbix_alert_delegation_fail_open_total{reason}`, logs, and degrades the UI's delegation badge from
+`armed` to `degraded`. A page that was not needed is noise; a page that was owed and never sent is
+the failure this feature exists to prevent.
+
+**Several owners.** Suppress only if at least one owning service is ACTIVELY COVERING that signal
+and the lookup completed without ambiguity. The notice names every actively covering owner, ordered
+by slug so the text is stable.
+
+**Suppression is at DELIVERY, never at recording.** Heartbeats, status flips, auto-incidents, outbox
+rows, escalation progress and the SLO history are untouched — the boundary escalation flat-down,
+dependency `DownAncestors` and instance-wide silence already use.
+
+**Suppression is VISIBLE, idempotent and bounded.** Per suppressed delivery: rows in
+`alert_suppressions` — ONE PER (outbox event, covering owner), so a monitor muted by two services
+records both rather than losing one to a singular column — a counter
+`cerbix_alert_suppressed_total{topic,reason}` counting UNIQUE suppressions rather than attempts, a log
+line, and — idempotently, in the SAME scoped store operation that resolved the owners — one
+`⏸ Suppressed:` note on the monitor's open auto-incident naming the covering services.
+
+The table's key is `(outbox_event_id, service_id, topic)` with a UNIQUE constraint, because the outbox
+is at-least-once: a redelivery re-runs the scoped operation, and without that key an audit-shaped
+table would grow a duplicate row every retry while the note stayed correctly idempotent. Reminders and
+escalation repeats make the table unbounded by construction, so it is purged on the existing retention
+sub-tick with its own bound, stated in the same place the heartbeat retention is. A recovery race that leaves no open incident is a valid
+no-note outcome; a DB error anywhere in the visibility path fails open and delivers. The
+once-marker's identity includes the ordered owner set, so a changed owner set annotates again
+rather than silently reusing a stale sentence.
+
+### 16.2 Membership: the EFFECTIVE definition, not the authored one
+
+`service_member_refs` is rewritten the moment a declaration is authored, while the declaration
+becomes effective at its bucket boundary (§6.1). Using the refs would suppress a monitor the live
+evaluator is not yet measuring:
+
+> 12:00:30 — M is added to S's `sli[]`, effective 12:01. 12:00:40 — M fails. The refs already
+> contain M, so delivery suppresses; the evaluator correctly still runs the pre-12:01 definition and
+> cannot replace the page. Nobody is told.
+
+**Both the evaluator and the delegation lookup resolve the members of the CURRENT EFFECTIVE
+definition revision**, and the arming state is stamped with that revision id. A monitor is not
+suppressed until the service has successfully evaluated the exact revision that contains it.
+
+### 16.3 The live signal
+
+Evaluated by the leader on a fixed cadence (`serviceAlertEvery`, 30s) through the SAME code path the
+public page uses — `servicePageProjectionsTx` over `reliability.StateAt` — so the pager and the page
+cannot disagree about what `down` means at one instant.
+
+```
+service_alert_state
+├── service_id        PK → services, ON DELETE CASCADE
+├── project_id        + composite FK (service_id, project_id) → services (id, project_id)
+├── observed_state    what THIS evaluation saw: healthy|degraded|down|unknown|excluded
+├── candidate_state   the state being confirmed
+├── streak            consecutive evaluations of candidate_state
+├── live_firing       whether an onset is currently announced   ← the level, not the edge
+├── emitted_state     what the last ENQUEUED notification announced (NULL = nothing ever)
+├── emitted_seq       monotonic per-service sequence, stamped into every payload
+├── config_generation services.alert_config_generation at evaluation time
+├── revision_id       the effective definition revision evaluated
+├── evaluated_at      DB-clock time of the last SUCCESSFUL evaluation (the freshness lease)
+└── last_error        the last evaluation error, or NULL
+```
+
+`emitted_state` is named for when it changes: at ENQUEUE, not at delivery. The first draft called it
+`notified_state`, which claimed something the outbox cannot promise (§16.5).
+
+**What pages** is declared: `page_on ⊆ {down, degraded}` (default `{down}`), plus a separate
+`page_on_unknown` (default false). `unknown` is deliberately not expressible inside `page_on` —
+"cannot see it" and "is broken" are different statements, and one list would let a UI offering "all
+states" enable the first while meaning the second. `excluded` never pages: a declared window is a
+declared silence.
+
+**Edges, stated as a level plus a transition.** `state != emitted_state` cannot express these, which
+is why `live_firing` exists:
+
+| From → to | Emits |
+|---|---|
+| nothing announced → non-pageable | nothing (bootstrap must not fake a recovery) |
+| non-pageable → pageable, confirmed | ONSET |
+| pageable → different pageable, confirmed | a new ONSET, not recovery-then-onset |
+| pageable → healthy, confirmed | CLOSE, reason `recovered` |
+| pageable → unknown (switch off) | CLOSE, reason `visibility_lost` |
+| pageable → excluded | CLOSE, reason `entered_maintenance` |
+| same state again | nothing |
+
+The last two are owner decision 7: the operator was told something was wrong and is owed the end of
+it, but calling blindness or maintenance "recovered" would assert evidence that does not exist. The
+close names its reason and the UI and payload carry it.
+
+**Bootstrap and lifecycle**, each stated because each is a way to page wrongly: enabling ownership
+while the service is ALREADY down emits an onset on the first confirmed evaluation (it is news to
+the operator); disabling ownership closes an open firing with reason `ownership_disabled`; editing
+`page_on`, `page_on_unknown` or `confirm_evaluations` bumps `alert_config_generation`, which
+DIS-ARMS delegation until the next successful evaluation of the new generation — the safe direction,
+since dis-armed means members page for themselves; a change of effective definition revision does
+the same; leader failover leaves a stale `evaluated_at`, which dis-arms rather than silences.
+
+**Confirmation** is `confirm_evaluations` consecutive evaluations (1..10, default 2) of the same
+candidate. `confirm_evaluations × 30s` is the NOMINAL delay under an uninterrupted evaluator, not a
+worst case: a stall or a failover extends it, which is precisely why a stale lease dis-arms
+delegation instead of holding a suppression open.
+
+### 16.4 The sealed burn signal
+
+`sla_targets` already carries `service_id` as a third exclusive scope with `burn_alert_enabled`
+rejected at the schema "until phase 5" (§11.3). Phase 5 lifts exactly that CHECK.
+
+**One math owner, arbitrary windows.** `reportBurn` today loops the FIXED reporting pair (1h/6h,
+D-0163) with one query per window; `BurnRule` allows arbitrary long/short pairs and alerting
+requires BOTH windows to breach. So the verdict-and-math is EXTRACTED into one owner that accepts a
+set of arbitrary durations, the underlying aggregates are batched for all service/rule windows of a
+slice, and the reporting card keeps calling the same owner with its fixed pair.
+
+**The hold matrix.** A rule evaluates to FIRE, CLEAR or HOLD, and HOLD means "keep the previous
+state and record why":
+
+| Window verdict | Effect on the rule |
+|---|---|
+| quotable, both windows ≥ threshold | FIRE |
+| quotable, either window < threshold | CLEAR |
+| `nothing_sealed` / `sealed_through` behind the window | HOLD |
+| `window_precedes_materialization_era` | HOLD |
+| `storage_gap` | HOLD |
+| `spans_definition_revisions` | HOLD |
+| `zero_decidable_time` | HOLD |
+| `decidable_coverage_below_min` | HOLD |
+| evaluation error | HOLD, dis-arm BURN coverage |
+
+Low coverage HOLDS rather than alerting: §11.2 lets a partial window keep its number WITH its
+fraction for a human reading a report, but paging on evidence the same section calls partial would
+be the strongest action taken on the weakest data. A FIRING rule under any HOLD reason stays FIRING
+— treating absent data as "burn = 0" would silently resolve a live alert, which is the most
+dangerous mistake available in this file.
+
+Every burn payload states the `sealed_through` it was computed from, because this signal trails the
+watermark by construction: it is a budget signal, and the live signal is the outage page.
+
+### 16.4a The firing episode: what makes a CLOSE possible at all
+
+A close must reach the people the onset reached, and it must still be possible after the thing that
+fired has been edited away. Neither is achievable from a state row that only holds the current level,
+so an ONSET creates a durable episode — not an incident, and deliberately not one:
+
+```
+service_alert_episodes
+├── id              uuid PK
+├── service_id      → services, ON DELETE SET NULL   ← survives its service, see below
+├── project_id      NOT NULL (tenant identity, kept even when service_id is nulled)
+├── signal          health | burn
+├── rule_key        canonical burn rule key, NULL for the health signal
+├── state           the state or rule that fired
+├── started_at      onset enqueue time (DB clock)
+├── closed_at       NULL while firing
+├── close_reason    recovered | visibility_lost | entered_maintenance | ownership_disabled
+│                   | policy_changed | burn_disabled | rule_removed | service_deleted
+├── recipients      jsonb — the IMMUTABLE snapshot resolved at onset
+└── emitted_seq     the onset's sequence, so a close is ordered against it
+```
+
+**The recipient snapshot is immutable ids, not a promise to re-resolve.** An on-call schedule rotates;
+re-resolving at close time would page a person who never heard the onset and leave the one who did
+holding an open alert. A snapshot recipient whose channel has since been deleted is COUNTED
+(`cerbix_service_alert_recipient_missing_total`) rather than silently replaced by whoever is on call
+now — replacing it would be the same lie in a different direction.
+
+**The episode is why every removal path can still close.** `service_id` is nullable and the project,
+signal, recipients and sequence survive it, so the close's delivery gate works after the service, the
+target or the rule is gone. Destructive paths therefore enqueue the close IN THE SAME TRANSACTION as
+the removal rather than being refused:
+
+| Change while firing | Close reason |
+|---|---|
+| `owns_paging → false` | `ownership_disabled` |
+| `page_on` / `page_on_unknown` edited so the current state is no longer pageable | `policy_changed` |
+| `confirm_evaluations` edited | *(no close — confirmation governs onset, not an open firing)* |
+| service burn target disabled | `burn_disabled` |
+| rule removed, or its canonical key changed | `rule_removed` |
+| service deleted | `service_deleted` |
+| the route became unresolvable | *(no close — dis-arming is not a recovery; members page again)* |
+
+The last row is the one worth stating: losing the ability to notify is not evidence about the
+service, so a firing episode stays open, delegation dis-arms, and the members resume paging for
+themselves. Announcing "recovered" because we lost a channel would be the same class of falsehood as
+announcing UNKNOWN as DOWN.
+
+### 16.4b The burn latch has ONE owner, and it is not `sla_targets.burn_rules`
+
+`BurnRule.Firing` currently lives inside the target's JSON, which is how the MONITOR path latches —
+and that stays exactly as it is, because phase 5 changes no monitor behaviour. For SERVICE targets
+the latch is normalized, because per-rule sequencing, exact-configuration arming and rule removal are
+not expressible inside a JSON array that an operator edits wholesale:
+
+```
+service_burn_alert_state
+├── (service_id, project_id, sla_target_id, rule_key)   PK, composite tenant FKs
+├── firing            the level
+├── last_verdict      fire | clear | hold
+├── last_reason       the §16.4 HOLD reason, or NULL
+├── target_generation the sla_targets generation this verdict is for
+├── config_generation services.alert_config_generation at evaluation time
+├── emitted_seq       monotonic per rule
+├── evaluated_at      DB clock of the last SUCCESSFUL evaluation
+├── lease_until       DB clock; see §16.5a
+└── last_error        the last evaluation error, or NULL
+```
+
+**The canonical `rule_key`** is the hash of the rule's DECLARED fields — long window, short window,
+threshold, severity — in canonical order, and it EXCLUDES `Firing` and every other server-owned latch
+field. Otherwise a rule would change identity by firing, which would silently orphan its own latch
+and re-arm coverage on every edge. Two rules with the same canonical key in one target are a
+validation error, not a silent merge: the one domain validator rejects them so a latch can never be
+ambiguous.
+
+### 16.5a The freshness lease is a DB-clock column, not a comparison somebody re-derives
+
+"`evaluated_at` within the lease" is not implementable as written, so:
+
+- each signal's state row carries `lease_until timestamptz`, written as
+  `now() + lease_multiplier × cadence` by the SUCCESSFUL evaluation that produced it, with the
+  multiplier fixed and validated (3, matching the freshness default the evaluator already uses for
+  members);
+- an evaluation ERROR sets `lease_until = now()` — dis-armed immediately, rather than coasting on the
+  previous success until it expires;
+- the clock is the DATABASE's on both sides, so a leader with a skewed clock cannot extend its own
+  arming;
+- freshness is ONE predicate, `now() < lease_until`, evaluated in the delegation query itself. The
+  UI and the metrics read the server's answer; they never re-derive it from a timestamp, because two
+  implementations of "fresh" is how a badge says armed while delivery says otherwise;
+- startup and failover need no special case: a new leader finds an unexpired lease it did not write
+  (fine — the state is still current) or an expired one (dis-armed until it evaluates), and the
+  `evaluated_at`/generation CAS keeps a deposed leader from overwriting newer state;
+- a cadence change re-derives the lease on the next successful evaluation; until then the old, shorter
+  or longer lease governs, and the maximum stale interval is therefore bounded by
+  `lease_multiplier × max(old, new) cadence`.
+
+### 16.5 Delivery: at-least-once, ordered, fenced
+
+**At-least-once, honestly.** The outbox guarantees the event is not forgotten; it explicitly permits
+a duplicate external delivery when the send succeeds and the delivery mark then fails. Phase 5 does
+NOT claim exactly-once. What it adds is an ordering gate so a duplicate cannot say something FALSE:
+
+- every live payload carries `emitted_seq`; delivery drops an event whose `emitted_seq` is behind the
+  service's current one, exactly as `monitor_transition` drops a superseded transition by
+  `state_sequence`;
+- every burn payload carries a per-rule sequence and the rule key; delivery drops a superseded one.
+
+So a retried DOWN cannot arrive after a newer CLOSE and re-announce an outage the service has left.
+**Dead-letter interaction:** a CLOSE whose ONSET never reached a channel is still delivered — an
+operator who received nothing loses nothing by a close, while suppressing it would leave a firing
+state nobody can see the end of.
+
+**Rolling upgrade.** `service_alert` joins the FENCED topic class (`pending_fenced` on enqueue,
+claimed only by a worker that understands it), like `incident_correlation`. A topic whitelisted in
+the schema but unknown to an old worker would be claimed and dead-lettered during a rolling upgrade.
+
+### 16.6 Routing (narrowed by owner decision 5)
+
+A service alert notifies:
+
+1. the service's **on-call schedule** (`services.oncall_schedule_id`) when set — resolved to its
+   current on-call targets at ENQUEUE time, so a page names who was on call when the state changed;
+2. otherwise the **project's notification channels**, exactly as a monitor alert falls back.
+
+`services.escalation_policy_id` is NOT consumed in phase 5, and the UI says so where the field
+appears: a ladder is defined relative to an incident start with acknowledgement, progress and
+repeat state, and owner decision 3 forbids service incidents, so "the ladder applies unchanged"
+was not implementable. §16.8 records what a later phase would need.
+
+A deleted or empty target falls back to the project's channels; an empty project channel set means
+the alert is recorded and counted with `cerbix_service_alert_undeliverable_total` rather than
+silently dropped. Instance-wide silence applies unchanged. Recovery/close goes to the same
+recipients the onset did.
+
+### 16.6a The write surface, concretely
+
+| Field | Type / CHECK | Default | API PATCH semantics |
+|---|---|---|---|
+| `services.owns_paging` | boolean | `false` | omitted = unchanged |
+| `services.page_on` | `text[]`, `<@ {down,degraded}` | `{down}` | omitted = unchanged; `[]` = explicitly page for no state (legal, and dis-arms LIVE) |
+| `services.page_on_unknown` | boolean | `false` | omitted = unchanged |
+| `services.confirm_evaluations` | integer, `1..10` | `2` | omitted = unchanged |
+| `services.alert_config_generation` | bigint | `0` | SERVER-OWNED; rejected in any request body |
+| service `sla_targets.burn_alert_enabled` / `burn_rules` | existing columns | `false` / `[]` | the existing SLA write path, with the phase-2 rejection lifted |
+
+One domain validator owns all of it — canonical order (`page_on` sorted, deduped), the bounds above,
+the rule-key collision check of §16.4b — and BOTH the API and the MaC apply call it. Server-owned
+fields (`alert_config_generation`, every latch and lease column) are rejected in request bodies and
+excluded from the canonical hash: a bundle whose hash moved because an alert fired would reapply
+forever.
+
+**Format 2** carries the declaration and nothing server-owned:
+
+```yaml
+services:
+  checkout:
+    alerting:
+      owns_paging: true
+      page_on: [down]
+      page_on_unknown: false
+      confirm_evaluations: 2
+```
+
+A file-managed service refuses UI paging edits with `409` and renders read-only, exactly as its
+declaration does (§15.1) — these fields are part of the desired state, so the file owns them.
+
+**Every paging-config change is audited** with its actor and its before/after, not only the moment
+ownership is switched on: a `page_on` edit that stops covering the current state is as consequential
+as disabling ownership, and §16.4a gives it a close reason.
+
+**None of these fields bumps a definition revision or an evaluation epoch.** They change who is paged,
+not what is measured, and an epoch bump would re-segment reliability history for an alerting edit.
+They all bump `alert_config_generation`, which dis-arms delegation until the new generation has been
+evaluated — the safe direction, because dis-armed means members page for themselves.
+
+### 16.6b Observability and readiness
+
+Fixed, low-cardinality families. No tenant, service or page labels anywhere: this surface is reachable
+by anyone who can make a service, and per-tenant labels would let them grow the metric endpoint.
+
+| Metric | Labels |
+|---|---|
+| `cerbix_service_alert_evaluations_total` | `signal`, `outcome` (ok\|error\|skipped) |
+| `cerbix_service_alert_emitted_total` | `signal`, `edge` (onset\|close) |
+| `cerbix_service_alert_active` (gauge) | `signal` |
+| `cerbix_service_alert_delegation_total` | `signal`, `state` (armed\|disarmed\|degraded) |
+| `cerbix_alert_delegation_fail_open_total` | `reason` (missing\|stale\|generation\|error\|unroutable\|ambiguous) |
+| `cerbix_alert_suppressed_total` | `topic`, `reason` |
+| `cerbix_service_alert_last_success_seconds` (gauge) | `signal` |
+| `cerbix_service_alert_lag_seconds` (gauge) | `signal` |
+| `cerbix_service_alert_backlog` (gauge) | `signal` |
+| `cerbix_service_alert_undeliverable_total` | `signal` |
+| `cerbix_service_alert_recipient_missing_total` | — |
+
+**Readiness.** §21 already requires that wedged service work must not look ready. A live or burn
+evaluation whose lag exceeds `lease_multiplier × cadence` marks the SCHEDULER not-ready, because a
+stalled evaluator is exactly the state in which delegation dis-arms and members resume paging — the
+system is degraded, and reporting ready would hide it. It does NOT mark the API not-ready: reads and
+the public page are unaffected, and taking the API out of rotation for an alerting stall would turn a
+degradation into an outage.
+
+**The runbook** for a stalled evaluator is one paragraph in `docs/overview.md`: the symptom (lag
+gauge, not-ready scheduler, `delegation_total{state="disarmed"}` rising), the immediate consequence
+(members page for themselves — noisier, not silent), and the recovery (leader restart; nothing to
+replay, because arming is derived and not stored as a decision).
+
+### 16.7 Cost: bounded slices, not one global transaction
+
+"One snapshot for ALL alerting services" is unbounded: per-project caps do not bound an
+installation, and a single global transaction can monopolize the leader's connection and starve
+dispatch. Phase 5 uses the shape the reliability slices already use:
+
+- keyset-ordered SLICES with a validated hard cap per slice, an absolute per-slice deadline, and a
+  cursor so every service is reached (fairness, no starvation);
+- ONE coherent snapshot per slice with a CONSTANT statement count within it, maintenance spans kept
+  PER PROJECT (a project-wide span covers every member handed to the evaluator);
+- the leader's lock-owning connection is fenced; `evaluated_at`/`config_generation` CAS means a
+  deposed or late evaluator cannot overwrite newer state;
+- telemetry: last success, lag, backlog, per-outcome counts — so a stalled evaluator is visible as
+  lag rather than as an absence of alerts, which is indistinguishable from "nothing is wrong";
+- zero alerting services costs one bounded query.
+
+### 16.8 Acceptance invariants (phase 5)
+
+75. ownership is DECLARED (`services.owns_paging`, default false); no existing installation's paging
+    changes until it is set; every paging-config change is audited with its actor, and none of them
+    bumps a definition revision or an evaluation epoch — they change who is paged, not what is
+    measured — while all of them bump `alert_config_generation`;
+76. suppression is per SIGNAL, per POLARITY, and requires ARMED coverage: a DOWN
+    `monitor_transition` (reminders included) and `escalation_step` only while LIVE coverage is
+    armed, a FIRING `slo_burn_alert` only while BURN coverage is armed, and a RECOVERY or a burn
+    CLEAR is suppressed NEVER — arming changes between an onset and its close, and a recipient left
+    holding an unclosable DOWN is worse than a duplicate "recovered". Armed means owns_paging ∧ a
+    policy that can page the current state ∧ a QUOTABLE last verdict (any burn HOLD dis-arms) ∧ the
+    CURRENT (config generation, target generation, effective revision, canonical rule key) ∧ a FRESH
+    DB-clock lease ∧ effective ROUTABILITY evaluated at delivery;
+77. every ambiguity FAILS OPEN — missing, stale, generation-mismatched, errored, HELD, UNROUTABLE
+    state, or an unreadable owner set — with a `reason`-labelled counter, a log line and a degraded
+    UI badge; pinned by a regression per cause, including an injected store failure, an empty
+    schedule with no project fallback, and a channel disabled AFTER arming;
+78. suppression touches DELIVERY only: facts, status flips, auto-incidents, escalation rows and
+    progress, and the SLO history are byte-identical with and without delegation;
+79. suppression is visible: an `alert_suppressions` row per suppressed delivery, a counter, and one
+    idempotent `⏸ Suppressed:` note naming the ordered set of actively covering services, written in
+    the SAME scoped operation that resolved them; no open incident is a valid no-note outcome;
+80. membership for BOTH the evaluator and the delegation lookup is the CURRENT EFFECTIVE definition
+    revision's members, never the authored refs, pinned by the future-effective race of §16.2;
+81. the live signal uses the SAME evaluation path as the public page, pages only for declared states,
+    never for `unknown` unless declared, never while excluded, and only after `confirm_evaluations`
+    consecutive evaluations; the state machine emits per the §16.3 table, including the three named
+    CLOSE reasons and the bootstrap that cannot fake a recovery;
+82. delivery is at-least-once and ORDERED: a superseded live or burn event is dropped at delivery by
+    sequence, a CLOSE whose ONSET never reached a channel is still delivered, and the spec claims no
+    exactly-once anywhere;
+83. `service_alert` is a FENCED topic, with a mixed old/new worker regression proving an old worker
+    neither claims nor dead-letters it;
+84. the burn signal reuses ONE math owner over arbitrary `BurnRule` windows, requires BOTH windows
+    to breach, and HOLDS on every non-quotable reason of the §16.4 matrix — pinned by starting from
+    FIRING and feeding each reason in turn;
+85. evaluation is BOUNDED: keyset slices with a hard cap, a per-slice deadline, a constant statement
+    count per slice, per-project maintenance scoping, generation/lease CAS against a deposed
+    evaluator, and telemetry for last success, lag and backlog; zero alerting services costs one
+    query;
+86. **SUPERSEDED by FR-022 (`func-service-incidents.md`, D-0170), kept at its number because other
+    documents cite it.** As written for phase 5: "no service alert opens, resolves or annotates an
+    INCIDENT, with the single explicit exception of the §16.1 suppression note on a MONITOR's incident —
+    a regression asserts the incident tables are otherwise untouched by an alerting cycle". FR-022 makes
+    service incidents the feature: a LIVE onset under armed coverage OPENS one and its close RESOLVES it,
+    in the same transaction as the announcement. What SURVIVES is the half FR-022 does not touch — a
+    service alert still does nothing to a MONITOR's incident (FR-022 NFR-017) — held by
+    `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident`, which REWRITES the phase-5 test rather than
+    deleting it, so the record that this rule changed survives its change;
+87. paging configuration has one domain validator (canonical order, dedupe, bounds, rule-key
+    collisions) shared by the API and the MaC apply; server-owned generation/latch/lease fields are
+    rejected in request bodies and excluded from the canonical hash; a file-managed service refuses
+    UI paging edits with 409 and renders read-only; format-2 carries the declaration only;
+88. every ONSET creates a durable episode with an IMMUTABLE recipient snapshot, and every close
+    reaches that snapshot rather than whoever is on call at close time; a snapshot recipient whose
+    channel has been deleted is COUNTED, never silently replaced;
+89. every removal path closes a firing episode in the SAME transaction as the removal, with its named
+    reason (`ownership_disabled`, `policy_changed`, `burn_disabled`, `rule_removed`,
+    `service_deleted`), and the close remains deliverable after the service, target or rule is gone;
+    losing the ROUTE closes nothing — dis-arming is not a recovery;
+90. the service burn latch is normalized per `(service_id, project_id, sla_target_id, rule_key)` with
+    the canonical key excluding every server-owned field, while the MONITOR latch stays exactly where
+    it is — phase 5 changes no monitor behaviour;
+91. freshness is ONE DB-clock predicate (`now() < lease_until`) written by successful evaluations and
+    collapsed immediately by an error; the UI and the metrics read the server's answer and never
+    re-derive it; a stalled evaluator marks the SCHEDULER not-ready (never the API) per §21.
+
+### 16.9 What phase 5 does NOT do
+
+- **service incidents** — owner decision 3; a service-anchored incident touches the status page, the
+  §14 correlation and postmortems;
+- **escalation POLICIES for services** — deferred by owner decision 5. A later phase needs a durable
+  non-incident occurrence with started/resolved/ack/progress/repeat state before "the ladder" means
+  anything for a service. **SUPERSEDED by FR-023 (D-0172), 2026-08-19**: the bullet stays so the
+  record of the deferral survives its end. What unblocked it is exactly what it asked for — FR-022's
+  service incident carries `started_at`, `acknowledged_at`, `escalation_step` and `last_escalated_at`,
+  so the ladder runs on the same row the monitor ladder has used since D-0100. See
+  [`func-service-escalation.md`](func-service-escalation.md);
+- **retroactive alerting** — a rule enabled today says nothing about last week;
+- **cross-project delegation**;
+- **per-member severity inside a service page** — the alert links to the service; which member is
+  diagnostics;
+- **suppressing anything beyond the three named topics** — SLA reports, incident webhooks and
+  status-page output are untouched.
+
+### 16.10 Required test matrix (written before code)
+
+`any`/`quorum` HEALTHY with one member DOWN: no monitor page and no ladder page, but ONLY while live
+coverage is armed and fresh · **a rule at CLEAR whose window HOLDs: the member's burn alert is
+DELIVERED** · a FIRING rule under every HOLD reason: neither fires again nor resolves ·
+**a monitor DOWN delivered while dis-armed, then the evaluator arms: the recovery is DELIVERED** ·
+the burn mirror of that race · **empty schedule with no project fallback, a channel disabled after
+arming, and a routing lookup error: the member PAGES** · restored routing re-arms ·
+a schedule that ROTATES between onset and close: the close reaches the ONSET's recipients ·
+every removal path from FIRING produces its named close, and the close delivers after the row is gone · missing / stale / generation-mismatched state and an injected store
+error: the monitor PAGES · burn disabled or its evaluator stale: monitor burn is NOT suppressed ·
+live policy that pages nothing: transitions are NOT suppressed · the future-effective membership
+race · several owners in every combination of active/stale/error · a real escalation ladder
+suppressed and its progress preserved · out-of-order retried onset after a close · duplicate delivery
+under at-least-once · bootstrap, enable-while-down, disable-while-firing, every config edit,
+maintenance entry and exit, visibility loss and return · FIRING burn against every HOLD reason ·
+bounded slice statement count with real members, maintenance and several projects · slice cap,
+deadline, cursor fairness and a deposed evaluator · cross-tenant direct SQL and API · old/new worker
+fence · zero alerting services · incident tables untouched except the suppression note.
+
 ## 17. Backward compatibility (acceptance criterion, not a footnote)
 
 ```
@@ -2166,6 +3123,23 @@ member, the ingress handshake of §10.4 writes no rows and the leader schedules 
 Service-aware UX begins only after explicit adoption. Upgrade day must not present an empty
 "Services" screen as the product's new front door.
 
+**Phase 4 keeps every line above, with THREE deliberate exceptions, enumerated here rather than
+discovered by a customer.** All three are the same inherited defect — the unknown shipped as
+health — and each is the point of the change, not a regression:
+
+1. a **`pending`** monitor component rendered `operational` (`ComponentStatusFromMonitor`) →
+   renders `no_data`;
+2. an **EMPTY page** rendered `operational` (`SummaryStatus(nil)`) → reports "no components
+   configured";
+3. a **MANUAL component with an empty `manual_status`** rendered `operational` (the render's
+   default) → renders `no_data`; an operator who wants the previous appearance sets the status
+   explicitly to `operational`, which is now the only way to assert it.
+
+Everything else holds: manual components stay first-class, service projection is opt-in per
+component, no component's source changes without an explicit previewed action (with the one
+inherited exception of a deleted active monitor, §15.0), composites keep behaviour and
+visibility (§15.5), and no historical number is recomputed or reinterpreted.
+
 ## 18. Delivery phases
 
 | Phase | Content |
@@ -2173,12 +3147,13 @@ Service-aware UX begins only after explicit adoption. Upgrade day must not prese
 | 1 | Domain + storage foundation: Service resource, definition revisions and evaluation epochs, the evaluation-semantics projection, effective-state model and piecewise reducer, duration-weighted fact schema, seal/ingest handshake, durable ranges, maintenance mutation contract, monitor slug, bundle format 2, bounds. No alerting, no status projection, no correlation. |
 | 2 | Reliability reporting: service SLO, error budget, burn-rate computation, both coverage axes, revision and epoch segmentation, insufficient-history UX, two-layer health card. |
 | 3 | Dependency impact graph: same-project service DAG (schema-enforced tenancy, bounded, outside the declaration — no revisions, no epochs), symmetric open-time incident correlation into structured incident-service links with 🕸 annotations, list+badge UI. Annotates and links; never suppresses, merges or hides. Specified in §14. |
-| 4 | *Intent only.* Status-page service projection, manual-component coexistence, composite conversion tooling. |
-| 5 | *Intent only.* Alerting ownership: service burn alerts and monitor delegation/suppression rules. |
+| 4 | Status-page service projection: a third component source (`service_id` under ONE active discriminator, dormant bindings retained), the SLI layer alone projected into the public vocabulary plus the new `no_data` status, sealed-facts-only 90-day strips, explicit previewed reversible conversion in both directions, the corrected `pending` mapping, and composite retire tooling with two-ended links. Impact links stay non-public. Specified in §15.0/§15.5. |
+| 5 | Alerting ownership: a DECLARED `owns_paging` service that alerts on a live health transition and a sealed burn breach, suppressing its effective SLI members' `monitor_transition`, `escalation_step` and `slo_burn_alert` DELIVERIES (never their facts) per SIGNAL and only while its replacement for that signal is ARMED and FRESH — every ambiguity pages. Bounded slices, at-least-once with ordering, fenced topic, routing narrowed to the service's schedule or the project's channels. Notifies; opens no incident. Specified in §16. |
 
-Phases 3–5 are **deliberately not specified**. Their UX depends on facts phase 1/2 will produce
-— real `UNKNOWN` density, late-arrival behavior, recompute cost — and specifying them now would
-encode assumptions that the data may refute.
+Phases 3, 4 and 5 are now specified (§14, §15.0/§15.5, §16). Phase 5 waited on purpose: its shape
+depends on facts phases 1–4 produce — `UNKNOWN` density, late-arrival behaviour and the latency of
+sealed facts — and the last of those is what forced its central decision, since a sealed-only
+signal trails the watermark and could not have carried outage paging on its own.
 
 ## 19. Acceptance invariants
 
@@ -2318,7 +3293,12 @@ encode assumptions that the data may refute.
 44. segments produced by a first-adoption backfill are labelled as declared reconstructions;
 45. every budget states the objective that produced it, and an objective change is annotated;
 46. existing monitor-level SLO behaviour is unchanged;
-47. service SLOs do not alert, and a service-scoped `burn_alert_enabled` is rejected.
+47. **SUPERSEDED by phase 5 (§16, D-0168), and kept at its number because other documents cite
+    it.** As written for phases 1–2 it read: "service SLOs do not alert, and a service-scoped
+    `burn_alert_enabled` is rejected". §16.4 lifts exactly that rejection — a service SLO now pages
+    per burn RULE, migration 00082 drops `sla_targets_service_no_burn_chk`, and the phase-2
+    regression was rewritten as `TestServiceScopedBurnTargetIsSupported`. What survives of 47 is
+    invariant 46: monitor-level burn behaviour is unchanged. Invariants 75–91 govern the alerting.
 
 Invariant 42 is the single sharpest test of whether this design succeeded: if it holds, Service
 is a reliability-domain object; if it fails, Service is still a grouping abstraction.
@@ -2381,8 +3361,9 @@ is a reliability-domain object; if it fails, Service is still a grouping abstrac
     rejected write);
 59. impacts are an authenticated-detail enrichment: absent from the shared incident model,
     absent from the incident LIST, and absent from every public and internal status-page
-    projection until phase 4 opts in — proven by a raw unauthenticated JSON regression over a
-    project with correlated incidents;
+    projection — unconditionally, since phase 4 DECLINED the opt-in this clause once left open
+    (iter-0154) — proven by a raw unauthenticated JSON regression over a project with correlated
+    incidents;
 60. read-side work is bounded and tested: no per-row impact query on the incident list, and
     the service-detail dependency health is ONE batched snapshot query at the maximum
     neighbour set;
@@ -2395,6 +3376,98 @@ is a reliability-domain object; if it fails, Service is still a grouping abstrac
     topics in its own dispatch set; the enqueue topic→class mapping is one store-side map
     pinned by test; proven by the mixed-owner, forced-failure, replay-both-paths,
     legacy-replay-rejected and legacy-topic-unchanged regressions.
+
+**Phase 4** adds:
+
+62. every component row carries its OWN tenant identity — `org_id NOT NULL`, nullable
+    `project_id`, composite FKs to the page, the project, the monitor and the service — so a
+    cross-org or cross-project component is unrepresentable to a DIRECT SQL writer, not merely
+    unreachable through the API; a project-scoped page's components carry that project;
+63. the source is an explicit discriminator (`source`), never the presence of a column: the
+    active binding is required by CHECK, inactive bindings stay DORMANT, and every transition in
+    the §15.0 matrix is therefore reversible without a staging table; the backfill of shipped
+    rows is total (`monitor_id` present ⇒ monitor, else manual) and changes no rendered output;
+64. a monitor-backed component keeps its inherited `manual_status` override (D-0021), a
+    service-backed component refuses one, and `manual_status = 'no_data'` is refused by CHECK —
+    `no_data` is computed, never typed;
+65. the public projection reads the SLI layer ALONE — the diagnostics layer and the §14 impact
+    links never appear on any public or internal status-page projection, proven by a raw
+    unauthenticated JSON regression over a page whose service has BOTH failing diagnostics and
+    impact links; a service component's project joins the page's incident/maintenance scope
+    exactly as a monitor component's does, and that too is pinned by a raw-JSON regression;
+66. the projection reads ONE authoritative batched DTO at ONE `as_of` carrying `sli`, `excluded`,
+    `reason` and `sealed_in_window`, over the existing evaluator — no second semantics owner — and
+    the §15.0 precedence is TOTAL: maintenance outranks absence, `sealed_in_window` governs the
+    STRIP and never the status, so a live-healthy service before its first seal publishes
+    `operational` with no strip; required tests: active maintenance, generic unknown, no `sli[]`,
+    healthy-before-first-seal, first seal. The batch is PAGE-scoped over `(project_id, service_id)`
+    pairs, not per project: an org-level page legitimately spans projects, so a per-project batch
+    is neither one snapshot nor a constant statement count;
+67. `no_data` does not join the severity ladder: the summary is `worst-of MEASURED` plus an
+    `unmeasured` count, and the §15.0 headline table is total — operational+unmeasured never
+    reads "all systems operational", all-`no_data` is not operational, an EMPTY page reports
+    "no components configured" instead of today's `operational`, and `severity()`'s unknown
+    default becomes the WORST measured rank instead of `operational` — the function orders measured
+    statuses and returns an int, so "the default becomes `no_data`" (§15.0) was not implementable
+    as written; what it protects against is a future enum value silently ranking as health, which
+    the worst-rank default delivers;
+68. THREE intentional changes to existing public output, each recorded in §15.0, §17 and D-0167 and
+    each with a regression that pins the OLD behaviour as REMOVED rather than merely unasserted:
+    a `pending` monitor component renders `no_data`; a manual component with no stated status
+    renders `no_data`; and an EMPTY page reports "no components configured" instead of
+    `operational`. §17 enumerates three, so an invariant naming one was an undercount;
+69. the 90-day history is bounded and honest: `daily[]` is UTC days from SEALED buckets only,
+    at most 90 points, days without data ABSENT (never zeros, never interpolation) and partial
+    days carrying their covered fraction; `uptime_90d` follows §11.2/§11.3 — withheld with its
+    reason below decidable coverage and withheld across a revision boundary, never synthesized;
+    ONE batched snapshot per page with a constant statement count, and `max_components_per_page`
+    = 50 fixed, with over-bound pages still rendering, refusing new components and logging the
+    overage;
+70. conversion is explicit in BOTH directions, previewed, audited in the MUTATING transaction,
+    and structurally CAS-guarded: `components.revision` and `status_pages.component_generation`
+    — the latter bumped by ANY component mutation on the page, neighbours included — are compared
+    inside the confirm transaction and a mismatch is 409 `page_configuration_stale`
+    (first-committer-wins), while live health is disclosed via `as_of` rather than locked;
+    two-admin stale-preview regressions cover a source change, a component-set change and a
+    NEIGHBOUR component's edit;
+71. deletion is specified per case: an actively-bound SERVICE is `RESTRICT` → 409 naming the page
+    and the component; an actively-bound MONITOR keeps the shipped `SET NULL (monitor_id)` and
+    the same statement sets `source='manual'` — an inherited automatic exception, recorded as one
+    rather than denied; a dormant binding is cleared with no source change; and project/org
+    cascade (D-0150/FR-019) stays ONE statement, with affected components enumerated in its
+    deletion preview and covered by tests on both a project-scoped and an org-level page;
+71a. the projection's inputs are window-scoped and error-honest: the 90-day window ends at
+    `sealed_through` (never at the page's `as_of`) with UTC day boundaries converted in SQL and the
+    NEWEST day retained under the 90-point cap, `sealed_in_window` — not "any fact" — decides
+    whether a strip exists, and an ACTIVE service that the projection cannot find degrades the
+    render with a logged, COUNTED failure plus a PUBLIC `unavailable` marker instead of publishing
+    the calm statement `no_data` — a failed read whose bytes match a calm value is the confusion
+    this forbids. `uptime_90d` and its `withheld_reason` come from the SAME §11.2/§11.3 decision the
+    authenticated report uses, never a second implementation;
+71b. the public render is bounded in ROWS, MEMORY and TIME, not merely in statement count: a
+    per-page ceiling persisted as `max(50, current)` that can only shrink — LOWERED by every
+    removal and never raisable above `max(50, current count)`, so no write creates headroom — an
+    absolute fail-closed public ceiling of 500 above which the page returns
+    `status_page_over_safe_limit` naming the count and the limit (never a truncated subset posing
+    as the whole page) while the authenticated view still lists everything, and a short-TTL render
+    cache keyed to the exact access shape (page + public/authenticated + unlisted token) as the
+    RATE bound, since a ceiling bounds one request and not repetition. Both counters — the page
+    generation and each component's revision — are DB-owned, because FK actions are part of the
+    contract and a cascade has no application on its path;
+72. a converted composite keeps probing, keeps its SLO, stays listed at full strength and is
+    never hidden by default; the link is ONE stored fact (`monitors.superseded_by_service_id`,
+    tenant-composite FK, `SET NULL` on service deletion) rendered from both ends;
+73. `retire` is ONE transaction setting BOTH `retired_at` (the lifecycle statement) and
+    `enabled = false` (the existing execution semantics), together with the `execution_revision`
+    bump and its epoch fan-out for referencing services and the `state_sequence` advance that
+    makes queued transition deliveries stale — a retired monitor therefore stops probing, paging
+    and materializing, which `retired_at` alone would not achieve; it is audited, reversible, and
+    refused for a file-managed composite except by its provider's authority;
+74. composite conversion is one serialized transaction (`FOR UPDATE` on the composite, then
+    service + link + audit atomically), so two simultaneous confirms cannot create two services;
+    a slug collision is a 409 naming the existing slug rather than a silently suffixed twin, and
+    re-confirming an already-converted composite is an idempotent no-op returning the existing
+    service.
 
 ## 20. Adversarial cases — answered
 
@@ -2507,8 +3580,8 @@ both are reproducible, and neither is ever inferred at read time.
 |---|---|
 | **Zero Services after upgrade** | Nothing changes: no service rows, no facts, no ingest handshake rows, no scheduler work, and monitor-level SLO behaviour is untouched (invariant 46). The feature costs nothing until a service exists. |
 | **Format-1 bundle after the upgrade** | Still valid, declares no services, and its monitors receive server-assigned slugs (§15.3). |
-| **Composite converted to Service** | Phase 4 intent. Phase 1 offers no conversion and the two coexist; a composite remains a monitor and may itself be an SLI member. |
-| **Existing manual status component preserved** | Phase 4 intent. Phase 1 does not project services onto status pages at all. |
+| **Composite converted to Service** | Phase 4 (§15.5): conversion creates the service and CHANGES NOTHING about the composite — it keeps probing, keeps its SLO, stays listed at full strength, and carries a two-ended link. Only an explicit `retire` disables it, behind a warning naming the loss of its SLO and alerts. A composite remains a monitor and may itself be an SLI member. |
+| **Existing manual status component preserved** | Phase 4 (§15.0): manual stays first-class; a component's source changes only through an explicit previewed action, and `manual_status` is preserved so the revert restores exactly what customers saw before. |
 | **Service dependency cycle** | Does not arise in phase 1/2: dependency edges are phase 3 (§14) and no edge type exists yet. Cycle rejection is a precondition of that phase, not an afterthought. |
 
 ## 21. Resource and write contract (phase 1)
@@ -2556,6 +3629,16 @@ maintenance archive versus annul, leader fencing on the lock-owning connection, 
 with the monitor slug, the native-RANGE storage decision and the TSDB boundary) → iteration
 report `docs/iterations/iter-NNNN.md` → a row in `docs/traceability.md` → `docs/overview.md` when
 behavior or stack changes.
+
+**Phase 4 process** (commissioned 2026-08-17): this §15.0/§15.5 amendment reviewed as a DESIGN
+round → UI mock approval for the component-source picker, the conversion preview dialog and the
+composite links **before** any frontend code → implementation → `-race` in both storage modes →
+E2E on a live stack including the PUBLIC page rendering `no_data` → decision record **D-0167**
+(the third component source and its exclusivity; the SLI-only projection with impacts staying
+non-public; `no_data` as a public status and its summary semantics; the corrected `pending`
+mapping as an intentional change to shipped public behaviour; sealed-facts-only strips;
+reversible previewed conversion; composite retire) → iteration report + status + traceability
+rows at completion.
 
 **Phase 3 process** (commissioned 2026-08-17): this §14 amendment reviewed as a DESIGN round →
 UI mock approval for the §14.5 surface **before** any frontend code → implementation on

@@ -31,8 +31,11 @@ import (
 // deliberately not a knob.
 const minDecidableCoverage = 0.95
 
-// serviceBurnWindows is the fixed reporting pair (§12.2's card, D-0163). Service burn is
-// REPORTING ONLY until phase 5 (§13); these windows never alert.
+// serviceBurnWindows is the fixed reporting pair (§12.2's card, D-0163). THIS PAIR never alerts —
+// not "not yet": phase 5 gave services paging through the operator's declared `burn_rules` on
+// `sla_targets` (§16.4), which is a different object with its own windows, latches and generations.
+// The card stayed exactly as it was, so a reader who finds a burn alert in production must look at
+// `burn_rules`, never here.
 var serviceBurnWindows = []sla.Window{
 	{Name: "1h", Duration: time.Hour},
 	{Name: "6h", Duration: 6 * time.Hour},
@@ -49,6 +52,67 @@ type factSums struct {
 	minBucket  time.Time
 	maxBucket  time.Time
 	d          domain.ReliabilityDurations
+}
+
+// serviceWindowVerdict is the §11.2/§11.3 decision about ONE window of sealed facts: the two
+// honesty axes judged independently, and whether the aggregate may be quoted at all.
+type serviceWindowVerdict struct {
+	Status domain.ServiceReportStatus
+	Reason string
+	// AggregateWithheld is set when a number exists in the facts but may not be quoted as one.
+	AggregateWithheld string
+	// Availability is nil whenever the number is withheld — never a zero standing in for unknown.
+	Availability *float64
+}
+
+// decideServiceWindow is the ONE owner of the withholding rule. The public status page and the
+// authenticated report BOTH call it, because a page that quoted a number the report withholds (or
+// the reverse) would be two different claims about the same facts — and §15.0 is explicit that the
+// projection adds no second semantics owner.
+//
+// Worst-first, and each axis on its own: a window reaching before the materialization era is
+// insufficient history; a gap that era cannot explain is a storage gap (the §10.5 watermark
+// contract makes it unreachable — checked anyway, because "checked independently" is the invariant,
+// not "derived from the watermark"); zero decidable time has nothing to average; low coverage keeps
+// its number WITH the fraction and reason.
+//
+// The AGGREGATE additionally requires (a) storage continuity, because rows that survived a hole
+// cannot vouch for the window and a hole can hide an entire definition revision, and (b) all facts
+// under ONE definition revision (§12.1, invariant 43) — across revisions the segments are the whole
+// answer, "not even labelled".
+func decideServiceWindow(
+	d domain.ReliabilityDurations, sealedBuckets, expectedBuckets int64, revisions int,
+	from, era time.Time,
+) serviceWindowVerdict {
+	var v serviceWindowVerdict
+	continuity := sealedBuckets == expectedBuckets
+	coverage := decidableCoverage(d)
+	measured := d.GoodUs + d.BadUs
+	switch {
+	case from.Before(era):
+		v.Status, v.Reason = domain.ServiceReportInsufficientHistory, domain.ServiceReportReasonEraShort
+	case !continuity:
+		v.Status, v.Reason = domain.ServiceReportPartial, domain.ServiceReportReasonStorageGap
+	case measured == 0:
+		v.Status, v.Reason = domain.ServiceReportUnavailable, domain.ServiceReportReasonZeroDecidable
+	case coverage < minDecidableCoverage:
+		v.Status, v.Reason = domain.ServiceReportPartial, domain.ServiceReportReasonLowCoverage
+	default:
+		v.Status = domain.ServiceReportOK
+	}
+	if revisions > 1 {
+		// The spans-revisions label is a CLAIM and is made only when the stored facts actually show
+		// more than one revision ([170] P2-1): a zero-fact gap has nothing to span, and its known
+		// reason is already the storage_gap status.
+		v.AggregateWithheld = domain.ServiceReportReasonSpansRevisions
+	}
+	quotable := revisions == 1 && continuity && measured > 0 &&
+		(v.Status == domain.ServiceReportOK ||
+			(v.Status == domain.ServiceReportPartial && v.Reason == domain.ServiceReportReasonLowCoverage))
+	if quotable {
+		v.Availability = availabilityPercent(d)
+	}
+	return v
 }
 
 // beginReportSnapshot opens the one snapshot a report is assembled in and reads its clock.
@@ -175,43 +239,13 @@ func (s *Store) serviceReliabilityReportTx(ctx context.Context, tx pgx.Tx, proje
 	rep.StorageContinuity = rep.SealedBuckets == rep.ExpectedBuckets
 	rep.Coverage = decidableCoverage(rep.Durations)
 
-	// Status: the two §11.2 axes judged INDEPENDENTLY, worst-first. A window reaching
-	// before the materialization era is insufficient history; a gap that era cannot explain
-	// is a storage gap (the watermark contract §10.5 makes it unreachable — checked anyway,
-	// because "checked independently" is the invariant, not "derived from the watermark").
 	measured := rep.Durations.GoodUs + rep.Durations.BadUs
-	switch {
-	case rep.From.Before(era):
-		rep.Status, rep.Reason = domain.ServiceReportInsufficientHistory, domain.ServiceReportReasonEraShort
-	case !rep.StorageContinuity:
-		rep.Status, rep.Reason = domain.ServiceReportPartial, domain.ServiceReportReasonStorageGap
-	case measured == 0:
-		rep.Status, rep.Reason = domain.ServiceReportUnavailable, domain.ServiceReportReasonZeroDecidable
-	case rep.Coverage < minDecidableCoverage:
-		rep.Status, rep.Reason = domain.ServiceReportPartial, domain.ServiceReportReasonLowCoverage
-	default:
-		rep.Status = domain.ServiceReportOK
-	}
-
-	// The window AGGREGATE exists only when (a) storage continuity HOLDS — §11.2's "both
-	// must pass" governs the numbers, not just the status: rows that survived a hole cannot
-	// vouch for the window, and a hole can hide an entire definition revision, which makes
-	// the single-revision inference below unsound — and (b) every stored bucket belongs to
-	// ONE definition revision (§12.1, invariant 43): across revisions the segments are the
-	// whole answer, "not even labelled". Low decidable coverage keeps its number WITH the
-	// fraction and reason (§11.2's explicit partial contract); missing storage does not.
-	aggregateAllowed := len(revisions) == 1
-	if len(revisions) > 1 {
-		// The spans-revisions label is a CLAIM and is made only when the stored facts
-		// actually show more than one revision ([170] P2-1): a zero-fact gap has nothing to
-		// span, and its known reason is already the storage_gap status.
-		rep.AggregateWithheld = domain.ServiceReportReasonSpansRevisions
-	}
-	quotable := aggregateAllowed && rep.StorageContinuity && measured > 0 &&
-		(rep.Status == domain.ServiceReportOK ||
-			(rep.Status == domain.ServiceReportPartial && rep.Reason == domain.ServiceReportReasonLowCoverage))
+	verdict := decideServiceWindow(rep.Durations, rep.SealedBuckets, rep.ExpectedBuckets,
+		len(revisions), rep.From, era)
+	rep.Status, rep.Reason, rep.AggregateWithheld = verdict.Status, verdict.Reason, verdict.AggregateWithheld
+	quotable := verdict.Availability != nil
 	if quotable {
-		rep.Availability = availabilityPercent(rep.Durations)
+		rep.Availability = verdict.Availability
 	}
 
 	// Objective, budget, burn: only from a SERVICE-scoped target for THIS window — never
@@ -338,70 +372,21 @@ func reportSegments(ctx context.Context, tx pgx.Tx, projectID, serviceID string,
 	return out, rows.Err()
 }
 
-// reportBurn computes the fixed reporting burn pair over sealed facts,
-// [sealed_through − w, sealed_through), with the SAME honesty rules as the main window:
-// storage continuity is measured per window and a gap withholds the rate (a burn window with
-// one surviving bucket returning "0×" would be exactly the fabricated confidence §11.1
-// forbids); a window spanning definition revisions offers no rate (invariant 43); low
-// decidable coverage keeps its rate WITH the fraction and reason (§11.2). §11.3's staleness
-// rule: when the equivalent real-time window [asOf − w, asOf) contains no sealed time at all
-// — sealed_through ≤ asOf − w — the answer is insufficient_sealed_coverage, not a stale rate.
+// reportBurn computes the fixed reporting pair (D-0163) over sealed facts by asking §16.4's
+// ONE burn math owner for its two durations — the same owner the alerting rule path calls
+// with the rule's arbitrary pair, so the card and the page cannot disagree about whether a
+// number may be quoted. The honesty rules and the staleness test live there
+// (decideBurnWindow); this function owns only WHICH windows the card shows.
 func reportBurn(ctx context.Context, tx pgx.Tx, projectID, serviceID string, objective float64, era, sealed, asOf time.Time) ([]domain.ServiceBurnWindow, error) {
-	out := make([]domain.ServiceBurnWindow, 0, len(serviceBurnWindows))
+	reqs := make([]burnWindowRequest, 0, len(serviceBurnWindows))
 	for _, w := range serviceBurnWindows {
-		bw := domain.ServiceBurnWindow{Window: w.Name, ExpectedBuckets: int64(w.Duration / domain.CanonicalBucket)}
-		from := sealed.Add(-w.Duration)
-
-		// The anchored window's OWN verdict is computed FIRST, unconditionally ([170]
-		// P1-2): the fields describe [sealed_through − w, sealed_through), and a stale or
-		// era-short status must not relabel a fully stored, fully measured window as 0/N
-		// with zero coverage — staleness qualifies the ANSWER, it does not rewrite the
-		// window's storage facts.
-		var revisions int
-		var d domain.ReliabilityDurations
-		if err := tx.QueryRow(ctx, `
-			SELECT count(*), count(DISTINCT e.revision_id),
-			       COALESCE(sum(b.good_us), 0)::bigint, COALESCE(sum(b.bad_us), 0)::bigint,
-			       COALESCE(sum(b.unknown_us), 0)::bigint
-			  FROM service_reliability_buckets b
-			  JOIN service_evaluation_epochs e ON e.id = b.epoch_id
-			 WHERE b.service_id = $1 AND b.project_id = $2
-			   AND b.bucket_start >= $3 AND b.bucket_start < $4
-			   AND b.state = 'sealed'`,
-			serviceID, projectID, from, sealed).Scan(&bw.SealedBuckets, &revisions, &d.GoodUs, &d.BadUs, &d.UnknownUs); err != nil {
-			return nil, fmt.Errorf("store: burn window %s: %w", w.Name, err)
-		}
-		bw.StorageContinuity = bw.SealedBuckets == bw.ExpectedBuckets
-		bw.Coverage = decidableCoverage(d)
-		measured := d.GoodUs + d.BadUs
-
-		switch {
-		case !sealed.After(asOf.Add(-w.Duration)):
-			bw.Status, bw.Reason = domain.ServiceReportInsufficientSealed, domain.ServiceReportReasonStaleWatermark
-		case from.Before(era):
-			bw.Status, bw.Reason = domain.ServiceReportInsufficientHistory, domain.ServiceReportReasonEraShort
-		case !bw.StorageContinuity:
-			// A gap withholds the rate: the surviving rows cannot vouch for the window
-			// and cannot even prove it spans one revision.
-			bw.Status, bw.Reason = domain.ServiceReportPartial, domain.ServiceReportReasonStorageGap
-		case revisions > 1:
-			// A burn window is a window: no aggregate across a definition boundary
-			// (invariant 43).
-			bw.Status, bw.Reason = domain.ServiceReportUnavailable, domain.ServiceReportReasonSpansRevisions
-		case measured == 0:
-			bw.Status, bw.Reason = domain.ServiceReportUnavailable, domain.ServiceReportReasonZeroDecidable
-		default:
-			rate := sla.BurnRate(objective, d.GoodUs, measured)
-			bw.Rate = &rate
-			if bw.Coverage < minDecidableCoverage {
-				bw.Status, bw.Reason = domain.ServiceReportPartial, domain.ServiceReportReasonLowCoverage
-			} else {
-				bw.Status = domain.ServiceReportOK
-			}
-		}
-		out = append(out, bw)
+		reqs = append(reqs, burnWindowRequest{
+			serviceID: serviceID, projectID: projectID,
+			label: w.Name, duration: w.Duration,
+			objective: objective, era: era, sealed: sealed,
+		})
 	}
-	return out, nil
+	return computeBurnWindows(ctx, tx, reqs, asOf)
 }
 
 // ServiceHealthNow is the categorical LIVE signal (§11.3): a different named thing than the

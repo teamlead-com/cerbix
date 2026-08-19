@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -289,5 +290,120 @@ func TestDuplicatePushPingDoesNotMarkTwice(t *testing.T) {
 	}
 	if got := ingestGeneration(t, st, ctx, f.serviceID, bucket); got != first {
 		t.Errorf("a duplicate ping moved the ingest generation %d -> %d", first, got)
+	}
+}
+
+// Invariant 37 (§10.4, §10.10): the late-arrival record is BOUNDED — at most `MaxLateExamples`
+// example timestamps per aggregated row, with an overflow counter for everything beyond it.
+//
+// The aggregation itself is proven above; this is the bound. It matters because the pathological
+// input is ordinary: one historical backfill of a month of heartbeats lands thousands of late
+// arrivals in the same bucket, and a record that kept an example for each would turn "here is why
+// the sealed fact disagrees with raw history" into a second, unbounded copy of that history. The
+// honest alternative to keeping everything is to keep a few and SAY how many did not fit.
+func TestLateArrivalExamplesAreBoundedAndCountTheOverflow(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	ts := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute).Add(5 * time.Second)
+	bucket := bucketOf(t, st, ctx, ts)
+
+	var epochID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM service_evaluation_epochs WHERE service_id=$1 ORDER BY epoch_seq DESC LIMIT 1`,
+		f.serviceID).Scan(&epochID); err != nil {
+		t.Fatalf("epoch: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO service_reliability_buckets
+		   (service_id, project_id, epoch_id, bucket_start, bucket_size_us,
+		    unknown_us, health_unknown_us, state, sealed_at)
+		 VALUES ($1,$2,$3,$4,60000000,60000000,60000000,'sealed', now())`,
+		f.serviceID, f.projectID, epochID, bucket); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+
+	const beats = MaxLateExamples + 2
+	for i := 0; i < beats; i++ {
+		beat(t, st, ctx, f.http, ts.Add(time.Duration(i)*time.Second), i%2 == 0)
+	}
+
+	var arrivals, overflow, examples int64
+	if err := st.pool.QueryRow(ctx,
+		`SELECT arrivals, overflow, jsonb_array_length(examples) FROM service_late_arrivals
+		  WHERE service_id=$1 AND bucket_start=$2 AND monitor_id=$3`,
+		f.serviceID, bucket, f.http).Scan(&arrivals, &overflow, &examples); err != nil {
+		t.Fatalf("late arrival not recorded: %v", err)
+	}
+	if arrivals != beats {
+		t.Fatalf("arrivals = %d, want %d — the count is the evidence that nothing was dropped silently",
+			arrivals, beats)
+	}
+	if examples != int64(MaxLateExamples) {
+		t.Errorf("examples = %d, want the bound %d — an unbounded example list turns one late backfill "+
+			"into a second copy of raw history (invariant 37)", examples, MaxLateExamples)
+	}
+	if want := int64(beats - MaxLateExamples); overflow != want {
+		t.Errorf("overflow = %d, want %d — what did not fit must be COUNTED, so a reader can tell a "+
+			"bounded record from a complete one (invariant 37)", overflow, want)
+	}
+}
+
+// Invariant 27 (§10.6): heartbeat retention prunes RAW heartbeats only. Derived facts,
+// late-arrival records and provenance are not pruned by it.
+//
+// This is what makes a sealed fact durable evidence: the raw rows behind it are expected to go, and
+// the fact plus its provenance must outlive them — otherwise "availability last quarter" quietly
+// becomes unanswerable at exactly the retention horizon, and the answer would depend on when it was
+// asked. A purge that ever learned about the service tables would also make retention a silent
+// rewriter of history rather than a cleaner of raw data.
+func TestHeartbeatRetentionLeavesDerivedFactsAndTheirProvenance(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	ts := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute).Add(5 * time.Second)
+	bucket := bucketOf(t, st, ctx, ts)
+	var epochID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM service_evaluation_epochs WHERE service_id=$1 ORDER BY epoch_seq DESC LIMIT 1`,
+		f.serviceID).Scan(&epochID); err != nil {
+		t.Fatalf("epoch: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO service_reliability_buckets
+		   (service_id, project_id, epoch_id, bucket_start, bucket_size_us,
+		    good_us, healthy_us, state, sealed_at, provenance)
+		 VALUES ($1,$2,$3,$4,60000000,60000000,60000000,'sealed', now(),
+		         '{"declared":1,"bad":[{"monitor_id":"m","reason":"probe_error"}]}'::jsonb)`,
+		f.serviceID, f.projectID, epochID, bucket); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	// A late arrival for the same bucket: the second thing retention must not touch.
+	beat(t, st, ctx, f.http, ts, false)
+
+	// Purge everything: the cutoff is now, so no raw heartbeat is old enough to keep.
+	if _, err := st.PurgeOldHeartbeats(ctx, time.Now().UTC()); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	var state, provenance string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT state, provenance::text FROM service_reliability_buckets
+		  WHERE service_id=$1 AND bucket_start=$2`, f.serviceID, bucket).Scan(&state, &provenance); err != nil {
+		t.Fatalf("the derived fact did not survive heartbeat retention: %v (invariant 27)", err)
+	}
+	if state != "sealed" || !strings.Contains(provenance, "probe_error") {
+		t.Errorf("fact after purge: state=%q provenance=%s — retention must prune RAW heartbeats only, "+
+			"so a sealed fact stays explainable after its raw rows are gone (invariant 27)", state, provenance)
+	}
+	var lateRows int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_late_arrivals WHERE service_id=$1 AND bucket_start=$2`,
+		f.serviceID, bucket).Scan(&lateRows); err != nil {
+		t.Fatalf("count late arrivals: %v", err)
+	}
+	if lateRows != 1 {
+		t.Errorf("late-arrival rows after purge = %d, want 1 — the record that EXPLAINS a disagreement "+
+			"must outlive the raw rows it is about (invariant 27)", lateRows)
 	}
 }

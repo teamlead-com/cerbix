@@ -8,6 +8,7 @@ import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import ServiceReliability from "@/components/ServiceReliability.vue";
+import ServiceAlerting from "@/components/ServiceAlerting.vue";
 import ServiceDependencies from "@/components/ServiceDependencies.vue";
 import { humanDuration, lagExact, sealedLabel } from "@/lib/services";
 
@@ -23,6 +24,9 @@ const loading = ref(true);
 const error = ref("");
 const detail = ref<Detail | null>(null);
 const monitors = ref<Monitor[]>([]);
+// The service's OPEN incident, if it has one (FR-022; mock panel 3). A LINK, never an embedded
+// timeline: the incident detail owns that, and two renderings of one timeline drift.
+const openIncident = ref<{ id?: string; title?: string } | null>(null);
 
 const serviceId = computed(() => String(route.params.id || ""));
 const managed = computed(() => detail.value?.service.managed_by ?? "");
@@ -48,11 +52,26 @@ async function load() {
     }
     detail.value = svc.data;
     monitors.value = mons.data ?? [];
+    loadOpenIncident().catch(() => {});
   } catch {
     error.value = "Could not load the service.";
   } finally {
     loading.value = false;
   }
+}
+
+// Best-effort, and it fails CLOSED into showing nothing: a link that cannot be resolved is worse
+// than no link, and the service page's own job — what this service IS and how it is doing — must
+// not depend on the incident query.
+async function loadOpenIncident() {
+  openIncident.value = null;
+  const projectID = ws.projectId;
+  if (!projectID || !serviceId.value) return;
+  const res = await api.GET("/api/v1/projects/{projectID}/incidents", {
+    params: { path: { projectID } },
+  });
+  const open = (res.data ?? []).find((i) => i.service_id === serviceId.value && i.status !== "resolved");
+  openIncident.value = open ? { id: open.id, title: open.title } : null;
 }
 
 // The declaration stores monitor ids; a reader needs the slug, which is what a bundle would
@@ -136,6 +155,14 @@ watch(() => [route.params.id, ws.projectId], load);
             </span>
           </div>
           <p class="mt-[3px] font-mono text-[12.5px] text-ink-3">{{ detail.service.slug }}</p>
+          <RouterLink
+            v-if="openIncident?.id"
+            :to="{ name: 'incident', params: { id: openIncident.id } }"
+            class="mt-[7px] inline-flex items-center gap-[6px] rounded-full border border-down/40 bg-down-weak px-[10px] py-[3px] text-[12.5px] text-down hover:border-down/60"
+            data-testid="service-open-incident"
+          >
+            open incident → <span class="font-medium">{{ openIncident.title }}</span>
+          </RouterLink>
           <p v-if="detail.service.description" class="mt-[6px] text-[13px] text-ink-2">{{ detail.service.description }}</p>
         </div>
 
@@ -155,6 +182,21 @@ watch(() => [route.params.id, ws.projectId], load);
           :has-sli="sli.size > 0"
         />
 
+        <!-- Phase 5 (§16.6a): the paging declaration, and — separately — what it is actually
+             producing. The two are different answers: the switch is what an operator asked for,
+             the badge is whether members' alerts are being replaced right now. -->
+        <ServiceAlerting
+          :project-id="ws.projectId"
+          :service-id="serviceId"
+          :can-write="canWrite"
+          :alerting="detail.alerting ?? null"
+          :state="detail.alerting_state ?? null"
+          :managed-by="managed"
+          :escalation-policy-id="detail.service.escalation_policy_id ?? ''"
+          @saved="(value) => detail && (detail.alerting = value)"
+          @policy-saved="(id) => detail && (detail.service.escalation_policy_id = id)"
+        />
+
         <!-- Phase 3 (iter-0148): the impact graph — both edge directions with the two-layer
              neighbour health, and the replace-set editor over the edge set's own token. -->
         <ServiceDependencies
@@ -163,6 +205,29 @@ watch(() => [route.params.id, ws.projectId], load);
           :can-write="canWrite"
           :managed-by="managed"
         />
+
+        <!-- Phase 4 (§15.5): the OTHER end of the composite link, from the same single column the
+             monitor side reads. A converted composite appears at full strength — still probing,
+             still alerting — because a monitor absent from where it is described while it can still
+             page someone is the defect this block exists to avoid. -->
+        <section v-if="detail.supersedes?.length" class="mb-4 overflow-hidden rounded border border-border bg-surface shadow-card" data-testid="service-supersedes">
+          <header class="flex items-center gap-2 border-b border-border px-4 py-[10px]">
+            <h2 class="text-[13.5px] font-semibold">Converted from</h2>
+            <span class="font-mono text-[11.5px] text-ink-3">{{ detail.supersedes.length }} composite{{ detail.supersedes.length === 1 ? "" : "s" }}</span>
+          </header>
+          <ul>
+            <li v-for="m in detail.supersedes" :key="m.id" class="flex items-center gap-3 border-b border-border px-4 py-[10px] last:border-b-0">
+              <RouterLink :to="{ name: 'monitor', params: { id: m.id } }" class="text-[13px] text-accent hover:underline">{{ m.name }}</RouterLink>
+              <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ m.type }}</span>
+              <span v-if="m.retired_at" class="rounded-full border border-border px-[8px] py-px text-[11.5px] text-ink-3">retired</span>
+              <span v-else-if="!m.enabled" class="rounded-full bg-pending-weak px-[8px] py-px text-[11.5px] text-ink-3">paused</span>
+              <span v-else class="rounded-full bg-up-weak px-[8px] py-px text-[11.5px] text-up" data-testid="supersede-active">still probing</span>
+            </li>
+          </ul>
+          <p class="border-t border-border px-4 py-[9px] text-[12px] text-ink-3">
+            A composite listed here keeps its own history and alerts until someone retires it. Retiring is done on the monitor.
+          </p>
+        </section>
 
         <!-- Declaration: two lists, side by side, separated by the rule that is the whole
              point of the model. Adding a monitor on the left never adds it on the right. -->

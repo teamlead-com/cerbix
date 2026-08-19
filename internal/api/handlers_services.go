@@ -99,6 +99,30 @@ type serviceDetailView struct {
 	// Dependencies is the phase-3 impact-graph block (§14.4): both directions
 	// with the two-layer neighbour health from ONE batched snapshot.
 	Dependencies *serviceGraphView `json:"dependencies,omitempty"`
+	// Alerting is the §16.6a paging DECLARATION — who gets paged for a live state, and nothing
+	// server-owned: no generation, no latch, no lease, no episode. It is absent (rather than
+	// defaulted) when it could not be read, for the same reason `reliability` is null here: a
+	// declaration a UI renders as "pages for down" because the read failed is worse than none.
+	Alerting *serviceAlertingView `json:"alerting,omitempty"`
+	// AlertingState is that declaration's CURRENT coverage per signal (§16.1). It carries no latch,
+	// lease-owner or generation: what an operator can act on is armed/not and why.
+	AlertingState *serviceAlertingStateView `json:"alerting_state,omitempty"`
+	// Supersedes is the OTHER end of the phase-4 composite link (§15.5), read from the same
+	// single column `monitors.superseded_by_service_id` — there is no second fact to keep in step.
+	// A converted composite appears here at full strength: still probing, still alerting, and
+	// carrying its own retirement state so the operator sees which of the two is doing the work.
+	Supersedes []supersededMonitorView `json:"supersedes"`
+}
+
+// supersededMonitorView is a composite this service now expresses. `retired_at` is present so the
+// UI never has to infer a lifecycle from `enabled`, which an afternoon's disable also clears.
+type supersededMonitorView struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Slug      string     `json:"slug,omitempty"`
+	Type      string     `json:"type"`
+	Enabled   bool       `json:"enabled"`
+	RetiredAt *time.Time `json:"retired_at,omitempty"`
 }
 
 func (h *Handler) writeServiceError(w http.ResponseWriter, err error) bool {
@@ -302,6 +326,25 @@ func (h *Handler) getService(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Materialization.Repairing = append(out.Materialization.Repairing, v)
 	}
+	// The phase-5 paging declaration (§16.6a), on the same best-effort terms as the two blocks
+	// below: an alerting read that cannot be served leaves the block ABSENT, never a synthesized
+	// default that would tell an operator this service pages for `down` when nobody knows.
+	if p, err := h.store.ServiceAlertPolicy(r.Context(), proj.ID, detail.Service.ID); err == nil {
+		av := newServiceAlertingView(p)
+		out.Alerting = &av
+	} else {
+		h.logEvent(r, "service_alerting_read_failed", "error", err.Error())
+	}
+	// ...and what that declaration is actually producing right now. Separate from the block above
+	// because they answer different questions: one is what was asked for, the other is whether it
+	// is replacing anything. Best-effort on the same terms — a failed read leaves it absent rather
+	// than reporting a coverage nobody measured.
+	if cs, err := h.store.ServiceAlertingState(r.Context(), proj.ID, detail.Service.ID); err == nil {
+		sv := newServiceAlertingStateView(cs)
+		out.AlertingState = &sv
+	} else {
+		h.logEvent(r, "service_alerting_state_read_failed", "error", err.Error())
+	}
 	// The phase-3 impact-graph block (§14.4). Best-effort presentation: a graph
 	// read failure degrades the block to absent rather than failing the detail.
 	if g, err := h.store.GetServiceDependencies(r.Context(), proj.ID, detail.Service.ID); err == nil {
@@ -309,6 +352,20 @@ func (h *Handler) getService(w http.ResponseWriter, r *http.Request) {
 		out.Dependencies = &gv
 	} else {
 		h.logEvent(r, "service_dependencies_read_failed", "error", err.Error())
+	}
+	// The composite link, presented from this end. Best-effort like the graph block above: a read
+	// failure leaves the list EMPTY and logs, because an annotation that fails to load must not
+	// take the service's real numbers down with it.
+	out.Supersedes = []supersededMonitorView{}
+	if sup, err := h.store.ListMonitorsSupersededBy(r.Context(), proj.ID, detail.Service.ID); err == nil {
+		for _, m := range sup {
+			out.Supersedes = append(out.Supersedes, supersededMonitorView{
+				ID: m.ID, Name: m.Name, Slug: m.Slug, Type: string(m.Type),
+				Enabled: m.Enabled, RetiredAt: m.RetiredAt,
+			})
+		}
+	} else {
+		h.logEvent(r, "service_supersedes_read_failed", "error", err.Error())
 	}
 	writeJSON(w, http.StatusOK, out)
 }

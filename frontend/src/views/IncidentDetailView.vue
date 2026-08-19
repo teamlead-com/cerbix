@@ -4,6 +4,7 @@ import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
+import IncidentSubjectChip from "@/components/IncidentSubjectChip.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { STATUS_ORDER, impactBadge, relTime, statusBadge } from "@/lib/incident";
@@ -24,6 +25,9 @@ const incident = ref<Incident | null>(null);
 const canWrite = computed(() => !!incident.value && session.canProjectWrite(ws.orgId, incident.value.project_id ?? ""));
 const updates = ref<IncidentUpdate[]>([]);
 const postmortem = ref<Postmortem | null>(null);
+// The SUBJECT's name for the chip (FR-022). One request, for the ONE anchor this incident has, and
+// only when it has one — a project-level incident asks for nothing.
+const subjectName = ref("");
 
 const isResolved = computed(() => incident.value?.status === "resolved");
 const isAcked = computed(() => !!incident.value?.acknowledged_at);
@@ -71,6 +75,27 @@ async function load() {
   updates.value = ups.data ?? [];
   postmortem.value = pm.error ? null : (pm.data ?? null);
   loading.value = false;
+  loadSubjectName().catch(() => {});
+}
+
+// Best-effort by design: without the name the chip still states the KIND, and an incident whose
+// subject was DELETED must keep rendering — its timeline is a record of something that happened,
+// and the anchor being gone does not unhappen it.
+async function loadSubjectName() {
+  const inc = incident.value;
+  const projectID = inc?.project_id;
+  if (!inc || !projectID) return;
+  if (inc.service_id) {
+    const res = await api.GET("/api/v1/projects/{projectID}/services/{serviceID}", {
+      params: { path: { projectID, serviceID: inc.service_id } },
+    });
+    subjectName.value = res.data?.service?.slug || res.data?.service?.name || "";
+  } else if (inc.monitor_id) {
+    const res = await api.GET("/api/v1/monitors/{monitorID}", {
+      params: { path: { monitorID: inc.monitor_id } },
+    });
+    subjectName.value = res.data?.name || "";
+  }
 }
 
 // Add-update composer.
@@ -180,6 +205,12 @@ onMounted(() => {
           <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="statusBadge(incident.status).cls">{{ statusBadge(incident.status).label }}</span>
           <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="impactBadge(incident.impact).cls">{{ impactBadge(incident.impact).label }}</span>
           <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ incident.source }}</span>
+          <IncidentSubjectChip
+            :service-id="incident.service_id"
+            :service-slug="subjectName"
+            :monitor-id="incident.monitor_id"
+            :monitor-name="subjectName"
+          />
           <span
             v-if="(incident.escalation_step ?? 0) > 0 && !incident.acknowledged_at && incident.status !== 'resolved'"
             class="rounded-full bg-degraded-weak px-[9px] py-[2px] text-[11.5px] font-medium text-degraded"
@@ -192,7 +223,6 @@ onMounted(() => {
             <template v-if="incident.acknowledged_by_name">by <b class="font-medium text-ink-2">{{ incident.acknowledged_by_name }}</b> ·</template>
             <span class="font-mono text-ink-2">{{ relTime(incident.acknowledged_at) }}</span></span>
           <span v-if="incident.resolved_at">resolved <span class="font-mono text-ink-2">{{ relTime(incident.resolved_at) }}</span></span>
-          <RouterLink v-if="incident.monitor_id" :to="{ name: 'monitor', params: { id: incident.monitor_id } }" class="text-accent hover:underline">monitor →</RouterLink>
           <span v-if="incident.external_key" class="rounded-xs border border-border bg-inset px-[6px] py-px font-mono text-[11px]" :title="'External correlation key'">{{ incident.external_key }}</span>
         </div>
       </div>

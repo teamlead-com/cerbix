@@ -321,6 +321,221 @@ func TestServiceWedgedGatesReadinessAndClearForgetsIt(t *testing.T) {
 	}
 }
 
+// FR-021 §16.6b — the evaluator families render as exact blocks, HELP/TYPE included, with the
+// label order the spec's table lists and a deterministic series order inside each family.
+func TestServiceAlertEvaluatorFamilies(t *testing.T) {
+	reg := New(buildinfo.Info{}, "scheduler")
+	var before bytes.Buffer
+	reg.WritePrometheus(&before)
+	if strings.Contains(before.String(), "cerbix_service_alert_") {
+		t.Fatalf("the alerting families should be absent until a leader publishes them:\n%s", before.String())
+	}
+
+	// One pass of each arm, as the scheduler feeds them: all three outcomes every pass, zeros
+	// included, so `outcome="error"` exists as a series before it ever has to fire.
+	reg.RecordServiceAlertEvaluations("health", "ok", 2)
+	reg.RecordServiceAlertEvaluations("health", "error", 1)
+	reg.RecordServiceAlertEvaluations("health", "skipped", 0)
+	reg.RecordServiceAlertEvaluations("burn", "ok", 2)
+	reg.RecordServiceAlertEvaluations("burn", "error", 0)
+	reg.RecordServiceAlertEvaluations("burn", "skipped", 1)
+	reg.RecordServiceAlertEmitted("health", "onset", 1)
+	reg.RecordServiceAlertEmitted("health", "close", 1)
+	reg.RecordServiceAlertEmitted("burn", "onset", 2)
+	reg.RecordServiceAlertEmitted("burn", "close", 0)
+	reg.SetServiceAlertPass("health", 1700000000, 12.5)
+	reg.SetServiceAlertPass("burn", 1700000060, 3)
+	reg.SetServiceAlertStats(ServiceAlertStat{
+		ActiveHealth: 4, ActiveBurn: 2, BacklogHealth: 7, BacklogBurn: 1,
+	})
+
+	var out bytes.Buffer
+	reg.WritePrometheus(&out)
+	got := out.String()
+	for _, tt := range []struct {
+		name  string
+		block string
+	}{
+		{name: "evaluations", block: `# HELP cerbix_service_alert_evaluations_total Service alerting evaluations by signal and outcome (FR-021 §16.6b).
+# TYPE cerbix_service_alert_evaluations_total counter
+cerbix_service_alert_evaluations_total{signal="burn",outcome="error"} 0
+cerbix_service_alert_evaluations_total{signal="burn",outcome="ok"} 2
+cerbix_service_alert_evaluations_total{signal="burn",outcome="skipped"} 1
+cerbix_service_alert_evaluations_total{signal="health",outcome="error"} 1
+cerbix_service_alert_evaluations_total{signal="health",outcome="ok"} 2
+cerbix_service_alert_evaluations_total{signal="health",outcome="skipped"} 0
+`},
+		{name: "emitted", block: `# HELP cerbix_service_alert_emitted_total Service alert edges enqueued, by signal and edge.
+# TYPE cerbix_service_alert_emitted_total counter
+cerbix_service_alert_emitted_total{signal="burn",edge="close"} 0
+cerbix_service_alert_emitted_total{signal="burn",edge="onset"} 2
+cerbix_service_alert_emitted_total{signal="health",edge="close"} 1
+cerbix_service_alert_emitted_total{signal="health",edge="onset"} 1
+`},
+		{name: "active", block: `# HELP cerbix_service_alert_active Open service alert episodes, by signal.
+# TYPE cerbix_service_alert_active gauge
+cerbix_service_alert_active{signal="burn"} 2
+cerbix_service_alert_active{signal="health"} 4
+`},
+		{name: "backlog", block: `# TYPE cerbix_service_alert_backlog gauge
+cerbix_service_alert_backlog{signal="burn"} 1
+cerbix_service_alert_backlog{signal="health"} 7
+`},
+		{name: "last success", block: `# TYPE cerbix_service_alert_last_success_seconds gauge
+cerbix_service_alert_last_success_seconds{signal="burn"} 1700000060
+cerbix_service_alert_last_success_seconds{signal="health"} 1700000000
+`},
+		{name: "lag", block: `# TYPE cerbix_service_alert_lag_seconds gauge
+cerbix_service_alert_lag_seconds{signal="burn"} 3.000
+cerbix_service_alert_lag_seconds{signal="health"} 12.500
+`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(got, tt.block) {
+				t.Fatalf("missing block:\n%s\nin:\n%s", tt.block, got)
+			}
+		})
+	}
+
+	// Repeated observations ACCUMULATE (counters) and REPLACE (gauges).
+	reg.RecordServiceAlertEvaluations("health", "ok", 3)
+	reg.RecordServiceAlertEmitted("health", "onset", 2)
+	reg.SetServiceAlertPass("health", 1700000090, 0.25)
+	reg.SetServiceAlertStats(ServiceAlertStat{ActiveHealth: 5})
+	out.Reset()
+	reg.WritePrometheus(&out)
+	for _, want := range []string{
+		`cerbix_service_alert_evaluations_total{signal="health",outcome="ok"} 5`,
+		`cerbix_service_alert_emitted_total{signal="health",edge="onset"} 3`,
+		`cerbix_service_alert_last_success_seconds{signal="health"} 1700000090`,
+		`cerbix_service_alert_lag_seconds{signal="health"} 0.250`,
+		`cerbix_service_alert_active{signal="health"} 5`,
+		`cerbix_service_alert_backlog{signal="health"} 0`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q in:\n%s", want, out.String())
+		}
+	}
+}
+
+// §16.6b — the alerting surface is reachable by anyone who can create a service, so its label set
+// is FIXED: `signal`, plus the family's own bounded enum. A tenant, service, target or rule label
+// would let a customer grow the metrics endpoint without limit.
+func TestServiceAlertFamiliesCarryNoUnboundedLabel(t *testing.T) {
+	reg := New(buildinfo.Info{}, "scheduler")
+	reg.RecordServiceAlertEvaluations("health", "ok", 1)
+	reg.RecordServiceAlertEmitted("burn", "onset", 1)
+	reg.SetServiceAlertPass("health", 1, 1)
+	reg.SetServiceAlertStats(ServiceAlertStat{})
+
+	allowed := map[string]map[string]bool{
+		"cerbix_service_alert_evaluations_total":    {"signal": true, "outcome": true},
+		"cerbix_service_alert_emitted_total":        {"signal": true, "edge": true},
+		"cerbix_service_alert_active":               {"signal": true},
+		"cerbix_service_alert_backlog":              {"signal": true},
+		"cerbix_service_alert_last_success_seconds": {"signal": true},
+		"cerbix_service_alert_lag_seconds":          {"signal": true},
+	}
+	var out bytes.Buffer
+	reg.WritePrometheus(&out)
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.HasPrefix(line, "cerbix_service_alert_") {
+			continue
+		}
+		name, rest, hasLabels := strings.Cut(line, "{")
+		labels, ok := allowed[name]
+		if !ok {
+			t.Fatalf("unexpected §16.6b family %q — the table is fixed", name)
+		}
+		seen[name] = true
+		if !hasLabels {
+			continue
+		}
+		labelSet, _, _ := strings.Cut(rest, "}")
+		for _, pair := range strings.Split(labelSet, ",") {
+			key, _, _ := strings.Cut(pair, "=")
+			if !labels[key] {
+				t.Fatalf("family %s carries the label %q — no tenant/service/target/rule label may exist here (line: %s)",
+					name, key, line)
+			}
+		}
+	}
+	for name := range allowed {
+		if !seen[name] {
+			t.Fatalf("family %s was never emitted", name)
+		}
+	}
+}
+
+// §16.6b readiness — a stalled evaluator makes THIS registry not-ready (the scheduler holds it),
+// the reason is deterministic when both arms stall, and the step-down clear forgets the verdict
+// with the rest of the leader-scoped state.
+func TestServiceAlertStallGatesReadiness(t *testing.T) {
+	reg := New(buildinfo.Info{}, "scheduler")
+	reg.SetReady(true, "")
+	if !reg.Ready() {
+		t.Fatal("baseline not ready")
+	}
+	reg.SetServiceAlertStalled("health", true, "service health alert evaluation lagging 300s (bound 90s)")
+	if reg.Ready() {
+		t.Fatal("§16.6b: readiness reported healthy while the live evaluator was stalled")
+	}
+	if reg.LastError() != "service health alert evaluation lagging 300s (bound 90s)" {
+		t.Fatalf("stall reason not surfaced: %q", reg.LastError())
+	}
+	var out bytes.Buffer
+	reg.WritePrometheus(&out)
+	if !strings.Contains(out.String(), "cerbix_ready 0") {
+		t.Fatalf("cerbix_ready disagrees with Ready() while stalled:\n%s", out.String())
+	}
+	// A generic SetReady(true) must not erase a component verdict, like the credential one.
+	reg.SetReady(true, "")
+	if reg.Ready() {
+		t.Fatal("generic SetReady(true) erased the alerting stall")
+	}
+	// The arms are independent: clearing one while the other stalls stays not-ready, and the
+	// reason is stable rather than alternating between scrapes.
+	reg.SetServiceAlertStalled("burn", true, "service burn alert evaluation lagging 600s (bound 180s)")
+	reg.SetServiceAlertStalled("health", false, "")
+	if reg.Ready() {
+		t.Fatal("a still-stalled burn arm reported ready")
+	}
+	if reg.LastError() != "service burn alert evaluation lagging 600s (bound 180s)" {
+		t.Fatalf("stall reason not surfaced for the remaining arm: %q", reg.LastError())
+	}
+	reg.SetServiceAlertStalled("burn", false, "")
+	if !reg.Ready() {
+		t.Fatalf("readiness did not recover after both arms cleared: %q", reg.LastError())
+	}
+
+	// Leadership loss forgets the stall AND the sampled gauges: a deposed scheduler holding a
+	// stale stall would keep a standby's /readyz down for an evaluation it no longer runs.
+	reg.SetServiceAlertStalled("health", true, "stale")
+	reg.SetServiceAlertStats(ServiceAlertStat{ActiveHealth: 3})
+	reg.SetServiceAlertPass("health", 1700000000, 5)
+	reg.RecordServiceAlertEvaluations("health", "ok", 1)
+	reg.ClearServiceReliabilityStats()
+	if !reg.Ready() {
+		t.Fatalf("a cleared registry still reports the old leader's stall: %q", reg.LastError())
+	}
+	out.Reset()
+	reg.WritePrometheus(&out)
+	for _, gone := range []string{
+		"cerbix_service_alert_active", "cerbix_service_alert_backlog",
+		"cerbix_service_alert_lag_seconds", "cerbix_service_alert_last_success_seconds",
+	} {
+		if strings.Contains(out.String(), gone) {
+			t.Fatalf("cleared registry still exports %s:\n%s", gone, out.String())
+		}
+	}
+	// The COUNTERS survive: they are this process's own history, and a counter that resets on a
+	// leadership blip is a counter no rate() can be trusted on.
+	if !strings.Contains(out.String(), `cerbix_service_alert_evaluations_total{signal="health",outcome="ok"} 1`) {
+		t.Fatalf("the step-down clear reset a monotonic counter:\n%s", out.String())
+	}
+}
+
 func TestFactMaintenanceStuckSignal(t *testing.T) {
 	// INITIAL failure: the tracking start is the last-success floor, so the age-based alert
 	// cannot fire on the first startup blip (last_success=0 would read as "stuck since the
@@ -383,6 +598,44 @@ func TestServiceReliabilityGauges(t *testing.T) {
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in:\n%s", want, s)
+		}
+	}
+}
+
+// The three DELIVERY-side families of §16.6b render with the same fixed labels as the evaluator
+// half: `signal` and a small enum, nothing per-tenant.
+func TestServiceAlertDeliveryFamilies(t *testing.T) {
+	r := New(buildinfo.Info{}, "api")
+
+	var empty bytes.Buffer
+	r.WritePrometheus(&empty)
+	for _, name := range []string{
+		"cerbix_service_alert_delegation_total",
+		"cerbix_service_alert_undeliverable_total",
+		"cerbix_service_alert_recipient_missing_total",
+	} {
+		if strings.Contains(empty.String(), name) {
+			t.Fatalf("%s is published before anything happened", name)
+		}
+	}
+
+	r.RecordServiceDelegation("health", "armed")
+	r.RecordServiceDelegation("health", "armed")
+	r.RecordServiceDelegation("burn", "disarmed")
+	r.RecordServiceAlertUndeliverable("burn")
+	r.RecordServiceAlertRecipientMissing(2)
+	r.RecordServiceAlertRecipientMissing(0) // nothing missing is not an observation
+
+	var out bytes.Buffer
+	r.WritePrometheus(&out)
+	for _, want := range []string{
+		`cerbix_service_alert_delegation_total{signal="burn",state="disarmed"} 1`,
+		`cerbix_service_alert_delegation_total{signal="health",state="armed"} 2`,
+		`cerbix_service_alert_undeliverable_total{signal="burn"} 1`,
+		`cerbix_service_alert_recipient_missing_total 2`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing series %q in:\n%s", want, out.String())
 		}
 	}
 }

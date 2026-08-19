@@ -75,7 +75,7 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 	queryCtx, cancel := context.WithTimeout(ctx, materializeQueryTimeout)
 	defer cancel()
 	rows, err := s.pool.Query(queryCtx,
-		`SELECT `+monitorColumns+`, m.config, gen_random_uuid()::text,
+		`SELECT `+monitorColumns+`, m.config, gen_random_uuid()::text, statement_timestamp(),
 		        COALESCE(refs.bound, '{}'::jsonb)
 		   FROM monitors m
 		   LEFT JOIN LATERAL (
@@ -101,7 +101,8 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 	for rows.Next() {
 		var rawConfig, rawRefs []byte
 		var jobID string
-		m, err := s.scanMonitorNoSecrets(rows, &rawConfig, &jobID, &rawRefs)
+		var issuedAt time.Time
+		m, err := s.scanMonitorNoSecrets(rows, &rawConfig, &jobID, &issuedAt, &rawRefs)
 		if err != nil {
 			return nil, fmt.Errorf("store: scan materialized execution: %w", err)
 		}
@@ -111,7 +112,7 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 			byID[m.ID] = entry
 			continue
 		}
-		job := dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1}
+		job := dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1, JobID: jobID, IssuedAt: issuedAt}
 		if !domain.CredentialedType(m.Type) {
 			entry.Job = job
 			byID[m.ID] = entry

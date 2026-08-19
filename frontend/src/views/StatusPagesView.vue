@@ -5,11 +5,14 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
-import { componentMeta } from "@/lib/statuspage";
+import { componentMeta, reasonText, sourceLabel, summaryHeadline } from "@/lib/statuspage";
 
 type StatusPage = components["schemas"]["StatusPage"];
 type Component = components["schemas"]["Component"];
 type Monitor = components["schemas"]["Monitor"];
+type Service = components["schemas"]["Service"];
+type ConversionPreview = components["schemas"]["ConversionPreview"];
+type ComponentSource = "monitor" | "service" | "manual";
 type Visibility = "public" | "internal" | "unlisted";
 
 const ws = useWorkspace();
@@ -20,6 +23,7 @@ const loading = ref(true);
 const error = ref("");
 const pages = ref<StatusPage[]>([]);
 const monitors = ref<Monitor[]>([]);
+const services = ref<Service[]>([]);
 
 const selected = ref<StatusPage | null>(null);
 const componentsList = ref<Component[]>([]);
@@ -33,14 +37,21 @@ async function loadPages() {
       pages.value = [];
       return;
     }
-    const [pg, mon] = await Promise.all([
+    const [pg, mon, svc] = await Promise.all([
       api.GET("/api/v1/organizations/{orgID}/status-pages", { params: { path: { orgID: ws.orgId } } }),
       ws.projectId
         ? api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID: ws.projectId } } })
         : Promise.resolve({ data: [] as Monitor[] }),
+      // Services are the third component source (FR-021 §15.0). Loaded from the SELECTED project:
+      // a service component binds a project, and offering another project's services here would
+      // build a component the page-scope rule then refuses at write time.
+      ws.projectId
+        ? api.GET("/api/v1/projects/{projectID}/services", { params: { path: { projectID: ws.projectId } } })
+        : Promise.resolve({ data: [] as Service[] }),
     ]);
     pages.value = pg.data ?? [];
     monitors.value = mon.data ?? [];
+    services.value = (svc.data as Service[] | undefined) ?? [];
     if (selected.value) select(pages.value.find((p) => p.id === selected.value?.id) ?? null);
   } catch {
     error.value = "Could not load status pages.";
@@ -110,7 +121,16 @@ async function createPage() {
 }
 
 // Add component.
-const compForm = reactive({ name: "", monitor_id: "", manual_status: "", group: "", description: "", position: 0 });
+const compForm = reactive({
+  source: "monitor" as ComponentSource,
+  name: "",
+  monitor_id: "",
+  service_id: "",
+  manual_status: "",
+  group: "",
+  description: "",
+  position: 0,
+});
 // Groups already in use on this page — offered as datalist suggestions.
 const usedGroups = computed(() => [...new Set(componentsList.value.map((c) => c.group).filter(Boolean))] as string[]);
 const addingComp = ref(false);
@@ -121,8 +141,14 @@ async function addComponent() {
   addingComp.value = true;
   compError.value = "";
   const body: components["schemas"]["CreateComponent"] = { name: compForm.name.trim() };
-  if (compForm.monitor_id) body.monitor_id = compForm.monitor_id;
-  if (compForm.manual_status) body.manual_status = compForm.manual_status as Component["manual_status"];
+  // Exactly the binding the chosen source needs. The server DERIVES `source` from what it
+  // receives, so sending a leftover id from another source would describe a different component
+  // than the form shows.
+  if (compForm.source === "monitor" && compForm.monitor_id) body.monitor_id = compForm.monitor_id;
+  if (compForm.source === "service" && compForm.service_id) body.service_id = compForm.service_id;
+  if (compForm.source === "manual" && compForm.manual_status) {
+    body.manual_status = compForm.manual_status as Component["manual_status"];
+  }
   if (compForm.group.trim()) body.group = compForm.group.trim();
   if (compForm.description.trim()) body.description = compForm.description.trim();
   if (compForm.position) body.position = compForm.position;
@@ -138,6 +164,7 @@ async function addComponent() {
     componentsList.value.push(res.data);
     compForm.name = "";
     compForm.monitor_id = "";
+    compForm.service_id = "";
     compForm.manual_status = "";
     compForm.group = "";
     compForm.description = "";
@@ -231,6 +258,119 @@ const publicPath = computed(() => {
   return base;
 });
 const monitorName = (id?: string) => monitors.value.find((m) => m.id === id)?.name ?? "—";
+const serviceName = (id?: string) => services.value.find((sv) => sv.id === id)?.name ?? "—";
+
+// What the line REPORTS, from the active source only. The dormant binding is shown separately
+// below it, never mixed in: a component that renders a service while still holding a monitor id is
+// the normal state after a conversion, and conflating the two is how an operator ends up reading
+// the wrong fact.
+function activeBinding(c: Component): string {
+  switch (c.source) {
+    case "monitor":
+      return "monitor: " + monitorName(c.monitor_id);
+    case "service":
+      return "service: " + serviceName(c.service_id);
+    default:
+      return c.manual_status ? "manual: " + componentMeta(c.manual_status).label : "manual: no status set";
+  }
+}
+
+// The binding a revert would restore without the operator choosing it again.
+function dormantBinding(c: Component): string {
+  if (c.source !== "monitor" && c.monitor_id) return "monitor: " + monitorName(c.monitor_id);
+  if (c.source !== "service" && c.service_id) return "service: " + serviceName(c.service_id);
+  if (c.source !== "manual" && c.manual_status) return "manual: " + componentMeta(c.manual_status).label;
+  return "";
+}
+
+// ── Conversion (FR-021 §15.0): preview, consent, confirm ──────────────────────────────────
+//
+// The two CAS tokens live INSIDE the preview object, never in separate refs: they are only
+// meaningful as the pair the server issued, and a stale token that survives a re-preview in a
+// stray ref is exactly the bug the fence exists to catch.
+const convertFor = ref<Component | null>(null);
+const convertTarget = reactive({ source: "service" as ComponentSource, service_id: "", monitor_id: "", manual_status: "" });
+const convertPreview = ref<ConversionPreview | null>(null);
+const convertBusy = ref(false);
+const convertError = ref("");
+
+function startConvert(c: Component) {
+  convertFor.value = c;
+  convertPreview.value = null;
+  convertError.value = "";
+  // Default to a source the component is NOT already on, so the dialog opens on a real choice.
+  convertTarget.source = c.source === "service" ? "manual" : "service";
+  convertTarget.service_id = c.service_id ?? "";
+  convertTarget.monitor_id = c.monitor_id ?? "";
+  convertTarget.manual_status = (c.manual_status as string) ?? "";
+}
+
+function cancelConvert() {
+  convertFor.value = null;
+  convertPreview.value = null;
+  convertError.value = "";
+}
+
+function convertBody() {
+  const body: Record<string, unknown> = { source: convertTarget.source };
+  // An empty id is sent as OMITTED, not as "": the server reads an absent id as "the dormant
+  // binding is the target", which is what makes a revert a single click.
+  if (convertTarget.source === "service" && convertTarget.service_id) body.service_id = convertTarget.service_id;
+  if (convertTarget.source === "monitor" && convertTarget.monitor_id) body.monitor_id = convertTarget.monitor_id;
+  if (convertTarget.source === "manual" && convertTarget.manual_status) body.manual_status = convertTarget.manual_status;
+  return body;
+}
+
+async function runPreview() {
+  if (!convertFor.value) return;
+  convertBusy.value = true;
+  convertError.value = "";
+  convertPreview.value = null;
+  try {
+    const res = await api.POST("/api/v1/components/{componentID}/conversion/preview", {
+      params: { path: { componentID: convertFor.value.id! } },
+      body: convertBody() as never,
+    });
+    if (res.error || !res.data) {
+      convertError.value = (res.error as { error?: string })?.error || "Could not preview the change.";
+      return;
+    }
+    convertPreview.value = res.data;
+  } finally {
+    convertBusy.value = false;
+  }
+}
+
+async function confirmConvert() {
+  const preview = convertPreview.value;
+  const target = convertFor.value;
+  // No preview, no confirmation: the button is disabled too, but the guard is here as well
+  // because a confirmation without the issued tokens is an unpreviewed conversion.
+  if (!preview || !target) return;
+  convertBusy.value = true;
+  convertError.value = "";
+  try {
+    const res = await api.POST("/api/v1/components/{componentID}/conversion", {
+      params: { path: { componentID: target.id! } },
+      body: { ...convertBody(), revision: preview.revision, page_generation: preview.page_generation } as never,
+    });
+    if (res.error || !res.data) {
+      const msg = (res.error as { error?: string })?.error ?? "";
+      convertError.value = msg.includes("page_configuration_stale")
+        ? "This page changed while you were looking at the preview. Preview again to see the current state."
+        : msg || "Could not apply the change.";
+      // A stale preview is DISCARDED rather than kept for a retry: re-confirming with the same
+      // tokens would fail identically, and leaving them on screen invites exactly that.
+      convertPreview.value = null;
+      return;
+    }
+    const i = componentsList.value.findIndex((c) => c.id === res.data!.id);
+    if (i >= 0) componentsList.value[i] = res.data;
+    cancelConvert();
+  } finally {
+    convertBusy.value = false;
+  }
+}
 
 onMounted(loadPages);
 watch(() => ws.orgId, loadPages);
@@ -351,33 +491,145 @@ watch(() => ws.orgId, loadPages);
           <div class="rounded border border-border bg-surface shadow-card">
             <div class="border-b border-border px-4 py-[11px] text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Components</div>
             <ul>
-              <li v-for="c in componentsList" :key="c.id" class="flex items-center gap-3 border-b border-border px-4 py-[11px] last:border-b-0">
+              <li v-for="c in componentsList" :key="c.id" class="flex items-center gap-3 border-b border-border px-4 py-[11px] last:border-b-0" data-testid="component-row">
                 <div class="min-w-0">
-                  <div class="text-[13px] font-medium">{{ c.name }}</div>
-                  <div class="font-mono text-[11px] text-ink-3">{{ c.monitor_id ? "monitor: " + monitorName(c.monitor_id) : "manual: " + (c.manual_status || "operational") }}</div>
+                  <div class="flex items-center gap-2 text-[13px] font-medium">
+                    {{ c.name }}
+                    <span class="rounded-full border border-border px-[7px] py-[1px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3" data-testid="component-source">{{ sourceLabel(c.source) }}</span>
+                  </div>
+                  <div class="font-mono text-[11px] text-ink-3" data-testid="component-binding">{{ activeBinding(c) }}</div>
+                  <!-- The dormant binding, stated as dormant. It is what a revert restores, and
+                       leaving it unlabelled would read as a second live source. -->
+                  <div v-if="dormantBinding(c)" class="font-mono text-[11px] text-ink-3" data-testid="component-dormant">
+                    kept for revert · {{ dormantBinding(c) }}
+                  </div>
                 </div>
-                <button v-if="canManage" type="button" class="ml-auto text-ink-3 hover:text-down" aria-label="Delete component" @click="deleteComponent(c.id!)">
-                  <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18" /></svg>
-                </button>
+                <div v-if="canManage" class="ml-auto flex items-center gap-3">
+                  <button type="button" class="text-[12px] text-ink-3 hover:text-accent" data-testid="convert-component" @click="startConvert(c)">Change source</button>
+                  <button type="button" class="text-ink-3 hover:text-down" aria-label="Delete component" @click="deleteComponent(c.id!)">
+                    <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                  </button>
+                </div>
               </li>
               <li v-if="!componentsList.length" class="px-4 py-5 text-center text-[13px] text-ink-3">No components yet.</li>
             </ul>
+
+            <!-- Conversion (FR-021 §15.0): the operator consents to the page as it WILL read,
+                 not to a form. The confirm button stays disabled until a preview exists, because
+                 the two CAS tokens come from the preview and nothing else. -->
+            <div v-if="convertFor" class="border-t border-border bg-surface-2 p-4" data-testid="conversion-dialog">
+              <div class="mb-3 text-[13px] font-medium">Change what “{{ convertFor.name }}” reports</div>
+              <div class="flex flex-wrap items-end gap-3">
+                <label class="flex flex-col gap-[6px]">
+                  <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">New source</span>
+                  <select v-model="convertTarget.source" class="w-[130px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" data-testid="conversion-source" @change="convertPreview = null">
+                    <option value="monitor">Monitor</option>
+                    <option value="service">Service</option>
+                    <option value="manual">Manual</option>
+                  </select>
+                </label>
+                <label v-if="convertTarget.source === 'service'" class="flex flex-col gap-[6px]">
+                  <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Service</span>
+                  <select v-model="convertTarget.service_id" class="w-[190px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" @change="convertPreview = null">
+                    <option value="">{{ convertFor.service_id ? "— keep " + serviceName(convertFor.service_id) + " —" : "— choose —" }}</option>
+                    <option v-for="sv in services" :key="sv.id" :value="sv.id">{{ sv.name }}</option>
+                  </select>
+                </label>
+                <label v-else-if="convertTarget.source === 'monitor'" class="flex flex-col gap-[6px]">
+                  <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Monitor</span>
+                  <select v-model="convertTarget.monitor_id" class="w-[190px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" @change="convertPreview = null">
+                    <option value="">{{ convertFor.monitor_id ? "— keep " + monitorName(convertFor.monitor_id) + " —" : "— choose —" }}</option>
+                    <option v-for="m in monitors" :key="m.id" :value="m.id">{{ m.name }}</option>
+                  </select>
+                </label>
+                <label v-else class="flex flex-col gap-[6px]">
+                  <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Manual status</span>
+                  <select v-model="convertTarget.manual_status" class="w-[170px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" @change="convertPreview = null">
+                    <option value="">{{ convertFor.manual_status ? "— keep " + componentMeta(convertFor.manual_status).label + " —" : "— not set —" }}</option>
+                    <option value="operational">{{ componentMeta("operational").label }}</option>
+                    <option value="degraded">{{ componentMeta("degraded").label }}</option>
+                    <option value="partial_outage">{{ componentMeta("partial_outage").label }}</option>
+                    <option value="major_outage">{{ componentMeta("major_outage").label }}</option>
+                    <option value="maintenance">{{ componentMeta("maintenance").label }}</option>
+                  </select>
+                </label>
+                <button type="button" :disabled="convertBusy" class="h-[38px] rounded-sm border border-border px-4 text-[13px] hover:border-accent hover:text-accent disabled:opacity-50" data-testid="conversion-preview" @click="runPreview">Preview</button>
+                <button type="button" class="h-[38px] px-2 text-[13px] text-ink-3 hover:text-ink" @click="cancelConvert">Cancel</button>
+              </div>
+
+              <p v-if="convertError" class="mt-3 text-[12.5px] text-down" data-testid="conversion-error">{{ convertError }}</p>
+
+              <div v-if="convertPreview" class="mt-4 rounded border border-border bg-surface p-4" data-testid="conversion-result">
+                <div class="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <div class="mb-1 text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Now</div>
+                    <div class="flex items-center gap-2 text-[13px]">
+                      <span class="h-[8px] w-[8px] rounded-full" :class="componentMeta(convertPreview.component?.status).dot"></span>
+                      <span :class="componentMeta(convertPreview.component?.status).text">{{ componentMeta(convertPreview.component?.status).label }}</span>
+                      <span class="font-mono text-[11px] text-ink-3">{{ sourceLabel(convertPreview.component?.source) }}</span>
+                    </div>
+                    <div v-if="reasonText(convertPreview.component?.reason)" class="mt-1 text-[11.5px] text-ink-3">{{ reasonText(convertPreview.component?.reason) }}</div>
+                    <div class="mt-2 text-[12px] text-ink-2" data-testid="summary-before">
+                      Page: {{ summaryHeadline(convertPreview.summary?.summary, convertPreview.summary?.summary_state, convertPreview.summary?.unmeasured_count) }}
+                    </div>
+                  </div>
+                  <div>
+                    <div class="mb-1 text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">After this change</div>
+                    <div class="flex items-center gap-2 text-[13px]">
+                      <span class="h-[8px] w-[8px] rounded-full" :class="componentMeta(convertPreview.proposed?.status).dot"></span>
+                      <span :class="componentMeta(convertPreview.proposed?.status).text" data-testid="proposed-status">{{ componentMeta(convertPreview.proposed?.status).label }}</span>
+                      <span class="font-mono text-[11px] text-ink-3">{{ sourceLabel(convertPreview.proposed?.source) }}</span>
+                    </div>
+                    <div v-if="reasonText(convertPreview.proposed?.reason)" class="mt-1 text-[11.5px] text-ink-3">{{ reasonText(convertPreview.proposed?.reason) }}</div>
+                    <div class="mt-2 text-[12px] text-ink-2" data-testid="summary-after">
+                      Page: {{ summaryHeadline(convertPreview.proposed_summary?.summary, convertPreview.proposed_summary?.summary_state, convertPreview.proposed_summary?.unmeasured_count) }}
+                    </div>
+                  </div>
+                </div>
+                <ul v-if="convertPreview.notes?.length" class="mt-3 flex flex-col gap-1 pl-4 text-[12.5px] text-ink-2">
+                  <li v-for="(n, i) in convertPreview.notes" :key="i" class="list-disc">{{ n }}</li>
+                </ul>
+                <div class="mt-4 flex items-center gap-3">
+                  <button type="button" :disabled="convertBusy || convertPreview.no_op" class="h-[36px] rounded-sm border border-accent px-4 text-[13px] text-accent hover:bg-accent-weak disabled:opacity-50" data-testid="conversion-confirm" @click="confirmConvert">Apply this change</button>
+                  <span class="font-mono text-[11px] text-ink-3">rev {{ convertPreview.revision }} · page {{ convertPreview.page_generation }}</span>
+                </div>
+              </div>
+            </div>
             <div v-if="canManage" class="flex flex-wrap items-end gap-3 border-t border-border p-4">
               <label class="flex flex-col gap-[6px]">
                 <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Name</span>
                 <input v-model="compForm.name" type="text" placeholder="API" class="w-[160px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
               </label>
               <label class="flex flex-col gap-[6px]">
+                <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Source</span>
+                <select v-model="compForm.source" class="w-[130px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" data-testid="new-component-source">
+                  <option value="monitor">Monitor</option>
+                  <option value="service">Service</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </label>
+              <label v-if="compForm.source === 'monitor'" class="flex flex-col gap-[6px]">
                 <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Monitor</span>
                 <select v-model="compForm.monitor_id" class="w-[180px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent">
-                  <option value="">— manual —</option>
+                  <option value="">— choose —</option>
                   <option v-for="m in monitors" :key="m.id" :value="m.id">{{ m.name }}</option>
                 </select>
               </label>
-              <label v-if="!compForm.monitor_id" class="flex flex-col gap-[6px]">
+              <label v-else-if="compForm.source === 'service'" class="flex flex-col gap-[6px]">
+                <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Service</span>
+                <select v-model="compForm.service_id" class="w-[180px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" data-testid="new-component-service">
+                  <option value="">— choose —</option>
+                  <option v-for="sv in services" :key="sv.id" :value="sv.id">{{ sv.name }}</option>
+                </select>
+                <span v-if="!services.length" class="text-[11px] text-ink-3">No services in this project yet.</span>
+              </label>
+              <label v-else class="flex flex-col gap-[6px]">
                 <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Manual status</span>
                 <select v-model="compForm.manual_status" class="w-[170px] rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent">
-                  <option value="">operational</option>
+                  <!-- No "no data" option: it is COMPUTED when measurement is absent, and an
+                       operator choosing it would be typing an unknown as if it were a statement. -->
+                  <option value="">— not set yet —</option>
+                  <option value="operational">{{ componentMeta("operational").label }}</option>
                   <option value="degraded">{{ componentMeta("degraded").label }}</option>
                   <option value="partial_outage">{{ componentMeta("partial_outage").label }}</option>
                   <option value="major_outage">{{ componentMeta("major_outage").label }}</option>

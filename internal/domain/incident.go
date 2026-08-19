@@ -79,9 +79,14 @@ func (s IncidentSource) Valid() bool {
 // Incident is a tracked disruption within a project, communicated through a
 // timeline of updates and (once resolved) an optional postmortem.
 type Incident struct {
-	ID             string         `json:"id"`
-	ProjectID      string         `json:"project_id"`
-	MonitorID      string         `json:"monitor_id,omitempty"`   // set for auto-incidents from a monitor
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	MonitorID string `json:"monitor_id,omitempty"` // set for auto-incidents from a monitor
+	// ServiceID is the OTHER anchor (FR-022, D-0170). At most one anchor is set — the schema enforces
+	// it — and an incident with neither is a project-level record, which is what a manual incident has
+	// always been. The discriminator is read EXPLICITLY everywhere: phase 4 paid for the alternative
+	// when `monitor_id != ""` as an implicit discriminator published a converted component's old monitor.
+	ServiceID      string         `json:"service_id,omitempty"`
 	ExternalKey    string         `json:"external_key,omitempty"` // correlates an externally-sourced incident (e.g. an Alertmanager fingerprint)
 	Title          string         `json:"title"`
 	Status         IncidentStatus `json:"status"`
@@ -109,6 +114,11 @@ type Incident struct {
 func (i Incident) PublicRedacted() Incident {
 	i.ProjectID = ""
 	i.MonitorID = ""
+	// The OTHER anchor is an internal id of exactly the same class as MonitorID (FR-022
+	// invariant 11): a status page names its components by slug and name, and an
+	// unauthenticated viewer has no use for the service's UUID. Adding an anchor without
+	// adding it here is how a redaction list silently stops being complete.
+	i.ServiceID = ""
 	i.ExternalKey = ""
 	i.AcknowledgedBy = ""
 	i.AcknowledgedByName = ""
@@ -186,4 +196,17 @@ func (p Postmortem) PublicRedacted() Postmortem {
 	p.IncidentID = ""
 	p.Author = ""
 	return p
+}
+
+// IncidentMember is one member of a service AS OF the instant its incident opened (FR-022 invariant 13).
+// It is a snapshot, not a reference: the monitor it names may be gone by the time a postmortem is read,
+// and the postmortem still has to be able to say who was in the service when it broke.
+type IncidentMember struct {
+	MonitorID string `json:"monitor_id"`
+	Name      string `json:"name"`
+	// Roles is a LIST because one monitor can hold several at once — a member is commonly both
+	// operational context and an SLI, and the declaration stores a row per role. A postmortem listing
+	// the same monitor twice reads as a duplicate rather than as a fact, so the roles are aggregated
+	// here and the monitor appears once.
+	Roles []string `json:"roles,omitempty"`
 }

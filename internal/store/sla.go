@@ -112,6 +112,62 @@ func scanSLATarget(row pgx.Row) (domain.SLATarget, error) {
 	return t, nil
 }
 
+// GetProjectSLATarget reads a PROJECT-scoped objective for a window, or ErrNotFound when the project
+// has none. A project objective is REPORTING ONLY (iter-0155): the schema refuses burn alerting on
+// this scope, so the returned target's burn fields are always empty and the report may state the
+// objective and the budget without implying that anything will page.
+func (s *Store) GetProjectSLATarget(ctx context.Context, projectID, window string) (domain.SLATarget, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+slaTargetColumns+`
+		   FROM sla_targets WHERE project_id = $1 AND window_name = $2`, projectID, window)
+	t, err := scanSLATarget(row)
+	if err != nil {
+		if noRows(err) {
+			return domain.SLATarget{}, ErrNotFound
+		}
+		return domain.SLATarget{}, fmt.Errorf("store: get project sla target: %w", err)
+	}
+	return t, nil
+}
+
+// UpsertProjectSLATarget sets (or replaces) a project's SLO objective for a window. There is no burn
+// argument by design and none can be added here without a migration: the schema's
+// `sla_targets_project_no_burn_chk` refuses a paging project target, so this write cannot become an
+// alerting write by accident. The objective must already be canonical — `domain.CanonicalObjective`
+// is the one rule for every scope and runs at the request boundary.
+func (s *Store) UpsertProjectSLATarget(ctx context.Context, projectID, window string, objective float64) (domain.SLATarget, error) {
+	row := s.pool.QueryRow(ctx,
+		`INSERT INTO sla_targets (project_id, window_name, objective, burn_alert_enabled, burn_rules)
+		 VALUES ($1, $2, $3, false, '[]'::jsonb)
+		 ON CONFLICT (project_id, window_name) WHERE project_id IS NOT NULL DO UPDATE
+		    SET objective = EXCLUDED.objective, updated_at = now()
+		 RETURNING `+slaTargetColumns, projectID, window, objective)
+	t, err := scanSLATarget(row)
+	if err != nil {
+		return domain.SLATarget{}, fmt.Errorf("store: upsert project sla target: %w", err)
+	}
+	return t, nil
+}
+
+// DeleteProjectSLATarget removes a project's objective for a window. It is NOT idempotent by
+// accident: an absent target answers ErrNotFound, because the UI's Clear is a statement about a
+// promise that exists, and silently succeeding on a window that never had one would let a mis-typed
+// window read as "cleared".
+//
+// Deleting the objective deletes the budget with it — there is no stored budget, it is derived — which
+// is why the row returns to dashes rather than to 100%.
+func (s *Store) DeleteProjectSLATarget(ctx context.Context, projectID, window string) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM sla_targets WHERE project_id = $1 AND window_name = $2`, projectID, window)
+	if err != nil {
+		return fmt.Errorf("store: delete project sla target: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // UpsertMonitorSLATarget sets (or replaces) a monitor's SLO objective for a
 // window and its burn-rate alerting. Rules semantics: enabling burn alerts with
 // no rules provided keeps the target's existing rules (or seeds the SRE default

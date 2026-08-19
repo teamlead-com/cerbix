@@ -240,6 +240,54 @@ func (s *Store) DeleteService(ctx context.Context, projectID, id string) error {
 	if err := assertServiceNotPinnedByFileEdgesTx(ctx, tx, id); err != nil {
 		return err
 	}
+	// FR-021 §15.0: a service that a status page RENDERS pins itself. The FK is RESTRICT, so
+	// without this guard the deletion would surface as a raw constraint error — a 500 for what
+	// is an operator decision. Checked BEFORE the dormant sweep below so the refusal is about
+	// the live page, not about what the sweep would have changed.
+	if err := assertServiceNotRenderedTx(ctx, tx, id); err != nil {
+		return err
+	}
+	// A DORMANT service binding (the component was converted away and could be reverted) is a
+	// convenience, not customer-visible content: losing the revert option is exactly what
+	// deleting the service means. Clearing it here is what makes the RESTRICT above mean
+	// "rendered", not "ever mentioned". The revision and page generation both advance so an
+	// operator holding a revert preview cannot confirm it against a service that is gone.
+	// PAGE FIRST, in id order ([318] P0-2): the sweep below writes components, and their AFTER
+	// trigger then takes each page — component→page, the order that cycles. Locking the affected
+	// pages up front, deterministically ordered, keeps this path on the same order as every other.
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM status_pages
+		 WHERE id IN (SELECT DISTINCT status_page_id FROM components WHERE service_id = $1)
+		 ORDER BY id FOR UPDATE`, id); err != nil {
+		return fmt.Errorf("store: lock pages for dormant sweep: %w", err)
+	}
+	// The revision and the page generation are advanced by TRIGGERS, so this statement only has to
+	// state the sweep itself. `source_project` follows the same rule as everywhere else: it
+	// survives only while a binding still needs it ([314] P0-1A).
+	if _, err := tx.Exec(ctx, `
+		WITH swept AS (
+		    UPDATE components SET service_id = NULL, source_project = CASE WHEN monitor_id IS NOT NULL THEN source_project ELSE NULL END, updated_at = now()
+		     WHERE service_id = $1 AND source <> 'service'
+		 RETURNING status_page_id
+		)
+		SELECT count(*) FROM swept`, id); err != nil {
+		return fmt.Errorf("store: clear dormant service bindings: %w", err)
+	}
+	// FR-021 §16.4a: a FIRING announcement must end when the thing that fired is deleted, and the
+	// close is enqueued HERE, inside the deletion's own transaction. After the commit there is no
+	// service row for any evaluator to notice, and refusing the deletion instead would make an open
+	// alert a lock on an operator's own configuration. The episode carries the onset's recipients,
+	// so the ending reaches the people who heard the beginning.
+	var asOf time.Time
+	var slug string
+	if err := tx.QueryRow(ctx,
+		`SELECT now(), slug FROM services WHERE id = $1`, id).Scan(&asOf, &slug); err != nil {
+		return fmt.Errorf("store: read service for close: %w", err)
+	}
+	if _, err := closeServiceEpisodesTx(ctx, tx, asOf, id, projectID, slug,
+		episodeCloseFilter{}, domain.CloseServiceDeleted); err != nil {
+		return err
+	}
 	// A preview whose affected set included this service goes stale on its own: the stored
 	// set is a snapshot the deletion cannot edit (00068 dropped that cascade), so the set
 	// comparison in confirmPreviewTx sees a member the current set no longer has.
@@ -269,6 +317,33 @@ func (s *Store) DeleteService(ctx context.Context, projectID, id string) error {
 // It is distinct from ErrManagedByFile (monitors) only so the message stays true; both map to
 // the same 409.
 var ErrServiceManagedByFile = errors.New("store: service is managed by a file provider")
+
+// ErrServiceRendered is returned when a service cannot be deleted because a status-page
+// component renders it as its ACTIVE source (FR-021 §15.0, invariant 71). The alternatives are
+// both worse: SET NULL would be the automatic conversion invariant 70 forbids — a customer would
+// see a component silently change what it means — and CASCADE would delete a customer-visible
+// row because of an internal decision. So the operator converts or removes the component first.
+var ErrServiceRendered = errors.New("store: service is rendered by a status page component")
+
+// assertServiceNotRenderedTx names the offending page and component, because "some status page
+// uses this" is not actionable on an org with thirty pages.
+func assertServiceNotRenderedTx(ctx context.Context, tx pgx.Tx, serviceID string) error {
+	var component, page string
+	err := tx.QueryRow(ctx, `
+		SELECT c.name, sp.title
+		  FROM components c
+		  JOIN status_pages sp ON sp.id = c.status_page_id
+		 WHERE c.service_id = $1 AND c.source = 'service'
+		 ORDER BY sp.title, c.position
+		 LIMIT 1`, serviceID).Scan(&component, &page)
+	if noRows(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("store: service render check: %w", err)
+	}
+	return fmt.Errorf("%w: component %q on status page %q", ErrServiceRendered, component, page)
+}
 
 // assertServiceNotFileManagedTx rejects a UI write to a file-owned service. The caller holds
 // the service row (or the membership lock), so the check is atomic against a concurrent apply.

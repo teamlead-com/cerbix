@@ -7,6 +7,7 @@ package dispatch
 
 import (
 	"context"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -14,9 +15,27 @@ import (
 // CheckJob carries a monitor snapshot to execute. The snapshot is taken at
 // publish time so workers need no database access.
 type CheckJob struct {
-	Monitor            domain.Monitor      `json:"monitor"`
-	ProtocolVersion    int                 `json:"protocol_version,omitempty"`
+	Monitor         domain.Monitor `json:"monitor"`
+	ProtocolVersion int            `json:"protocol_version,omitempty"`
+	// JobID and IssuedAt identify this dispatch. Both are stamped by the core when the job is
+	// materialized — the id and the instant come from the DATABASE in one statement — and an
+	// executor copies them onto the result it returns (`StampResult`). That is what makes
+	// `observed_at >= job_issued_at` a comparison between an executor's clock and the core's rather
+	// than between two readings of the same unknown clock. A credentialed job also carries the id
+	// inside its envelope, where it is AAD; this field exists because every job needs the identity,
+	// not only the ones with a secret.
+	JobID              string              `json:"job_id,omitempty"`
+	IssuedAt           time.Time           `json:"issued_at,omitempty"`
 	CredentialEnvelope *CredentialEnvelope `json:"credential_envelope,omitempty"`
+}
+
+// StampResult copies a job's identity onto the result that answers it. One owner, because three
+// executors publish results (the AMQP worker pool, the pull agent's batch, and the probe-error path)
+// and a stamp that each of them applied separately would drift the first time one of them was edited.
+func StampResult(hb domain.Heartbeat, job CheckJob) domain.Heartbeat {
+	hb.JobID = job.JobID
+	hb.JobIssuedAt = job.IssuedAt
+	return hb
 }
 
 // DeliveredJob is a CheckJob together with the carrier generation it actually arrived on.

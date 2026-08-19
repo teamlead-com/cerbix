@@ -1,6 +1,6 @@
 # func-org-deletion — Delete an organization (FR-019)
 
-Status: TODO (spec) · Owner rule: application (tenant lifecycle) / transport (RBAC) ·
+Status: IMPLEMENTED (FR-019 is DONE in `docs/status.md`; this document is the contract it was built to) · Owner rule: application (tenant lifecycle) / transport (RBAC) ·
 Decision: D-0151 · Iteration: iter-0112
 
 ## 1. Context & motivation

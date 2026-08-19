@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
@@ -31,6 +32,13 @@ type LeaderSession interface {
 	// RunServiceSlice works the service-reliability queue until the deadline, on the
 	// lock-owning connection. It reports whether it found anything to do.
 	RunServiceSlice(ctx context.Context, deadline time.Time) (bool, error)
+	// EvaluateServiceAlerts and EvaluateServiceBurnAlerts run the two FR-021 §16 alert slices on
+	// that same connection. They belong here rather than on Store because an evaluation writes
+	// the arming state that silences OTHER monitors' alerts and publishes pages: a deposed leader
+	// committing one behind its successor could tell people an alert ended while the real leader
+	// keeps it firing.
+	EvaluateServiceAlerts(ctx context.Context, cadence time.Duration) (store.ServiceAlertEvaluation, error)
+	EvaluateServiceBurnAlerts(ctx context.Context, cadence time.Duration) (store.ServiceBurnEvaluation, error)
 }
 
 // StoreAdapter widens *store.Store to the Store interface.
@@ -74,7 +82,7 @@ type Store interface {
 	EvaluateBurnAlerts(ctx context.Context) (fired, resolved int, err error)
 	EnqueueDueSLAReports(ctx context.Context) (int, error)
 	EvaluateRegionWorkerAlerts(ctx context.Context, live map[string]bool, graceSeconds int) (fired, resolved int, err error)
-	AdvanceEscalations(ctx context.Context) (fired int, err error)
+	AdvanceEscalations(ctx context.Context) (store.EscalationPass, error)
 	EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds int) error
 	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds int) error
 	EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds int) error
@@ -87,6 +95,9 @@ type Store interface {
 	DeleteExpiredAuthFlows(ctx context.Context) (int64, error)
 	PullQueueStats(ctx context.Context) ([]metrics.PullStat, error)
 	ServiceReliabilityStats(ctx context.Context) (metrics.ServiceReliabilityStat, error)
+	// ServiceAlertStats samples what an evaluation SLICE cannot see: the alerts that are open
+	// right now and the work waiting to be evaluated (FR-021 §16.6b).
+	ServiceAlertStats(ctx context.Context) (metrics.ServiceAlertStat, error)
 }
 
 // PullStatsSink receives the leader's per-region pull-queue gauge snapshot.
@@ -95,15 +106,30 @@ type PullStatsSink interface {
 	SetPullStats(stats []metrics.PullStat)
 }
 
-// ServiceStatsSink receives the leader's service-reliability snapshot and slice outcomes.
-// Implemented by *metrics.Registry. Optional: an installation with no services pays one
-// cheap sample per cadence and exports honest zeros.
+// ServiceStatsSink receives the leader's service-side telemetry: the reliability snapshot and
+// slice outcomes, and the FR-021 §16.6b alerting families. Implemented by *metrics.Registry.
+// Optional: an installation with no services pays one cheap sample per cadence and exports
+// honest zeros.
+//
+// ONE sink for both subsystems on purpose. They share a lifecycle — leader-only, published from
+// the same loop, forgotten by the same step-down clear — and a second injected sink would be a
+// second wiring to keep in step with it. It is also what keeps the alerting stall OFF the API's
+// readiness: nothing but the scheduler's leader loop ever holds this interface.
 type ServiceStatsSink interface {
 	SetServiceReliabilityStats(st metrics.ServiceReliabilityStat)
 	SetServiceWedged(wedged bool, reason string)
 	SetServiceFactMaintenance(ok bool, nowUnix int64)
 	ClearServiceReliabilityStats()
 	RecordServiceSlice(outcome string)
+	// The §16.6b evaluator families. Counters come from what a slice DID, the pass gauges from
+	// each successful pass, the stats from the out-of-band sample.
+	RecordServiceAlertEvaluations(signal, outcome string, n int)
+	RecordServiceAlertEmitted(signal, edge string, n int)
+	RecordServiceIncidents(action string, n int)
+	RecordEscalationSteps(subject string, n int)
+	SetServiceAlertPass(signal string, lastSuccessUnix int64, lagSeconds float64)
+	SetServiceAlertStats(st metrics.ServiceAlertStat)
+	SetServiceAlertStalled(signal string, stalled bool, reason string)
 }
 
 // LeaderStateSink records whether this process currently holds scheduler
@@ -170,6 +196,15 @@ const (
 	renotifyEvery = 15 * time.Second
 	// burnEvery is how often the leader evaluates SLO burn-rate alerts.
 	burnEvery = time.Minute
+	// serviceAlertEvery is the LIVE service signal's fixed cadence (FR-021 §16.3). It is passed
+	// to the evaluator rather than assumed by it, because the freshness lease is a multiple of
+	// this number: a leader that evaluated on one cadence and armed on another would either
+	// dis-arm a healthy evaluator or keep coverage armed after it stopped.
+	serviceAlertEvery = 30 * time.Second
+	// serviceBurnEvery is the SEALED service signal's cadence. It trails the seal watermark by
+	// construction (§16.4), so evaluating it faster than facts are sealed buys nothing; it shares
+	// the minute the monitor burn path already uses.
+	serviceBurnEvery = time.Minute
 	// reportEvery is how often the leader checks for due weekly SLA reports (the
 	// 7-day watermark gates the actual send).
 	reportEvery = time.Hour
@@ -243,12 +278,21 @@ type Scheduler struct {
 	pullMetrics            PullStatsSink
 	serviceMetrics         ServiceStatsSink
 	statsEvery             time.Duration // test override for the stats cadence
-	leaderState            LeaderStateSink
-	confirmCh              <-chan string      // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
-	configCh               <-chan struct{}    // execution-config changes (LISTEN monitor_config_changed) → force a snapshot reload
-	reconciler             *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
-	credentialEnvelopes    bool
-	secretResolution       SecretResolutionSink
+	// alertSuccess is when each alerting arm last SUCCEEDED, and it is what makes a persistently
+	// failing evaluator visible. Readiness cannot be derived from lag alone: a pass that rolled
+	// back reports no lag at all, so an arm erroring every cadence would keep the last successful
+	// pass's lag forever and read as healthy while every lease it should refresh expired.
+	alertSuccess   map[string]time.Time
+	alertSuccessMu sync.Mutex
+	// now is the clock, injectable so a readiness test can age a stall deterministically instead
+	// of sleeping through three cadences.
+	now                 func() time.Time
+	leaderState         LeaderStateSink
+	confirmCh           <-chan string      // monitor ids entering the confirmation phase (LISTEN monitor_confirm)
+	configCh            <-chan struct{}    // execution-config changes (LISTEN monitor_config_changed) → force a snapshot reload
+	reconciler          *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
+	credentialEnvelopes bool
+	secretResolution    SecretResolutionSink
 }
 
 // WithCredentialEnvelopes switches the scheduler to the decrypt-free snapshot plus
@@ -293,6 +337,8 @@ func New(store Store, dispatcher dispatch.Dispatcher, logger *slog.Logger) *Sche
 		retry:         5 * time.Second,
 		leaderKey:     advisoryLockKey,
 		retentionDays: defaultRetentionDays,
+		alertSuccess:  map[string]time.Time{},
+		now:           time.Now,
 	}
 }
 
@@ -390,6 +436,136 @@ func serviceWedgeReason(st metrics.ServiceReliabilityStat) (bool, string) {
 	return false, ""
 }
 
+// serviceAlertStallThreshold is §16.6b's readiness bound: an evaluation whose lag exceeds
+// `lease_multiplier × cadence` marks the SCHEDULER not-ready, because a stalled evaluator is
+// exactly the state in which delegation dis-arms and members resume paging — the system is
+// degraded, and reporting ready would hide it.
+//
+// The multiplier is the store's, not a second number: the lease the evaluator writes and the lag
+// readiness judges are the same claim about freshness read from two sides, and a bound that drifted
+// from the lease would either wedge a healthy leader or stay ready straight through a stall.
+func serviceAlertStallThreshold(cadence time.Duration) time.Duration {
+	return store.ServiceAlertLeaseMultiplier * cadence
+}
+
+// serviceAlertPass is one arm's result reduced to the §16.6b vocabulary, so both arms publish
+// through ONE function and cannot drift into two dialects of "ok".
+type serviceAlertPass struct {
+	signal  string
+	cadence time.Duration
+	lag     time.Duration
+	// ok, skipped and errors PARTITION the units the pass touched — a service for the live arm, a
+	// burn rule for the sealed one. `skipped` is where the burn arm's HOLDs land: a hold is a
+	// successful evaluation that cannot speak, which is neither an error nor an answer.
+	ok, skipped, errors int
+	onsets, closes      int
+	// FR-022: incidents this pass OPENED and RESOLVED by machine. Counted apart from the edges
+	// because they are not the same event — an onset for a service whose incident is already open
+	// announces and opens nothing, and that difference is the interesting one.
+	incidentsOpened, incidentsResolved int
+}
+
+// observeServiceAlertPass publishes ONE successful evaluation pass: the per-outcome counters, the
+// edges it enqueued, the freshness gauges, and the readiness verdict.
+//
+// All three outcomes are recorded every pass, zeros included, so the series exist from the first
+// healthy pass and an alert on `outcome="error"` does not have to survive a missing series first.
+func (s *Scheduler) observeServiceAlertPass(p serviceAlertPass) {
+	if s.serviceMetrics == nil {
+		return
+	}
+	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "ok", p.ok)
+	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "error", p.errors)
+	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "skipped", p.skipped)
+	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "onset", p.onsets)
+	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "close", p.closes)
+	s.serviceMetrics.RecordServiceIncidents("opened", p.incidentsOpened)
+	s.serviceMetrics.RecordServiceIncidents("resolved", p.incidentsResolved)
+	now := s.clock()
+	s.markAlertSuccess(p.signal, now)
+	s.serviceMetrics.SetServiceAlertPass(p.signal, now.Unix(), p.lag.Seconds())
+
+	threshold := serviceAlertStallThreshold(p.cadence)
+	if p.lag > threshold {
+		reason := fmt.Sprintf("service %s alert evaluation lagging %ds (bound %ds)",
+			p.signal, int(p.lag.Seconds()), int(threshold.Seconds()))
+		s.serviceMetrics.SetServiceAlertStalled(p.signal, true, reason)
+		s.logger.Warn("service_alert_evaluator_stalled", "signal", p.signal,
+			"lag_seconds", int(p.lag.Seconds()), "bound_seconds", int(threshold.Seconds()))
+		return
+	}
+	s.serviceMetrics.SetServiceAlertStalled(p.signal, false, "")
+}
+
+// recordServiceAlertArmError counts a whole pass that rolled back. The unit counters above measure
+// items, but a slice that failed evaluated NONE of them, and an arm erroring every cadence with no
+// series moving at all would be invisible in a family that only counts successes.
+//
+// It also decides readiness, which an earlier revision left to the success path alone. That was
+// wrong: lag is only measurable from a pass that READ the state, so an arm erroring every cadence
+// kept the last successful pass's lag forever and read as healthy — while every lease it should
+// have refreshed expired and every service it covers dis-armed. Invariant 91 asks for the opposite:
+// a stalled evaluator marks the scheduler not-ready.
+//
+// The measure is therefore the AGE of the last success, not the last reported lag. With no success
+// yet, it ages from when this leadership began — a process that has just acquired the lock is not
+// stalled, it is starting.
+func (s *Scheduler) recordServiceAlertArmError(signal string, cadence time.Duration) {
+	if s.serviceMetrics == nil {
+		return
+	}
+	s.serviceMetrics.RecordServiceAlertEvaluations(signal, "error", 1)
+
+	age := s.sinceAlertSuccess(signal, s.clock())
+	threshold := serviceAlertStallThreshold(cadence)
+	if age <= threshold {
+		return
+	}
+	reason := fmt.Sprintf("service %s alert evaluation failing for %ds (bound %ds)",
+		signal, int(age.Seconds()), int(threshold.Seconds()))
+	s.serviceMetrics.SetServiceAlertStalled(signal, true, reason)
+	s.logger.Warn("service_alert_evaluator_failing", "signal", signal,
+		"age_seconds", int(age.Seconds()), "bound_seconds", int(threshold.Seconds()))
+}
+
+// clock is the injectable now, so a readiness test can age a stall instead of sleeping.
+func (s *Scheduler) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// markAlertSuccess records that an arm completed a pass, and startAlertBaseline records that this
+// leadership began — the point failures age from before any pass has succeeded.
+func (s *Scheduler) markAlertSuccess(signal string, at time.Time) {
+	s.alertSuccessMu.Lock()
+	defer s.alertSuccessMu.Unlock()
+	if s.alertSuccess == nil {
+		s.alertSuccess = map[string]time.Time{}
+	}
+	s.alertSuccess[signal] = at
+}
+
+func (s *Scheduler) startAlertBaseline(at time.Time) {
+	for _, signal := range []string{"health", "burn"} {
+		s.markAlertSuccess(signal, at)
+	}
+}
+
+func (s *Scheduler) sinceAlertSuccess(signal string, now time.Time) time.Duration {
+	s.alertSuccessMu.Lock()
+	defer s.alertSuccessMu.Unlock()
+	last, ok := s.alertSuccess[signal]
+	if !ok {
+		// No baseline at all: treat it as starting now rather than as infinitely stale, so a
+		// process that has not yet run a cycle cannot declare itself wedged.
+		s.alertSuccess[signal] = now
+		return 0
+	}
+	return now.Sub(last)
+}
+
 // serviceStatsLoop samples the bounded service-reliability snapshot on its own cadence and
 // derives the wedge verdict, isolated from dispatch.
 //
@@ -413,6 +589,22 @@ func (s *Scheduler) serviceStatsLoop(ctx context.Context) {
 			s.serviceMetrics.SetServiceReliabilityStats(st)
 			wedged, reason := serviceWedgeReason(st)
 			s.serviceMetrics.SetServiceWedged(wedged, reason)
+		})
+		// The alerting sample (FR-021 §16.6b) rides the same cadence but its OWN timeout and its
+		// own verdict: it answers what a slice cannot see (open episodes, evaluation backlog), and
+		// failing to read it is not evidence that reliability work is wedged. It leaves the
+		// previous gauges standing rather than publishing zeros — "we could not look" and "there
+		// is nothing open" are the two answers this feature must never confuse.
+		withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+			st, err := s.store.ServiceAlertStats(c)
+			if err != nil {
+				if ctx.Err() != nil {
+					return // shutting down: the join + step-down clear own what follows
+				}
+				s.logger.Warn("service_alert_stats_failed", "error", err.Error())
+				return
+			}
+			s.serviceMetrics.SetServiceAlertStats(st)
 		})
 	}
 	sample()
@@ -506,6 +698,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 		if s.serviceMetrics != nil {
 			s.serviceMetrics.SetServiceWedged(true, "service reliability state unknown (no sample yet)")
 		}
+		// The alerting arms age their failures from HERE. A process that has just acquired the
+		// lock has not stalled, it has started, and a baseline taken at the epoch would make it
+		// declare itself not-ready before its first cadence.
+		s.startAlertBaseline(s.clock())
 		s.setLeaderState(true)
 		lost := s.lead(ctx, session)
 		session.Release()
@@ -577,7 +773,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 	// signal — a recovery stops the signals, so acceleration decays on its own;
 	// the snapshot refresh prunes it authoritatively).
 	confirmFast := map[string]time.Time{}
-	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk, lastServiceSlice time.Time
+	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk, lastServiceSlice, lastServiceAlert, lastServiceBurn time.Time
 	ticker := time.NewTicker(s.tick)
 	defer ticker.Stop()
 	for {
@@ -728,6 +924,64 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					}
 				})
 			}
+			// FR-021 §16.3/§16.4. Both arms are LEADER-ONLY and session-fenced: `session != nil`
+			// is the same guard the service slices use, because an evaluation writes the arming
+			// state that silences other people's alerts, and a deposed leader must not.
+			if session != nil && (lastServiceAlert.IsZero() || now.Sub(lastServiceAlert) >= serviceAlertEvery) {
+				lastServiceAlert = now
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					ev, err := session.EvaluateServiceAlerts(c, serviceAlertEvery)
+					if err != nil {
+						s.recordServiceAlertArmError(string(domain.ServiceSignalHealth), serviceAlertEvery)
+						s.logger.Error("service_alert_eval_failed", "error", err.Error())
+						return
+					}
+					// The live arm's unit is the SERVICE: `Evaluated` are the ones that got a
+					// verdict, `Errors` the ones whose evaluation dis-armed them. It has no
+					// `skipped` — nothing in the live path succeeds without being able to speak.
+					s.observeServiceAlertPass(serviceAlertPass{
+						signal: string(domain.ServiceSignalHealth), cadence: serviceAlertEvery,
+						lag: ev.Lag, ok: ev.Evaluated, errors: ev.Errors,
+						onsets: ev.Onsets, closes: ev.Closes,
+						incidentsOpened: ev.IncidentsOpened, incidentsResolved: ev.IncidentsResolved,
+					})
+					// Logged whenever anything happened OR anything is behind: a stalled evaluator
+					// has to read as lag rather than as an absence of alerts, which is
+					// indistinguishable from "nothing is wrong" (§16.7).
+					if ev.Onsets > 0 || ev.Closes > 0 || ev.Errors > 0 || ev.Lag > serviceAlertEvery {
+						s.logger.Info("service_alerts_evaluated", "evaluated", ev.Evaluated,
+							"onsets", ev.Onsets, "closes", ev.Closes, "errors", ev.Errors,
+							"incidents_opened", ev.IncidentsOpened, "incidents_resolved", ev.IncidentsResolved,
+							"lag_seconds", int(ev.Lag.Seconds()))
+					}
+				})
+			}
+			if session != nil && (lastServiceBurn.IsZero() || now.Sub(lastServiceBurn) >= serviceBurnEvery) {
+				lastServiceBurn = now
+				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+					ev, err := session.EvaluateServiceBurnAlerts(c, serviceBurnEvery)
+					if err != nil {
+						s.recordServiceAlertArmError(string(domain.ServiceSignalBurn), serviceBurnEvery)
+						s.logger.Error("service_burn_eval_failed", "error", err.Error())
+						return
+					}
+					// The burn arm's unit is the RULE (`Rules` is every rule that got a verdict,
+					// `Holds` the subset that could not be quoted), except for `Errors`, which the
+					// evaluator counts per TARGET because a target that cannot be read dis-arms all
+					// of its rules at once and names none of them.
+					s.observeServiceAlertPass(serviceAlertPass{
+						signal: string(domain.ServiceSignalBurn), cadence: serviceBurnEvery,
+						lag: ev.Lag, ok: ev.Rules - ev.Holds, skipped: ev.Holds, errors: ev.Errors,
+						onsets: ev.Onsets, closes: ev.Closes,
+					})
+					if ev.Onsets > 0 || ev.Closes > 0 || ev.Holds > 0 || ev.Errors > 0 || ev.Lag > serviceBurnEvery {
+						s.logger.Info("service_burn_alerts_evaluated", "targets", ev.Targets,
+							"rules", ev.Rules, "onsets", ev.Onsets, "closes", ev.Closes,
+							"holds", ev.Holds, "errors", ev.Errors,
+							"lag_seconds", int(ev.Lag.Seconds()))
+					}
+				})
+			}
 			if lastReport.IsZero() || now.Sub(lastReport) >= reportEvery {
 				lastReport = now
 				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
@@ -770,10 +1024,17 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			if lastEscalation.IsZero() || now.Sub(lastEscalation) >= escalationEvery {
 				lastEscalation = now
 				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
-					if n, err := s.store.AdvanceEscalations(c); err != nil {
+					if p, err := s.store.AdvanceEscalations(c); err != nil {
 						s.logger.Error("advance_escalations_failed", "error", err.Error())
-					} else if n > 0 {
-						s.logger.Info("escalations_advanced", "fired", n)
+					} else if p.Total() > 0 {
+						// Split by SUBJECT (FR-023): "12 steps fired" stops being an answer the moment
+						// two kinds of thing can page, and the interesting question at 3am is which.
+						s.logger.Info("escalations_advanced", "fired", p.Total(),
+							"monitor_steps", p.MonitorSteps, "service_steps", p.ServiceSteps)
+						if s.serviceMetrics != nil {
+							s.serviceMetrics.RecordEscalationSteps("monitor", p.MonitorSteps)
+							s.serviceMetrics.RecordEscalationSteps("service", p.ServiceSteps)
+						}
 					}
 				})
 			}

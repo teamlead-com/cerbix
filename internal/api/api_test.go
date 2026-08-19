@@ -41,16 +41,34 @@ type fakeStore struct {
 	rep *fakeReporting
 	// deleteServiceErr injects a store-level delete failure (e.g. the §14.2 file pin).
 	deleteServiceErr error
+	// FR-021 phase-5 fakes: which monitors a service is covering, and an injected lookup failure.
+	delegatedMonitors map[string][]store.DelegationOwner
+	delegationErr     error
 	// FR-021 phase-3 fakes: the impact graph + correlation reads.
 	graphs               map[string]*fakeGraph
 	graphErr             error
 	impacts              map[string][]domain.ServiceImpactLink
 	impactsErr           error
+	memberSnapshots      map[string][]domain.IncidentMember // FR-022: present iff the key exists
+	memberSnapshotErr    error
 	graphActors          []store.GraphActor
 	serviceSeq           int
 	neighbourHealth      map[string]domain.ServiceHealthNow
 	neighbourHealthErr   error
 	neighbourHealthCalls int
+	// FR-021 phase-4 fakes: the status-page projection, the page CAS counter and the strips.
+	projections            map[string]store.ServiceStatusProjection
+	serviceDaily           map[string][]store.ServiceDayPoint
+	serviceUptime          map[string]*float64
+	serviceWithheld        map[string]string
+	monitorUptime          map[string]float64
+	pageGeneration         map[string]int64
+	projectionCalls        int
+	monitorProjectionCalls int
+	pageIncidentCalls      int
+	pageMaintenanceCalls   int
+	timelineCalls          int
+	postmortemCalls        int
 	// previews and sealedThrough model the retroactive-maintenance gate.
 	previews           map[string]store.MaintenancePreview
 	sealedThrough      time.Time
@@ -110,6 +128,14 @@ type fakeStore struct {
 	secretRefs     map[string]int                    // "projectID/name" → UI-managed ref count
 	secretFileRefs map[string]int                    // "projectID/name" → file-managed ref count
 	secretSeq      int
+	// project-scoped SLO objective (iter-0155)
+	projectTargets map[string]domain.SLATarget
+	// global audit (iter-0155)
+	globalAudit    []domain.AuditEntry
+	globalAuditErr error
+	// FR-023: policies belonging to ANOTHER project, and how many escalation-policy writes landed.
+	foreignPolicies        map[string]bool
+	escalationPolicyWrites int
 }
 
 // fakeSecret backs the project secret inventory in memory. The value is kept
@@ -123,28 +149,34 @@ type fakeSecret struct {
 
 func seededStore() *fakeStore {
 	fs := &fakeStore{
-		orgs:        map[string]domain.Organization{},
-		projects:    map[string]domain.Project{},
-		users:       map[string]domain.User{},
-		byOrg:       map[string][]domain.Project{},
-		userOrgs:    map[string][]domain.Organization{},
-		members:     map[string][]domain.Membership{},
-		monitors:    map[string]domain.Monitor{},
-		passwords:   map[string]string{},
-		slaTargets:  map[string]domain.SLATarget{},
-		slaReports:  map[string]bool{},
-		maintenance: map[string]domain.MaintenanceWindow{},
-		incidents:   map[string]domain.Incident{},
-		incUpdates:  map[string][]domain.IncidentUpdate{},
-		postmortems: map[string]domain.Postmortem{},
-		pages:       map[string]domain.StatusPage{},
-		components:  map[string]domain.Component{},
-		apiTokens:   map[string]domain.ApiToken{},
-		webhooks:    map[string]domain.Webhook{},
-		channels:    map[string]domain.NotificationChannel{},
-		monLinks:    map[string][]string{},
-		deadOutbox:  map[string]domain.OutboxEventView{},
-		subscribers: map[string]domain.Subscriber{},
+		orgs:            map[string]domain.Organization{},
+		projects:        map[string]domain.Project{},
+		users:           map[string]domain.User{},
+		byOrg:           map[string][]domain.Project{},
+		userOrgs:        map[string][]domain.Organization{},
+		members:         map[string][]domain.Membership{},
+		monitors:        map[string]domain.Monitor{},
+		passwords:       map[string]string{},
+		slaTargets:      map[string]domain.SLATarget{},
+		slaReports:      map[string]bool{},
+		maintenance:     map[string]domain.MaintenanceWindow{},
+		incidents:       map[string]domain.Incident{},
+		incUpdates:      map[string][]domain.IncidentUpdate{},
+		postmortems:     map[string]domain.Postmortem{},
+		pages:           map[string]domain.StatusPage{},
+		components:      map[string]domain.Component{},
+		projections:     map[string]store.ServiceStatusProjection{},
+		serviceDaily:    map[string][]store.ServiceDayPoint{},
+		serviceUptime:   map[string]*float64{},
+		serviceWithheld: map[string]string{},
+		monitorUptime:   map[string]float64{},
+		pageGeneration:  map[string]int64{},
+		apiTokens:       map[string]domain.ApiToken{},
+		webhooks:        map[string]domain.Webhook{},
+		channels:        map[string]domain.NotificationChannel{},
+		monLinks:        map[string][]string{},
+		deadOutbox:      map[string]domain.OutboxEventView{},
+		subscribers:     map[string]domain.Subscriber{},
 	}
 	o1 := domain.Organization{ID: "o1", Slug: "acme", Name: "Acme"}
 	o2 := domain.Organization{ID: "o2", Slug: "globex", Name: "Globex"}
@@ -168,7 +200,9 @@ func seededStore() *fakeStore {
 	fs.pages["sp1"] = domain.StatusPage{ID: "sp1", OrgID: "o1", Slug: "acme-status", Title: "Acme", Visibility: domain.VisibilityPublic}
 	fs.pages["sp2"] = domain.StatusPage{ID: "sp2", OrgID: "o1", Slug: "internal-status", Title: "Internal", Visibility: domain.VisibilityInternal}
 	fs.pages["sp3"] = domain.StatusPage{ID: "sp3", OrgID: "o1", Slug: "secret-status", Title: "Secret", Visibility: domain.VisibilityUnlisted, UnlistedToken: "tok123"}
-	fs.components["c1"] = domain.Component{ID: "c1", StatusPageID: "sp1", Name: "API", MonitorID: "mon1"}
+	// A migrated row: the backfill gave every monitor-bound component source='monitor' (00081).
+	fs.components["c1"] = domain.Component{ID: "c1", StatusPageID: "sp1", OrgID: "o1", Name: "API",
+		Source: domain.ComponentSourceMonitor, SourceProject: "p1", MonitorID: "mon1"}
 	fs.apiTokens["at1"] = domain.ApiToken{ID: "at1", OrgID: "o1", Name: "ci", Role: domain.RoleEditor}
 	fs.webhooks["wh1"] = domain.Webhook{ID: "wh1", OrgID: "o1", URL: "https://hook.example/x", Secret: "s", Enabled: true}
 	fs.channels["nc1"] = domain.NotificationChannel{ID: "nc1", ProjectID: "p1", Type: domain.ChannelWebhook, Name: "ops", Config: map[string]string{"url": "https://hook.example/n"}, Enabled: true}
@@ -1030,8 +1064,322 @@ func (f *fakeStore) ListStatusPagesByOrg(_ context.Context, orgID string) ([]dom
 }
 func (f *fakeStore) CreateComponent(_ context.Context, c domain.Component) (domain.Component, error) {
 	c.ID = "c-new"
+	// Mirrors the store: the source is DERIVED, never taken from the caller, and a service
+	// binding wins over a leftover monitor one.
+	switch {
+	case c.ServiceID != "":
+		c.Source = domain.ComponentSourceService
+	case c.MonitorID != "":
+		c.Source = domain.ComponentSourceMonitor
+	default:
+		c.Source = domain.ComponentSourceManual
+	}
+	if sp, ok := f.pages[c.StatusPageID]; ok {
+		c.OrgID = sp.OrgID
+	}
 	f.components[c.ID] = c
 	return c, nil
+}
+
+// ── FR-021 phase 4: the status-page projection and the composite lifecycle ────────────────
+
+// The page's incident/maintenance context, batched. Each carries a call counter, because the
+// difference between "batched" and "looped" is invisible in the payload ([318] P1-1).
+func (f *fakeStore) IncidentsForPage(ctx context.Context, projectIDs []string, since time.Time) (store.PageIncidents, error) {
+	f.pageIncidentCalls++
+	out := store.PageIncidents{Active: []domain.Incident{}, Recent: []domain.Incident{}}
+	want := map[string]bool{}
+	for _, id := range projectIDs {
+		want[id] = true
+	}
+	for _, in := range f.incidents {
+		if !want[in.ProjectID] {
+			continue
+		}
+		if in.Status != domain.IncidentResolved {
+			out.Active = append(out.Active, in)
+			continue
+		}
+		if in.ResolvedAt != nil && in.ResolvedAt.After(since) {
+			out.Recent = append(out.Recent, in)
+		}
+	}
+	sort.Slice(out.Active, func(i, j int) bool { return out.Active[i].ID < out.Active[j].ID })
+	sort.Slice(out.Recent, func(i, j int) bool { return out.Recent[i].ID < out.Recent[j].ID })
+	return out, nil
+}
+
+func (f *fakeStore) MaintenanceForPage(ctx context.Context, projectIDs []string, now time.Time) ([]domain.MaintenanceWindow, error) {
+	f.pageMaintenanceCalls++
+	want := map[string]bool{}
+	for _, id := range projectIDs {
+		want[id] = true
+	}
+	out := []domain.MaintenanceWindow{}
+	for _, mw := range f.maintenance {
+		if want[mw.ProjectID] && mw.ArchivedAt == nil && mw.EndsAt.After(now) {
+			out = append(out, mw)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartsAt.Before(out[j].StartsAt) })
+	return out, nil
+}
+
+func (f *fakeStore) IncidentTimelines(ctx context.Context, incidentIDs []string) (map[string][]domain.IncidentUpdate, error) {
+	f.timelineCalls++
+	out := map[string][]domain.IncidentUpdate{}
+	for _, id := range incidentIDs {
+		if ups, ok := f.incUpdates[id]; ok {
+			out[id] = ups
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) PostmortemsForIncidents(ctx context.Context, incidentIDs []string) (map[string]domain.Postmortem, error) {
+	f.postmortemCalls++
+	out := map[string]domain.Postmortem{}
+	for _, id := range incidentIDs {
+		if pm, ok := f.postmortems[id]; ok {
+			out[id] = pm
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpdateComponent(_ context.Context, orgID string, c domain.Component) (domain.Component, error) {
+	cur, ok := f.components[c.ID]
+	if !ok || cur.OrgID != orgID {
+		return domain.Component{}, store.ErrNotFound
+	}
+	cur.Name, cur.Description, cur.GroupName, cur.Position = c.Name, c.Description, c.GroupName, c.Position
+	if cur.Source == domain.ComponentSourceManual {
+		cur.ManualStatus = c.ManualStatus
+	}
+	cur.Revision++
+	f.components[c.ID] = cur
+	f.pageGeneration[cur.StatusPageID]++
+	return cur, nil
+}
+
+// ServicePageProjections is ONE call for the whole page, across projects. The call counter is what
+// pins that: a per-component or per-project loop would satisfy every behavioural assertion.
+func (f *fakeStore) ServicePageProjections(_ context.Context, refs []store.ServiceRef, withHistory bool) (map[string]store.ServicePageProjection, error) {
+	f.projectionCalls++
+	out := map[string]store.ServicePageProjection{}
+	for _, ref := range refs {
+		p, ok := f.projections[ref.ServiceID]
+		if !ok {
+			continue // absent on purpose: invariant 71a's unreadable-service case
+		}
+		page := store.ServicePageProjection{
+			ProjectID: ref.ProjectID, ServiceID: ref.ServiceID,
+			SLI: p.SLI, Excluded: p.Excluded, Reason: p.Reason,
+			SealedThrough: p.SealedThrough, SealedInWindow: p.SealedInWindow,
+			Uptime: f.serviceUptime[ref.ServiceID], UptimeWithheld: f.serviceWithheld[ref.ServiceID],
+		}
+		if withHistory {
+			page.Daily = f.serviceDaily[ref.ServiceID]
+		}
+		out[ref.ServiceID] = page
+	}
+	return out, nil
+}
+
+// MonitorPageProjections is the batched monitor half, with its own call counter.
+func (f *fakeStore) MonitorPageProjections(_ context.Context, monitorIDs []string, since time.Time, withHistory bool) (map[string]store.MonitorPageProjection, error) {
+	f.monitorProjectionCalls++
+	out := map[string]store.MonitorPageProjection{}
+	for _, id := range monitorIDs {
+		m, ok := f.monitors[id]
+		if !ok {
+			continue // a deleted monitor simply does not come back
+		}
+		p := store.MonitorPageProjection{MonitorID: id, ProjectID: m.ProjectID, Status: m.Status}
+		if withHistory {
+			// The same two days and the same aggregate the per-monitor fakes served, so the
+			// batching change does not silently alter what the render tests assert.
+			p.Daily = []store.DailyAvailability{
+				{Up: 90, Total: 100, UptimePercent: 90},
+				{Up: 100, Total: 100, UptimePercent: 100},
+			}
+			u := 95.0
+			if custom, ok := f.monitorUptime[id]; ok {
+				u = custom
+			}
+			p.Uptime = &u
+		}
+		out[id] = p
+	}
+	return out, nil
+}
+
+func (f *fakeStore) PreviewComponentConversion(_ context.Context, orgID, componentID string, target store.ComponentConversionTarget) (store.ComponentConversionPlan, error) {
+	cur, ok := f.components[componentID]
+	if !ok || cur.OrgID != orgID {
+		return store.ComponentConversionPlan{}, store.ErrNotFound
+	}
+	proposed := cur
+	proposed.Source = target.Source
+	switch target.Source {
+	case domain.ComponentSourceService:
+		if target.ServiceID != "" {
+			proposed.ServiceID = target.ServiceID
+		}
+		if proposed.ServiceID == "" {
+			return store.ComponentConversionPlan{}, store.ErrComponentConversionTarget
+		}
+	case domain.ComponentSourceMonitor:
+		if target.MonitorID != "" {
+			proposed.MonitorID = target.MonitorID
+		}
+		if proposed.MonitorID == "" {
+			return store.ComponentConversionPlan{}, store.ErrComponentConversionTarget
+		}
+	case domain.ComponentSourceManual:
+		if target.ManualStatus != "" {
+			proposed.ManualStatus = target.ManualStatus
+		}
+	default:
+		return store.ComponentConversionPlan{}, store.ErrComponentConversionTarget
+	}
+	return store.ComponentConversionPlan{
+		Current: cur, Proposed: proposed, Revision: cur.Revision,
+		PageGeneration: f.pageGeneration[cur.StatusPageID],
+		NoOp:           cur.Source == proposed.Source && cur.ServiceID == proposed.ServiceID && cur.MonitorID == proposed.MonitorID && cur.ManualStatus == proposed.ManualStatus,
+	}, nil
+}
+
+func (f *fakeStore) ConfirmComponentConversion(ctx context.Context, orgID, componentID string, target store.ComponentConversionTarget, revision, pageGeneration int64, actor store.GraphActor) (domain.Component, error) {
+	plan, err := f.PreviewComponentConversion(ctx, orgID, componentID, target)
+	if err != nil {
+		return domain.Component{}, err
+	}
+	if plan.Revision != revision || plan.PageGeneration != pageGeneration {
+		return domain.Component{}, store.ErrComponentConversionStale
+	}
+	if plan.NoOp {
+		return plan.Current, nil
+	}
+	next := plan.Proposed
+	next.Revision++
+	f.components[componentID] = next
+	f.pageGeneration[next.StatusPageID]++
+	return next, nil
+}
+
+func (f *fakeStore) SetMonitorSuccessor(_ context.Context, projectID, monitorID, serviceID string, actor store.GraphActor) (domain.Monitor, error) {
+	m, ok := f.monitors[monitorID]
+	if !ok || m.ProjectID != projectID {
+		return domain.Monitor{}, store.ErrNotFound
+	}
+	if m.Type != domain.MonitorComposite {
+		return domain.Monitor{}, store.ErrNotAComposite
+	}
+	if serviceID != "" {
+		if fs, ok := f.serviceStore()[serviceID]; !ok || fs.svc.ProjectID != projectID {
+			return domain.Monitor{}, store.ErrSuccessorNotAService
+		}
+	}
+	m.SupersededByServiceID = serviceID
+	f.monitors[monitorID] = m
+	return m, nil
+}
+
+func (f *fakeStore) RetireMonitor(_ context.Context, projectID, monitorID string, actor store.GraphActor) (domain.Monitor, error) {
+	m, ok := f.monitors[monitorID]
+	if !ok || m.ProjectID != projectID {
+		return domain.Monitor{}, store.ErrNotFound
+	}
+	if m.Type != domain.MonitorComposite {
+		return domain.Monitor{}, store.ErrNotAComposite
+	}
+	if m.RetiredAt != nil {
+		return domain.Monitor{}, store.ErrMonitorAlreadyRetired
+	}
+	now := time.Now()
+	m.RetiredAt, m.Enabled, m.Status = &now, false, domain.StatusPending
+	m.ExecutionRevision++
+	m.StateSequence++
+	f.monitors[monitorID] = m
+	return m, nil
+}
+
+func (f *fakeStore) ReactivateMonitor(_ context.Context, projectID, monitorID string, actor store.GraphActor) (domain.Monitor, error) {
+	m, ok := f.monitors[monitorID]
+	if !ok || m.ProjectID != projectID {
+		return domain.Monitor{}, store.ErrNotFound
+	}
+	if m.Type != domain.MonitorComposite {
+		return domain.Monitor{}, store.ErrNotAComposite
+	}
+	if m.RetiredAt == nil {
+		return domain.Monitor{}, store.ErrMonitorNotRetired
+	}
+	m.RetiredAt, m.Enabled, m.Status = nil, true, domain.StatusPending
+	m.ExecutionRevision++
+	m.StateSequence++
+	f.monitors[monitorID] = m
+	return m, nil
+}
+
+func (f *fakeStore) ConvertCompositeToService(_ context.Context, projectID, monitorID string, sli []string, actor store.GraphActor) (store.CompositeConversion, error) {
+	m, ok := f.monitors[monitorID]
+	if !ok || m.ProjectID != projectID {
+		return store.CompositeConversion{}, store.ErrNotFound
+	}
+	if m.Type != domain.MonitorComposite {
+		return store.CompositeConversion{}, store.ErrCompositeNotComposite
+	}
+	// Mirrors the store: the SLI is the operator's statement and every member must be a live child.
+	if len(sli) == 0 && m.SupersededByServiceID == "" {
+		return store.CompositeConversion{}, store.ErrCompositeSLIRequired
+	}
+	children := map[string]bool{}
+	for _, id := range m.ChildIDs() {
+		children[id] = true
+	}
+	for _, id := range sli {
+		if !children[id] {
+			return store.CompositeConversion{}, store.ErrCompositeSLINotAChild
+		}
+	}
+	if m.SupersededByServiceID != "" {
+		fs, ok := f.serviceStore()[m.SupersededByServiceID]
+		if !ok {
+			return store.CompositeConversion{}, store.ErrNotFound
+		}
+		return store.CompositeConversion{Service: fs.svc, Monitor: m, AlreadyConverted: true}, nil
+	}
+	slug := m.Slug
+	if slug == "" {
+		slug = "converted"
+	}
+	for _, existing := range f.serviceStore() {
+		if existing.svc.ProjectID == projectID && existing.svc.Slug == slug {
+			return store.CompositeConversion{}, store.ErrServiceSlugTaken
+		}
+	}
+	f.serviceSeq++
+	svc := domain.Service{
+		ID:        fmt.Sprintf("00000000-0000-4000-8000-%012d", f.serviceSeq),
+		ProjectID: projectID, Slug: slug, Name: m.Name,
+	}
+	f.serviceStore()[svc.ID] = &fakeService{svc: svc}
+	m.SupersededByServiceID = svc.ID
+	f.monitors[monitorID] = m
+	return store.CompositeConversion{Service: svc, Monitor: m}, nil
+}
+
+func (f *fakeStore) ListMonitorsSupersededBy(_ context.Context, projectID, serviceID string) ([]domain.Monitor, error) {
+	out := []domain.Monitor{}
+	for _, m := range f.monitors {
+		if m.ProjectID == projectID && m.SupersededByServiceID == serviceID {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 func (f *fakeStore) ListComponentsByPage(_ context.Context, pageID string) ([]domain.Component, error) {
 	var out []domain.Component
@@ -1847,6 +2195,44 @@ func (f *fakeStore) ListAuditByOrg(_ context.Context, orgID string, limit int) (
 	return out, nil
 }
 
+func (f *fakeStore) DeleteProjectSLATarget(_ context.Context, projectID, window string) error {
+	key := projectID + "|" + window
+	if _, ok := f.projectTargets[key]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.projectTargets, key)
+	return nil
+}
+
+func (f *fakeStore) GetProjectSLATarget(_ context.Context, projectID, window string) (domain.SLATarget, error) {
+	if t, ok := f.projectTargets[projectID+"|"+window]; ok {
+		return t, nil
+	}
+	return domain.SLATarget{}, store.ErrNotFound
+}
+
+func (f *fakeStore) UpsertProjectSLATarget(_ context.Context, projectID, window string, objective float64) (domain.SLATarget, error) {
+	if f.projectTargets == nil {
+		f.projectTargets = map[string]domain.SLATarget{}
+	}
+	t := domain.SLATarget{ProjectID: projectID, Window: window, Objective: objective}
+	f.projectTargets[projectID+"|"+window] = t
+	return t, nil
+}
+
+func (f *fakeStore) ListGlobalAudit(_ context.Context, limit int) ([]domain.AuditEntry, error) {
+	if f.globalAuditErr != nil {
+		return nil, f.globalAuditErr
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if len(f.globalAudit) > limit {
+		return f.globalAudit[:limit], nil
+	}
+	return f.globalAudit, nil
+}
+
 func (f *fakeStore) totpState() map[string]struct {
 	secret  string
 	enabled bool
@@ -2065,6 +2451,34 @@ type fakeService struct {
 	rev    *domain.DefinitionRevision
 	epoch  *domain.EvaluationEpoch
 	detail store.ServiceDetail
+
+	// FR-021 phase-5 alerting state (§16.6a). `alerting` is nil until something declares one, so
+	// the fake reproduces the SCHEMA defaults rather than a zero struct: an undeclared service
+	// pages for `down` only, not for unknown, confirmed over two evaluations. A zero value would
+	// have been confirm_evaluations=0 — an invalid policy — and every merge assertion below would
+	// then have passed for the wrong reason.
+	alerting    *domain.ServiceAlertPolicy
+	fileManaged bool
+	// burnTargets is keyed by window name. A window with no objective is absent, because the
+	// real store answers ErrNotFound for a burn write against a target nobody declared.
+	burnTargets map[string]*fakeBurnTarget
+	// alertWrites / burnWrites count writes that were actually ATTEMPTED against the store, so a
+	// test can assert that a refusal wrote nothing rather than only that it returned a status.
+	alertWrites int
+	burnWrites  int
+	alertActors []store.AlertActor
+}
+
+type fakeBurnTarget struct {
+	enabled bool
+	rules   []domain.BurnRule
+}
+
+func (fs *fakeService) alertPolicy() domain.ServiceAlertPolicy {
+	if fs.alerting == nil {
+		return domain.DefaultServiceAlertPolicy()
+	}
+	return *fs.alerting
 }
 
 func (f *fakeStore) serviceStore() map[string]*fakeService {
@@ -2238,6 +2652,144 @@ func (f *fakeStore) UpsertServiceSLATarget(_ context.Context, projectID, service
 	return nil
 }
 
+// ── FR-021 phase 5 fakes: the alerting-ownership write surface (§16.6a) ─────
+//
+// These mirror the real store's REFUSALS, in its order, so the HTTP tests are not run against a
+// mock that agrees with whatever it is told: a foreign or unknown id is ErrNotFound before
+// anything else is looked at, a file-managed service is ErrServiceManagedByFile, and the ONE
+// domain validator decides what is storable. `UpdateServiceAlertPolicy` returns the CANONICAL
+// policy it stored, which is what lets the handler echo the stored value rather than the request.
+
+func (f *fakeStore) ServiceAlertPolicy(_ context.Context, projectID, serviceID string) (domain.ServiceAlertPolicy, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return domain.ServiceAlertPolicy{}, store.ErrNotFound
+	}
+	return fs.alertPolicy(), nil
+}
+
+// The fake mirrors the real read's SHAPE, not its arming logic: the HTTP layer only passes it
+// through, and the agreement between a badge and the delivery gate is pinned where it lives, against
+// a real database.
+// delegatedMonitors lets a test say "this monitor's live alerts are covered by that service", which
+// is the only thing the HTTP layer does with the answer — the arming itself is pinned against a real
+// database, where it lives.
+func (f *fakeStore) MonitorDelegation(
+	_ context.Context, monitorID, projectID string,
+) (store.MonitorDelegation, error) {
+	if f.delegationErr != nil {
+		return store.MonitorDelegation{}, f.delegationErr
+	}
+	out := store.MonitorDelegation{
+		Live: store.DelegationVerdict{FailOpenReason: "no_active_owner"},
+		Burn: store.DelegationVerdict{FailOpenReason: "no_active_owner"},
+	}
+	if owners, ok := f.delegatedMonitors[monitorID]; ok {
+		out.Live = store.DelegationVerdict{Owners: owners}
+	}
+	_ = projectID
+	return out, nil
+}
+
+func (f *fakeStore) ServiceAlertingState(
+	_ context.Context, projectID, serviceID string,
+) (store.ServiceAlertingState, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return store.ServiceAlertingState{}, store.ErrNotFound
+	}
+	p := fs.alertPolicy()
+	live := store.ServiceSignalState{Armed: p.OwnsPaging}
+	if !p.OwnsPaging {
+		live.Reason = store.AlertReasonNotOwned
+	}
+	return store.ServiceAlertingState{Live: live, Burn: live}, nil
+}
+
+func (f *fakeStore) UpdateServiceAlertPolicy(
+	_ context.Context, projectID, serviceID string, patch store.ServiceAlertPolicyPatch,
+	actor store.AlertActor,
+) (domain.ServiceAlertPolicy, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return domain.ServiceAlertPolicy{}, store.ErrNotFound
+	}
+	if fs.fileManaged {
+		return domain.ServiceAlertPolicy{}, store.ErrServiceManagedByFile
+	}
+	// The MERGE is the store's, and the fake mirrors that: it merges onto what it holds, so an
+	// HTTP test asserting "an omitted field is unchanged" is asserting the real contract rather
+	// than the handler's own arithmetic.
+	next := patch.Merged(fs.alertPolicy()).Canonical()
+	if err := next.Validate(); err != nil {
+		return domain.ServiceAlertPolicy{}, err
+	}
+	fs.alertWrites++
+	fs.alertActors = append(fs.alertActors, actor)
+	fs.alerting = &next
+	return next, nil
+}
+
+func (f *fakeStore) SetServiceBurnAlerting(
+	_ context.Context, projectID, serviceID, window string, enabled bool,
+	rules []domain.BurnRule, actor store.AlertActor,
+) error {
+	if err := domain.ValidateBurnRules(rules); err != nil {
+		return err
+	}
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return store.ErrNotFound
+	}
+	if fs.fileManaged {
+		return store.ErrServiceManagedByFile
+	}
+	t, ok := fs.burnTargets[window]
+	if !ok {
+		// No objective for this window: the real store reaches sla_targets THROUGH the service and
+		// answers ErrNotFound, because enabling burn alerting on an undeclared objective would page
+		// against a number that does not exist.
+		return store.ErrNotFound
+	}
+	fs.burnWrites++
+	fs.alertActors = append(fs.alertActors, actor)
+	t.enabled = enabled
+	t.rules = make([]domain.BurnRule, 0, len(rules))
+	for _, r := range rules {
+		// The latch is server-owned: the store zeroes `firing` on the way in, so the fake does too.
+		r.Firing = false
+		t.rules = append(t.rules, r)
+	}
+	sort.Slice(t.rules, func(i, j int) bool { return t.rules[i].Key() < t.rules[j].Key() })
+	return nil
+}
+
+// SetServiceEscalationPolicy mirrors the store's answers in the order the store gives them: tenancy
+// first (one answer for wrong tenant and unknown id), then file ownership, then the no-op, then the
+// policy's own tenancy. A fake that checked them in a different order would let a handler test pass
+// against a sequence the real store never produces.
+func (f *fakeStore) SetServiceEscalationPolicy(
+	_ context.Context, projectID, serviceID, policyID string, actor store.AlertActor,
+) (string, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return "", store.ErrNotFound
+	}
+	if fs.fileManaged {
+		return "", store.ErrServiceManagedByFile
+	}
+	if fs.svc.EscalationPolicyID == policyID {
+		return policyID, nil // not a write, and no actor recorded
+	}
+	if policyID != "" && f.foreignPolicies[policyID] {
+		return "", store.ErrOwnerNotInProject
+	}
+	fs.svc.EscalationPolicyID = policyID
+	f.escalationPolicyWrites++
+	fs.alertActors = append(fs.alertActors, actor)
+	return policyID, nil
+}
+
 // ── FR-021 phase 3 fakes: the impact graph + correlation reads ──────────────
 
 func (f *fakeStore) graphStore() map[string]*fakeGraph {
@@ -2347,6 +2899,18 @@ func (f *fakeStore) ServiceNeighbourHealth(_ context.Context, projectID string, 
 		}
 	}
 	return out, nil
+}
+
+// IncidentMemberSnapshot mirrors the store's three-way answer: an error, a present
+// snapshot (possibly empty), or no snapshot at all. Presence is KEY EXISTENCE, not a
+// non-empty slice, because "this service had no members" and "this incident has no
+// snapshot" are different facts (FR-022 invariant 13).
+func (f *fakeStore) IncidentMemberSnapshot(_ context.Context, incidentID string) ([]domain.IncidentMember, bool, error) {
+	if f.memberSnapshotErr != nil {
+		return nil, false, f.memberSnapshotErr
+	}
+	ms, ok := f.memberSnapshots[incidentID]
+	return ms, ok, nil
 }
 
 func (f *fakeStore) ListIncidentImpacts(_ context.Context, projectID, incidentID string) ([]domain.ServiceImpactLink, error) {

@@ -236,15 +236,18 @@ func CredentialProbeErrorReason(err error) string {
 
 // ProbeErrorHeartbeat builds the typed non-liveness wire member for a rejected job.
 func ProbeErrorHeartbeat(job CheckJob, reason string) domain.Heartbeat {
-	jobID := ""
-	if job.CredentialEnvelope != nil {
+	// The envelope's id is the AAD-bound one and exists only for credentialed jobs; the job's own id
+	// exists for every job. Prefer the job's, fall back to the envelope's, so a v1 payload from a
+	// fleet that predates this field still names something.
+	jobID := job.JobID
+	if jobID == "" && job.CredentialEnvelope != nil {
 		jobID = job.CredentialEnvelope.JobID
 	}
-	return domain.Heartbeat{
+	return StampResult(domain.Heartbeat{
 		MonitorID:         job.Monitor.ID,
 		ExecutionRevision: job.Monitor.ExecutionRevision,
 		ProbeError:        &domain.ProbeError{Reason: reason, JobID: jobID},
-	}
+	}, job)
 }
 
 // errNoDispatchKey is the one structural failure that keeps its own bounded reason: an

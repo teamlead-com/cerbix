@@ -35,6 +35,31 @@ type rawService struct {
 	MissingData string           `yaml:"missing_data"`
 	Maintenance string           `yaml:"maintenance"`
 	Freshness   *rawFreshness    `yaml:"freshness"`
+	// Alerting is the §16.6a paging declaration. It is a POINTER because absent and empty are
+	// different statements here (see decodeServiceAlerting).
+	Alerting *rawServiceAlerting `yaml:"alerting"`
+}
+
+// rawServiceAlerting is the strict wire shape of the §16.6a paging declaration — the four
+// DECLARED fields and nothing server-owned. `alert_config_generation`, the latches and the
+// leases have no field here at all, so a bundle that names one is refused by KnownFields(true)
+// rather than silently ignored: they are the database's, and a hash that moved because an alert
+// FIRED would make the bundle reapply forever.
+//
+// Every scalar is a pointer so "omitted" is distinguishable from a meaningful zero:
+// `confirm_evaluations: 0` must be REFUSED by the shared validator (bounds are 1..10), while an
+// omitted one takes the documented default of 2. Reusing the zero value for both would silently
+// accept the one spelling the spec forbids.
+type rawServiceAlerting struct {
+	OwnsPaging *bool `yaml:"owns_paging"`
+	// PageOn is a plain slice, not a pointer, because yaml.v3 already distinguishes what
+	// matters: an omitted key decodes to nil (→ the default `{down}`), and `page_on: []`
+	// decodes to a non-nil empty slice (→ §16.6a's "explicitly page for no state", which
+	// dis-arms LIVE). An explicit `page_on:` null reads as omitted, exactly as every other
+	// null does in this package.
+	PageOn             []string `yaml:"page_on"`
+	PageOnUnknown      *bool    `yaml:"page_on_unknown"`
+	ConfirmEvaluations *int     `yaml:"confirm_evaluations"`
 }
 
 type rawServiceOwner struct {
@@ -74,6 +99,18 @@ type DesiredService struct {
 	Monitors []string
 	SLI      []string
 	Policies domain.ServicePolicies
+
+	// Alerting is the §16.6a paging declaration, canonical and already validated. It is NEVER nil
+	// for a parsed format-2 service: an absent block declares the DEFAULT policy, because a file
+	// that describes the desired state cannot let history decide what a service pages for. NIL when
+	// the bundle declares nothing about paging at all.
+	//
+	// Nil is not "the default policy". A service that has ownership ON and whose declaration
+	// loses its `alerting:` block must not be disowned by that silence, and a service that
+	// never had ownership must not gain it — so the apply writes the four columns only when
+	// this is non-nil, exactly as §15.2's format gate treats a format-1 bundle's silence about
+	// `services` as no statement rather than as "delete them all".
+	Alerting *domain.ServiceAlertPolicy
 
 	// Hash is the canonical semantic hash. An unchanged hash MUST NOT create a definition
 	// revision — the direct analogue of §7's "MUST NOT call the semantic monitor update
@@ -150,9 +187,14 @@ func decodeService(slug string, rs rawService) (DesiredService, error) {
 		return DesiredService{}, err
 	}
 
+	alerting, err := decodeServiceAlerting(slug, rs.Alerting)
+	if err != nil {
+		return DesiredService{}, err
+	}
+
 	svc := DesiredService{
 		Slug: slug, Name: name, Description: rs.Description,
-		Monitors: monitors, SLI: sli, Policies: policies,
+		Monitors: monitors, SLI: sli, Policies: policies, Alerting: alerting,
 	}
 	if rs.Owner != nil {
 		svc.EscalationPolicy = strings.TrimSpace(rs.Owner.EscalationPolicy)
@@ -255,6 +297,60 @@ func decodeServicePolicies(slug string, rs rawService) (domain.ServicePolicies, 
 	return p, nil
 }
 
+// decodeServiceAlerting maps the `alerting:` block to the canonical, validated paging policy
+// (spec §16.6a), or to nil when the block is absent.
+//
+// Two things happen here that deliberately do NOT happen at apply time:
+//
+//   - Canonicalization. `page_on` is sorted and deduplicated by the domain's own Canonical(),
+//     so re-ordering two entries in a YAML file is not a change: it must not move the hash,
+//     must not reapply, and must not bump `alert_config_generation` — which would dis-arm
+//     delegation and page the members for an edit nobody made.
+//   - Validation, through the ONE validator §16.6a gives the API and the MaC apply. Doing it at
+//     PARSE time is what makes a bad bundle a file-named rejection that keeps its
+//     last-known-good, instead of a half-applied transaction discovering the bounds after the
+//     services before it in the same bundle were already written.
+//
+// The order is canonical THEN validate, matching the store's UI path exactly, so a declaration
+// can never be accepted in one spelling and refused in another.
+func decodeServiceAlerting(slug string, ra *rawServiceAlerting) (*domain.ServiceAlertPolicy, error) {
+	// An ABSENT block is the DEFAULT policy, not silence — the file is the desired state, and a
+	// desired state that depends on what the file used to say is not declarative. An earlier
+	// revision returned nil here and the apply skipped the columns, which meant a bundle that once
+	// declared `owns_paging: true` and then dropped the block left the service still owning paging:
+	// the same file converged to two different databases depending on history, and for a
+	// file-managed service the UI cannot even correct it (§16.6a refuses those edits with a 409).
+	// Converging to the default is also safe for existing bundles, because a service that never
+	// declared alerting already holds exactly these values.
+	//
+	// Inside a PRESENT block the same defaults apply per field, so the two readings agree.
+	p := domain.DefaultServiceAlertPolicy()
+	if ra == nil {
+		return &p, nil
+	}
+	if ra.OwnsPaging != nil {
+		p.OwnsPaging = *ra.OwnsPaging
+	}
+	if ra.PageOn != nil {
+		states := make([]domain.ServiceAlertState, 0, len(ra.PageOn))
+		for _, s := range ra.PageOn {
+			states = append(states, domain.ServiceAlertState(strings.TrimSpace(s)))
+		}
+		p.PageOn = states
+	}
+	if ra.PageOnUnknown != nil {
+		p.PageOnUnknown = *ra.PageOnUnknown
+	}
+	if ra.ConfirmEvaluations != nil {
+		p.ConfirmEvaluations = *ra.ConfirmEvaluations
+	}
+	p = p.Canonical()
+	if err := p.Validate(); err != nil {
+		return nil, rejectf(ReasonDomainInvalid, slug, "%s", err.Error())
+	}
+	return &p, nil
+}
+
 // canonicalService is the stable projection hashed for the create/update/no-op decision.
 //
 // It covers the DECLARATION only. Server-owned values — revision numbers, epoch ids,
@@ -269,13 +365,29 @@ type canonicalService struct {
 	Monitors         []string               `json:"monitors"`
 	SLI              []string               `json:"sli"`
 	Policies         domain.ServicePolicies `json:"policies"`
+	// The paging declaration is DELIBERATELY ABSENT from this hash, and that is a correctness
+	// decision rather than an omission.
+	//
+	// This hash decides create/update/NO-OP, and the update branch calls
+	// `putServiceDeclarationTx`, which creates a definition revision AND its evaluation epoch
+	// unconditionally. §16.6a is explicit that paging fields must bump neither: they change who
+	// is paged, not what is measured, and an epoch bump would re-segment reliability history for
+	// an alerting edit. Putting `alerting:` in here would have done exactly that on every
+	// `owns_paging` toggle.
+	//
+	// The apply therefore reconciles the paging declaration on EVERY branch — create, update and
+	// no-op alike — against the row itself, which is idempotent by construction and needs no hash
+	// to notice a change. `alert_config_generation`, the latches, the leases and `firing` inside
+	// a burn rule are absent for the ordinary reason: they are server-owned, and a hash that
+	// moved because an alert fired would make the bundle reapply forever.
 }
 
 // canonicalServiceHash computes the semantic hash of a normalized service.
 //
-// The member lists are already sorted and deduplicated, and json.Marshal emits map keys in
-// sorted order, so the encoding is deterministic across parses of semantically-equal YAML:
-// comments, key order, indentation and the file's path and mtime cannot move it.
+// The member lists are already sorted and deduplicated, and json.Marshal emits map keys in sorted
+// order — so the encoding is
+// deterministic across parses of semantically-equal YAML: comments, key order, indentation, the
+// order two `page_on` states were typed in, and the file's path and mtime cannot move it.
 func canonicalServiceHash(svc DesiredService) string {
 	c := canonicalService{
 		Slug: svc.Slug, Name: svc.Name, Description: svc.Description,

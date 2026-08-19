@@ -65,6 +65,55 @@ function mountWith(detail: Record<string, unknown>) {
   return mount(IncidentDetailView, { global: { stubs: { RouterLink } } });
 }
 
+// FR-022, mock panel 1: the header says what the incident is an incident OF. The name comes from a
+// SECOND request, so the interesting cases are the ones where that request has not answered or has
+// nothing to answer about.
+describe("IncidentDetailView subject chip", () => {
+  beforeEach(() => {
+    apiMock.GET.mockReset();
+    apiMock.POST.mockReset();
+  });
+
+  function mountAnchored(anchor: Record<string, unknown>, subject: Record<string, unknown> | null) {
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path.endsWith("/updates")) return Promise.resolve({ data: [] });
+      if (path.endsWith("/postmortem")) return Promise.resolve({ error: { error: "not found" } });
+      if (path.includes("/services/")) return Promise.resolve({ data: subject ? { service: subject } : undefined });
+      if (path.includes("/monitors/")) return Promise.resolve({ data: subject ?? undefined });
+      return Promise.resolve({ data: { ...BASE_INCIDENT, monitor_id: undefined, ...anchor, impacts: [] } });
+    });
+    return mount(IncidentDetailView, { global: { stubs: { RouterLink } } });
+  }
+
+  it("names the service a service incident belongs to", async () => {
+    const w = mountAnchored({ service_id: "svc1" }, { slug: "checkout", name: "Checkout" });
+    await flushPromises();
+    const chip = w.get('[data-testid="incident-subject"]');
+    expect(chip.text()).toContain("service");
+    expect(chip.text()).toContain("checkout");
+  });
+
+  it("names the monitor for a monitor incident — the anchor changed, the grammar did not", async () => {
+    const w = mountAnchored({ monitor_id: "mon1" }, { name: "checkout-http" });
+    await flushPromises();
+    expect(w.get('[data-testid="incident-subject"]').text()).toContain("checkout-http");
+  });
+
+  it("still renders the incident when its subject is GONE, stating the kind alone", async () => {
+    const w = mountAnchored({ service_id: "svc-deleted" }, null);
+    await flushPromises();
+    // A timeline is a record of something that happened; deleting the subject does not unhappen it.
+    expect(w.text()).toContain(BASE_INCIDENT.title);
+    expect(w.get('[data-testid="incident-subject"]').text()).toContain("service");
+  });
+
+  it("shows NO chip on a project-level incident", async () => {
+    const w = mountAnchored({}, null);
+    await flushPromises();
+    expect(w.find('[data-testid="incident-subject"]').exists()).toBe(false);
+  });
+});
+
 describe("IncidentDetailView impact enrichment", () => {
   beforeEach(() => {
     apiMock.GET.mockReset();

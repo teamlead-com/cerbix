@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -26,11 +27,12 @@ func burnAlert(t *testing.T, monitorID string, firing bool) []byte {
 }
 
 type fakeStore struct {
-	pending   []domain.OutboxEvent
-	delivered []string
-	failed    []string
-	monitors  map[string]domain.Monitor
-	claimErr  error
+	pending     []domain.OutboxEvent
+	delivered   []string
+	failed      []string
+	failReasons []string
+	monitors    map[string]domain.Monitor
+	claimErr    error
 
 	// incident-context fakes
 	ictx       domain.IncidentContext
@@ -47,11 +49,22 @@ type fakeStore struct {
 	inMaintenance    map[string]bool
 	inMaintenanceErr error
 
+	// alerting-ownership fakes (FR-021 §16)
+	delegation      map[string]store.DelegationVerdict // "monitor|signal" → verdict
+	delegationErr   error
+	suppressRecords []string // "event|monitor|topic|owners"
+	suppressErr     error
+	alertSeq        map[string]int64 // "service|signal|target|rule" → current sequence
+	alertSeqMissing bool
+
 	// impact-correlation fakes (FR-021 §14.3)
 	correlated        []string // incident ids passed to CorrelateIncident
 	correlateLinks    []domain.ServiceImpactLink
 	correlateOverflow int
 	correlateErr      error
+	// monitorLookups records every GetMonitor the worker performs, so a test can assert a
+	// lookup did NOT happen — the absence of a call is the claim in FR-023 D7.
+	monitorLookups []string
 }
 
 func (f *fakeStore) CorrelateIncident(_ context.Context, incidentID string) ([]domain.ServiceImpactLink, int, error) {
@@ -113,11 +126,13 @@ func (f *fakeStore) MarkOutboxDelivered(_ context.Context, id, _ string) (bool, 
 	f.delivered = append(f.delivered, id)
 	return true, nil
 }
-func (f *fakeStore) FailOutbox(_ context.Context, id, _, _ string, _ int) (bool, error) {
+func (f *fakeStore) FailOutbox(_ context.Context, id, _, lastErr string, _ int) (bool, error) {
 	f.failed = append(f.failed, id)
+	f.failReasons = append(f.failReasons, lastErr)
 	return true, nil
 }
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {
+	f.monitorLookups = append(f.monitorLookups, id)
 	m, ok := f.monitors[id]
 	if !ok {
 		return domain.Monitor{}, store.ErrNotFound
@@ -153,6 +168,7 @@ type fakeNotify struct {
 	channelIDs []string
 	called     int
 	err        error
+	resolved   *int
 }
 
 func (f *fakeNotify) Deliver(_ context.Context, m domain.Monitor, up bool) error {
@@ -175,7 +191,25 @@ func (f *fakeNotify) DeliverChannels(_ context.Context, channelIDs []string, tex
 	return f.err
 }
 
+// resolved, when set, is how many of the requested channels still exist — the fake's way of
+// deleting a snapshot recipient out from under an announcement. Zero means "all of them".
+func (f *fakeNotify) DeliverChannelsReporting(
+	_ context.Context, channelIDs []string, text string,
+) (domain.ChannelDelivery, error) {
+	f.channelIDs, f.text, f.called = channelIDs, text, f.called+1
+	out := domain.ChannelDelivery{Requested: len(channelIDs), Resolved: len(channelIDs)}
+	if f.resolved != nil {
+		out.Resolved = *f.resolved
+	}
+	return out, f.err
+}
+
 type fakeMetrics struct {
+	suppressed                                      map[string]int
+	failOpen                                        map[string]int
+	delegation                                      map[string]int // "signal/state" → count
+	undeliverable                                   map[string]int
+	recipientMissing                                int
 	delivered, dead, impactFailures, impactOverflow int
 	impactLinks                                     map[string]int
 }
@@ -188,7 +222,35 @@ func (m *fakeMetrics) RecordImpactLinks(role string, n int) {
 	}
 	m.impactLinks[role] += n
 }
-func (m *fakeMetrics) RecordImpactFailure()              { m.impactFailures++ }
+func (m *fakeMetrics) RecordImpactFailure() { m.impactFailures++ }
+func (m *fakeMetrics) RecordAlertSuppressed(topic, reason string) {
+	if m.suppressed == nil {
+		m.suppressed = map[string]int{}
+	}
+	m.suppressed[topic+"|"+reason]++
+}
+func (m *fakeMetrics) RecordServiceDelegation(signal, state string) {
+	if m.delegation == nil {
+		m.delegation = map[string]int{}
+	}
+	m.delegation[signal+"/"+state]++
+}
+
+func (m *fakeMetrics) RecordServiceAlertUndeliverable(signal string) {
+	if m.undeliverable == nil {
+		m.undeliverable = map[string]int{}
+	}
+	m.undeliverable[signal]++
+}
+
+func (m *fakeMetrics) RecordServiceAlertRecipientMissing(n int) { m.recipientMissing += n }
+
+func (m *fakeMetrics) RecordDelegationFailOpen(reason string) {
+	if m.failOpen == nil {
+		m.failOpen = map[string]int{}
+	}
+	m.failOpen[reason]++
+}
 func (m *fakeMetrics) RecordImpactWitnessOverflow(n int) { m.impactOverflow += n }
 
 func incidentEvent(t *testing.T, typ, project string) []byte {
@@ -513,6 +575,27 @@ func TestIncidentContextAttached(t *testing.T) {
 	if len(fs4.delivered) != 1 {
 		t.Fatalf("context failure must not fail the event: delivered=%v", fs4.delivered)
 	}
+
+	// A SERVICE-anchored auto-incident gets NO ⚡ context (FR-022 invariant 12). The note's whole
+	// content is about a MONITOR — co-failing monitors, a dominant error class, a single region —
+	// and the ⚡/⏸ family keeps exactly one home each so a single outage is never explained twice.
+	// The source is `auto` here, which is what makes this a real gate rather than the manual case
+	// two blocks up passing again under a new name.
+	openedService, _ := json.Marshal(domain.IncidentEvent{
+		Type: domain.EventIncidentOpened,
+		Incident: domain.Incident{
+			ID: "inc3", ProjectID: "p1", ServiceID: "svc1", Source: domain.SourceAuto,
+		},
+	})
+	fs5 := &fakeStore{pending: []domain.OutboxEvent{{ID: "e6", Topic: domain.TopicIncidentEvent, Payload: openedService, Attempts: 1}}, ictx: ictx}
+	newWorker(fs5, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).drain(context.Background())
+	if len(fs5.delivered) != 1 {
+		t.Fatalf("a service incident's event was not delivered: %v", fs5.delivered)
+	}
+	if len(fs5.appended) != 0 {
+		t.Fatalf("a SERVICE incident got a ⚡ context note (%+v) — its content describes a monitor, and "+
+			"the outage would then be explained twice (FR-022 invariant 12)", fs5.appended)
+	}
 }
 
 func TestDeliversSubscriberConfirm(t *testing.T) {
@@ -796,6 +879,12 @@ func TestCorrelationAndWebhookFailIndependently(t *testing.T) {
 func TestFencedTopicsAreDispatchable(t *testing.T) {
 	payloads := map[string][]byte{
 		domain.TopicIncidentCorrelation: []byte(`{"incident_id":"i1"}`),
+		// A CLOSE, deliberately: an onset for a service the fake knows nothing about would be dropped
+		// by the ordering gate as "the service is gone", and this test is about the switch knowing
+		// the topic, not about the gate.
+		domain.TopicServiceAlert: []byte(
+			`{"service_id":"s1","service_name":"Checkout","signal":"health","firing":false,` +
+				`"close_reason":"recovered","seq":1,"recipients":["ch-1"]}`),
 	}
 	for _, topic := range domain.FencedTopics() {
 		payload, ok := payloads[topic]
@@ -807,5 +896,560 @@ func TestFencedTopicsAreDispatchable(t *testing.T) {
 		if len(fs.delivered) != 1 {
 			t.Fatalf("fenced topic %q not dispatched: delivered=%v failed=%v", topic, fs.delivered, fs.failed)
 		}
+	}
+}
+
+// The THIRD parity leg (the other two live in internal/store): every topic this binary can
+// ENQUEUE must be one its own worker can DISPATCH. The schema-side guard proves such a row can be
+// written; without this one, a topic could be written, accepted, and then sit failing forever
+// because the switch has no case for it — the mirror image of the whitelist narrowing that stopped
+// three live topics in phase 5.
+//
+// It asserts the SWITCH, not the payloads: a topic the worker knows fails on its fixture ("cannot
+// unmarshal", a nil deliverer), while a topic it does not know fails with "unknown outbox topic".
+// Only the second is drift, so only the second fails this test.
+func TestEveryEnqueueableTopicIsDispatchable(t *testing.T) {
+	for _, topic := range domain.AllTopics() {
+		fs := &fakeStore{pending: []domain.OutboxEvent{
+			{ID: "e", Topic: topic, Payload: []byte(`{}`), Attempts: 1},
+		}}
+		newWorker(fs, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).drain(context.Background())
+		for _, reason := range fs.failReasons {
+			if strings.Contains(reason, "unknown outbox topic") {
+				t.Fatalf("topic %q is enqueueable but the worker has no dispatch case: %s", topic, reason)
+			}
+		}
+	}
+	// The guard has teeth: a topic nobody dispatches IS reported this way.
+	fs := &fakeStore{pending: []domain.OutboxEvent{
+		{ID: "e", Topic: "not_a_topic", Payload: []byte(`{}`), Attempts: 1},
+	}}
+	newWorker(fs, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).drain(context.Background())
+	var sawUnknown bool
+	for _, reason := range fs.failReasons {
+		if strings.Contains(reason, "unknown outbox topic") {
+			sawUnknown = true
+		}
+	}
+	if !sawUnknown {
+		t.Fatal("the drift signal this guard reads no longer exists — it would pass vacuously")
+	}
+}
+
+// ── FR-021 §16 store surface ─────────────────────────────────────────────────────────────
+
+func (f *fakeStore) ActiveDelegation(
+	_ context.Context, monitorID, projectID string, signal store.DelegationSignal,
+) (store.DelegationVerdict, error) {
+	if f.delegationErr != nil {
+		return store.DelegationVerdict{}, f.delegationErr
+	}
+	v, ok := f.delegation[monitorID+"|"+string(signal)]
+	if !ok {
+		return store.DelegationVerdict{FailOpenReason: "no_active_owner"}, nil
+	}
+	return v, nil
+}
+
+func (f *fakeStore) RecordSuppression(
+	_ context.Context, eventID, monitorID, projectID, topic string, owners []store.DelegationOwner,
+) error {
+	if f.suppressErr != nil {
+		return f.suppressErr
+	}
+	names := make([]string, 0, len(owners))
+	for _, o := range owners {
+		names = append(names, o.Name)
+	}
+	f.suppressRecords = append(f.suppressRecords,
+		eventID+"|"+monitorID+"|"+topic+"|"+strings.Join(names, ","))
+	return nil
+}
+
+func (f *fakeStore) ServiceAlertSequence(
+	_ context.Context, a domain.ServiceAlert,
+) (int64, error) {
+	if f.alertSeqMissing {
+		return 0, store.ErrNotFound
+	}
+	// Keyed by the same tuple the real latch is keyed by: two targets of one service may carry the
+	// same canonical rule key, so a fake keyed by (service, rule) would answer for the wrong one and
+	// make the ordering gate look correct in a test while it is broken in the store.
+	return f.alertSeq[a.ServiceID+"|"+string(a.Signal)+"|"+a.SLATargetID+"|"+a.RuleKey], nil
+}
+
+// FR-021 §16.1 at the delivery boundary. These are the cases the two design rounds produced, and
+// each of them is a way to lose a page or its ending.
+
+func armedFor(monitorID string, signals ...store.DelegationSignal) map[string]store.DelegationVerdict {
+	m := map[string]store.DelegationVerdict{}
+	for _, sig := range signals {
+		m[monitorID+"|"+string(sig)] = store.DelegationVerdict{
+			Owners: []store.DelegationOwner{{ServiceID: "svc-1", Slug: "checkout", Name: "Checkout"}},
+		}
+	}
+	return m
+}
+
+// A DOWN is suppressed while live coverage is armed; the RECOVERY of the same monitor is not,
+// whatever the arming says. Arming changes between an onset and its close, and a muted recovery
+// leaves whoever was paged holding an alert that can never end.
+func TestDelegationSuppressesOnsetButNeverRecovery(t *testing.T) {
+	fs := &fakeStore{
+		monitors: map[string]domain.Monitor{
+			"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusDown},
+		},
+		delegation: armedFor("m1", store.DelegationLive),
+		pending: []domain.OutboxEvent{
+			{ID: "e-down", Topic: domain.TopicMonitorTransition,
+				Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 0, false)},
+		},
+	}
+	nf, m := &fakeNotify{}, &fakeMetrics{}
+	newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+	if nf.called != 0 {
+		t.Fatalf("a DOWN was delivered while the service actively covers it (called=%d)", nf.called)
+	}
+	if len(fs.suppressRecords) != 1 || !strings.Contains(fs.suppressRecords[0], "Checkout") {
+		t.Fatalf("suppression records = %v, want one naming the covering service", fs.suppressRecords)
+	}
+	if m.suppressed["monitor_transition|service_delegation"] != 1 {
+		t.Fatalf("suppression counter = %v", m.suppressed)
+	}
+
+	// The recovery, with delegation still armed.
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusUp}
+	fs.pending = []domain.OutboxEvent{
+		{ID: "e-up", Topic: domain.TopicMonitorTransition,
+			Payload: transitionSeq(t, "m1", domain.StatusDown, domain.StatusUp, 0, false)},
+	}
+	nf.called = 0
+	newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("the RECOVERY was suppressed (called=%d): a recipient would hold a DOWN forever", nf.called)
+	}
+}
+
+// Everything ambiguous PAGES, and says why.
+func TestDelegationFailsOpen(t *testing.T) {
+	cases := []struct {
+		name       string
+		arrange    func(*fakeStore)
+		wantReason string
+	}{
+		{"lookup error", func(f *fakeStore) { f.delegationErr = errors.New("boom") }, "error"},
+		{"no active owner", func(f *fakeStore) {
+			f.delegation = map[string]store.DelegationVerdict{
+				"m1|live": {FailOpenReason: "no_active_owner"},
+			}
+		}, "no_active_owner"},
+		{"the suppression cannot be recorded", func(f *fakeStore) {
+			f.delegation = armedFor("m1", store.DelegationLive)
+			f.suppressErr = errors.New("write failed")
+		}, "record_failed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := &fakeStore{
+				monitors: map[string]domain.Monitor{
+					"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusDown},
+				},
+				pending: []domain.OutboxEvent{
+					{ID: "e", Topic: domain.TopicMonitorTransition,
+						Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 0, false)},
+				},
+			}
+			c.arrange(fs)
+			nf, m := &fakeNotify{}, &fakeMetrics{}
+			newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+			if nf.called != 1 {
+				t.Fatalf("%s: the alert was MUTED (called=%d) — an ambiguous delegation must page",
+					c.name, nf.called)
+			}
+			if m.failOpen[c.wantReason] != 1 {
+				t.Fatalf("%s: fail-open counters = %v, want reason %q", c.name, m.failOpen, c.wantReason)
+			}
+		})
+	}
+}
+
+// The ladder is where a monitor with an escalation policy ACTUALLY pages, so delegation has to cover
+// it — otherwise phase 5 keeps its promise for everyone except the installations that page properly.
+func TestDelegationSuppressesTheEscalationLadder(t *testing.T) {
+	payload, err := json.Marshal(domain.EscalationStepAlert{
+		IncidentID: "inc-1", MonitorID: "m1", MonitorName: "checkout-http",
+		Step: 0, ChannelIDs: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	fs := &fakeStore{
+		monitors:   map[string]domain.Monitor{"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http"}},
+		delegation: armedFor("m1", store.DelegationLive),
+		pending:    []domain.OutboxEvent{{ID: "e-step", Topic: domain.TopicEscalationStep, Payload: payload}},
+	}
+	nf, m := &fakeNotify{}, &fakeMetrics{}
+	newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+	if nf.called != 0 {
+		t.Fatalf("the escalation step paged anyway (called=%d)", nf.called)
+	}
+	if m.suppressed["escalation_step|service_delegation"] != 1 {
+		t.Fatalf("suppression counter = %v, want the ladder counted", m.suppressed)
+	}
+}
+
+// The burn signal is delegated SEPARATELY: a service can cover the live signal while its burn window
+// is held, and then a member's burn alert must still be delivered.
+func TestBurnDelegationIsIndependentOfLive(t *testing.T) {
+	firing, err := json.Marshal(domain.SLOBurnAlert{MonitorID: "m1", Window: "30d", Firing: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	clear, err := json.Marshal(domain.SLOBurnAlert{MonitorID: "m1", Window: "30d", Firing: false})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	base := func(d map[string]store.DelegationVerdict, ev domain.OutboxEvent) *fakeStore {
+		return &fakeStore{
+			monitors:   map[string]domain.Monitor{"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http"}},
+			delegation: d,
+			pending:    []domain.OutboxEvent{ev},
+		}
+	}
+
+	// LIVE coverage alone must not touch a burn alert.
+	fs := base(armedFor("m1", store.DelegationLive),
+		domain.OutboxEvent{ID: "e1", Topic: domain.TopicSLOBurnAlert, Payload: firing})
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("a burn alert was suppressed by LIVE coverage (called=%d)", nf.called)
+	}
+
+	// With burn armed, the FIRING alert is suppressed...
+	fs = base(armedFor("m1", store.DelegationLive, store.DelegationBurn),
+		domain.OutboxEvent{ID: "e2", Topic: domain.TopicSLOBurnAlert, Payload: firing})
+	nf = &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 0 {
+		t.Fatalf("a FIRING burn alert was delivered while burn coverage is armed (called=%d)", nf.called)
+	}
+
+	// ...and a CLEAR still is not.
+	fs = base(armedFor("m1", store.DelegationLive, store.DelegationBurn),
+		domain.OutboxEvent{ID: "e3", Topic: domain.TopicSLOBurnAlert, Payload: clear})
+	nf = &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("the burn CLEAR was suppressed: a recipient would hold a firing alert forever")
+	}
+}
+
+// The service's own alert: the ordering gate drops a superseded ONSET, and never a close.
+func TestServiceAlertOrderingGate(t *testing.T) {
+	alert := func(seq int64, firing bool, reason domain.ServiceAlertCloseReason) []byte {
+		b, err := json.Marshal(domain.ServiceAlert{
+			ServiceID: "svc-1", ServiceName: "Checkout", Signal: domain.ServiceSignalHealth,
+			Firing: firing, State: domain.ServiceAlertDown, Seq: seq, ConfirmedOver: 2,
+			CloseReason: reason, Recipients: []string{"ch-1"},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	fs := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health||": 7},
+		pending: []domain.OutboxEvent{
+			{ID: "e-stale", Topic: domain.TopicServiceAlert, Payload: alert(3, true, "")},
+		},
+	}
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 0 {
+		t.Fatalf("a superseded ONSET was announced (called=%d)", nf.called)
+	}
+
+	fs.pending = []domain.OutboxEvent{
+		{ID: "e-now", Topic: domain.TopicServiceAlert, Payload: alert(7, true, "")},
+	}
+	nf = &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("the current onset was not delivered (called=%d)", nf.called)
+	}
+
+	// A CLOSE for a service that no longer exists still delivers: its episode outlived it precisely
+	// so the people who were paged learn that it ended, and it says WHY.
+	fs.alertSeqMissing = true
+	fs.pending = []domain.OutboxEvent{
+		{ID: "e-close", Topic: domain.TopicServiceAlert,
+			Payload: alert(8, false, domain.CloseServiceDeleted)},
+	}
+	nf = &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("a close for a deleted service was dropped (called=%d)", nf.called)
+	}
+	if !strings.Contains(nf.text, "deleted") {
+		t.Fatalf("the close does not say why it ended: %q", nf.text)
+	}
+}
+
+// FR-021 §16.4a/§16.6b — the two ways an announcement reaches nobody WITHOUT failing.
+//
+// Both are invisible in every other signal: the outbox marks the row delivered, no error is
+// returned, no retry happens, and the operator sees a page that was never sent. They are the reason
+// the spec asks for counters of their own.
+func TestServiceAlertThatReachesNobodyIsCounted(t *testing.T) {
+	alert := func(recipients []string) []byte {
+		b, err := json.Marshal(domain.ServiceAlert{
+			ServiceID: "svc-1", ServiceName: "Checkout", Signal: domain.ServiceSignalHealth,
+			Firing: false, State: domain.ServiceAlertDown, Seq: 9,
+			CloseReason: domain.CloseRecovered, Recipients: recipients,
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	t.Run("a snapshot recipient whose channel is gone", func(t *testing.T) {
+		fs := &fakeStore{alertSeqMissing: true, pending: []domain.OutboxEvent{
+			{ID: "e1", Topic: domain.TopicServiceAlert, Payload: alert([]string{"ch-1", "ch-2"})},
+		}}
+		one := 1
+		nf := &fakeNotify{resolved: &one} // ch-2 has been deleted since the onset
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+		if nf.called != 1 {
+			t.Fatalf("the close was not attempted (called=%d)", nf.called)
+		}
+		if m.recipientMissing != 1 {
+			t.Fatalf("recipient_missing = %d, want 1: a snapshot recipient that no longer exists "+
+				"is COUNTED, never silently replaced by whoever is on call now", m.recipientMissing)
+		}
+		if m.undeliverable["health"] != 0 {
+			t.Fatalf("an alert that reached one of two recipients was called undeliverable")
+		}
+	})
+
+	t.Run("nobody left at all", func(t *testing.T) {
+		fs := &fakeStore{alertSeqMissing: true, pending: []domain.OutboxEvent{
+			{ID: "e2", Topic: domain.TopicServiceAlert, Payload: alert([]string{"ch-1"})},
+		}}
+		zero := 0
+		nf := &fakeNotify{resolved: &zero}
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+		if m.recipientMissing != 1 || m.undeliverable["health"] != 1 {
+			t.Fatalf("missing=%d undeliverable=%d, want 1 and 1: an announcement nobody heard is "+
+				"not a successful delivery", m.recipientMissing, m.undeliverable["health"])
+		}
+	})
+
+	t.Run("an empty recipient snapshot", func(t *testing.T) {
+		fs := &fakeStore{alertSeqMissing: true, pending: []domain.OutboxEvent{
+			{ID: "e3", Topic: domain.TopicServiceAlert, Payload: alert(nil)},
+		}}
+		nf := &fakeNotify{}
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+		if nf.called != 0 {
+			t.Fatalf("an empty route was still sent somewhere (called=%d)", nf.called)
+		}
+		if m.undeliverable["health"] != 1 {
+			t.Fatalf("undeliverable = %d, want 1", m.undeliverable["health"])
+		}
+	})
+}
+
+// §16.6b — delegation reports its outcome per signal, in three states, because "why is this monitor
+// still paging" is the question the runbook starts from. `armed` means a member's alert was
+// suppressed by an active replacement; `disarmed` means there was none, so it paged for itself;
+// `degraded` means the lookup could not conclude, which also pages.
+func TestDelegationOutcomesAreCountedPerSignal(t *testing.T) {
+	down := func() []domain.OutboxEvent {
+		return []domain.OutboxEvent{{ID: "e", Topic: domain.TopicMonitorTransition,
+			Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 0, false)}}
+	}
+	monitors := map[string]domain.Monitor{
+		"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusDown},
+	}
+
+	t.Run("armed", func(t *testing.T) {
+		fs := &fakeStore{monitors: monitors, delegation: armedFor("m1", store.DelegationLive), pending: down()}
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, &fakeNotify{}, m).drain(context.Background())
+		if m.delegation["health/armed"] != 1 {
+			t.Fatalf("delegation counters = %v, want one health/armed", m.delegation)
+		}
+	})
+
+	t.Run("disarmed", func(t *testing.T) {
+		fs := &fakeStore{monitors: monitors, pending: down()} // no active owner
+		m := &fakeMetrics{}
+		newWorker(fs, &fakeWebhook{}, &fakeNotify{}, m).drain(context.Background())
+		if m.delegation["health/disarmed"] != 1 {
+			t.Fatalf("delegation counters = %v, want one health/disarmed", m.delegation)
+		}
+	})
+
+	t.Run("degraded", func(t *testing.T) {
+		fs := &fakeStore{monitors: monitors, delegationErr: errors.New("lookup exploded"), pending: down()}
+		m := &fakeMetrics{}
+		nf := &fakeNotify{}
+		newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+		if m.delegation["health/degraded"] != 1 {
+			t.Fatalf("delegation counters = %v, want one health/degraded", m.delegation)
+		}
+		if nf.called != 1 {
+			t.Fatal("an ambiguous delegation lookup did not FAIL OPEN: the page was withheld")
+		}
+	})
+}
+
+// Invariant 78 (§16, §19): suppression touches DELIVERY ONLY. Facts, status flips,
+// auto-incidents, escalation rows and progress, and the SLO history are what they would have been
+// with no delegation at all — the only differences are the page that was not sent and the
+// suppression record that says so.
+//
+// This is the invariant that makes delegation safe to turn on: an operator who disowns a service
+// tomorrow must find the same history they would have had, not a gap. Run one identical event
+// through an ARMED worker and a DISARMED one and compare everything the worker did to the store.
+func TestDelegationChangesDeliveryAndNothingElse(t *testing.T) {
+	build := func(armed bool) (*fakeStore, *fakeNotify) {
+		fs := &fakeStore{
+			monitors: map[string]domain.Monitor{
+				"m1": {ID: "m1", ProjectID: "p1", Name: "checkout-http", Status: domain.StatusDown},
+			},
+			ictx: domain.IncidentContext{CoFailures: []string{"api-http"}, CoFailureTotal: 1, DominantClass: "timeout"},
+			pending: []domain.OutboxEvent{
+				{ID: "e-down", Topic: domain.TopicMonitorTransition,
+					Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 0, false)},
+			},
+		}
+		if armed {
+			fs.delegation = armedFor("m1", store.DelegationLive)
+		}
+		nf := &fakeNotify{}
+		newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+		return fs, nf
+	}
+
+	armed, armedNotify := build(true)
+	open, openNotify := build(false)
+
+	// The page is the ONLY thing that differs.
+	if armedNotify.called != 0 || openNotify.called == 0 {
+		t.Fatalf("delivery: armed called=%d (want 0), disarmed called=%d (want >0)",
+			armedNotify.called, openNotify.called)
+	}
+	if len(armed.suppressRecords) != 1 || len(open.suppressRecords) != 0 {
+		t.Fatalf("suppression records: armed=%v, disarmed=%v", armed.suppressRecords, open.suppressRecords)
+	}
+
+	// Everything else the worker did to the store is identical. The event is CONSUMED either way:
+	// a suppressed row that stayed pending would be redelivered forever, and a suppressed row that
+	// FAILED would poison the queue with a decision that was deliberate.
+	if !reflect.DeepEqual(armed.delivered, open.delivered) {
+		t.Fatalf("delivered rows differ: armed=%v, disarmed=%v — suppression must consume the event, "+
+			"not change the queue's history (invariant 78)", armed.delivered, open.delivered)
+	}
+	if !reflect.DeepEqual(armed.failed, open.failed) || len(armed.failed) != 0 {
+		t.Fatalf("failure rows differ: armed=%v, disarmed=%v — a deliberate suppression is not a "+
+			"delivery failure (invariant 78)", armed.failed, open.failed)
+	}
+	if !reflect.DeepEqual(armed.appended, open.appended) {
+		t.Fatalf("incident context differs: armed=%v, disarmed=%v — the ⚡ context note is a FACT about "+
+			"the outage and does not depend on who pages (invariant 78)", armed.appended, open.appended)
+	}
+	if !reflect.DeepEqual(armed.correlated, open.correlated) {
+		t.Fatalf("correlation differs: armed=%v, disarmed=%v (invariant 78)", armed.correlated, open.correlated)
+	}
+}
+
+// FR-023 D7 / invariant 10: a SERVICE's escalation step is the owner's own page, so delivery-time
+// delegation must not touch it — suppressing it would leave the outage with nobody told at all.
+// The monitor case is asserted beside it, because the whole point is that ONE of the two changed.
+//
+// The second assertion is about a call that must NOT happen: a service step carries no monitor id,
+// so a lookup could only fail, and the fail-open warning it logged would be an alarm about a
+// question nobody asked.
+func TestAServiceEscalationStepSkipsDelegationEntirely(t *testing.T) {
+	step := func(a domain.EscalationStepAlert) []byte {
+		b, err := json.Marshal(a)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+	// A world where delegation WOULD suppress: the monitor is covered by an armed service.
+	armed := func() *fakeStore {
+		return &fakeStore{
+			monitors: map[string]domain.Monitor{"m1": {ID: "m1", ProjectID: "p1", Name: "api-http"}},
+			// keyed "monitor|signal", the shape the fake's ActiveDelegation reads
+			delegation: map[string]store.DelegationVerdict{
+				"m1|" + string(store.DelegationLive): {
+					Owners: []store.DelegationOwner{{ServiceID: "svc1", Slug: "checkout", Name: "Checkout"}},
+				},
+			},
+		}
+	}
+
+	// The MONITOR's step is suppressed — unchanged behaviour (NFR-018).
+	mon := armed()
+	mon.pending = []domain.OutboxEvent{{ID: "e1", Topic: domain.TopicEscalationStep, Attempts: 1,
+		Payload: step(domain.EscalationStepAlert{IncidentID: "inc1", MonitorID: "m1", MonitorName: "api-http",
+			SubjectName: "api-http", Step: 0, ChannelIDs: []string{"c1"}})}}
+	nfMon := &fakeNotify{}
+	newWorker(mon, &fakeWebhook{}, nfMon, &fakeMetrics{}).drain(context.Background())
+	if nfMon.called != 0 {
+		t.Fatalf("a monitor's step was delivered while a service owns its paging: %d calls — that is "+
+			"the no-double-page promise of §16.6b broken", nfMon.called)
+	}
+
+	// The SERVICE's own step is DELIVERED, and no monitor lookup is attempted for it.
+	svc := armed()
+	svc.pending = []domain.OutboxEvent{{ID: "e2", Topic: domain.TopicEscalationStep, Attempts: 1,
+		Payload: step(domain.EscalationStepAlert{IncidentID: "inc2", ServiceID: "svc1",
+			MonitorName: "Checkout", SubjectName: "Checkout", Step: 0, ChannelIDs: []string{"c1"}})}}
+	nfSvc := &fakeNotify{}
+	newWorker(svc, &fakeWebhook{}, nfSvc, &fakeMetrics{}).drain(context.Background())
+	if nfSvc.called != 1 {
+		t.Fatalf("a SERVICE's escalation step was not delivered (%d calls) — delegation exists so a "+
+			"service can page INSTEAD of its members, and this step IS that page", nfSvc.called)
+	}
+	if len(svc.monitorLookups) != 0 {
+		t.Fatalf("a service step looked up monitor(s) %v — it carries no monitor id, so the lookup "+
+			"could only fail and log a fail-open nobody asked for (FR-023 D7)", svc.monitorLookups)
+	}
+	if len(svc.suppressRecords) != 0 {
+		t.Fatalf("a service step recorded a suppression: %v", svc.suppressRecords)
+	}
+
+	// Invariant 11: instance-wide SILENCE mutes a service step exactly as it mutes a monitor's, and
+	// the event is CONSUMED — a muted row left pending would be redelivered forever. Stated by
+	// assertion rather than inherited by reading, because "the check happens earlier in the same
+	// function" is an argument about code, not about behaviour.
+	silenced := armed()
+	silenced.pending = []domain.OutboxEvent{{ID: "e3", Topic: domain.TopicEscalationStep, Attempts: 1,
+		Payload: step(domain.EscalationStepAlert{IncidentID: "inc3", ServiceID: "svc1",
+			MonitorName: "Checkout", SubjectName: "Checkout", Step: 0, ChannelIDs: []string{"c1"}})}}
+	nfSilenced := &fakeNotify{}
+	newWorker(silenced, &fakeWebhook{}, nfSilenced, &fakeMetrics{}).
+		WithSilence(func() bool { return true }).drain(context.Background())
+	if nfSilenced.called != 0 {
+		t.Fatalf("instance-wide silence did not mute a SERVICE step: %d calls", nfSilenced.called)
+	}
+	if len(silenced.delivered) != 1 {
+		t.Fatalf("a muted service step was not consumed (%v) — it would be redelivered forever", silenced.delivered)
 	}
 }

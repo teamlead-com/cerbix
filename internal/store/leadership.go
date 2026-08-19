@@ -168,3 +168,27 @@ func (ls *LeaderSession) RunServiceSlice(ctx context.Context, deadline time.Time
 	}
 	return ls.store.AdvanceServiceMaterializationOn(ctx, ls.conn, deadline)
 }
+
+// EvaluateServiceAlerts runs the LIVE service-alert slice (FR-021 §16.3) on the LOCK-OWNING
+// connection.
+//
+// It lives on the session, not on the Store, and that is the fence: the whole slice — snapshot,
+// state, episodes and outbox rows — runs inside one transaction on the connection holding the
+// advisory lock, so a leader that has lost the lock cannot commit an evaluation behind its
+// successor. Leader-GATING alone does not give this: a watchdog samples every few seconds, and in
+// the window between two samples a deposed process would otherwise happily commit on any pool
+// connection. The latch CAS is not a substitute either — the episode and its outbox row are written
+// BEFORE it, so by the time the CAS lost, somebody has already been paged.
+func (ls *LeaderSession) EvaluateServiceAlerts(
+	ctx context.Context, cadence time.Duration,
+) (ServiceAlertEvaluation, error) {
+	return ls.store.evaluateServiceAlertsOn(ctx, ls.conn, cadence)
+}
+
+// EvaluateServiceBurnAlerts runs the SEALED service-alert slice (§16.4) on the same fenced
+// connection, for the same reason.
+func (ls *LeaderSession) EvaluateServiceBurnAlerts(
+	ctx context.Context, cadence time.Duration,
+) (ServiceBurnEvaluation, error) {
+	return ls.store.evaluateServiceBurnAlertsOn(ctx, ls.conn, cadence)
+}

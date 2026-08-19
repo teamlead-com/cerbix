@@ -799,3 +799,142 @@ func TestNeighbourHealthMatchesSingleServiceOwner(t *testing.T) {
 		t.Fatalf("a foreign service produced a health entry: %+v", m)
 	}
 }
+
+// openService opens a SERVICE-anchored auto-incident (FR-022): the second kind of
+// anchor, which correlation must treat as a position in the graph the same way it
+// treats a monitor's membership.
+func (f impactFixture) openService(t *testing.T, st *Store, ctx context.Context, name string) domain.Incident {
+	t.Helper()
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: f.projectID, ServiceID: f.svc[name], Title: name + " is down",
+		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+	}, "service "+name+" is down", "auto")
+	if err != nil {
+		t.Fatalf("open service incident %s: %v", name, err)
+	}
+	return inc
+}
+
+// A service incident is correlated like any other anchor — upstream services with
+// an open incident become its probable roots, downstream ones become affected — and
+// its links NAME EVERY SERVICE BUT ITS OWN (FR-022 invariant 9). The chain here is
+// db ← payments ← checkout, and the anchor is the SERVICE incident in the middle:
+// so both directions are live in one attempt, and the one service a naive
+// implementation would name itself (payments) is the one that must never appear on
+// the anchor's rows.
+func TestAServiceIncidentIsCorrelatedAndNamesEveryServiceButItsOwn(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := seedImpact(t, st, ctx, "db", "payments", "checkout")
+	f.edge(t, st, ctx, "payments", "db", 0)
+	f.edge(t, st, ctx, "checkout", "payments", 0)
+
+	upstream := f.open(t, st, ctx, "db")         // a monitor incident above
+	downstream := f.open(t, st, ctx, "checkout") // and one below
+	anchor := f.openService(t, st, ctx, "payments")
+
+	links, overflow, err := st.CorrelateIncident(ctx, anchor.ID)
+	if err != nil {
+		t.Fatalf("correlate service incident: %v", err)
+	}
+	if overflow != 0 {
+		t.Errorf("witness overflow = %d, want 0", overflow)
+	}
+	if len(links) == 0 {
+		t.Fatal("a service incident got NO impact links: correlation still skips the service anchor, " +
+			"so FR-022's promise of a service incident WITH its impact links is unkept")
+	}
+
+	got := map[string]bool{}
+	for _, r := range relationRows(t, st, ctx) {
+		got[r] = true
+	}
+	want := []string{
+		anchor.ID + "|db|probable_root|db>payments",                 // upstream, on the anchor
+		anchor.ID + "|checkout|affected|payments>checkout",          // downstream, on the anchor
+		upstream.ID + "|payments|affected|db>payments",              // the mirror back-fill…
+		downstream.ID + "|payments|probable_root|payments>checkout", // …in both directions
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("missing relation row %q — the service anchor's links or their mirror are wrong", w)
+		}
+	}
+	for r := range got {
+		if strings.HasPrefix(r, anchor.ID+"|payments|") {
+			t.Fatalf("SELF-LINK: %q — a service incident named the service it is an incident OF "+
+				"(FR-022 invariant 9). The walk must never return its own start node.", r)
+		}
+	}
+	if n := impactNotes(t, st, ctx, anchor.ID); len(n) != 1 ||
+		!strings.Contains(n[0], "probable root — db") || !strings.Contains(n[0], "affected — checkout") {
+		t.Errorf("service incident 🕸 note = %v, want one note naming both directions", n)
+	}
+}
+
+// A service incident WITNESSES like a monitor one, which is what keeps the
+// relation's content independent of opening order (§14.3). Here the service
+// incident opens FIRST and is the only open incident upstream; the monitor
+// incident that opens second must still find it and gain probable_root, and the
+// mirror must give the service incident its affected row. If service incidents
+// were invisible to the witness query, the same two outages would produce links in
+// one order and nothing in the other.
+func TestAServiceIncidentWitnessesJustLikeAMonitorOne(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := seedImpact(t, st, ctx, "payments", "checkout")
+	f.edge(t, st, ctx, "checkout", "payments", 0)
+
+	upstream := f.openService(t, st, ctx, "payments") // the service incident, FIRST
+	child := f.open(t, st, ctx, "checkout")           // a monitor incident below it, second
+
+	links, _, err := st.CorrelateIncident(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("correlate child: %v", err)
+	}
+	if len(links) == 0 {
+		t.Fatal("a monitor incident found NO probable root while the upstream SERVICE had an open incident: " +
+			"a service incident is not being counted as a witness, so the relation's content now depends on " +
+			"which of the two opened first (§14.3 symmetry)")
+	}
+	got := map[string]bool{}
+	for _, r := range relationRows(t, st, ctx) {
+		got[r] = true
+	}
+	if !got[child.ID+"|payments|probable_root|payments>checkout"] {
+		t.Errorf("child lacks probable_root(payments): %v", got)
+	}
+	if !got[upstream.ID+"|checkout|affected|payments>checkout"] {
+		t.Errorf("the service incident lacks the mirrored affected(checkout): %v", got)
+	}
+}
+
+// A cycle no write path can create — the store's check refuses one under the graph
+// lock, but a restore or a direct INSERT does not — still produces NO self-link.
+// This is the only condition under which walk()'s start exclusion can matter, so it
+// is the only place invariant 9's guard is observable at all.
+func TestNoSelfLinkEvenWhenTheStoredGraphHasACycle(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := seedImpact(t, st, ctx, "payments", "checkout")
+	f.edge(t, st, ctx, "checkout", "payments", 0)
+	// checkout → payments exists; add payments → checkout behind the store's back.
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO service_dependencies (service_id, depends_on_id, project_id) VALUES ($1, $2, $3)`,
+		f.svc["payments"], f.svc["checkout"], f.projectID); err != nil {
+		t.Fatalf("plant the cycle: %v", err)
+	}
+	if _, err := st.ReplaceServiceDependencies(ctx, f.projectID, f.svc["payments"],
+		[]string{f.svc["checkout"]}, 1, GraphActor{Label: "t"}); err == nil {
+		t.Fatal("the store accepted a cycle — this test's premise (only direct SQL can create one) is gone")
+	}
+
+	f.open(t, st, ctx, "payments") // a second open incident IN the anchor's own service
+	anchor := f.openService(t, st, ctx, "payments")
+	if _, _, err := st.CorrelateIncident(ctx, anchor.ID); err != nil {
+		t.Fatalf("correlate under a cycle: %v", err)
+	}
+	for _, r := range relationRows(t, st, ctx) {
+		if strings.HasPrefix(r, anchor.ID+"|payments|") {
+			t.Fatalf("SELF-LINK under a cycle: %q — the walk returned its own start node, so a service "+
+				"incident now names the service it is an incident OF (FR-022 invariant 9)", r)
+		}
+	}
+}

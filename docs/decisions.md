@@ -3382,3 +3382,371 @@ iter-0146 implemented, the load-bearing decisions of the service impact graph:
 Review chain: implementation round 1/2 [276] (1 P0 + 5 P1 + 1 P2, all closed), fix pass
 [281], FINAL 2/2 [283] (one residual P1 — witness scoping — closed under the [263]-delegated
 disposition recorded in iter-0146 §9; per the two-round contract no third review round ran).
+
+## D-0167 — FR-021 phase 4: the status-page service projection, `no_data`, and the composite lifecycle (iter-0150)
+
+Phase 4's §15.0/§15.5 amendment (design gate cleared [310], owner-approved mock
+`design/mock-status-projection.html`) chose, and iter-0150 implemented, the following:
+
+- **The third component source is a DISCRIMINATOR, not a second populated column.**
+  `components.source ∈ {monitor, service, manual}` decides what the line renders from; the
+  inactive binding stays DORMANT so a conversion is revertible without re-choosing what it
+  replaced. An exclusivity CHECK over "which column is set" cannot coexist with reversibility,
+  so the CHECK asserts only that the ACTIVE binding exists. Consequence: every read path must
+  branch on the discriminator — the shipped renderer branched on `monitor_id != ""` and would
+  have kept publishing the OLD monitor of a converted component, and its
+  `if ManualStatus != ""` override would have let a dormant manual status beat a live service.
+- **`no_data` is a public status that is deliberately OUTSIDE the severity ladder.** Whether
+  "we do not know" is better or worse than declared maintenance is a false comparison, so the
+  page summary is **worst-of-MEASURED plus an unmeasured COUNT** (`summary`, `summary_state`,
+  `unmeasured_count`) rather than a single ordered value. `severity()`'s unknown default moved
+  from 0 (operational) to worst-measured, so a future enum value can never silently mean fine.
+  `no_data` is never operator-settable: refused by CHECK and by both write paths.
+- **Three inherited public statements are changed on purpose (§17).** A `pending` monitor
+  component, a manual component with no status, and an EMPTY page all used to publish
+  `operational`. They now publish `no_data` / `no_data` / `summary_state: empty`. The unit tests
+  that pinned the old answers were REWRITTEN and each additionally asserts the old answer is
+  gone, so a regression fails loudly instead of passing quietly.
+- **Conversion is explicit in both directions, previewed, and structurally CAS-fenced.** Consent
+  binds `components.revision` AND `status_pages.component_generation`, the latter bumped by ANY
+  component mutation on the page — a NEIGHBOUR's edit invalidates a preview, because the preview
+  showed the page SUMMARY. Mismatch is `409 page_configuration_stale` (first committer wins);
+  confirming without the tokens is `400`. Preview and confirm share ONE validator, so a preview
+  cannot promise what the confirmation then refuses, and the preview renders through the SAME
+  resolver as the public page, so it cannot predict a page the server would not produce.
+- **Deletion is specified per case, and the refusals are typed.** An actively-bound service is
+  `RESTRICT` → a conflict naming the page and the component (`SET NULL` would be the automatic
+  conversion this decision forbids; `CASCADE` would delete a customer-visible row for an internal
+  reason). A DORMANT service binding is swept in the same transaction with both counters bumped,
+  which is what makes `RESTRICT` mean *rendered* rather than *ever mentioned*. The monitor keeps
+  its shipped `SET NULL (monitor_id)` — an inherited automatic exception, recorded as one.
+- **The page-scope rule is a DEFERRED CONSTRAINT TRIGGER on both sides.** "A project-scoped page
+  admits only that project's components" must read `status_pages`, which a CHECK cannot, and the
+  `(status_page_id, org_id)` FK proves only the org. One trigger refuses a foreign component;
+  the other refuses NARROWING a page's scope while it holds one. Deferred, so a legitimate
+  multi-statement rearrangement is judged at COMMIT on its final state.
+- **The public render is bounded in ROWS, not merely in statements.** One batched projection with
+  a constant statement count, a per-page ceiling persisted as `max(50, current)` that may only
+  SHRINK, and an absolute fail-closed public ceiling of 500 in code above which the page returns
+  `status_page_over_safe_limit` naming the count and the limit — never a truncated subset posing
+  as the whole page, while the authenticated view still lists everything.
+- **Absence carries its reason, and a failed read is not absence.** The 90-day strip is built
+  from SEALED buckets only and ends at `sealed_through`, never at "now"; `sealed_in_window`, not
+  "any fact exists", decides whether a strip is drawn; days with zero decidable time are ABSENT
+  rather than 0%. An ACTIVE service the projection cannot find degrades the component with a
+  logged, named failure (`service_unreadable`) instead of publishing the calm statement
+  `no_data`, which would present a bug as a fact.
+- **The composite stays visible and active; retiring is a separate, explicit act** (owner
+  decision). The link is ONE stored fact (`monitors.superseded_by_service_id`, tenant-composite
+  FK, `SET NULL` on service deletion) rendered from BOTH ends, so there is no pair to fall out of
+  sync. Recording it bumps no `execution_revision` — an annotation must not force a re-probe.
+  `retire` is ONE transaction setting `retired_at` (lifecycle) **and** `enabled = false`
+  (execution), with the config fence, the `state_sequence` advance that makes a queued transition
+  stale at delivery, and the epoch fan-out for every referencing service; `retired_at` alone
+  would leave a "retired" monitor probing and paging. Reversible, audited, refused for a
+  file-managed monitor. Composite→service conversion is one serialized transaction (composite
+  `FOR UPDATE` → service → declaration → link → audit), idempotent on the link column, and a slug
+  collision is a conflict naming the existing slug rather than a suffixed twin.
+- **The `quorum` translation refuses rather than approximates.** A composite states its threshold
+  as a DOWN-vote count and a service as a minimum GOOD count, so the arithmetic is
+  `degraded_min = n − M + 1`; transcribing the number would invert the meaning. A flat "M of N
+  children" is not expressible as per-region quorum plus a region rollup, so a quorum composite
+  whose children span regions is refused with a named reason. A conversion that quietly changes
+  what "down" means on a customer-facing page is worse than no conversion tool.
+- **`RetiredAt` and `SupersededByServiceID` are classified SemanticPresentation.** `RetiredAt`
+  does accompany an execution change, but `enabled` is the field that CARRIES it and is already
+  SemanticEvaluation; listing both would hash the same fact twice and would let a future path
+  that set only `retired_at` register as a semantic change while the monitor kept probing.
+
+- **The tenant rule keys on the PRESENCE OF A BINDING, and the page-scope guard holds a LOCK.**
+  Two corrections from review round 1/2 [314] that the first implementation got wrong in ways worth
+  recording: a composite FK is MATCH SIMPLE, so `(monitor_id, source_project)` with a NULL project
+  is not enforced at all — keying the CHECK on `source` therefore left a dormant foreign binding
+  unconstrained on both sides. And `DEFERRABLE INITIALLY DEFERRED` is not a lock: each transaction
+  validates at COMMIT against its OWN snapshot, so an insert and a page-narrowing could both commit
+  a state neither would have accepted. The guard takes the page row `FOR UPDATE`; the narrowing side
+  already row-locks it.
+- **Deleting a monitor that a page RENDERS is a DB-level transition.** `ON DELETE SET NULL
+  (monitor_id)` clears the binding and leaves `source='monitor'`, which the active-binding CHECK
+  rejects — so the first implementation broke an ordinary monitor delete outright. The transition
+  (source → manual, binding cleared, `source_project` kept only while another binding needs it) is a
+  `BEFORE DELETE` trigger on `monitors`, because the D-0150 project cascade deletes monitors through
+  FK actions with NO application on the path. For the same reason both counters — the page generation
+  and each component's revision — are DB-owned: "any component mutation bumps the generation" cannot
+  be application discipline while FK actions are part of the contract.
+- **The ceiling's rule is "no write may create headroom", not monotonicity.** It is LOWERED by every
+  removal and may never exceed `max(50, current count)`, which is by construction a value at which
+  an oversized page is still full. A flat no-increase rule could not express the legacy state the
+  backfill itself creates.
+- **The projection is PAGE-scoped, and the withholding rule has ONE owner.** An org-level page spans
+  projects, so a per-project batch is neither one snapshot nor a constant statement count. And
+  `uptime_90d` with its `withheld_reason` comes from `decideServiceWindow`, EXTRACTED from the
+  authenticated report so the page cannot quote what the report withholds; the page mirrors the
+  report's branch order for the no-watermark and no-SLI pre-checks. The monitor half is batched too:
+  amplification left in place is amplification claimed gone. A short-TTL render cache keyed to page +
+  access shape + unlisted token is the RATE bound the ceiling cannot provide.
+- **A failed read is PUBLICLY distinguishable and counted.** An active service the projection cannot
+  find carries `unavailable: true` on the public payload and increments
+  `cerbix_status_page_component_unreadable_total`. Bytes identical to a calm `no_data` were the
+  confusion invariant 71a exists to forbid; the marker says something about cerbix, not about the
+  customer's topology.
+- **Converting a composite REQUIRES an explicit `sli[]`, and refuses partial child loss.** §15.5 says
+  explicit confirmation and never a silent "all children", so there is no default anywhere in the
+  stack. Every live child joins the operational CONTEXT regardless. A composite whose declared
+  children are not all live is refused by name, since `all` over 2 is not `all` over 3. The quorum
+  translation is `degraded_min = n − M + 1` with `healthy_min` EQUAL to it — the exact binary mapping,
+  because a composite has two states and adding a degraded band would report more than it did on a
+  customer-facing page. Widening that vocabulary is a later owner decision with a preview.
+- **The lifecycle actions are COMPOSITE-only, and §15.1's "may MUTATE a resource" means
+  DECLARATION authority — not every column of the row.** This narrowing is the substance of the
+  [316] disposition and it is what makes the file-ownership split coherent: `retire`/`reactivate`
+  and the conversion refuse for a file-managed composite because they write `enabled` or create a
+  declaration, both of which a reapply would restate; the `superseded_by_service_id` annotation is
+  PERMITTED there because it is not in bundle format 2, enters no canonical hash or generation, and
+  cannot be contradicted by any reconcile. Refusing it would remove the only way to annotate a
+  file-managed composite while protecting nothing.
+
+Impact links stay NON-PUBLIC (phase 4 declined projecting them): a status page would publish the
+dependency graph, and that needs its own owner decision in a later phase.
+
+Review chain: round 1/2 [314] REJECTED with 2 P0 + 7 P1 + 2 P2; the disposition on the single
+contested item is [315]/[316] (split accepted, with §15.1 narrowed as above). Round 2 carries a
+direct regression for every finding — including the two-session page-scope race in both commit
+orders, the rendered-monitor delete under API and cascade, a MEASURED statement count, and
+page-versus-report agreement on the withheld reason.
+
+## D-0168 — FR-021 phase 5: alerting ownership, per-signal ARMED delegation, and the refusal to suppress a close (iter-0151)
+
+Phase 5 answers the question §13 deliberately left open: monitor burn alerting already pages, so
+turning on service alerts without an ownership rule pages twice for one failure. The owner's decisions
+(2026-08-17) and the two design rounds ([324] REJECTED before code, [326] REJECTED with a closed
+authority ledger, amended and dispositioned here under the delegated authority) produce the following.
+
+**The owner's seven decisions.** Ownership is DECLARED at the service and defaults to OFF; a service
+alerts on TWO signals — a LIVE health transition and a SEALED burn breach; the alert NOTIFIES and opens
+no incident; service burn rules are the same `BurnRule` monitors use; routing is NARROWED to the
+service's on-call schedule or the project's channels with escalation POLICIES deferred;
+`escalation_step` IS suppressed for a delegated monitor; and losing sight of a paged service CLOSES the
+alert with a named reason rather than as "recovered".
+
+- **`owns_paging` alone silences NOTHING.** Delegation is per SIGNAL and must be ARMED: owns_paging ∧ a
+  policy that can page the current state ∧ a QUOTABLE last verdict ∧ the CURRENT (config generation,
+  target generation, effective definition revision, canonical rule key) ∧ a FRESH DB-clock lease ∧
+  effective ROUTABILITY. Three findings drove each clause and each one could lose a page:
+  a HOLD is a *successful* evaluation, so quotability had to join arming or a CLEAR rule holding on
+  `nothing_sealed` would mute a member's real burn alert while being structurally unable to fire; an
+  unroutable service satisfied every other clause and delivered nothing; and a missing or stale
+  evaluation is not evidence of coverage. Everything ambiguous FAILS OPEN and pages.
+- **A RECOVERY is never suppressed.** Arming is evaluated at delivery and changes between an onset and
+  its close: a monitor DOWN can fail-open while dis-armed, the evaluator can then arm, and the matching
+  UP would be muted — leaving a recipient holding a DOWN that can never end. Only onset-like events
+  (DOWN transitions and reminders, `escalation_step`, `firing = true` burn) are suppressible. An
+  episode table per monitor per owner per generation would be the general fix; refusing to suppress
+  closes is the fix that cannot be got wrong, and a duplicate "recovered" is strictly safer than an
+  unmatched "down".
+- **`escalation_step` is in the suppressed set, and that is the finding that mattered most.** The
+  worker already drops the flat DOWN `monitor_transition` for a monitor with an escalation policy and
+  auto-incident; its real pages are the ladder's steps over the open incident. Suppressing only
+  transitions and burn would have delivered phase 5's promise to everyone EXCEPT the installations that
+  page correctly. The ladder's rows, progress and incident are untouched; only delivery is muted.
+- **Membership is the CURRENT EFFECTIVE definition revision**, never `service_member_refs`, which is
+  rewritten at authoring time while a declaration becomes effective on its bucket boundary. Otherwise a
+  monitor added at 12:00:30 for a 12:01 revision is suppressed at 12:00:40 by a service that is still
+  measuring the old definition and cannot replace the page. Arming is stamped with the revision id.
+- **Delivery is at-least-once, ordered — and the spec says so.** The first draft claimed a
+  same-transaction enqueue made redelivery harmless; the worker explicitly permits a duplicate external
+  send when the delivery mark fails. Phase 5 adds `emitted_seq` per service and a per-rule sequence,
+  both checked at delivery so a retried onset cannot re-announce a state the service has left. A CLOSE
+  whose ONSET never reached a channel is still delivered.
+- **Routing is narrowed because "the ladder applies unchanged" was not implementable.** Escalation steps
+  are defined relative to an incident start with acknowledgement, progress and repeat state, and owner
+  decision 3 forbids service incidents. Phase 5 resolves the service's on-call schedule at ONSET, falls
+  back to the project's channels, and leaves `services.escalation_policy_id` unconsumed with the UI
+  saying so. A later phase needs a durable non-incident occurrence before "ladder" means anything here.
+- **An ONSET creates a durable episode with an IMMUTABLE recipient snapshot**, which is what makes a
+  close both correct and possible: a rotating schedule must not receive a close for an onset it never
+  saw, and a close must still deliver after the service, target or rule has been deleted — so every
+  removal path enqueues its close in the same transaction, with a named reason. Losing the ROUTE closes
+  nothing: dis-arming is not a recovery.
+- **The service burn latch is normalized** per `(service_id, project_id, sla_target_id, rule_key)` with
+  the canonical key excluding every server-owned field, so a rule cannot change identity by firing. The
+  MONITOR latch stays inside `sla_targets.burn_rules` exactly as it is: phase 5 changes no monitor
+  behaviour.
+- **Bounded slices, not one global transaction.** Per-project caps do not bound an installation, and a
+  single global snapshot can monopolize the leader's connection. Keyset slices with a hard cap, a
+  per-slice deadline, cursor fairness, constant statements per slice, per-project maintenance scoping,
+  and generation/lease CAS against a deposed evaluator.
+- **A stalled evaluator marks the SCHEDULER not-ready, never the API.** The stall is exactly the state
+  in which delegation dis-arms and members resume paging; reporting ready would hide a degradation,
+  while taking the API out of rotation would turn it into an outage.
+
+`any`/`quorum` tolerated failure is APPROVED as designed and is not reopened: with live coverage armed
+and fresh, one DOWN member under a declaration that tolerates it does not phone-page, and the monitor
+stays red with its incident open and its delegation named.
+
+Review chain: design round 1/2 [324] REJECTED before code (4 P0 + 10 P1 + 2 P2), revised design [325],
+FINAL round 2/2 [326] REJECTED with a closed authority ledger and no third round. The P0/P1 items of
+[326] are amended in §16.1/§16.4/§16.4a/§16.4b/§16.5a/§16.6a/§16.6b with invariants 75–91 and the
+§16.10 test matrix; implementation proceeds under that record.
+
+## D-0169 — FR-021 closes at a measured boundary, and §16.9 becomes an explicit non-goal (iter-0153)
+
+Phases 1–5 of `func-service-reliability.md` are shipped and reviewed, and the question this decision
+answers is not "is there more to build" — there always is — but **what "FR-021 is done" is allowed to
+mean**. Until iter-0153 it meant a chain of review verdicts: nothing in the repository mapped the
+spec's 91 numbered acceptance invariants (§19 for phases 1–4, §16.8 for phase 5) or its 24-scenario
+required matrix (§16.10) to a test, 36 invariant numbers appeared in no document at all, and the only
+way to audit the claim was to re-read thirty immutable iteration reports.
+
+**The requirement closes against a discharge map, not against a memory.** `docs/traceability.md`
+carries one row per invariant and per required scenario, naming the test that holds it, and
+`make docs-check` fails when a row cites a test the tree lacks or when any of the 115 numbers has no
+row. Building the map found seven properties that were specified, believed and unpinned — invariants
+1, 25, 27, 35, 37, 78 and 86 — none of them a product defect, each now carrying a test that fails
+behaviourally when the property is broken (iter-0153 §2.7). Invariant 86 is the sharpest evidence for
+why the map is the boundary rather than a formality: the spec's own required matrix demanded that
+regression, and it did not exist.
+
+**§16.9 is an explicit NON-GOAL of FR-021, not unfinished work inside it.** Service incidents (owner
+decision 3), escalation POLICIES for services (owner decision 5 — which first needs a durable
+non-incident occurrence carrying started/resolved/ack/progress/repeat state, a subsystem and not a
+refinement), retroactive alerting, cross-project delegation, per-member severity inside a service page,
+and suppression beyond the three named topics are all deliberately outside this requirement. They stay
+described in §16.9 so the reasoning survives; when any of them is commissioned it opens its OWN
+requirement with its own acceptance invariants, rather than reopening a closed one. A requirement that
+stays open for everything it could have been never closes, and the checklist stops meaning anything —
+which this repository had already demonstrated: 28 status rows sat at `IN_PROGRESS` for eight
+iterations after the verdict that closed them (iter-0153 §2.6).
+
+**Consequence.** `FR-021` and `NFR-016` are `DONE` in `docs/status.md`; the discharge tables are the
+evidence and the gate keeps them true; the deferred set is a stated non-goal with a named owner
+decision behind each item. Invariant 47 is superseded rather than deleted (§16.4 lifts the phase-2
+rejection it asserted), because other documents cite invariants by number.
+
+## D-0170 — FR-022 commissioned: a Service can own an incident, and its six decisions are delegated (iter-0155)
+
+The owner commissioned Service incidents — the first of §16.9's six deferred items — and delegated the six
+decisions the design-gate input had raised to that document's own recommendations. Recording that is the
+point of this entry: each decision below was a JUDGEMENT of mine that the owner adopted, not a fact derived
+from the code, and a later reader deserves to know which is which.
+
+**The six, resolved.** A service alert AUTO-OPENS an incident, on a LIVE onset only and never on a burn
+breach, under the same three gates that decide whether it pages at all (armed coverage, `confirm_evaluations`,
+a fresh DB-clock lease). The incident lives in the EXISTING `incidents` table under an exclusive anchor —
+at most one of `monitor_id` / `service_id`, because a manual project-level incident has neither today —
+rather than a second table, since phase 4 already paid for the alternative when an implicit
+`monitor_id != ""` discriminator published a converted component's old monitor. A service incident does
+NOTHING to its members' incidents: two timelines, both true. It reaches the status page; its §14 impact
+links do not, keeping §15.0's refusal to publish internal topology. The escalation ladder does not ride it
+in this requirement — §16.9's escalation item needs a durable non-incident occurrence first, and bundling
+them would smuggle a subsystem in through a feature. And a postmortem snapshots its member set at open
+time, the same device phase 5 used for an episode's recipients, because a postmortem is read after the
+world moved.
+
+**The consequence that matters more than any of them: FR-022 SUPERSEDES FR-021 invariant 86** — "no service
+alert opens, resolves or annotates an incident". That invariant is true today and held by
+`TestAServiceAlertNeverTouchesTheIncidentTables`, written in iter-0155. So the spec requires three things to
+move IN THE SAME CHANGE as the code: invariant 86 gains a SUPERSEDED note keeping its number, its discharge
+row moves to the test holding the new rule, and that test is REWRITTEN rather than deleted — exactly as
+phase 5 rewrote the phase-2 burn-rejection test when it inverted. Without that, this repository repeats
+invariant 47's history: a spec asserting the opposite of what its own code does, left standing for a phase.
+
+**Consequence.** `FR-022`/`NFR-017` stay `TODO` until the spec is reviewed adversarially and a UI mock is
+approved; the spec carries fourteen numbered acceptance invariants and a required test matrix written
+before the code, because iter-0155 established that an unmapped invariant list is worth nothing and that
+`make docs-check` is what keeps a mapped one true.
+
+## D-0171 — FR-022 closes against its own enforced discharge map, and one of its invariants was corrected rather than implemented (2026-08-19)
+
+**Context.** FR-021 closed against a map of 91 invariants and 24 scenarios that `make docs-check` refuses to
+let go stale (D-0169), after that arc found 36 invariant numbers cited nowhere. FR-022 was written with
+sixteen numbered invariants and a sixteen-line test matrix BEFORE the code, so the same instrument applies
+to it — and applying it before closing, rather than after, is the whole point.
+
+**Decision.** FR-022 and NFR-017 are DONE, closed against the map in `traceability.md`: every one of the
+sixteen §6 invariants and the sixteen §7 scenarios has a row naming a test that exists, enforced by the gate
+(now 91 + 24 + 16 + 16). Two consequences are recorded as part of the closure rather than left implicit:
+
+1. **Invariant 14 was CORRECTED, not implemented.** As written — "every write is audited with its actor and
+   tenant, in the mutating transaction" — it was false of the product, not merely unimplemented: incident
+   writes carry no audit row for EITHER anchor. Implementing it would have meant changing the monitor path
+   inside a requirement forbidden from touching it. The spec keeps the number, quotes the original, states
+   what FR-022 does promise (the absence of asymmetry, pinned by a test), and **an audit trail for incident
+   writes is hereby recorded as an open gap needing its own requirement**, where it can be designed for both
+   anchors at once. It is NOT in this repository yet and nothing in FR-022 provides it.
+2. **Invariant 8's discharge is honest about what rests on judgement.** "Byte-identical" is discharged by the
+   unchanged suite plus the surfaces named by me as reachable — my judgement — plus the browser suite on a
+   live stack, which is not. The row says which half is which.
+
+**Consequence.** The FR-022 obligation toward FR-021 invariant 86 is discharged: the note, the discharge row,
+§16.10's scenario 24 and the rewritten test all moved in the change that made them necessary. §16.9's other
+items (escalation policies for services, retroactive alerting, cross-project delegation, per-member severity,
+suppression beyond three topics) remain non-goals and still open their own requirements. What FR-022 does NOT
+add, deliberately: a way to open a service incident BY HAND (the create API takes no service anchor), a
+webhook `incident.opened` event for a service incident, and any UI for the member snapshot the API serves.
+
+## D-0172 — the next §16.9 item is escalation for services, and FR-022 is what unblocked it (2026-08-19)
+
+**Context.** §16.9 lists what FR-021 phase 5 deliberately did not do. Service incidents were the first item
+and closed as FR-022 (D-0171). Asked for the next one, the honest reading of the remaining five is that they
+are not all the same kind of thing: **retroactive alerting** and **per-member severity** are stated as
+POSITIONS with their reasons ("a rule enabled today says nothing about last week"; "which member is
+diagnostics"), not as deferrals; **cross-project delegation** and **suppression beyond the three topics** are
+open questions nobody has asked for. Only **escalation policies for services** was deferred with a stated
+blocker — owner decision 5: it needs "a durable non-incident occurrence with started/resolved/ack/progress/
+repeat state before 'the ladder' means anything for a service".
+
+**Decision.** FR-023 / NFR-018 are commissioned and specified in `func-service-escalation.md`. FR-022
+removed D5's blocker in the exact terms it was written in: a service alert now opens an incident carrying
+`started_at`, `acknowledged_at`, `escalation_step` and `last_escalated_at`. There is no new subsystem to
+build and no migration to write — the policy column has existed on `services` since phase 5 and is
+deliberately unread, and the progress columns are the ones the monitor ladder already uses.
+
+**Two decisions inside it are worth the record.** The ladder FAILS CLOSED where delegation fails open: a
+missing, stale or unreadable verdict does not advance a step, because ambiguity at delivery time means *a
+page exists* while ambiguity in a ladder would mean *a page multiplies* on a state nobody can confirm. And
+the service GRAPH does not pause the ladder, against the obvious symmetry with the monitor dependency pause,
+because §14 states its own position — the impact graph "annotates and links; never suppresses, merges or
+hides" — and a graph sold as advisory must not become a suppression mechanism because a second feature found
+it convenient.
+
+**Consequence.** Writing the spec corrected one of its own decisions before any code existed: fencing
+`TopicEscalationStep` was the first answer, and `domain.FencedTopics`' doc comment says why a PRE-fence topic
+must stay legacy — a currently-deployed worker claims `status = 'pending'` and would stop seeing escalation
+steps entirely during a rolling upgrade. The payload evolves compatibly instead, and what an OLD worker does
+with a service step is stated rather than left to be discovered.
+
+## D-0173 — FR-023 closes, and two of its invariants were written by the implementation (2026-08-19)
+
+**Context.** FR-023 was specified before any code (D-0172) with fourteen invariants and a seventeen-line test
+matrix. Implementing it produced two findings that the spec could not have had, and both are now invariants
+rather than footnotes.
+
+**Decision.** FR-023 and NFR-018 are DONE, closed against the map in `traceability.md`: sixteen invariants and
+nineteen scenarios, each naming a test that exists, enforced by `make docs-check` (FR-021 91+24, FR-022 16+16,
+FR-023 16+19).
+
+**The two added invariants, and why they belong in the requirement rather than in a report.**
+
+1. **Invariant 15 — the policy had no write path.** D1 said the API "accepts" the policy. It accepts it only
+   at CREATE time: there is no service update endpoint at all, so a service that already existed could not be
+   given one. Harmless while the column was inert; a hole the moment FR-023 made it decide who is woken. The
+   route is its own transaction with its own audit action naming what moved, a no-op writes nothing at all,
+   and a foreign policy is refused BY NAME rather than as an FK violation an API could only render as a 500.
+2. **Invariant 16 — the operator needs it in the product, not only in the API.** The SPA control is
+   independent of the paging declaration: separate write, separate save, separate error, and it does not
+   disappear when the declaration cannot be read — which is where my first implementation put it, and what
+   the unit tests refused.
+
+**Two decisions worth keeping in view.** The ladder FAILS CLOSED where delegation fails open, because
+ambiguity at delivery time means *a page exists* while ambiguity in a ladder would mean *a page multiplies* on
+a state nobody can confirm. And the service GRAPH does not pause the ladder, against the obvious symmetry with
+the monitor dependency pause, because §14 states its own position — the impact graph "annotates and links;
+never suppresses, merges or hides".
+
+**Consequence.** §16.9's escalation bullet is SUPERSEDED, with the bullet kept so the record of the deferral
+survives its end. Of what remains in §16.9, nothing is a deferral: retroactive alerting and per-member
+severity are POSITIONS with their reasons, and cross-project delegation and suppression beyond the three
+topics are open questions nobody has asked for. The audit trail for INCIDENT writes stays an open gap from
+D-0171, unaffected by this requirement and still needing its own.
+

@@ -222,3 +222,175 @@ depth in presentation only; affected chips; the 🕸 system note beside ⚡/⏸)
 deliberately WITHOUT impacts (the §14.7 read bound made visible; a designed absence).
 
 The **Spec notes** toggle is again a review affordance overlaying §14 rules and does not ship.
+
+## FR-021 phase 4 — Status projection (design track — APPROVED 2026-08-17)
+
+Mock produced **before** any frontend code and **approved by the owner**, per the standing gate.
+Source: `docs/design/mock-status-projection.html`
+(artifact `7a555bda-8b0d-4389-987b-60518061384a`). Implement 1:1 from it. Tokens and shell are
+1:1 with the earlier mocks; the feature adds **one public status and no new colour**.
+
+Five screens: Component source (the discriminator with DORMANT bindings shown dashed, the
+same-project refusal, and the two rows whose appearance changed) · Conversion preview
+(now → would-see per component AND for the page summary, both CAS counters with `as_of`, and the
+`page_configuration_stale` refusal) · Public page (the two-part headline, gaps-not-zeros strip,
+withheld availability with its reason, all-`no_data` and empty-page edges, and the fail-closed
+over-limit response) · Composite · retire (one stored link rendered both ways, the warning naming
+the loss of SLO and alerts, and the list distinguishing superseded / retired / disabled) ·
+Deletion cases (three deletions, three honest answers).
+
+### The one addition to the design language (approved)
+
+**`no_data` is the `--pending` hue plus a DASHED ring — not a new colour.** A sixth hue would
+invite the reader to rank "we do not know" against "declared maintenance", and §15.0 explicitly
+refuses that comparison: the summary keeps them apart as measured-vs-unmeasured instead of
+ordering them. This is the same motif phase 2 used for UNKNOWN ticks — deficient evidence reads
+as deficient at any size, in both themes.
+
+### Fidelity notes for implementation
+
+The public page's strip must render ABSENT days as gaps and partially decidable days as short
+bars. A zero-height day and a zero-availability day would look identical, which is the exact
+confusion `daily[]` omitting absent days exists to prevent. The window label reads
+`sealed through …`, never "now" — the mock says so on the axis because an implementation that
+ended the window at page load would be silently wrong.
+
+## FR-021 phase 5 — alerting ownership (approved 2026-08-17)
+
+Source: `docs/design/mock-alerting-ownership.html`. Approved by the owner after the design's second
+revision, which is the version that matters: the first mock showed a single ownership toggle, and two
+design rounds established that a toggle is a DECLARATION and not coverage.
+
+Five screens: Ownership switch (the declaration, the per-signal ARMED / PENDING / DEGRADED badge with
+its reason, the before/after of who pages, the confirmation delay stated as nominal, and the routing
+that says plainly which field is not consumed yet) · A delegated monitor (its own real status pill
+kept, a dashed delegation chip naming the owner, which signals are delegated and which are NOT, and
+the `⏸ Suppressed:` note in the incident timeline) · Tolerated failure (a member DOWN under `any`
+while the service is HEALTHY — what was recorded, what was not paged, and what to change if that is
+wrong) · The alerts (live transition vs sealed burn with its watermark, and a CLOSE that names its
+reason and goes to the onset's recipients) · Refusals (unknown, maintenance, a held burn window that
+dis-arms, nobody to notify, and a recovery that is never suppressed).
+
+### The additions to the design language (approved)
+
+**Arming badges, and no new hue.** `armed` borrows `--up`, `pending` borrows the `--pending` hue with
+a dashed ring (the phase-4 dormant grammar), `degraded` borrows `--degraded`. Alerting is a question
+of who is paged, not a new state of a thing, so it introduces no colour of its own. `armed` is the
+only badge that means anything is suppressed, and it is the only one carrying the accent weight.
+
+**A delegated monitor is never greyed out.** It keeps its real status pill — DOWN reads as DOWN — and
+gains a dashed chip naming the owner. Dimming it would make the system show something other than what
+it knows, which is what §11 and §14 exist to prevent.
+
+### Fidelity notes for implementation
+
+The per-signal badge must render the SERVER's arming reason, never a client reconstruction from a
+timestamp: two implementations of "fresh" is how a badge says armed while delivery suppresses nothing.
+Screen 1's held-burn warning is the mandatory case — a green ownership toggle beside a dis-armed burn
+signal is the exact confusion the badges exist to remove.
+
+## Instance audit — the global admin's own history (iter-0155, AWAITING OWNER APPROVAL)
+
+Source: `docs/design/mock-instance-audit.html`. **Not approved yet** — the backend of this item is
+landed and tested, and no Vue file is touched until the owner signs the mock off, per the process gate.
+
+`RecordAudit` stores an empty `OrgID` as NULL, and those rows are what a GLOBAL admin's actions leave
+behind (`user.global_admin`, `user.delete`, file-provider and outbox operations). They have been
+written since D-0109 and shown nowhere: the audit list in `MembersPanel` is org-scoped by construction,
+so the installation's own history is invisible in the product that records it.
+
+What the mock decides, so the implementation invents nothing:
+
+- **Placement** — Settings → Administration, a tab beside Users / File providers / Outbox. That group
+  already means "instance, not tenant"; the feature adds no navigation.
+- **Row grammar is the org audit's, unchanged** — dot, actor, action prose, monospace target, relative
+  time, "Show more". One reader learns one shape.
+- **One new device: a dashed `instance` chip**, reusing the dashed grammar phases 4 and 5 gave to "a
+  different KIND of thing" (a dormant binding, a delegated monitor). It says these rows have no
+  organization — not that an organization is missing.
+- **A machine actor renders as "machine"**, exactly as the org list renders a NULL actor. An audit row
+  whose actor cannot be resolved must never borrow a human's name.
+- **Nothing is deletable or editable.** An audit trail with a delete button is not an audit trail.
+- **Org-scoped rows are NOT mixed in** — deliberately. That would make this the "everything" view and
+  answer, in one glance, a question this panel is not allowed to answer: who did what inside a tenant.
+  The API enforces the same split: `GET /api/v1/admin/audit` is a distinct read (`org_id IS NULL`),
+  not the org listing with a wider filter, so no authz slip can widen one into the other.
+
+## Project objective — the promise about the whole, not the mean of its parts (iter-0155, AWAITING OWNER APPROVAL)
+
+Source: `docs/design/mock-project-objective.html`. **Not approved yet** — the backend and migration 00083
+are landed and tested, and no Vue file is touched until the owner signs it off.
+
+The SLA page already shows an "Error budget remaining · 30d" card that is a MEAN across monitors which
+happen to have objectives. That answers "how are my monitors doing". A project objective answers a
+different question — "what did we promise for this project" — and until now it had nowhere to live even
+though `sla_targets` has carried the project scope since migration 00077.
+
+What the mock decides:
+
+- **The two cards sit side by side and each says which question it answers.** "mean across SLO monitors"
+  beside "Project objective". Two numbers that could be mistaken for one another must be labelled, not
+  separated by hoping the reader notices.
+- **An objective is per WINDOW; only a window that has one shows numbers.** Other windows show a dash,
+  never 30d's objective borrowed — a budget without the promise it was measured against is a number
+  nobody made.
+- **The Burn column is always a dash at this scope, and there is NO burn control at all** — not a
+  disabled one. A disabled switch says "not yet"; an absent one says "not here". Paging at project scope
+  needs an arming rule, a routing answer and close semantics, and until those exist the database refuses
+  the row (`sla_targets_project_no_burn_chk`).
+- **Rejection happens before the request**, mirroring the server's rule client-side (`lib/objective.ts`,
+  D-0165): the open interval (0,100), four decimals, half-up. The operator reads why, not a 400.
+- **Clear is explicit**, and clearing takes the budget with it: the row returns to dashes, never to 100%.
+- **Not shown on purpose:** a project-level burn history (cannot exist without paging semantics) and a
+  per-monitor breakdown of the project budget (that is the objectives table directly below).
+
+## FR-022 — service incidents, SPA deltas only (AWAITING OWNER APPROVAL)
+
+Source: `docs/design/mock-service-incidents.html`. **APPROVED by the owner on 2026-08-19** ("мок ок"), and
+built in iter-0156 §2.10. Per the owner's instruction the mock covers ONLY what changes in the SPA: four
+surfaces gain something and nothing else moves. Backend work proceeded without it and no Vue file was touched
+until the sign-off — including through a round in which a REVIEWER wrote "approved on behalf of the owner",
+which is not the owner and did not unblock anything.
+
+- **The subject is a CHIP**, not a column and not a title prefix. Chips are already how phases 4 and 5 say
+  "this row is a different KIND of thing"; a column would reshape every existing row, and a prefix would put
+  the discriminator inside the text people search. A project-level incident carries no chip — which is what
+  makes the chip a discriminator rather than decoration.
+- **A monitor incident is untouched, visibly.** Every panel shows the monitor case beside the service case,
+  because NFR-017 is a promise the UI has to keep too.
+- **"opened automatically" is stated with what confirmed it** — "service DOWN confirmed over 2 evaluations",
+  the same number that governs paging. An operator who finds an incident nobody typed must be able to see
+  the machine that opened it and why.
+- **Impact chips stay on the authenticated detail only.** They already do for monitors (§14); the public page
+  gets the incident and NOT the graph, because §15.0 keeps internal topology unpublished and phase 4 declined
+  to opt in (FR-021 invariant 59).
+- **The service page links, it does not embed.** One timeline, one owner; two renderings of one timeline drift.
+- **Not shown and not built:** a resolve-all control, per-member severity, or escalation progress on a service
+  incident (D5 defers the ladder). A control for a feature that does not exist is a promise the backend refuses.
+
+## FR-023 — a Service escalates its own outage (mock, 2026-08-19)
+
+Source: `docs/design/mock-service-escalation.html`. **APPROVED by the owner on 2026-08-19** ("мок ок"), built in iter-0157 §2.10. SPA deltas only, per the owner's
+standing instruction; the backend of FR-023 is already in the branch and needed no mock.
+
+> **Corrected on the owner's first look: the first draft used a palette I invented.** The tokens are now
+> lifted VERBATIM from `frontend/src/style.css` — the same block every approved mock carries — and checked
+> against it token by token rather than by eye. A mock that reviews a colour decision nobody made is worse
+> than no mock: it spends the reviewer's attention on my invention instead of on the product.
+
+- **No new colour at all.** An escalation step is not a new state — it is the existing DOWN story told
+  again to more people — so a fired step carries the DOWN hue and the progress pill keeps the degraded hue
+  it already has. Steps not yet due are OUTLINED, never tinted: a step that has not happened is not a state.
+- **The policy control goes in the paging panel, with its OWN save button.** It belongs where ownership and
+  `Pages for` live — but the declaration and the policy are two writes with two audit actions, and one button
+  that half-applies is worse than two buttons. The empty option CLEARS the policy, because "this service
+  escalates nothing" has to be sayable, not merely reachable by never having chosen.
+- **The progress pill needs no code.** `⛑ escalated to step N` already reads `incident.escalation_step`, and
+  FR-023 advances that for a service incident too. It is in the mock so its absence is not read as a gap.
+- **The per-step list is drawn and NOT built, deliberately.** The API exposes the current step index and
+  nothing per step; rendering three rows from one integer would be a guess presented as a record. If the list
+  is wanted it needs a read model, which is its own requirement.
+- **Absent on purpose:** a renotify field (D8 — services have no such column), an "escalate now" button (a
+  page nobody could explain from the record afterwards), a pause control (the ladder pauses itself and
+  acknowledgement is the operator's stop — a third mechanism would give three answers to "why is it quiet"),
+  and any graph hint (§14 annotates, never suppresses, and the ladder does not consult it).

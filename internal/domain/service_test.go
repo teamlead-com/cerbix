@@ -73,3 +73,42 @@ func TestServicePoliciesRoundTrip(t *testing.T) {
 		t.Fatalf("round trip changed the policy:\n got %+v\nwant %+v\n(%s)", back, p, b)
 	}
 }
+
+// Invariant 6 (§9.5): threshold validation runs against the DECLARED cardinality, and a momentary
+// exclusion never triggers it.
+//
+// Both halves are load-bearing and they pull in opposite directions. Validating against the declared
+// count is what makes `healthy_min: 3` on a two-member service a REFUSAL at write time instead of a
+// service that can never be healthy. Not validating against the momentary count is what stops a
+// maintenance window or a disabled member from retroactively invalidating a stored declaration —
+// that case is the reducer's clamp (`TestQuorumClampsToEligibleAndRecordsIt`), not a rejection.
+func TestThresholdValidationReadsTheDeclaredCardinality(t *testing.T) {
+	policies := func(healthyMin int) ServicePolicies {
+		return ApplyServicePolicyDefaults(ServicePolicies{
+			Aggregation: AggregationPolicy{Mode: AggQuorum, DegradedMin: 1, HealthyMin: healthyMin},
+			Maintenance: MaintenanceExclude,
+		}, map[string]int{"core": 2}, 1) // one region, so the region clause cannot fire first
+	}
+
+	// Declared 2, asking for 3 healthy: refused BY NAME, at write time.
+	err := ValidateServicePolicies(policies(3), map[string]int{"core": 2}, 1)
+	if err == nil {
+		t.Fatal("healthy_min 3 over 2 declared members was accepted — a service that can never be " +
+			"healthy must be refused at write time, not discovered in a report (invariant 6)")
+	}
+	if !strings.Contains(err.Error(), "exceeds") || !strings.Contains(err.Error(), "core") {
+		t.Errorf("refusal = %q, want it to name the excess and the region", err)
+	}
+
+	// Declared 2, asking for 2: accepted — and it stays accepted no matter how many members are
+	// momentarily excluded, because validation never sees the momentary count.
+	if err := ValidateServicePolicies(policies(2), map[string]int{"core": 2}, 1); err != nil {
+		t.Fatalf("healthy_min 2 over 2 declared members was refused: %v", err)
+	}
+	// The same policies with a SMALLER declared map is a different declaration, not a momentary
+	// exclusion — and it is refused, which is what proves the check reads the map it is given.
+	if err := ValidateServicePolicies(policies(2), map[string]int{"core": 1}, 1); err == nil {
+		t.Error("healthy_min 2 over 1 declared member was accepted — validation must read the declared " +
+			"cardinality it is handed (invariant 6)")
+	}
+}

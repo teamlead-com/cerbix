@@ -578,9 +578,46 @@ per cadence, before any current-month work.
 Facts are never purged by retention — they are the sealed product; raw heartbeat retention is
 governed separately.
 
+### Alerting evaluator: a stall, and what it costs (FR-021 §16.6b)
+
+The two alerting arms run as leader-only sub-cadences: the LIVE signal every 30s, the SEALED
+burn signal every 60s. Both export the same fixed, low-cardinality families — labelled by
+`signal` (`health`|`burn`) and nothing else. There is deliberately no tenant, service, target or
+rule label: this surface is reachable by anyone who can create a service.
+
+| Metric (type) | Meaning |
+| --- | --- |
+| `cerbix_service_alert_evaluations_total{signal,outcome}` (counter) | Units of work by outcome, `ok`\|`error`\|`skipped`. The unit is what gets a verdict: a SERVICE for `health`, a burn RULE for `burn`. `skipped` is where the burn arm's HOLDs land — a successful evaluation that cannot be quoted. A pass that failed wholesale counts one `error`. |
+| `cerbix_service_alert_emitted_total{signal,edge}` (counter) | Alert edges ENQUEUED (`onset`\|`close`) — not deliveries; the outbox owns those. |
+| `cerbix_service_incidents_total{action}` (counter) | Incidents a MACHINE opened or resolved for a SERVICE (`opened`\|`resolved`, FR-022). Deliberately NOT folded into the edge counter: an onset for a service whose incident is already open announces WITHOUT opening one, so a persistent gap between `emitted{edge="onset"}` and `incidents{action="opened"}` is a real signal — the open is being refused by the per-service index because something older never resolved. |
+| `cerbix_service_alert_active{signal}` (gauge) | Open (unclosed) alert episodes, sampled, saturating at 1000. |
+| `cerbix_service_alert_backlog{signal}` (gauge) | Owning services (`health`) and enabled burn targets (`burn`) DUE for evaluation — DB-clock lease expired, or never evaluated. Saturates at 1000. |
+| `cerbix_service_alert_last_success_seconds{signal}` (gauge) | Unix time of the last SUCCESSFUL pass. A failed pass leaves it aging on purpose. |
+| `cerbix_service_alert_lag_seconds{signal}` (gauge) | How far behind the stalest verdict of that pass was. |
+
+**The stall.** Symptom: `cerbix_service_alert_lag_seconds` climbing (with backlog that does not
+drain), the scheduler failing `/readyz`, and `cerbix_alert_delegation_fail_open_total` rising on
+the delivery side. Readiness is the lag: a pass whose lag exceeds **3 × its cadence** — the same
+multiplier the evaluator writes its freshness lease with — marks the SCHEDULER not-ready. It
+never marks the API not-ready: reads and the public status page are unaffected, and taking the
+API out of rotation for an alerting stall would turn a degradation into an outage.
+
+Immediate consequence: coverage DIS-ARMS, so member monitors page for themselves — noisier, not
+silent. Nothing is lost while it lasts.
+
+Recovery: restart the leader (a standby takes over; readiness recovers on the next pass inside
+the bound). There is nothing to replay — arming is DERIVED from the last verdict's freshness and
+generations, never stored as a decision, so a recovered evaluator re-arms by evaluating.
+
 ### Suggested alerts
 
 - `cerbix_service_wedged == 1 for 5m` — page: the subsystem needs an operator by definition.
+- `cerbix_service_alert_lag_seconds{signal="health"} > 90` (or `{signal="burn"} > 180`) `for 10m` —
+  page: the evaluator is stalled and members are paging for themselves.
+- `time() - cerbix_service_alert_last_success_seconds > 300` — ticket: an arm that keeps failing
+  never updates its lag, so the aging last-success is what catches it.
+- `cerbix_service_alert_backlog > 0 for 30m` — ticket: work that never drains at a fixed slice
+  cap of 50 means the installation outgrew one leader's cadence.
 - `cerbix_service_repair_ranges{state="error"} > 0 for 15m` — ticket.
 - `increase(cerbix_service_slices_total{outcome="error"}[15m]) > 10` — ticket.
 - `cerbix_service_watermark_lag_seconds > 3600 AND its 1h trend is not decreasing` — ticket:

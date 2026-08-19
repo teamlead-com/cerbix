@@ -138,10 +138,20 @@ func (d *Dispatcher) DeliverProjectText(ctx context.Context, projectID, text str
 // set of enabled channels (resolved by the scheduler at fire time), with the same
 // per-channel error aggregation as the other Deliver methods for outbox retry.
 func (d *Dispatcher) DeliverChannels(ctx context.Context, channelIDs []string, text string) error {
+	_, err := d.DeliverChannelsReporting(ctx, channelIDs, text)
+	return err
+}
+
+// DeliverChannelsReporting is DeliverChannels plus what it reached.
+func (d *Dispatcher) DeliverChannelsReporting(
+	ctx context.Context, channelIDs []string, text string,
+) (domain.ChannelDelivery, error) {
+	out := domain.ChannelDelivery{Requested: len(channelIDs)}
 	channels, err := d.store.EnabledChannelsByIDs(ctx, channelIDs)
 	if err != nil {
-		return fmt.Errorf("notify: channels by ids: %w", err)
+		return out, fmt.Errorf("notify: channels by ids: %w", err)
 	}
+	out.Resolved = len(channels)
 	var errs []error
 	for _, ch := range channels {
 		if ch.Type == domain.ChannelEmail {
@@ -159,7 +169,7 @@ func (d *Dispatcher) DeliverChannels(ctx context.Context, channelIDs []string, t
 			errs = append(errs, fmt.Errorf("channel %s: %w", ch.ID, err))
 		}
 	}
-	return errors.Join(errs...)
+	return out, errors.Join(errs...)
 }
 
 // renderAlertText produces the (url, body, content-type) for a context-free alert

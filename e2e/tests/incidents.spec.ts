@@ -26,6 +26,43 @@ test.describe("incidents", () => {
     await expect(page.getByText("Resolved").first()).toBeVisible();
   });
 
+  // FR-022: the incident says what it is an incident OF, and a project-level incident says nothing —
+  // the chip is a discriminator, so its ABSENCE carries meaning too. Only two of the three states are
+  // reachable from here: a SERVICE-anchored incident is opened by the evaluator alone (the create API
+  // deliberately takes no service anchor), so that state is covered by the unit specs instead.
+  test("the incident header names its subject — and stays silent when there is none", async ({ page }) => {
+    const { projectID } = await firstProject(page);
+    const mon = await (
+      await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+        name: "e2e-subject-chip", type: "http", target: "https://example.com/", interval_seconds: 300,
+        timeout_seconds: 5, region: "core", enabled: false,
+      })
+    ).json();
+    const anchored = await (
+      await apiSend(page, "post", `/api/v1/projects/${projectID}/incidents`, {
+        title: "e2e-anchored", impact: "minor", body: "e2e", monitor_id: mon.id,
+      })
+    ).json();
+    const projectLevel = await (
+      await apiSend(page, "post", `/api/v1/projects/${projectID}/incidents`, {
+        title: "e2e-project-level", impact: "minor", body: "e2e",
+      })
+    ).json();
+
+    await page.goto(`/incidents/${anchored.id}`);
+    await expect(page.getByTestId("incident-subject")).toContainText("monitor");
+    await expect(page.getByTestId("incident-subject")).toContainText("e2e-subject-chip");
+
+    await page.goto(`/incidents/${projectLevel.id}`);
+    await expect(page.getByText("e2e-project-level").first()).toBeVisible();
+    await expect(page.getByTestId("incident-subject")).toHaveCount(0);
+
+    for (const id of [anchored.id, projectLevel.id]) {
+      await apiSend(page, "post", `/api/v1/incidents/${id}/updates`, { status: "resolved", body: "cleanup" });
+    }
+    await apiSend(page, "delete", `/api/v1/monitors/${mon.id}`);
+  });
+
   test("escalation progress pill renders while unacknowledged", async ({ page }) => {
     const { projectID } = await firstProject(page);
     const r = await apiSend(page, "post", `/api/v1/projects/${projectID}/incidents`, {

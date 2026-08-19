@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: cerbix API
-  version: 0.20.0
+  version: 0.23.0
   description: >
     Internal uptime & SLA monitoring API. Authentication is via a server-side
     session cookie established by an OIDC provider (`/auth/login` → `/auth/callback`)
@@ -934,10 +934,16 @@ paths:
       tags: [services]
       summary: Set the service-scoped objective for one standard window (editor+)
       description: >
-        The body is `{window, objective}` and NOTHING else. Service burn alerting is phase 5
-        (spec 13, invariant 47): any burn field is rejected at the decoder, the store offers
-        no burn parameter, and the schema CHECK is the final fence. Reporting always states
-        which objective produced a budget, and a change is annotated via its timestamp.
+        The body is `{window, objective}` and NOTHING else, and it stays that way now that
+        phase 5 has landed. Service burn alerting IS expressible — on its own route,
+        `…/sla-target/burn-alerting` — because the objective and the burn declaration are two
+        store transactions with two audit actions and two families of lifecycle close;
+        accepting both here would make one request no layer can commit atomically. A burn
+        field in THIS body is still a 400, now meaning "wrong endpoint".
+
+
+        Reporting always states which objective produced a budget, and a change is annotated
+        via its timestamp.
       requestBody:
         required: true
         content:
@@ -959,6 +965,201 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/projects/{projectID}/services/{serviceID}/alerting:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+    get:
+      tags: [services]
+      summary: The service's paging declaration
+      description: >
+        WHO gets paged for a live state, and nothing server-owned: no
+        `alert_config_generation`, no latch, no lease, no episode. Ownership is DECLARED and
+        defaults to off, so a service that has never been touched reads as
+        `{owns_paging: false, page_on: [down], page_on_unknown: false, confirm_evaluations: 2}`
+        — the quiet, non-surprising value in every field.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceAlerting' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [services]
+      summary: Change the service's paging declaration (editor+)
+      description: >
+        PATCH semantics, strictly: an OMITTED field is unchanged. Every field is therefore
+        optional and `false` is a real edit — a body that never mentions `owns_paging` must
+        not disown the service, which would close every announcement it has open on both
+        signals with `ownership_disabled`.
+
+
+        `page_on: []` is LEGAL and means "page for no state" (it dis-arms live coverage). It
+        is not the same statement as omitting the field.
+
+
+        Server-owned fields are REFUSED, not ignored: `alert_config_generation` and every
+        latch, lease and episode column are absent from this schema and rejected by the
+        decoder, so a bundle whose hash moved because an alert fired cannot exist.
+
+
+        The response is the CANONICAL stored declaration — `page_on` sorted and deduplicated
+        — not the request as sent. None of these fields bumps a definition revision or an
+        evaluation epoch; all of them bump `alert_config_generation`, which dis-arms
+        delegation until the new generation has been evaluated (the safe direction: dis-armed
+        means members page for themselves).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchServiceAlertingRequest' }
+      responses:
+        '200':
+          description: The canonical stored declaration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceAlerting' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >
+            The service is owned by a file provider (`managed_by_file`). These fields are part
+            of the desired state, so the bundle owns them and the UI renders them read-only.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/alerting/state:
+    parameters:
+      - { name: projectID, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: serviceID, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [services]
+      summary: What the paging declaration is producing right now, per signal
+      description: >
+        A route of its own, and small on purpose: a badge that renders arming must be able to
+        re-ask cheaply and often. Rendering coverage once at page load and leaving it there is
+        the failure FR-021 §16 spends a section on — a badge saying ARMED while delivery has
+        already dis-armed, which an operator reads as "my monitors are covered" while every one
+        of them is paging for itself.
+      responses:
+        '200':
+          description: Both signals' coverage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceAlertingState' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/escalation-policy:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+    put:
+      tags: [services]
+      summary: Attach or clear the escalation policy a service escalates its own incident with (editor+)
+      description: >
+        FR-023. A service with a policy escalates its OWN auto-opened incident: the policy's steps
+        fire from the incident's start, progress latches on the incident, and acknowledgement or
+        resolution ends it.
+
+
+        An EMPTY string clears the policy — the body states the whole value, which is why this is a
+        PUT and why the field is a plain string rather than a pointer. Re-sending the value already
+        stored is not a write: it produces a 200, no `updated_at` bump and NO audit line, because a
+        trail that records a change nobody made is worse than one line short.
+
+
+        Its own route rather than a field on the paging declaration, for the same reason
+        `…/sla-target/burn-alerting` is separate: a distinct transaction with a distinct audit action
+        (`service.escalation_policy`, naming before→after) and distinct consequences. A change here
+        does NOT reset the progress of a ladder already in flight — the monitor path behaves the same
+        way, and rewinding would page everyone again for an edit.
+
+
+        A policy belonging to another project is a 400 `owner_not_in_project`: routing decides who is
+        woken, so pointing it across a tenant boundary is the one mistake in this feature that wakes
+        the wrong humans. The composite FK refuses it as well; this answer exists so the refusal is
+        legible.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [escalation_policy_id]
+              additionalProperties: false
+              properties:
+                escalation_policy_id:
+                  type: string
+                  description: 'The policy id, or an empty string to clear it.'
+      responses:
+        '200':
+          description: The policy id now stored (empty when cleared) — what the DATABASE holds.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [escalation_policy_id]
+                additionalProperties: false
+                properties:
+                  escalation_policy_id: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The service is owned by a file provider (`managed_by_file`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+    put:
+      tags: [services]
+      summary: Declare which error-budget burns page, for one window (editor+)
+      description: >
+        A full REPLACE of one SLA target's burn declaration, not a patch: rules that are no
+        longer declared have their announcements closed (`rule_removed`) and their latch rows
+        deleted, and a partial body could not say which those are. `burn_rules` is the
+        complete set and omitting it declares none.
+
+
+        `window` names the target and defaults to 30d. A window with no declared objective is
+        a 404: enabling burn alerting on an objective nobody set would page against a number
+        that does not exist, so `PUT …/sla-target` is the prerequisite.
+
+
+        A rule's `firing` latch is SERVER-owned and rejected on the wire — never silently
+        zeroed, because a request that says "this rule is firing" and receives a 200 has been
+        told it was believed. Rules are stored and echoed in canonical key order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetServiceBurnAlertingRequest' }
+      responses:
+        '200':
+          description: The stored burn declaration, in canonical key order.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceBurnAlerting' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such service in this project, or no objective declared for `window`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: The service is owned by a file provider (`managed_by_file`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/v1/projects/{projectID}/sla:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
     get:
@@ -970,6 +1171,69 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProjectSLA' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/sla-target:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - in: query
+        name: window
+        required: false
+        schema: { type: string, default: "30d" }
+    get:
+      tags: [sla]
+      summary: The project's SLO objective for a window (viewer+)
+      description: >
+        404 when the project has no objective for that window. Absent is the answer: a project without
+        an objective has no error budget, and returning 99.9 would be a number nobody chose.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SLATarget' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [sla]
+      summary: Set the project's SLO objective for a window (editor+)
+      description: >
+        REPORTING ONLY. The body is `{window, objective}` and nothing else — `burn_alert` or
+        `burn_rules` are a 400 rather than a silently dropped hope, and the schema refuses a paging
+        project target as well (`sla_targets_project_no_burn_chk`), so the three layers agree. The
+        objective goes through the one canonical rule shared by every scope: the open interval (0,100),
+        rounded half-up at four decimals (D-0165).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                window: { type: string, default: "30d" }
+                objective: { type: number, format: double, example: 99.9 }
+              required: [objective]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SLATarget' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [sla]
+      summary: Clear the project's SLO objective for a window (editor+)
+      description: >
+        404 when that window has no objective — Clear is a statement about a promise that exists, and a
+        quiet success on a mis-typed window would read as "cleared". Clearing the objective clears the
+        budget with it: the budget is derived, never stored, so the window returns to dashes rather than
+        to 100%.
+      responses:
+        '204': { description: Cleared }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/projects/{projectID}/sla-report:
@@ -1776,6 +2040,26 @@ paths:
         name: componentID
         required: true
         schema: { type: string, format: uuid }
+    patch:
+      tags: [status-pages]
+      summary: Edit a component's presentation (org admin)
+      description: >-
+        Cannot change the source: that is the previewed conversion below. An update path able to
+        change what a page line MEANS would be the way around that gate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateComponent' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Component' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [status-pages]
       summary: Delete a component (org admin)
@@ -1783,6 +2067,189 @@ paths:
         '204': { description: Deleted. }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/components/{componentID}/conversion/preview:
+    parameters:
+      - in: path
+        name: componentID
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [status-pages]
+      summary: Preview a component source conversion (org admin)
+      description: >-
+        Renders the page twice — as it is and as it would be — and returns the two CAS tokens the
+        confirmation must carry. Writes nothing, takes no locks, and expires nothing: an abandoned
+        preview leaves no state behind.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConversionTarget' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversionPreview' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/components/{componentID}/conversion:
+    parameters:
+      - in: path
+        name: componentID
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [status-pages]
+      summary: Confirm a previewed conversion (org admin)
+      description: >-
+        Applies the conversion under BOTH CAS tokens. `page_generation` is bumped by ANY component
+        mutation on the page, neighbours included, because the preview showed the page SUMMARY. A
+        mismatch is 409 `page_configuration_stale` — first committer wins, re-preview and retry.
+        Confirming without the tokens is a 400: the fence is not optional.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConversionTarget' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Component' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/monitors/{monitorID}/successor:
+    parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
+    put:
+      tags: [monitors]
+      summary: Record or clear the service that supersedes this composite (project write)
+      description: >-
+        An ANNOTATION (FR-021 §15.5). The monitor keeps probing, keeps alerting, keeps its history
+        and its status-page component; nothing a customer sees changes, and no execution state moves
+        — not the config generation, not the freshness watermark, not the transition sequence. ONE
+        stored fact, rendered from both ends, so there is no pair of links to fall out of sync. Send
+        an empty `service_id` to clear it. COMPOSITE monitors only. A FILE-MANAGED composite MAY be
+        annotated, unlike retire/reactivate below: `superseded_by_service_id` is not a declared
+        field, so no reapply can restate it, and refusing would remove the only way to annotate a
+        file-managed composite while protecting nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                service_id: { type: string, format: uuid, description: 'Empty clears the annotation.' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Monitor' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/monitors/{monitorID}/retire:
+    parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
+    post:
+      tags: [monitors]
+      summary: Retire a monitor (project write)
+      description: >-
+        ONE transaction setting BOTH `retired_at` (the lifecycle statement) and `enabled = false`
+        (the execution semantics), together with the config fence, the state-sequence advance that
+        makes queued transition deliveries stale, and the evaluation-epoch fan-out for every
+        service that names it. `retired_at` alone would leave a "retired" monitor probing and
+        paging. NOTHING is deleted: heartbeats, incidents and past numbers stay. Refused for a
+        file-managed monitor, whose lifecycle belongs to its provider.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Monitor' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/monitors/{monitorID}/reactivate:
+    parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
+    post:
+      tags: [monitors]
+      summary: Reactivate a retired monitor (project write)
+      description: >-
+        The explicit inverse, so a mistaken retire is recoverable. The monitor starts `pending`: an
+        observation from before the retirement is not evidence about the target now, and
+        fabricating a freshness watermark is what would produce a false dead-man DOWN.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Monitor' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/monitors/{monitorID}/convert-to-service:
+    parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
+    post:
+      tags: [monitors]
+      summary: Build a Service from a composite monitor (project write)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sli]
+              description: >-
+                `sli` is the operator's EXPLICIT selection of which live children become the
+                service's reliability inputs. §15.5 requires the confirmation and forbids a silent
+                "all children"; omitting it is a 400 naming how many children are available. Every
+                live child becomes the operational CONTEXT regardless, so keeping a diagnostic
+                visible never changes the number.
+              properties:
+                sli:
+                  type: array
+                  items: { type: string, format: uuid }
+      description: >-
+        One serialized transaction: the composite is taken FOR UPDATE, then the service, its
+        declaration and the link are written atomically, so two simultaneous confirms cannot create
+        two services. The composite's children become BOTH the operational context and the SLI, and
+        its aggregation mode becomes the service's policy — `quorum` translated as
+        `degraded_min = n - M + 1` with `healthy_min` equal to it, the EXACT binary mapping, because
+        a composite has two states and adding a degraded band would report more than it did on a
+        customer-facing page. A quorum composite whose children span regions is REFUSED with 400,
+        because a flat M-of-N is not expressible as per-region quorum plus a region rollup and
+        approximating it would silently redefine availability. A composite whose declared children
+        are not all live is refused too: converting on the survivors moves the aggregation's meaning
+        without anybody stating it. These endpoints apply to COMPOSITE monitors only. A slug collision is a 409 naming the existing slug,
+        never a suffixed twin. Re-confirming returns 200 with the existing service. The composite
+        keeps running: retiring is a separate act.
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompositeConversion' }
+        '200':
+          description: Already converted — the existing service, unchanged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompositeConversion' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /api/v1/public/status-pages/{slug}:
     parameters:
@@ -2351,6 +2818,29 @@ paths:
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PublicBranding' } } } }
 
+  /api/v1/admin/audit:
+    parameters:
+      - in: query
+        name: limit
+        required: false
+        schema: { type: integer, default: 100, maximum: 500 }
+    get:
+      tags: [admin]
+      summary: Instance-level audit entries (global admin)
+      description: >
+        The entries a GLOBAL admin's own actions leave — `user.global_admin`, `user.delete`,
+        file-provider and outbox operations. They carry no organization (`org_id` is empty),
+        which is exactly what separates them from `/organizations/{orgID}/audit`: an org admin
+        must never read the installation's history, so this is a distinct read rather than the
+        org listing with a wider filter. `limit` is clamped server-side (default 100, max 500).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AuditEntry' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /api/v1/admin/users:
     get:
       tags: [admin]
@@ -2594,6 +3084,13 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: >-
+        The request lost a race or contradicts current state: a stale CAS token, an already-applied
+        lifecycle act, a name already taken. First committer wins; re-read and decide again.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
 
   schemas:
     Error:
@@ -2784,6 +3281,29 @@ components:
             impacts_unavailable:
               type: boolean
               description: Present and true when the impact read degraded.
+            members:
+              type: array
+              items: { $ref: '#/components/schemas/IncidentMember' }
+              description: >
+                The member set the incident's SERVICE had AT OPEN TIME (FR-022). Three answers
+                stay distinguishable: the key is ABSENT when there is no snapshot at all (a
+                monitor or project-level incident), an EMPTY array when the service genuinely
+                had no members, and absent with `members_unavailable: true` when the read
+                degraded. A snapshot, not a live join — it keeps naming a member deleted since.
+            members_unavailable:
+              type: boolean
+              description: Present and true when the member-snapshot read degraded.
+
+    IncidentMember:
+      type: object
+      required: [monitor_id, name, roles]
+      properties:
+        monitor_id: { type: string, format: uuid, description: 'The member as of the open instant; the monitor may no longer exist.' }
+        name: { type: string, description: 'The member name AS OF the effective declaration — not re-read from the monitor, which may be renamed or gone.' }
+        roles:
+          type: array
+          items: { type: string, enum: [context, sli] }
+          description: 'Every role this member held, aggregated — the declaration stores a row per (monitor, role) and a postmortem must show the member once.'
 
     AggregationPolicy:
       type: object
@@ -3015,6 +3535,185 @@ components:
         window: { type: string, enum: [24h, 7d, 30d, 90d], default: 30d }
         objective: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 100 }
 
+    MonitorDelegation:
+      type: object
+      description: >
+        FR-021 §16.1 from the MONITOR's side: which of its own alerts a service is delivering
+        instead, and who. The two signals are kept apart because they are delegated apart — a
+        service can be replacing DOWN transitions while its budget signal is held, and a monitor
+        page that said "delegated" without saying WHICH would be worse than saying nothing.
+      required: [live, burn]
+      additionalProperties: false
+      properties:
+        live: { $ref: '#/components/schemas/MonitorSignalDelegation' }
+        burn: { $ref: '#/components/schemas/MonitorSignalDelegation' }
+    MonitorSignalDelegation:
+      type: object
+      required: [delegated]
+      additionalProperties: false
+      properties:
+        delegated:
+          type: boolean
+          description: True only while this monitor's alerts for that signal are actually withheld.
+        owners:
+          type: array
+          description: The services covering it — the chip's text.
+          items:
+            type: object
+            required: [id, slug, name]
+            additionalProperties: false
+            properties:
+              id: { type: string, format: uuid }
+              slug: { type: string }
+              name: { type: string }
+        reason:
+          type: string
+          description: >
+            Why NOT, never empty when `delegated` is false: "why is this monitor still paging" is
+            the question this block exists to answer.
+    ServiceSignalState:
+      type: object
+      description: >
+        One signal's COVERAGE right now (FR-021 §16.1). A different question from the
+        declaration: `owns_paging` says what an operator asked for, this says whether it is
+        actually replacing anything. Read from the delivery gate's own predicates, so a badge
+        rendered from it cannot disagree with what suppression decides.
+      required: [armed]
+      additionalProperties: false
+      properties:
+        armed:
+          type: boolean
+          description: >
+            True only while a replacement for THIS signal is demonstrably able to fire and reach
+            somebody. Everything ambiguous is false, because the member monitor keeps paging.
+        reason:
+          type: string
+          description: >
+            The FIRST unsatisfied clause, absent when armed. Fixed vocabulary — these are
+            rendered and they name what to do about it.
+          enum: [not_owned, policy_pages_nothing, never_evaluated, generation_changed,
+                 revision_changed, evaluation_error, stale_lease, no_enabled_target, held,
+                 rule_unevaluated, unroutable]
+        evaluated_at:
+          type: string
+          format: date-time
+          description: The last SUCCESSFUL evaluation; absent when there has never been one.
+        lease_until:
+          type: string
+          format: date-time
+          description: >
+            The DB-clock instant that verdict stops speaking for now. Freshness is the server's
+            answer and is never re-derived by a client.
+        last_error:
+          type: string
+          description: The evaluator's own message, surfaced rather than summarized.
+    ServiceAlertingState:
+      type: object
+      description: >
+        Both signals' coverage. They are reported separately because they are ARMED separately —
+        a service can be replacing DOWN pages while its budget signal is held.
+      required: [live, burn]
+      additionalProperties: false
+      properties:
+        live: { $ref: '#/components/schemas/ServiceSignalState' }
+        burn: { $ref: '#/components/schemas/ServiceSignalState' }
+    ServiceAlerting:
+      type: object
+      description: >
+        The paging DECLARATION of FR-021 §16.6a, and only the declaration. Latch, lease,
+        generation and episode state have no field here by construction, so no future edit can
+        leak one by forgetting to redact it.
+      required: [owns_paging, page_on, page_on_unknown, confirm_evaluations]
+      additionalProperties: false
+      properties:
+        owns_paging:
+          type: boolean
+          default: false
+          description: >
+            While true, the service's SLI members stop DELIVERING their own alerts — they keep
+            probing, flipping, recording and opening incidents. Suppression additionally
+            requires ARMED coverage, so this switch alone silences nothing.
+        page_on:
+          type: array
+          description: >
+            The subset of {down, degraded} that notifies. Never null: `[]` is a legal
+            declaration meaning "page for no state", which dis-arms live coverage.
+          items: { type: string, enum: [down, degraded] }
+        page_on_unknown:
+          type: boolean
+          default: false
+          description: >
+            "Tell me when you cannot SEE this service" — a different statement from "it is
+            down", which is why unknown has its own switch and cannot appear in `page_on`.
+        confirm_evaluations:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 2
+          description: Consecutive evaluations a new state needs before it notifies.
+
+    PatchServiceAlertingRequest:
+      type: object
+      description: >
+        Every field is OPTIONAL and an omitted one is UNCHANGED. `false` is a real edit, not
+        absence. Server-owned fields — `alert_config_generation` and every latch, lease and
+        episode column — are absent here and rejected by the decoder.
+      additionalProperties: false
+      properties:
+        owns_paging: { type: boolean }
+        page_on:
+          type: array
+          description: '`[]` explicitly pages for no state; omitting the field leaves it unchanged.'
+          items: { type: string, enum: [down, degraded] }
+        page_on_unknown: { type: boolean }
+        confirm_evaluations: { type: integer, minimum: 1, maximum: 10 }
+
+    BurnRuleDeclaration:
+      type: object
+      description: >
+        A burn rule as a CLIENT may state it: the four declared fields and nothing else. The
+        `firing` latch of `BurnRule` is deliberately missing — it is server-owned (§16.4b) and
+        a body carrying it is a 400. Two rules with the same canonical key (severity, both
+        windows, threshold) are also a 400: one latch cannot answer for two rules.
+      required: [long_window_seconds, short_window_seconds, threshold, severity]
+      additionalProperties: false
+      properties:
+        long_window_seconds: { type: integer, description: 'Noise-filtering window, must exceed the short one (max 7d).' }
+        short_window_seconds: { type: integer, minimum: 60, description: 'Confirmation window ("still burning right now").' }
+        threshold: { type: number, format: double, exclusiveMinimum: 0, description: 'Burn-rate multiple that trips the rule (e.g. 14.4).' }
+        severity: { type: string, enum: [page, ticket] }
+
+    SetServiceBurnAlertingRequest:
+      type: object
+      description: >
+        A full replace of one service SLA target's burn declaration. `burn_rules` is the
+        complete set; omitting it declares none.
+      required: [burn_alert_enabled]
+      additionalProperties: false
+      properties:
+        window: { type: string, enum: [24h, 7d, 30d, 90d], default: 30d }
+        burn_alert_enabled: { type: boolean }
+        burn_rules:
+          type: array
+          maxItems: 4
+          items: { $ref: '#/components/schemas/BurnRuleDeclaration' }
+
+    ServiceBurnAlerting:
+      type: object
+      required: [window, burn_alert_enabled, burn_rules]
+      additionalProperties: false
+      properties:
+        window: { type: string }
+        burn_alert_enabled: { type: boolean }
+        burn_rules:
+          type: array
+          description: >
+            The stored rule set, in canonical key order, as DECLARATIONS. Not `BurnRule`: that
+            schema carries `firing`, which for a service target is not even in this JSON — the
+            latch is the normalized per-rule row — so echoing it would be a statement about
+            state this endpoint never read.
+          items: { $ref: '#/components/schemas/BurnRuleDeclaration' }
+
     ServiceDeclaration:
       type: object
       description: What a human declared availability to MEAN, as of `effective_at`.
@@ -3098,7 +3797,7 @@ components:
 
     ServiceDetail:
       type: object
-      required: [service, declaration, epoch, materialization, reliability]
+      required: [service, declaration, epoch, materialization, reliability, supersedes]
       additionalProperties: false
       properties:
         service: { $ref: '#/components/schemas/Service' }
@@ -3116,12 +3815,41 @@ components:
             Always null in this release. SLO, error budget and burn rate are phase 2; a zero
             a client could render as a number would be exactly the confident falsehood this
             feature exists to prevent.
+        alerting_state:
+          allOf: [ { $ref: '#/components/schemas/ServiceAlertingState' } ]
+          description: >
+            What the declaration is currently producing. Absent when the read could not be
+            served — a coverage nobody measured is not reported as absent coverage.
+        alerting:
+          allOf: [ { $ref: '#/components/schemas/ServiceAlerting' } ]
+          description: >
+            The §16.6a paging declaration. ABSENT (rather than defaulted) when the alerting
+            read degraded: a declaration a UI renders as "pages for down" because a read
+            failed is worse than no block at all. Write it at
+            `PATCH …/services/{serviceID}/alerting`.
         dependencies:
           allOf: [ { $ref: '#/components/schemas/ServiceGraph' } ]
           nullable: true
           description: >
             The phase-3 impact-graph block: both directions with batched neighbour health.
             Absent when the graph read degraded.
+        supersedes:
+          type: array
+          description: >
+            The composites this service now expresses (FR-021 §15.5), read from the SAME single
+            column the monitor side reads — there is no second fact to keep in step. A converted
+            composite appears at full strength: still probing, still alerting, and carrying its own
+            retired_at, so the UI never infers a lifecycle from `enabled`, which an afternoon's
+            disable also clears. A read failure leaves the list empty rather than failing the detail.
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+              slug: { type: string }
+              type: { type: string }
+              enabled: { type: boolean }
+              retired_at: { type: string, format: date-time, nullable: true }
 
     PutDeclarationRequest:
       type: object
@@ -3408,6 +4136,13 @@ components:
           description: 'Server time of the latest credential-envelope diagnostic.'
         management:
           $ref: '#/components/schemas/MonitorManagement'
+        delegation:
+          allOf: [ { $ref: '#/components/schemas/MonitorDelegation' } ]
+          description: >
+            Detail only, and best-effort: a lookup that cannot conclude leaves this ABSENT rather
+            than reporting "not delegated", which would be a claim rather than an absence.
+        superseded_by_service_id: { type: string, format: uuid, description: 'The service that now expresses what this monitor expresses (FR-021 §15.5). An ANNOTATION — the monitor keeps probing, alerting and holding its own history.' }
+        retired_at: { type: string, format: date-time, nullable: true, description: 'Set when an operator ended this monitor''s working life. ALWAYS accompanied by enabled=false, because retired_at alone stops nothing: the scheduler, dead-man, ingest and SLO paths key on enabled.' }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     MonitorManagement:
@@ -3636,6 +4371,7 @@ components:
         id: { type: string, format: uuid }
         project_id: { type: string, format: uuid }
         monitor_id: { type: string, format: uuid, description: 'Set for auto-incidents opened from a monitor going down.' }
+        service_id: { type: string, format: uuid, description: 'The OTHER anchor (FR-022): set when the incident''s subject is a SERVICE. At most one anchor is set, enforced by a CHECK; a manual project-level incident carries neither. Absent from public status-page renders, like every internal id. Cleared — and the incident kept — when the service is deleted.' }
         external_key: { type: string, description: 'Correlation key for externally-sourced incidents (e.g. an Alertmanager fingerprint).' }
         title: { type: string }
         status: { $ref: '#/components/schemas/IncidentStatus' }
@@ -3894,7 +4630,28 @@ components:
       enum: [public, internal, unlisted]
     ComponentStatus:
       type: string
-      enum: [operational, degraded, partial_outage, major_outage, maintenance]
+      description: >-
+        A component's displayed state. `no_data` (FR-021 §15.0) means measurement is ABSENT —
+        nothing sealed, no SLI declared, a monitor never confirmed either way, or a manual
+        component whose operator has said nothing. It is deliberately OUTSIDE the severity ladder:
+        asking whether "we do not know" is better or worse than declared maintenance is a false
+        comparison, so the page summary keeps measured and unmeasured apart instead of ordering
+        them. An operator can never SET it — see ComponentSource and manual_status.
+      enum: [operational, degraded, partial_outage, major_outage, maintenance, no_data]
+    ComponentSource:
+      type: string
+      description: >-
+        Which binding a component actually renders from (FR-021 §15.0). The source is a
+        DISCRIMINATOR, not the presence of a column: the inactive binding stays DORMANT so a
+        conversion can be reverted without re-choosing what it replaced.
+      enum: [monitor, service, manual]
+    PageSummaryState:
+      type: string
+      description: >-
+        The page headline. It exists because one ComponentStatus cannot express "operational, but
+        part of this page was not measured". `empty` is a page with no components — which before
+        FR-021 phase 4 reported `operational`, i.e. all-clear with nothing configured.
+      enum: [operational, impaired, no_data, empty]
     StatusPage:
       type: object
       properties:
@@ -3930,20 +4687,83 @@ components:
         description: { type: string }
         group: { type: string }
         position: { type: integer }
-        monitor_id: { type: string, format: uuid, description: 'Set to derive status from a monitor.' }
+        org_id: { type: string, format: uuid, description: 'The component''s own tenant identity.' }
+        source: { $ref: '#/components/schemas/ComponentSource' }
+        source_project: { type: string, format: uuid, description: 'Project of the BINDINGS — not the page''s scope, since an org-level page may hold several projects.' }
+        monitor_id: { type: string, format: uuid, description: 'The monitor binding. Present but DORMANT when source is not `monitor`.' }
+        service_id: { type: string, format: uuid, description: 'The service binding. Present but DORMANT when source is not `service`.' }
         manual_status: { $ref: '#/components/schemas/ComponentStatus' }
+        revision: { type: integer, format: int64, description: 'Structural CAS token for the conversion contract.' }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     CreateComponent:
       type: object
       required: [name]
+      description: >-
+        The source is DERIVED from the bindings server-side, never taken from the caller; a
+        service binding wins over a leftover monitor one. `manual_status` may not be `no_data`.
       properties:
         name: { type: string }
         description: { type: string }
         group: { type: string }
         position: { type: integer }
         monitor_id: { type: string, format: uuid }
+        service_id: { type: string, format: uuid }
         manual_status: { $ref: '#/components/schemas/ComponentStatus' }
+    UpdateComponent:
+      type: object
+      required: [name]
+      description: >-
+        Presentation only. A component's SOURCE changes exclusively through the previewed,
+        CAS-fenced conversion, and `manual_status` is ignored unless the source is `manual` — so an
+        edit form that does not show a dormant status cannot destroy it.
+      properties:
+        name: { type: string }
+        description: { type: string }
+        group: { type: string }
+        position: { type: integer }
+        manual_status: { $ref: '#/components/schemas/ComponentStatus' }
+    ConversionTarget:
+      type: object
+      required: [source]
+      description: >-
+        What the component should render from. On a REVERT the id may be omitted: the dormant
+        binding is the target. `revision` and `page_generation` are required on confirm ONLY, and
+        must be the pair a preview returned.
+      properties:
+        source: { $ref: '#/components/schemas/ComponentSource' }
+        service_id: { type: string, format: uuid }
+        monitor_id: { type: string, format: uuid }
+        manual_status: { $ref: '#/components/schemas/ComponentStatus' }
+        revision: { type: integer, format: int64 }
+        page_generation: { type: integer, format: int64 }
+    ConversionPreview:
+      type: object
+      description: >-
+        The component line and the page summary, BEFORE and AFTER, rendered with the SAME resolver
+        the public page uses — a preview that predicted something else would defeat its purpose.
+      properties:
+        component: { $ref: '#/components/schemas/ComponentView' }
+        proposed: { $ref: '#/components/schemas/ComponentView' }
+        summary: { $ref: '#/components/schemas/PageSummary' }
+        proposed_summary: { $ref: '#/components/schemas/PageSummary' }
+        revision: { type: integer, format: int64 }
+        page_generation: { type: integer, format: int64 }
+        no_op: { type: boolean, description: 'The component already renders from that source; confirming changes nothing.' }
+        reverts_to: { $ref: '#/components/schemas/ComponentSource' }
+        notes: { type: array, items: { type: string }, description: 'Consequences the two summaries do not show.' }
+    PageSummary:
+      type: object
+      properties:
+        summary: { $ref: '#/components/schemas/ComponentStatus' }
+        summary_state: { $ref: '#/components/schemas/PageSummaryState' }
+        unmeasured_count: { type: integer }
+    CompositeConversion:
+      type: object
+      properties:
+        service: { $ref: '#/components/schemas/Service' }
+        monitor: { $ref: '#/components/schemas/Monitor' }
+        already_converted: { type: boolean, description: 'The composite was already linked; the existing service is returned unchanged.' }
     ComponentDay:
       type: object
       description: One day of a component's 90-day availability strip.
@@ -3960,14 +4780,31 @@ components:
         description: { type: string }
         status: { $ref: '#/components/schemas/ComponentStatus' }
         uptime_90d: { type: number, format: double, nullable: true }
-        daily: { type: array, items: { $ref: '#/components/schemas/ComponentDay' }, description: 'Per-day availability; empty for manual components.' }
+        daily: { type: array, items: { $ref: '#/components/schemas/ComponentDay' }, description: 'Per-day availability; empty for manual components. For a service source these are SEALED buckets only and the window ends at the service''s sealed watermark, so days without data are ABSENT rather than zero.' }
+        source: { $ref: '#/components/schemas/ComponentSource' }
+        reason: { type: string, description: 'AUTHENTICATED ONLY: why a status is not a measurement (`no_manual_status`, `monitor_never_confirmed`, `monitor_deleted`, `no_sli_declared`, `no_decidable_observation`, `excluded_by_maintenance`, `service_unreadable`).' }
+        unavailable:
+          type: boolean
+          description: >-
+            PUBLIC. The component's state could not be READ, as opposed to measurement being
+            absent. It says something about cerbix, not about the customer's topology, and without
+            it a failed read would be byte-identical to a calm `no_data` (§15.0, invariant 71a).
+        withheld_reason:
+          type: string
+          description: >-
+            PUBLIC. Why `uptime_90d` is absent, per §11.2/§11.3: `no_sli`, `nothing_sealed`,
+            `window_precedes_materialization_era`, `storage_gap`, `zero_decidable_time`,
+            `decidable_coverage_below_min`, `spans_definition_revisions`, `nothing_measured`. A
+            missing number without its reason is indistinguishable from one nobody computed.
     StatusPageRender:
       type: object
       properties:
         slug: { type: string }
         title: { type: string }
         visibility: { $ref: '#/components/schemas/Visibility' }
-        summary: { $ref: '#/components/schemas/ComponentStatus' }
+        summary: { $ref: '#/components/schemas/ComponentStatus', description: 'The worst MEASURED status. Unchanged in name and type; `no_data` when nothing was measured.' }
+        summary_state: { $ref: '#/components/schemas/PageSummaryState' }
+        unmeasured_count: { type: integer, description: 'How many components reported no measurement.' }
         components: { type: array, items: { $ref: '#/components/schemas/ComponentView' } }
         active_incidents: { type: array, items: { $ref: '#/components/schemas/IncidentDetail' } }
         recent_incidents: { type: array, items: { $ref: '#/components/schemas/IncidentDetail' }, description: 'Resolved in the last 90 days, newest first; each carries its timeline and postmortem (if published).' }

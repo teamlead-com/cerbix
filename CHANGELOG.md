@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
-## [Unreleased]
+## [v0.1.5-beta.2] - 2026-08-19
+
+Three defects found by running `v0.1.5-beta.1` in production rather than by a test. The first blocked the
+upgrade outright.
 
 ### Fixed
 

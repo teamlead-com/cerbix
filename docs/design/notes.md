@@ -367,3 +367,22 @@ which is not the owner and did not unblock anything.
 - **The service page links, it does not embed.** One timeline, one owner; two renderings of one timeline drift.
 - **Not shown and not built:** a resolve-all control, per-member severity, or escalation progress on a service
   incident (D5 defers the ladder). A control for a feature that does not exist is a promise the backend refuses.
+
+## FR-023 — a Service escalates its own outage (mock, 2026-08-19)
+
+Source: `docs/design/mock-service-escalation.html`. **Not approved yet.** SPA deltas only, per the owner's
+standing instruction; the backend of FR-023 is already in the branch and needed no mock.
+
+- **The policy control goes in the paging panel, with its OWN save button.** It belongs where ownership and
+  `Pages for` live — but the declaration and the policy are two writes with two audit actions, and one button
+  that half-applies is worse than two buttons. The empty option CLEARS the policy, because "this service
+  escalates nothing" has to be sayable, not merely reachable by never having chosen.
+- **The progress pill needs no code.** `⛑ escalated to step N` already reads `incident.escalation_step`, and
+  FR-023 advances that for a service incident too. It is in the mock so its absence is not read as a gap.
+- **The per-step list is drawn and NOT built, deliberately.** The API exposes the current step index and
+  nothing per step; rendering three rows from one integer would be a guess presented as a record. If the list
+  is wanted it needs a read model, which is its own requirement.
+- **Absent on purpose:** a renotify field (D8 — services have no such column), an "escalate now" button (a
+  page nobody could explain from the record afterwards), a pause control (the ladder pauses itself and
+  acknowledgement is the operator's stop — a third mechanism would give three answers to "why is it quiet"),
+  and any graph hint (§14 annotates, never suppresses, and the ladder does not consult it).

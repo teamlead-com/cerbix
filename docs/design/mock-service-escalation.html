@@ -1,0 +1,125 @@
+<title>FR-023 · Service escalation</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --surface: #fff; --surface-2: #f5f3f0; --ink: #1c1a17; --ink-2: #4a4642;
+    --ink-3: #857f78; --border: #e3ded7; --border-strong: #cdc5bb; --accent: #2f6f5e;
+    --down: #a8392b; --warn: #9a6b17; --ok: #2f6f5e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17161a; --surface: #1e1d22; --surface-2: #26242b; --ink: #ece9e4; --ink-2: #bdb8b1;
+      --ink-3: #8b857e; --border: #322f38; --border-strong: #494452; --accent: #6fbfa5;
+      --down: #e08b7c; --warn: #d9ac5c; --ok: #6fbfa5;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17161a; --surface: #1e1d22; --surface-2: #26242b; --ink: #ece9e4; --ink-2: #bdb8b1;
+    --ink-3: #8b857e; --border: #322f38; --border-strong: #494452; --accent: #6fbfa5;
+    --down: #e08b7c; --warn: #d9ac5c; --ok: #6fbfa5;
+  }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.55 ui-sans-serif, system-ui, sans-serif;
+         margin: 0; padding: 34px 22px 64px; }
+  main { max-width: 940px; margin: 0 auto; }
+  h1 { font-size: 22px; letter-spacing: -.01em; margin: 0 0 6px; }
+  .sub { color: var(--ink-3); margin: 0 0 26px; font-size: 13px; }
+  .panel { border: 1px solid var(--border); background: var(--surface); border-radius: 6px;
+           overflow: hidden; margin-bottom: 18px; }
+  .phead { display: flex; align-items: center; gap: 10px; padding: 11px 15px;
+           border-bottom: 1px solid var(--border); background: var(--surface-2); }
+  .phead h2 { font-size: 13.5px; margin: 0; font-weight: 600; }
+  .where { margin-left: auto; font: 11.5px ui-monospace, monospace; color: var(--ink-3); }
+  .body { padding: 14px 15px; display: flex; flex-direction: column; gap: 11px; }
+  .row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  select, .fake-select { border: 1px solid var(--border); background: var(--surface);
+    color: var(--ink); border-radius: 4px; padding: 4px 8px; font-size: 12.5px; }
+  .btn { border: 0; background: var(--accent); color: #fff; border-radius: 4px;
+         padding: 5px 11px; font-size: 12px; }
+  .btn[disabled] { opacity: .45; }
+  .pill { border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 600; }
+  .pill.down { color: var(--down); background: color-mix(in srgb, var(--down) 14%, transparent); }
+  .pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+  .mono { font: 11.5px ui-monospace, monospace; }
+  .muted { color: var(--ink-3); }
+  .no { border-left: 2px solid var(--border-strong); padding: 7px 0 7px 11px;
+        color: var(--ink-2); font-size: 12.5px; background: var(--surface-2); }
+  .step { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
+  .dot.fired { background: var(--down); }
+  ul { margin: 0; padding-left: 18px; }
+  li { margin-bottom: 5px; font-size: 13px; }
+  code { font: 11.5px ui-monospace, monospace; background: var(--surface-2); padding: 1px 4px; border-radius: 3px; }
+</style>
+
+<main>
+  <h1>FR-023 · a Service escalates its own outage</h1>
+  <p class="sub">SPA deltas only. Two surfaces gain something; nothing else moves. The backend of this
+    requirement is already in the branch — the ladder, its fail-closed predicates, and the write path this
+    mock's control needs.</p>
+
+  <div class="panel">
+    <div class="phead"><h2>1 · The policy joins the paging panel it belongs to</h2><span class="where">ServiceAlerting.vue</span></div>
+    <div class="body">
+      <div class="row">
+        <span class="muted">Escalation policy</span>
+        <span class="fake-select">on-call — payments rota ▾</span>
+        <button class="btn">Save policy</button>
+        <span class="mono muted">audited · none → on-call</span>
+      </div>
+      <div class="no">
+        Its OWN save button, beside the declaration's — not folded into it. They are two writes with two
+        audit actions, and one button that half-applies is worse than two buttons. The empty option is
+        <code>— none —</code>, which CLEARS the policy: a service with no policy escalates nothing, and
+        that must be sayable rather than only reachable by never having chosen.
+      </div>
+      <div class="no">
+        Unchanged: the ownership checkbox, the <code>Pages for</code> chips, <code>Confirm over</code>, and
+        the file-managed read-only note — which covers this control too, because a file's desired state
+        includes the policy.
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="phead"><h2>2 · The ladder's progress, on the incident that owns it</h2><span class="where">IncidentDetailView.vue</span></div>
+    <div class="body">
+      <div class="row">
+        <span style="font-weight:600">Checkout — service down</span>
+        <span class="pill down">investigating</span>
+        <span class="mono muted">service · checkout</span>
+        <span class="pill down" style="margin-left:auto">⛑ escalated to step 2 · 6m ago</span>
+      </div>
+      <div class="no">
+        <b>Nothing to build here.</b> The pill already exists and reads <code>incident.escalation_step</code>,
+        which FR-023 now advances for a service incident too — so this surface works without a line of new
+        frontend code. It is in the mock because a mock that omits it would imply it is missing.
+      </div>
+      <div class="step"><span class="dot fired"></span> step 1 · ops-webhook <span class="muted mono">14:02</span></div>
+      <div class="step"><span class="dot fired"></span> step 2 · payments rota <span class="muted mono">14:12</span></div>
+      <div class="step"><span class="dot"></span> <span class="muted">step 3 · escalation-manager — not yet due</span></div>
+      <div class="no">
+        <b>NOT built, and the reason is the backend's:</b> this step list is drawn to show what an operator
+        WANTS and to make the decision explicit — the API exposes no per-step state, only the current step
+        index. Rendering three rows from one integer would be a guess presented as a record. If the list is
+        worth having, it needs a read model first, and that is its own requirement.
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="phead"><h2>3 · What is deliberately absent</h2><span class="where">—</span></div>
+    <div class="body">
+      <ul>
+        <li><b>No renotify field for a service.</b> Monitors have one; services do not, and FR-023's D8
+          keeps it that way — the policy's own steps are the repeat mechanism. A control for a column that
+          does not exist would be a promise the backend refuses.</li>
+        <li><b>No "escalate now" button.</b> The ladder is a function of the incident's start and the
+          policy's offsets; a manual push would be a page nobody can explain afterwards from the record.</li>
+        <li><b>No pause control.</b> The ladder already pauses itself when the service's verdict goes stale
+          or ownership is withdrawn, and acknowledgement is the operator's stop. A third mechanism would
+          give three answers to "why is it quiet".</li>
+        <li><b>No graph hint.</b> §14's graph annotates and links; it does not suppress, and the ladder does
+          not consult it (D5). A UI implying otherwise would teach the wrong model.</li>
+      </ul>
+    </div>
+  </div>
+</main>

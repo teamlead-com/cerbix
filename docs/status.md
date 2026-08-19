@@ -2,7 +2,15 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current iteration (iter-0157 — FR-023 escalation for services: CLOSED (D-0173). The ladder, its fail-closed predicates, the payload, the write path the column never had, observability and the SPA control — against an enforced map of 16 invariants + 19 scenarios. See [iter-0157](iterations/iter-0157.md))
+## Current iteration (iter-0158 — corrections of record after the merge: the flake iter-0157 could not name, and two harness self-inflictions. See [iter-0158](iterations/iter-0158.md))
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0158-1 | The flake `iter-0157` §4 could not name is identified and fixed at its cause: `TestFenceRefusesAnExhaustedCallerTail` (a phase-1 test, predating the merged branch) asserted a BUDGET refusal through a 5ms wall-clock deadline — 0 failures in 15 idle runs, 2 in 12 with the CPUs busy. The budget half is now deterministic (a one-nanosecond fence budget, generous context, no statement cut); the caller-tail half keeps the 5ms deadline but asserts what it can promise — refused WITHOUT DAMAGE, either error being honest. | DONE | [`backlog0133_internal_test.go`](../internal/store/backlog0133_internal_test.go); 20 `-race` runs under the same CPU load, clean; one mutant fatal; `internal/store` `-race` green ([iter-0158](iterations/iter-0158.md) §1). |
+| AC-0158-2 | Two harness self-inflictions recorded as a pair, because they share one cause — a command matching its own pattern: `pkill -f` killed my shell (second time in this arc), and an `until pgrep -f` loop waited on itself for a full five-minute timeout. The rule: never match a process by a pattern the matching command contains — kill by PID, or bound the load with `timeout` and let it expire. | DONE | [iter-0158](iterations/iter-0158.md) §2. |
+| DoD-0158 | Corrections of record are discharged; `main` is green with `-race` over every package. | IN_PROGRESS | §3 of [iter-0158](iterations/iter-0158.md); the full-suite confirmation run on merged `main` is the closing gate. |
+
+## Previous iteration (iter-0157 — FR-023 escalation for services: CLOSED (D-0173). The ladder, its fail-closed predicates, the payload, the write path the column never had, observability and the SPA control — against an enforced map of 16 invariants + 19 scenarios. See [iter-0157](iterations/iter-0157.md))
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |

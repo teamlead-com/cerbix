@@ -2074,14 +2074,36 @@ func TestFenceRefusesAnExhaustedCallerTail(t *testing.T) {
 		future.Format(pgTimestamp), future.AddDate(0, 1, 0).Format(pgTimestamp)); err != nil {
 		t.Fatalf("lifecycle: %v", err)
 	}
-	shortCtx, cancel := context.WithDeadline(ctx, time.Now().Add(5*time.Millisecond))
-	defer cancel()
-	err := st.adoptDefaultServiceFactMonth(shortCtx, name, future)
+	// The BUDGET is what this test is about, and it is asserted through the budget rather than
+	// through the wall clock. The original shape gave the caller a 5ms context deadline and expected
+	// the refusal — which is a bet that several statements finish inside 5ms. Under a loaded machine
+	// they do not: the context dies first and `context deadline exceeded` surfaces from a query,
+	// which is an honest answer to a spent tail and not the property under test. Measured at 2
+	// failures in 12 runs with the CPUs busy, so a full -race suite loses it roughly once in fifteen
+	// (iter-0158 §1).
+	//
+	// A tiny FENCE budget reaches the same refusal deterministically: the deadline is
+	// `min(now + fenceBudget, callerDeadline - schedulingTolerance)`, so a nanosecond budget is spent
+	// before the check while the caller's context stays generous and no statement is cut.
+	err := st.adoptServiceFactMonth(ctx, name, future, adoptionPolicy{
+		fenceBudget: time.Nanosecond, rowGate: adoptionFenceRowGate,
+	})
 	if err == nil {
-		t.Fatal("a spent caller tail cut a fence")
+		t.Fatal("a spent budget cut a fence")
 	}
 	if !errors.Is(err, errSliceBudget) {
-		t.Fatalf("the exhausted tail surfaced as %v, want the budget refusal (never a net kill)", err)
+		t.Fatalf("the exhausted budget surfaced as %v, want the budget refusal (never a net kill)", err)
+	}
+
+	// And the other half, now stated as what it can actually promise: a caller whose TAIL expires
+	// mid-flight is refused WITHOUT DAMAGE. Which error surfaces depends on where the tail ran out —
+	// the budget refusal if the check is reached, a context deadline if a statement was cut — and both
+	// are honest. What must never happen is a partition left unusable, which the safety assertions
+	// below check for whichever path this run took.
+	shortCtx, cancel := context.WithDeadline(ctx, time.Now().Add(5*time.Millisecond))
+	defer cancel()
+	if terr := st.adoptDefaultServiceFactMonth(shortCtx, name, future); terr == nil {
+		t.Fatal("a spent caller tail cut a fence")
 	}
 	// Everything is safe: parent authoritative, staging resumable.
 	stateNow, serr := st.factPartitionStateOf(ctx, name)

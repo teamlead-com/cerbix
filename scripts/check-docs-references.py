@@ -24,8 +24,13 @@ Anything intentionally unresolvable lives in ALLOWED below, each with a reason.
 """
 import os, re, sys, glob, itertools
 
+# CHANGELOG.md is a LIVING document for this gate's purpose even though it is a historical
+# record: its RELEASE NOTES cite code paths a reader is expected to open, and it carried a
+# `backend/internal/...` path — a tree layout this repository has never had — for weeks precisely
+# because nothing checked it (found while cutting v0.1.5-beta.1).
 LIVING = ['docs/status.md', 'docs/traceability.md', 'docs/overview.md', 'docs/runbook.md',
-          'docs/project-description.md', 'README.md', 'CLAUDE.md'] + sorted(glob.glob('docs/specs/*.md'))
+          'docs/project-description.md', 'README.md', 'CLAUDE.md',
+          'CHANGELOG.md'] + sorted(glob.glob('docs/specs/*.md'))
 
 ALLOWED = {
     'ActionServiceRead':  'a name the spec says must NOT exist (§4 "Service is not a security boundary")',
@@ -39,6 +44,10 @@ ALLOWED = {
 }
 
 PATH_RE = re.compile(r'`([A-Za-z0-9_./{},\-]+\.(?:go|ts|vue|sql|ya?ml|md|json|sh|html))`')
+# Markdown LINK TARGETS too, not only backticked paths: the broken `backend/internal/...`
+# reference in CHANGELOG.md lived inside a link and was invisible to the backtick form for
+# weeks. Absolute urls and pure anchors are excluded — this is about repo-relative files.
+LINK_RE = re.compile(r'\]\((?!https?:|#|mailto:)([A-Za-z0-9_./{},\-]+\.(?:go|ts|vue|sql|ya?ml|md|json|sh|html))(?:#[^)]*)?\)')
 TEST_RE = re.compile(r'`(Test[A-Za-z0-9_]{4,})`')
 BRACE_RE = re.compile(r'\{([^{}]*)\}')
 
@@ -179,7 +188,7 @@ def main():
         if not os.path.exists(doc):
             continue
         for n, line in enumerate(open(doc, encoding='utf-8'), 1):
-            for raw in PATH_RE.findall(line):
+            for raw in PATH_RE.findall(line) + LINK_RE.findall(line):
                 for tok in expand(raw):
                     if tok in ALLOWED or raw in ALLOWED or resolves(tok):
                         continue

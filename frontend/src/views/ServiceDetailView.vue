@@ -192,7 +192,9 @@ watch(() => [route.params.id, ws.projectId], load);
           :alerting="detail.alerting ?? null"
           :state="detail.alerting_state ?? null"
           :managed-by="managed"
+          :escalation-policy-id="detail.service.escalation_policy_id ?? ''"
           @saved="(value) => detail && (detail.alerting = value)"
+          @policy-saved="(id) => detail && (detail.service.escalation_policy_id = id)"
         />
 
         <!-- Phase 3 (iter-0148): the impact graph — both edge directions with the two-layer

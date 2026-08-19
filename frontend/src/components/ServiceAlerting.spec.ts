@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import ServiceAlerting from "@/components/ServiceAlerting.vue";
 
-const apiMock = vi.hoisted(() => ({ PATCH: vi.fn(), GET: vi.fn() }));
+const apiMock = vi.hoisted(() => ({ PATCH: vi.fn(), GET: vi.fn(), PUT: vi.fn() }));
 vi.mock("@/api/client", () => ({ api: apiMock }));
 
 // FR-021 phase 5 (§16.6a/§16.1), against the approved mock. Three properties, each of which the
@@ -24,6 +24,11 @@ function mountWith(opts: {
   managedBy?: string;
   patchError?: string;
   stateAfterRefresh?: { live: { armed: boolean; reason?: string; last_error?: string }; burn: { armed: boolean; reason?: string; last_error?: string } };
+  // FR-023
+  policies?: { id: string; name: string; steps?: unknown[] }[];
+  escalationPolicyId?: string;
+  putError?: string;
+  putEcho?: string;
 }) {
   apiMock.PATCH.mockReset();
   apiMock.GET.mockReset();
@@ -33,11 +38,23 @@ function mountWith(opts: {
   // That ordering is the point: it makes "the badge changed" provable as "the panel asked again",
   // rather than as "the fixture always said so".
   let reads = 0;
-  apiMock.GET.mockImplementation(async () => {
+  apiMock.GET.mockImplementation(async (path: string) => {
+    // TWO endpoints share this mock since FR-023: coverage and the escalation-policy list. Answering
+    // by PATH matters — a single answer would hand the policy picker a coverage payload and any
+    // assertion about it would then pass by accident.
+    if (path.includes("escalation-policies")) return { data: opts.policies ?? [] };
     reads++;
     const later = opts.stateAfterRefresh && reads > 1 ? opts.stateAfterRefresh : undefined;
     return { data: later ?? opts.state ?? undefined };
   });
+  apiMock.PUT.mockReset();
+  apiMock.PUT.mockImplementation(async (_path: string, req: { body: { escalation_policy_id?: string } }) =>
+    opts.putError
+      ? { error: { error: opts.putError } }
+      : // The real endpoint echoes what the DATABASE holds, which is not always what was sent — a
+        // no-op echoes the stored value. `putEcho` is how a test says so.
+        { data: { escalation_policy_id: opts.putEcho ?? req.body.escalation_policy_id } },
+  );
   apiMock.PATCH.mockImplementation(async (_path: string, req: { body: Record<string, unknown> }) =>
     opts.patchError
       ? { error: { error: opts.patchError } }
@@ -51,6 +68,7 @@ function mountWith(opts: {
       alerting: opts.alerting ?? null,
       state: opts.state ?? null,
       managedBy: opts.managedBy ?? "",
+      escalationPolicyId: opts.escalationPolicyId ?? "",
     },
   });
 }
@@ -335,4 +353,85 @@ it("a forced refresh after a save cancels the cadence read it replaces", async (
   } finally {
     vi.useRealTimers();
   }
+});
+
+// FR-023 (approved mock, panel 1): the ladder's policy lives in this panel and saves SEPARATELY.
+// What these pin is the pair of ways the control could lie — a picker that preselects nothing while a
+// policy is attached, and a save whose local state believes the request instead of the response.
+describe("ServiceAlerting escalation policy", () => {
+  const POLICIES = [
+    { id: "pol-1", name: "payments rota", steps: [{}, {}, {}] },
+    { id: "pol-2", name: "night shift", steps: [{}] },
+  ];
+
+  it("lists the project's policies, preselects the attached one, and offers — none —", async () => {
+    const w = mountWith({ policies: POLICIES, escalationPolicyId: "pol-2" });
+    await flushPromises();
+    const select = w.get('[data-testid="alerting-escalation-select"]');
+    const options = select.findAll("option").map((o) => o.attributes("value"));
+    expect(options).toEqual(["", "pol-1", "pol-2"]);
+    expect((select.element as HTMLSelectElement).value).toBe("pol-2");
+    // The step count is shown, because "which of these ladders" is the question an operator has.
+    expect(select.text()).toContain("3 step(s)");
+  });
+
+  it("saves separately from the declaration and trusts the ECHO, not the request", async () => {
+    const w = mountWith({ policies: POLICIES, escalationPolicyId: "", putEcho: "pol-1" });
+    await flushPromises();
+    // Nothing to save until something changes: the button is a statement about dirtiness.
+    expect(w.get('[data-testid="alerting-escalation-save"]').attributes("disabled")).toBeDefined();
+
+    await w.get('[data-testid="alerting-escalation-select"]').setValue("pol-1");
+    await w.get('[data-testid="alerting-escalation-save"]').trigger("click");
+    await flushPromises();
+
+    expect(apiMock.PUT).toHaveBeenCalledTimes(1);
+    const [path, req] = apiMock.PUT.mock.calls[0] as [string, { body: { escalation_policy_id: string } }];
+    expect(path).toContain("/escalation-policy");
+    expect(req.body).toEqual({ escalation_policy_id: "pol-1" });
+    // The DECLARATION was not touched: two writes, two buttons, and this one must not send the other.
+    expect(apiMock.PATCH).not.toHaveBeenCalled();
+    expect(w.emitted("policy-saved")).toEqual([["pol-1"]]);
+    expect(w.emitted("saved")).toBeUndefined();
+  });
+
+  it("emits what the server stored even when that differs from what was sent", async () => {
+    // A no-op echoes the STORED value. A component that assumed its own draft had won would then
+    // tell the parent something the database does not hold.
+    const w = mountWith({ policies: POLICIES, escalationPolicyId: "pol-1", putEcho: "pol-1" });
+    await flushPromises();
+    await w.get('[data-testid="alerting-escalation-select"]').setValue("");
+    await w.get('[data-testid="alerting-escalation-save"]').trigger("click");
+    await flushPromises();
+    expect(w.emitted("policy-saved")).toEqual([["pol-1"]]);
+    expect((w.get('[data-testid="alerting-escalation-select"]').element as HTMLSelectElement).value).toBe("pol-1");
+  });
+
+  it("renders a refusal as ITSELF and emits nothing", async () => {
+    const w = mountWith({ policies: POLICIES, escalationPolicyId: "", putError: "owner_not_in_project" });
+    await flushPromises();
+    await w.get('[data-testid="alerting-escalation-select"]').setValue("pol-1");
+    await w.get('[data-testid="alerting-escalation-save"]').trigger("click");
+    await flushPromises();
+    expect(w.get('[data-testid="alerting-escalation-error"]').text()).toContain("owner_not_in_project");
+    expect(w.emitted("policy-saved")).toBeUndefined();
+    // The declaration's own error line stays empty: two writes, two error surfaces, or a reader
+    // cannot tell which half failed.
+    expect(w.find('[data-testid="alerting-error"]').exists()).toBe(false);
+  });
+
+  it("says a project has no policies instead of offering a picker that implies one", async () => {
+    const w = mountWith({ policies: [], escalationPolicyId: "" });
+    await flushPromises();
+    expect(w.get('[data-testid="alerting-escalation-empty"]').text()).toContain("no escalation policy yet");
+    // — none — is still there: the control is not hidden, because the field exists either way.
+    expect(w.get('[data-testid="alerting-escalation-select"]').findAll("option")).toHaveLength(1);
+  });
+
+  it("is read-only for a file-managed service — the file's desired state includes the policy", async () => {
+    const w = mountWith({ policies: POLICIES, escalationPolicyId: "pol-1", managedBy: "file:ops.yaml" });
+    await flushPromises();
+    expect(w.get('[data-testid="alerting-escalation-select"]').attributes("disabled")).toBeDefined();
+    expect(w.find('[data-testid="alerting-escalation-save"]').exists()).toBe(false);
+  });
 });

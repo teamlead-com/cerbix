@@ -33,9 +33,15 @@ const props = defineProps<{
   state?: AlertingState | null;
   /** The file provider owning this service, or "" when the UI owns it. */
   managedBy?: string;
+  /** FR-023: the ladder's policy, from the same service detail that carries the declaration. */
+  escalationPolicyId?: string;
 }>();
 
-const emit = defineEmits<{ (e: "saved", value: Alerting): void }>();
+const emit = defineEmits<{
+  (e: "saved", value: Alerting): void
+  /** FR-023: the policy id now stored, so the detail that owns the service row stays truthful. */
+  (e: "policy-saved", value: string): void
+}>();
 
 const saving = ref(false);
 const error = ref("");
@@ -111,6 +117,7 @@ async function refreshState() {
 
 onMounted(() => {
   void refreshState();
+  void loadPolicies(); // FR-023: the picker's options, once per mount
   timer = setInterval(() => void refreshState(), REFRESH_MS);
 });
 onBeforeUnmount(() => {
@@ -132,6 +139,62 @@ watch(
 
 /** The file owns these fields (§16.6a); the UI renders them and refuses to send. */
 const readOnly = computed(() => !props.canWrite || !!props.managedBy);
+
+// ── FR-023: the ladder's policy ────────────────────────────────────────────────────────────────
+// Its own draft, its own save and its own error, deliberately. The declaration and the policy are two
+// writes with two audit actions and two sets of consequences; one button that half-applies is worse
+// than two buttons, and a shared error line could not say which half failed.
+type Policy = components["schemas"]["EscalationPolicy"];
+const policies = ref<Policy[]>([]);
+const policyDraft = ref(props.escalationPolicyId ?? "");
+const policySaving = ref(false);
+const policyError = ref("");
+const policyDirty = computed(() => policyDraft.value !== (props.escalationPolicyId ?? ""));
+
+// The list is read once per mount. A failure leaves it EMPTY and says so rather than rendering a
+// select with only the current value in it — a picker that silently offers one option reads as "this
+// installation has one policy", which is a claim this component cannot make.
+async function loadPolicies() {
+  const mine = ++generation;
+  try {
+    const res = await api.GET("/api/v1/projects/{projectID}/escalation-policies", {
+      params: { path: { projectID: props.projectId } },
+    });
+    if (mine !== generation) return;
+    policies.value = res.data ?? [];
+    if (res.error) policyError.value = "could not load escalation policies";
+  } catch {
+    if (mine === generation) policyError.value = "could not load escalation policies";
+  }
+}
+
+async function savePolicy() {
+  if (readOnly.value || !policyDirty.value || policySaving.value) return;
+  const mine = ++generation;
+  policySaving.value = true;
+  policyError.value = "";
+  try {
+    const res = (await api.PUT("/api/v1/projects/{projectID}/services/{serviceID}/escalation-policy", {
+      params: { path: { projectID: props.projectId, serviceID: props.serviceId } },
+      body: { escalation_policy_id: policyDraft.value },
+    })) as { data?: { escalation_policy_id?: string }; error?: { error?: string } };
+    if (mine !== generation) return;
+    if (res.error || !res.data) {
+      // Each refusal renders as itself: `owner_not_in_project` and `managed_by_file` are different
+      // answers and an operator can act on exactly one of them.
+      policyError.value = res.error?.error ?? "could not save the escalation policy";
+      return;
+    }
+    // The ECHO is what the database holds, which is what the parent must hold too.
+    const stored = res.data.escalation_policy_id ?? "";
+    policyDraft.value = stored;
+    emit("policy-saved", stored);
+  } catch {
+    if (mine === generation) policyError.value = "could not reach the server";
+  } finally {
+    if (mine === generation) policySaving.value = false;
+  }
+}
 
 watch(
   () => props.alerting,
@@ -378,5 +441,40 @@ async function save() {
         These fields are part of the file's desired state, so they are edited there.
       </p>
     </div>
+    <!-- FR-023, mock panel 1: the ladder's policy. Deliberately OUTSIDE the declaration branch above:
+       it is a different write on a different route, so a declaration that could not be READ must not
+       hide a control that has nothing to do with it. Its own save, its own error, for the same
+       reason — one button that half-applies is worse than two, and a shared error line could not say
+       which half failed. -->
+    <div class="flex flex-wrap items-center gap-2 border-t border-border pt-[10px]" data-testid="alerting-escalation">
+      <span class="text-ink-3">Escalation policy</span>
+      <select
+        class="rounded border border-border bg-surface px-1.5 py-0.5 text-[12px]"
+        :value="policyDraft"
+        :disabled="readOnly || policySaving"
+        data-testid="alerting-escalation-select"
+        @change="policyDraft = ($event.target as HTMLSelectElement).value"
+      >
+        <!-- The empty option CLEARS it: "this service escalates nothing" has to be sayable, not
+             only reachable by never having chosen. -->
+        <option value="">— none —</option>
+        <option v-for="p in policies" :key="p.id" :value="p.id">
+          {{ p.name }}<template v-if="p.steps"> · {{ p.steps.length }} step(s)</template>
+        </option>
+      </select>
+      <button
+        v-if="!readOnly"
+        type="button"
+        class="rounded border border-border px-2 py-0.5 text-[12px] text-ink-2 disabled:opacity-50"
+        :disabled="!policyDirty || policySaving"
+        data-testid="alerting-escalation-save"
+        @click="savePolicy"
+      >{{ policySaving ? "Saving…" : "Save policy" }}</button>
+      <span v-if="!policies.length && !policyError" class="text-[11.5px] text-ink-3" data-testid="alerting-escalation-empty">
+        This project has no escalation policy yet, so a service can only page its route directly.
+      </span>
+      <p v-if="policyError" class="text-[12px] text-bad" data-testid="alerting-escalation-error">{{ policyError }}</p>
+    </div>
+
   </section>
 </template>

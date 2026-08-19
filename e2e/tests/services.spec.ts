@@ -308,6 +308,27 @@ test.describe("services", () => {
     const after = await apiGet(page, `/api/v1/projects/${projectID}/services/${svc.id}`);
     expect(after.service.escalation_policy_id ?? "").toBe("");
 
+    // FR-023 SPA delta (approved mock, panel 1): the same round-trip through the CONTROL, not the API.
+    // The picker is what an operator actually has, and until this test nothing proved it reaches the
+    // route — a select bound to the wrong field would have passed every unit test in the component.
+    await page.goto(`/services/${svc.id}`);
+    const select = page.getByTestId("alerting-escalation-select");
+    await expect(select).toBeVisible();
+    await select.selectOption(policy.id);
+    await page.getByTestId("alerting-escalation-save").click();
+    await expect(page.getByTestId("alerting-escalation-error")).toHaveCount(0);
+    await expect
+      .poll(async () => (await apiGet(page, `/api/v1/projects/${projectID}/services/${svc.id}`)).service.escalation_policy_id)
+      .toBe(policy.id);
+
+    // And CLEARING through the same control, which is the half an operator needs when a service
+    // should stop escalating: — none — is a real choice, not the absence of one.
+    await select.selectOption("");
+    await page.getByTestId("alerting-escalation-save").click();
+    await expect
+      .poll(async () => (await apiGet(page, `/api/v1/projects/${projectID}/services/${svc.id}`)).service.escalation_policy_id ?? "")
+      .toBe("");
+
     await apiSend(page, "delete", `/api/v1/escalation-policies/${policy.id}`);
     await apiSend(page, "delete", `/api/v1/notification-channels/${ch.id}`);
   });

@@ -370,7 +370,7 @@ which is not the owner and did not unblock anything.
 
 ## FR-023 — a Service escalates its own outage (mock, 2026-08-19)
 
-Source: `docs/design/mock-service-escalation.html`. **Not approved yet.** SPA deltas only, per the owner's
+Source: `docs/design/mock-service-escalation.html`. **APPROVED by the owner on 2026-08-19** ("мок ок"), built in iter-0157 §2.10. SPA deltas only, per the owner's
 standing instruction; the backend of FR-023 is already in the branch and needed no mock.
 
 > **Corrected on the owner's first look: the first draft used a palette I invented.** The tokens are now

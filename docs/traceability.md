@@ -237,6 +237,8 @@ earlier draft of this row said — counted programmatically after the 91+24 arit
 | 12 | the policy is tenant-scoped, proven by DIRECT SQL | `TestAServiceCannotBorrowAnotherProjectsEscalationPolicy` — the composite FK of migration 00069, not the store's own check |
 | 13 | a service deleted mid-outage stops the ladder; nothing escalates on a NULL anchor | `TestAServiceLadderIgnoresAHumansIncidentAndAPolicylessService` — its third case asserts the incident is still OPEN with a cleared anchor before asserting nothing fires |
 | 14 | a MONITOR's ladder is byte-identical (NFR-018) | the monitor ladder's own suite, unchanged and green — `TestAdvanceEscalations`, `TestAdvanceEscalationsSkipsDisabledMonitor`, `TestAdvanceEscalationsRepeatLast`, `TestAdvanceEscalationsRequiresDownStatus`, `TestEscalationPolicySuppressesFlatDown` — now asserting `MonitorSteps` specifically, so a monitor step miscounted as a service one fails them |
+| 15 | ADDED in implementation: the policy has a WRITE PATH for an existing service — own route, own transaction, audit naming what moved, no-op writing nothing, foreign policy refused by name, file-managed refused | `TestSetServiceEscalationPolicyIsAuditedAndRefusesCarefully`, `TestSetServiceEscalationPolicy` (five API sub-cases); four mutants, all fatal |
+| 16 | ADDED in implementation: an operator can attach AND clear it from the SPA, independently of the paging declaration | `ServiceAlerting.spec.ts` — six cases including the echo-not-draft rule and the empty-project message; the e2e in `services.spec.ts` drives the CONTROL, selecting, saving, polling, then clearing with `— none —` |
 
 ### FR-023 required test matrix (§7, written before the code)
 
@@ -258,7 +260,9 @@ earlier draft of this row said — counted programmatically after the 91+24 arit
 | 14 | instance-wide silence: muted and consumed | `TestAServiceEscalationStepSkipsDelegationEntirely` |
 | 15 | a policy from another project by DIRECT SQL: refused | `TestAServiceCannotBorrowAnotherProjectsEscalationPolicy` |
 | 16 | the service deleted mid-outage: the ladder stops | `TestAServiceLadderIgnoresAHumansIncidentAndAPolicylessService` |
-| 17 | every monitor-ladder regression unchanged and green | `TestAdvanceEscalations`, `TestAdvanceEscalationsSkipsDisabledMonitor`, `TestAdvanceEscalationsRepeatLast`, `TestAdvanceEscalationsRequiresDownStatus`, `TestEscalationPolicySuppressesFlatDown` — unchanged in behaviour, and now asserting `MonitorSteps` specifically |
+| 17 | attach and clear on an EXISTING service, each audited, every refusal writing nothing | `TestSetServiceEscalationPolicyIsAuditedAndRefusesCarefully`, `TestSetServiceEscalationPolicy` |
+| 18 | the same round-trip through the SPA control, including `— none —` | `ServiceAlerting.spec.ts` (six cases) and the live-stack e2e in `services.spec.ts` |
+| 19 | every monitor-ladder regression unchanged and green | `TestAdvanceEscalations`, `TestAdvanceEscalationsSkipsDisabledMonitor`, `TestAdvanceEscalationsRepeatLast`, `TestAdvanceEscalationsRequiresDownStatus`, `TestEscalationPolicySuppressesFlatDown` — unchanged in behaviour, and now asserting `MonitorSteps` specifically |
 
 
 ## FR-022 acceptance discharge — the sixteen invariants of `func-service-incidents.md` §6

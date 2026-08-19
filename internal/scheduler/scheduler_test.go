@@ -1244,13 +1244,12 @@ func TestLeaderPublishesServiceAlertTelemetry(t *testing.T) {
 	}
 	reg := metrics.New(buildinfo.Info{}, "scheduler")
 	reg.SetReady(true, "")
-	got := leadUntilMetrics(t, fs, reg, func(s string) bool {
-		return strings.Contains(s, `cerbix_service_alert_evaluations_total{signal="health",outcome="ok"} 2`) &&
-			strings.Contains(s, `cerbix_service_alert_evaluations_total{signal="burn",outcome="ok"} 2`) &&
-			strings.Contains(s, `cerbix_service_alert_active{signal="health"} 4`)
-	})
 
-	for _, want := range []string{
+	// The wait and the assertions are built from ONE list, and that is the fix rather than a longer
+	// predicate: waiting for three series while asserting sixteen made this a race — the sampled
+	// families and the burn arm's HOLD arrive on their own passes, so a render that satisfied the old
+	// predicate could legitimately be missing half of what follows. Two failures in forty -race runs.
+	want := []string{
 		// The live arm's unit is the service: Evaluated → ok, Errors → error, no skips.
 		`cerbix_service_alert_evaluations_total{signal="health",outcome="ok"} 2`,
 		`cerbix_service_alert_evaluations_total{signal="health",outcome="error"} 1`,
@@ -1279,9 +1278,20 @@ func TestLeaderPublishesServiceAlertTelemetry(t *testing.T) {
 		`cerbix_service_alert_active{signal="burn"} 2`,
 		`cerbix_service_alert_backlog{signal="health"} 7`,
 		`cerbix_service_alert_backlog{signal="burn"} 1`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("missing %q in:\n%s", want, got)
+	}
+	got := leadUntilMetrics(t, fs, reg, func(s string) bool {
+		for _, w := range want {
+			if !strings.Contains(s, w) {
+				return false
+			}
+		}
+		return true
+	})
+	// Still asserted item by item: leadUntilMetrics fails with the whole render, and this names WHICH
+	// line is missing if the two ever disagree.
+	for _, w := range want {
+		if !strings.Contains(got, w) {
+			t.Fatalf("missing %q in:\n%s", w, got)
 		}
 	}
 	if !strings.Contains(got, `cerbix_service_alert_last_success_seconds{signal="health"}`) {
@@ -1300,8 +1310,14 @@ func TestErroringServiceAlertArmCountsAnErrorOutcome(t *testing.T) {
 	fs := &fakeStore{leader: true, alertErr: errors.New("boom")}
 	reg := metrics.New(buildinfo.Info{}, "scheduler")
 	reg.SetReady(true, "")
+	// The predicate waits for BOTH facts this test asserts, not just the first one. Waiting only for
+	// the health arm's error made the burn assertion a RACE: the health arm fails on its first pass
+	// while the burn arm may not have run at all yet, and the test then reported "the healthy burn arm
+	// published nothing" about an arm that had simply not been asked. Two failures in thirty -race
+	// runs, and it is a defect of the WAIT, not of the code under test.
 	got := leadUntilMetrics(t, fs, reg, func(s string) bool {
-		return strings.Contains(s, `cerbix_service_alert_evaluations_total{signal="health",outcome="error"} 1`)
+		return strings.Contains(s, `cerbix_service_alert_evaluations_total{signal="health",outcome="error"} 1`) &&
+			strings.Contains(s, `cerbix_service_alert_evaluations_total{signal="burn",outcome="ok"}`)
 	})
 	if strings.Contains(got, `cerbix_service_alert_evaluations_total{signal="health",outcome="ok"}`) {
 		t.Fatalf("a failed pass reported evaluated units:\n%s", got)

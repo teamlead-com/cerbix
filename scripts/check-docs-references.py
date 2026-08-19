@@ -150,8 +150,8 @@ def check_discharge(src):
     for heading, count, label in ((INV_HEADING, 91, 'invariant'), (MATRIX_HEADING, 24, 'scenario'),
                                   (FR022_HEADING, 16, 'FR-022 invariant'),
                                   (FR022_MATRIX_HEADING, 16, 'FR-022 scenario'),
-                                  (FR023_HEADING, 14, 'FR-023 invariant'),
-                                  (FR023_MATRIX_HEADING, 17, 'FR-023 scenario')):
+                                  (FR023_HEADING, 16, 'FR-023 invariant'),
+                                  (FR023_MATRIX_HEADING, 19, 'FR-023 scenario')):
         rows = discharge_rows(text, heading)
         if rows is None:
             bad.append((DISCHARGE_DOC, 0, 'discharge', f'the {label} table is missing entirely'))
@@ -199,7 +199,7 @@ def main():
     bad += check_row_statuses()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
-              'and every acceptance map is complete (FR-021: 91+24, FR-022: 16+16, FR-023: 14+17); '
+              'and every acceptance map is complete (FR-021: 91+24, FR-022: 16+16, FR-023: 16+19); '
               'every requirement row states one of the three statuses')
         return 0
     print(f'docs references: {len(bad)} unresolved citation(s) in living documents\n')

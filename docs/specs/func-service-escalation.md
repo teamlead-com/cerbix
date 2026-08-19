@@ -157,7 +157,17 @@ since phase 5.
 13. deleting the service mid-outage clears the anchor (FR-022 invariant 3) and the ladder stops — an incident
     with no service never escalates on a NULL anchor;
 14. a MONITOR's ladder is byte-identical to before FR-023 — candidates, steps, progress, delivery-time
-    suppression and payload (NFR-018), proven by regression over each.
+    suppression and payload (NFR-018), proven by regression over each;
+15. **ADDED during implementation (iter-0157 §2.7), because D1 was imprecise.** D1 said the API "accepts"
+    the policy; it accepts it only at CREATE time, and there is no service update endpoint at all — so an
+    existing service could not be given one. A change to this field is a change to WHO IS WOKEN, so it has
+    its own route, its own transaction and an audit row naming what moved, written INSIDE that transaction;
+    a no-op writes nothing at all; a policy from another project is refused BY NAME rather than as a
+    constraint violation; and a file-managed service refuses, because its fields are the file's state;
+16. **ADDED during implementation (iter-0157 §2.10).** An operator can attach AND clear the policy from the
+    SPA — clearing is a choice, not the absence of one — and that control is independent of the paging
+    declaration: separate write, separate save, separate error, and it does not disappear when the
+    declaration cannot be read.
 
 ## 7. Required test matrix (written before the code)
 
@@ -172,6 +182,8 @@ a redelivered step: progress advances once · a service step at delivery: no del
 `GetMonitor("")`, and the page is delivered · the SAME payload rendered through the legacy field alone
 (what a pre-FR-023 worker does): a correct sentence, never a blank subject · instance-wide silence: the step is muted and consumed ·
 a policy from another project by DIRECT SQL: refused · the service deleted mid-outage: the ladder stops ·
+attach and clear on an EXISTING service, each audited with what moved, and every refusal writing nothing ·
+the same round-trip through the SPA control, including `— none —` ·
 every monitor-ladder regression in the suite, unchanged and green.
 
 ## 8. Non-goals of FR-023

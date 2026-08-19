@@ -1,125 +1,202 @@
-<title>FR-023 · Service escalation</title>
+<title>Cerbix Service Escalation</title>
+
 <style>
-  :root {
-    --bg: #fbfaf8; --surface: #fff; --surface-2: #f5f3f0; --ink: #1c1a17; --ink-2: #4a4642;
-    --ink-3: #857f78; --border: #e3ded7; --border-strong: #cdc5bb; --accent: #2f6f5e;
-    --down: #a8392b; --warn: #9a6b17; --ok: #2f6f5e;
+/* Tokens 1:1 from `frontend/src/style.css` — the SAME block the approved mocks carry. FR-023 adds NO
+   colour: an escalation step is not a new state, it is the existing DOWN story told again to more
+   people, so every hue here is one the product already uses. The only structural device is a
+   step-progress row, and its unfired rows are OUTLINED rather than tinted — a step that has not
+   happened must not look like a state. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
   }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #17161a; --surface: #1e1d22; --surface-2: #26242b; --ink: #ece9e4; --ink-2: #bdb8b1;
-      --ink-3: #8b857e; --border: #322f38; --border-strong: #494452; --accent: #6fbfa5;
-      --down: #e08b7c; --warn: #d9ac5c; --ok: #6fbfa5;
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg: #17161a; --surface: #1e1d22; --surface-2: #26242b; --ink: #ece9e4; --ink-2: #bdb8b1;
-    --ink-3: #8b857e; --border: #322f38; --border-strong: #494452; --accent: #6fbfa5;
-    --down: #e08b7c; --warn: #d9ac5c; --ok: #6fbfa5;
-  }
-  body { background: var(--bg); color: var(--ink); font: 14px/1.55 ui-sans-serif, system-ui, sans-serif;
-         margin: 0; padding: 34px 22px 64px; }
-  main { max-width: 940px; margin: 0 auto; }
-  h1 { font-size: 22px; letter-spacing: -.01em; margin: 0 0 6px; }
-  .sub { color: var(--ink-3); margin: 0 0 26px; font-size: 13px; }
-  .panel { border: 1px solid var(--border); background: var(--surface); border-radius: 6px;
-           overflow: hidden; margin-bottom: 18px; }
-  .phead { display: flex; align-items: center; gap: 10px; padding: 11px 15px;
-           border-bottom: 1px solid var(--border); background: var(--surface-2); }
-  .phead h2 { font-size: 13.5px; margin: 0; font-weight: 600; }
-  .where { margin-left: auto; font: 11.5px ui-monospace, monospace; color: var(--ink-3); }
-  .body { padding: 14px 15px; display: flex; flex-direction: column; gap: 11px; }
-  .row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-  select, .fake-select { border: 1px solid var(--border); background: var(--surface);
-    color: var(--ink); border-radius: 4px; padding: 4px 8px; font-size: 12.5px; }
-  .btn { border: 0; background: var(--accent); color: #fff; border-radius: 4px;
-         padding: 5px 11px; font-size: 12px; }
-  .btn[disabled] { opacity: .45; }
-  .pill { border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 600; }
-  .pill.down { color: var(--down); background: color-mix(in srgb, var(--down) 14%, transparent); }
-  .pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
-  .mono { font: 11.5px ui-monospace, monospace; }
-  .muted { color: var(--ink-3); }
-  .no { border-left: 2px solid var(--border-strong); padding: 7px 0 7px 11px;
-        color: var(--ink-2); font-size: 12.5px; background: var(--surface-2); }
-  .step { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
-  .dot.fired { background: var(--down); }
-  ul { margin: 0; padding-left: 18px; }
-  li { margin-bottom: 5px; font-size: 13px; }
-  code { font: 11.5px ui-monospace, monospace; background: var(--surface-2); padding: 1px 4px; border-radius: 3px; }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+button,select{font:inherit; color:inherit; background:none; border:0}
+
+.wrap{padding:26px 22px 60px; max-width:1000px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+.head h1{font-size:21px; font-weight:650; letter-spacing:-.015em}
+.head .sub{margin-top:4px; font-size:13px; color:var(--ink-3); max-width:74ch}
+
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.card > header{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card > header h2{font-size:14px; font-weight:600}
+.card .body{padding:16px; display:flex; flex-direction:column; gap:12px}
+.card .spacer{flex:1}
+.where{font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--ink-3)}
+
+.row{display:flex; flex-wrap:wrap; align-items:center; gap:9px}
+.row .nm{font-weight:550; font-size:13.5px}
+.row .spacer{flex:1}
+
+.pill{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px 0 7px; border-radius:999px; font-size:12px; font-weight:500}
+.pill .dot{width:7px; height:7px; border-radius:50%; flex:none}
+.pill.down{color:var(--down); background:var(--down-weak)} .pill.down .dot{background:var(--down)}
+.pill.deg{color:var(--degraded); background:var(--degraded-weak)} .pill.deg .dot{background:var(--degraded)}
+
+.chip{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:11.5px; color:var(--ink-2); background:var(--surface-2)}
+.chip.mono{font-family:ui-monospace,Menlo,monospace; font-size:10.5px}
+.chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+
+.field{display:inline-flex; align-items:center; gap:8px}
+.select{border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--ink); padding:5px 9px; font-size:12.5px}
+.btn{border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink); border-radius:6px; padding:5px 11px; font-size:12.5px; font-weight:550}
+.btn.ghost{background:var(--surface); color:var(--ink-2); border-color:var(--border)}
+
+/* Step progress. FIRED rows carry the DOWN hue because that is what they are — the same outage,
+   escalated. Rows not yet due are outlined and grey: a step that has not happened is not a state. */
+.steps{display:flex; flex-direction:column; gap:7px}
+.step{display:flex; align-items:center; gap:9px; font-size:12.5px}
+.step .mk{width:9px; height:9px; border-radius:50%; flex:none; background:var(--down)}
+.step.due .mk{background:transparent; border:1px dashed var(--border-strong)}
+.step.due{color:var(--ink-3)}
+
+.note{border:1px solid var(--note-border); background:var(--note-bg); border-radius:8px; padding:12px 14px; font-size:12.5px; line-height:1.6; color:var(--ink-2)}
+.note b{color:var(--ink); font-weight:600}
+.note ul{margin:8px 0 0; padding-left:20px}
+.note li{margin:6px 0}
+.no{border-left:2px solid var(--border-strong); background:var(--surface-2); border-radius:0 6px 6px 0; padding:9px 13px; font-size:12.5px; color:var(--ink-2)}
+.no b{color:var(--ink)}
+code{font-family:ui-monospace,Menlo,monospace; font-size:11.5px; background:var(--inset); padding:1px 5px; border-radius:4px}
 </style>
 
-<main>
-  <h1>FR-023 · a Service escalates its own outage</h1>
-  <p class="sub">SPA deltas only. Two surfaces gain something; nothing else moves. The backend of this
-    requirement is already in the branch — the ladder, its fail-closed predicates, and the write path this
-    mock's control needs.</p>
+<div class="wrap">
+  <div class="head">
+    <h1>FR-023 · a Service escalates its own outage</h1>
+    <p class="sub">SPA deltas only, per the owner's standing instruction — the backend of this requirement is
+      already in the branch: the ladder, its fail-closed predicates, and the write path the control below
+      needs. Two surfaces gain something, two things are drawn in order to be REFUSED, and nothing else
+      moves.</p>
+  </div>
 
-  <div class="panel">
-    <div class="phead"><h2>1 · The policy joins the paging panel it belongs to</h2><span class="where">ServiceAlerting.vue</span></div>
+  <div class="card">
+    <header><h2>1 · The policy joins the paging panel it belongs to</h2><span class="spacer"></span><span class="where">ServiceAlerting.vue</span></header>
     <div class="body">
-      <div class="row">
-        <span class="muted">Escalation policy</span>
-        <span class="fake-select">on-call — payments rota ▾</span>
+      <div class="row"><span class="lbl">Paging ownership</span><span class="spacer"></span>
+        <span class="chip acc">live · armed</span><span class="chip">burn · armed</span></div>
+      <div class="row"><input type="checkbox" checked disabled> <span>This service owns paging for its declared inputs</span></div>
+      <div class="row"><span style="color:var(--ink-3)">Pages for</span>
+        <span class="chip acc mono">down</span><span class="chip mono">degraded</span>
+        <span style="color:var(--ink-3)">· confirm over</span><span class="chip mono">2</span></div>
+
+      <div class="row" style="padding-top:4px; border-top:1px solid var(--border); margin-top:2px">
+        <span class="field"><span class="lbl">Escalation policy</span>
+          <span class="select">payments rota · 3 steps ▾</span></span>
         <button class="btn">Save policy</button>
-        <span class="mono muted">audited · none → on-call</span>
+        <span class="chip mono">audited · none → payments rota</span>
       </div>
-      <div class="no">
-        Its OWN save button, beside the declaration's — not folded into it. They are two writes with two
-        audit actions, and one button that half-applies is worse than two buttons. The empty option is
-        <code>— none —</code>, which CLEARS the policy: a service with no policy escalates nothing, and
-        that must be sayable rather than only reachable by never having chosen.
-      </div>
-      <div class="no">
-        Unchanged: the ownership checkbox, the <code>Pages for</code> chips, <code>Confirm over</code>, and
-        the file-managed read-only note — which covers this control too, because a file's desired state
-        includes the policy.
-      </div>
+      <div class="no"><b>Its own save button, beside the declaration's — not folded into it.</b> They are two
+        writes with two audit actions and two sets of consequences, and one button that half-applies is worse
+        than two buttons. The list carries <code>— none —</code>, which CLEARS the policy: "this service
+        escalates nothing" has to be sayable, not merely reachable by never having chosen.</div>
+      <div class="no"><b>Unchanged:</b> ownership, the <code>Pages for</code> chips, <code>Confirm over</code>,
+        the arming badges, and the file-managed read-only note — which covers this control too, because a
+        file's desired state includes the policy.</div>
     </div>
   </div>
 
-  <div class="panel">
-    <div class="phead"><h2>2 · The ladder's progress, on the incident that owns it</h2><span class="where">IncidentDetailView.vue</span></div>
+  <div class="card">
+    <header><h2>2 · The ladder's progress, on the incident that owns it</h2><span class="spacer"></span><span class="where">IncidentDetailView.vue</span></header>
     <div class="body">
       <div class="row">
-        <span style="font-weight:600">Checkout — service down</span>
-        <span class="pill down">investigating</span>
-        <span class="mono muted">service · checkout</span>
-        <span class="pill down" style="margin-left:auto">⛑ escalated to step 2 · 6m ago</span>
+        <span class="nm">Checkout — service down</span>
+        <span class="pill down"><i class="dot"></i>investigating</span>
+        <span class="chip">service · checkout</span>
+        <span class="spacer"></span>
+        <span class="pill deg"><i class="dot"></i>⛑ escalated to step 2 · 6m ago</span>
       </div>
-      <div class="no">
-        <b>Nothing to build here.</b> The pill already exists and reads <code>incident.escalation_step</code>,
-        which FR-023 now advances for a service incident too — so this surface works without a line of new
-        frontend code. It is in the mock because a mock that omits it would imply it is missing.
+      <div class="no"><b>Nothing to build here.</b> That pill exists today and reads
+        <code>incident.escalation_step</code>, which FR-023 now advances for a SERVICE incident too — so this
+        surface works without a line of new frontend code. It is drawn so its absence from the mock is not
+        read as a gap.</div>
+
+      <div class="steps">
+        <div class="step"><i class="mk"></i> step 1 · ops-webhook <span class="mono" style="color:var(--ink-3)">14:02</span></div>
+        <div class="step"><i class="mk"></i> step 2 · payments rota <span class="mono" style="color:var(--ink-3)">14:12</span></div>
+        <div class="step due"><i class="mk"></i> step 3 · escalation-manager — not yet due</div>
       </div>
-      <div class="step"><span class="dot fired"></span> step 1 · ops-webhook <span class="muted mono">14:02</span></div>
-      <div class="step"><span class="dot fired"></span> step 2 · payments rota <span class="muted mono">14:12</span></div>
-      <div class="step"><span class="dot"></span> <span class="muted">step 3 · escalation-manager — not yet due</span></div>
-      <div class="no">
-        <b>NOT built, and the reason is the backend's:</b> this step list is drawn to show what an operator
-        WANTS and to make the decision explicit — the API exposes no per-step state, only the current step
-        index. Rendering three rows from one integer would be a guess presented as a record. If the list is
-        worth having, it needs a read model first, and that is its own requirement.
-      </div>
+      <div class="no"><b>Drawn, and NOT built.</b> The API exposes the current step INDEX and nothing per
+        step; three rows rendered from one integer would be a guess presented as a record — the exact thing
+        this product refuses elsewhere when it withholds a number instead of inventing one. If the list is
+        worth having it needs a read model, and that is its own requirement.</div>
     </div>
   </div>
 
-  <div class="panel">
-    <div class="phead"><h2>3 · What is deliberately absent</h2><span class="where">—</span></div>
-    <div class="body">
-      <ul>
-        <li><b>No renotify field for a service.</b> Monitors have one; services do not, and FR-023's D8
-          keeps it that way — the policy's own steps are the repeat mechanism. A control for a column that
-          does not exist would be a promise the backend refuses.</li>
-        <li><b>No "escalate now" button.</b> The ladder is a function of the incident's start and the
-          policy's offsets; a manual push would be a page nobody can explain afterwards from the record.</li>
-        <li><b>No pause control.</b> The ladder already pauses itself when the service's verdict goes stale
-          or ownership is withdrawn, and acknowledgement is the operator's stop. A third mechanism would
-          give three answers to "why is it quiet".</li>
-        <li><b>No graph hint.</b> §14's graph annotates and links; it does not suppress, and the ladder does
-          not consult it (D5). A UI implying otherwise would teach the wrong model.</li>
-      </ul>
-    </div>
+  <div class="note">
+    <b>What this mock decides.</b>
+    <ul>
+      <li><b>No new colour.</b> An escalation step is not a new state — it is the existing DOWN story told
+        again to more people — so the fired rows carry the DOWN hue and the pill keeps the degraded hue it
+        already has. Steps not yet due are OUTLINED, never tinted: a step that has not happened is not a
+        state.</li>
+      <li><b>The policy sits with paging, not on the service form.</b> It answers "who is woken", which is the
+        question that panel exists for. Its own save keeps the two audit actions honest.</li>
+      <li><b>No renotify field for a service.</b> Monitors have one, services do not, and D8 keeps it that
+        way — the policy's steps are the repeat. A control for a column that does not exist is a promise the
+        backend refuses.</li>
+      <li><b>No "escalate now", and no pause.</b> The ladder is a function of the incident's start and the
+        policy's offsets; a manual push would be a page nobody can explain from the record afterwards. It
+        already pauses itself when the verdict goes stale or ownership is withdrawn, and acknowledgement is
+        the operator's stop — a third mechanism would give three answers to "why is it quiet".</li>
+      <li><b>No graph hint.</b> §14's graph annotates and links; it never suppresses, and the ladder does not
+        consult it (D5). A UI implying otherwise would teach the wrong model.</li>
+    </ul>
   </div>
-</main>
+</div>

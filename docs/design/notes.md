@@ -373,6 +373,14 @@ which is not the owner and did not unblock anything.
 Source: `docs/design/mock-service-escalation.html`. **Not approved yet.** SPA deltas only, per the owner's
 standing instruction; the backend of FR-023 is already in the branch and needed no mock.
 
+> **Corrected on the owner's first look: the first draft used a palette I invented.** The tokens are now
+> lifted VERBATIM from `frontend/src/style.css` — the same block every approved mock carries — and checked
+> against it token by token rather than by eye. A mock that reviews a colour decision nobody made is worse
+> than no mock: it spends the reviewer's attention on my invention instead of on the product.
+
+- **No new colour at all.** An escalation step is not a new state — it is the existing DOWN story told
+  again to more people — so a fired step carries the DOWN hue and the progress pill keeps the degraded hue
+  it already has. Steps not yet due are OUTLINED, never tinted: a step that has not happened is not a state.
 - **The policy control goes in the paging panel, with its OWN save button.** It belongs where ownership and
   `Pages for` live — but the declaration and the policy are two writes with two audit actions, and one button
   that half-applies is worse than two buttons. The empty option CLEARS the policy, because "this service

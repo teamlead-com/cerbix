@@ -3074,7 +3074,11 @@ dispatch. Phase 5 uses the shape the reliability slices already use:
   §14 correlation and postmortems;
 - **escalation POLICIES for services** — deferred by owner decision 5. A later phase needs a durable
   non-incident occurrence with started/resolved/ack/progress/repeat state before "the ladder" means
-  anything for a service;
+  anything for a service. **SUPERSEDED by FR-023 (D-0172), 2026-08-19**: the bullet stays so the
+  record of the deferral survives its end. What unblocked it is exactly what it asked for — FR-022's
+  service incident carries `started_at`, `acknowledged_at`, `escalation_step` and `last_escalated_at`,
+  so the ladder runs on the same row the monitor ladder has used since D-0100. See
+  [`func-service-escalation.md`](func-service-escalation.md);
 - **retroactive alerting** — a rule enabled today says nothing about last week;
 - **cross-project delegation**;
 - **per-member severity inside a service page** — the alert links to the service; which member is

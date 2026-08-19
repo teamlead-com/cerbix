@@ -82,7 +82,7 @@ type Store interface {
 	EvaluateBurnAlerts(ctx context.Context) (fired, resolved int, err error)
 	EnqueueDueSLAReports(ctx context.Context) (int, error)
 	EvaluateRegionWorkerAlerts(ctx context.Context, live map[string]bool, graceSeconds int) (fired, resolved int, err error)
-	AdvanceEscalations(ctx context.Context) (fired int, err error)
+	AdvanceEscalations(ctx context.Context) (store.EscalationPass, error)
 	EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds int) error
 	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds int) error
 	EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds int) error
@@ -126,6 +126,7 @@ type ServiceStatsSink interface {
 	RecordServiceAlertEvaluations(signal, outcome string, n int)
 	RecordServiceAlertEmitted(signal, edge string, n int)
 	RecordServiceIncidents(action string, n int)
+	RecordEscalationSteps(subject string, n int)
 	SetServiceAlertPass(signal string, lastSuccessUnix int64, lagSeconds float64)
 	SetServiceAlertStats(st metrics.ServiceAlertStat)
 	SetServiceAlertStalled(signal string, stalled bool, reason string)
@@ -1023,10 +1024,17 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			if lastEscalation.IsZero() || now.Sub(lastEscalation) >= escalationEvery {
 				lastEscalation = now
 				withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
-					if n, err := s.store.AdvanceEscalations(c); err != nil {
+					if p, err := s.store.AdvanceEscalations(c); err != nil {
 						s.logger.Error("advance_escalations_failed", "error", err.Error())
-					} else if n > 0 {
-						s.logger.Info("escalations_advanced", "fired", n)
+					} else if p.Total() > 0 {
+						// Split by SUBJECT (FR-023): "12 steps fired" stops being an answer the moment
+						// two kinds of thing can page, and the interesting question at 3am is which.
+						s.logger.Info("escalations_advanced", "fired", p.Total(),
+							"monitor_steps", p.MonitorSteps, "service_steps", p.ServiceSteps)
+						if s.serviceMetrics != nil {
+							s.serviceMetrics.RecordEscalationSteps("monitor", p.MonitorSteps)
+							s.serviceMetrics.RecordEscalationSteps("service", p.ServiceSteps)
+						}
 					}
 				})
 			}

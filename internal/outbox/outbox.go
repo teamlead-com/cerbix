@@ -557,11 +557,19 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		// transition is already dropped above — so delegation has to cover it, or phase 5 would
 		// keep its no-double-page promise for everyone except the installations that page properly.
 		// The ladder's row, its progress and its incident are untouched; only this delivery is muted.
-		if mon, err := w.store.GetMonitor(ctx, a.MonitorID); err != nil {
-			w.logger.Warn("escalation_monitor_lookup_failed", "monitor_id", a.MonitorID, "error", err.Error())
-			w.metrics.RecordDelegationFailOpen("error")
-		} else if w.serviceDelegationSuppressed(ctx, e.ID, mon, store.DelegationLive, domain.TopicEscalationStep) {
-			return nil
+		//
+		// A SERVICE's step (FR-023) skips this entirely, and not as an optimisation: delegation
+		// exists so a service can page INSTEAD of its members, and this step IS that page. Muting
+		// it would leave the outage with nobody told at all. Skipping the lookup with it also
+		// matters — a service step carries no monitor id, so the lookup could only fail, and the
+		// fail-open warning it logged would be an alarm about a question nobody asked.
+		if a.ServiceID == "" {
+			if mon, err := w.store.GetMonitor(ctx, a.MonitorID); err != nil {
+				w.logger.Warn("escalation_monitor_lookup_failed", "monitor_id", a.MonitorID, "error", err.Error())
+				w.metrics.RecordDelegationFailOpen("error")
+			} else if w.serviceDelegationSuppressed(ctx, e.ID, mon, store.DelegationLive, domain.TopicEscalationStep) {
+				return nil
+			}
 		}
 		if w.notifs == nil {
 			return errors.New("no notification deliverer configured")

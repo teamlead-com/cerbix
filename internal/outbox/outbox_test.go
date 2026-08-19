@@ -62,6 +62,9 @@ type fakeStore struct {
 	correlateLinks    []domain.ServiceImpactLink
 	correlateOverflow int
 	correlateErr      error
+	// monitorLookups records every GetMonitor the worker performs, so a test can assert a
+	// lookup did NOT happen — the absence of a call is the claim in FR-023 D7.
+	monitorLookups []string
 }
 
 func (f *fakeStore) CorrelateIncident(_ context.Context, incidentID string) ([]domain.ServiceImpactLink, int, error) {
@@ -129,6 +132,7 @@ func (f *fakeStore) FailOutbox(_ context.Context, id, _, lastErr string, _ int) 
 	return true, nil
 }
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {
+	f.monitorLookups = append(f.monitorLookups, id)
 	m, ok := f.monitors[id]
 	if !ok {
 		return domain.Monitor{}, store.ErrNotFound
@@ -1369,5 +1373,83 @@ func TestDelegationChangesDeliveryAndNothingElse(t *testing.T) {
 	}
 	if !reflect.DeepEqual(armed.correlated, open.correlated) {
 		t.Fatalf("correlation differs: armed=%v, disarmed=%v (invariant 78)", armed.correlated, open.correlated)
+	}
+}
+
+// FR-023 D7 / invariant 10: a SERVICE's escalation step is the owner's own page, so delivery-time
+// delegation must not touch it — suppressing it would leave the outage with nobody told at all.
+// The monitor case is asserted beside it, because the whole point is that ONE of the two changed.
+//
+// The second assertion is about a call that must NOT happen: a service step carries no monitor id,
+// so a lookup could only fail, and the fail-open warning it logged would be an alarm about a
+// question nobody asked.
+func TestAServiceEscalationStepSkipsDelegationEntirely(t *testing.T) {
+	step := func(a domain.EscalationStepAlert) []byte {
+		b, err := json.Marshal(a)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+	// A world where delegation WOULD suppress: the monitor is covered by an armed service.
+	armed := func() *fakeStore {
+		return &fakeStore{
+			monitors: map[string]domain.Monitor{"m1": {ID: "m1", ProjectID: "p1", Name: "api-http"}},
+			// keyed "monitor|signal", the shape the fake's ActiveDelegation reads
+			delegation: map[string]store.DelegationVerdict{
+				"m1|" + string(store.DelegationLive): {
+					Owners: []store.DelegationOwner{{ServiceID: "svc1", Slug: "checkout", Name: "Checkout"}},
+				},
+			},
+		}
+	}
+
+	// The MONITOR's step is suppressed — unchanged behaviour (NFR-018).
+	mon := armed()
+	mon.pending = []domain.OutboxEvent{{ID: "e1", Topic: domain.TopicEscalationStep, Attempts: 1,
+		Payload: step(domain.EscalationStepAlert{IncidentID: "inc1", MonitorID: "m1", MonitorName: "api-http",
+			SubjectName: "api-http", Step: 0, ChannelIDs: []string{"c1"}})}}
+	nfMon := &fakeNotify{}
+	newWorker(mon, &fakeWebhook{}, nfMon, &fakeMetrics{}).drain(context.Background())
+	if nfMon.called != 0 {
+		t.Fatalf("a monitor's step was delivered while a service owns its paging: %d calls — that is "+
+			"the no-double-page promise of §16.6b broken", nfMon.called)
+	}
+
+	// The SERVICE's own step is DELIVERED, and no monitor lookup is attempted for it.
+	svc := armed()
+	svc.pending = []domain.OutboxEvent{{ID: "e2", Topic: domain.TopicEscalationStep, Attempts: 1,
+		Payload: step(domain.EscalationStepAlert{IncidentID: "inc2", ServiceID: "svc1",
+			MonitorName: "Checkout", SubjectName: "Checkout", Step: 0, ChannelIDs: []string{"c1"}})}}
+	nfSvc := &fakeNotify{}
+	newWorker(svc, &fakeWebhook{}, nfSvc, &fakeMetrics{}).drain(context.Background())
+	if nfSvc.called != 1 {
+		t.Fatalf("a SERVICE's escalation step was not delivered (%d calls) — delegation exists so a "+
+			"service can page INSTEAD of its members, and this step IS that page", nfSvc.called)
+	}
+	if len(svc.monitorLookups) != 0 {
+		t.Fatalf("a service step looked up monitor(s) %v — it carries no monitor id, so the lookup "+
+			"could only fail and log a fail-open nobody asked for (FR-023 D7)", svc.monitorLookups)
+	}
+	if len(svc.suppressRecords) != 0 {
+		t.Fatalf("a service step recorded a suppression: %v", svc.suppressRecords)
+	}
+
+	// Invariant 11: instance-wide SILENCE mutes a service step exactly as it mutes a monitor's, and
+	// the event is CONSUMED — a muted row left pending would be redelivered forever. Stated by
+	// assertion rather than inherited by reading, because "the check happens earlier in the same
+	// function" is an argument about code, not about behaviour.
+	silenced := armed()
+	silenced.pending = []domain.OutboxEvent{{ID: "e3", Topic: domain.TopicEscalationStep, Attempts: 1,
+		Payload: step(domain.EscalationStepAlert{IncidentID: "inc3", ServiceID: "svc1",
+			MonitorName: "Checkout", SubjectName: "Checkout", Step: 0, ChannelIDs: []string{"c1"}})}}
+	nfSilenced := &fakeNotify{}
+	newWorker(silenced, &fakeWebhook{}, nfSilenced, &fakeMetrics{}).
+		WithSilence(func() bool { return true }).drain(context.Background())
+	if nfSilenced.called != 0 {
+		t.Fatalf("instance-wide silence did not mute a SERVICE step: %d calls", nfSilenced.called)
+	}
+	if len(silenced.delivered) != 1 {
+		t.Fatalf("a muted service step was not consumed (%v) — it would be redelivered forever", silenced.delivered)
 	}
 }

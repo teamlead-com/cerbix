@@ -51,6 +51,7 @@ type Registry struct {
 	serviceAlertEvals   map[string]map[string]uint64 // signal → outcome → count (ok|error|skipped)
 	serviceAlertEmitted map[string]map[string]uint64 // signal → edge → count (onset|close)
 	serviceIncidents    map[string]uint64            // action → count (opened|resolved), FR-022
+	escalationSteps     map[string]uint64            // subject → count (monitor|service), FR-023
 	// The DELIVERY side of §16.6b: what delegation concluded per signal, and the two ways an
 	// announcement can fail to reach anybody without failing to deliver.
 	serviceDelegation       map[string]map[string]uint64 // signal → state → count
@@ -569,6 +570,23 @@ func (r *Registry) RecordServiceIncidents(action string, n int) {
 	r.serviceIncidents[action] += uint64(n)
 }
 
+// RecordEscalationSteps counts on-call ladder steps ENQUEUED, by the subject that paged. A single
+// total stopped being an answer when FR-023 gave the ladder a second kind of subject: "12 steps
+// fired" cannot tell an operator whether services or monitors are doing the paging, and those two
+// have different owners and different fixes. Zeros are recorded so both series exist from the first
+// pass that fires anything.
+func (r *Registry) RecordEscalationSteps(subject string, n int) {
+	if n < 0 {
+		n = 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.escalationSteps == nil {
+		r.escalationSteps = map[string]uint64{}
+	}
+	r.escalationSteps[subject] += uint64(n)
+}
+
 // SetServiceAlertPass records one SUCCESSFUL evaluation pass of a signal: when it happened and how
 // far behind the stalest verdict it found was. Both are gauges of the LAST success — a failed pass
 // leaves them untouched on purpose, so an aging last-success next to a live process is exactly the
@@ -808,6 +826,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	serviceAlertEvals := copyCounts2(r.serviceAlertEvals)
 	serviceAlertEmitted := copyCounts2(r.serviceAlertEmitted)
 	serviceIncidents := copyCounts(r.serviceIncidents)
+	escalationSteps := copyCounts(r.escalationSteps)
 	serviceAlertLastSuccess := maps.Clone(r.serviceAlertLastSuccess)
 	serviceAlertLag := maps.Clone(r.serviceAlertLag)
 	serviceAlertStats := r.serviceAlertStats
@@ -1028,6 +1047,13 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		out.println("# TYPE cerbix_service_incidents_total counter")
 		for _, action := range sortedKeys(serviceIncidents) {
 			out.printf("cerbix_service_incidents_total{action=%q} %d\n", action, serviceIncidents[action])
+		}
+	}
+	if len(escalationSteps) > 0 {
+		out.println("# HELP cerbix_escalation_steps_total On-call ladder steps enqueued, by the subject that paged (monitor|service, FR-023). Not deliveries — the outbox owns those.")
+		out.println("# TYPE cerbix_escalation_steps_total counter")
+		for _, subject := range sortedKeys(escalationSteps) {
+			out.printf("cerbix_escalation_steps_total{subject=%q} %d\n", subject, escalationSteps[subject])
 		}
 	}
 	if serviceAlertStats != nil {

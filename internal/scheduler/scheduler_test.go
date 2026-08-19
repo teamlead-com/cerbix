@@ -53,8 +53,9 @@ type fakeStore struct {
 	alertErr  error
 	burnErr   error
 	// alertStats backs ServiceAlertStats (FR-021 §16.6b); alertStatsErr fails the sample.
-	alertStats    metrics.ServiceAlertStat
-	alertStatsErr error
+	alertStats     metrics.ServiceAlertStat
+	alertStatsErr  error
+	escalationPass store.EscalationPass
 }
 
 type staticCredentialRegions map[string]bool
@@ -214,7 +215,11 @@ func (f *fakeStore) EnqueueDueSLAReports(context.Context) (int, error)    { retu
 func (f *fakeStore) EvaluateRegionWorkerAlerts(context.Context, map[string]bool, int) (int, int, error) {
 	return 0, 0, nil
 }
-func (f *fakeStore) AdvanceEscalations(context.Context) (int, error)             { return 0, nil }
+
+// escalationPass is what this fake's ladder "did"; a test that cares sets it.
+func (f *fakeStore) AdvanceEscalations(context.Context) (store.EscalationPass, error) {
+	return f.escalationPass, nil
+}
 func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error   { return nil }
 func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int) error { return nil }
 func (f *fakeStore) EnqueuePullJobV3(context.Context, string, []byte, int) error { return nil }
@@ -813,6 +818,7 @@ func (r *recordingServiceSink) RecordServiceSlice(string) {}
 func (r *recordingServiceSink) RecordServiceAlertEvaluations(string, string, int) {}
 func (r *recordingServiceSink) RecordServiceAlertEmitted(string, string, int)     {}
 func (r *recordingServiceSink) RecordServiceIncidents(string, int)                {}
+func (r *recordingServiceSink) RecordEscalationSteps(string, int)                 {}
 func (r *recordingServiceSink) SetServiceAlertPass(string, int64, float64)        {}
 func (r *recordingServiceSink) SetServiceAlertStats(metrics.ServiceAlertStat)     {}
 func (r *recordingServiceSink) SetServiceAlertStalled(string, bool, string)       {}
@@ -1232,6 +1238,9 @@ func TestLeaderPublishesServiceAlertTelemetry(t *testing.T) {
 		alertStats: metrics.ServiceAlertStat{
 			ActiveHealth: 4, ActiveBurn: 2, BacklogHealth: 7, BacklogBurn: 1,
 		},
+		// FR-023: the ladder now has two kinds of subject, and unequal numbers are what prove the
+		// two series are fed from the split rather than from one total counted twice.
+		escalationPass: store.EscalationPass{MonitorSteps: 2, ServiceSteps: 5},
 	}
 	reg := metrics.New(buildinfo.Info{}, "scheduler")
 	reg.SetReady(true, "")
@@ -1259,6 +1268,10 @@ func TestLeaderPublishesServiceAlertTelemetry(t *testing.T) {
 		// snapshot: recorded, and invisible to whoever has to answer for it at 3am.
 		`cerbix_service_incidents_total{action="opened"} 3`,
 		`cerbix_service_incidents_total{action="resolved"} 2`,
+		// The ladder's own family, split by who paged (FR-023). Before this the ladder had NO metric
+		// at all — only a log line — so "12 steps fired" was not even askable, let alone by subject.
+		`cerbix_escalation_steps_total{subject="monitor"} 2`,
+		`cerbix_escalation_steps_total{subject="service"} 5`,
 		`cerbix_service_alert_lag_seconds{signal="health"} 12.500`,
 		`cerbix_service_alert_lag_seconds{signal="burn"} 3.000`,
 		// The sampled half: what the slice cannot see.

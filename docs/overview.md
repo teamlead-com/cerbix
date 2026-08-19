@@ -162,6 +162,18 @@ carries WHY it ended, and only a genuine return to health is called `recovered`;
 off, a policy that no longer covers the state, a target disabled, a rule removed and a service
 deleted each say so in their own words, from a durable episode that outlives what fired.
 
+**Escalation for services (FR-023).** A service with an escalation policy escalates its OWN
+auto-opened incident: the policy's steps fire from the incident's start, progress latches on the
+incident so a step fires once, acknowledgement or resolution ends it, and every step names the
+SERVICE. Two rules are worth knowing before reading the code. The ladder **fails closed** where
+delegation fails open — a missing, stale or unreadable live verdict does not advance a step, because
+ambiguity at delivery time means a page EXISTS while ambiguity in a ladder would mean a page
+MULTIPLIES on a state nobody can currently confirm. And the service GRAPH does **not** pause it,
+against the obvious symmetry with the monitor dependency pause: §14's impact graph annotates and
+links, never suppresses, and a graph sold as advisory does not become a suppression mechanism because
+a second feature found it convenient. A service's own step is never suppressed by delegation either —
+that step IS the page delegation exists to redirect.
+
 **Service incidents (FR-022).** A `Service` can be the SUBJECT of an incident, not merely a thing
 that pages. An incident has AT MOST ONE anchor — a monitor or a service, enforced by a CHECK so the
 discriminator every read path branches on cannot be ambiguous, while a manual project-level incident

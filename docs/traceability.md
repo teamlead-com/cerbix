@@ -213,6 +213,54 @@ Mapping from requirements to code, tests, and metrics. Updated every iteration.
 | Service incidents commissioned as FR-022 (iter-0155, D-0170), and IN PROGRESS since iter-0156 | [`func-service-incidents.md`](specs/func-service-incidents.md) — the six decisions resolved and recorded as DELEGATED (D1b added after the code exposed that auto-open without auto-resolve is a trap), the schema (exclusive anchor CHECK, composite tenant FK with the PG15 column-list `SET NULL`, a per-service open-auto index, a member snapshot), SIXTEEN numbered invariants and a required test matrix written before the code; `FR-022`/`NFR-017` in [status.md](status.md), AC-0156-1…4 | schema and store: `TestAnIncidentHasAtMostOneAnchor`, `TestDeletingAServiceClearsTheAnchorAndKeepsTheIncident`, `TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers`, `TestTheMachineLeavesAHumanIncidentAlone`; the evaluator: `TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident`; correlation: `TestAServiceIncidentIsCorrelatedAndNamesEveryServiceButItsOwn`, `TestAServiceIncidentWitnessesJustLikeAMonitorOne`, `TestNoSelfLinkEvenWhenTheStoredGraphHasACycle`; the public projection: `TestPublicRenderCarriesAServiceIncidentAndNoImpactLinks`; the member snapshot on the detail: `TestIncidentDetailNamesTheMembersTheServiceHadAtOpenTime` | the SPA deltas only — the mock is published and NOT yet approved, and no frontend code exists until it is (the owner's instruction: a mock for SPA changes, nothing else) | process — D-0169 opened it as its OWN requirement; the spec's §4 obligation (FR-022 supersedes FR-021 invariant 86, and the note, the discharge row AND §16.10's scenario 24 move in the same change) was DISCHARGED in that change, so this repository does not repeat invariant 47's history |
 
 
+## FR-023 acceptance discharge — fourteen invariants and seventeen scenarios of `func-service-escalation.md`
+
+Same instrument as FR-021's and FR-022's maps: every number names a test that EXISTS, and `make docs-check`
+fails if one is missing or cites a test the tree lacks. The scenario count is SEVENTEEN, not the sixteen an
+earlier draft of this row said — counted programmatically after the 91+24 arithmetic slip of iter-0153.
+
+### FR-023 invariants (§6 of func-service-escalation.md)
+
+| # | What it requires | Discharged by |
+| --- | --- | --- |
+| 1 | only an AUTO-opened service incident escalates | `TestAServiceLadderIgnoresAHumansIncidentAndAPolicylessService` |
+| 2 | a service with no policy escalates nothing | `TestAServiceLadderIgnoresAHumansIncidentAndAPolicylessService` |
+| 3 | acknowledgement stops the ladder | `TestAServiceLadderFiresNamesTheServiceAndStopsOnAck` — asserted with the progress REWOUND, so the stop cannot be the latch in disguise |
+| 4 | resolution stops the ladder | `TestAServiceLadderFiresNamesTheServiceAndStopsOnAck` — its own case, because an outage a machine opened and closed is never acknowledged at all |
+| 5 | a step advances only while owning, firing and FRESH; ambiguity does not advance it | `TestAServiceLadderFailsClosedOnAnythingItCannotConfirm` — five sub-cases (stale, ownership withdrawn, no state, recovered, unreadable), the first asserting the fixture CAN fire; the stale case also proves fail-closed is a PAUSE, not a termination |
+| 6 | progress is written in the pass's own transaction and cannot double-advance | `TestAServiceLadderFiresNamesTheServiceAndStopsOnAck` (the second pass fires nothing), and the unreadable-verdict sub-case above (a failed pass leaves the step at 0) |
+| 7 | the SERVICE GRAPH does not pause the ladder | `TestTheServiceGraphDoesNotPauseAServiceLadder` — builds the exact configuration that pauses a MONITOR |
+| 8 | a burn breach never escalates | INHERITED and stated as such: a burn breach opens no incident at all (`TestABurnBreachOpensNoIncidentEver`), and the ladder's only candidates are incidents — so there is nothing for FR-023 to refuse |
+| 9 | the step names the SERVICE, and never renders a blank subject — including for a PRE-FR-023 worker | `TestAServiceLadderFiresNamesTheServiceAndStopsOnAck` renders the payload through the LEGACY field alone |
+| 10 | delivery-time delegation does not apply to a service's own step, and no monitor lookup happens | `TestAServiceEscalationStepSkipsDelegationEntirely` — asserts the monitor case is STILL suppressed, and that the lookup did not happen |
+| 11 | instance-wide silence mutes a service step as it mutes a monitor's, and the event is consumed | `TestAServiceEscalationStepSkipsDelegationEntirely`, `TestDeliversEscalationStep` (the monitor half) |
+| 12 | the policy is tenant-scoped, proven by DIRECT SQL | `TestAServiceCannotBorrowAnotherProjectsEscalationPolicy` — the composite FK of migration 00069, not the store's own check |
+| 13 | a service deleted mid-outage stops the ladder; nothing escalates on a NULL anchor | `TestAServiceLadderIgnoresAHumansIncidentAndAPolicylessService` — its third case asserts the incident is still OPEN with a cleared anchor before asserting nothing fires |
+| 14 | a MONITOR's ladder is byte-identical (NFR-018) | the monitor ladder's own suite, unchanged and green — `TestAdvanceEscalations`, `TestAdvanceEscalationsSkipsDisabledMonitor`, `TestAdvanceEscalationsRepeatLast`, `TestAdvanceEscalationsRequiresDownStatus`, `TestEscalationPolicySuppressesFlatDown` — now asserting `MonitorSteps` specifically, so a monitor step miscounted as a service one fails them |
+
+### FR-023 required test matrix (§7, written before the code)
+
+| # | Scenario | Discharged by |
+| --- | --- | --- |
+| 1 | a service DOWN with a policy: the step fires and names the SERVICE | `TestAServiceLadderFiresNamesTheServiceAndStopsOnAck` |
+| 2 | after an ACK: no further steps | `TestAServiceLadderFiresNamesTheServiceAndStopsOnAck` |
+| 3 | after a RESOLVE: no further steps | `TestAServiceLadderFiresNamesTheServiceAndStopsOnAck` |
+| 4 | `owns_paging` off mid-outage: the ladder stops | `TestAServiceLadderFailsClosedOnAnythingItCannotConfirm` |
+| 5 | the verdict goes stale: the ladder stops, and RESUMES when refreshed | `TestAServiceLadderFailsClosedOnAnythingItCannotConfirm` |
+| 6 | a store error reading the verdict: no step, no progress written | `TestAServiceLadderFailsClosedOnAnythingItCannotConfirm` — direct-SQL fault injection: the table is renamed away for exactly one pass |
+| 7 | a service with no policy: nothing, ever | `TestAServiceLadderIgnoresAHumansIncidentAndAPolicylessService` |
+| 8 | a human-opened service incident: nothing, ever | `TestAServiceLadderIgnoresAHumansIncidentAndAPolicylessService` |
+| 9 | a burn breach: nothing, ever | `TestABurnBreachOpensNoIncidentEver` (inherited — see invariant 8) |
+| 10 | an upstream service with an open incident: the downstream ladder is unaffected | `TestTheServiceGraphDoesNotPauseAServiceLadder` |
+| 11 | a redelivered step: progress advances once | `TestAServiceLadderFiresNamesTheServiceAndStopsOnAck` — the latch is on the incident, so a second pass fires nothing |
+| 12 | a service step at delivery: no delegation lookup, and the page IS delivered | `TestAServiceEscalationStepSkipsDelegationEntirely` |
+| 13 | the same payload through the legacy field alone (a pre-FR-023 worker) | `TestAServiceLadderFiresNamesTheServiceAndStopsOnAck` |
+| 14 | instance-wide silence: muted and consumed | `TestAServiceEscalationStepSkipsDelegationEntirely` |
+| 15 | a policy from another project by DIRECT SQL: refused | `TestAServiceCannotBorrowAnotherProjectsEscalationPolicy` |
+| 16 | the service deleted mid-outage: the ladder stops | `TestAServiceLadderIgnoresAHumansIncidentAndAPolicylessService` |
+| 17 | every monitor-ladder regression unchanged and green | `TestAdvanceEscalations`, `TestAdvanceEscalationsSkipsDisabledMonitor`, `TestAdvanceEscalationsRepeatLast`, `TestAdvanceEscalationsRequiresDownStatus`, `TestEscalationPolicySuppressesFlatDown` — unchanged in behaviour, and now asserting `MonitorSteps` specifically |
+
+
 ## FR-022 acceptance discharge — the sixteen invariants of `func-service-incidents.md` §6
 
 The same rule as FR-021's map above, and for the same reason: a requirement closes against a table where

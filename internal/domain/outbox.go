@@ -227,27 +227,54 @@ func (a RegionWorkerAlert) Message() string {
 }
 
 // EscalationStepAlert is the payload for a TopicEscalationStep outbox event: one
-// rung of an on-call escalation ladder fired for a monitor's open (unacknowledged)
+// rung of an on-call escalation ladder fired for an open (unacknowledged)
 // auto-incident. The scheduler resolves the step's targets (channels + whoever is
 // on call) into concrete channel ids at fire time; the delivery worker sends the
 // text to exactly those channels. Repeat marks a re-send of the final step.
+//
+// The subject may be a MONITOR or, since FR-023, a SERVICE — the two are exclusive,
+// as the incident's anchor is. Three fields carry that, and the reason each exists
+// is worth stating because this topic is PRE-FENCE (domain.FencedTopics): a
+// currently-deployed worker claims these rows and must keep rendering them.
+//
+//   - ServiceID is set for a service step, and is what the delivery worker branches
+//     on to skip delegation — a service's ladder IS the owner's page, and
+//     suppressing it would mute the only alert anyone gets (FR-023 D7);
+//   - SubjectName is the authoritative display name for both kinds;
+//   - MonitorName is a LEGACY RENDER FIELD, kept populated with the SUBJECT's name
+//     (the service's, for a service step) so a pre-FR-023 worker renders a correct
+//     sentence instead of " is DOWN". Fencing the topic was the alternative and it
+//     is worse: pre-fence topics stay legacy forever precisely because every
+//     deployed owner already dispatches them, so fencing this one would stop those
+//     workers claiming escalation steps at all during a rolling upgrade.
 type EscalationStepAlert struct {
 	IncidentID  string   `json:"incident_id"`
 	MonitorID   string   `json:"monitor_id"`
 	MonitorName string   `json:"monitor_name"`
+	ServiceID   string   `json:"service_id,omitempty"`
+	SubjectName string   `json:"subject_name,omitempty"`
 	Step        int      `json:"step"`
 	Repeat      bool     `json:"repeat,omitempty"`
 	ChannelIDs  []string `json:"channel_ids"`
+}
+
+// Subject is the name to render. SubjectName wins; MonitorName is the fallback for
+// payloads enqueued before FR-023, which never carried one.
+func (a EscalationStepAlert) Subject() string {
+	if a.SubjectName != "" {
+		return a.SubjectName
+	}
+	return a.MonitorName
 }
 
 // Message renders the human-readable escalation notification.
 func (a EscalationStepAlert) Message() string {
 	if a.Repeat {
 		return fmt.Sprintf("🚨 Still unacknowledged: %s is DOWN (escalation step %d). Acknowledge the incident to stop escalation.",
-			a.MonitorName, a.Step+1)
+			a.Subject(), a.Step+1)
 	}
 	return fmt.Sprintf("🚨 %s is DOWN — on-call escalation step %d. Acknowledge the incident to stop escalation.",
-		a.MonitorName, a.Step+1)
+		a.Subject(), a.Step+1)
 }
 
 // SLAReportWindow is one rolling window's availability line in a weekly report.

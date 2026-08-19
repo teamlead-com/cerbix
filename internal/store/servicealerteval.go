@@ -483,10 +483,13 @@ func (s *Store) emitServiceAlertTx(ctx context.Context, tx pgx.Tx, e serviceAler
 // resolveServiceRecipientsTx resolves WHO to notify, in the §16.6 order: the service's on-call
 // schedule when it has one, otherwise the project's enabled channels.
 //
-// `services.escalation_policy_id` is deliberately NOT consulted. A ladder is defined relative to an
-// incident start with acknowledgement and progress state, and a service alert opens no incident — so
-// "the ladder applies unchanged" was not implementable, and pretending otherwise would have shipped
-// a policy that silently fires one step.
+// `services.escalation_policy_id` is still NOT consulted HERE, and the reason changed with FR-023.
+// It used to be that no ladder was possible at all: a ladder is defined relative to an incident start
+// with acknowledgement and progress state, and a service alert opened no incident. FR-022 made the
+// incident, and FR-023 built the ladder on it — in `AdvanceEscalations`, where every other ladder
+// lives. So the division of labour is now deliberate rather than forced: THIS function answers "who
+// hears the announcement", and the ladder answers "who hears it next, and next" from the incident's
+// own progress. A policy read here would fire a step nobody latched.
 func resolveServiceRecipientsTx(
 	ctx context.Context, tx pgx.Tx, projectID, scheduleID string, at time.Time,
 ) ([]string, error) {

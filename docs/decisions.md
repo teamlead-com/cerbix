@@ -3716,3 +3716,37 @@ must stay legacy — a currently-deployed worker claims `status = 'pending'` and
 steps entirely during a rolling upgrade. The payload evolves compatibly instead, and what an OLD worker does
 with a service step is stated rather than left to be discovered.
 
+## D-0173 — FR-023 closes, and two of its invariants were written by the implementation (2026-08-19)
+
+**Context.** FR-023 was specified before any code (D-0172) with fourteen invariants and a seventeen-line test
+matrix. Implementing it produced two findings that the spec could not have had, and both are now invariants
+rather than footnotes.
+
+**Decision.** FR-023 and NFR-018 are DONE, closed against the map in `traceability.md`: sixteen invariants and
+nineteen scenarios, each naming a test that exists, enforced by `make docs-check` (FR-021 91+24, FR-022 16+16,
+FR-023 16+19).
+
+**The two added invariants, and why they belong in the requirement rather than in a report.**
+
+1. **Invariant 15 — the policy had no write path.** D1 said the API "accepts" the policy. It accepts it only
+   at CREATE time: there is no service update endpoint at all, so a service that already existed could not be
+   given one. Harmless while the column was inert; a hole the moment FR-023 made it decide who is woken. The
+   route is its own transaction with its own audit action naming what moved, a no-op writes nothing at all,
+   and a foreign policy is refused BY NAME rather than as an FK violation an API could only render as a 500.
+2. **Invariant 16 — the operator needs it in the product, not only in the API.** The SPA control is
+   independent of the paging declaration: separate write, separate save, separate error, and it does not
+   disappear when the declaration cannot be read — which is where my first implementation put it, and what
+   the unit tests refused.
+
+**Two decisions worth keeping in view.** The ladder FAILS CLOSED where delegation fails open, because
+ambiguity at delivery time means *a page exists* while ambiguity in a ladder would mean *a page multiplies* on
+a state nobody can confirm. And the service GRAPH does not pause the ladder, against the obvious symmetry with
+the monitor dependency pause, because §14 states its own position — the impact graph "annotates and links;
+never suppresses, merges or hides".
+
+**Consequence.** §16.9's escalation bullet is SUPERSEDED, with the bullet kept so the record of the deferral
+survives its end. Of what remains in §16.9, nothing is a deferral: retroactive alerting and per-member
+severity are POSITIONS with their reasons, and cross-project delegation and suppression beyond the three
+topics are open questions nobody has asked for. The audit trail for INCIDENT writes stays an open gap from
+D-0171, unaffected by this requirement and still needing its own.
+

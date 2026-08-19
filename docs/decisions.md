@@ -3685,3 +3685,34 @@ suppression beyond three topics) remain non-goals and still open their own requi
 add, deliberately: a way to open a service incident BY HAND (the create API takes no service anchor), a
 webhook `incident.opened` event for a service incident, and any UI for the member snapshot the API serves.
 
+## D-0172 — the next §16.9 item is escalation for services, and FR-022 is what unblocked it (2026-08-19)
+
+**Context.** §16.9 lists what FR-021 phase 5 deliberately did not do. Service incidents were the first item
+and closed as FR-022 (D-0171). Asked for the next one, the honest reading of the remaining five is that they
+are not all the same kind of thing: **retroactive alerting** and **per-member severity** are stated as
+POSITIONS with their reasons ("a rule enabled today says nothing about last week"; "which member is
+diagnostics"), not as deferrals; **cross-project delegation** and **suppression beyond the three topics** are
+open questions nobody has asked for. Only **escalation policies for services** was deferred with a stated
+blocker — owner decision 5: it needs "a durable non-incident occurrence with started/resolved/ack/progress/
+repeat state before 'the ladder' means anything for a service".
+
+**Decision.** FR-023 / NFR-018 are commissioned and specified in `func-service-escalation.md`. FR-022
+removed D5's blocker in the exact terms it was written in: a service alert now opens an incident carrying
+`started_at`, `acknowledged_at`, `escalation_step` and `last_escalated_at`. There is no new subsystem to
+build and no migration to write — the policy column has existed on `services` since phase 5 and is
+deliberately unread, and the progress columns are the ones the monitor ladder already uses.
+
+**Two decisions inside it are worth the record.** The ladder FAILS CLOSED where delegation fails open: a
+missing, stale or unreadable verdict does not advance a step, because ambiguity at delivery time means *a
+page exists* while ambiguity in a ladder would mean *a page multiplies* on a state nobody can confirm. And
+the service GRAPH does not pause the ladder, against the obvious symmetry with the monitor dependency pause,
+because §14 states its own position — the impact graph "annotates and links; never suppresses, merges or
+hides" — and a graph sold as advisory must not become a suppression mechanism because a second feature found
+it convenient.
+
+**Consequence.** Writing the spec corrected one of its own decisions before any code existed: fencing
+`TopicEscalationStep` was the first answer, and `domain.FencedTopics`' doc comment says why a PRE-fence topic
+must stay legacy — a currently-deployed worker claims `status = 'pending'` and would stop seeing escalation
+steps entirely during a rolling upgrade. The payload evolves compatibly instead, and what an OLD worker does
+with a service step is stated rather than left to be discovered.
+

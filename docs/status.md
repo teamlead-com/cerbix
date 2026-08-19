@@ -2,7 +2,16 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current iteration (iter-0158 — CLOSED: corrections of record after the merge — the flake iter-0157 could not name, and two harness self-inflictions. Merged `main` green with `-race` over 33 packages. See [iter-0158](iterations/iter-0158.md))
+## Current iteration (iter-0159 — the dependency backlog: seven dependabot branches merged in two classes, none of them stale. See [iter-0159](iterations/iter-0159.md))
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0159-1 | Three low-risk bumps merged and verified by the gates that can see them: `x/crypto` 0.55.0 / `x/net` 0.58.0 / `x/text` 0.41.0 (33 packages with `-race`), the build image's golang 1.26.6 (the IMAGE built, brought up, browser suite against it), pinia 4.0.3 (frontend gates + snapshot + image + browser suite). | DONE | [iter-0159](iterations/iter-0159.md) §1. |
+| AC-0159-2 | Four MAJOR frontend bumps merged one at a time, each with `npm ci` from the resolved lock, `vue-tsc`, 136 unit tests and a build — `@vitejs/plugin-vue` 6.0.8, `npm-run-all2` 9.0.3 (which is the build gate itself), `unplugin-auto-import` 21.1.0 (0.x → 21, running inside `vite.config.ts`), `@vueuse/core` 14.4.0. The lock CONFLICTED and was regenerated from `package.json` rather than hand-merged, then read back to confirm the pins — a hand-merged lock describes a tree npm never resolved. | DONE | [iter-0159](iterations/iter-0159.md) §1–§2; browser suite 48 passed / 1 known skip. |
+| AC-0159-3 | Two findings recorded rather than smoothed over: NOTHING in this SPA uses `@vueuse/core` — removing it from the auto-import preset leaves type-check and build green, so bump 7 is safe by accident, and whether the dependency should exist is a question this sweep does not answer. And `make spa-snapshot` produced a ZERO diff after all four majors: the emitted bundle is byte-identical, checked rather than reasoned about. | DONE | [iter-0159](iterations/iter-0159.md) §3–§4. |
+| DoD-0159 | The dependency backlog is empty of anything worth merging, and what remains unmerged is named with the reason it must stay that way. | DONE | No unmerged remote branch remains. `deps/tailwind-v4` and `deps/ts58-vue-tsconfig-openapi-fetch` carry OLDER versions than `main` and would roll dependencies backwards; `origin/feat/service-reliability` is empty. All three are deletion candidates and deletion is the owner's call ([iter-0159](iterations/iter-0159.md) §6). |
+
+## Previous iteration (iter-0158 — CLOSED: corrections of record after the merge — the flake iter-0157 could not name, and two harness self-inflictions. Merged `main` green with `-race` over 33 packages. See [iter-0158](iterations/iter-0158.md))
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |

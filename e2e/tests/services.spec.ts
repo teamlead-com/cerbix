@@ -253,4 +253,62 @@ test.describe("services", () => {
     const graph = await apiGet(page, `/api/v1/projects/${projectID}/services/${parent}/dependencies`);
     expect(graph.depends_on ?? []).toEqual([]);
   });
+
+  // FR-023: the escalation policy of an EXISTING service, through the live stack. Until FR-023 this
+  // column had no write path at all, so what this proves is the whole chain — route, tenancy check,
+  // store transaction and the AUDIT row it writes inside that transaction — against a real database
+  // rather than a fake. The audit assertion is the point: unit tests can prove a row is inserted, and
+  // only a live run proves the action name reaches the surface an operator actually reads.
+  test("a service's escalation policy round-trips, and the change is audited", async ({ page }) => {
+    // The API helpers fetch RELATIVE urls from inside the page, so the page has to be on the app's
+    // origin first — on about:blank the same call fails with "Failed to parse URL". Every other test
+    // here navigates as part of what it checks; this one is API-shaped and has to say so explicitly.
+    await page.goto("/services");
+    // This spec's own fixture helper, not firstProject: the afterEach above cleans up what it creates.
+    const { orgID, projectID } = await ensureE2EWorkspace(page);
+    const svc = await (
+      await apiSend(page, "post", `/api/v1/projects/${projectID}/services`, {
+        slug: `${SLUG}-ladder`, name: "E2E Ladder",
+      })
+    ).json();
+    const ch = await (
+      await apiSend(page, "post", `/api/v1/projects/${projectID}/notification-channels`, {
+        type: "webhook", name: `${SLUG}-ladder-hook`, config: { url: "https://example.com/e2e-ladder" },
+        enabled: true,
+      })
+    ).json();
+    const policy = await (
+      await apiSend(page, "post", `/api/v1/projects/${projectID}/escalation-policies`, {
+        name: `${SLUG}-ladder-policy`,
+        steps: [{ after_seconds: 0, targets: [{ type: "channel", id: ch.id }] }],
+      })
+    ).json();
+
+    const path = `/api/v1/projects/${projectID}/services/${svc.id}/escalation-policy`;
+    const attach = await apiSend(page, "put", path, { escalation_policy_id: policy.id });
+    expect(attach.status(), await attach.text()).toBe(200);
+    expect((await attach.json()).escalation_policy_id).toBe(policy.id);
+
+    // The READ path agrees — the service detail is where an operator would look.
+    const detail = await apiGet(page, `/api/v1/projects/${projectID}/services/${svc.id}`);
+    expect(detail.service.escalation_policy_id).toBe(policy.id);
+
+    // The audit action reached the org trail, naming what moved.
+    const audit = (await apiGet(page, `/api/v1/organizations/${orgID}/audit?limit=50`)) as {
+      action?: string; target?: string;
+    }[];
+    const line = audit.find((e) => e.action === "service.escalation_policy" && (e.target ?? "").includes(svc.id));
+    expect(line, "the escalation-policy change is missing from the audit trail").toBeTruthy();
+    expect(line!.target).toContain(policy.id);
+
+    // An EMPTY string clears it, and clearing is itself a change.
+    const cleared = await apiSend(page, "put", path, { escalation_policy_id: "" });
+    expect(cleared.status()).toBe(200);
+    expect((await cleared.json()).escalation_policy_id).toBe("");
+    const after = await apiGet(page, `/api/v1/projects/${projectID}/services/${svc.id}`);
+    expect(after.service.escalation_policy_id ?? "").toBe("");
+
+    await apiSend(page, "delete", `/api/v1/escalation-policies/${policy.id}`);
+    await apiSend(page, "delete", `/api/v1/notification-channels/${ch.id}`);
+  });
 });

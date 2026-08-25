@@ -1654,6 +1654,10 @@ worker-geo1) — the tracking row appears within a tick, after the grace a `regi
 recovery when the worker returns. **Deploy nuance (found on the run):** roles must not apply migrations
 in parallel — on the first deploy of a new migration, roles starting simultaneously race (`relation already
 exists`); run `cerbix migrate` once before starting the roles (see overview §2.4).
+**Superseded (ed652d0, 2026-08-08):** `store.Migrate` now holds a session `pg_advisory_lock` for the
+whole goose run, so concurrent roles serialize and the race above can no longer happen. The one-off
+`migrate` remains the recommendation — as a way to keep a schema change deliberate, not as a
+workaround. Raised again by issue #40, whose premise came from the un-updated overview text.
 
 ## D-0089 — On-call / escalations (phase A of func-oncall-synthetic-pull)
 **Context:** notifications were "flat" — a monitor's down went to **all** channels, repeats only via

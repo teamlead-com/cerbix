@@ -305,11 +305,13 @@ flowchart TB
   probes.
 
 **Rollout order:** `cerbix migrate` (one-off) → scheduler → workers → api. Every role
-fails fast on an invalid config/unreachable DB. **Important for distributed deployment:** run
-`cerbix migrate` **as a separate one-off step before** starting the roles. Roles auto-apply migrations at
-startup, and on the first deploy of a new migration, simultaneously starting roles race for it (goose does not
-take a cross-process lock) — one applies it, the others fail with `relation already exists`. After
-the one-off `migrate`, roles see the current version and simply skip this step.
+fails fast on an invalid config/unreachable DB. Roles also auto-apply migrations at startup whenever
+`database.dsn` is set, and doing so concurrently is safe: `store.Migrate` holds a session
+`pg_advisory_lock` for the whole goose run, so roles starting together serialize instead of racing.
+**Recommended for distributed deployment anyway:** run `cerbix migrate` **as a separate one-off step
+before** starting the roles, using the NEW binary. Not as protection against a race, but to keep a
+schema change a deliberate act performed at a moment somebody chose — after it, the roles find no
+pending version and apply nothing.
 
 ## 2.3 Traefik + embed (recommended default edge, no nginx)
 

@@ -1,8 +1,10 @@
 # func-service-escalation — a Service escalates its own outage (FR-023 / NFR-018)
 
-> **STATUS: SPEC, decisions resolved, awaiting review.** The owner commissioned the next §16.9 item on
-> 2026-08-19. Nothing here is implementable until this file has been reviewed; a UI mock is required only
-> if a slice touches the SPA, per the owner's standing instruction.
+> **STATUS: DELIVERED** in [iter-0157](../iterations/iter-0157.md), acceptance rows AC-0157-* in
+> [status.md](../status.md). The owner commissioned this §16.9 item on 2026-08-19 and the review gate it
+> announced was met; the "nothing here is implementable" line outlived the delivery and is corrected
+> rather than deleted. §8's non-goals still bind — one of them, retroactive escalation, was found
+> contradicted by the implementation and fixed in [iter-0161](../iterations/iter-0161.md) §13.
 >
 > Invariants here are numbered **within this document**. FR-021's 1–91 and FR-022's 1–16 are separate
 > spaces; a bare "invariant 9" in cerbix means FR-021's unless it names its requirement.

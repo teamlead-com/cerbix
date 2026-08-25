@@ -22,6 +22,7 @@ WHAT IS CHECKED IN THEM:
 Brace shorthand is expanded: `store/{users,sessions}.go` checks both files.
 Anything intentionally unresolvable lives in ALLOWED below, each with a reason.
 """
+import glob
 import os, re, sys, glob, itertools
 
 # CHANGELOG.md is a LIVING document for this gate's purpose even though it is a historical
@@ -149,6 +150,59 @@ def check_row_statuses():
     return bad
 
 
+
+# A spec's banner claims the feature is not built yet; status.md says a requirement of that spec is
+# DONE. Both cannot be true, and the failure mode is one-directional: a banner is written once, at the
+# moment the spec is authored, and nothing in the process ever brings the author back to it. FR-022 and
+# FR-023 carried "Nothing is implementable until this file has been reviewed" for weeks after shipping,
+# and an operator reading the spec to learn what cerbix does was told the feature did not exist.
+UNBUILT_CLAIM_RE = re.compile(
+    r'nothing (?:is|here is) implementable|awaiting (?:adversarial )?review|awaiting a UI mock',
+    re.IGNORECASE)
+REQ_RE = re.compile(r'\b((?:FR|NFR)-\d{3,})\b')
+# The banner lives at the top; prose further down may legitimately quote the old gate as history.
+BANNER_LINES = 30
+
+
+def check_spec_banners():
+    """No spec says it is unbuilt while status.md marks one of its requirements DONE."""
+    status_path = 'docs/status.md'
+    if not os.path.exists(status_path):
+        return []
+    # The REQUIREMENT's own row is the authority, not the acceptance rows that cite it: an AC row
+    # names its requirement only when its prose happens to, so reading those would make the gate's
+    # coverage depend on wording.
+    done = set()
+    for line in open(status_path, encoding='utf-8'):
+        cells = split_row(line.rstrip('\n'))
+        if len(cells) < 5:
+            continue
+        req = cells[1].strip()
+        if REQ_RE.fullmatch(req) and cells[3].strip() == 'DONE':
+            done.add(req)
+
+    bad = []
+    for spec in sorted(glob.glob('docs/specs/*.md')):
+        lines = open(spec, encoding='utf-8').read().splitlines()[:BANNER_LINES]
+        head = '\n'.join(lines)
+        # The requirements a spec is ABOUT are named in its title line.
+        owned = set(REQ_RE.findall(lines[0])) if lines else set()
+        shipped = sorted(owned & done)
+        if not shipped:
+            continue
+        # A banner that DECLARES its delivery is allowed to quote the claim it replaced — the
+        # correction reads better with the old words in it, and the status line above them is the
+        # authority. Only an undeclared spec is measured by its prose.
+        if re.search(r'STATUS:\s*\**\s*(DELIVERED|SUPERSEDED|SHIPPED)', head, re.IGNORECASE):
+            continue
+        for n, line in enumerate(lines, 1):
+            if UNBUILT_CLAIM_RE.search(line):
+                bad.append((spec, n, 'stale-status',
+                            f'says unbuilt while {", ".join(shipped)} is DONE in status.md'))
+                break
+    return bad
+
+
 def check_discharge(src):
     """FR-021 states 91 acceptance invariants and 24 required scenarios; FR-022 states 16. Every one
     must have a row,
@@ -206,10 +260,12 @@ def main():
                 bad.append((doc, n, 'test', name))
     bad += check_discharge(src)
     bad += check_row_statuses()
+    bad += check_spec_banners()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
               'and every acceptance map is complete (FR-021: 91+24, FR-022: 16+16, FR-023: 16+19); '
-              'every requirement row states one of the three statuses')
+              'every requirement row states one of the three statuses, and no spec calls itself '
+              'unbuilt while its requirement is DONE')
         return 0
     print(f'docs references: {len(bad)} unresolved citation(s) in living documents\n')
     for doc, n, kind, tok in bad:

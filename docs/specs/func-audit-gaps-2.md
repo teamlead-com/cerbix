@@ -23,7 +23,8 @@ no visual surface).
 ## Non-goals (accepted, documented here)
 
 `sla_targets.project_id` stays as dormant schema (a project-level objective is a real
-feature, not a gap fix); dead store functions stay as test support (now labeled);
+feature, not a gap fix) — **superseded**: it became that feature in iter-0155 (AC-0155-3,
+migration 00083), which is exactly the "real feature" this line was reserving it for; dead store functions stay as test support (now labeled);
 `GET /organizations/{orgID}`-style read-one endpoints stay (list responses satisfy the
 SPA); agent transport routes stay undocumented in openapi by design.
 

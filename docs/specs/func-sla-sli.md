@@ -44,5 +44,7 @@ Code: `internal/sla/sla.go` (pure functions), `internal/store/sla.go`
 ## Open questions / next
 
 - TimescaleDB hypertable + CAGG for 90d at large volumes (D-0017).
-- Project-level SLO targets + an aggregated error budget per project.
+- ~~Project-level SLO targets + an aggregated error budget per project.~~ DELIVERED: AC-0155-3,
+  migration 00083, `GET`/`PUT`/`DELETE /api/v1/projects/{projectID}/sla-target`. A project target
+  cannot page, by CHECK.
 - Burn-rate alerting and displaying the error budget on the status page (status pages phase).

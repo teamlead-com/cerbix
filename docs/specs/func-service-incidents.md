@@ -1,10 +1,14 @@
 # func-service-incidents — a Service can own an incident (FR-022 / NFR-017)
 
-> **STATUS: SPEC, decisions resolved, awaiting adversarial review and a UI mock.** The owner commissioned
-> FR-022 and delegated its six decisions to the recommendations of the design-gate input; each is recorded
-> below as **DECIDED (delegated)** with the reasoning that made it the recommendation, so a later reader
-> can see it was a judgement and whose. Nothing is implementable until this file has been reviewed and
-> the mock approved — the gate that governed FR-021 phases 3–5 and iter-0155's two panels.
+> **STATUS: DELIVERED** in [iter-0156](../iterations/iter-0156.md) (D-0171), acceptance rows AC-0156-1
+> through AC-0156-8 in [status.md](../status.md). The gate this file used to announce — adversarial
+> review and an approved UI mock before any code — was met; the banner that said "nothing is
+> implementable" outlived it by several weeks and is corrected here rather than deleted, so the sequence
+> stays visible. Post-delivery corrections live in [iter-0161](../iterations/iter-0161.md) §9–§13.
+>
+> The owner commissioned FR-022 and delegated its six decisions to the recommendations of the design-gate
+> input; each is recorded below as **DECIDED (delegated)** with the reasoning that made it the
+> recommendation, so a later reader can see it was a judgement and whose.
 >
 > Invariants here are numbered **within this document**. FR-021's 1–91 are a separate space; a bare
 > "invariant 12" in cerbix means FR-021's unless it names FR-022.

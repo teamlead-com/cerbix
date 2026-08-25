@@ -213,8 +213,7 @@ func (h *Handler) addIncidentUpdate(w http.ResponseWriter, r *http.Request) {
 	// A plain comment keeps the current status — and says so by sending NOTHING, rather than by
 	// echoing the status this handler read a moment ago. Materializing it here is what let a comment
 	// revert a transition committed between that read and this write: the store resolves the intent
-	// against the row it holds a lock on.
-	_ = inc.Status
+	// against the row it holds a lock on. `inc` is still needed, for its id and for access control.
 	upd := domain.IncidentUpdate{
 		IncidentID: inc.ID,
 		Status:     domain.IncidentStatus(body.Status),

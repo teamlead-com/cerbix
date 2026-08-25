@@ -27,6 +27,24 @@ func enqueueOutboxTx(ctx context.Context, tx pgx.Tx, topic string, payload []byt
 	return nil
 }
 
+// enqueueOutboxAtTx is the same enqueue with the row's timestamps STATED rather than defaulted.
+//
+// The defaults are `now()`, which is the transaction's start. A writer that waited on a row lock
+// therefore schedules its event as though it had been enqueued before the wait — and since
+// `next_attempt_at` is what the claim orders by, an event caused by a later action can become due
+// before the one it followed. Callers that already own a post-lock instant pass it here so the event
+// is scheduled on the same clock as the rows that caused it. It is deliberately a separate function:
+// changing the default for every topic would re-time paths that never take a row lock at all.
+func enqueueOutboxAtTx(ctx context.Context, tx pgx.Tx, topic string, payload []byte, at time.Time) error {
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO outbox_events (topic, payload, status, fenced, created_at, updated_at, next_attempt_at)
+		 VALUES ($1, $2, CASE WHEN $3 THEN 'pending_fenced' ELSE 'pending' END, $3, $4, $4, $4)`,
+		topic, string(payload), domain.FencedTopic(topic), at); err != nil {
+		return fmt.Errorf("store: enqueue outbox at instant: %w", err)
+	}
+	return nil
+}
+
 // EnqueueOutbox queues a standalone outbound event that isn't tied to a store
 // mutation (so it can't ride an existing transaction) — e.g. a subscriber
 // confirmation email queued straight from an API handler. Payload must be valid

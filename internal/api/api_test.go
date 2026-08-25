@@ -103,17 +103,19 @@ type fakeStore struct {
 	agentTokens        map[string]domain.AgentToken
 	backfilled         []domain.Heartbeat
 	incUpdates         map[string][]domain.IncidentUpdate
-	postmortems        map[string]domain.Postmortem
-	pages              map[string]domain.StatusPage
-	components         map[string]domain.Component
-	apiTokens          map[string]domain.ApiToken
-	webhooks           map[string]domain.Webhook
-	channels           map[string]domain.NotificationChannel
-	monLinks           map[string][]string // monitor id -> channel ids
-	deadOutbox         map[string]domain.OutboxEventView
-	searchHits         []domain.SearchHit
-	subscribers        map[string]domain.Subscriber // keyed by confirm token
-	outboxEvents       []struct {
+	// lastUpdateStatus is the status the HANDLER passed down, verbatim — "" for a plain comment.
+	lastUpdateStatus string
+	postmortems      map[string]domain.Postmortem
+	pages            map[string]domain.StatusPage
+	components       map[string]domain.Component
+	apiTokens        map[string]domain.ApiToken
+	webhooks         map[string]domain.Webhook
+	channels         map[string]domain.NotificationChannel
+	monLinks         map[string][]string // monitor id -> channel ids
+	deadOutbox       map[string]domain.OutboxEventView
+	searchHits       []domain.SearchHit
+	subscribers      map[string]domain.Subscriber // keyed by confirm token
+	outboxEvents     []struct {
 		Topic   string
 		Payload []byte
 	}
@@ -990,8 +992,17 @@ func (f *fakeStore) ListIncidentsByProject(_ context.Context, projectID string) 
 }
 func (f *fakeStore) AddIncidentUpdate(_ context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error) {
 	upd.ID = "iu-new"
+	// The fake records what the HANDLER sent, before resolving anything, because that is what the
+	// handler's regression is about: an empty status is the keep-current INTENT, and materializing
+	// it into the incident's last-read value is the defect. The real store resolves it against a
+	// locked row; the fake stands in for that below.
+	f.lastUpdateStatus = string(upd.Status)
 	f.incUpdates[upd.IncidentID] = append(f.incUpdates[upd.IncidentID], upd)
 	if inc, ok := f.incidents[upd.IncidentID]; ok {
+		if upd.Status == "" {
+			upd.Status = inc.Status
+			f.incUpdates[upd.IncidentID][len(f.incUpdates[upd.IncidentID])-1].Status = inc.Status
+		}
 		inc.Status = upd.Status
 		if upd.Status == domain.IncidentResolved && inc.ResolvedAt == nil {
 			now := time.Now()

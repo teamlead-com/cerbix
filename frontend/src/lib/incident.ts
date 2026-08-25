@@ -33,6 +33,16 @@ export function impactBadge(i?: string): Badge {
 
 // The forward lifecycle order, for status selects.
 export const STATUS_ORDER: IncidentStatus[] = ["investigating", "identified", "monitoring", "resolved"];
+
+// The lifecycle only moves forward, and the server enforces it: an update that would move an incident
+// backward is refused. Offering a backward step therefore produces a button that can only fail, which
+// is worse than not offering it — the operator reads the refusal as a bug rather than as a rule.
+// `resolved` is deliberately excluded here: resolving is its own action with its own confirmation,
+// not one more rung on this picker.
+export function forwardStatuses(current?: IncidentStatus | string): IncidentStatus[] {
+  const from = Math.max(0, STATUS_ORDER.indexOf((current ?? "investigating") as IncidentStatus));
+  return STATUS_ORDER.slice(from).filter((s) => s !== "resolved");
+}
 export const IMPACT_ORDER: IncidentImpact[] = ["none", "minor", "major", "critical"];
 
 export function relTime(ts?: string): string {

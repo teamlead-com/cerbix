@@ -53,17 +53,49 @@ func scanIncident(row pgx.Row) (domain.Incident, error) {
 // idempotently: acknowledging an already-acked incident keeps the first ack. Returns
 // the updated incident, or ErrNotFound if it is gone / already resolved.
 func (s *Store) AcknowledgeIncident(ctx context.Context, id, by string) (domain.Incident, error) {
-	row := s.pool.QueryRow(ctx,
+	// Same row, same rule as `AddIncidentUpdate`: lock, then read the clock, then write. A single
+	// UPDATE looks atomic and is — but its `now()` is fixed when the statement's transaction began,
+	// so an acknowledgement that waited behind a timeline update stamps `updated_at` BEFORE the
+	// update it queued behind, walking the incident's own modification time backwards.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Incident{}, fmt.Errorf("store: begin acknowledge: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	var status domain.IncidentStatus
+	err = tx.QueryRow(ctx, `SELECT status FROM incidents WHERE id = $1 FOR UPDATE`, id).Scan(&status)
+	if noRows(err) {
+		return domain.Incident{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Incident{}, fmt.Errorf("store: lock incident for acknowledge: %w", err)
+	}
+	if status.Terminal() {
+		// Unchanged answer: a resolved incident is not acknowledgeable, and the caller has always
+		// been told that as ErrNotFound.
+		return domain.Incident{}, ErrNotFound
+	}
+	var asOf time.Time
+	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&asOf); err != nil {
+		return domain.Incident{}, fmt.Errorf("store: read acknowledge instant: %w", err)
+	}
+	row := tx.QueryRow(ctx,
 		`UPDATE incidents
-		    SET acknowledged_at = COALESCE(acknowledged_at, now()),
+		    SET acknowledged_at = COALESCE(acknowledged_at, $3),
 		        acknowledged_by = COALESCE(acknowledged_by, $2),
-		        updated_at = now()
+		        updated_at = $3
 		  WHERE id = $1 AND status <> 'resolved'
 		  RETURNING `+incidentColumns,
-		id, by)
+		id, by, asOf)
 	inc, err := scanIncident(row)
 	if noRows(err) {
 		return domain.Incident{}, ErrNotFound
+	}
+	if err == nil {
+		if cerr := tx.Commit(ctx); cerr != nil {
+			return domain.Incident{}, fmt.Errorf("store: commit acknowledge: %w", cerr)
+		}
 	}
 	if err != nil {
 		return domain.Incident{}, fmt.Errorf("store: acknowledge incident: %w", err)
@@ -96,8 +128,17 @@ func (s *Store) CreateIncident(ctx context.Context, inc domain.Incident, opening
 		externalKey = &inc.ExternalKey
 	}
 	row := tx.QueryRow(ctx,
-		`INSERT INTO incidents (project_id, monitor_id, service_id, title, status, impact, source, external_key)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING `+incidentColumns,
+		// An incident CREATED as resolved is stamped at creation. D-0020 promises `resolved_at` the
+		// first time an incident reaches Resolved, and creation is one of those times: the API and
+		// the new-incident form both offer the whole status list, so recording a historical outage
+		// after the fact is a supported act. Without the stamp such an incident falls out of BOTH
+		// status-page lists at once — the active one filters `status <> 'resolved'`, the recent one
+		// `resolved_at IS NOT NULL` — so the operator writes it down and it appears nowhere.
+		`INSERT INTO incidents (project_id, monitor_id, service_id, title, status, impact, source, external_key,
+		                        resolved_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
+		         CASE WHEN $5 = 'resolved' THEN statement_timestamp() ELSE NULL END)
+		 RETURNING `+incidentColumns,
 		inc.ProjectID, monitorID, serviceID, inc.Title, inc.Status, inc.Impact, inc.Source, externalKey)
 	created, err := scanIncident(row)
 	if err != nil {
@@ -323,7 +364,10 @@ func (s *Store) AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate
 	if err != nil {
 		return domain.IncidentUpdate{}, fmt.Errorf("store: marshal incident event: %w", err)
 	}
-	if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentEvent, payload); err != nil {
+	// The event is SCHEDULED on the same instant as the rows that caused it. Left on the default it
+	// would carry the transaction's start, so a writer that waited would hand the outbox an event
+	// due before the update it followed.
+	if err := enqueueOutboxAtTx(ctx, tx, domain.TopicIncidentEvent, payload, asOf); err != nil {
 		return domain.IncidentUpdate{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

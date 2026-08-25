@@ -298,9 +298,19 @@ func TestAnIncidentCannotWalkBackwardsThroughItsLifecycle(t *testing.T) {
 	if err := post(domain.IncidentMonitoring, "still watching"); err != nil {
 		t.Fatalf("same status: %v", err)
 	}
+	timeline := incidentUpdateCount(t, st, ctx, inc.ID)
+	events := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "pending")
 	for _, backward := range []domain.IncidentStatus{domain.IncidentIdentified, domain.IncidentInvestigating} {
 		if err := post(backward, "back"); !errors.Is(err, ErrStatusRegression) {
 			t.Fatalf("monitoring → %s: %v, want ErrStatusRegression", backward, err)
+		}
+		// A refusal writes NOTHING — not a timeline entry nobody can act on, and not an event
+		// announcing a change that did not happen.
+		if got := incidentUpdateCount(t, st, ctx, inc.ID); got != timeline {
+			t.Fatalf("a refused %s left %d timeline rows, want %d", backward, got, timeline)
+		}
+		if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "pending"); got != events {
+			t.Fatalf("a refused %s enqueued an event: %d rows, want %d", backward, got, events)
 		}
 	}
 	var status string
@@ -396,8 +406,12 @@ func TestAWaitingWriterStampsItsUpdateAfterTheWait(t *testing.T) {
 		done <- err
 	}()
 
-	// Let the writer block for long enough that a transaction-start clock is unmistakably early.
-	time.Sleep(600 * time.Millisecond)
+	// WAIT FOR THE WAIT, rather than sleeping and hoping. A sleep proves nothing about whether the
+	// goroutine has even begun its transaction: under load it can reach the lock after the release
+	// below, and then a `now()` mutant passes because there was no wait to be early about.
+	waitForLockWait(t, st, ctx)
+	// A moment of separation so the assertion is about the clock and not about scheduling noise.
+	time.Sleep(200 * time.Millisecond)
 	var released time.Time
 	if err := st.pool.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&released); err != nil {
 		t.Fatalf("read release instant: %v", err)
@@ -423,5 +437,104 @@ func TestAWaitingWriterStampsItsUpdateAfterTheWait(t *testing.T) {
 	if !updatedAt.Equal(createdAt) {
 		t.Fatalf("incident.updated_at %s and the update's created_at %s disagree; one transaction "+
 			"writes one instant", updatedAt, createdAt)
+	}
+	// The EVENT is scheduled on that instant too. `next_attempt_at` is what the claim orders by, so
+	// an event left on the transaction-start default can come due before the one it followed.
+	var eventCreated, nextAttempt time.Time
+	if err := st.pool.QueryRow(ctx, `
+		SELECT created_at, next_attempt_at FROM outbox_events
+		 WHERE topic = $1 ORDER BY created_at DESC LIMIT 1`, domain.TopicIncidentEvent).
+		Scan(&eventCreated, &nextAttempt); err != nil {
+		t.Fatalf("read the queued event: %v", err)
+	}
+	if eventCreated.Before(released) || nextAttempt.Before(released) {
+		t.Fatalf("the event is scheduled at %s/%s, before the lock was released at %s",
+			eventCreated, nextAttempt, released)
+	}
+}
+
+// An incident CREATED as resolved is stamped, because D-0020 promises `resolved_at` the first time an
+// incident reaches Resolved and creation is one of those times. Without the stamp the row falls out of
+// BOTH status-page lists at once: active filters `status <> 'resolved'`, recent filters `resolved_at IS
+// NOT NULL`. The operator records a past outage and it appears nowhere.
+func TestAnIncidentCreatedResolvedIsStampedAndStaysVisible(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "yesterday's outage", Status: domain.IncidentResolved,
+		Impact: domain.ImpactMinor, Source: domain.SourceManual,
+	}, "recorded after the fact", "author")
+	if err != nil {
+		t.Fatalf("create resolved incident: %v", err)
+	}
+	if inc.ResolvedAt == nil {
+		t.Fatal("an incident created as resolved has no resolved_at: it is invisible to the active " +
+			"list AND to the recent list")
+	}
+	// And an ordinary open incident is NOT stamped — the stamp means "reached Resolved", not
+	// "was written".
+	open, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "live", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("create open incident: %v", err)
+	}
+	if open.ResolvedAt != nil {
+		t.Fatalf("an investigating incident carries resolved_at %v", open.ResolvedAt)
+	}
+}
+
+// The acknowledgement writes the same row as a timeline update and had the same defect: a single
+// UPDATE looks atomic, but its `now()` is fixed when its transaction began, so an acknowledgement that
+// queued behind an update stamps the incident's modification time BEFORE the update it waited for.
+func TestAWaitingAcknowledgementStampsAfterItsWait(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+	}, "opening", "system")
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+
+	hold, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
+	}
+	var one int
+	if err := hold.QueryRow(ctx, `SELECT 1 FROM incidents WHERE id = $1 FOR UPDATE`, inc.ID).Scan(&one); err != nil {
+		t.Fatalf("hold the incident row: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.AcknowledgeIncident(ctx, inc.ID, "u1")
+		done <- err
+	}()
+	waitForLockWait(t, st, ctx)
+	time.Sleep(200 * time.Millisecond)
+	var released time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&released); err != nil {
+		t.Fatalf("read release instant: %v", err)
+	}
+	if err := hold.Rollback(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the waiting acknowledgement failed: %v", err)
+	}
+
+	var ackAt, updatedAt time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT acknowledged_at, updated_at FROM incidents WHERE id = $1`, inc.ID).Scan(&ackAt, &updatedAt); err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+	if ackAt.Before(released) || updatedAt.Before(released) {
+		t.Fatalf("acknowledged_at %s / updated_at %s predate the lock release at %s: the incident's "+
+			"own modification time walked backwards", ackAt, updatedAt, released)
 	}
 }

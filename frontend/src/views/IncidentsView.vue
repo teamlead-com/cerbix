@@ -6,7 +6,7 @@ import AppShell from "@/components/AppShell.vue";
 import IncidentSubjectChip from "@/components/IncidentSubjectChip.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
-import { STATUS_ORDER, relTime } from "@/lib/incident";
+import { forwardStatuses, relTime } from "@/lib/incident";
 import { renderSections } from "@/lib/postmortem";
 
 type Incident = components["schemas"]["Incident"];
@@ -159,7 +159,7 @@ async function select(id: string) {
 // click; Resolve is a deliberate, separate action (it's terminal).
 const canWrite = computed(() => !!selected.value && session.canProjectWrite(ws.orgId, selected.value.project_id ?? ""));
 // The working statuses shown as a segmented control (resolve has its own button).
-const workingStatuses = STATUS_ORDER.filter((s) => s !== "resolved");
+const workingStatuses = computed(() => forwardStatuses(selected.value?.status));
 const resolving = ref(false);
 async function setStatus(status: string, body = "") {
   const inc = selected.value;

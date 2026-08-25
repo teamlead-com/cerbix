@@ -7,7 +7,7 @@ import AppShell from "@/components/AppShell.vue";
 import IncidentSubjectChip from "@/components/IncidentSubjectChip.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
-import { STATUS_ORDER, impactBadge, relTime, statusBadge } from "@/lib/incident";
+import { forwardStatuses, impactBadge, relTime, statusBadge } from "@/lib/incident";
 import { PM_SECTIONS, emptySections, parsePostmortem, renderSections, serializePostmortem } from "@/lib/postmortem";
 
 type Incident = components["schemas"]["AuthedIncident"];
@@ -292,7 +292,7 @@ onMounted(() => {
         <div class="flex flex-wrap items-center gap-[6px]">
           <span class="mr-1 text-[12px] text-ink-3">Status</span>
           <button
-            v-for="s in STATUS_ORDER"
+            v-for="s in forwardStatuses(incident?.status)"
             :key="s"
             type="button"
             class="rounded-sm border px-[11px] py-[6px] text-[12.5px] font-medium transition-colors"

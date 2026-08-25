@@ -212,3 +212,19 @@ describe("IncidentDetailView plain comment", () => {
     expect(call[1].body).toEqual({ status: "identified", body: "cause found" });
   });
 });
+
+// The server refuses a backward transition, so a button offering one can only fail. Both screens now
+// offer the current status and the ones after it, and resolving stays its own action.
+describe("IncidentDetailView status picker", () => {
+  it("offers no step the server would refuse", async () => {
+    const wrapper = mountWith({ ...BASE_INCIDENT, status: "monitoring" });
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="update-status-monitoring"]').exists()).toBe(true);
+    for (const backward of ["investigating", "identified"]) {
+      expect(wrapper.find(`[data-testid="update-status-${backward}"]`).exists()).toBe(false);
+    }
+    // Resolving is its own action, not a rung on this picker.
+    expect(wrapper.find('[data-testid="update-status-resolved"]').exists()).toBe(false);
+  });
+});

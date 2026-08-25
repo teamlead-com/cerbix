@@ -43,6 +43,10 @@ type ServiceAlertEvaluation struct {
 	// per-service unique index absorbs.
 	IncidentsOpened   int
 	IncidentsResolved int
+	// Unroutable counts ONSETS withheld because the service's coverage was not ARMED — no resolvable
+	// recipient, or no governing declaration. They are neither errors nor announcements, and counting
+	// them separately is what keeps "nothing was wrong" distinguishable from "nobody could be told".
+	Unroutable int
 	// Lag is how far behind the oldest evaluated service was, so a stalled evaluator reads as lag
 	// rather than as an absence of alerts — which is indistinguishable from "nothing is wrong".
 	Lag time.Duration
@@ -208,6 +212,47 @@ func (s *Store) evaluateServiceAlertsOn(
 			candidateState, streak = c.candidateState, c.streak+1
 		}
 		decision := domain.DecideServiceAlert(c.policy, candidateState, streak, c.firing, c.emitted)
+
+		// FR-022 invariant 5: a service opens an incident ONLY while that signal's coverage is ARMED,
+		// and `owns_paging` — which the slice already filters on — is one of five conditions, not the
+		// whole of it. Two of the others can be false here and were never checked:
+		//
+		//   * ROUTABILITY. With no enabled channel and no populated schedule the announcement reaches
+		//     nobody, `activeLiveDelegationSQL` says DIS-ARMED through its routable clause, and the
+		//     members are correctly paging for themselves. Opening an incident on top of that is the
+		//     thing the FR-022 test comment calls worse than opening none;
+		//   * a GOVERNING DECLARATION. Before the first revision takes effect there is nothing the
+		//     verdict was computed from, `revision_id` is NULL, and delegation is dis-armed for the
+		//     same reason.
+		//
+		// The suppression covers ONSETS only. A CLOSE is never withheld (§16's polarity rule): an
+		// announcement already made must be able to end, whatever the route looks like now.
+		//
+		// It also refuses to LATCH. Emitting nothing while advancing `live_firing` and `emitted_state`
+		// would leave the service looking announced, so restoring the route later produces no edge and
+		// the outage is never paged at all — a silence that outlives its cause.
+		armed := true
+		if decision.Notify && !decision.Close {
+			if c.revisionID == nil {
+				armed = false
+			} else {
+				route, rerr := resolveServiceRecipientsTx(ctx, tx, c.projectID, c.scheduleID, asOf)
+				if rerr != nil {
+					return out, rerr
+				}
+				armed = len(route) > 0
+			}
+		}
+		if !decision.Notify || !armed {
+			// Not an error and not an announcement: a successful evaluation that had nothing it was
+			// allowed to say. The state below records the observation and refreshes the lease, so the
+			// next pass sees the same candidate and the same streak.
+			if decision.Notify {
+				out.Unroutable++
+			}
+			decision.Notify = false
+			decision.NextFiring = c.firing
+		}
 
 		emittedState, emittedSeq := c.emitted, c.emittedSeq
 		if decision.Notify {

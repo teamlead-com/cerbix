@@ -806,3 +806,99 @@ func TestSnapshotRefusesARevisionThatIsNotTheServices(t *testing.T) {
 		t.Fatalf("refusal = %v, want it to name the ownership failure", err)
 	}
 }
+
+// FR-022 invariant 5 in FULL: "only while that signal's coverage is ARMED". `owns_paging` is one of
+// five conditions and the only one the evaluator was checking — the slice filters on it. Two others
+// can be false at exactly the moment a service decides to speak.
+//
+// The route case is the sharper one. With ownership on, a pageable DOWN and no enabled channel, the
+// announcement reaches nobody, delegation is DIS-ARMED through its routable clause, and the members
+// are correctly paging for themselves. Opening an incident there is what this file's own comment
+// calls worse than opening none — and latching `live_firing` while doing it is worse still: restoring
+// the channel later produces no edge, so the outage is never paged at all.
+func TestAnUnroutableServiceOpensNothingAndDoesNotSwallowTheLaterOnset(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := alertingService(t, st, ctx)
+
+	// Take the route away, leaving every other arming condition true.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE notification_channels SET enabled = false WHERE project_id = $1`, f.projectID); err != nil {
+		t.Fatalf("disable channels: %v", err)
+	}
+
+	setMemberHealth(t, st, ctx, f, true)
+	evalOnce(t, st, ctx)
+	setMemberHealth(t, st, ctx, f, false)
+	evalOnce(t, st, ctx)
+	got := evalOnce(t, st, ctx)
+
+	if got.Onsets != 0 || got.IncidentsOpened != 0 {
+		t.Fatalf("an UNROUTABLE service announced %+v — nobody could be told, and its members are "+
+			"already paging for themselves", got)
+	}
+	if got.Unroutable == 0 {
+		t.Fatal("the withheld onset was not counted: silence that reads as 'nothing was wrong' is " +
+			"indistinguishable from silence that means 'nobody could be told'")
+	}
+	var incidents int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM incidents WHERE service_id = $1`, f.serviceID).Scan(&incidents); err != nil {
+		t.Fatalf("count incidents: %v", err)
+	}
+	if incidents != 0 {
+		t.Fatalf("%d incident(s) opened for an announcement nobody received", incidents)
+	}
+	// The latch did NOT advance, which is the half that decides whether the outage is ever paged.
+	var firing bool
+	var emitted *string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT live_firing, emitted_state FROM service_alert_state WHERE service_id = $1`,
+		f.serviceID).Scan(&firing, &emitted); err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if firing || emitted != nil {
+		t.Fatalf("the service latched (firing=%v emitted=%v) while announcing nothing: restoring the "+
+			"route would produce no edge and the outage would never be paged", firing, emitted)
+	}
+
+	// Give it a route back. The SAME outage now announces and opens its incident.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE notification_channels SET enabled = true WHERE project_id = $1`, f.projectID); err != nil {
+		t.Fatalf("re-enable channels: %v", err)
+	}
+	got = evalOnce(t, st, ctx)
+	if got.Onsets != 1 || got.IncidentsOpened != 1 {
+		t.Fatalf("after the route came back the evaluation reported %+v, want one onset and one "+
+			"incident for the outage that was waiting", got)
+	}
+}
+
+// The same fail-closed rule for the OTHER missing arming condition: before any declaration governs,
+// `revision_id` is NULL, the verdict was computed from nothing, and delegation is dis-armed.
+func TestAServiceWithNoGoverningDeclarationOpensNothing(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := alertingService(t, st, ctx)
+
+	// Push every revision into the future: authored, effective later, governing nothing right now.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_definition_revisions SET effective_at = now() + interval '1 hour'
+		  WHERE service_id = $1`, f.serviceID); err != nil {
+		t.Fatalf("defer the declaration: %v", err)
+	}
+
+	setMemberHealth(t, st, ctx, f, true)
+	evalOnce(t, st, ctx)
+	setMemberHealth(t, st, ctx, f, false)
+	evalOnce(t, st, ctx)
+	got := evalOnce(t, st, ctx)
+
+	var incidents int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM incidents WHERE service_id = $1`, f.serviceID).Scan(&incidents); err != nil {
+		t.Fatalf("count incidents: %v", err)
+	}
+	if got.IncidentsOpened != 0 || incidents != 0 {
+		t.Fatalf("a service with no governing declaration opened %d incident(s) (%+v): the verdict "+
+			"was computed from no declaration at all", incidents, got)
+	}
+}

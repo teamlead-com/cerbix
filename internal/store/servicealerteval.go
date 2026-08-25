@@ -243,8 +243,11 @@ func (s *Store) evaluateServiceAlertsOn(
 				out.Onsets++
 				// Only a LIVE onset opens one, and never a burn breach (spec D1): a budget signal is not an
 				// outage. This evaluator is the live one, so being here is already that guarantee.
+				// The SAME revision this verdict was computed from (§16.1's arming half), so the
+				// postmortem names the declaration that was governing during the outage rather than
+				// one that becomes effective at the next bucket boundary.
 				_, created, ierr := s.OpenServiceIncidentTx(ctx, tx, c.serviceID, c.projectID,
-					c.name+" — service "+string(candidateState), streak)
+					c.name+" — service "+string(candidateState), streak, c.revisionID)
 				if ierr != nil {
 					return out, ierr
 				}

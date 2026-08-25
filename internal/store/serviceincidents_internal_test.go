@@ -106,7 +106,7 @@ func TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers(t *testing.T)
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout degraded", 2)
+		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout degraded", 2, governingRevision(t, st, ctx, f.serviceID))
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -435,7 +435,7 @@ func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
 
 	var opened domain.Incident
 	inTx(func(tx pgx.Tx) {
-		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 3)
+		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 3, governingRevision(t, st, ctx, f.serviceID))
 		if err != nil || !created {
 			t.Fatalf("open: %v (created=%v)", err, created)
 		}
@@ -448,7 +448,7 @@ func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
 
 	// The evaluator that LOSES the open race announces nothing: one opening, one announcement.
 	inTx(func(tx pgx.Tx) {
-		if _, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 3); err != nil || created {
+		if _, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 3, governingRevision(t, st, ctx, f.serviceID)); err != nil || created {
 			t.Fatalf("second open: %v (created=%v, want false)", err, created)
 		}
 	})
@@ -588,7 +588,7 @@ func openLiveOccurrence(t *testing.T, st *Store, ctx context.Context, f armFixtu
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 2)
+	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 2, governingRevision(t, st, ctx, f.serviceID))
 	if err != nil || !created {
 		t.Fatalf("open incident: %v (created=%v)", err, created)
 	}
@@ -656,4 +656,116 @@ func openBurnOccurrence(t *testing.T, st *Store, ctx context.Context, f armFixtu
 		f.serviceID, f.targetID); err != nil {
 		t.Fatalf("latch burn: %v", err)
 	}
+}
+
+// governingRevision resolves the declaration in force NOW, the way the epoch owner and the evaluator
+// resolve it: the latest boundary that has PASSED. Tests call it so they hand the opener the same id a
+// real evaluator would, rather than whatever happens to be newest.
+func governingRevision(t *testing.T, st *Store, ctx context.Context, serviceID string) *string {
+	t.Helper()
+	var id *string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT r.id::text FROM service_definition_revisions r
+		 WHERE r.service_id = $1 AND r.state = 'effective' AND r.effective_at <= now()
+		 ORDER BY r.effective_at DESC, r.revision DESC LIMIT 1`, serviceID).Scan(&id); err != nil {
+		if noRows(err) {
+			return nil
+		}
+		t.Fatalf("resolve governing revision: %v", err)
+	}
+	return id
+}
+
+// FR-022 invariant 13 / spec D6 — the postmortem names the declaration the OUTAGE was measured
+// against, not one that becomes effective later.
+//
+// The window is ordinary, not exotic. `service_definition_revisions.state` defaults to 'effective' the
+// moment a revision is authored (00064), and its `effective_at` sits on the next bucket boundary — so
+// every ordinary edit opens a gap in which "the latest effective revision" and "the revision governing
+// now" are different rows. An incident opened inside that gap used to snapshot the members of a
+// declaration that had not started governing anything.
+func TestTheIncidentSnapshotNamesTheGoverningDeclaration(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// A second monitor, and a NEXT revision that adds it, effective a minute from now.
+	other, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: f.projectID, Name: "checkout-dns", Type: domain.MonitorHTTP,
+		Target: "https://dns.example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("second monitor: %v", err)
+	}
+	var futureRev string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO service_definition_revisions (service_id, project_id, revision, effective_at)
+		SELECT s.id, s.project_id, 99, now() + interval '1 minute' FROM services s WHERE s.id = $1
+		RETURNING id::text`, f.serviceID).Scan(&futureRev); err != nil {
+		t.Fatalf("future revision: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO service_definition_members (revision_id, project_id, monitor_id, monitor_name, role)
+		VALUES ($1::uuid, $2, $3, 'checkout-dns', 'sli')`, futureRev, f.projectID, other.ID); err != nil {
+		t.Fatalf("future members: %v", err)
+	}
+	// It is 'effective' ALREADY — that is the trap, spelled out rather than assumed.
+	var state string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT state FROM service_definition_revisions WHERE id = $1::uuid`, futureRev).Scan(&state); err != nil {
+		t.Fatalf("read future state: %v", err)
+	}
+	if state != "effective" {
+		t.Fatalf("the future revision is %q; this test no longer exercises the window it was written for", state)
+	}
+
+	inc := openLiveOccurrence(t, st, ctx, f)
+
+	names := snapshotNames(t, st, ctx, inc.ID)
+	for _, n := range names {
+		if n == "checkout-dns" {
+			t.Fatalf("the snapshot named %v — it took a declaration that governs only from the next "+
+				"boundary, while the outage was computed from the previous one", names)
+		}
+	}
+	if len(names) == 0 {
+		t.Fatal("the snapshot is empty; the governing declaration does have members")
+	}
+
+	// And a service with NO governing declaration snapshots nothing rather than reaching for the
+	// newest one — the fallback is the defect one level down.
+	if err := snapshotServiceMembersTx(ctx, mustTx(t, st, ctx), "00000000-0000-0000-0000-000000000000",
+		f.projectID, f.serviceID, nil); err != nil {
+		t.Fatalf("nil revision must be a no-op, got %v", err)
+	}
+}
+
+func snapshotNames(t *testing.T, st *Store, ctx context.Context, incidentID string) []string {
+	t.Helper()
+	var raw []byte
+	if err := st.pool.QueryRow(ctx,
+		`SELECT members FROM incident_member_snapshots WHERE incident_id = $1`, incidentID).Scan(&raw); err != nil {
+		if noRows(err) {
+			return nil
+		}
+		t.Fatalf("read snapshot: %v", err)
+	}
+	var members []domain.IncidentMember
+	if err := json.Unmarshal(raw, &members); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	out := make([]string, 0, len(members))
+	for _, m := range members {
+		out = append(out, m.Name)
+	}
+	return out
+}
+
+func mustTx(t *testing.T, st *Store, ctx context.Context) pgx.Tx {
+	t.Helper()
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	return tx
 }

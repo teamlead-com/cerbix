@@ -27,8 +27,11 @@ import (
 // concurrent evaluator losing that race has done nothing wrong — one incident is open, which is the
 // invariant (FR-022 invariant 4). The caller decides what to do with `created == false`; the evaluator
 // uses it to avoid announcing twice.
+// `revisionID` is the declaration the OUTAGE was computed from, resolved by the caller that computed
+// it. It is not optional and not re-derived here: see `snapshotServiceMembersTx`.
 func (s *Store) OpenServiceIncidentTx(
 	ctx context.Context, tx pgx.Tx, serviceID, projectID, title string, confirmedOver int,
+	revisionID *string,
 ) (domain.Incident, bool, error) {
 	row := tx.QueryRow(ctx,
 		`INSERT INTO incidents (project_id, service_id, title, status, impact, source)
@@ -50,7 +53,7 @@ func (s *Store) OpenServiceIncidentTx(
 		return domain.Incident{}, false, fmt.Errorf("store: open service incident: %w", err)
 	}
 
-	if err := snapshotServiceMembersTx(ctx, tx, inc.ID, projectID, serviceID); err != nil {
+	if err := snapshotServiceMembersTx(ctx, tx, inc.ID, projectID, serviceID, revisionID); err != nil {
 		return domain.Incident{}, false, err
 	}
 	// The opening update states WHAT confirmed it. An operator who finds an incident nobody typed must be
@@ -115,7 +118,23 @@ func (s *Store) FindOpenAutoIncidentByService(ctx context.Context, q dbConn, ser
 // spec D6). A postmortem is read after the world moved — a member may be renamed, dropped from the
 // declaration or deleted outright — and a live join would then render "3 members" it cannot name. Same
 // device as phase 5's immutable recipient snapshot, for the same reason.
-func snapshotServiceMembersTx(ctx context.Context, tx pgx.Tx, incidentID, projectID, serviceID string) error {
+//
+// The revision is PASSED IN, not resolved here. Resolving it locally is what this once did, with
+// `state = 'effective' ORDER BY effective_at DESC LIMIT 1` and no time bound — and `state` defaults to
+// `'effective'` the moment a revision is authored (00064), while its `effective_at` sits on the next
+// bucket boundary. So an edit at 12:00:30 opened a window until 12:01 in which an incident snapshotted
+// the members of a declaration that was not yet governing anything, while the outage that opened it
+// had been computed from the previous one. The evaluator already resolved the governing revision for
+// the verdict; handing that exact id down is the only way the two can agree by construction.
+//
+// A NULL revision snapshots NOTHING. No declaration governs, so there is no membership to name, and
+// falling back to "the latest effective" would reintroduce the defect one level down.
+func snapshotServiceMembersTx(
+	ctx context.Context, tx pgx.Tx, incidentID, projectID, serviceID string, revisionID *string,
+) error {
+	if revisionID == nil || *revisionID == "" {
+		return nil
+	}
 	// `service_definition_members` already carries `monitor_name` as of the declaration — the effective
 	// revision IS a snapshot of the membership, which is why this reads it instead of joining `monitors`:
 	// a join would render an empty name for a member deleted since, and naming the members after the world
@@ -123,12 +142,9 @@ func snapshotServiceMembersTx(ctx context.Context, tx pgx.Tx, incidentID, projec
 	rows, err := tx.Query(ctx, `
 		SELECT mem.monitor_id::text, min(mem.monitor_name), array_agg(mem.role ORDER BY mem.role)
 		  FROM service_definition_members mem
-		 WHERE mem.revision_id = (
-		       SELECT id FROM service_definition_revisions
-		        WHERE service_id = $1 AND state = 'effective'
-		        ORDER BY effective_at DESC LIMIT 1)
+		 WHERE mem.revision_id = $1::uuid
 		 GROUP BY mem.monitor_id
-		 ORDER BY min(mem.monitor_name)`, serviceID)
+		 ORDER BY min(mem.monitor_name)`, *revisionID)
 	if err != nil {
 		return fmt.Errorf("store: read members for snapshot: %w", err)
 	}

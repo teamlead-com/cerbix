@@ -769,3 +769,40 @@ func mustTx(t *testing.T, st *Store, ctx context.Context) pgx.Tx {
 	t.Cleanup(func() { _ = tx.Rollback(ctx) })
 	return tx
 }
+
+// A revision that does not belong to this service is REFUSED, not recorded as "no members". The
+// difference matters because the snapshot is what a postmortem reads: `members: []` is a claim that
+// the declaration named nobody, and storing it for a revision we simply had no business reading
+// would put a false statement in the incident record.
+func TestSnapshotRefusesARevisionThatIsNotTheServices(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// A second service in the same project, with its own declaration.
+	other, err := st.CreateService(ctx, domain.Service{ProjectID: f.projectID, Slug: "cart", Name: "Cart"})
+	if err != nil {
+		t.Fatalf("second service: %v", err)
+	}
+	var foreign string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO service_definition_revisions (service_id, project_id, revision, effective_at)
+		VALUES ($1, $2, 1, now() - interval '1 hour') RETURNING id::text`,
+		other.ID, f.projectID).Scan(&foreign); err != nil {
+		t.Fatalf("foreign revision: %v", err)
+	}
+
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only probe
+	err = snapshotServiceMembersTx(ctx, tx, "00000000-0000-0000-0000-000000000000",
+		f.projectID, f.serviceID, &foreign)
+	if err == nil {
+		t.Fatal("another service's revision was accepted: the snapshot would record its members, or " +
+			"an empty list, as the truth about this incident")
+	}
+	if !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("refusal = %v, want it to name the ownership failure", err)
+	}
+}

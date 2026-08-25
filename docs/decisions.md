@@ -3795,3 +3795,38 @@ shipped in iter-0144 and the numbers live on `…/services/{id}/reliability` —
 description is a false statement about capability, not a wording preference. The non-goals are now stated
 PUBLICLY in the README, quoted from the specification instead of softened.
 
+## D-0175 — a ladder carried across the 00085 upgrade starts at the upgrade, and that is an EXCEPTION (2026-08-26)
+
+**Context.** FR-023 §8 makes retroactive escalation a non-goal, and iter-0161 §13 enforced it by freezing
+each incident's ladder in a snapshot taken when the incident opens. An incident that opened without a
+policy has no snapshot and never escalates, however long the policy has been attached since. Migration
+00085 then had to answer a question the non-goal does not cover: what happens to incidents that were
+ALREADY OPEN when the snapshot table appeared. Without a backfill they lose their ladder permanently
+(iter-0161 §16). With a naive backfill they page every elapsed step at once on the first pass
+afterwards, which is the non-goal itself, arriving through the migration (§17).
+
+**What cannot be known.** WHEN a policy was attached to a service is recorded nowhere. A carried-over
+incident that opened with no policy is indistinguishable, in the data, from one that had this policy
+from its first second. No predicate over the existing rows separates them.
+
+**Decision.** The snapshot carries `due_base`, the instant its step offsets are measured from:
+
+- a row written when an incident OPENS uses the incident's own `started_at` — unchanged behaviour, and
+  what AC-0157-1's "steps fire from the incident's start" describes;
+- a row written by 00085's backfill uses the MIGRATION's instant. The ladder starts at the upgrade: its
+  first step fires on the next pass, its later steps wait their real delays.
+
+**This is an exception, not the same rule as §13, and calling it the same would be wrong.** A native
+attach-after-open never escalates that incident at all; a legacy carried-over incident does escalate,
+prospectively. The two differ in what they do, and they are justified differently: §13 refuses to page
+because the operator's intent is knowable and was "not for this incident", while this refuses to page
+for ELAPSED time because intent is unknowable, and chooses continuity over silence for the time that
+follows. It applies to exactly one population — the rows 00085's backfill wrote — and cannot recur:
+every incident opened after the migration gets a snapshot at open.
+
+**Consequence.** Monitor incidents set `due_base` to their start explicitly, so NFR-018's "byte-identical
+monitor ladder" holds. AC-0157-1's sentence remains true for every incident cerbix opens from now on and
+carries this exception for the upgrade population; iter-0157 is closed and immutable, so the correction
+is forward-only, here and in iter-0161 §17. Verified both ways: a backfill copying `started_at` fails the
+column assertion, and a ladder measuring from `started_at` fails with "the first pass after the upgrade
+fired 3 steps, want exactly its first".

@@ -695,9 +695,11 @@ func TestUpgradingWithAnOpenServiceIncidentKeepsItsLadder(t *testing.T) {
 		t.Fatalf("open a pre-upgrade incident: %v", err)
 	}
 
-	// The upgrade itself.
-	if err := goose.UpContext(ctx, db, "migrations"); err != nil {
-		t.Fatalf("migrate to head: %v", err)
+	// The upgrade itself, stopping AT 85. Migrating to head would make this test's subject drift
+	// silently: a future migration touching the same rows would be exercised here under a name that
+	// claims to be about 00085.
+	if err := goose.UpToContext(ctx, db, "migrations", 85); err != nil {
+		t.Fatalf("migrate to 85: %v", err)
 	}
 
 	var policyName string

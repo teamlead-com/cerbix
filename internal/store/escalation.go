@@ -323,7 +323,8 @@ type EscalationPass struct {
 func (p EscalationPass) Total() int { return p.MonitorSteps + p.ServiceSteps }
 
 // AdvanceEscalations drives every open, unacknowledged auto-incident whose monitor has
-// an escalation policy: it fires each ladder step whose offset from the incident start
+// an escalation policy: it fires each ladder step whose offset from the incident's BASE instant
+// (`dueBase`: the incident's start, except for a ladder carried across 00085 — D-0175)
 // has elapsed (resolving targets — channels + whoever is on call — to concrete channel
 // ids at fire time), latching progress on the incident so a step fires once. When all
 // steps are done and the policy repeats, it re-sends the last step on the monitor's
@@ -582,7 +583,9 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		step := inc.step
 		changed := false
 		lastEsc := inc.lastEscalated
-		// Fire every step whose offset from the incident start has elapsed.
+		// Fire every step whose offset from the incident's base has elapsed. Every elapsed step fires
+		// in THIS pass, which is why `dueBase` matters so much for a carried-over ladder: measured
+		// from a two-hour-old outage, a three-step ladder empties itself into the rotation at once.
 		for step < len(p.Steps) {
 			due := inc.dueBase.Add(time.Duration(p.Steps[step].AfterSeconds) * time.Second)
 			if now.Before(due) {

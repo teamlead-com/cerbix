@@ -158,14 +158,29 @@ func snapshotServiceMembersTx(
 	// revision belonging to another tenant's service would have its members copied into this
 	// incident's snapshot. Today's one caller passes the right value — which is an argument for
 	// checking it here, not against.
+	// Ownership is established FIRST, and its failure is an error rather than an empty answer. Doing
+	// the check by joining inside the members query would make a revision belonging to another
+	// service produce zero rows — indistinguishable from a declaration that genuinely names nobody,
+	// and stored as `members: []` as though that were the truth about this incident. A boundary that
+	// answers "nothing" when it means "not yours" is not fail-closed; it is quietly wrong.
+	var owns bool
+	err := tx.QueryRow(ctx, `
+		SELECT true FROM service_definition_revisions
+		 WHERE id = $1::uuid AND service_id = $2 AND project_id = $3`,
+		*revisionID, serviceID, projectID).Scan(&owns)
+	if noRows(err) {
+		return fmt.Errorf("store: snapshot members: revision %s does not belong to service %s",
+			*revisionID, serviceID)
+	}
+	if err != nil {
+		return fmt.Errorf("store: verify revision ownership: %w", err)
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT mem.monitor_id::text, min(mem.monitor_name), array_agg(mem.role ORDER BY mem.role)
 		  FROM service_definition_members mem
-		  JOIN service_definition_revisions rev
-		    ON rev.id = mem.revision_id AND rev.service_id = $2 AND rev.project_id = $3
 		 WHERE mem.revision_id = $1::uuid
 		 GROUP BY mem.monitor_id
-		 ORDER BY min(mem.monitor_name)`, *revisionID, serviceID, projectID)
+		 ORDER BY min(mem.monitor_name)`, *revisionID)
 	if err != nil {
 		return fmt.Errorf("store: read members for snapshot: %w", err)
 	}

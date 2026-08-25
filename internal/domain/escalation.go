@@ -28,7 +28,10 @@ type EscalationTarget struct {
 	ID   string               `json:"id"`
 }
 
-// EscalationStep is one rung of the ladder: after AfterSeconds from the incident
+// EscalationStep is one rung of the ladder: after AfterSeconds from the incident's base instant,
+// which is the incident's start for every incident cerbix opens and, for the one population of
+// service incidents carried across migration 00085, the instant of that upgrade (D-0175). Read the
+// next line as "from the incident
 // start, notify Targets (unless the incident was acknowledged first).
 type EscalationStep struct {
 	AfterSeconds int                `json:"after_seconds"`

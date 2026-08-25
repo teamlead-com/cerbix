@@ -23,6 +23,11 @@ CREATE TABLE incident_escalation_snapshots (
     policy_name text NOT NULL,
     repeat_last boolean NOT NULL DEFAULT false,
     steps       jsonb NOT NULL,
+    -- The instant this incident's step OFFSETS are measured from. For an incident opened normally it
+    -- is the incident's own `started_at`, which is the behaviour the ladder has always had. For a row
+    -- written by the backfill below it is the MIGRATION's instant, and that difference is the whole
+    -- reason the column exists: see the backfill's own note.
+    due_base    timestamptz NOT NULL DEFAULT now(),
     created_at  timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT incident_escalation_snapshots_steps_chk CHECK (jsonb_typeof(steps) = 'array'),
     -- COMPOSITE, not two independent keys. With `incident_id → incidents(id)` and
@@ -46,6 +51,19 @@ CREATE TABLE incident_escalation_snapshots (
 --
 -- Incidents whose service has NO policy attached get nothing, which is the same thing a fresh open
 -- would do for them today.
+--
+-- `due_base` is deliberately LEFT AT ITS DEFAULT — the migration's own instant — and not set to
+-- `i.started_at`. Copying the incident's start would trade one upgrade defect for its mirror image:
+-- steps are fired for every offset that has already elapsed, in a single pass, so a ladder attached to
+-- a two-hour-old incident would empty itself into the on-call rotation the moment the first pass ran
+-- after the upgrade. And it cannot be narrowed by looking at the data, because WHEN a policy was
+-- attached is not recorded anywhere — an incident that opened with no policy at all is
+-- indistinguishable here from one that had this policy from the start.
+--
+-- So a carried-over ladder starts at the upgrade: its first step fires on the next pass, and its later
+-- steps wait their real delays. That is the honest reading of what we know, and it is the same
+-- direction §13 chose for attaching a policy to an already-open incident — cerbix does not page for
+-- time nobody decided to page for.
 INSERT INTO incident_escalation_snapshots
     (incident_id, project_id, policy_id, policy_name, repeat_last, steps)
 SELECT i.id, i.project_id, p.id, p.name, p.repeat_last, p.steps

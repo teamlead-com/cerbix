@@ -702,14 +702,27 @@ func TestUpgradingWithAnOpenServiceIncidentKeepsItsLadder(t *testing.T) {
 
 	var policyName string
 	var steps []byte
-	if err := db.QueryRowContext(ctx,
-		`SELECT policy_name, steps FROM incident_escalation_snapshots WHERE incident_id = $1`,
-		incidentID).Scan(&policyName, &steps); err != nil {
+	var dueBase, startedAt time.Time
+	if err := db.QueryRowContext(ctx, `
+		SELECT esc.policy_name, esc.steps, esc.due_base, i.started_at
+		  FROM incident_escalation_snapshots esc
+		  JOIN incidents i ON i.id = esc.incident_id
+		 WHERE esc.incident_id = $1`, incidentID).Scan(&policyName, &steps, &dueBase, &startedAt); err != nil {
 		t.Fatalf("the incident carried across the upgrade has no ladder snapshot, so it will never "+
 			"escalate again: %v", err)
 	}
 	if policyName != "ladder" || len(steps) == 0 {
 		t.Fatalf("snapshot = %q/%s, want the policy the service had attached", policyName, steps)
+	}
+	// And the OTHER upgrade defect, which a naive backfill walks straight into: offsets are measured
+	// from `due_base`, and every elapsed step fires in ONE pass. Had the backfill copied
+	// `started_at`, this incident — open for two hours before the upgrade — would empty its whole
+	// ladder into the rotation on the first pass afterwards, for time nobody decided to page for.
+	// The attachment history that would let us do better is recorded nowhere, so a carried-over
+	// ladder starts at the upgrade.
+	if !dueBase.After(startedAt) {
+		t.Fatalf("due_base %s is not after the incident's start %s: the backfilled ladder measures "+
+			"its delays from the outage and will fire every elapsed step at once", dueBase, startedAt)
 	}
 }
 
@@ -734,5 +747,46 @@ func TestAnEscalationSnapshotCannotCrossTenants(t *testing.T) {
 	if err == nil {
 		t.Fatal("an incident of one project accepted another project's escalation snapshot: the row " +
 			"that decides who gets paged is the wrong one to leave un-tenanted")
+	}
+}
+
+// The same guarantee stated as BEHAVIOUR rather than as a column: after the upgrade, the first pass
+// climbs one step, not the whole ladder.
+func TestTheFirstPassAfterAnUpgradeDoesNotEmptyTheLadder(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	lf, inc := escalatingService(t, st, ctx)
+	setFiring(t, st, ctx, lf.serviceID, true, true)
+
+	// A three-step ladder, and an incident that has been open far longer than all of it.
+	if _, err := st.UpdateEscalationPolicy(ctx, domain.EscalationPolicy{
+		ID: lf.policyID, ProjectID: lf.projectID, Name: "service-ladder",
+		Steps: []domain.EscalationStep{
+			{AfterSeconds: 0, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: lf.channelID}}},
+			{AfterSeconds: 300, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: lf.channelID}}},
+			{AfterSeconds: 900, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: lf.channelID}}},
+		},
+	}); err != nil {
+		t.Fatalf("three-step ladder: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE incidents SET started_at = now() - interval '2 hours' WHERE id = $1`, inc.ID); err != nil {
+		t.Fatalf("age the incident: %v", err)
+	}
+	// The upgrade's own shape: the snapshot exists, carries the ladder, and bases its delays on the
+	// migration instant rather than on the outage.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE incident_escalation_snapshots
+		   SET steps = (SELECT steps FROM escalation_policies WHERE id = $2), due_base = now()
+		 WHERE incident_id = $1`, inc.ID, lf.policyID); err != nil {
+		t.Fatalf("apply the backfilled shape: %v", err)
+	}
+
+	if _, err := st.AdvanceEscalations(ctx); err != nil {
+		t.Fatalf("advance escalations: %v", err)
+	}
+	steps := stepPayloads(t, st, ctx)
+	if len(steps) != 1 {
+		t.Fatalf("the first pass after the upgrade fired %d steps, want exactly its first — a ladder "+
+			"carried across an upgrade must not page for the hours it was open before it", len(steps))
 	}
 }

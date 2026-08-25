@@ -272,10 +272,11 @@ func resolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body st
 func snapshotEscalationPolicyTx(ctx context.Context, tx pgx.Tx, incidentID, projectID, serviceID string) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO incident_escalation_snapshots
-		  (incident_id, project_id, policy_id, policy_name, repeat_last, steps)
-		SELECT $1, $2, p.id, p.name, p.repeat_last, p.steps
+		  (incident_id, project_id, policy_id, policy_name, repeat_last, steps, due_base)
+		SELECT $1, $2, p.id, p.name, p.repeat_last, p.steps, i.started_at
 		  FROM services s
 		  JOIN escalation_policies p ON p.id = s.escalation_policy_id AND p.project_id = s.project_id
+		  JOIN incidents i ON i.id = $1 AND i.project_id = $2
 		 WHERE s.id = $3 AND s.project_id = $2
 		ON CONFLICT (incident_id) DO NOTHING`, incidentID, projectID, serviceID)
 	if err != nil {

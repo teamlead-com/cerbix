@@ -384,8 +384,13 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		id, monitorID, name, policyID string
 		// serviceID is the FR-023 anchor; exactly one of monitorID/serviceID is set, as the
 		// incident's own anchor CHECK guarantees. `name` is the SUBJECT's name either way.
-		serviceID       string
-		startedAt       time.Time
+		serviceID string
+		startedAt time.Time
+		// dueBase is where this incident's step OFFSETS are measured from. It equals startedAt for a
+		// monitor and for any service incident opened normally; it differs only for a ladder carried
+		// across the 00085 upgrade, whose base is the migration instant because the attachment history
+		// it would need is not recorded anywhere.
+		dueBase         time.Time
 		step            int
 		lastEscalated   *time.Time
 		renotifySeconds int
@@ -401,6 +406,8 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 			rows.Close()
 			return pass, fmt.Errorf("store: scan escalating incident: %w", err)
 		}
+		// A monitor's ladder has always measured from the incident start, and still does.
+		o.dueBase = o.startedAt
 		incs = append(incs, o)
 	}
 	rows.Close()
@@ -440,7 +447,8 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		// opened without a policy has no snapshot and is simply not selected — attaching one starts
 		// the NEXT incident's ladder.
 		`SELECT i.id, i.service_id, i.started_at, i.escalation_step, i.last_escalated_at,
-		        s.name, COALESCE(esc.policy_id::text, ''), esc.policy_name, esc.repeat_last, esc.steps
+		        s.name, COALESCE(esc.policy_id::text, ''), esc.policy_name, esc.repeat_last, esc.steps,
+		        esc.due_base
 		   FROM incidents i
 		   JOIN services s ON s.id = i.service_id
 		   JOIN service_alert_state st ON st.service_id = s.id
@@ -464,7 +472,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		var frozen domain.EscalationPolicy
 		var rawSteps []byte
 		if err := srows.Scan(&o.id, &o.serviceID, &o.startedAt, &o.step, &o.lastEscalated,
-			&o.name, &o.policyID, &frozen.Name, &frozen.RepeatLast, &rawSteps); err != nil {
+			&o.name, &o.policyID, &frozen.Name, &frozen.RepeatLast, &rawSteps, &o.dueBase); err != nil {
 			srows.Close()
 			return pass, fmt.Errorf("store: scan escalating service incident: %w", err)
 		}
@@ -576,7 +584,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		lastEsc := inc.lastEscalated
 		// Fire every step whose offset from the incident start has elapsed.
 		for step < len(p.Steps) {
-			due := inc.startedAt.Add(time.Duration(p.Steps[step].AfterSeconds) * time.Second)
+			due := inc.dueBase.Add(time.Duration(p.Steps[step].AfterSeconds) * time.Second)
 			if now.Before(due) {
 				break
 			}

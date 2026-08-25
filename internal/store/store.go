@@ -35,6 +35,11 @@ var ErrAlreadyOpen = errors.New("store: auto-incident already open")
 // service, blocking the NEXT outage from opening its own.
 var ErrIncidentTerminal = errors.New("store: incident is resolved")
 
+// ErrStatusRegression is returned when an update would move an incident BACKWARD through its
+// lifecycle. The lifecycle is documented as forward-flowing, and until now only its last step was
+// enforced: `resolved` was terminal, while `monitoring → identified` was accepted without comment.
+var ErrStatusRegression = errors.New("store: incident status cannot move backward")
+
 // ErrConflict is returned when a create violates a unique constraint (e.g. a
 // duplicate slug), so the API can answer 409 instead of a raw 500.
 var ErrConflict = errors.New("store: conflict")

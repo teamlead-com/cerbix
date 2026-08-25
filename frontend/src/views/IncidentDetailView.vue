@@ -110,12 +110,16 @@ const willChangeStatus = computed(() => !!composer.status && composer.status !==
 async function addUpdate(forceResolve = false) {
   posting.value = true;
   updateError.value = "";
-  const status = forceResolve ? "resolved" : composer.status || incident.value?.status || "investigating";
+  // A plain comment sends NO status. Echoing the status this screen last loaded is how a comment
+  // written while somebody else moved the incident forward used to revert it; the server resolves
+  // "keep whatever it is" against the row it locks, and a screen minutes out of date can no longer
+  // publish a stale opinion about the lifecycle.
+  const status = forceResolve ? "resolved" : composer.status;
   const body = forceResolve ? (composer.body || "Resolved.") : composer.body;
   try {
     const res = await api.POST("/api/v1/incidents/{incidentID}/updates", {
       params: { path: { incidentID: id } },
-      body: { status: status as IncidentUpdate["status"], body },
+      body: { ...(status ? { status: status as IncidentUpdate["status"] } : {}), body },
     });
     if (res.error) {
       updateError.value = (res.error as { error?: string })?.error || "Could not post the update.";
@@ -293,13 +297,14 @@ onMounted(() => {
             type="button"
             class="rounded-sm border px-[11px] py-[6px] text-[12.5px] font-medium transition-colors"
             :class="nextStatus === s ? 'border-accent bg-accent-weak text-accent' : 'border-border text-ink-2 hover:border-border-strong hover:text-ink'"
+            :data-testid="`update-status-${s}`"
             @click="composer.status = s"
           >{{ statusBadge(s).label }}</button>
         </div>
-        <textarea v-model="composer.body" rows="3" placeholder="What changed (optional, markdown)." class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13.5px] outline-none focus:border-accent"></textarea>
+        <textarea v-model="composer.body" rows="3" data-testid="update-body" placeholder="What changed (optional, markdown)." class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13.5px] outline-none focus:border-accent"></textarea>
         <div v-if="updateError" class="text-[12.5px] text-down">{{ updateError }}</div>
         <div>
-          <button type="button" :disabled="posting" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="addUpdate(false)">
+          <button type="button" :disabled="posting" data-testid="update-post" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="addUpdate(false)">
             {{ posting ? "Posting…" : willChangeStatus ? `Change to ${statusBadge(composer.status).label}` : "Post update" }}
           </button>
         </div>

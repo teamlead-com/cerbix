@@ -34,6 +34,43 @@ func (s IncidentStatus) Valid() bool {
 // Terminal reports whether s is an end state (no further updates allowed).
 func (s IncidentStatus) Terminal() bool { return s == IncidentResolved }
 
+// rank orders the lifecycle. It is unexported because the ORDER is the contract and the numbers are
+// not: nothing outside this file should compare statuses by arithmetic.
+func (s IncidentStatus) rank() int {
+	switch s {
+	case IncidentInvestigating:
+		return 0
+	case IncidentIdentified:
+		return 1
+	case IncidentMonitoring:
+		return 2
+	case IncidentResolved:
+		return 3
+	default:
+		return -1
+	}
+}
+
+// CanFollow reports whether s is a legal status for an update posted against an incident currently at
+// `current`. Forward or staying put is legal; going BACKWARD is not.
+//
+// "Forward-flowing" was written down as the lifecycle's contract and then enforced only at its last
+// step: the store refused writes once an incident was resolved, and nothing stopped `monitoring →
+// identified` or `identified → investigating`. Those are not races — they are accepted, sequentially,
+// through the ordinary API — and they make the public timeline read as if the operators went
+// backwards. The race makes it worse rather than causing it: a plain comment carrying a status read
+// moments earlier lands after somebody else moved the incident on, and silently reverts it.
+func (s IncidentStatus) CanFollow(current IncidentStatus) bool {
+	if current.Terminal() {
+		return false
+	}
+	cr, sr := current.rank(), s.rank()
+	if cr < 0 || sr < 0 {
+		return false
+	}
+	return sr >= cr
+}
+
 // IncidentImpact grades how much the incident affects users.
 type IncidentImpact string
 
@@ -172,7 +209,11 @@ func (u IncidentUpdate) Validate() error {
 	if u.IncidentID == "" {
 		return fmt.Errorf("incident update: incident_id is required")
 	}
-	if !u.Status.Valid() {
+	// An EMPTY status is legal and means "keep whatever the incident is at when this lands". It is
+	// resolved inside the store's transaction, against the locked row. Materializing it in the
+	// caller — reading the incident, then posting its status back — is what let a plain comment
+	// revert a transition somebody else had already made.
+	if u.Status != "" && !u.Status.Valid() {
 		return fmt.Errorf("incident update: unknown status %q", u.Status)
 	}
 	return nil

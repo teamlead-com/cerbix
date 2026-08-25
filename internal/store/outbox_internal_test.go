@@ -265,3 +265,163 @@ func incidentUpdateCount(t *testing.T, st *Store, ctx context.Context, id string
 	}
 	return n
 }
+
+// The lifecycle is documented as forward-flowing, and until now only its LAST step was enforced.
+// `resolved` was terminal; `monitoring → identified` was accepted without comment, sequentially,
+// through the ordinary API. The public timeline would then read as though the operators had
+// un-diagnosed the outage.
+func TestAnIncidentCannotWalkBackwardsThroughItsLifecycle(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+	post := func(status domain.IncidentStatus, body string) error {
+		_, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+			IncidentID: inc.ID, Status: status, Body: body, Author: "author",
+		})
+		return err
+	}
+
+	if err := post(domain.IncidentIdentified, "cause found"); err != nil {
+		t.Fatalf("forward to identified: %v", err)
+	}
+	if err := post(domain.IncidentMonitoring, "fix applied"); err != nil {
+		t.Fatalf("forward to monitoring: %v", err)
+	}
+	// Staying put is legal: an update that adds information without moving the lifecycle.
+	if err := post(domain.IncidentMonitoring, "still watching"); err != nil {
+		t.Fatalf("same status: %v", err)
+	}
+	for _, backward := range []domain.IncidentStatus{domain.IncidentIdentified, domain.IncidentInvestigating} {
+		if err := post(backward, "back"); !errors.Is(err, ErrStatusRegression) {
+			t.Fatalf("monitoring → %s: %v, want ErrStatusRegression", backward, err)
+		}
+	}
+	var status string
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM incidents WHERE id = $1`, inc.ID).Scan(&status); err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+	if status != string(domain.IncidentMonitoring) {
+		t.Fatalf("status = %q after two refused regressions, want monitoring", status)
+	}
+}
+
+// A plain comment carries NO status and means "whatever the incident is when this lands". The store
+// resolves that against the row it has locked, so a comment written while somebody else moves the
+// incident forward cannot revert it. This is the race the API's own pre-check cannot cover: it reads
+// the incident in a different transaction.
+func TestAPlainCommentTakesTheStatusItLandsOnNotTheOneItRead(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+
+	// The commenter has read `investigating` — that read is the whole setup, and it is why the old
+	// handler would have sent that value back.
+	seen := domain.IncidentInvestigating
+	// Somebody else moves the incident on, and commits.
+	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		IncidentID: inc.ID, Status: domain.IncidentIdentified, Body: "cause found", Author: "other",
+	}); err != nil {
+		t.Fatalf("concurrent transition: %v", err)
+	}
+	// Now the comment lands, carrying no status.
+	created, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		IncidentID: inc.ID, Body: "adding a note", Author: "commenter",
+	})
+	if err != nil {
+		t.Fatalf("plain comment: %v", err)
+	}
+	if created.Status != domain.IncidentIdentified {
+		t.Fatalf("the comment recorded %q, want the status it landed on (identified); it read %q "+
+			"before the transition", created.Status, seen)
+	}
+	var status string
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM incidents WHERE id = $1`, inc.ID).Scan(&status); err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+	if status != string(domain.IncidentIdentified) {
+		t.Fatalf("the incident is %q after a plain comment, want identified — the comment reverted a "+
+			"transition it never saw", status)
+	}
+}
+
+// A writer that WAITED on the incident lock must stamp what it writes after the wait, not before it.
+//
+// `now()` is the transaction's start time, so a writer blocked for a minute records a timeline entry
+// dated a minute before the update it is actually following. `ListIncidentUpdates` orders by
+// `created_at`, so the public timeline would then show the two in the wrong order — the record
+// claiming a sequence the database never had. `statement_timestamp()` read in its own statement AFTER
+// the lock is the first clock reading this writer is entitled to.
+func TestAWaitingWriterStampsItsUpdateAfterTheWait(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+
+	// Hold the INCIDENT row — not the service, not a table lock. That is the row the writer must
+	// wait for, and a timestamp taken before this is released is a timestamp from the past.
+	hold, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
+	}
+	var one int
+	if err := hold.QueryRow(ctx, `SELECT 1 FROM incidents WHERE id = $1 FOR UPDATE`, inc.ID).Scan(&one); err != nil {
+		t.Fatalf("hold the incident row: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+			IncidentID: inc.ID, Status: domain.IncidentIdentified, Body: "cause found", Author: "waiter",
+		})
+		done <- err
+	}()
+
+	// Let the writer block for long enough that a transaction-start clock is unmistakably early.
+	time.Sleep(600 * time.Millisecond)
+	var released time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&released); err != nil {
+		t.Fatalf("read release instant: %v", err)
+	}
+	if err := hold.Rollback(ctx); err != nil {
+		t.Fatalf("release the lock: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the waiting writer failed: %v", err)
+	}
+
+	var createdAt, updatedAt time.Time
+	if err := st.pool.QueryRow(ctx, `
+		SELECT u.created_at, i.updated_at
+		  FROM incident_updates u JOIN incidents i ON i.id = u.incident_id
+		 WHERE u.incident_id = $1 AND u.author = 'waiter'`, inc.ID).Scan(&createdAt, &updatedAt); err != nil {
+		t.Fatalf("read the waiter's row: %v", err)
+	}
+	if createdAt.Before(released) {
+		t.Fatalf("the timeline entry is stamped %s, before the lock was released at %s: a writer that "+
+			"waited is claiming it wrote earlier than it did", createdAt, released)
+	}
+	if !updatedAt.Equal(createdAt) {
+		t.Fatalf("incident.updated_at %s and the update's created_at %s disagree; one transaction "+
+			"writes one instant", updatedAt, createdAt)
+	}
+}

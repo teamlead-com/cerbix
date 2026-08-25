@@ -210,9 +210,11 @@ func (h *Handler) addIncidentUpdate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.Status == "" {
-		body.Status = string(inc.Status) // a plain comment keeps the current status
-	}
+	// A plain comment keeps the current status — and says so by sending NOTHING, rather than by
+	// echoing the status this handler read a moment ago. Materializing it here is what let a comment
+	// revert a transition committed between that read and this write: the store resolves the intent
+	// against the row it holds a lock on.
+	_ = inc.Status
 	upd := domain.IncidentUpdate{
 		IncidentID: inc.ID,
 		Status:     domain.IncidentStatus(body.Status),
@@ -229,6 +231,10 @@ func (h *Handler) addIncidentUpdate(w http.ResponseWriter, r *http.Request) {
 	// here, and the store refuses rather than reopening a closed incident.
 	if errors.Is(err, store.ErrIncidentTerminal) {
 		writeError(w, http.StatusBadRequest, "incident is resolved")
+		return
+	}
+	if errors.Is(err, store.ErrStatusRegression) {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if errors.Is(err, store.ErrNotFound) {

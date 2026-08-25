@@ -248,48 +248,67 @@ func (s *Store) AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-	// The status write comes FIRST and carries its own guard, because the order is the
-	// invariant. `status <> 'resolved'` inside the UPDATE is what makes resolved terminal for
-	// concurrent writers: the API's pre-check reads the incident outside this transaction, so
-	// between that read and this write another request can resolve it, and an unguarded write
-	// would then reopen a closed incident while leaving `resolved_at` stamped. That state is not
-	// merely untidy — it is unreachable through any legal sequence, and for an auto-incident it
-	// re-enters `incidents_service_open_auto_idx`, which then refuses the NEXT outage its own
-	// incident.
+	// THE ORDER OF THESE THREE STEPS IS THE INVARIANT: lock, then read the clock, then write.
 	//
-	// Doing it before the timeline insert is the other half: a refused update must leave NO
-	// trace. Insert-then-guard would roll back here anyway, but it would also mean the
-	// conflicting path had already written a row, and a future reader of this function would
-	// have to know that to reason about it.
+	// (1) The incident row is locked FOR UPDATE before anything is decided. Every rule below is
+	// about the row's CURRENT status, and a rule evaluated against a value read outside the lock is
+	// a rule about the past. The API's pre-check is exactly that, which is why it is a courtesy and
+	// this is the enforcement.
+	var current domain.IncidentStatus
+	err = tx.QueryRow(ctx,
+		`SELECT status FROM incidents WHERE id = $1 FOR UPDATE`, upd.IncidentID).Scan(&current)
+	if noRows(err) {
+		return domain.IncidentUpdate{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.IncidentUpdate{}, fmt.Errorf("store: lock incident: %w", err)
+	}
+
+	// The keep-current intent is resolved HERE, against the locked row, never by the caller. A
+	// handler that reads the incident and posts its status back is publishing a value that was true
+	// when it looked, and landing it later reverts whatever happened in between.
+	next := upd.Status
+	if next == "" {
+		next = current
+	}
+	switch {
+	case current.Terminal():
+		return domain.IncidentUpdate{}, ErrIncidentTerminal
+	case !next.CanFollow(current):
+		// Backwards. Sequentially or by race, the timeline would say the operators un-diagnosed
+		// something, and the public page would show it.
+		return domain.IncidentUpdate{}, fmt.Errorf("%w: %s cannot follow %s", ErrStatusRegression, next, current)
+	}
+	upd.Status = next
+
+	// (2) ONE instant for everything this transaction writes, taken AFTER the lock. `now()` is the
+	// transaction's start time, so a writer that waited on the lock would stamp its timeline entry
+	// with a moment before the update it is actually following — the record would claim an order the
+	// database did not have. `statement_timestamp()` in its own statement, after the wait, is the
+	// first clock reading this writer is entitled to.
+	var asOf time.Time
+	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&asOf); err != nil {
+		return domain.IncidentUpdate{}, fmt.Errorf("store: read write instant: %w", err)
+	}
+
+	// (3) The writes, all carrying that instant. The status guard stays in the statement as well:
+	// belt and braces cost nothing here, and it keeps the SQL true on its own terms.
 	evInc, err := scanIncident(tx.QueryRow(ctx,
 		`UPDATE incidents
 		    SET status = $2,
-		        updated_at = now(),
-		        resolved_at = CASE WHEN $2 = 'resolved' AND resolved_at IS NULL THEN now() ELSE resolved_at END
+		        updated_at = $3,
+		        resolved_at = CASE WHEN $2 = 'resolved' AND resolved_at IS NULL THEN $3 ELSE resolved_at END
 		  WHERE id = $1 AND status <> 'resolved'
 		 RETURNING `+incidentColumns,
-		upd.IncidentID, upd.Status))
-	if noRows(err) {
-		// Zero rows is two different answers, and the caller needs them apart: the incident does
-		// not exist, or it exists and is terminal.
-		var exists bool
-		if qerr := tx.QueryRow(ctx,
-			`SELECT true FROM incidents WHERE id = $1`, upd.IncidentID).Scan(&exists); qerr != nil {
-			if noRows(qerr) {
-				return domain.IncidentUpdate{}, ErrNotFound
-			}
-			return domain.IncidentUpdate{}, fmt.Errorf("store: classify update refusal: %w", qerr)
-		}
-		return domain.IncidentUpdate{}, ErrIncidentTerminal
-	}
+		upd.IncidentID, upd.Status, asOf))
 	if err != nil {
 		return domain.IncidentUpdate{}, fmt.Errorf("store: sync incident status: %w", err)
 	}
 
 	row := tx.QueryRow(ctx,
-		`INSERT INTO incident_updates (incident_id, status, body, author)
-		 VALUES ($1,$2,$3,$4) RETURNING `+incidentUpdateColumns,
-		upd.IncidentID, upd.Status, upd.Body, upd.Author)
+		`INSERT INTO incident_updates (incident_id, status, body, author, created_at)
+		 VALUES ($1,$2,$3,$4,$5) RETURNING `+incidentUpdateColumns,
+		upd.IncidentID, upd.Status, upd.Body, upd.Author, asOf)
 	created, err := scanIncidentUpdate(row)
 	if err != nil {
 		return domain.IncidentUpdate{}, fmt.Errorf("store: add incident update: %w", err)

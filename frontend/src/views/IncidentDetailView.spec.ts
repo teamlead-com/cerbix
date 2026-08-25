@@ -172,3 +172,43 @@ describe("IncidentDetailView impact enrichment", () => {
     expect(chips[1].text()).toContain("billing-db → payments → checkout");
   });
 });
+
+// The API contract has always said "omit to keep the current status (a plain comment)". This screen
+// echoed the status it had last loaded instead, so a comment written while somebody else moved the
+// incident forward carried a stale opinion about the lifecycle — and the server, which used to take
+// that opinion at face value, reverted the transition.
+describe("IncidentDetailView plain comment", () => {
+  it("sends no status at all when the composer only carries a body", async () => {
+    const wrapper = mountWith({ ...BASE_INCIDENT, status: "identified" });
+    await flushPromises();
+
+    const box = wrapper.find('[data-testid="update-body"]');
+    await box.setValue("adding a note");
+    await wrapper.find('[data-testid="update-post"]').trigger("click");
+    await flushPromises();
+
+    const call = apiMock.POST.mock.calls.find(
+      (c) => String(c[0]).endsWith("/updates"),
+    ) as [string, { body: Record<string, unknown> }] | undefined;
+    if (!call) throw new Error("the update was never posted");
+    expect(call[1].body).toEqual({ body: "adding a note" });
+    expect("status" in call[1].body).toBe(false);
+  });
+
+  it("still sends the status when the operator picked one", async () => {
+    const wrapper = mountWith({ ...BASE_INCIDENT, status: "investigating" });
+    await flushPromises();
+
+    await wrapper.find('[data-testid="update-body"]').setValue("cause found");
+    const picker = wrapper.find('[data-testid="update-status-identified"]');
+    await picker.trigger("click");
+    await wrapper.find('[data-testid="update-post"]').trigger("click");
+    await flushPromises();
+
+    const call = apiMock.POST.mock.calls.find(
+      (c) => String(c[0]).endsWith("/updates"),
+    ) as [string, { body: Record<string, unknown> }] | undefined;
+    if (!call) throw new Error("the update was never posted");
+    expect(call[1].body).toEqual({ status: "identified", body: "cause found" });
+  });
+});

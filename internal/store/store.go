@@ -27,6 +27,14 @@ var ErrNotFound = errors.New("store: not found")
 // caller treats it as a benign no-op — the concurrent create won the race.
 var ErrAlreadyOpen = errors.New("store: auto-incident already open")
 
+// ErrIncidentTerminal is returned when a write targets an incident that is already resolved.
+// Resolved is TERMINAL, and the check that enforces it has to live in the same statement as the
+// write: a handler that reads the status, decides, and then writes is correct only until two
+// requests overlap. The one that loses re-opens an incident somebody already closed, and for an
+// auto-incident it also re-enters the partial unique index that admits one open incident per
+// service, blocking the NEXT outage from opening its own.
+var ErrIncidentTerminal = errors.New("store: incident is resolved")
+
 // ErrConflict is returned when a create violates a unique constraint (e.g. a
 // duplicate slug), so the API can answer 409 instead of a raw 500.
 var ErrConflict = errors.New("store: conflict")

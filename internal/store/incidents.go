@@ -239,6 +239,44 @@ func (s *Store) AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
+	// The status write comes FIRST and carries its own guard, because the order is the
+	// invariant. `status <> 'resolved'` inside the UPDATE is what makes resolved terminal for
+	// concurrent writers: the API's pre-check reads the incident outside this transaction, so
+	// between that read and this write another request can resolve it, and an unguarded write
+	// would then reopen a closed incident while leaving `resolved_at` stamped. That state is not
+	// merely untidy — it is unreachable through any legal sequence, and for an auto-incident it
+	// re-enters `incidents_service_open_auto_idx`, which then refuses the NEXT outage its own
+	// incident.
+	//
+	// Doing it before the timeline insert is the other half: a refused update must leave NO
+	// trace. Insert-then-guard would roll back here anyway, but it would also mean the
+	// conflicting path had already written a row, and a future reader of this function would
+	// have to know that to reason about it.
+	evInc, err := scanIncident(tx.QueryRow(ctx,
+		`UPDATE incidents
+		    SET status = $2,
+		        updated_at = now(),
+		        resolved_at = CASE WHEN $2 = 'resolved' AND resolved_at IS NULL THEN now() ELSE resolved_at END
+		  WHERE id = $1 AND status <> 'resolved'
+		 RETURNING `+incidentColumns,
+		upd.IncidentID, upd.Status))
+	if noRows(err) {
+		// Zero rows is two different answers, and the caller needs them apart: the incident does
+		// not exist, or it exists and is terminal.
+		var exists bool
+		if qerr := tx.QueryRow(ctx,
+			`SELECT true FROM incidents WHERE id = $1`, upd.IncidentID).Scan(&exists); qerr != nil {
+			if noRows(qerr) {
+				return domain.IncidentUpdate{}, ErrNotFound
+			}
+			return domain.IncidentUpdate{}, fmt.Errorf("store: classify update refusal: %w", qerr)
+		}
+		return domain.IncidentUpdate{}, ErrIncidentTerminal
+	}
+	if err != nil {
+		return domain.IncidentUpdate{}, fmt.Errorf("store: sync incident status: %w", err)
+	}
+
 	row := tx.QueryRow(ctx,
 		`INSERT INTO incident_updates (incident_id, status, body, author)
 		 VALUES ($1,$2,$3,$4) RETURNING `+incidentUpdateColumns,
@@ -247,21 +285,8 @@ func (s *Store) AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate
 	if err != nil {
 		return domain.IncidentUpdate{}, fmt.Errorf("store: add incident update: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE incidents
-		    SET status = $2,
-		        updated_at = now(),
-		        resolved_at = CASE WHEN $2 = 'resolved' AND resolved_at IS NULL THEN now() ELSE resolved_at END
-		  WHERE id = $1`,
-		upd.IncidentID, upd.Status); err != nil {
-		return domain.IncidentUpdate{}, fmt.Errorf("store: sync incident status: %w", err)
-	}
-	// Load the now-updated incident and enqueue the lifecycle event in the same
-	// transaction. The event type follows the update's status.
-	evInc, err := scanIncident(tx.QueryRow(ctx, `SELECT `+incidentColumns+` FROM incidents WHERE id = $1`, upd.IncidentID))
-	if err != nil {
-		return domain.IncidentUpdate{}, fmt.Errorf("store: reload incident for event: %w", err)
-	}
+	// The lifecycle event rides the same transaction as the fact it announces (no dual-write).
+	// The event type follows the update's status.
 	eventType := domain.EventIncidentUpdated
 	if upd.Status == domain.IncidentResolved {
 		eventType = domain.EventIncidentResolved

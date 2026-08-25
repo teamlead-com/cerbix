@@ -224,6 +224,17 @@ func (h *Handler) addIncidentUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created, err := h.store.AddIncidentUpdate(r.Context(), upd)
+	// The pre-check above is a fast, friendly answer; THIS is the one that holds. It reads the
+	// incident outside the store's transaction, so a concurrent resolve between the two lands
+	// here, and the store refuses rather than reopening a closed incident.
+	if errors.Is(err, store.ErrIncidentTerminal) {
+		writeError(w, http.StatusBadRequest, "incident is resolved")
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		h.serverError(w, "add_incident_update", err)
 		return

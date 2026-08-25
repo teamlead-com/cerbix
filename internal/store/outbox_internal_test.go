@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -176,4 +177,91 @@ func TestPurgeDeliveredOutbox(t *testing.T) {
 	if remaining != 2 {
 		t.Fatalf("remaining = %d, want 2 (recent delivered + dead)", remaining)
 	}
+}
+
+// A resolved incident is TERMINAL, and terminal has to hold against a writer that decided before
+// the resolve landed. The API checks the status outside this store's transaction, so the window is
+// real: two editors, or an editor and the evaluator's auto-resolve, and the loser's write arrives
+// after the incident closed. Reopening it would leave `status = investigating` with `resolved_at`
+// stamped — a state no legal sequence produces — and for an auto-incident it would re-enter
+// `incidents_service_open_auto_idx` and refuse the NEXT outage its own incident.
+func TestAWriteThatRacedAResolveIsRefusedWithoutATrace(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "first",
+	}); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	resolvedAt := incidentResolvedAt(t, st, ctx, inc.ID)
+	events := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "pending")
+	timeline := incidentUpdateCount(t, st, ctx, inc.ID)
+
+	// The loser of the race: it read `investigating` before the resolve committed.
+	_, err = st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		IncidentID: inc.ID, Status: domain.IncidentInvestigating, Body: "still looking", Author: "second",
+	})
+	if !errors.Is(err, ErrIncidentTerminal) {
+		t.Fatalf("write against a resolved incident: %v, want ErrIncidentTerminal", err)
+	}
+
+	var status string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT status FROM incidents WHERE id = $1`, inc.ID).Scan(&status); err != nil {
+		t.Fatalf("reread incident: %v", err)
+	}
+	if status != string(domain.IncidentResolved) {
+		t.Fatalf("status = %q after a refused write, want it to stay resolved", status)
+	}
+	if got := incidentResolvedAt(t, st, ctx, inc.ID); !got.Equal(resolvedAt) {
+		t.Fatalf("resolved_at moved from %v to %v", resolvedAt, got)
+	}
+	// A refusal writes NOTHING: no timeline entry, no lifecycle event for a change that did not
+	// happen. Announcing an update nobody applied is the same lie in a different channel.
+	if got := incidentUpdateCount(t, st, ctx, inc.ID); got != timeline {
+		t.Fatalf("timeline rows = %d after a refused write, want %d", got, timeline)
+	}
+	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "pending"); got != events {
+		t.Fatalf("incident_event rows = %d after a refused write, want %d", got, events)
+	}
+
+	// And a write to an incident that never existed is a different answer, not the same one.
+	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		IncidentID: "00000000-0000-0000-0000-000000000000",
+		Status:     domain.IncidentInvestigating, Body: "ghost", Author: "second",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("write against a missing incident: %v, want ErrNotFound", err)
+	}
+}
+
+func incidentResolvedAt(t *testing.T, st *Store, ctx context.Context, id string) time.Time {
+	t.Helper()
+	var at *time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT resolved_at FROM incidents WHERE id = $1`, id).Scan(&at); err != nil {
+		t.Fatalf("read resolved_at: %v", err)
+	}
+	if at == nil {
+		t.Fatal("resolved_at is NULL on a resolved incident")
+	}
+	return *at
+}
+
+func incidentUpdateCount(t *testing.T, st *Store, ctx context.Context, id string) int {
+	t.Helper()
+	var n int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM incident_updates WHERE incident_id = $1`, id).Scan(&n); err != nil {
+		t.Fatalf("count timeline: %v", err)
+	}
+	return n
 }

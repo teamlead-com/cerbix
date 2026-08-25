@@ -389,6 +389,10 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		step            int
 		lastEscalated   *time.Time
 		renotifySeconds int
+		// frozen is the ladder snapshotted onto the incident when it opened (FR-023 §8). Service
+		// incidents always have one — the selection below requires it — and monitor incidents never
+		// do, which is why the policy load below branches on it rather than on the anchor.
+		frozen *domain.EscalationPolicy
 	}
 	var incs []openInc
 	for rows.Next() {
@@ -429,13 +433,24 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 	// "annotates and links; never suppresses, merges or hides" (spec D5), so a graph sold as
 	// advisory does not become a suppression mechanism because this feature found it convenient.
 	srows, err := tx.Query(ctx,
+		// The ladder comes from the incident's SNAPSHOT, not from the service's current policy.
+		// Joining `escalation_policy_id` here is what made attaching a policy page an old incident
+		// retroactively, against FR-023 §8: every step's delay is measured from `started_at`, so a
+		// two-hour-old incident found them all elapsed on the very next pass. An incident that
+		// opened without a policy has no snapshot and is simply not selected — attaching one starts
+		// the NEXT incident's ladder.
 		`SELECT i.id, i.service_id, i.started_at, i.escalation_step, i.last_escalated_at,
-		        s.name, s.escalation_policy_id
+		        s.name, COALESCE(esc.policy_id::text, ''), esc.policy_name, esc.repeat_last, esc.steps
 		   FROM incidents i
 		   JOIN services s ON s.id = i.service_id
 		   JOIN service_alert_state st ON st.service_id = s.id
+		   JOIN incident_escalation_snapshots esc ON esc.incident_id = i.id
 		  WHERE i.source = 'auto' AND i.status <> 'resolved' AND i.acknowledged_at IS NULL
 		    AND i.service_id IS NOT NULL
+		    -- The service must STILL have a ladder attached. The snapshot freezes what the steps
+		    -- ARE; it does not make the ladder unstoppable. Detaching a policy is an operator saying
+		    -- "stop paging through this", and continuing after that would be worse than the
+		    -- retroactive paging above, because it overrides an action somebody took on purpose.
 		    AND s.escalation_policy_id IS NOT NULL
 		    AND s.owns_paging
 		    AND st.live_firing
@@ -446,11 +461,19 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 	}
 	for srows.Next() {
 		var o openInc
+		var frozen domain.EscalationPolicy
+		var rawSteps []byte
 		if err := srows.Scan(&o.id, &o.serviceID, &o.startedAt, &o.step, &o.lastEscalated,
-			&o.name, &o.policyID); err != nil {
+			&o.name, &o.policyID, &frozen.Name, &frozen.RepeatLast, &rawSteps); err != nil {
 			srows.Close()
 			return pass, fmt.Errorf("store: scan escalating service incident: %w", err)
 		}
+		if err := json.Unmarshal(rawSteps, &frozen.Steps); err != nil {
+			srows.Close()
+			return pass, fmt.Errorf("store: decode frozen escalation ladder: %w", err)
+		}
+		frozen.ID, frozen.ProjectID = o.policyID, ""
+		o.frozen = &frozen
 		// renotifySeconds stays ZERO: a service has no renotify knob (spec D8), and zero is what
 		// disables the repeat branch below — the non-goal is enforced by the value, not by a comment.
 		incs = append(incs, o)
@@ -533,12 +556,20 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 	}
 
 	for _, inc := range incs {
-		p, err := loadPolicy(inc.policyID)
-		if err != nil {
-			if noRows(err) {
-				continue // policy deleted since the monitor referenced it
+		// A service incident runs the ladder it froze; a monitor incident reads its policy live,
+		// exactly as before — FR-023 changed no monitor behaviour.
+		p := domain.EscalationPolicy{}
+		if inc.frozen != nil {
+			p = *inc.frozen
+		} else {
+			var err error
+			p, err = loadPolicy(inc.policyID)
+			if err != nil {
+				if noRows(err) {
+					continue // policy deleted since the monitor referenced it
+				}
+				return pass, fmt.Errorf("store: load escalation policy: %w", err)
 			}
-			return pass, fmt.Errorf("store: load escalation policy: %w", err)
 		}
 		step := inc.step
 		changed := false

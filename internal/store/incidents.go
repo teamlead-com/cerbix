@@ -114,6 +114,15 @@ func (s *Store) CreateIncident(ctx context.Context, inc domain.Incident, opening
 		created.ID, created.Status, openingBody, author); err != nil {
 		return domain.Incident{}, fmt.Errorf("store: create opening update: %w", err)
 	}
+	// A SERVICE-anchored incident freezes its ladder here too. No production caller creates one
+	// through this door today — the evaluator uses `OpenServiceIncidentTx` — but an incident that
+	// reached the table by a route that skipped the snapshot would silently never escalate, and
+	// "the other door forgot" is the exact shape of three defects this iteration already fixed.
+	if created.ServiceID != "" {
+		if err := snapshotEscalationPolicyTx(ctx, tx, created.ID, created.ProjectID, created.ServiceID); err != nil {
+			return domain.Incident{}, err
+		}
+	}
 	// Enqueue the webhook event in the same transaction — the event is durable iff
 	// the incident is (no dual-write).
 	payload, err := json.Marshal(domain.IncidentEvent{Type: domain.EventIncidentOpened, Incident: created})

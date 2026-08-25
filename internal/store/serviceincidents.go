@@ -77,6 +77,19 @@ func (s *Store) OpenServiceIncidentTx(
 	if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentCorrelation, corr); err != nil {
 		return domain.Incident{}, false, err
 	}
+	// The ladder this incident will run, frozen NOW. FR-023 §8 makes retroactive escalation a
+	// non-goal, and the live read could not honour it: a policy attached later would find every
+	// step's delay already elapsed against this incident's `started_at`. Taking the STEPS rather
+	// than the policy id also closes the third route to the same defect — `escalation_policies`
+	// has no version, so an in-place edit of its `steps` would otherwise move the ladder under an
+	// incident already climbing it.
+	//
+	// No policy at open means no snapshot, and no snapshot means this incident never escalates.
+	// That IS the non-goal: attaching a policy to a service starts the next incident's ladder, not
+	// this one's.
+	if err := snapshotEscalationPolicyTx(ctx, tx, inc.ID, projectID, serviceID); err != nil {
+		return domain.Incident{}, false, err
+	}
 	// The LIFECYCLE event, which this path did not send and the monitor's auto-path always has.
 	// `incident_event` is what reaches incident webhooks and the confirmed subscribers of every
 	// status page that surfaces the project, so without it a service outage was visible in the
@@ -244,4 +257,21 @@ func resolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body st
 		return false, err
 	}
 	return true, nil
+}
+
+// snapshotEscalationPolicyTx freezes the service's CURRENT escalation policy onto the incident. A
+// service with no policy attached writes nothing, which is how "no ladder" is represented.
+func snapshotEscalationPolicyTx(ctx context.Context, tx pgx.Tx, incidentID, projectID, serviceID string) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO incident_escalation_snapshots
+		  (incident_id, project_id, policy_id, policy_name, repeat_last, steps)
+		SELECT $1, $2, p.id, p.name, p.repeat_last, p.steps
+		  FROM services s
+		  JOIN escalation_policies p ON p.id = s.escalation_policy_id AND p.project_id = s.project_id
+		 WHERE s.id = $3 AND s.project_id = $2
+		ON CONFLICT (incident_id) DO NOTHING`, incidentID, projectID, serviceID)
+	if err != nil {
+		return fmt.Errorf("store: snapshot escalation policy: %w", err)
+	}
+	return nil
 }

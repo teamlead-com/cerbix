@@ -510,3 +510,124 @@ func TestSetServiceEscalationPolicyIsAuditedAndRefusesCarefully(t *testing.T) {
 		t.Fatalf("a refused file-managed write left %d audit rows, want 2", len(a))
 	}
 }
+
+// FR-023 §8 — "retroactive escalation of incidents opened before a policy was attached" is a NON-GOAL,
+// and it used to be one only in prose. The ladder read `services.escalation_policy_id` live and timed
+// its steps from `incidents.started_at`, so attaching a policy to a service with an hours-old open
+// incident made the next pass find every delay already elapsed.
+func TestAttachingAPolicyDoesNotPageAnAlreadyOpenIncident(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	ch, err := st.CreateNotificationChannel(ctx, domain.NotificationChannel{
+		ProjectID: f.projectID, Type: domain.ChannelWebhook, Name: "ops-late",
+		Config: map[string]string{"url": "https://hook.example/late"}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("channel: %v", err)
+	}
+
+	// The incident opens while the service has NO policy.
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 2,
+		governingRevision(t, st, ctx, f.serviceID))
+	if err != nil || !created {
+		t.Fatalf("open: %v (created=%v)", err, created)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	// ...and it has been open for two hours.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE incidents SET started_at = now() - interval '2 hours' WHERE id = $1`, inc.ID); err != nil {
+		t.Fatalf("age the incident: %v", err)
+	}
+	setFiring(t, st, ctx, f.serviceID, true, true)
+
+	// NOW an operator attaches a ladder whose first step fires immediately.
+	policy, err := st.CreateEscalationPolicy(ctx, domain.EscalationPolicy{
+		ProjectID: f.projectID, Name: "late-ladder", Steps: []domain.EscalationStep{
+			{AfterSeconds: 0, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: ch.ID}}},
+			{AfterSeconds: 300, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: ch.ID}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE services SET escalation_policy_id = $2 WHERE id = $1`, f.serviceID, policy.ID); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	if _, err := st.AdvanceEscalations(ctx); err != nil {
+		t.Fatalf("advance escalations: %v", err)
+	}
+	if steps := stepPayloads(t, st, ctx); len(steps) != 0 {
+		t.Fatalf("the ladder paged %d step(s) for an incident that opened before the policy existed: %+v",
+			len(steps), steps)
+	}
+
+	// The NEXT incident does climb it: the non-goal is about retroactivity, not about the policy.
+	if _, err := st.pool.Exec(ctx, `DELETE FROM incidents WHERE id = $1`, inc.ID); err != nil {
+		t.Fatalf("clear incident: %v", err)
+	}
+	tx2, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, _, err := st.OpenServiceIncidentTx(ctx, tx2, f.serviceID, f.projectID, "checkout down again", 2,
+		governingRevision(t, st, ctx, f.serviceID)); err != nil {
+		t.Fatalf("second open: %v", err)
+	}
+	if err := tx2.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := st.AdvanceEscalations(ctx); err != nil {
+		t.Fatalf("advance escalations again: %v", err)
+	}
+	if steps := stepPayloads(t, st, ctx); len(steps) != 1 {
+		t.Fatalf("the next incident climbed %d step(s), want its first", len(steps))
+	}
+}
+
+// The same freeze, reached by the route a policy id alone would not have closed: `escalation_policies`
+// keeps its ladder in a jsonb column and has no version, so editing a policy IN PLACE would otherwise
+// move the ladder under an incident already climbing it.
+func TestEditingAPolicyInPlaceDoesNotMoveAnOpenIncidentsLadder(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	lf, _ := escalatingService(t, st, ctx)
+	setFiring(t, st, ctx, lf.serviceID, true, true)
+
+	other, err := st.CreateNotificationChannel(ctx, domain.NotificationChannel{
+		ProjectID: lf.projectID, Type: domain.ChannelWebhook, Name: "ops-swapped",
+		Config: map[string]string{"url": "https://hook.example/swapped"}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("second channel: %v", err)
+	}
+	// Rewrite the attached policy's steps to page somebody else, entirely.
+	if _, err := st.UpdateEscalationPolicy(ctx, domain.EscalationPolicy{
+		ID: lf.policyID, ProjectID: lf.projectID, Name: "service-ladder",
+		Steps: []domain.EscalationStep{
+			{AfterSeconds: 0, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: other.ID}}},
+		},
+	}); err != nil {
+		t.Fatalf("edit policy: %v", err)
+	}
+
+	if _, err := st.AdvanceEscalations(ctx); err != nil {
+		t.Fatalf("advance escalations: %v", err)
+	}
+	steps := stepPayloads(t, st, ctx)
+	if len(steps) != 1 {
+		t.Fatalf("%d steps fired, want 1", len(steps))
+	}
+	for _, id := range steps[0].ChannelIDs {
+		if id == other.ID {
+			t.Fatalf("the open incident paged the REWRITTEN ladder's target; it must climb the one "+
+				"it froze at open (channels %v)", steps[0].ChannelIDs)
+		}
+	}
+}

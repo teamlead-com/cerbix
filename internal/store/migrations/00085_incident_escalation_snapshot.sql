@@ -14,7 +14,7 @@
 -- the ladder under every open incident that names it — the same defect, reached by a third route. The
 -- snapshot therefore holds the STEPS, not a reference to them.
 CREATE TABLE incident_escalation_snapshots (
-    incident_id uuid PRIMARY KEY REFERENCES incidents (id) ON DELETE CASCADE,
+    incident_id uuid PRIMARY KEY,
     project_id  uuid NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     -- The policy this was taken from, kept for the record and deliberately NOT a foreign key: the
     -- ladder an incident ran has to remain readable after the policy is deleted, exactly as the
@@ -24,8 +24,38 @@ CREATE TABLE incident_escalation_snapshots (
     repeat_last boolean NOT NULL DEFAULT false,
     steps       jsonb NOT NULL,
     created_at  timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT incident_escalation_snapshots_steps_chk CHECK (jsonb_typeof(steps) = 'array')
+    CONSTRAINT incident_escalation_snapshots_steps_chk CHECK (jsonb_typeof(steps) = 'array'),
+    -- COMPOSITE, not two independent keys. With `incident_id → incidents(id)` and
+    -- `project_id → projects(id)` written separately, each column is individually valid while the
+    -- PAIR is not: direct SQL happily attaches project B's ladder to project A's incident, and the
+    -- row that decides who gets paged is exactly the wrong row to leave un-tenanted. The
+    -- (id, project_id) key this points at has existed since 00080 for the same reason.
+    CONSTRAINT incident_escalation_snapshots_incident_fkey
+        FOREIGN KEY (incident_id, project_id) REFERENCES incidents (id, project_id) ON DELETE CASCADE
 );
+
+-- BACKFILL, and it is not optional. The selection that reads this table INNER JOINs it, so without
+-- this statement every service auto-incident that was already open at upgrade time silently stops
+-- climbing its ladder: the rows exist, the service still has its policy, and nothing ever pages
+-- again. An upgrade performed DURING an outage is exactly when that matters, and the failure is
+-- invisible — no error, no log line, just a ladder that never advances.
+--
+-- It runs in the migration rather than in application code so the table is never observable in the
+-- empty-but-required state: after this transaction the invariant "every open service incident that
+-- can escalate has a snapshot" holds for old rows and new ones alike.
+--
+-- Incidents whose service has NO policy attached get nothing, which is the same thing a fresh open
+-- would do for them today.
+INSERT INTO incident_escalation_snapshots
+    (incident_id, project_id, policy_id, policy_name, repeat_last, steps)
+SELECT i.id, i.project_id, p.id, p.name, p.repeat_last, p.steps
+  FROM incidents i
+  JOIN services s ON s.id = i.service_id AND s.project_id = i.project_id
+  JOIN escalation_policies p ON p.id = s.escalation_policy_id AND p.project_id = s.project_id
+ WHERE i.source = 'auto'
+   AND i.status <> 'resolved'
+   AND i.service_id IS NOT NULL
+ON CONFLICT (incident_id) DO NOTHING;
 
 -- +goose Down
 DROP TABLE IF EXISTS incident_escalation_snapshots;

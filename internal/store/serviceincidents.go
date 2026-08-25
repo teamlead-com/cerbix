@@ -152,12 +152,20 @@ func snapshotServiceMembersTx(
 	// revision IS a snapshot of the membership, which is why this reads it instead of joining `monitors`:
 	// a join would render an empty name for a member deleted since, and naming the members after the world
 	// moved is the entire purpose of this table.
+	// The revision is SCOPED to the service and project it was resolved for, not trusted as a bare
+	// id. Passing the id down (rather than resolving it here) fixed which declaration is read; it
+	// also made this query's only predicate a value from outside, and a caller that ever passes a
+	// revision belonging to another tenant's service would have its members copied into this
+	// incident's snapshot. Today's one caller passes the right value — which is an argument for
+	// checking it here, not against.
 	rows, err := tx.Query(ctx, `
 		SELECT mem.monitor_id::text, min(mem.monitor_name), array_agg(mem.role ORDER BY mem.role)
 		  FROM service_definition_members mem
+		  JOIN service_definition_revisions rev
+		    ON rev.id = mem.revision_id AND rev.service_id = $2 AND rev.project_id = $3
 		 WHERE mem.revision_id = $1::uuid
 		 GROUP BY mem.monitor_id
-		 ORDER BY min(mem.monitor_name)`, *revisionID)
+		 ORDER BY min(mem.monitor_name)`, *revisionID, serviceID, projectID)
 	if err != nil {
 		return fmt.Errorf("store: read members for snapshot: %w", err)
 	}

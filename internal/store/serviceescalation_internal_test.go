@@ -2,10 +2,17 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/pressly/goose/v3"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -629,5 +636,103 @@ func TestEditingAPolicyInPlaceDoesNotMoveAnOpenIncidentsLadder(t *testing.T) {
 			t.Fatalf("the open incident paged the REWRITTEN ladder's target; it must climb the one "+
 				"it froze at open (channels %v)", steps[0].ChannelIDs)
 		}
+	}
+}
+
+// The UPGRADE path, which the first version of 00085 did not have — and this test runs the REAL
+// migration rather than a copy of its backfill statement, because a test that re-types the SQL it is
+// checking passes just as happily after somebody deletes the original.
+//
+// The shape: migrate a throwaway database to 84, open a service auto-incident there the way a running
+// installation would have one, then migrate to 85 and require the snapshot to exist. Without the
+// backfill the selection's INNER JOIN drops that incident and its ladder stops for good — silently,
+// with the service still owning paging and its policy still attached.
+func TestUpgradingWithAnOpenServiceIncidentKeepsItsLadder(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+
+	dsn := os.Getenv("CERBIX_TEST_DATABASE_DSN")
+	u, err := url.Parse(dsn)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+		t.Fatalf("CERBIX_TEST_DATABASE_DSN is not a postgres:// URL (%q): %v", dsn, err)
+	}
+	name := fmt.Sprintf("cerbix_test_upgrade85_%d_%d", os.Getpid(), time.Now().UnixNano())
+	if _, err := st.pool.Exec(ctx, `CREATE DATABASE `+name); err != nil {
+		t.Fatalf("create probe database (this gate requires CREATEDB): %v", err)
+	}
+	defer func() {
+		if _, err := st.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
+			t.Errorf("drop probe database %s: %v", name, err)
+		}
+	}()
+	u.Path = "/" + name
+	db, err := sql.Open("pgx", u.String())
+	if err != nil {
+		t.Fatalf("open probe: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	goose.SetBaseFS(migrationsFS)
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatalf("goose dialect: %v", err)
+	}
+	// The world as it stood BEFORE this change shipped.
+	if err := goose.UpToContext(ctx, db, "migrations", 84); err != nil {
+		t.Fatalf("migrate to 84: %v", err)
+	}
+	var incidentID string
+	if err := db.QueryRowContext(ctx, `
+		WITH org AS (INSERT INTO organizations (slug, name) VALUES ('acme','Acme') RETURNING id),
+		     proj AS (INSERT INTO projects (org_id, slug, name)
+		              SELECT id, 'payments', 'Payments' FROM org RETURNING id, id AS pid),
+		     pol AS (INSERT INTO escalation_policies (project_id, name, steps)
+		             SELECT pid, 'ladder', '[{"after_seconds":0,"targets":[]}]'::jsonb FROM proj
+		             RETURNING id, project_id),
+		     svc AS (INSERT INTO services (project_id, slug, name, escalation_policy_id)
+		             SELECT project_id, 'checkout', 'Checkout', id FROM pol RETURNING id, project_id)
+		INSERT INTO incidents (project_id, service_id, title, status, impact, source)
+		SELECT project_id, id, 'Checkout — service down', 'investigating', 'major', 'auto' FROM svc
+		RETURNING id::text`).Scan(&incidentID); err != nil {
+		t.Fatalf("open a pre-upgrade incident: %v", err)
+	}
+
+	// The upgrade itself.
+	if err := goose.UpContext(ctx, db, "migrations"); err != nil {
+		t.Fatalf("migrate to head: %v", err)
+	}
+
+	var policyName string
+	var steps []byte
+	if err := db.QueryRowContext(ctx,
+		`SELECT policy_name, steps FROM incident_escalation_snapshots WHERE incident_id = $1`,
+		incidentID).Scan(&policyName, &steps); err != nil {
+		t.Fatalf("the incident carried across the upgrade has no ladder snapshot, so it will never "+
+			"escalate again: %v", err)
+	}
+	if policyName != "ladder" || len(steps) == 0 {
+		t.Fatalf("snapshot = %q/%s, want the policy the service had attached", policyName, steps)
+	}
+}
+
+// The tenant invariant belongs to the DATABASE, not to the one caller that happens to pass the right
+// project. Two independent foreign keys let each column be valid while the PAIR is not.
+func TestAnEscalationSnapshotCannotCrossTenants(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	lf, inc := escalatingService(t, st, ctx)
+
+	other, err := st.CreateProject(ctx, lf.orgID, "other", "Other")
+	if err != nil {
+		t.Fatalf("second project: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`DELETE FROM incident_escalation_snapshots WHERE incident_id = $1`, inc.ID); err != nil {
+		t.Fatalf("clear snapshot: %v", err)
+	}
+	_, err = st.pool.Exec(ctx, `
+		INSERT INTO incident_escalation_snapshots
+		    (incident_id, project_id, policy_id, policy_name, repeat_last, steps)
+		VALUES ($1, $2, NULL, 'borrowed', false, '[]'::jsonb)`, inc.ID, other.ID)
+	if err == nil {
+		t.Fatal("an incident of one project accepted another project's escalation snapshot: the row " +
+			"that decides who gets paged is the wrong one to leave un-tenanted")
 	}
 }

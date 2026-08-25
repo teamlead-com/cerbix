@@ -270,11 +270,18 @@ function tickOf(
   const startMs = clip ? Math.max(stepStart, clip.fromMs) : stepStart;
   const endMs = clip ? Math.min(stepStart + stepMsOf(), clip.toMs) : stepStart + stepMsOf();
   let state: ReliabilityTick["state"] = "none";
+  // The ORDER is §9.1's display rule, not a convenience: bad, then UNKNOWN, then good, then
+  // excluded. Unknown outranking good is the half that matters and the half this once had
+  // backwards — a step that was partly unmeasured rendered green because some of it happened
+  // to be good, which is the picture claiming to have seen an hour it never saw. The rule is
+  // deliberately pessimistic for the same reason a one-second outage colours the whole tick:
+  // the timeline may overstate a problem, never hide one, and the exact number lives in the
+  // figure underneath.
   if (intersectsRepair(startMs, endMs)) state = "repairing";
   else if ((d.BadUs ?? 0) > 0) state = "bad";
+  else if ((d.UnknownUs ?? 0) > 0) state = "unknown";
   else if ((d.GoodUs ?? 0) > 0) state = "good";
   else if ((d.ExcludedUs ?? 0) > 0) state = "excluded";
-  else if ((d.UnknownUs ?? 0) > 0) state = "unknown";
   return {
     state,
     weight: p.buckets || 1,

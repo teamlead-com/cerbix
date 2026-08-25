@@ -366,6 +366,40 @@ describe("ServiceReliability honesty states", () => {
     expect(wrapper.find('[data-testid="svc-provisional-note"]').text()).toContain("reduced");
   });
 
+  it("renders a partly unmeasured step as unknown, never as good (§9.1 display order)", async () => {
+    // The tick rule is pessimistic BY DESIGN, and the order carries the whole point: a step
+    // holding both good and unknown time is UNKNOWN, because a green tick would claim we
+    // watched an hour we only partly watched. Bad still outranks unknown; excluded is last.
+    const wrapper = mountWith(okReport, undefined, {
+      from: "a",
+      to: "b",
+      step: "day",
+      points: [
+        // mostly good, a sliver unmeasured → unknown wins
+        {
+          start: "2026-08-13T00:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 24,
+          durations: { ...goodDurations, GoodUs: 86_000_000, UnknownUs: 400_000, HealthUnknownUs: 400_000 },
+        },
+        // bad present as well → bad still outranks unknown
+        {
+          start: "2026-08-14T00:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 24,
+          durations: { ...goodDurations, GoodUs: 80_000_000, BadUs: 1_000_000, UnknownUs: 400_000 },
+        },
+        // nothing measured, some excluded → excluded, and never good
+        {
+          start: "2026-08-15T00:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 24,
+          durations: { ...goodDurations, GoodUs: 0, ExcludedUs: 86_400_000, HealthyUs: 0 },
+        },
+      ],
+    });
+    await flushPromises();
+    const states = wrapper
+      .find('[data-testid="svc-timeline"]')
+      .findAll("rect[data-state]")
+      .map((r) => r.attributes("data-state"));
+    expect(states).toEqual(["unknown", "bad", "excluded"]);
+  });
+
   it("never lands a deferred response from a previous service into the current screen", async () => {
     // [218] P0: start the GETs for service A, switch to B, let B complete, THEN let the
     // stale A response arrive — the screen must keep showing B.

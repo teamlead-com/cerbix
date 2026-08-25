@@ -41,7 +41,7 @@ type Delegation = {
   burn: { delegated: boolean; owners?: { id: string; slug: string; name: string }[]; reason?: string };
 };
 
-function mountWith(delegation?: Delegation) {
+function mountWith(delegation?: Delegation, monitorOverrides: Record<string, unknown> = {}) {
   apiMock.GET.mockReset();
   apiMock.GET.mockImplementation(async (path: string) => {
     if (path === "/api/v1/monitors/{monitorID}") {
@@ -57,7 +57,25 @@ function mountWith(delegation?: Delegation) {
           interval_seconds: 30,
           management: { source: "ui" },
           ...(delegation ? { delegation } : {}),
+          ...monitorOverrides,
         },
+      };
+    }
+    if (path === "/api/v1/projects/{projectID}/services") {
+      // The REAL shape: this endpoint answers with ServiceSummary rows, the service nested under
+      // `service` beside fields the picker ignores. A fixture shaped like a bare Service would let
+      // the defect this pins come back invisibly.
+      return {
+        data: [
+          {
+            service: { id: "svc1", project_id: "p1", slug: "checkout", name: "Checkout" },
+            revision: 3,
+            context_members: 2,
+            sli_members: 1,
+            epoch_seq: 7,
+            repairing_count: 0,
+          },
+        ],
       };
     }
     return { data: undefined };
@@ -119,5 +137,22 @@ describe("MonitorDetailView delegation", () => {
     // Absent is not "not delegated": a failed lookup must not be rendered as a claim.
     expect(w.find('[data-testid="monitor-delegation"]').exists()).toBe(false);
     expect(w.find('[data-testid="monitor-delegated"]').exists()).toBe(false);
+  });
+});
+
+describe("MonitorDetailView successor picker", () => {
+  it("reads the service out of the summary row the API actually returns", async () => {
+    // The endpoint returns ServiceSummary[]; the view used to assert it was Service[] and read
+    // `sv.id` / `sv.name` straight off the row. Both are undefined there, so the dropdown rendered
+    // blank options and would have posted `undefined` as the successor id.
+    // The block belongs to a COMPOSITE (or an already-linked monitor), which is what makes the
+    // picker reachable at all.
+    const w = mountWith(undefined, { type: "composite" });
+    await flushPromises();
+    const options = w.find('[data-testid="successor-select"]').findAll("option");
+    const real = options.filter((o) => o.attributes("value") !== "");
+    expect(real).toHaveLength(1);
+    expect(real[0].attributes("value")).toBe("svc1");
+    expect(real[0].text()).toBe("Checkout");
   });
 });

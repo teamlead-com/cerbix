@@ -226,7 +226,13 @@ async function loadServices() {
   const res = await api.GET("/api/v1/projects/{projectID}/services", {
     params: { path: { projectID: ws.projectId } },
   });
-  services.value = (res.data as components["schemas"]["Service"][] | undefined) ?? [];
+  // The endpoint answers with SUMMARIES — the service is nested under `service`, alongside the
+  // revision and coverage fields this picker has no use for. There is no cast here on purpose: the
+  // generated `paths` type already describes the response, and the cast this line used to carry is
+  // precisely what let it read `sv.id` and `sv.name` off the wrong object, rendering a list of blank
+  // options and posting `undefined`. Mapping instead of asserting puts `vue-tsc` back in charge of a
+  // shape the SPA does not own.
+  services.value = (res.data ?? []).map((row) => row.service);
 }
 
 async function lifecycle(run: () => Promise<{ data?: unknown; error?: unknown }>) {
@@ -304,7 +310,12 @@ async function convertToService() {
       body: { sli: chosenSLI.value },
     });
     if (res.data) {
-      monitor.value = (res.data as { monitor: Monitor }).monitor;
+      // `monitor` is optional in the schema, so it is checked rather than asserted. The cast this
+      // line used to carry claimed it was always there; the reload below keeps the screen honest if
+      // a future response ever omits it.
+      if (res.data.monitor) {
+        monitor.value = res.data.monitor;
+      }
       await loadServices();
     }
     return res;

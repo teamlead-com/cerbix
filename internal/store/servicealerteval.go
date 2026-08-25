@@ -551,8 +551,32 @@ func resolveServiceRecipientsTx(
 			if sc.Overrides, err = loadOverrides(ctx, tx, sc.ID); err != nil {
 				return nil, err
 			}
+			// The channel the rotation names has to STILL BE A CHANNEL. `participants` is a JSON
+			// array of ids that nothing prunes: deleting a notification channel removes its row and
+			// leaves the id in every schedule that named it, and disabling one changes no JSON at
+			// all. Returning that id unchecked is how a service came to hold a route that cannot
+			// receive anything — while `routableClause` armed on the same non-empty array, so the
+			// member's own alert was suppressed at the same time. Both paths silent, which is the
+			// one outcome §16.1 exists to prevent.
+			//
+			// §16.6 already says what to do instead: a deleted or empty target falls back to the
+			// project's channels. A DISABLED one is the same fact wearing a different hat.
 			if ch := sc.OnCall(at); ch != "" {
-				return []string{ch}, nil
+				var live bool
+				// Compared as TEXT, not cast to uuid: a participant id that is not a uuid at all is a
+				// participant that resolves to no channel, and that must fail closed rather than
+				// error the whole evaluation. One malformed entry in one schedule would otherwise
+				// stop the slice for every service in it.
+				if err := tx.QueryRow(ctx, `
+					SELECT true FROM notification_channels
+					 WHERE id::text = $1 AND project_id = $2 AND enabled`, ch, projectID).Scan(&live); err != nil {
+					if !noRows(err) {
+						return nil, fmt.Errorf("store: verify on-call channel: %w", err)
+					}
+				}
+				if live {
+					return []string{ch}, nil
+				}
 			}
 		}
 		// A schedule that resolves to nobody falls through to the project's channels rather than

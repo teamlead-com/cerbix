@@ -153,10 +153,12 @@ func TestEvaluatorClosesToTheOnsetRecipients(t *testing.T) {
 	f := alertingService(t, st, ctx)
 
 	// A schedule with one participant is the route at onset time.
+	chans := liveChannels(t, st, ctx, f.projectID, "first", "second")
 	var schedule string
 	if err := st.pool.QueryRow(ctx, `
 		INSERT INTO oncall_schedules (project_id, name, shift_seconds, anchor_at, participants)
-		VALUES ($1,'primary',604800,now(),'["ch-first"]') RETURNING id`, f.projectID).Scan(&schedule); err != nil {
+		VALUES ($1,'primary',604800,now(),jsonb_build_array($2::text)) RETURNING id`,
+		f.projectID, chans[0]).Scan(&schedule); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
 	if _, err := st.pool.Exec(ctx,
@@ -170,13 +172,14 @@ func TestEvaluatorClosesToTheOnsetRecipients(t *testing.T) {
 	if len(onset) != 1 || !onset[0].Firing {
 		t.Fatalf("expected one onset, got %+v", onset)
 	}
-	if len(onset[0].Recipients) != 1 || onset[0].Recipients[0] != "ch-first" {
+	if len(onset[0].Recipients) != 1 || onset[0].Recipients[0] != chans[0] {
 		t.Fatalf("onset recipients = %v, want the schedule's on-call", onset[0].Recipients)
 	}
 
 	// The rotation changes who is on call BEFORE the service recovers.
 	if _, err := st.pool.Exec(ctx,
-		`UPDATE oncall_schedules SET participants = '["ch-second"]' WHERE id = $1`, schedule); err != nil {
+		`UPDATE oncall_schedules SET participants = jsonb_build_array($2::text) WHERE id = $1`,
+		schedule, chans[1]); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
 	setMemberHealth(t, st, ctx, f, true)
@@ -194,7 +197,7 @@ func TestEvaluatorClosesToTheOnsetRecipients(t *testing.T) {
 	if closeEvent.CloseReason != domain.CloseRecovered {
 		t.Fatalf("close reason = %q, want recovered", closeEvent.CloseReason)
 	}
-	if len(closeEvent.Recipients) != 1 || closeEvent.Recipients[0] != "ch-first" {
+	if len(closeEvent.Recipients) != 1 || closeEvent.Recipients[0] != chans[0] {
 		t.Fatalf("close recipients = %v, want the ONSET's snapshot — a rotation must not page a "+
 			"stranger and leave the original recipient hanging", closeEvent.Recipients)
 	}
@@ -451,4 +454,24 @@ func TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident(t *testing.T) {
 	if monUpdates != 1 {
 		t.Errorf("the monitor's incident gained %d updates, want only its own opening one", monUpdates)
 	}
+}
+
+// liveChannels creates two REAL notification channels and returns their ids. Schedule participants
+// are channel ids (`api/tenant_scope.go`), and a fixture that invents strings only ever satisfied the
+// old "the array is non-empty" arming rule — under the current one such a participant resolves to
+// nothing and correctly falls back to the project's channels.
+func liveChannels(t *testing.T, st *Store, ctx context.Context, projectID string, names ...string) []string {
+	t.Helper()
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		var id string
+		if err := st.pool.QueryRow(ctx, `
+			INSERT INTO notification_channels (project_id, type, name, config, enabled)
+			VALUES ($1,'webhook',$2,'{"url":"https://hook.example/x"}',true)
+			RETURNING id::text`, projectID, n).Scan(&id); err != nil {
+			t.Fatalf("channel %s: %v", n, err)
+		}
+		out = append(out, id)
+	}
+	return out
 }

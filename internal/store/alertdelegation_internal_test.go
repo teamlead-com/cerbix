@@ -198,12 +198,22 @@ func TestUnroutableServiceDisarmsBothSignals(t *testing.T) {
 			t.Fatalf("%s: a service with nobody to notify still silenced the monitor", sig)
 		}
 	}
-	// An on-call schedule with participants restores the route without any channel.
+	// An on-call schedule restores the route. Its participants are CHANNEL IDS (see
+	// `api/tenant_scope.go`), and this fixture used to hold `[{"kind":"email",...}]` — a shape
+	// nothing resolves, which armed coverage only because the old predicate counted array entries
+	// without looking at them. A schedule that names a live channel is the real restoration.
+	var liveChannel string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO notification_channels (project_id, type, name, config, enabled)
+		VALUES ($1,'webhook','oncall','{"url":"https://hook.example/oncall"}',true)
+		RETURNING id::text`, f.projectID).Scan(&liveChannel); err != nil {
+		t.Fatalf("on-call channel: %v", err)
+	}
 	var schedule string
 	if err := st.pool.QueryRow(ctx, `
 		INSERT INTO oncall_schedules (project_id, name, shift_seconds, anchor_at, participants)
-		VALUES ($1,'primary',604800,now(),'[{"kind":"email","value":"a@example.com"}]')
-		RETURNING id`, f.projectID).Scan(&schedule); err != nil {
+		VALUES ($1,'primary',604800,now(),jsonb_build_array($2::text))
+		RETURNING id`, f.projectID, liveChannel).Scan(&schedule); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
 	if _, err := st.pool.Exec(ctx,
@@ -770,5 +780,91 @@ func TestReplacingARuleInPlaceDisarmsDespiteMatchingCardinality(t *testing.T) {
 	if delegated(t, st, ctx, f, DelegationBurn) {
 		t.Fatal("burn coverage stayed armed on a verdict about a rule that is no longer declared: " +
 			"the counts match, so only the target generation can tell these apart")
+	}
+}
+
+// A schedule's `participants` is a JSON array of channel ids that NOTHING prunes: deleting a
+// notification channel removes its row and leaves the id behind, and disabling one changes no JSON at
+// all. Arming on "the array is non-empty" therefore let a service suppress its members' alerts on the
+// strength of a rotation pointing at a channel that cannot receive anything — while the service's own
+// page went to that same dead channel. Both paths silent, which is the one outcome §16.1 exists to
+// prevent.
+func TestADeadScheduleTargetDoesNotArmAnythingWhenTheProjectHasNoChannels(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// Point the service at a schedule whose only participant is the project's channel.
+	var channelID string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id::text FROM notification_channels WHERE project_id = $1 LIMIT 1`, f.projectID).
+		Scan(&channelID); err != nil {
+		t.Fatalf("read channel: %v", err)
+	}
+	sched, err := st.CreateOnCallSchedule(ctx, domain.OnCallSchedule{
+		ProjectID: f.projectID, Name: "primary", ShiftSeconds: 86400,
+		Participants: []string{channelID}, AnchorAt: time.Now().Add(-24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE services SET oncall_schedule_id = $2 WHERE id = $1`, f.serviceID, sched.ID); err != nil {
+		t.Fatalf("attach schedule: %v", err)
+	}
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("the fixture is not armed with a live schedule target: the rest proves nothing")
+	}
+
+	// Disable the channel. The schedule still names it, and its JSON is untouched.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE notification_channels SET enabled = false WHERE id = $1`, channelID); err != nil {
+		t.Fatalf("disable channel: %v", err)
+	}
+	var participants int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT jsonb_array_length(participants) FROM oncall_schedules WHERE id = $1`, sched.ID).
+		Scan(&participants); err != nil {
+		t.Fatalf("read participants: %v", err)
+	}
+	if participants == 0 {
+		t.Fatal("disabling the channel emptied the schedule; this test no longer covers the gap it " +
+			"was written for")
+	}
+
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a schedule whose only target is DISABLED still armed live coverage: the member's " +
+			"alert is suppressed and the service's own page goes nowhere")
+	}
+	// The resolver agrees — the two must never disagree about who can be reached.
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only probe
+	route, err := resolveServiceRecipientsTx(ctx, tx, f.projectID, sched.ID, time.Now())
+	if err != nil {
+		t.Fatalf("resolve recipients: %v", err)
+	}
+	if len(route) != 0 {
+		t.Fatalf("the resolver returned %v for a schedule pointing at a disabled channel", route)
+	}
+
+	// §16.6's documented fallback: give the project another live channel and BOTH arm again.
+	other, err := st.CreateNotificationChannel(ctx, domain.NotificationChannel{
+		ProjectID: f.projectID, Type: domain.ChannelWebhook, Name: "fallback",
+		Config: map[string]string{"url": "https://hook.example/fallback"}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("fallback channel: %v", err)
+	}
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a project channel exists, so the service is routable again")
+	}
+	route, err = resolveServiceRecipientsTx(ctx, tx, f.projectID, sched.ID, time.Now())
+	if err != nil {
+		t.Fatalf("resolve recipients after fallback: %v", err)
+	}
+	if len(route) != 1 || route[0] != other.ID {
+		t.Fatalf("the resolver returned %v, want the project's live channel %s", route, other.ID)
 	}
 }

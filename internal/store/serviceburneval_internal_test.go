@@ -219,10 +219,12 @@ func TestBurnEvaluatorClosesToTheOnsetRecipients(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := burnAlertService(t, st, ctx, oneBurnRule)
 
+	chans := liveChannels(t, st, ctx, f.projectID, "first", "second")
 	var schedule string
 	if err := st.pool.QueryRow(ctx, `
 		INSERT INTO oncall_schedules (project_id, name, shift_seconds, anchor_at, participants)
-		VALUES ($1,'primary',604800,now(),'["ch-first"]') RETURNING id`, f.projectID).Scan(&schedule); err != nil {
+		VALUES ($1,'primary',604800,now(),jsonb_build_array($2::text)) RETURNING id`,
+		f.projectID, chans[0]).Scan(&schedule); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
 	if _, err := st.pool.Exec(ctx,
@@ -235,13 +237,14 @@ func TestBurnEvaluatorClosesToTheOnsetRecipients(t *testing.T) {
 		t.Fatalf("no onset to close (%+v)", got)
 	}
 	onset := burnEventsFor(t, st, ctx, f.targetID)
-	if len(onset[0].Recipients) != 1 || onset[0].Recipients[0] != "ch-first" {
+	if len(onset[0].Recipients) != 1 || onset[0].Recipients[0] != chans[0] {
 		t.Fatalf("onset recipients = %v, want the schedule's on-call", onset[0].Recipients)
 	}
 
 	// The rotation happens BEFORE the burn subsides.
 	if _, err := st.pool.Exec(ctx,
-		`UPDATE oncall_schedules SET participants = '["ch-second"]' WHERE id = $1`, schedule); err != nil {
+		`UPDATE oncall_schedules SET participants = jsonb_build_array($2::text) WHERE id = $1`,
+		schedule, chans[1]); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
 	plantBurn(t, st, ctx, f, 5, 0) // nothing bad at all
@@ -263,7 +266,7 @@ func TestBurnEvaluatorClosesToTheOnsetRecipients(t *testing.T) {
 		t.Fatalf("the close does not name what ended: %+v", closeEvent)
 	case closeEvent.Seq <= onset[0].Seq:
 		t.Fatalf("close seq %d is not after the onset's %d", closeEvent.Seq, onset[0].Seq)
-	case len(closeEvent.Recipients) != 1 || closeEvent.Recipients[0] != "ch-first":
+	case len(closeEvent.Recipients) != 1 || closeEvent.Recipients[0] != chans[0]:
 		t.Fatalf("close recipients = %v, want the ONSET's snapshot — a rotation must not page a "+
 			"stranger and leave the original recipient hanging", closeEvent.Recipients)
 	}

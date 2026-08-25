@@ -110,14 +110,26 @@ func (s *Store) ActiveDelegation(
 	return out, nil
 }
 
-// The routable clause, shared by both signals. A service is routable when it has an on-call schedule
-// with at least one target, or its project has at least one ENABLED notification channel. Both halves
-// are live reads: a channel disabled after arming must dis-arm immediately, which a generation stamped
-// on the service cannot see.
+// The routable predicate, shared by both signals. Both halves are live reads: a channel disabled after
+// arming must dis-arm immediately, which a generation stamped on the service cannot see.
+//
+// A schedule arms only if one of its participants is STILL a live channel of this project.
+// `jsonb_array_length(participants) > 0` was the old test, and it counts ids that nothing prunes:
+// deleting a notification channel removes its row and leaves the id in every schedule that named it,
+// and disabling one changes no JSON at all. A service could therefore suppress its members' alerts on
+// the strength of a rotation resolving to a deleted channel, while its own page went nowhere — both
+// paths silent, which is the single outcome §16.1 exists to prevent.
+//
+// It is deliberately no MORE permissive than `resolveServiceRecipientsTx`: this asks for a live
+// participant, and the resolver falls back to the project's enabled channels when the current
+// rotation names a dead one (§16.6's "a deleted or empty target falls back"). So anything armed here
+// has somewhere to land.
 const routablePredicate = `(
 		    EXISTS (SELECT 1 FROM oncall_schedules os
-		             WHERE os.id = s.oncall_schedule_id AND os.project_id = s.project_id
-		               AND jsonb_array_length(os.participants) > 0)
+		             JOIN notification_channels pc
+		               ON pc.project_id = os.project_id AND pc.enabled
+		              AND os.participants @> to_jsonb(pc.id::text)
+		            WHERE os.id = s.oncall_schedule_id AND os.project_id = s.project_id)
 		    OR EXISTS (SELECT 1 FROM notification_channels nc
 		                WHERE nc.project_id = s.project_id AND nc.enabled)
 		)`

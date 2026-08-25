@@ -818,10 +818,13 @@ func TestDisowningClosesEachOpenSignalExactlyOnce(t *testing.T) {
 	f := burnAlertService(t, st, ctx, oneBurnRule)
 	live := alertFixture{projectID: f.projectID, serviceID: f.serviceID, monitorID: f.monitorID}
 
+	rota := liveChannels(t, st, ctx, f.projectID, "burn-oncall", "live-oncall")
+	burnChan, liveChan := rota[0], rota[1]
 	var schedule string
 	if err := st.pool.QueryRow(ctx, `
 		INSERT INTO oncall_schedules (project_id, name, shift_seconds, anchor_at, participants)
-		VALUES ($1,'primary',604800,now(),'["ch-burn"]') RETURNING id`, f.projectID).Scan(&schedule); err != nil {
+		VALUES ($1,'primary',604800,now(),jsonb_build_array($2::text)) RETURNING id`,
+		f.projectID, burnChan).Scan(&schedule); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
 	if _, err := st.pool.Exec(ctx,
@@ -836,13 +839,14 @@ func TestDisowningClosesEachOpenSignalExactlyOnce(t *testing.T) {
 	}
 	burnOnset := burnEventsFor(t, st, ctx, f.targetID)
 	if len(burnOnset) != 1 || len(burnOnset[0].Recipients) != 1 ||
-		burnOnset[0].Recipients[0] != "ch-burn" {
-		t.Fatalf("burn onset = %+v, want one alert to ch-burn", burnOnset)
+		burnOnset[0].Recipients[0] != burnChan {
+		t.Fatalf("burn onset = %+v, want one alert to the on-call channel %s", burnOnset, burnChan)
 	}
 
 	// (b) the rotation, and then the LIVE announcement, to somebody else entirely.
 	if _, err := st.pool.Exec(ctx,
-		`UPDATE oncall_schedules SET participants = '["ch-live"]' WHERE id = $1`, schedule); err != nil {
+		`UPDATE oncall_schedules SET participants = jsonb_build_array($2::text) WHERE id = $1`,
+		schedule, liveChan); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
 	setMemberHealth(t, st, ctx, live, false)
@@ -855,8 +859,8 @@ func TestDisowningClosesEachOpenSignalExactlyOnce(t *testing.T) {
 		}
 	}
 	if healthOnset.EpisodeID == "" || len(healthOnset.Recipients) != 1 ||
-		healthOnset.Recipients[0] != "ch-live" {
-		t.Fatalf("health onset = %+v, want one alert to ch-live", healthOnset)
+		healthOnset.Recipients[0] != liveChan {
+		t.Fatalf("health onset = %+v, want one alert to the rotated channel %s", healthOnset, liveChan)
 	}
 	if healthOnset.EpisodeID == burnOnset[0].EpisodeID {
 		t.Fatal("the two signals share an episode: this fixture cannot tell two closes from one")

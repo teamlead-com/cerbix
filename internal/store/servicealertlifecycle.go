@@ -92,8 +92,12 @@ func closeServiceEpisodesTx(
 		return 0, fmt.Errorf("store: close alert episodes: %w", err)
 	}
 
+	healthEnded := false
 	for _, e := range endings {
 		signal := domain.ServiceAlertSignal(e.signal)
+		if signal == domain.ServiceSignalHealth {
+			healthEnded = true
+		}
 		// The close continues the episode's sequence. Delivery never DROPS a close on this gate, but
 		// the number is what lets a channel order the ending against the onset it ends.
 		seq := e.seq + 1
@@ -142,5 +146,44 @@ func closeServiceEpisodesTx(
 			}
 		}
 	}
+
+	// The LIVE occurrence has one more artefact than its episode: the auto-incident the evaluator
+	// opened for it. Ending the announcement without ending the incident is what left a service
+	// stranded — `ResolveServiceIncidentTx` has exactly one other caller, the evaluator's recovery
+	// path, and the evaluator only ever looks at services with `owns_paging`. So after ownership is
+	// switched off the incident could never be resolved by anything, and a deleted service left one
+	// open forever with its `service_id` nulled by the FK. Worse, on a service that is merely
+	// disowned and later re-owned, that survivor still occupies
+	// `incidents_service_open_auto_idx` and refuses the NEXT outage its own incident.
+	//
+	// It belongs HERE, in the one function every lifecycle close already goes through, rather than
+	// at the five call sites: a path added later gets the ending for free, which is the property
+	// this phase kept discovering it did not have.
+	//
+	// BURN closes never touch it. A budget alert is not the outage record, and `burn_disabled` or
+	// `rule_removed` say nothing about whether the service is down.
+	if healthEnded {
+		if _, err := resolveServiceIncidentTx(ctx, tx, serviceID, lifecycleResolutionBody(reason)); err != nil {
+			return 0, err
+		}
+	}
 	return len(endings), nil
+}
+
+// lifecycleResolutionBody says WHY the incident ends, in the timeline an operator reads. None of
+// these is a recovery, and the text refuses to let one be read as one: the machine stopped being
+// allowed to speak about this service, which is a different fact from the service being well.
+func lifecycleResolutionBody(reason domain.ServiceAlertCloseReason) string {
+	switch reason {
+	case domain.CloseOwnershipDisabled:
+		return "Resolved automatically: paging ownership was turned off for this service, so nothing " +
+			"evaluates it any more. This is not a statement that the service recovered."
+	case domain.ClosePolicyChanged:
+		return "Resolved automatically: the paging policy no longer covers the state this incident " +
+			"was opened for. This is not a statement that the service recovered."
+	case domain.CloseServiceDeleted:
+		return "Resolved automatically: the service was deleted. This is not a statement that it recovered."
+	default:
+		return "Resolved automatically: " + string(reason) + ". This is not a statement that the service recovered."
+	}
 }

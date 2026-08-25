@@ -1,9 +1,11 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -484,5 +486,174 @@ func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
 	})
 	if got := len(events()); got != 2 {
 		t.Fatalf("a no-op resolve announced: %d events, want 2", got)
+	}
+}
+
+// FR-022 D1b + FR-021 §16.4a — the LIVE occurrence ends as ONE thing.
+//
+// Closing the health episode without resolving the incident stranded the service: the only other
+// caller of the resolve is the evaluator's recovery, and the evaluator's slice is `WHERE
+// s.owns_paging`, so after ownership is switched off nothing would ever look at the service again.
+// The incident then sits open forever, and — because at most one auto-incident may be open per
+// service — it also refuses the NEXT outage its own incident once ownership comes back.
+func TestDisowningAServiceEndsItsIncidentAndNotJustItsAlert(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	inc := openLiveOccurrence(t, st, ctx, f)
+
+	// The operator turns paging ownership off while the outage is live.
+	off := false
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		ServiceAlertPolicyPatch{OwnsPaging: &off}, AlertActor{}); err != nil {
+		t.Fatalf("disown: %v", err)
+	}
+
+	var status string
+	var resolvedAt *time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT status, resolved_at FROM incidents WHERE id = $1`, inc.ID).Scan(&status, &resolvedAt); err != nil {
+		t.Fatalf("reread incident: %v", err)
+	}
+	if status != string(domain.IncidentResolved) || resolvedAt == nil {
+		t.Fatalf("incident is %q/resolved_at=%v after disowning; it would never be resolved by anything "+
+			"again, and it blocks the next outage from opening one", status, resolvedAt)
+	}
+	// The timeline says WHY, and refuses to be read as a recovery.
+	var body string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT body FROM incident_updates WHERE incident_id = $1 AND status = 'resolved'
+		  ORDER BY created_at DESC LIMIT 1`, inc.ID).Scan(&body); err != nil {
+		t.Fatalf("read closing note: %v", err)
+	}
+	if !strings.Contains(body, "paging ownership") || !strings.Contains(body, "not a statement that the service recovered") {
+		t.Fatalf("closing note = %q; it must name the reason and deny a recovery", body)
+	}
+	// And the ending was announced, like any other incident ending.
+	if got := incidentEventTypes(t, st, ctx); len(got) != 2 || got[1] != string(domain.EventIncidentResolved) {
+		t.Fatalf("lifecycle events = %v, want an opened followed by a resolved", got)
+	}
+	// The service can now own paging again and the NEXT outage opens its own incident.
+	on := true
+	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
+		ServiceAlertPolicyPatch{OwnsPaging: &on}, AlertActor{}); err != nil {
+		t.Fatalf("re-own: %v", err)
+	}
+	next := openLiveOccurrence(t, st, ctx, f)
+	if next.ID == inc.ID {
+		t.Fatal("the second outage reused the first incident — the survivor was still occupying the index")
+	}
+}
+
+// A BURN close is not the outage record: disabling a burn target says nothing about whether the
+// service is down, so the incident must survive it untouched.
+func TestDisablingBurnAlertsLeavesTheOutageIncidentAlone(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	inc := openLiveOccurrence(t, st, ctx, f)
+
+	// There must be an open BURN episode for this test to mean anything: with nothing to close, the
+	// close loop never runs and the assertion below would hold for the wrong reason.
+	openBurnOccurrence(t, st, ctx, f)
+
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", false, nil, AlertActor{}); err != nil {
+		t.Fatalf("disable burn: %v", err)
+	}
+	var closed int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_alert_episodes WHERE signal = 'burn' AND closed_at IS NOT NULL`).
+		Scan(&closed); err != nil {
+		t.Fatalf("count closed burn episodes: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("%d burn episodes closed, want 1 — the fixture did not exercise the close path", closed)
+	}
+
+	var status string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT status FROM incidents WHERE id = $1`, inc.ID).Scan(&status); err != nil {
+		t.Fatalf("reread incident: %v", err)
+	}
+	if status != string(domain.IncidentInvestigating) {
+		t.Fatalf("incident is %q after a BURN close; a budget alert is not the outage record", status)
+	}
+}
+
+// openLiveOccurrence puts the service in the state a live outage leaves behind: an open health
+// episode and the auto-incident the evaluator opened for it.
+func openLiveOccurrence(t *testing.T, st *Store, ctx context.Context, f armFixture) domain.Incident {
+	t.Helper()
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 2)
+	if err != nil || !created {
+		t.Fatalf("open incident: %v (created=%v)", err, created)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO service_alert_episodes
+		  (service_id, project_id, service_name, signal, state, recipients, emitted_seq)
+		SELECT s.id, s.project_id, s.name, 'health', 'down', '["chan-1"]'::jsonb, 1
+		  FROM services s WHERE s.id = $1`, f.serviceID); err != nil {
+		t.Fatalf("open episode: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE service_alert_state SET live_firing = true, emitted_state = 'down', emitted_seq = 1
+		 WHERE service_id = $1`, f.serviceID); err != nil {
+		t.Fatalf("latch live: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return inc
+}
+
+func incidentEventTypes(t *testing.T, st *Store, ctx context.Context) []string {
+	t.Helper()
+	rows, err := st.pool.Query(ctx,
+		`SELECT payload->>'event' FROM outbox_events WHERE topic = $1 ORDER BY created_at, id`,
+		domain.TopicIncidentEvent)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var typ string
+		if err := rows.Scan(&typ); err != nil {
+			t.Fatalf("scan type: %v", err)
+		}
+		out = append(out, typ)
+	}
+	return out
+}
+
+// openBurnOccurrence adds an OPEN burn episode with its latch, so a burn lifecycle close has
+// something to close. The three target columns travel together: 00082's CHECK ties rule_key,
+// target_snapshot_id and target_window to the burn signal.
+func openBurnOccurrence(t *testing.T, st *Store, ctx context.Context, f armFixture) {
+	t.Helper()
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO service_alert_episodes
+		  (service_id, project_id, service_name, signal, rule_key, target_snapshot_id, target_window,
+		   state, recipients, emitted_seq)
+		SELECT s.id, s.project_id, s.name, 'burn', 'page/3600/300/14', $2, '30d',
+		       'page/3600/300/14', '["chan-1"]'::jsonb, 1
+		  FROM services s WHERE s.id = $1`, f.serviceID, f.targetID); err != nil {
+		t.Fatalf("open burn episode: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO service_burn_alert_state
+		  (service_id, project_id, sla_target_id, rule_key, firing, last_verdict,
+		   target_generation, config_generation, emitted_seq, evaluated_at, lease_until)
+		SELECT s.id, s.project_id, t.id, 'page/3600/300/14', true, 'fire', t.alert_generation,
+		       s.alert_config_generation, 1, now(), now() + interval '90 seconds'
+		  FROM services s JOIN sla_targets t ON t.id = $2
+		 WHERE s.id = $1
+		ON CONFLICT (service_id, project_id, sla_target_id, rule_key) DO NOTHING`,
+		f.serviceID, f.targetID); err != nil {
+		t.Fatalf("latch burn: %v", err)
 	}
 }

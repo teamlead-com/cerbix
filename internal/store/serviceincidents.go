@@ -187,6 +187,14 @@ func (s *Store) IncidentMemberSnapshot(ctx context.Context, incidentID string) (
 // `source = 'auto'` and `status <> 'resolved'` are both in the WHERE: an incident a HUMAN resolved, or one a
 // human opened, is left alone. A machine must not reopen or re-annotate a conclusion a person drew.
 func (s *Store) ResolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body string) (bool, error) {
+	return resolveServiceIncidentTx(ctx, tx, serviceID, body)
+}
+
+// resolveServiceIncidentTx is the same operation without a receiver, so the lifecycle closes — which
+// are package-level functions holding only a transaction — end the incident through the SAME code the
+// evaluator's recovery uses. Two spellings of "resolve the service's incident" is how one of them
+// comes to forget the lifecycle event.
+func resolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body string) (bool, error) {
 	// The guarded write returns the whole resolved row, so the announcement below describes the
 	// incident as it now IS rather than as a second read hopes it is.
 	inc, err := scanIncident(tx.QueryRow(ctx,

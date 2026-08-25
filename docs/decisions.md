@@ -3830,3 +3830,38 @@ carries this exception for the upgrade population; iter-0157 is closed and immut
 is forward-only, here and in iter-0161 §17. Verified both ways: a backfill copying `started_at` fails the
 column assertion, and a ladder measuring from `started_at` fails with "the first pass after the upgrade
 fired 3 steps, want exactly its first".
+
+## D-0176 — an onset nobody can receive is withheld, not recorded (2026-08-26)
+
+**Context.** §16.6 said an alert with no resolvable recipient "is recorded and counted with
+`cerbix_service_alert_undeliverable_total` rather than silently dropped" — written when the service
+signal stood alone. Two things have changed under it since. FR-022 made an onset open an INCIDENT, and
+FR-021 §16.1 made a monitor's own alert be SUPPRESSED while its service covers it.
+
+**The failure that forced the question.** With ownership on, a pageable DOWN and no enabled channel,
+the old rule recorded an announcement, opened an incident, and advanced `live_firing` — while the
+delegation query, which checks routability live, correctly told the member to keep paging. Then the
+route comes back. Delegation arms and the member falls silent; the service has no edge left to
+announce, because it spent it on an empty route. The outage is never paged by anybody. The recording
+was not free: it had to latch, and the latch is what made the silence permanent.
+
+**Decision (owner, 2026-08-26).** An ONSET with no resolvable recipient is WITHHELD: no episode, no
+outbox row, no incident, and NO LATCH. The next evaluation sees the same candidate and the same streak
+and announces the moment somebody can be told. CLOSES are never withheld — §16's polarity rule — since
+an announcement already made must be able to end whatever the route looks like now. It applies to both
+signals: the burn arm withholds a FIRE edge on the same condition, or the two signals would disagree
+about what "armed" means.
+
+**Rejected alternative:** keep recording, but neither open an incident nor latch. It satisfies both
+documents' letters and writes an undeliverable episode plus an outbox row on EVERY pass — one every
+few seconds for as long as the route is broken — so the honest record becomes the noisiest table in
+the product, and the outbox worker retries deliveries that cannot succeed.
+
+**Consequence.** `cerbix_service_alert_undeliverable_total` is not implemented and its line in §16.6
+carries a superseding note. Withheld onsets are counted instead as
+`cerbix_service_alert_evaluations_total{outcome="withheld"}` — a new VALUE on an existing bounded
+label, next to `ok`/`error`/`skipped`, so no new series family appears. `skipped` keeps its own
+meaning (the burn arm's HOLDs: a verdict that cannot be QUOTED), because "cannot be quoted" and
+"cannot be delivered" are different facts and an operator reading silence needs to tell them apart.
+Verified both ways in both arms: dropping the gate opens an incident nobody received, and withholding
+while still latching leaves the restored route with no edge to announce.

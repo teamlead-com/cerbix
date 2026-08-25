@@ -2907,9 +2907,14 @@ appears: a ladder is defined relative to an incident start with acknowledgement,
 repeat state, and owner decision 3 forbids service incidents, so "the ladder applies unchanged"
 was not implementable. §16.8 records what a later phase would need.
 
-A deleted or empty target falls back to the project's channels; an empty project channel set means
-the alert is recorded and counted with `cerbix_service_alert_undeliverable_total` rather than
-silently dropped. Instance-wide silence applies unchanged. Recovery/close goes to the same
+A deleted, DISABLED or empty target falls back to the project's channels. ~~An empty project channel
+set means the alert is recorded and counted with `cerbix_service_alert_undeliverable_total` rather
+than silently dropped.~~ **Superseded by D-0176 (2026-08-26):** an ONSET with no resolvable recipient
+is WITHHELD — no episode, no outbox row — and does not latch, so the next evaluation announces it the
+moment somebody can be told. Recording it instead would have to latch it, and a latched announcement
+nobody received is an announcement that can never happen: restoring the route produces no edge, while
+delegation begins suppressing the member's own alert. Withheld onsets are counted as
+`cerbix_service_alert_evaluations_total{outcome="withheld"}`. CLOSES are never withheld. Instance-wide silence applies unchanged. Recovery/close goes to the same
 recipients the onset did.
 
 ### 16.6a The write surface, concretely

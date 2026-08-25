@@ -593,3 +593,50 @@ func TestABurnBreachOpensNoIncidentEver(t *testing.T) {
 			"watermark and says nothing about now (FR-022 invariant 6)", incidents, snapshots)
 	}
 }
+
+// The BURN arm owes the same arming rule as the live one (§16.1, D-0176). Without it the swallow the
+// live arm just lost survives in the second signal: emit to nobody, latch firing=true, and when the
+// route returns there is no edge left to announce — while `activeBurnDelegationSQL` has begun
+// suppressing the member's own burn alert. The member goes quiet for an alert the service already
+// spent on an empty route.
+func TestBurnWithholdsAnOnsetNobodyCanReceiveAndDoesNotLatch(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE notification_channels SET enabled = false WHERE project_id = $1`, f.projectID); err != nil {
+		t.Fatalf("disable channels: %v", err)
+	}
+	plantBurn(t, st, ctx, f, 5, minute/60) // the same breach the fires-once test uses
+
+	got := burnEvalOnce(t, st, ctx)
+	if got.Onsets != 0 {
+		t.Fatalf("an unroutable burn FIRE announced %+v", got)
+	}
+	if got.Withheld == 0 {
+		t.Fatal("the withheld FIRE was not counted: silence that means 'nobody could be told' must " +
+			"not read as 'nothing is burning'")
+	}
+	var firing bool
+	var seq int64
+	if err := st.pool.QueryRow(ctx,
+		`SELECT firing, emitted_seq FROM service_burn_alert_state WHERE sla_target_id = $1`,
+		f.targetID).Scan(&firing, &seq); err != nil {
+		t.Fatalf("read latch: %v", err)
+	}
+	if firing || seq != 0 {
+		t.Fatalf("the rule latched (firing=%v seq=%d) while announcing nothing: restoring the route "+
+			"would leave no edge and the member would be silenced for an alert nobody got", firing, seq)
+	}
+
+	// Route restored: exactly one onset, and only now may delegation suppress the member's own burn.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE notification_channels SET enabled = true WHERE project_id = $1`, f.projectID); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	got = burnEvalOnce(t, st, ctx)
+	if got.Onsets != 1 {
+		t.Fatalf("after the route came back the burn arm reported %+v, want the one onset that was "+
+			"waiting", got)
+	}
+}

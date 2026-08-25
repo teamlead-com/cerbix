@@ -49,6 +49,10 @@ type ServiceBurnEvaluation struct {
 	Closes  int
 	Holds   int
 	Errors  int
+	// Withheld counts FIRE edges not announced because the target had no resolvable recipient. Like
+	// the live arm's, it is neither an error nor an announcement, and counting it apart is what keeps
+	// "nobody could be told" from reading as "nothing is burning".
+	Withheld int
 	// Lag is how far behind the oldest evaluated rule was, so a stalled evaluator reads as lag rather
 	// than as an absence of alerts — which is indistinguishable from "nothing is burning".
 	Lag time.Duration
@@ -265,6 +269,26 @@ func (s *Store) evaluateServiceBurnAlertsOn(
 		prev := latch[burnLatchKey{targetID: c.targetID, ruleKey: key}]
 		long := windows[sl.long]
 		decision := domain.DecideBurnRule(long, windows[sl.short], rule.Threshold, prev.firing)
+
+		// The SAME arming rule the live arm applies (§16.1, D-0176): an ONSET nobody can receive is
+		// withheld and does not latch. Without this the burn signal keeps the swallow the live one
+		// just lost — emit to nobody, set firing=true, and when the route comes back there is no edge
+		// left to announce while `activeBurnDelegationSQL` has begun suppressing the member's own burn
+		// alert. The member falls silent for an alert the service already spent on an empty route.
+		//
+		// A CLEAR is never withheld: polarity again. An announcement already made must be able to end.
+		if decision.Edge && decision.Firing {
+			route, rerr := resolveServiceRecipientsTx(ctx, tx, c.projectID, c.scheduleID, asOf)
+			if rerr != nil {
+				return out, rerr
+			}
+			if len(route) == 0 {
+				out.Withheld++
+				// Neither the level nor the sequence moves: the next evaluation sees the same
+				// unannounced FIRE and announces it as soon as there is somebody to tell.
+				decision.Edge, decision.Firing = false, prev.firing
+			}
+		}
 
 		seq := prev.seq
 		if decision.Edge {

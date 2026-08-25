@@ -458,7 +458,12 @@ type serviceAlertPass struct {
 	// burn rule for the sealed one. `skipped` is where the burn arm's HOLDs land: a hold is a
 	// successful evaluation that cannot speak, which is neither an error nor an answer.
 	ok, skipped, errors int
-	onsets, closes      int
+	// withheld counts ONSETS a successful evaluation refused to announce because the service had no
+	// resolvable recipient (§16.6, amended by D-0176). It is its own outcome rather than `skipped`,
+	// which the burn arm uses for HOLDs: "cannot be quoted" and "cannot be delivered" are different
+	// facts, and an operator seeing silence needs to know which one produced it.
+	withheld       int
+	onsets, closes int
 	// FR-022: incidents this pass OPENED and RESOLVED by machine. Counted apart from the edges
 	// because they are not the same event — an onset for a service whose incident is already open
 	// announces and opens nothing, and that difference is the interesting one.
@@ -477,6 +482,9 @@ func (s *Scheduler) observeServiceAlertPass(p serviceAlertPass) {
 	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "ok", p.ok)
 	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "error", p.errors)
 	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "skipped", p.skipped)
+	// Recorded even at zero, like the others: a series that only appears when something goes wrong
+	// is one an alerting rule cannot be written against.
+	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "withheld", p.withheld)
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "onset", p.onsets)
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "close", p.closes)
 	s.serviceMetrics.RecordServiceIncidents("opened", p.incidentsOpened)
@@ -937,11 +945,11 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						return
 					}
 					// The live arm's unit is the SERVICE: `Evaluated` are the ones that got a
-					// verdict, `Errors` the ones whose evaluation dis-armed them. It has no
-					// `skipped` — nothing in the live path succeeds without being able to speak.
+					// verdict, `Errors` the ones whose evaluation dis-armed them, and `withheld` the
+					// onsets it refused to announce for want of a recipient.
 					s.observeServiceAlertPass(serviceAlertPass{
 						signal: string(domain.ServiceSignalHealth), cadence: serviceAlertEvery,
-						lag: ev.Lag, ok: ev.Evaluated, errors: ev.Errors,
+						lag: ev.Lag, ok: ev.Evaluated, errors: ev.Errors, withheld: ev.Unroutable,
 						onsets: ev.Onsets, closes: ev.Closes,
 						incidentsOpened: ev.IncidentsOpened, incidentsResolved: ev.IncidentsResolved,
 					})

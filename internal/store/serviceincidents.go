@@ -74,6 +74,22 @@ func (s *Store) OpenServiceIncidentTx(
 	if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentCorrelation, corr); err != nil {
 		return domain.Incident{}, false, err
 	}
+	// The LIFECYCLE event, which this path did not send and the monitor's auto-path always has.
+	// `incident_event` is what reaches incident webhooks and the confirmed subscribers of every
+	// status page that surfaces the project, so without it a service outage was visible in the
+	// database and the UI while the people who asked to be told heard nothing. The service's own
+	// `service_alert` does not cover this: it pages the service's RECIPIENTS, a different audience
+	// from the page's subscribers.
+	//
+	// It sits after the ON CONFLICT branch on purpose. A concurrent evaluator that lost the race
+	// returns above with `created == false` and enqueues nothing, so one opening announces once.
+	opened, err := json.Marshal(domain.IncidentEvent{Type: domain.EventIncidentOpened, Incident: inc})
+	if err != nil {
+		return domain.Incident{}, false, fmt.Errorf("store: marshal service incident event: %w", err)
+	}
+	if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentEvent, opened); err != nil {
+		return domain.Incident{}, false, err
+	}
 	return inc, true, nil
 }
 
@@ -171,22 +187,37 @@ func (s *Store) IncidentMemberSnapshot(ctx context.Context, incidentID string) (
 // `source = 'auto'` and `status <> 'resolved'` are both in the WHERE: an incident a HUMAN resolved, or one a
 // human opened, is left alone. A machine must not reopen or re-annotate a conclusion a person drew.
 func (s *Store) ResolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body string) (bool, error) {
-	var incidentID string
-	err := tx.QueryRow(ctx,
+	// The guarded write returns the whole resolved row, so the announcement below describes the
+	// incident as it now IS rather than as a second read hopes it is.
+	inc, err := scanIncident(tx.QueryRow(ctx,
 		`UPDATE incidents
 		    SET status = 'resolved', resolved_at = now(), updated_at = now()
 		  WHERE service_id = $1 AND source = 'auto' AND status <> 'resolved'
-		 RETURNING id::text`, serviceID).Scan(&incidentID)
+		 RETURNING `+incidentColumns, serviceID))
 	if err != nil {
 		if noRows(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("store: resolve service incident: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO incident_updates (incident_id, status, body, author) VALUES ($1, 'resolved', $2, 'system')`,
-		incidentID, body); err != nil {
+	upd, err := scanIncidentUpdate(tx.QueryRow(ctx,
+		`INSERT INTO incident_updates (incident_id, status, body, author)
+		 VALUES ($1, 'resolved', $2, 'system') RETURNING `+incidentUpdateColumns,
+		inc.ID, body))
+	if err != nil {
 		return false, fmt.Errorf("store: resolve service incident note: %w", err)
+	}
+	// The closing half of the lifecycle, for the same audience as the opening half. An ending that
+	// never reaches the people who were told about the beginning is the worse of the two omissions:
+	// they are still watching an outage the system knows ended.
+	payload, err := json.Marshal(domain.IncidentEvent{
+		Type: domain.EventIncidentResolved, Incident: inc, Update: &upd,
+	})
+	if err != nil {
+		return false, fmt.Errorf("store: marshal service incident event: %w", err)
+	}
+	if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentEvent, payload); err != nil {
+		return false, err
 	}
 	return true, nil
 }

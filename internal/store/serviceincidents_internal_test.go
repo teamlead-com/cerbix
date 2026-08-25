@@ -1,8 +1,11 @@
 package store
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -376,5 +379,110 @@ func TestAnOpenServiceIncidentMovesNoComponentStatus(t *testing.T) {
 		t.Fatalf("the quoted number appeared or vanished with an incident open: %v vs %v", b.Uptime, a.Uptime)
 	case a.Excluded != b.Excluded:
 		t.Fatalf("maintenance exclusion changed with an incident open: %v vs %v", b.Excluded, a.Excluded)
+	}
+}
+
+// FR-022 + FR-012: a service incident owes the SAME lifecycle events as any other incident.
+//
+// `incident_event` is what reaches incident webhooks and the confirmed subscribers of every status
+// page surfacing the project. The service path enqueued only its correlation attempt, so a service
+// outage was visible in the database and the UI while the people who explicitly asked to be told
+// heard nothing — and the monitor's auto-path, which goes through `CreateIncident`, always sent it.
+// Two automatic paths disagreeing about whether an outage is announceable is the defect; the
+// service's own `service_alert` does not cover it, because that pages the service's recipients, a
+// different audience from the page's subscribers.
+func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	inTx := func(fn func(tx pgx.Tx)) {
+		t.Helper()
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+		fn(tx)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+	events := func() []domain.IncidentEvent {
+		t.Helper()
+		rows, err := st.pool.Query(ctx,
+			`SELECT payload FROM outbox_events WHERE topic = $1 ORDER BY created_at, id`,
+			domain.TopicIncidentEvent)
+		if err != nil {
+			t.Fatalf("read events: %v", err)
+		}
+		defer rows.Close()
+		var out []domain.IncidentEvent
+		for rows.Next() {
+			var raw []byte
+			if err := rows.Scan(&raw); err != nil {
+				t.Fatalf("scan event: %v", err)
+			}
+			var ev domain.IncidentEvent
+			if err := json.Unmarshal(raw, &ev); err != nil {
+				t.Fatalf("decode event: %v", err)
+			}
+			out = append(out, ev)
+		}
+		return out
+	}
+
+	var opened domain.Incident
+	inTx(func(tx pgx.Tx) {
+		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 3)
+		if err != nil || !created {
+			t.Fatalf("open: %v (created=%v)", err, created)
+		}
+		opened = inc
+	})
+	evs := events()
+	if len(evs) != 1 || evs[0].Type != domain.EventIncidentOpened || evs[0].Incident.ID != opened.ID {
+		t.Fatalf("after the open, events = %+v; want exactly one incident.opened for %s", evs, opened.ID)
+	}
+
+	// The evaluator that LOSES the open race announces nothing: one opening, one announcement.
+	inTx(func(tx pgx.Tx) {
+		if _, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 3); err != nil || created {
+			t.Fatalf("second open: %v (created=%v, want false)", err, created)
+		}
+	})
+	if got := len(events()); got != 1 {
+		t.Fatalf("a losing racer announced too: %d events, want 1", got)
+	}
+
+	inTx(func(tx pgx.Tx) {
+		resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "recovered")
+		if err != nil || !resolved {
+			t.Fatalf("resolve: %v (resolved=%v)", err, resolved)
+		}
+	})
+	evs = events()
+	if len(evs) != 2 {
+		t.Fatalf("after the resolve, %d events, want 2", len(evs))
+	}
+	closing := evs[1]
+	switch {
+	case closing.Type != domain.EventIncidentResolved:
+		t.Fatalf("closing event type = %q, want incident.resolved", closing.Type)
+	case closing.Incident.ID != opened.ID:
+		t.Fatalf("the close names incident %s, want %s", closing.Incident.ID, opened.ID)
+	case closing.Incident.Status != domain.IncidentResolved:
+		t.Fatalf("the close carries status %q — it must describe the row as it now IS", closing.Incident.Status)
+	case closing.Update == nil || closing.Update.Body != "recovered":
+		t.Fatalf("the close carries update %+v, want the timeline entry it wrote", closing.Update)
+	}
+
+	// A second resolve has nothing to end, and must not announce an ending twice.
+	inTx(func(tx pgx.Tx) {
+		if resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "again"); err != nil || resolved {
+			t.Fatalf("second resolve: %v (resolved=%v, want false)", err, resolved)
+		}
+	})
+	if got := len(events()); got != 2 {
+		t.Fatalf("a no-op resolve announced: %d events, want 2", got)
 	}
 }

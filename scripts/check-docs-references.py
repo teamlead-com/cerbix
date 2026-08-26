@@ -217,7 +217,10 @@ def fr021_invariant_numbers():
     102 while keeping 103, both passed. The discharge map has to match this set EXACTLY — a missing
     key is an unchecked requirement and an extra one is a requirement nobody made."""
     text = open('docs/specs/func-service-reliability.md', encoding='utf-8').read()
-    numbers = set()
+    # Collected as a LIST first. Folding straight into a set hid a duplicate: two `103.` entries with
+    # different text passed, and the discharge map could only ever match one of them, so half a
+    # requirement was silently unchecked.
+    seen = []
     for start in FR021_INV_SECTIONS:
         i = text.find(start)
         if i < 0:
@@ -227,10 +230,15 @@ def fr021_invariant_numbers():
         end = re.search(r'\n#{2,3} (?!19\.|16\.8)', section)
         if end:
             section = section[:end.start()]
-        numbers.update(int(m) for m in re.findall(r'^\s{0,4}(\d{1,3})\.\s', section, re.M))
-    if not numbers:
+        seen.extend(int(m) for m in re.findall(r'^\s{0,4}(\d{1,3})\.\s', section, re.M))
+    if not seen:
         raise SystemExit('check-docs-references: the FR-021 spec states no invariants at all')
-    return numbers
+    dupes = sorted({n for n in seen if seen.count(n) > 1})
+    if dupes:
+        raise SystemExit('check-docs-references: the FR-021 spec states invariant number(s) '
+                         f'{dupes} more than once — the discharge map can only match one of them, '
+                         'so the other is a requirement nothing checks')
+    return set(seen)
 
 
 def check_invariant_set(src, text, expected):

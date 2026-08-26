@@ -957,6 +957,18 @@ func TestAServiceIncidentResolvesAfterTheWaitItActuallyDid(t *testing.T) {
 		t.Fatalf("read transaction clock: %v", err)
 	}
 
+	// The resolver's own backend, so the wait below watches THIS transaction and not whatever else
+	// happens to be running. `pg_locks` filtered only by "some ungranted tuple lock" would accept a
+	// stranger's waiter on a shared database and hand this test a floor it never earned.
+	var resolverPID int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&resolverPID); err != nil {
+		t.Fatalf("resolver pid: %v", err)
+	}
+	var blockerPID int
+	if err := blocker.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+		t.Fatalf("blocker pid: %v", err)
+	}
+
 	done := make(chan error, 1)
 	go func() {
 		_, rerr := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "recovered")
@@ -965,7 +977,7 @@ func TestAServiceIncidentResolvesAfterTheWaitItActuallyDid(t *testing.T) {
 
 	// Wait until the resolver is genuinely BLOCKED on the row, not merely slow to start. Anything
 	// less makes this a sleep, and a sleep proves nothing about a lock.
-	waitUntilBlocked(t, st, ctx, held)
+	waitUntilBlockedBy(t, st, ctx, resolverPID, blockerPID)
 
 	// The floor: every instant from here on is after the wait. Read on a third connection so the
 	// resolver's own transaction cannot supply it.
@@ -1006,29 +1018,28 @@ func TestAServiceIncidentResolvesAfterTheWaitItActuallyDid(t *testing.T) {
 	}
 }
 
-// waitUntilBlocked returns once a backend is waiting on a lock for this incident row. Polling
-// `pg_locks` is what makes the test deterministic: a timer would pass whether or not the resolver
-// ever queued.
-func waitUntilBlocked(t *testing.T, st *Store, ctx context.Context, incidentID string) {
+// waitUntilBlockedBy returns once `waiter` is blocked SPECIFICALLY by `holder`. `pg_blocking_pids`
+// answers exactly that question, which is the whole reason to use it: an earlier version asked
+// whether ANY ungranted tuple lock existed anywhere in the cluster, so on a shared or concurrent
+// database an unrelated waiter would satisfy it and the floor read afterwards would be one this test
+// never earned.
+//
+// Polling rather than sleeping, for the same class of reason: a timer passes whether or not the
+// resolver ever queued.
+func waitUntilBlockedBy(t *testing.T, st *Store, ctx context.Context, waiter, holder int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var waiting bool
-		if err := st.pool.QueryRow(ctx, `
-			SELECT EXISTS (
-			    SELECT 1 FROM pg_locks
-			     WHERE NOT granted AND locktype = 'tuple'
-			     UNION ALL
-			    SELECT 1 FROM pg_stat_activity
-			     WHERE wait_event_type = 'Lock' AND state = 'active'
-			       AND query ILIKE '%FROM incidents%FOR UPDATE%'
-			)`).Scan(&waiting); err != nil {
-			t.Fatalf("poll locks: %v", err)
+		var blocked bool
+		if err := st.pool.QueryRow(ctx,
+			`SELECT $2::int = ANY(pg_blocking_pids($1::int))`, waiter, holder).Scan(&blocked); err != nil {
+			t.Fatalf("poll blocking pids: %v", err)
 		}
-		if waiting {
+		if blocked {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("the resolver never blocked on the incident row: this test would prove nothing about a wait")
+	t.Fatalf("backend %d never blocked on backend %d: without a real wait this test proves nothing "+
+		"about a post-lock clock", waiter, holder)
 }

@@ -3180,8 +3180,11 @@ it is MADE.
 102. durable damage predating the lifecycle fixes is REPAIRED where the correct value is derivable
     from the row and REPORTED where it is not, and `(status = 'resolved') = (resolved_at IS NOT NULL)`
     is a database CHECK (D-0182).
-103. the service lifecycle close stamps the incident, its timeline note and its outbox row with the
-    CALLER's post-lock instant, never the transaction's start.
+103. the service lifecycle close takes its OWN lock on the incident, reads `statement_timestamp()`
+    after that wait, and stamps all six observable times with it — the incident's `resolved_at` and
+    `updated_at`, the timeline note's `created_at`, and the outbox row's `created_at`, `updated_at`
+    and `next_attempt_at`. Not the caller's instant: a caller's clock is post-ITS-locks and says
+    nothing about this one.
 
 ### 16.9 What phase 5 does NOT do
 

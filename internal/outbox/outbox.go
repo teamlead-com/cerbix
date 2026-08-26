@@ -560,27 +560,32 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 			w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
 			return nil
 		}
-		if err != nil {
-			return err
-		}
 		// Somebody was told. THIS is what arms coverage: §16.1's committed onset is now a DELIVERED
 		// one, and until this lands the members keep paging for themselves.
 		//
-		// A failure here does not fail the delivery — the page has already gone out, and returning an
-		// error would send it again. It leaves coverage dis-armed instead, which is the direction
-		// every other ambiguity in the conjunction takes.
+		// Credited on `Resolved > 0`, INDEPENDENTLY of `err`. A partial delivery — three channels
+		// reached, a fourth timing out — is an announcement people received, and D-0179's contract is
+		// "at least one recipient", not "a clean call". Gating this on `err == nil` meant the retry
+		// (which the error below still triggers) had to succeed before the service stopped paging its
+		// members redundantly. Safe, and noisier than the contract says.
+		//
+		// The credit is monotonic and sequence-guarded, so crediting before a retry that re-delivers
+		// to everyone changes nothing the second time.
 		//
 		// A CLOSE never counts. Coverage is about an announcement that is LIVE, and crediting an
 		// ending would arm a service whose alert is over. The store refuses one too — a safety
 		// property with one guard is a safety property one refactor from being gone.
-		if !a.Firing {
-			return nil
+		//
+		// A failure to RECORD does not fail the delivery: the page has gone out, and returning that
+		// error would send it again. It leaves coverage dis-armed, the direction every other
+		// ambiguity in the conjunction takes.
+		if a.Firing && res.Resolved > 0 {
+			if derr := w.store.MarkServiceAlertDelivered(ctx, a); derr != nil {
+				w.logger.Warn("service_alert_delivery_unrecorded", "service_id", a.ServiceID,
+					"signal", string(a.Signal), "seq", a.Seq, "error", derr.Error())
+			}
 		}
-		if derr := w.store.MarkServiceAlertDelivered(ctx, a); derr != nil {
-			w.logger.Warn("service_alert_delivery_unrecorded", "service_id", a.ServiceID,
-				"signal", string(a.Signal), "seq", a.Seq, "error", derr.Error())
-		}
-		return nil
+		return err
 
 	case domain.TopicSLAReport:
 		var rep domain.SLAReport

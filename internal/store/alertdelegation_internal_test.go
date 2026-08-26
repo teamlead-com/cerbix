@@ -879,11 +879,13 @@ func TestAPolicyThatDoesNotCoverTheCurrentStateArmsNothing(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := armedService(t, st, ctx)
 
-	// The service is DOWN and the policy pages DOWN: armed, and the announcement is committed.
+	// The service is DOWN and the policy pages DOWN: armed, announced and DELIVERED. The sequence
+	// pair joined this fixture with D-0179 — an announcement is a state PLUS a sequence that reached
+	// somebody, and a bare `emitted_state` is neither.
 	if _, err := st.pool.Exec(ctx, `
 		UPDATE service_alert_state
 		   SET observed_state = 'down', candidate_state = 'down', live_firing = true,
-		       emitted_state = 'down'
+		       emitted_state = 'down', emitted_seq = 1, delivered_seq = 1
 		 WHERE service_id = $1`, f.serviceID); err != nil {
 		t.Fatalf("set down: %v", err)
 	}
@@ -897,7 +899,7 @@ func TestAPolicyThatDoesNotCoverTheCurrentStateArmsNothing(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `
 		UPDATE service_alert_state
 		   SET observed_state = 'degraded', candidate_state = 'degraded', live_firing = true,
-		       emitted_state = 'degraded'
+		       emitted_state = 'degraded', emitted_seq = 2, delivered_seq = 2
 		 WHERE service_id = $1`, f.serviceID); err != nil {
 		t.Fatalf("set degraded: %v", err)
 	}
@@ -1615,5 +1617,81 @@ func creditLiveDelivery(t *testing.T, st *Store, ctx context.Context, serviceID 
 		`UPDATE service_alert_state SET delivered_seq = emitted_seq WHERE service_id = $1`,
 		serviceID); err != nil {
 		t.Fatalf("credit live delivery: %v", err)
+	}
+}
+
+// The announcement has to be about the state the service is IN.
+//
+// A DEGRADED alert is delivered and covers. The service then observes DOWN and starts collecting its
+// confirm streak — which exists so it does not announce too early. For that whole window the stale
+// DEGRADED announcement counted as coverage, so a member monitor's own DOWN was suppressed in favour
+// of a service alert saying something else. The service's caution was handed to the members as
+// silence, which is the exact trade §16.1 refuses everywhere else.
+func TestAnAnnouncementOfAnEarlierStateIsNotCoverage(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	exec(t, st, ctx, `UPDATE services SET page_on = '{degraded,down}' WHERE id = $1`, f.serviceID)
+
+	// DEGRADED: announced, delivered, and genuinely covering. `config_generation` is re-synced
+	// because editing `page_on` bumps the DB-owned generation, and a stale one would dis-arm this
+	// fixture for a reason that has nothing to do with what the test is about.
+	exec(t, st, ctx, `UPDATE service_alert_state st
+	                     SET observed_state = 'degraded', candidate_state = 'degraded', live_firing = true,
+	                         emitted_state = 'degraded', emitted_seq = 4, delivered_seq = 4, emitted_at = now(),
+	                         config_generation = s.alert_config_generation
+	                    FROM services s
+	                   WHERE st.service_id = $1 AND s.id = st.service_id`, f.serviceID)
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a delivered DEGRADED announcement did not cover a DEGRADED service")
+	}
+
+	// Now the service is DOWN and has announced nothing about it yet.
+	exec(t, st, ctx, `UPDATE service_alert_state SET observed_state = 'down', candidate_state = 'down', streak = 1
+	                   WHERE service_id = $1`, f.serviceID)
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("the previous DEGRADED announcement covered a service that is now DOWN: the member's " +
+			"own DOWN is suppressed while the replacement is still telling people something else")
+	}
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationLive)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonOnsetPending {
+		t.Fatalf("delivery reported %q, want %q — nothing has been announced about THIS state yet",
+			v.FailOpenReason, AlertReasonOnsetPending)
+	}
+
+	// Once DOWN is announced and delivered, it covers again.
+	exec(t, st, ctx, `UPDATE service_alert_state
+	                     SET emitted_state = 'down', emitted_seq = 5, delivered_seq = 5
+	                   WHERE service_id = $1`, f.serviceID)
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a delivered DOWN announcement did not cover a DOWN service")
+	}
+}
+
+// A state with NO sequence was never announced. `emitted_state` alone said otherwise, and the
+// delivered clause used to wave a zero sequence through as well — two spellings of the same hole.
+func TestAStateWithNoSequenceIsNotAnAnnouncement(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	exec(t, st, ctx, `UPDATE services SET page_on = '{down}' WHERE id = $1`, f.serviceID)
+	exec(t, st, ctx, `UPDATE service_alert_state st
+	                     SET observed_state = 'down', candidate_state = 'down', live_firing = true,
+	                         emitted_state = 'down', emitted_seq = 0, delivered_seq = 0,
+	                         config_generation = s.alert_config_generation
+	                    FROM services s
+	                   WHERE st.service_id = $1 AND s.id = st.service_id`, f.serviceID)
+
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a latch carrying an emitted STATE with no emitted SEQUENCE armed coverage: nothing " +
+			"was ever announced, and a zero sequence cannot have been delivered either")
+	}
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationLive)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonOnsetPending {
+		t.Fatalf("delivery reported %q, want %q", v.FailOpenReason, AlertReasonOnsetPending)
 	}
 }

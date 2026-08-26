@@ -399,3 +399,49 @@ func TestPublicRenderCarriesAServiceIncidentAndNoImpactLinks(t *testing.T) {
 		t.Fatalf("the authenticated render lost the service anchor: %s", arec.Body.String())
 	}
 }
+
+// D-0180 at the RENDER: the page's project set comes from the store's one owner, and a project-scoped
+// page reports its OWN project's incidents even when no component points anywhere.
+//
+// The render used to rebuild the set from the resolved components, which is what let three surfaces
+// disagree — and the review's point stands that rebuilding it "the same way" is not a single owner:
+// removing the own-project arm from the handler's own loop left every API test green, because
+// nothing here was asking the owner anything. This test fails if the handler stops asking.
+func TestPublicRenderReportsThePagesOwnProject(t *testing.T) {
+	fs := seededStore()
+	// A project-scoped page whose only component is MANUAL — no monitor, no service, nothing that
+	// contributes a project by itself.
+	fs.pages["sp9"] = domain.StatusPage{
+		ID: "sp9", OrgID: "o1", ProjectID: "p1", Slug: "own-status", Title: "Own",
+		Visibility: domain.VisibilityPublic,
+	}
+	fs.components["c9"] = domain.Component{
+		ID: "c9", StatusPageID: "sp9", OrgID: "o1", Name: "Typed by hand",
+		Source: domain.ComponentSourceManual, ManualStatus: domain.CompOperational,
+	}
+	h := newPublicHandler(fs)
+
+	rec := do(h, outsider, http.MethodGet, "/api/v1/public/status-pages/own-status", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("public render = %d, want 200", rec.Code)
+	}
+	var render struct {
+		ActiveIncidents []struct {
+			ID string `json:"id"`
+		} `json:"active_incidents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &render); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found bool
+	for _, i := range render.ActiveIncidents {
+		if i.ID == "inc1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the page reports no incident of its own project p1 (%d active): a reader looking at "+
+			"a project's status page sees nothing about that project's outage",
+			len(render.ActiveIncidents))
+	}
+}

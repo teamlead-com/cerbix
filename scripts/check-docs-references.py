@@ -203,6 +203,27 @@ def check_spec_banners():
     return bad
 
 
+def highest_fr021_invariant():
+    """The highest numbered invariant STATED in the FR-021 spec, which is what the discharge map has
+    to cover exactly — no fewer (an unchecked requirement) and no more (a requirement nobody made)."""
+    text = open('docs/specs/func-service-reliability.md', encoding='utf-8').read()
+    # Scoped to the two sections that STATE invariants, because the spec is full of other numbered
+    # lists and a bare max over the file would happily count one of those as an invariant.
+    total = 0
+    for start in ('## 19.', '### 16.8'):
+        i = text.find(start)
+        if i < 0:
+            continue
+        section = text[i:]
+        end = re.search(r'\n#{2,3} (?!19\.|16\.8)', section)
+        if end:
+            section = section[:end.start()]
+        numbers = [int(m) for m in re.findall(r'^\s{0,4}(\d{1,3})\.\s', section, re.M)]
+        if numbers:
+            total = max(total, max(numbers))
+    return total
+
+
 def check_discharge(src):
     """FR-021 states 91 acceptance invariants and 24 required scenarios; FR-022 states 16. Every one
     must have a row,
@@ -210,7 +231,11 @@ def check_discharge(src):
     a checkable claim instead of a memory of thirty iteration reports."""
     bad = []
     text = open(DISCHARGE_DOC, encoding='utf-8').read()
-    for heading, count, label in ((INV_HEADING, 91, 'invariant'), (MATRIX_HEADING, 24, 'scenario'),
+    # The FR-021 invariant count is READ from the spec, not written here. Hard-coding 91 meant a
+    # discharge row above that number was neither required nor checked, so twelve invariants existed
+    # only in the map — a claim nobody had made in the requirement it was being checked against.
+    fr021_count = highest_fr021_invariant()
+    for heading, count, label in ((INV_HEADING, fr021_count, 'invariant'), (MATRIX_HEADING, 24, 'scenario'),
                                   (FR022_HEADING, 16, 'FR-022 invariant'),
                                   (FR022_MATRIX_HEADING, 16, 'FR-022 scenario'),
                                   (FR023_HEADING, 16, 'FR-023 invariant'),

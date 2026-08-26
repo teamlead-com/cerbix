@@ -4160,8 +4160,10 @@ names the declaration that governed. None of it touched rows already written by 
 not, and the review was right that a future-write test is not evidence for a defect that has already
 written customer history.
 
-Four classes exist. Two are repairable from the row itself; two are not, and the difference is the
-decision.
+FIVE classes exist, not the four an earlier draft of this decision counted: three are repairable from
+the row itself and two are not, and that line is the decision. (The one the draft missed is the
+mirror of the first — `resolved` with no resolution time — which the migration has always repaired
+because the CHECK below is a biconditional and would otherwise refuse to install.)
 
 **Repaired.**
 
@@ -4171,6 +4173,10 @@ not cosmetic: the row occupies the partial unique indexes that permit ONE open i
 so the next outage cannot open one and the second failure is invisible in the timeline. `resolved_at`
 is the durable fact — only a resolve stamps it and nothing clears it — so the status is the field
 that lied, and it is corrected to match.
+
+*Resolved rows with no resolution time* — the mirror, reachable by older code. `updated_at` is the
+closest durable instant the row still carries and is never later than the resolve that set the
+status, so it is used rather than invented.
 
 *Stranded service incidents* — an open auto-incident whose health episode is closed (or never
 existed) and whose service is not firing now. Disowning used to end the alert and leave the incident

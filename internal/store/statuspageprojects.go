@@ -26,6 +26,19 @@ const statusPageProjectsSQL = `
 	  SELECT c.source_project FROM components c
 	   WHERE c.status_page_id = $1 AND c.source_project IS NOT NULL`
 
+// statusPageReportsProjectSQL is the SAME axis as a predicate over one page row, for the INVERSE
+// direction. It is here, beside the forward query, and not written out again in `subscribers.go`:
+// the two are one rule and the whole point of D-0180 is that they cannot drift. A `WHERE id IN
+// (forward query)` would express it in one string, but it would make the subscriber fan-out a
+// correlated scan of every page for every project; this keeps the text shared and the plan sane.
+//
+// `$1` is the PROJECT and `sp` is the page in the caller's FROM.
+const statusPageReportsProjectSQL = `(
+		    sp.project_id = $1
+		    OR EXISTS (SELECT 1 FROM components c
+		                WHERE c.status_page_id = sp.id AND c.source_project = $1)
+		)`
+
 // StatusPageProjectIDs is the FORWARD direction: which projects' incidents this page reports.
 // Sorted, so two identical pages issue identical SQL downstream.
 func (s *Store) StatusPageProjectIDs(ctx context.Context, pageID string) ([]string, error) {

@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 )
 
@@ -23,7 +28,7 @@ import (
 // instead would pass just as happily after somebody deleted the original.
 func TestTheRepairMigrationFixesWhatItCanAndLeavesWhatItCannot(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	db, done := probeDatabaseAt(t, st, ctx, "repair", 89)
+	db, notices, done := probeDatabaseAt(t, st, ctx, "repair", 89)
 	defer done()
 
 	var orgID, projID, svcID string
@@ -105,6 +110,54 @@ func TestTheRepairMigrationFixesWhatItCanAndLeavesWhatItCannot(t *testing.T) {
 		t.Fatalf("seed human: %v", err)
 	}
 
+	// (4) A member snapshot on an incident whose service later took a new revision — the population
+	// the migration BOUNDS and refuses to rewrite.
+	//
+	// Its own service, because `incidents_service_open_auto_idx` allows exactly one open auto-incident
+	// per service and the stranded row above already holds Checkout's — the same index whose blocking
+	// is the reason the resurrected class is repaired at all.
+	var billing, snapshotted string
+	if err := db.QueryRowContext(ctx,
+		`INSERT INTO services (project_id, slug, name) VALUES ($1,'billing','Billing') RETURNING id::text`,
+		projID).Scan(&billing); err != nil {
+		t.Fatalf("third service: %v", err)
+	}
+	// Firing, so the stranded-row repair does not close it and the two cases stay independent.
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO service_alert_state
+		  (service_id, project_id, observed_state, candidate_state, live_firing, config_generation,
+		   evaluated_at, lease_until)
+		VALUES ($1, $2, 'down', 'down', true, 1, now(), now() + interval '90 seconds')`,
+		billing, projID); err != nil {
+		t.Fatalf("billing state: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO incidents (project_id, service_id, title, status, impact, source, started_at)
+		VALUES ($1, $2, 'Billing — service down', 'investigating', 'major', 'auto',
+		        now() - interval '3 days')
+		RETURNING id::text`, projID, billing).Scan(&snapshotted); err != nil {
+		t.Fatalf("seed snapshotted incident: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO incident_member_snapshots (incident_id, project_id, members)
+		VALUES ($1, $2, '[{"monitor_name":"checkout-http"}]'::jsonb)`, snapshotted, projID); err != nil {
+		t.Fatalf("seed member snapshot: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO service_definition_revisions (service_id, project_id, revision, state, effective_at, created_by)
+		VALUES ($1, $2, 1, 'effective', now() - interval '1 day', 'test')`, billing, projID); err != nil {
+		t.Fatalf("seed later revision: %v", err)
+	}
+
+	// (5) An anchorless auto-incident: both the monitor and the service are gone.
+	var anchorless string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO incidents (project_id, title, status, impact, source)
+		VALUES ($1, 'about something that no longer exists', 'investigating', 'major', 'auto')
+		RETURNING id::text`, projID).Scan(&anchorless); err != nil {
+		t.Fatalf("seed anchorless: %v", err)
+	}
+
 	if err := goose.UpToContext(ctx, db, "migrations", 90); err != nil {
 		t.Fatalf("migrate to 90: %v", err)
 	}
@@ -142,14 +195,61 @@ func TestTheRepairMigrationFixesWhatItCanAndLeavesWhatItCannot(t *testing.T) {
 		t.Fatalf("the repair touched a HUMAN's incident (%q)", r.status)
 	}
 
-	// Each repaired row says what happened to it, and a second run adds no second note.
-	var notes int
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM incident_updates WHERE body LIKE '🔧 Repaired:%'`).Scan(&notes); err != nil {
-		t.Fatalf("count notes: %v", err)
-	}
+	// Each repaired row says what happened to it.
+	notes := notesFor(t, db)
 	if notes != 2 {
 		t.Fatalf("%d repair notes, want one for each of the two repaired rows", notes)
+	}
+
+	// The two REPORTED classes are left exactly as they were. This is the half the first version of
+	// this test did not have, and the reviewer proved it by replacing both reporting queries with
+	// `SELECT 0` and watching it stay green.
+	if r := read(snapshotted); r.status != "investigating" {
+		t.Fatalf("the snapshotted incident was modified (%q): its membership is not derivable from "+
+			"the stored data, and rewriting immutable history on a guess is the thing this decision "+
+			"refuses", r.status)
+	}
+	var members string
+	if err := db.QueryRowContext(ctx,
+		`SELECT members::text FROM incident_member_snapshots WHERE incident_id = $1`,
+		snapshotted).Scan(&members); err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if !strings.Contains(members, "checkout-http") {
+		t.Fatalf("the member snapshot was rewritten: %s", members)
+	}
+	if r := read(anchorless); r.status != "investigating" {
+		t.Fatalf("an anchorless auto-incident was resolved (%q): nothing identifies what it was "+
+			"about, so closing it attaches somebody else's conclusion to it", r.status)
+	}
+
+	// And both were REPORTED. A class that is silently skipped is indistinguishable from one nobody
+	// thought about.
+	joined := strings.Join(*notices, "\n")
+	for _, want := range []string{
+		"resurrected row(s) resolved",
+		"stranded service incident(s) resolved",
+		"member snapshot(s) COULD have been taken",
+		"anchorless auto-incident(s) remain open",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("the migration did not report %q — an operator upgrading past it learns nothing "+
+				"about the rows it declined to touch. Reported:\n%s", want, joined)
+		}
+	}
+
+	// RERUN. Down to 89 drops only the constraint; the repaired DATA stays, so coming back up runs
+	// the whole DO block over rows that are already correct. It must add no second note and change
+	// nothing — the `🔧 Repaired:` marker is the guard, and a marker nobody tests is a comment.
+	before := notesFor(t, db)
+	if err := goose.DownToContext(ctx, db, "migrations", 89); err != nil {
+		t.Fatalf("down to 89: %v", err)
+	}
+	if err := goose.UpToContext(ctx, db, "migrations", 90); err != nil {
+		t.Fatalf("re-migrate to 90: %v", err)
+	}
+	if after := notesFor(t, db); after != before {
+		t.Fatalf("a rerun produced %d repair notes, want the original %d", after, before)
 	}
 
 	// The invariant is the DATABASE's from here on, in both directions.
@@ -168,7 +268,7 @@ func TestTheRepairMigrationFixesWhatItCanAndLeavesWhatItCannot(t *testing.T) {
 // an OLD release produced and then run the real migration over it.
 func probeDatabaseAt(
 	t *testing.T, st *Store, ctx context.Context, label string, version int64,
-) (*sql.DB, func()) {
+) (*sql.DB, *[]string, func()) {
 	t.Helper()
 	dsn := os.Getenv("CERBIX_TEST_DATABASE_DSN")
 	u, err := url.Parse(dsn)
@@ -180,10 +280,22 @@ func probeDatabaseAt(
 		t.Fatalf("create probe database: %v", err)
 	}
 	u.Path = "/" + name
-	db, err := sql.Open("pgx", u.String())
+	// The migration REPORTS two classes it will not repair, and a report nobody can read is not a
+	// discharge. `OnNotice` is how those RAISE lines reach a test at all; `sql.Open("pgx", dsn)`
+	// throws them away, which is why the first version of this test could not tell whether the
+	// reporting queries ran — and indeed stayed green when the reviewer replaced both with SELECT 0.
+	cfg, err := pgx.ParseConfig(u.String())
 	if err != nil {
-		t.Fatalf("open probe: %v", err)
+		t.Fatalf("parse probe dsn: %v", err)
 	}
+	var noticesMu sync.Mutex
+	notices := &[]string{}
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		noticesMu.Lock()
+		defer noticesMu.Unlock()
+		*notices = append(*notices, n.Message)
+	}
+	db := stdlib.OpenDB(*cfg)
 	goose.SetBaseFS(migrationsFS)
 	if err := goose.SetDialect("postgres"); err != nil {
 		t.Fatalf("goose dialect: %v", err)
@@ -191,10 +303,21 @@ func probeDatabaseAt(
 	if err := goose.UpToContext(ctx, db, "migrations", version); err != nil {
 		t.Fatalf("migrate to %d: %v", version, err)
 	}
-	return db, func() {
+	return db, notices, func() {
 		_ = db.Close()
 		if _, err := st.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
 			t.Errorf("drop probe database: %v", err)
 		}
 	}
+}
+
+// notesFor counts the repair notes the migration writes, which is how a rerun is checked.
+func notesFor(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM incident_updates WHERE body LIKE '🔧 Repaired:%'`).Scan(&n); err != nil {
+		t.Fatalf("count repair notes: %v", err)
+	}
+	return n
 }

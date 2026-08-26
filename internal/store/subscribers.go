@@ -95,9 +95,7 @@ func (s *Store) ConfirmedSubscriberEmailsForProject(ctx context.Context, project
 		  FROM subscribers sub
 		  JOIN status_pages sp ON sp.id = sub.status_page_id
 		 WHERE sub.confirmed_at IS NOT NULL
-		   AND (sp.project_id = $1
-		        OR EXISTS (SELECT 1 FROM components c
-		                    WHERE c.status_page_id = sp.id AND c.source_project = $1))`, projectID)
+		   AND `+statusPageReportsProjectSQL, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: subscriber emails for project: %w", err)
 	}

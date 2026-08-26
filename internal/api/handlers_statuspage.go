@@ -513,18 +513,8 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	views := make([]componentView, 0, len(comps))
-	// The page's OWN project seeds the set (D-0180). Without it a project-scoped page whose
-	// components are all manual reported none of its project's incidents, while the feed for the
-	// same page reported them — the render and the mail disagreeing about what the page is about.
-	projSet := map[string]struct{}{}
-	if sp.ProjectID != "" {
-		projSet[sp.ProjectID] = struct{}{}
-	}
 	for _, c := range comps {
 		res := resolved[c.ID]
-		if res.Project != "" {
-			projSet[res.Project] = struct{}{}
-		}
 		view := componentView{
 			ID: c.ID, Name: c.Name, Group: c.GroupName, Description: c.Description,
 			Status: res.Status, Uptime90d: res.Uptime90d, Daily: res.Daily,
@@ -548,9 +538,15 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 	// maintenance — for ALL the page's projects in two statements and one, not per project. The
 	// per-project loop made an unauthenticated render O(projects), which is the same amplification
 	// the component projections had to remove ([318] P1-1).
-	projects := make([]string, 0, len(projSet))
-	for pid := range projSet {
-		projects = append(projects, pid)
+	// ONE owner for the page's project set (D-0180), the same call the feed and the subscriber
+	// inverse derive from. This used to be rebuilt here from the resolved components, which is how
+	// three surfaces came to disagree — and rebuilding it "the same way" is not a single owner: the
+	// review's mutation removing the own-project arm from this loop left every API test green,
+	// because nothing here was asking the owner anything.
+	projects, err := h.store.StatusPageProjectIDs(ctx, sp.ID)
+	if err != nil {
+		h.serverError(w, "status_page_projects", err)
+		return
 	}
 	sort.Strings(projects) // deterministic argument order, so two identical pages issue identical SQL
 	historyCutoff := now.Add(-win90.Duration)

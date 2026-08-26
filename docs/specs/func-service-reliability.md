@@ -2583,9 +2583,15 @@ LIVE coverage is ARMED  ⟺  owns_paging
                            (observed_state ∈ page_on  ∨  (observed_state = unknown ∧ page_on_unknown)
                             ∨  observed_state is healthy/excluded — nothing to replace yet)
                         ∧  the announcement for a pageable state is COMMITTED
-                           (live_firing ∧ emitted_state = observed_state; healthy/excluded need
-                            nothing — D-0176 withholds an onset nobody can receive, and coverage
-                            begins when the onset does, not when the route returns)
+                           (live_firing ∧ emitted_state = observed_state ∧ emitted_seq > 0;
+                            healthy/excluded need nothing — D-0176 withholds an onset nobody can
+                            receive, and coverage begins when the onset does, not when the route
+                            returns)
+                        ∧  that announcement was DELIVERED (delivered_seq ≥ emitted_seq, D-0179):
+                           an onset the worker attempted and resolved to ZERO recipients is
+                           terminal — no retry reaches a deleted channel — and the latch stays
+                           firing, so without this a restored route re-arms coverage for a page
+                           nobody received
                         ∧  a SUCCESSFUL live evaluation exists for the CURRENT
                            (alert_config_generation, effective definition revision)
                         ∧  that evaluation is FRESH (DB-clock now() < lease_until)
@@ -2595,6 +2601,8 @@ LIVE coverage is ARMED  ⟺  owns_paging
 BURN coverage is ARMED  ⟺  owns_paging
                         ∧  an enabled service burn target with ≥ 1 rule exists
                         ∧  the last verdict for that rule was QUOTABLE — FIRE or CLEAR, never HOLD
+                        ∧  a FIRE was ANNOUNCED and DELIVERED (firing ∧ emitted_seq > 0 ∧
+                           delivered_seq ≥ emitted_seq, D-0179); a CLEAR quotes by itself
                         ∧  that verdict is for the CURRENT (alert_config_generation, target
                            generation, canonical rule key)
                         ∧  it is FRESH (DB-clock now() < lease_until)
@@ -3135,6 +3143,43 @@ dispatch. Phase 5 uses the shape the reliability slices already use:
 91. freshness is ONE DB-clock predicate (`now() < lease_until`) written by successful evaluations and
     collapsed immediately by an error; the UI and the metrics read the server's answer and never
     re-derive it; a stalled evaluator marks the SCHEDULER not-ready (never the API) per §21.
+
+**Added after phase 5 closed** (iter-0161's correction arc), at the numbers `docs/traceability.md`
+already discharges them under. They are here because an invariant that lives only in a discharge map
+is not a requirement anybody agreed to — the map is where a claim is CHECKED, and the spec is where
+it is MADE.
+
+92. the dis-arming REASON is one vocabulary in two parts (§16.6b). CLASSIFICATION: every candidate
+    service is judged by ONE clause evaluation, so its badge and the reason delivery computes for it
+    are the same string. SELECTION: the counter carries no service label, so across several
+    candidates it reports the FURTHEST miss by the published rank — always one of their badge
+    reasons, never an arbitrary row, and not necessarily the badge on screen.
+93. `(incident.id, seq)` is unique per event and monotonic per incident on EVERY writer, the human
+    doors and the machine ones alike.
+94. the burn arm's diagnostic aggregates are scoped to the same targets the burn conjunction uses, so
+    a latch on a target that is not part of the answer cannot name the reason.
+95. the burn blindness reason is `burnRuleCoversSQL` taken apart: every fact the gate uses has its own
+    clause and its own name, `stale_lease` means an expired lease and nothing else, and a withheld
+    onset is diagnosed as the LIVE arm diagnoses its own (D-0178).
+96. the selection RANK published in §16.6b IS `coverageReasonRank`; the table is written in that order
+    and the two may not drift.
+97. coverage requires an announcement that REACHED somebody: `delivered_seq >= emitted_seq` on both
+    arms, credited only by a delivery that resolved ≥ 1 recipient, monotonic, sequence-guarded, and
+    never for a CLOSE (D-0179).
+98. the burn blindness diagnostics live INSIDE the coverage gate's branch, so the gate is the single
+    decider and each diagnostic is reachable only when it has refused.
+99. a status page's project set is ONE axis — `page.project_id` when project-scoped UNION every
+    non-NULL `components.source_project`, not filtered by `source` — and the subscriber fan-out is its
+    exact inverse (D-0180).
+100. a SERVICE ladder ends at its last step: the repeat runs on the monitor's renotify interval and a
+    service has none (FR-023 D8, corrected by D-0181).
+101. a search hit carries its tenant — every hit type switches org and project before navigating — and
+    a detail view follows the id in the route rather than the one it mounted with.
+102. durable damage predating the lifecycle fixes is REPAIRED where the correct value is derivable
+    from the row and REPORTED where it is not, and `(status = 'resolved') = (resolved_at IS NOT NULL)`
+    is a database CHECK (D-0182).
+103. the service lifecycle close stamps the incident, its timeline note and its outbox row with the
+    CALLER's post-lock instant, never the transaction's start.
 
 ### 16.9 What phase 5 does NOT do
 

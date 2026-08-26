@@ -1646,3 +1646,38 @@ func TestAnUnrecordedDeliveryFailsOpenRatherThanRetrying(t *testing.T) {
 		t.Fatalf("the event was not settled: %v", fs.delivered)
 	}
 }
+
+// A PARTIAL delivery is still an announcement people received.
+//
+// D-0179's contract is "at least one recipient", and the credit used to be gated on `err == nil` as
+// well — so three channels reached and a fourth timing out left the service covering nobody until a
+// retry came back clean, with its members paging redundantly the whole time. Safe, and louder than
+// the contract says. The event still fails and still retries; the credit is monotonic and
+// sequence-guarded, so the retry's second credit changes nothing.
+func TestAPartialDeliveryStillCountsAsAnAnnouncement(t *testing.T) {
+	b, err := json.Marshal(domain.ServiceAlert{
+		ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+		Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+		Seq: 7, ConfirmedOver: 2, Recipients: []string{"ch-1", "ch-2"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	fs := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health||": 7},
+		pending:  []domain.OutboxEvent{{ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b}},
+	}
+	resolved := 1
+	nf := &fakeNotify{resolved: &resolved, err: errors.New("one channel timed out")}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+	if len(fs.alertDelivered) != 1 {
+		t.Fatalf("%d delivery credits for an announcement ONE recipient received: the contract is at "+
+			"least one recipient, not a clean call, and until the credit lands the members page for "+
+			"themselves", len(fs.alertDelivered))
+	}
+	if len(fs.failed) != 1 {
+		t.Fatalf("the event was not retried (%v): a channel that timed out has not been told yet",
+			fs.failed)
+	}
+}

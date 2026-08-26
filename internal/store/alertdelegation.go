@@ -231,18 +231,34 @@ const livePageableStateSQL = `(
 		    )
 		)`
 
+// The announcement has to be OF THE STATE THE SERVICE IS IN, and it has to have a sequence.
+//
+// `emitted_state IS NOT NULL` was not that question, and the gap is a real suppression: a DEGRADED
+// announcement is delivered, the service then observes DOWN and is still collecting its confirm
+// streak, and for that whole window the stale DEGRADED counted as coverage — so a member monitor's
+// own DOWN was suppressed in favour of a service alert that says something else. The confirm streak
+// exists precisely so a service does not announce too early; treating the previous announcement as
+// cover for the new state hands that delay to the members as silence.
+//
+// `emitted_seq > 0` belongs here for the same reason: a state with no sequence was never announced,
+// and a row carrying `emitted_state` with a zero sequence is legacy or damage, not coverage.
 const liveOnsetCommittedSQL = `(
 		    st.observed_state IN ('healthy', 'excluded')
-		    OR (st.live_firing AND st.emitted_state IS NOT NULL)
+		    OR (st.live_firing
+		        AND st.emitted_state = st.observed_state
+		        AND st.emitted_seq > 0)
 		)`
 
 // liveOnsetDeliveredSQL is the same question one step further along (D-0179): the announcement did
 // not merely get enqueued, it reached somebody. An onset the worker attempted and resolved to zero
 // recipients is terminal — no retry fixes a deleted channel — and the latch stays firing, so without
 // this clause a restored route re-arms coverage for a page NOBODY received.
+//
+// No `emitted_seq = 0` escape: it used to be here and it was a hole, because a never-announced state
+// is not a delivered one. The clause above now refuses a zero sequence outright, so this one only
+// ever runs against a real announcement.
 const liveOnsetDeliveredSQL = `(
 		    st.observed_state IN ('healthy', 'excluded')
-		    OR st.emitted_seq = 0
 		    OR st.delivered_seq >= st.emitted_seq
 		)`
 

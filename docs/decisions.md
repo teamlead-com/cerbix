@@ -4118,3 +4118,36 @@ only manual components, and a Service-only org page — and asserts the forward 
 inverse for both. `TestADormantBindingKeepsThePageReportingItsProject` pins the no-`source`-filter
 rule. Dropping the own-project arm fails with `want its OWN project`; restoring the monitor JOIN in
 the inverse fails with `the mail about it went to nobody`.
+
+## D-0181 — a service ladder ends at its last step, and the spec said otherwise (2026-08-26)
+
+**Context.** FR-023's D8 declared "no renotify knob for services" — correct, and still the decision —
+and then justified it with a sentence that was not true: "the policy's own steps (including its
+repeat) are the repeat mechanism". They are not. The repeat branch is
+`p.RepeatLast && inc.renotifySeconds > 0`, and the service arm passes zero because a service has no
+such interval. `repeat_last` on a policy attached to a service does exactly nothing.
+
+Nothing was broken by this; a service ladder ending at its last step is the intended behaviour. Two
+things were wrong around it. The spec told a reader that a mechanism existed which does not, so
+anyone reasoning about coverage from the document reached the wrong conclusion. And the UI offered
+`repeat last step (renotify)` on a policy that may be attached to a service, with nothing saying the
+toggle is inert there — a policy shared by monitors and services behaves differently on each.
+
+**Decision.** The non-goal STANDS: no renotify interval for services, here or by the back door. What
+changes is that it is now said honestly in all three places. D8 carries a forward-only correction
+naming the false sentence rather than quietly deleting it. The escalation form states, beside the
+control, that repeat uses each monitor's renotify interval and that service incidents have none. And
+the behaviour is a TEST rather than a zero that happens to disable a branch —
+`TestAServiceLadderDoesNotRepeatItsLastStep` gives the frozen ladder `repeat_last = true`, finishes
+the ladder, moves the clock six hours, and requires no further step.
+
+Giving services a renotify cadence remains a separate requirement with its own owner. Inventing one
+here — a default, a fallback to some other interval — would be exactly the "random cadence" the
+review warned against.
+
+**A defect of my own, caught by the mutation.** The first version of that test set `repeat_last` on
+the LIVE policy, and an open incident climbs the ladder FROZEN when it opened (D-0175). The frozen
+`repeat_last` stayed false, so the test never reached the branch it names and the mutation that gives
+the service arm a non-zero interval left it green. It now writes the snapshot and ASSERTS the frozen
+value before proceeding, and the mutation fails with `a finished service ladder fired 1 more step(s)
+with repeat_last on`.

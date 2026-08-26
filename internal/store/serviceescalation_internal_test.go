@@ -792,3 +792,63 @@ func TestTheFirstPassAfterAnUpgradeDoesNotEmptyTheLadder(t *testing.T) {
 			"carried across an upgrade must not page for the hours it was open before it", len(steps))
 	}
 }
+
+// Spec D8's non-goal, made a test instead of a value that happens to disable a branch.
+//
+// The repeat runs on the MONITOR's `renotify_seconds`. A service has no such interval and gains
+// none, so the service arm passes zero and the repeat branch's `renotifySeconds > 0` never holds.
+// That is correct and it was ENTIRELY implicit: nothing failed if somebody gave the service arm a
+// non-zero default, and D8's own sentence claimed the policy's repeat WAS the repeat mechanism for
+// services, which it is not (corrected forward-only in this iteration).
+//
+// A policy shared by monitors and services therefore behaves differently on each, which is a thing
+// to state rather than to hide — the escalation form now says it beside the toggle.
+func TestAServiceLadderDoesNotRepeatItsLastStep(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f, _ := escalatingService(t, st, ctx)
+	setFiring(t, st, ctx, f.serviceID, true, true)
+
+	// The repeat is asked for on the FROZEN ladder, not on the live policy: an open incident climbs
+	// the snapshot taken when it opened (D-0175), so editing `escalation_policies` here would leave
+	// the incident's own `repeat_last` false and the test would pass without reaching the branch it
+	// names. It did, in its first version, and the mutation that should have killed it did not.
+	exec(t, st, ctx, `UPDATE escalation_policies SET repeat_last = true WHERE id = $1`, f.policyID)
+	exec(t, st, ctx, `UPDATE incident_escalation_snapshots SET repeat_last = true
+	                   WHERE incident_id = (SELECT id FROM incidents WHERE service_id = $1)`, f.serviceID)
+	var frozenRepeat bool
+	if err := st.pool.QueryRow(ctx, `
+		SELECT repeat_last FROM incident_escalation_snapshots
+		 WHERE incident_id = (SELECT id FROM incidents WHERE service_id = $1)`,
+		f.serviceID).Scan(&frozenRepeat); err != nil {
+		t.Fatalf("read frozen ladder: %v", err)
+	}
+	if !frozenRepeat {
+		t.Fatal("the frozen ladder does not ask for the repeat: this test would prove nothing")
+	}
+
+	n, err := st.AdvanceEscalations(ctx)
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if n.ServiceSteps != 1 {
+		t.Fatalf("first pass fired %d service steps, want the one step the ladder has", n.ServiceSteps)
+	}
+
+	// The whole ladder is done. Time passes — far more than any plausible renotify cadence — and the
+	// last step must NOT go out again.
+	exec(t, st, ctx, `UPDATE incidents SET last_escalated_at = now() - interval '6 hours'
+	                   WHERE service_id = $1`, f.serviceID)
+	n, err = st.AdvanceEscalations(ctx)
+	if err != nil {
+		t.Fatalf("second advance: %v", err)
+	}
+	if n.ServiceSteps != 0 {
+		t.Fatalf("a finished service ladder fired %d more step(s) with repeat_last on: a service has "+
+			"no renotify interval (spec D8), so the repeat has no cadence to run on and the ladder "+
+			"ends at its last step", n.ServiceSteps)
+	}
+	if got := len(stepPayloads(t, st, ctx)); got != 1 {
+		t.Fatalf("%d step events in total, want the single step: the repeat announced itself on a "+
+			"cadence nobody configured", got)
+	}
+}

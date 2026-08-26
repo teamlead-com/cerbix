@@ -353,6 +353,19 @@ const selectCls =
                 <input v-model="policyForm.repeat_last" type="checkbox" /> repeat last step (renotify)
               </label>
             </div>
+            <!--
+              The repeat runs on the MONITOR's renotify interval. A service has no such interval and
+              deliberately gains none (spec D8), so on a service incident the ladder runs to its last
+              step and stops. Saying so beside the control is the fix: the toggle used to look like it
+              applied to both, and a policy shared by monitors and services behaves differently on
+              each — which is a thing the operator has to be told, not a thing to hide.
+            -->
+            <div class="flex items-center gap-3">
+              <p class="ml-auto text-[11.5px] text-ink-3">
+                Repeat uses each monitor's renotify interval. Service incidents have none: their
+                ladder ends at the last step.
+              </p>
+            </div>
             <p v-if="policyError" class="text-[12.5px] text-down">{{ policyError }}</p>
             <div class="flex items-center gap-2">
               <button type="submit" :disabled="savingPolicy" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50">

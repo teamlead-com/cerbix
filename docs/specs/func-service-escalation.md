@@ -101,8 +101,15 @@ and never logs a fail-open it did not have.
 
 **D8 — no renotify knob for services in this requirement. DECIDED.**
 Monitors carry `renotify_seconds`; services do not, and adding one is a separate decision about a separate
-control surface. The policy's own steps (including its repeat) are the repeat mechanism. Stated as a non-goal
-rather than left as an omission a reader has to notice.
+control surface. Stated as a non-goal rather than left as an omission a reader has to notice.
+
+> **Corrected 2026-08-26 (D-0181).** This decision originally added "the policy's own steps (including its
+> repeat) are the repeat mechanism", and that sentence was false. The policy's repeat runs ON the monitor's
+> renotify interval — `RepeatLast && renotifySeconds > 0` — so with no interval a service ladder runs to its
+> LAST STEP AND STOPS, whatever `repeat_last` says. The non-goal is unchanged and correct; what was wrong was
+> the claim that something else covered it. A policy shared by monitors and services therefore behaves
+> differently on each, which the escalation form now says beside the toggle, and
+> `TestAServiceLadderDoesNotRepeatItsLastStep` holds it.
 
 ## 4. What must move WITH the implementation, not after it
 

@@ -193,11 +193,18 @@ So, when upgrading a deployment across 00088:
 3. `cerbix migrate` with the NEW binary.
 4. Start the new `scheduler`, then `api` (or `all`).
 
-Skipping the stop does not corrupt anything and loses no event. What it risks is exactly one thing:
-an incident's events delivered out of order to a webhook or a subscriber, once, by the worker that was
-mid-flight — the defect 00088 exists to end. If a deployment cannot take the pause, the honest
-expectation is that the ordering guarantee begins after the last old worker exits, not when the
-migration commits.
+Skipping the stop does not corrupt anything and loses no event. What it risks is one thing —
+an incident's events delivered out of order to a webhook or a subscriber, the defect 00088 exists to
+end — and the BOUND on it is worth stating plainly, because "once" would be wrong. Each old owner may
+already hold a claimed batch of up to 50 rows, and it works through that batch even after losing the
+claim-token CAS on a row (it has already sent; the log line is `outbox_cas_lost`). Several
+`all`/`api`/`scheduler` replicas may each hold one, and a single `incident_event` fans out to every
+webhook and every confirmed subscriber of the pages that surface it. So the honest bound is: one
+already-claimed batch per old outbox owner at the moment of the barrier, after which the class fencing
+stops those workers claiming any more.
+
+If a deployment cannot take the pause, the honest expectation is that the ordering guarantee begins
+after the last old owner exits, not when the migration commits.
 
 ### PostgreSQL 15 is a hard requirement (learned in production)
 

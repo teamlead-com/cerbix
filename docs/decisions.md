@@ -3913,9 +3913,11 @@ things were missing and both are now in:
   worker already has in flight, and the promotion only takes that worker's claim token away so it
   cannot settle the row afterwards. Upgrades crossing 00088 therefore stop the outbox owners
   (`all`/`api`/`scheduler`) before migrating — probers and agents keep running — and the runbook
-  carries the procedure. Skipping it loses no event and corrupts nothing; it risks exactly one
-  out-of-order delivery from the worker that was mid-call, which is the defect the migration exists to
-  end.
+  carries the procedure. Skipping it loses no event and corrupts nothing; it risks out-of-order
+  delivery — the defect the migration exists to end — bounded by one ALREADY-CLAIMED batch per old
+  outbox owner (up to 50 rows each, each fanning out to every hook and subscriber), because a worker
+  continues through its batch after losing the claim-token CAS. Replacing the token stops settlement
+  and release, not calls already in memory.
 - Rows written before any of this carry NO sequence, so every such row of one incident ties at zero.
   A tie is not a predecessor, which would have released a whole legacy backlog in one batch, so the
   claim orders on (sequence, created_at, id) — the only order those rows have.

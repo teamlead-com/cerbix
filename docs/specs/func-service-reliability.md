@@ -2976,13 +2976,41 @@ by anyone who can make a service, and per-tenant labels would let them grow the 
 | `cerbix_service_alert_emitted_total` | `signal`, `edge` (onset\|close) |
 | `cerbix_service_alert_active` (gauge) | `signal` |
 | `cerbix_service_alert_delegation_total` | `signal`, `state` (armed\|disarmed\|degraded) |
-| `cerbix_alert_delegation_fail_open_total` | `reason` (missing\|stale\|generation\|error\|unroutable\|ambiguous) |
+| `cerbix_alert_delegation_fail_open_total` | `reason` (the dis-arming vocabulary below, one fixed value per clause) |
 | `cerbix_alert_suppressed_total` | `topic`, `reason` |
 | `cerbix_service_alert_last_success_seconds` (gauge) | `signal` |
 | `cerbix_service_alert_lag_seconds` (gauge) | `signal` |
 | `cerbix_service_alert_backlog` (gauge) | `signal` |
 | `cerbix_service_alert_undeliverable_total` | `signal` |
 | `cerbix_service_alert_recipient_missing_total` | — |
+
+**The dis-arming vocabulary is normative and shared.** A member alert that pages because coverage
+could not be confirmed, and the badge on the service that would have covered it, MUST name the same
+clause. They are not two independent classifications of the same situation that happen to agree in
+testing: both are computed from ONE clause evaluation over the same row, so a screen reading
+`unroutable` while the counter reads something else about the same service at the same instant is not
+expressible. Each value is a different thing for an operator to go and fix, which is the whole reason
+the family carries a reason at all.
+
+| `reason` | What is unsatisfied | Ordinary fix |
+|---|---|---|
+| `no_owning_service` | No service in the project names this monitor as an SLI. Nothing could cover it; the monitor pages for itself. Delivery-side only — the badge is always asked about a service that exists. | None. This is the design, and it is the common value. |
+| `not_owned` | The service exists but does not declare `owns_paging`. | Turn ownership on, if it was meant to be on. |
+| `policy_pages_nothing` | `page_on = {}` and `page_on_unknown` off: the policy pages for no state at all. | Choose the states the service should page for. |
+| `state_not_pageable` | The policy pages for something, but not for the state the service is IN (`page_on = {down}` at DEGRADED). | Widen `page_on`, or accept that members page in this state. |
+| `onset_pending` | The state is pageable and the announcement is not committed yet — the window D-0176 opens when an onset is withheld for want of a recipient. | Fix the route. Coverage begins when the onset commits, not when the route returns. |
+| `never_evaluated` | No verdict exists yet for this service. | Wait one cadence. Absence of evidence is not coverage. |
+| `generation_changed` | The verdict is for a configuration that has been replaced. | Wait one cadence after the edit. |
+| `revision_changed` | The verdict was computed from a declaration that no longer governs. | Wait one cadence after the revision change. |
+| `evaluation_error` | The last evaluation failed and recorded why. | Read the recorded error; this one does not clear on its own. |
+| `stale_lease` | The last successful evaluation is too old to speak for now. | Look at the scheduler — this is the readiness symptom below. |
+| `no_enabled_target` | Burn only: no enabled burn target with rules. | Enable a target, or accept that burn delegates nothing. |
+| `rule_unevaluated` | Burn only: a declared rule has no verdict of its own yet. | Wait one cadence. |
+| `held` | Burn only: a rule's window could not be quoted, so the rule cannot fire (§16.4). | Look at the window's data availability. |
+| `unroutable` | Nothing this service could notify resolves right now: no participant channel that exists, is enabled and belongs to the project. | Fix or re-enable the channel. Until then members page for themselves, which is louder, not quieter. |
+
+A value may be added to this table only with a decision record. Removing or renaming one is a
+breaking change to both the metric and the UI, which renders these as translated text.
 
 **Readiness.** §21 already requires that wedged service work must not look ready. A live or burn
 evaluation whose lag exceeds `lease_multiplier × cadence` marks the SCHEDULER not-ready, because a

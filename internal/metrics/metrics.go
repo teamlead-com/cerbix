@@ -448,11 +448,18 @@ func (r *Registry) RecordAlertSuppressed(topic, reason string) {
 	r.alertSuppressed[topic+"|"+reason]++
 }
 
-// RecordDelegationFailOpen counts a delivery that PAGED because coverage could not be confirmed.
-// It is not an error counter: "no_active_owner" is the overwhelmingly common value and means the
-// system is behaving exactly as designed. What makes it worth collecting is the OTHER values —
-// stale, error, unroutable — which say members are paging for themselves because a replacement
-// went quiet.
+// RecordDelegationFailOpen counts a delivery that PAGED because coverage could not be confirmed, by
+// the CLAUSE that failed.
+//
+// It is not an error counter. `no_owning_service` is the overwhelmingly common value and means the
+// system is behaving exactly as designed: nothing claims this monitor, so it pages for itself. What
+// makes the family worth collecting is the other values — `stale_lease`, `evaluation_error`,
+// `unroutable`, `onset_pending` — which say a replacement EXISTS and went quiet, and each of them
+// names a different thing to go and fix.
+//
+// The vocabulary is the badge's, deliberately and by construction: both come from
+// `serviceCoverageClauses`, so a screen saying "unroutable" and a delivery counting something else
+// about the same service at the same instant is not expressible.
 // RecordServiceDelegation counts what delegation concluded for one signal: `armed` (a member's
 // alert was suppressed because a replacement is active), `disarmed` (no active replacement, so the
 // member paged for itself) or `degraded` (the lookup could not conclude, which also pages).

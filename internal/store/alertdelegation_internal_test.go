@@ -1050,3 +1050,89 @@ func TestAnAmbiguousBurnRowArmsNothing(t *testing.T) {
 		})
 	}
 }
+
+// §16.6b promises a bounded, diagnosable reason when coverage fails, and delivery used to answer
+// `no_active_owner` for every cause there is: not owned, never evaluated, stale, unroutable — one word
+// for all of them, while the badge on the same screen could name the exact clause. Two surfaces
+// disagreeing about why a monitor is still paging is a question an operator cannot even ask properly.
+func TestDeliveryReportsTheSameReasonTheBadgeShows(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	reasonOf := func(t *testing.T, sig DelegationSignal) string {
+		t.Helper()
+		v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, sig)
+		if err != nil {
+			t.Fatalf("active delegation: %v", err)
+		}
+		return v.FailOpenReason
+	}
+	badgeOf := func(t *testing.T) ServiceAlertingState {
+		t.Helper()
+		state, err := st.ServiceAlertingState(ctx, f.projectID, f.serviceID)
+		if err != nil {
+			t.Fatalf("alerting state: %v", err)
+		}
+		return state
+	}
+
+	for _, tc := range []struct {
+		name   string
+		breaks func(t *testing.T)
+		want   string
+	}{
+		{
+			name: "ownership withdrawn",
+			breaks: func(t *testing.T) {
+				exec(t, st, ctx, `UPDATE services SET owns_paging = false WHERE id = $1`, f.serviceID)
+			},
+			want: AlertReasonNotOwned,
+		},
+		{
+			name: "never evaluated",
+			breaks: func(t *testing.T) {
+				exec(t, st, ctx, `UPDATE services SET owns_paging = true WHERE id = $1`, f.serviceID)
+				exec(t, st, ctx, `DELETE FROM service_alert_state WHERE service_id = $1`, f.serviceID)
+			},
+			want: AlertReasonNeverEvaluated,
+		},
+		{
+			name: "nothing to notify",
+			breaks: func(t *testing.T) {
+				armLive(t, st, ctx, f)
+				exec(t, st, ctx, `UPDATE notification_channels SET enabled = false WHERE project_id = $1`, f.projectID)
+			},
+			want: AlertReasonUnroutable,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.breaks(t)
+			if got := reasonOf(t, DelegationLive); got != tc.want {
+				t.Fatalf("delivery reported %q, want %q — an operator asking 'why is this monitor "+
+					"still paging' gets this string", got, tc.want)
+			}
+			if badge := badgeOf(t); badge.Live.Reason != tc.want {
+				t.Fatalf("the badge says %q and delivery says %q for the same service at the same "+
+					"instant", badge.Live.Reason, tc.want)
+			}
+		})
+	}
+
+	// And a monitor no service claims at all is a different answer from a service that exists and is
+	// dis-armed: the two send an operator to different places.
+	other, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: f.projectID, Name: "unclaimed", Type: domain.MonitorHTTP,
+		Target: "https://unclaimed.example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("second monitor: %v", err)
+	}
+	v, err := st.ActiveDelegation(ctx, other.ID, f.projectID, DelegationLive)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonNoOwningService {
+		t.Fatalf("a monitor no service declares reported %q, want %q",
+			v.FailOpenReason, AlertReasonNoOwningService)
+	}
+}

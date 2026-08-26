@@ -70,22 +70,10 @@ func (v DelegationVerdict) Suppress() bool { return len(v.Owners) > 0 }
 func (s *Store) ActiveDelegation(
 	ctx context.Context, monitorID, projectID string, signal DelegationSignal,
 ) (DelegationVerdict, error) {
-	var rows interface {
-		Next() bool
-		Scan(...any) error
-		Close()
-		Err() error
-	}
-	var err error
-
-	switch signal {
-	case DelegationLive:
-		rows, err = s.pool.Query(ctx, activeLiveDelegationSQL, monitorID, projectID)
-	case DelegationBurn:
-		rows, err = s.pool.Query(ctx, activeBurnDelegationSQL, monitorID, projectID)
-	default:
+	if signal != DelegationLive && signal != DelegationBurn {
 		return DelegationVerdict{}, fmt.Errorf("store: unknown delegation signal %q", signal)
 	}
+	rows, err := s.pool.Query(ctx, candidateCoverageSQL, monitorID, projectID)
 	if err != nil {
 		// The caller treats an error as fail-open; returning it lets the caller name the reason and
 		// count it rather than guessing here.
@@ -94,21 +82,82 @@ func (s *Store) ActiveDelegation(
 	defer rows.Close()
 
 	var out DelegationVerdict
+	best := -1
 	for rows.Next() {
 		var o DelegationOwner
-		if err := rows.Scan(&o.ServiceID, &o.Slug, &o.Name); err != nil {
-			return DelegationVerdict{}, fmt.Errorf("store: scan delegation owner: %w", err)
+		var clauses serviceCoverageClauses
+		dest := append([]any{&o.ServiceID, &o.Slug, &o.Name}, clauses.scanInto()...)
+		if err := rows.Scan(dest...); err != nil {
+			return DelegationVerdict{}, fmt.Errorf("store: scan delegation candidate: %w", err)
 		}
-		out.Owners = append(out.Owners, o)
+		armed, reason := clauses.liveVerdict()
+		if signal == DelegationBurn {
+			armed, reason = clauses.burnVerdict()
+		}
+		if armed {
+			out.Owners = append(out.Owners, o)
+			continue
+		}
+		// The reason reported is the FURTHEST any candidate got. Two services may both fail to cover
+		// this monitor for different reasons, and "one of them is merely un-routable" is the more
+		// actionable of "not owned" and "unroutable" — it names a thing somebody can fix.
+		if rank := coverageReasonRank(reason); rank > best {
+			best, out.FailOpenReason = rank, reason
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return DelegationVerdict{}, fmt.Errorf("store: iterate delegation owners: %w", err)
+		return DelegationVerdict{}, fmt.Errorf("store: iterate delegation candidates: %w", err)
 	}
-	if len(out.Owners) == 0 {
-		out.FailOpenReason = "no_active_owner"
+	if len(out.Owners) > 0 {
+		out.FailOpenReason = ""
+		return out, nil
+	}
+	if out.FailOpenReason == "" {
+		// No candidate at all: no service in this project declares this monitor an SLI of its
+		// EFFECTIVE definition. Distinct from a service that exists and is dis-armed, and the two
+		// send an operator to different places.
+		out.FailOpenReason = AlertReasonNoOwningService
 	}
 	return out, nil
 }
+
+// coverageReasonRank orders the reasons by how far a candidate got through the conjunction, so the
+// verdict can report the nearest MISS across several candidates rather than an arbitrary one.
+func coverageReasonRank(reason string) int {
+	for i, r := range []string{
+		AlertReasonNoOwningService,
+		AlertReasonNotOwned,
+		AlertReasonNeverEvaluated,
+		AlertReasonNoEnabledTarget,
+		AlertReasonPolicyPagesNothing,
+		AlertReasonStateNotPageable,
+		AlertReasonRuleUnevaluated,
+		AlertReasonHeld,
+		AlertReasonGenerationChanged,
+		AlertReasonRevisionChanged,
+		AlertReasonEvaluationError,
+		AlertReasonStaleLease,
+		AlertReasonUnroutable,
+		AlertReasonOnsetPending,
+	} {
+		if r == reason {
+			return i
+		}
+	}
+	return 0
+}
+
+// candidateCoverageSQL is every service that could cover this monitor — one that names it as an SLI of
+// its EFFECTIVE definition — with each clause of both conjunctions as its own boolean. The filtering
+// used to happen in SQL, which answered "is anybody covering" and nothing else: every empty result
+// became `no_active_owner`, whatever had actually failed, while the badge could name the exact clause.
+// One query, one decision function, two surfaces.
+var candidateCoverageSQL = `
+	SELECT s.id, s.slug, s.name,` + serviceCoverageClausesSQL + `
+	  FROM services s
+	  LEFT JOIN service_alert_state st ON st.service_id = s.id AND st.project_id = s.project_id
+	 WHERE s.project_id = $2` + effectiveSLIClause + `
+	 ORDER BY s.slug`
 
 // The routable predicate, shared by both signals. Both halves are live reads: a channel disabled after
 // arming must dis-arm immediately, which a generation stamped on the service cannot see.

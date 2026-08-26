@@ -25,6 +25,10 @@ import (
 // Dis-arming reasons. FIXED and low-cardinality: §16.6b forbids unbounded label values on this
 // surface, and the UI renders these as text it must be able to translate.
 const (
+	// AlertReasonNoOwningService: no service in the project names this monitor as an SLI of its
+	// effective definition, so there is nothing that could cover it. Reported by the delivery-time
+	// lookup only — the badge is always asked about a service that exists.
+	AlertReasonNoOwningService = "no_owning_service"
 	// AlertReasonNotOwned: the service does not declare ownership at all.
 	AlertReasonNotOwned = "not_owned"
 	// AlertReasonPolicyPagesNothing: `page_on = {}` with `page_on_unknown` off — legal, and it means
@@ -86,8 +90,12 @@ type ServiceAlertingState struct {
 // Selecting the clauses instead of their AND is what makes a REASON possible without writing the
 // conjunction twice: `Armed` below is the conjunction of exactly these columns, and the columns are
 // the delegation lookup's own predicate text.
-var serviceAlertingStateSQL = `
-	SELECT s.owns_paging,
+// serviceCoverageClausesSQL is every clause of both conjunctions as its own boolean, in the order the
+// verdict functions below read them. It is shared TEXT rather than two copies because the badge and
+// the delivery-time lookup must answer the same question the same way: a badge that says ARMED while
+// delivery suppresses (or the reverse) is a bug an operator cannot even describe.
+const serviceCoverageClausesSQL = `
+	       s.owns_paging,
 	       (cardinality(s.page_on) > 0 OR s.page_on_unknown),
 	       COALESCE(` + livePageableStateSQL + `, false),
 	       COALESCE(` + liveOnsetCommittedSQL + `, false),
@@ -97,7 +105,6 @@ var serviceAlertingStateSQL = `
 	       COALESCE(st.revision_id IS NOT NULL AND st.revision_id = (` + effectiveRevisionSQL + `), false),
 	       COALESCE(st.last_error, ''),
 	       COALESCE(now() < st.lease_until, false),
-	       st.evaluated_at, st.lease_until,
 	       EXISTS (SELECT 1 FROM sla_targets t
 	                WHERE t.service_id = s.id AND t.burn_alert_enabled
 	                  AND t.burn_rules <> '[]'::jsonb),
@@ -112,14 +119,86 @@ var serviceAlertingStateSQL = `
 	                WHERE b.service_id = s.id AND b.project_id = s.project_id
 	                  AND (b.config_generation <> s.alert_config_generation
 	                       OR b.target_generation <> t.alert_generation)),
-	       (SELECT min(b.evaluated_at) FROM service_burn_alert_state b
-	         WHERE b.service_id = s.id AND b.project_id = s.project_id),
-	       (SELECT min(b.lease_until) FROM service_burn_alert_state b
-	         WHERE b.service_id = s.id AND b.project_id = s.project_id),
 	       COALESCE((SELECT string_agg(DISTINCT b.last_error, '; ')
 	                   FROM service_burn_alert_state b
 	                  WHERE b.service_id = s.id AND b.project_id = s.project_id
-	                    AND b.last_error IS NOT NULL), '')
+	                    AND b.last_error IS NOT NULL), '')`
+
+// serviceCoverageClauses is one service's answers, in the same order.
+type serviceCoverageClauses struct {
+	ownsPaging, policyPages, pageableState, onsetCommitted, routable bool
+	evaluated, genOK, revOK                                          bool
+	liveErr                                                          string
+	fresh                                                            bool
+	hasTarget, replacement, nothingBlind, allLatched                 bool
+	anyHold, anyGenMismatch                                          bool
+	burnErr                                                          string
+}
+
+// scanInto returns the destinations for `serviceCoverageClausesSQL`, in its column order.
+func (c *serviceCoverageClauses) scanInto() []any {
+	return []any{
+		&c.ownsPaging, &c.policyPages, &c.pageableState, &c.onsetCommitted, &c.routable,
+		&c.evaluated, &c.genOK, &c.revOK, &c.liveErr, &c.fresh,
+		&c.hasTarget, &c.replacement, &c.nothingBlind, &c.allLatched,
+		&c.anyHold, &c.anyGenMismatch, &c.burnErr,
+	}
+}
+
+// liveVerdict is §16.1's LIVE conjunction and its reason, in one place. The ORDER of the cases is the
+// conjunction's own, so the reason names the nearest cause rather than the most alarming one.
+func (c serviceCoverageClauses) liveVerdict() (bool, string) {
+	switch {
+	case !c.ownsPaging:
+		return false, AlertReasonNotOwned
+	case !c.evaluated:
+		return false, AlertReasonNeverEvaluated
+	case !c.policyPages:
+		return false, AlertReasonPolicyPagesNothing
+	case !c.pageableState:
+		return false, AlertReasonStateNotPageable
+	case !c.genOK:
+		return false, AlertReasonGenerationChanged
+	case !c.revOK:
+		return false, AlertReasonRevisionChanged
+	case c.liveErr != "":
+		return false, AlertReasonEvaluationError
+	case !c.fresh:
+		return false, AlertReasonStaleLease
+	case !c.routable:
+		return false, AlertReasonUnroutable
+	case !c.onsetCommitted:
+		return false, AlertReasonOnsetPending
+	default:
+		return true, ""
+	}
+}
+
+// burnVerdict is the same for the SEALED signal.
+func (c serviceCoverageClauses) burnVerdict() (bool, string) {
+	switch {
+	case !c.ownsPaging:
+		return false, AlertReasonNotOwned
+	case !c.hasTarget:
+		return false, AlertReasonNoEnabledTarget
+	case !c.allLatched:
+		return false, AlertReasonRuleUnevaluated
+	case !c.replacement || !c.nothingBlind:
+		return false, burnBlindReason(c.anyHold, c.anyGenMismatch, c.burnErr)
+	case !c.routable:
+		return false, AlertReasonUnroutable
+	default:
+		return true, ""
+	}
+}
+
+var serviceAlertingStateSQL = `
+	SELECT` + serviceCoverageClausesSQL + `,
+	       st.evaluated_at, st.lease_until,
+	       (SELECT min(b.evaluated_at) FROM service_burn_alert_state b
+	         WHERE b.service_id = s.id AND b.project_id = s.project_id),
+	       (SELECT min(b.lease_until) FROM service_burn_alert_state b
+	         WHERE b.service_id = s.id AND b.project_id = s.project_id)
 	  FROM services s
 	  LEFT JOIN service_alert_state st ON st.service_id = s.id AND st.project_id = s.project_id
 	 WHERE s.id = $1 AND s.project_id = $2`
@@ -132,78 +211,24 @@ func (s *Store) ServiceAlertingState(
 	ctx context.Context, projectID, serviceID string,
 ) (ServiceAlertingState, error) {
 	var out ServiceAlertingState
-	var (
-		ownsPaging, policyPages, pageableState, onsetCommitted, routable bool
-		evaluated, genOK, revOK, fresh                                   bool
-		liveErr                                                          string
-		hasTarget, replacement, nothingBlind, allLat                     bool
-		anyHold, anyGenMismatch                                          bool
-		burnErr                                                          string
-	)
-	err := s.pool.QueryRow(ctx, serviceAlertingStateSQL, serviceID, projectID).Scan(
-		&ownsPaging, &policyPages, &pageableState, &onsetCommitted, &routable,
-		&evaluated, &genOK, &revOK, &liveErr, &fresh,
-		&out.Live.EvaluatedAt, &out.Live.LeaseUntil,
-		&hasTarget, &replacement, &nothingBlind, &allLat, &anyHold, &anyGenMismatch,
-		&out.Burn.EvaluatedAt, &out.Burn.LeaseUntil, &burnErr)
+	var clauses serviceCoverageClauses
+	dest := append(clauses.scanInto(),
+		&out.Live.EvaluatedAt, &out.Live.LeaseUntil, &out.Burn.EvaluatedAt, &out.Burn.LeaseUntil)
+	err := s.pool.QueryRow(ctx, serviceAlertingStateSQL, serviceID, projectID).Scan(dest...)
 	if noRows(err) || isInvalidTextRepresentation(err) {
 		return ServiceAlertingState{}, ErrNotFound
 	}
 	if err != nil {
 		return ServiceAlertingState{}, fmt.Errorf("store: read alerting state: %w", err)
 	}
-	out.Live.LastError, out.Burn.LastError = liveErr, burnErr
+	out.Live.LastError, out.Burn.LastError = clauses.liveErr, clauses.burnErr
 
-	// The order is the conjunction's own, so the reason names the nearest cause rather than the
-	// most alarming one.
-	switch {
-	case !ownsPaging:
-		out.Live.Reason = AlertReasonNotOwned
-	case !evaluated:
-		// Before the state-dependent clauses: with no verdict at all there is no observed state for
-		// them to be about, and "never evaluated" is the nearer cause.
-		out.Live.Reason = AlertReasonNeverEvaluated
-	case !policyPages:
-		out.Live.Reason = AlertReasonPolicyPagesNothing
-	case !pageableState:
-		// The policy pages plenty — just not what is happening now.
-		out.Live.Reason = AlertReasonStateNotPageable
-	case !genOK:
-		out.Live.Reason = AlertReasonGenerationChanged
-	case !revOK:
-		out.Live.Reason = AlertReasonRevisionChanged
-	case liveErr != "":
-		out.Live.Reason = AlertReasonEvaluationError
-	case !fresh:
-		out.Live.Reason = AlertReasonStaleLease
-	case !routable:
-		// Checked BEFORE the pending onset: an onset that is pending BECAUSE nothing can receive it
-		// should read as unroutable, which names the thing an operator has to fix.
-		out.Live.Reason = AlertReasonUnroutable
-	case !onsetCommitted:
-		// The state is pageable and the announcement has not been committed yet — the window D-0176
-		// creates on purpose. Coverage begins when the onset does, not when the route returns.
-		out.Live.Reason = AlertReasonOnsetPending
-	default:
-		out.Live.Armed = true
-	}
+	// ONE decision for both surfaces. The badge used to carry its own copy of these two switches and
+	// the delivery lookup carried none at all, which is how `no_active_owner` became the only thing an
+	// operator was ever told at delivery time while the badge knew exactly which clause had failed.
+	out.Live.Armed, out.Live.Reason = clauses.liveVerdict()
+	out.Burn.Armed, out.Burn.Reason = clauses.burnVerdict()
 
-	switch {
-	case !ownsPaging:
-		out.Burn.Reason = AlertReasonNotOwned
-	case !hasTarget:
-		out.Burn.Reason = AlertReasonNoEnabledTarget
-	case !allLat:
-		// A declared rule with no verdict of its own. Checked before the blindness clause because
-		// "it has never run" explains more than "something is unquotable".
-		out.Burn.Reason = AlertReasonRuleUnevaluated
-	case !replacement || !nothingBlind:
-		out.Burn.Reason = burnBlindReason(anyHold, anyGenMismatch, burnErr)
-	case !routable:
-		out.Burn.Reason = AlertReasonUnroutable
-	default:
-		out.Burn.Armed = true
-	}
 	return out, nil
 }
 

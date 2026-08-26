@@ -3893,8 +3893,24 @@ silence, never a missing ending into one. A payload with no sequence (written be
 is treated as unknown and delivered. `ClaimDueOutbox` additionally sorts its batch by
 (`next_attempt_at`, `created_at`, `id`) before returning, which orders the in-batch half.
 
-**What this does NOT claim.** The gate makes a wrong ORDER unobservable by dropping the stale member
-of the pair; it does not serialize two workers. That is the same guarantee `service_alert` has, and
+**Amended the same day, because dropping the stale member is not the same as keeping order.** Two
+things were missing and both are now in:
+
+- the CLAIM refuses to hand out an event while an EARLIER event of the same incident is undelivered,
+  so one batch cannot carry both ends of a lifecycle and two workers cannot race them. A DEAD
+  predecessor blocks too: releasing past it would deliver a resolution whose opening was parked for an
+  operator, an ending to an announcement nobody received. The stream waits for the replay, and the
+  dead row is already the thing an operator looks at. Migration 00087 indexes the question;
+- `incident_event` became a FENCED topic. The ordering lives in the claim, so a pre-fence worker
+  running the old claim would take the rows and bypass it — fencing means such a worker never sees
+  them, because it does not list the topic. The cost is the fenced class's usual one: during a rolling
+  upgrade these events wait for a worker that can order them, which is a delay rather than a wrong
+  order. Rows enqueued BEFORE the upgrade stay in the legacy class with no sequence, and the delivery
+  gate reads an absent sequence as "unknown, deliver".
+
+**What this still does NOT claim.** The gate makes a wrong ORDER unobservable by dropping the stale
+member of the pair; the claim keeps the pair in order; neither serializes a worker against a route
+that vanished between enqueue and delivery, which is its own open question. That is the same guarantee `service_alert` has, and
 it is enough for the failure that motivated it — nobody is told an outage began after it ended.
 Verified both ways: removing the gate delivers the superseded opening, and letting it apply to
 resolutions drops an ending.

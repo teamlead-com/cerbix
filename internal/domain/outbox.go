@@ -78,7 +78,18 @@ func FencedTopic(topic string) bool {
 // introduced (the same protection the fence gives against pre-fence binaries,
 // carried forward automatically).
 func FencedTopics() []string {
-	return []string{TopicIncidentCorrelation, TopicServiceAlert}
+	// `incident_event` joined this set with D-0177's causal fence, and the reason is the rolling
+	// upgrade rather than the topic's age. The ordering guarantee lives in the CLAIM — a successor is
+	// not handed out while a predecessor of the same incident is undelivered — so a pre-fence worker
+	// running the old claim would take the rows and bypass it. Fencing them means such a worker never
+	// sees them: it does not list this topic, so its capable claim cannot match. The cost is the
+	// fenced class's usual one — during a rolling upgrade, incident events wait for a worker that can
+	// order them, which is a delay rather than a wrong order.
+	//
+	// Rows enqueued BEFORE the upgrade stay in the legacy 'pending' class and keep the old behaviour.
+	// They carry no sequence, and the delivery gate reads an absent sequence as "unknown, deliver" —
+	// the fence may never turn a missing number into a missing page.
+	return []string{TopicIncidentCorrelation, TopicServiceAlert, TopicIncidentEvent}
 }
 
 // IncidentCorrelation is the payload for a TopicIncidentCorrelation outbox

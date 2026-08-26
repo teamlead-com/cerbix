@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -57,8 +58,15 @@ func TestIncidentEnqueuesOutboxInTx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create incident: %v", err)
 	}
-	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "pending"); got != 1 {
-		t.Fatalf("after create: incident_event rows = %d, want 1", got)
+	// FENCED, not legacy-pending: D-0177's ordering lives in the claim, so a pre-fence worker running
+	// the old claim must not be able to see these rows at all. That is what the class buys, and it is
+	// worth asserting rather than assuming.
+	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "pending_fenced"); got != 1 {
+		t.Fatalf("after create: fenced incident_event rows = %d, want 1", got)
+	}
+	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "pending"); got != 0 {
+		t.Fatalf("%d incident_event rows are in the LEGACY class, where an old worker would claim "+
+			"them and bypass the ordering the fence exists for", got)
 	}
 
 	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
@@ -66,8 +74,8 @@ func TestIncidentEnqueuesOutboxInTx(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("add update: %v", err)
 	}
-	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "pending"); got != 2 {
-		t.Fatalf("after resolve: incident_event rows = %d, want 2", got)
+	if got := st.countOutbox(ctx, t, domain.TopicIncidentEvent, "pending_fenced"); got != 2 {
+		t.Fatalf("after resolve: fenced incident_event rows = %d, want 2", got)
 	}
 }
 
@@ -536,5 +544,126 @@ func TestAWaitingAcknowledgementStampsAfterItsWait(t *testing.T) {
 	if ackAt.Before(released) || updatedAt.Before(released) {
 		t.Fatalf("acknowledged_at %s / updated_at %s predate the lock release at %s: the incident's "+
 			"own modification time walked backwards", ackAt, updatedAt, released)
+	}
+}
+
+// D-0177's causal half, at the CLAIM rather than at delivery. Dropping a superseded onset keeps a
+// subscriber from being told an outage began after it ended; it does not keep the two events in
+// order. This does.
+func TestAnIncidentsEventsAreClaimedInOrder(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "author",
+	}); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// Both ends of the lifecycle are queued. ONE may be claimed.
+	claimed, err := st.ClaimDueOutbox(ctx, 50)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var lifecycle []domain.OutboxEvent
+	for _, e := range claimed {
+		if e.Topic == domain.TopicIncidentEvent {
+			lifecycle = append(lifecycle, e)
+		}
+	}
+	if len(lifecycle) != 1 {
+		t.Fatalf("%d lifecycle events claimed at once: one batch carrying both ends can deliver them "+
+			"either way round, and two workers can race them", len(lifecycle))
+	}
+	var first domain.IncidentEvent
+	if err := json.Unmarshal(lifecycle[0].Payload, &first); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if first.Type != domain.EventIncidentOpened {
+		t.Fatalf("the claim released %q first, want the opening", first.Type)
+	}
+
+	// The successor is still blocked while its predecessor is merely claimed, not delivered.
+	again, err := st.ClaimDueOutbox(ctx, 50)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	for _, e := range again {
+		if e.Topic == domain.TopicIncidentEvent {
+			t.Fatal("the resolution was released while its opening was still in flight")
+		}
+	}
+
+	// Delivered, and the resolution follows.
+	if _, err := st.MarkOutboxDelivered(ctx, lifecycle[0].ID, lifecycle[0].ClaimToken); err != nil {
+		t.Fatalf("mark delivered: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE outbox_events SET next_attempt_at = now() - interval '1 minute'
+		  WHERE topic = $1 AND status <> 'delivered'`, domain.TopicIncidentEvent); err != nil {
+		t.Fatalf("make due: %v", err)
+	}
+	third, err := st.ClaimDueOutbox(ctx, 50)
+	if err != nil {
+		t.Fatalf("third claim: %v", err)
+	}
+	var resolved bool
+	for _, e := range third {
+		if e.Topic != domain.TopicIncidentEvent {
+			continue
+		}
+		var ev domain.IncidentEvent
+		if err := json.Unmarshal(e.Payload, &ev); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		resolved = ev.Type == domain.EventIncidentResolved
+	}
+	if !resolved {
+		t.Fatal("the resolution never became claimable after its opening was delivered")
+	}
+}
+
+// A DEAD predecessor blocks its stream rather than releasing it. The alternative is delivering a
+// resolution whose opening was parked for an operator: an ending to an announcement nobody received.
+func TestADeadPredecessorHoldsTheIncidentStream(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "author",
+	}); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	// The opening is parked as dead, which is the state an operator is meant to see and replay.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE outbox_events SET status = 'dead'
+		 WHERE topic = $1 AND (payload->>'event') = $2`,
+		domain.TopicIncidentEvent, domain.EventIncidentOpened); err != nil {
+		t.Fatalf("park the opening: %v", err)
+	}
+
+	claimed, err := st.ClaimDueOutbox(ctx, 50)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	for _, e := range claimed {
+		if e.Topic == domain.TopicIncidentEvent {
+			t.Fatal("the resolution was released past a DEAD opening: an ending to an announcement " +
+				"nobody received")
+		}
 	}
 }

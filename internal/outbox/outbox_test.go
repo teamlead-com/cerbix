@@ -886,6 +886,10 @@ func TestFencedTopicsAreDispatchable(t *testing.T) {
 		domain.TopicServiceAlert: []byte(
 			`{"service_id":"s1","service_name":"Checkout","signal":"health","firing":false,` +
 				`"close_reason":"recovered","seq":1,"recipients":["ch-1"]}`),
+		// A RESOLUTION, for the same reason the service alert above is a close: the ordering gate
+		// never drops one, so this exercises the switch rather than the gate.
+		domain.TopicIncidentEvent: []byte(
+			`{"event":"incident.resolved","incident":{"id":"inc-1","project_id":"p1"},"seq":2}`),
 	}
 	for _, topic := range domain.FencedTopics() {
 		payload, ok := payloads[topic]

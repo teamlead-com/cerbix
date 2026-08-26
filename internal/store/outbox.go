@@ -82,10 +82,28 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		       claim_token = gen_random_uuid(),
 		       updated_at = now()
 		 WHERE id IN (
-		     SELECT id FROM outbox_events
-		      WHERE (status = 'pending' OR (status = 'pending_fenced' AND topic = ANY($2)))
-		        AND next_attempt_at <= now()
-		      ORDER BY next_attempt_at
+		     SELECT o.id FROM outbox_events o
+		      WHERE (o.status = 'pending' OR (o.status = 'pending_fenced' AND o.topic = ANY($2)))
+		        AND o.next_attempt_at <= now()
+		        -- D-0177's CAUSAL half. Dropping a superseded onset at delivery keeps a subscriber
+		        -- from being told an outage began after it ended; it does not keep the two events in
+		        -- order. This does: a successor is not handed out while an EARLIER event of the same
+		        -- incident is undelivered, so one batch cannot carry both ends of a lifecycle and two
+		        -- workers cannot race them.
+		        --
+		        -- A DEAD predecessor blocks too, deliberately. The alternative is delivering a
+		        -- resolution whose opening was parked for an operator — an ending to an announcement
+		        -- nobody received. The stream waits for the replay, and the dead row is the thing an
+		        -- operator already looks at.
+		        AND NOT EXISTS (
+		            SELECT 1 FROM outbox_events p
+		             WHERE p.topic = 'incident_event' AND o.topic = 'incident_event'
+		               AND p.status <> 'delivered'
+		               AND p.id <> o.id
+		               AND p.payload -> 'incident' ->> 'id' = o.payload -> 'incident' ->> 'id'
+		               AND COALESCE((p.payload ->> 'seq')::bigint, 0)
+		                   < COALESCE((o.payload ->> 'seq')::bigint, 0))
+		      ORDER BY o.next_attempt_at
 		      FOR UPDATE SKIP LOCKED
 		      LIMIT $1)
 		 RETURNING id, topic, payload, attempts, claim_token, next_attempt_at, created_at`,

@@ -230,7 +230,7 @@ func (s *Store) evaluateServiceAlertsOn(
 		// whole of it. Two of the others can be false here and were never checked:
 		//
 		//   * ROUTABILITY. With no enabled channel and no populated schedule the announcement reaches
-		//     nobody, `activeLiveDelegationSQL` says DIS-ARMED through its routable clause, and the
+		//     nobody, the arming conjunction says DIS-ARMED through its routable clause, and the
 		//     members are correctly paging for themselves. Opening an incident on top of that is the
 		//     thing the FR-022 test comment calls worse than opening none;
 		//   * a GOVERNING DECLARATION. Before the first revision takes effect there is nothing the
@@ -573,7 +573,7 @@ func resolveServiceRecipientsTx(
 			// array of ids that nothing prunes: deleting a notification channel removes its row and
 			// leaves the id in every schedule that named it, and disabling one changes no JSON at
 			// all. Returning that id unchecked is how a service came to hold a route that cannot
-			// receive anything — while `routableClause` armed on the same non-empty array, so the
+			// receive anything — while the routable clause armed on the same non-empty array, so the
 			// member's own alert was suppressed at the same time. Both paths silent, which is the
 			// one outcome §16.1 exists to prevent.
 			//

@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
@@ -145,6 +147,7 @@ func coverageReasonRank(reason string) int {
 		AlertReasonStaleLease,
 		AlertReasonUnroutable,
 		AlertReasonOnsetPending,
+		AlertReasonOnsetUndelivered,
 		AlertReasonLatchInconsistent,
 	} {
 		if r == reason {
@@ -190,13 +193,6 @@ const routablePredicate = `(
 		                WHERE nc.project_id = s.project_id AND nc.enabled)
 		)`
 
-// routableClause is that predicate as a WHERE conjunct. Both spellings exist so the badge read
-// (`ServiceAlertingState`) and this lookup share the PREDICATE TEXT itself rather than two copies of
-// it: a badge that decided "routable" its own way is exactly how a UI comes to say ARMED while
-// delivery says otherwise.
-const routableClause = `
-		AND ` + routablePredicate
-
 // §16.1's live policy clause, as TWO questions, because they fail for different reasons and an
 // operator needs the difference.
 //
@@ -240,6 +236,16 @@ const liveOnsetCommittedSQL = `(
 		    OR (st.live_firing AND st.emitted_state IS NOT NULL)
 		)`
 
+// liveOnsetDeliveredSQL is the same question one step further along (D-0179): the announcement did
+// not merely get enqueued, it reached somebody. An onset the worker attempted and resolved to zero
+// recipients is terminal — no retry fixes a deleted channel — and the latch stays firing, so without
+// this clause a restored route re-arms coverage for a page NOBODY received.
+const liveOnsetDeliveredSQL = `(
+		    st.observed_state IN ('healthy', 'excluded')
+		    OR st.emitted_seq = 0
+		    OR st.delivered_seq >= st.emitted_seq
+		)`
+
 // THE definition of "the revision that governs right now", written once and shared by every arming
 // clause. Two spellings of this question is how a membership check and a revision stamp come to
 // disagree about which declaration is in force, so there is only one. The ordering matches the epoch
@@ -262,33 +268,14 @@ const effectiveSLIClause = `
 		       AND m.monitor_id = $1 AND m.role = 'sli'
 		)`
 
-// The revision half of the LIVE arming conjunction (§16.1): the successful evaluation must be OF the
+// The revision half of the LIVE arming conjunction (§16.1), as a clause of `serviceCoverageClauses`:
+// the successful evaluation must be OF the
 // declaration that governs now, not merely fresh under the current config generation. Membership
 // alone is not that check — it asks whether the monitor is an SLI of the current revision, while this
 // asks whether the SERVICE'S VERDICT was computed from it. Without it a service still measuring the
 // PREVIOUS definition suppresses a member of the NEW one it has never looked at, which is a page
 // nobody sends. `revision_id IS NULL` (a pre-stamp row, or an evaluation that found no governing
 // declaration) dis-arms, because absence of evidence is not coverage.
-const evaluatedCurrentRevisionClause = `
-		AND st.revision_id IS NOT NULL
-		AND st.revision_id = (` + effectiveRevisionSQL + `)`
-
-// LIVE coverage: a policy that can page something, a fresh successful evaluation of the CURRENT
-// generation and effective revision, no evaluation error, and a route.
-var activeLiveDelegationSQL = `
-	SELECT s.id, s.slug, s.name
-	  FROM services s
-	  JOIN service_alert_state st ON st.service_id = s.id AND st.project_id = s.project_id
-	 WHERE s.project_id = $2
-	   AND s.owns_paging
-	   AND ` + livePageableStateSQL + `
-	   AND ` + liveOnsetCommittedSQL + `
-	   AND st.config_generation = s.alert_config_generation
-	   AND st.last_error IS NULL
-	   AND now() < st.lease_until` +
-	evaluatedCurrentRevisionClause + effectiveSLIClause + routableClause + `
-	 ORDER BY s.slug`
-
 // The predicate ONE burn rule's latch must satisfy to be a replacement: quotable (a HOLD is a
 // successful evaluation that cannot fire), for the current target and config generations, error-free
 // and fresh. Written once because it is asked twice below, in opposite directions.
@@ -303,7 +290,8 @@ var activeLiveDelegationSQL = `
 // anything. The member's own burn alert would fall silent for an onset that had never been sent.
 const burnRuleCoversSQL = `
 		           ((bs.last_verdict = 'clear' AND NOT bs.firing)
-		            OR (bs.last_verdict = 'fire' AND bs.firing AND bs.emitted_seq > 0))
+		            OR (bs.last_verdict = 'fire' AND bs.firing AND bs.emitted_seq > 0
+		                AND bs.delivered_seq >= bs.emitted_seq))
 		       AND bs.config_generation = s.alert_config_generation
 		       AND bs.target_generation = t.alert_generation
 		       AND bs.last_error IS NULL
@@ -359,17 +347,6 @@ const burnEveryRuleLatchedSQL = `NOT EXISTS (
 	                 FROM service_burn_alert_state bs
 	                WHERE bs.service_id = s.id AND bs.project_id = s.project_id
 	                  AND bs.sla_target_id = t.id) <> jsonb_array_length(t.burn_rules))`
-
-var activeBurnDelegationSQL = `
-	SELECT s.id, s.slug, s.name
-	  FROM services s
-	 WHERE s.project_id = $2
-	   AND s.owns_paging
-	   AND ` + burnReplacementExistsSQL + `
-	   AND ` + burnNothingBlindSQL + `
-	   AND ` + burnEveryRuleLatchedSQL +
-	effectiveSLIClause + routableClause + `
-	 ORDER BY s.slug`
 
 // RecordSuppression writes the visibility half of §16.1 and annotates the monitor's open incident, in
 // ONE scoped operation — the same operation that resolved the owners, so a suppression cannot be
@@ -489,6 +466,51 @@ func (s *Store) ServiceAlertSequence(ctx context.Context, a domain.ServiceAlert)
 		return 0, fmt.Errorf("store: service alert sequence: %w", err)
 	}
 	return seq, nil
+}
+
+// MarkServiceAlertDelivered records that this announcement reached at least ONE recipient, which is
+// what §16.1 now means by a committed onset (D-0179).
+//
+// It is the delivery side of `ServiceAlertSequence` and takes the whole payload for the same reason:
+// a burn latch's identity is (service, project, target, rule), and a call missing the target would
+// credit one target's delivery to the other's onset. Advancing is MONOTONIC and guarded by the
+// sequence, so it is idempotent under the retries at-least-once delivery guarantees, and a late
+// retry of a superseded onset cannot mark the current one delivered.
+//
+// A CLOSE never comes through here. Coverage is about an announcement that is live; an ending has no
+// coverage to confer, and crediting it would arm a service whose alert is over.
+func (s *Store) MarkServiceAlertDelivered(ctx context.Context, a domain.ServiceAlert) error {
+	if !a.Firing {
+		return nil
+	}
+	var tag pgconn.CommandTag
+	var err error
+	if a.Signal == domain.ServiceSignalBurn {
+		if a.SLATargetID == "" || a.RuleKey == "" {
+			return fmt.Errorf(
+				"store: mark burn alert delivered: payload carries no target/rule identity (service %s)",
+				a.ServiceID)
+		}
+		tag, err = s.pool.Exec(ctx, `
+			UPDATE service_burn_alert_state SET delivered_seq = $5
+			 WHERE service_id = $1 AND project_id = $2 AND sla_target_id = $3 AND rule_key = $4
+			   AND emitted_seq = $5 AND delivered_seq < $5`,
+			a.ServiceID, a.ProjectID, a.SLATargetID, a.RuleKey, a.Seq)
+	} else {
+		tag, err = s.pool.Exec(ctx, `
+			UPDATE service_alert_state SET delivered_seq = $3
+			 WHERE service_id = $1 AND project_id = $2
+			   AND emitted_seq = $3 AND delivered_seq < $3`,
+			a.ServiceID, a.ProjectID, a.Seq)
+	}
+	if err != nil {
+		return fmt.Errorf("store: mark service alert delivered: %w", err)
+	}
+	// No row is not an error and not a surprise: the latch may have moved on, been superseded, or
+	// gone with its service. The guard is `emitted_seq = $seq`, so a miss means this delivery no
+	// longer describes the current announcement, and crediting it would be the lie.
+	_ = tag
+	return nil
 }
 
 // MonitorDelegation is what BOTH signals conclude for one monitor, which is what a monitor's own

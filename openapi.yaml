@@ -3594,7 +3594,7 @@ components:
           enum: [not_owned, policy_pages_nothing, state_not_pageable, never_evaluated,
                  generation_changed, revision_changed, evaluation_error, stale_lease,
                  no_enabled_target, held, rule_unevaluated, unroutable, onset_pending,
-                 latch_inconsistent]
+                 onset_undelivered, latch_inconsistent]
         evaluated_at:
           type: string
           format: date-time

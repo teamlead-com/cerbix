@@ -46,6 +46,7 @@ type Store interface {
 	// monitor — armed, quotable, routable, generation-matched and fresh. An error here must page.
 	ActiveDelegation(ctx context.Context, monitorID, projectID string, signal store.DelegationSignal) (store.DelegationVerdict, error)
 	ServiceAlertSequence(ctx context.Context, a domain.ServiceAlert) (int64, error)
+	MarkServiceAlertDelivered(ctx context.Context, a domain.ServiceAlert) error
 	RecordSuppression(ctx context.Context, eventID, monitorID, projectID, topic string, owners []store.DelegationOwner) error
 }
 
@@ -553,9 +554,33 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 				"signal", string(a.Signal), "missing", missing, "requested", res.Requested)
 		}
 		if err == nil && res.Resolved == 0 {
+			// Enqueued, attempted, and heard by nobody. Terminal on purpose — no retry reaches a
+			// channel that is gone — but it must NOT look like an announcement from here on, or the
+			// service would go on covering members for an onset that reached no one (D-0179).
 			w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
+			return nil
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		// Somebody was told. THIS is what arms coverage: §16.1's committed onset is now a DELIVERED
+		// one, and until this lands the members keep paging for themselves.
+		//
+		// A failure here does not fail the delivery — the page has already gone out, and returning an
+		// error would send it again. It leaves coverage dis-armed instead, which is the direction
+		// every other ambiguity in the conjunction takes.
+		//
+		// A CLOSE never counts. Coverage is about an announcement that is LIVE, and crediting an
+		// ending would arm a service whose alert is over. The store refuses one too — a safety
+		// property with one guard is a safety property one refactor from being gone.
+		if !a.Firing {
+			return nil
+		}
+		if derr := w.store.MarkServiceAlertDelivered(ctx, a); derr != nil {
+			w.logger.Warn("service_alert_delivery_unrecorded", "service_id", a.ServiceID,
+				"signal", string(a.Signal), "seq", a.Seq, "error", derr.Error())
+		}
+		return nil
 
 	case domain.TopicSLAReport:
 		var rep domain.SLAReport

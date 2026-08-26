@@ -4011,3 +4011,73 @@ really is `fire`/not-firing/`seq = 0`/FRESH before asking, then requires `unrout
 `onset_pending`; removing the two new clause cases fails it with `latch_inconsistent`.
 `TestADisabledTargetsLatchDoesNotNameTheReason` was rewritten to expire a lease for real — its first
 version wrote an unannounced FIRE and asserted `stale_lease`, which codified this very defect.
+
+## D-0179 — coverage means somebody was TOLD, not that an announcement was enqueued (2026-08-26)
+
+**Context.** D-0176 closed the case where the evaluator finds no route AT EVALUATION: the onset is
+withheld, nothing latches, and the next pass announces it as soon as somebody can be told. The review
+kept pointing out that this is not the whole class, and it was right. The window between the ENQUEUE
+and the DELIVERY is a second one, and it produced the same swallow:
+
+1. the evaluator resolves a route, enqueues the onset and latches firing;
+2. the channel is disabled or deleted before the worker gets to it;
+3. the worker resolves ZERO recipients, counts it, and terminally SUCCEEDS — correctly, because no
+   retry reaches a channel that is gone and a dead letter for it helps nobody;
+4. the latch still says firing, so the evaluator sees no edge and announces nothing further;
+5. the route comes back, and the arming conjunction — which asked only whether the onset had been
+   COMMITTED — armed coverage and silenced the member monitors for a page nobody ever received.
+
+The same chain runs without any race whenever the on-call participant changes between the onset and
+the restoration: §16.4a deliberately keeps the ORIGINAL recipients for the close, so the current
+recipient never heard the onset either.
+
+**Decision. `delivered_seq`, and arming requires it.** Both latch tables carry a delivered sequence
+(migration 00089), advanced by the outbox worker only when a delivery resolved at least one recipient.
+The arming conjunction's committed-onset clause becomes `delivered_seq >= emitted_seq`. Until an
+announcement is received, members keep paging for themselves — noisier, never silent, which is the
+direction §16.1 takes at every other ambiguity.
+
+The credit is monotonic, guarded by `emitted_seq = $seq`, and therefore idempotent under the retries
+at-least-once delivery guarantees will happen; a retry of a superseded onset cannot credit the current
+one. A CLOSE is never credited — coverage is about a LIVE announcement, and crediting an ending would
+arm a service whose alert is over. Both the worker and the store refuse it, because a safety property
+with one guard is one refactor from having none.
+
+**What was NOT taken.** The review offered a second option: re-edge on zero resolved, so a restored
+route gets a fresh onset with a new sequence. It is the better product behaviour and it is a bigger
+change — a new edge needs an episode identity decision, since the current episode is already open and
+its uniqueness index says one per service. Not arming is the safe half and it is complete on its own:
+nobody is silenced. The re-edge is recorded as available, not done.
+
+**The upgrade is conservative in the other direction, deliberately.** Existing rows carry no delivery
+evidence, so a truthful default of zero would declare every armed service undelivered at once and
+every member monitor of every covered service would start paging in the same minute. An upgrade that
+pages an installation is not a safety improvement. Migration 00089 seeds `delivered_seq = emitted_seq`
+for existing rows: they keep the coverage they had, and the new rule governs from the first
+announcement after the upgrade. The window is one already-emitted onset per latch and it closes at
+that latch's next edge. This is the same class of legacy exception as D-0175, and it is named rather
+than described as the same rule.
+
+**One value is added to §16.6b: `onset_undelivered`** — distinct from `onset_pending`, which is an
+announcement not yet made. The two have different fixes: wait, versus go and repair a channel.
+
+**A defect of my own, found while proving this.** The mutation that removed the delivered term from
+`burnRuleCoversSQL` left the tests green, because the burn classifier had been given its own
+`burnOnsetUndelivered` case sitting BESIDE the gate rather than inside it. That is two implementations
+of one rule — exactly what D-0177's §34 work removed from between the badge and delivery, reintroduced
+one section later. The blindness diagnostics are now all inside the gate's branch, so each is
+reachable only when the gate has refused and every one of them is mutation-testable through it.
+
+**And two queries were dead.** `activeLiveDelegationSQL` and `activeBurnDelegationSQL` stopped running
+when `ActiveDelegation` moved to `candidateCoverageSQL`, and nothing said so: Go does not complain
+about an unused package-level var, and three comments in other files still pointed maintainers at them
+as the place where coverage is decided. Deleted, with their orphaned clauses, and the comments now
+name the conjunction itself.
+
+**Verified:** `TestCoverageNeedsAnAnnouncementSomebodyReceived` and its burn twin walk the whole chain
+— delivered onset arms, lost delivery dis-arms with `onset_undelivered`, a restored route alone does
+NOT re-arm, a fresh delivered announcement does. `TestMarkServiceAlertDeliveredIsGuardedAndIdempotent`
+covers the superseded retry, the duplicate, the refused close and the unidentified burn payload.
+`TestAnAnnouncementNobodyReceivedIsNotCreditedAsDelivered` proves the worker leaves no credit for a
+zero-resolved delivery and does not retry it. Removing the delivered term from either arm's gate fails
+these with `coverage armed for an onset NOBODY received`.

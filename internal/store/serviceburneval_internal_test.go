@@ -596,7 +596,7 @@ func TestABurnBreachOpensNoIncidentEver(t *testing.T) {
 
 // The BURN arm owes the same arming rule as the live one (§16.1, D-0176). Without it the swallow the
 // live arm just lost survives in the second signal: emit to nobody, latch firing=true, and when the
-// route returns there is no edge left to announce — while `activeBurnDelegationSQL` has begun
+// route returns there is no edge left to announce — while the arming conjunction has begun
 // suppressing the member's own burn alert. The member goes quiet for an alert the service already
 // spent on an empty route.
 func TestBurnWithholdsAnOnsetNobodyCanReceiveAndDoesNotLatch(t *testing.T) {
@@ -658,9 +658,33 @@ func TestBurnWithholdsAnOnsetNobodyCanReceiveAndDoesNotLatch(t *testing.T) {
 		t.Fatalf("after the route came back the burn arm reported %+v, want the one onset that was "+
 			"waiting", got)
 	}
-	// ...and only NOW may it suppress the member's own burn alert.
+	// ...and STILL not suppress the member's own burn alert.
+	//
+	// This assertion was inverted by D-0179 and is kept rather than deleted, because the reason is
+	// the point. When it was written, an announcement being ENQUEUED was the end of the story. It is
+	// not: the worker can resolve zero recipients and terminally succeed, and the [61]/[84] chain
+	// showed that arming on the enqueue re-creates the same swallow one step later. Coverage now
+	// waits for a delivery that reached somebody.
+	if delegatedBurn(t, st, ctx, f) {
+		t.Fatal("burn coverage armed on an announcement that has only been ENQUEUED: the worker may " +
+			"still resolve zero recipients, and then the member is silent for a page nobody got")
+	}
+	// The worker credits a delivery that reached somebody. NOW it covers.
+	var targetID, ruleKey string
+	var emitted int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT sla_target_id, rule_key, emitted_seq FROM service_burn_alert_state
+		 WHERE service_id = $1`, f.serviceID).Scan(&targetID, &ruleKey, &emitted); err != nil {
+		t.Fatalf("read latch: %v", err)
+	}
+	if err := st.MarkServiceAlertDelivered(ctx, domain.ServiceAlert{
+		ServiceID: f.serviceID, ProjectID: f.projectID, Signal: domain.ServiceSignalBurn,
+		Firing: true, Seq: emitted, SLATargetID: targetID, RuleKey: ruleKey,
+	}); err != nil {
+		t.Fatalf("credit delivery: %v", err)
+	}
 	if !delegatedBurn(t, st, ctx, f) {
-		t.Fatal("burn coverage did not arm after its onset was announced")
+		t.Fatal("burn coverage did not arm after its onset was DELIVERED")
 	}
 }
 

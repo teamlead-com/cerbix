@@ -57,6 +57,10 @@ type fakeStore struct {
 	alertSeq        map[string]int64 // "service|signal|target|rule" → current sequence
 	incidentSeq     map[string]int64 // incident id → current lifecycle sequence
 	alertSeqMissing bool
+	// D-0179: what the worker credited as an announcement somebody actually received. A LIST, so a
+	// test can prove an ABSENCE — an attempted delivery resolving zero recipients must leave nothing.
+	alertDelivered   []domain.ServiceAlert
+	markDeliveredErr error
 
 	// impact-correlation fakes (FR-021 §14.3)
 	correlated        []string // incident ids passed to CorrelateIncident
@@ -981,6 +985,17 @@ func (f *fakeStore) IncidentEventSequence(_ context.Context, incidentID string) 
 	return seq, nil
 }
 
+// delivered records what the worker credited as an announcement somebody actually received. It is a
+// LIST rather than a flag on purpose: the point of D-0179 is that an attempted delivery resolving
+// zero recipients must leave NO trace here, and a set that only ever grows cannot prove an absence.
+func (f *fakeStore) MarkServiceAlertDelivered(_ context.Context, a domain.ServiceAlert) error {
+	if f.markDeliveredErr != nil {
+		return f.markDeliveredErr
+	}
+	f.alertDelivered = append(f.alertDelivered, a)
+	return nil
+}
+
 func (f *fakeStore) ServiceAlertSequence(
 	_ context.Context, a domain.ServiceAlert,
 ) (int64, error) {
@@ -1519,4 +1534,115 @@ func TestAWorkerBuiltWithoutMetricsDeliversAndSuppresses(t *testing.T) {
 	// nil metrics — the documented case.
 	w := New(fs, &fakeWebhook{}, &fakeNotify{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.drain(context.Background()) // must not panic
+}
+
+// D-0179 — the swallow [61]/[84] named, at the point where it is decided.
+//
+// The chain that made a member monitor silent for a page nobody received: the evaluator saw a route
+// and enqueued the onset, latching firing; the channel went before the worker delivered; the worker
+// resolved zero recipients, counted it and terminally SUCCEEDED, because no retry reaches a deleted
+// channel; the latch still said firing, so no further edge was coming; and when the route came back,
+// coverage re-armed against that latch.
+//
+// The worker's part of the fix is exactly this: an announcement that reached nobody must leave NO
+// delivery evidence behind. Asserting an absence is why the fake keeps a list.
+func TestAnAnnouncementNobodyReceivedIsNotCreditedAsDelivered(t *testing.T) {
+	payload := func() []byte {
+		b, err := json.Marshal(domain.ServiceAlert{
+			ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+			Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+			Seq: 7, ConfirmedOver: 2, Recipients: []string{"ch-1"},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	for _, tc := range []struct {
+		name     string
+		resolved int
+		want     int
+	}{
+		{"every recipient channel has been deleted", 0, 0},
+		{"one of them is still there", 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeStore{
+				alertSeq: map[string]int64{"svc-1|health||": 7},
+				pending: []domain.OutboxEvent{
+					{ID: "e-1", Topic: domain.TopicServiceAlert, Payload: payload()},
+				},
+			}
+			resolved := tc.resolved
+			nf := &fakeNotify{resolved: &resolved}
+			m := &fakeMetrics{}
+			newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+			if got := len(fs.alertDelivered); got != tc.want {
+				t.Fatalf("%d delivery credits, want %d — coverage means somebody was TOLD, and a "+
+					"credit here is what lets the service silence its members", got, tc.want)
+			}
+			if len(fs.failed) != 0 {
+				t.Fatalf("the event was retried (%v): no retry reaches a deleted channel, and "+
+					"parking a dead letter for it helps nobody", fs.failed)
+			}
+		})
+	}
+}
+
+// A CLOSE is never credited. Coverage is about an announcement that is LIVE; crediting an ending
+// would arm a service whose alert is over — the mirror of the bug above, in the other direction.
+func TestACloseIsNotCreditedAsCoverage(t *testing.T) {
+	b, err := json.Marshal(domain.ServiceAlert{
+		ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+		Signal: domain.ServiceSignalHealth, Firing: false, State: domain.ServiceAlertHealthy,
+		Seq: 8, CloseReason: domain.CloseRecovered, Recipients: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	fs := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health||": 8},
+		pending:  []domain.OutboxEvent{{ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b}},
+	}
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("the close was not delivered (called=%d)", nf.called)
+	}
+	if len(fs.alertDelivered) != 0 {
+		t.Fatalf("a CLOSE was credited as coverage: %+v", fs.alertDelivered)
+	}
+}
+
+// Recording the credit is not allowed to re-send the page. The delivery already happened; returning
+// an error would deliver it again, so the failure leaves coverage DIS-ARMED instead — the direction
+// every other ambiguity in the conjunction takes.
+func TestAnUnrecordedDeliveryFailsOpenRatherThanRetrying(t *testing.T) {
+	b, err := json.Marshal(domain.ServiceAlert{
+		ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+		Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+		Seq: 7, ConfirmedOver: 2, Recipients: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	fs := &fakeStore{
+		alertSeq:         map[string]int64{"svc-1|health||": 7},
+		markDeliveredErr: errors.New("boom"),
+		pending:          []domain.OutboxEvent{{ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b}},
+	}
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+	if nf.called != 1 {
+		t.Fatalf("the page did not go out (called=%d)", nf.called)
+	}
+	if len(fs.failed) != 0 {
+		t.Fatalf("the event was retried (%v) — the recipients would be paged a second time for one "+
+			"announcement", fs.failed)
+	}
+	if len(fs.delivered) != 1 {
+		t.Fatalf("the event was not settled: %v", fs.delivered)
+	}
 }

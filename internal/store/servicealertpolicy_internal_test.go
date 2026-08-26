@@ -513,7 +513,7 @@ func TestRemovingOneRuleClosesOnlyThatRule(t *testing.T) {
 
 // (6) The consequence of (5), and the whole reason the latch row is deleted rather than left behind.
 //
-// `activeBurnDelegationSQL` has two halves: one replacement must EXIST, and NOTHING the service owns
+// The burn conjunction has two halves: one replacement must EXIST, and NOTHING the service owns
 // may be blind. A latch row for a rule that no longer exists sits forever in the second half — no
 // evaluator writes it, so its lease expires and is never renewed — and burn coverage for the whole
 // service is dis-armed permanently. The members would page for themselves forever, which is safe and
@@ -541,6 +541,9 @@ func TestRemovedRuleLatchDeletionKeepsBurnCoverageArmed(t *testing.T) {
 	if got := burnEvalOnce(t, st, ctx); got.Rules != 1 {
 		t.Fatalf("the pass after the removal evaluated %d rules, want only the declared one", got.Rules)
 	}
+	// The surviving rule's announcement reached somebody (D-0179): this test is about the REMOVED
+	// rule's latch, and without the credit it would pass or fail for an unrelated reason.
+	creditBurnDeliveries(t, st, ctx, f.serviceID)
 	if !delegated(t, st, ctx, f.armFixture, DelegationBurn) {
 		t.Fatal("burn coverage is dis-armed after a rule removal: the surviving rule is quotable and " +
 			"fresh, so the only thing that could dis-arm the service is a latch nothing evaluates")

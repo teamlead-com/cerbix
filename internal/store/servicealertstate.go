@@ -70,6 +70,10 @@ const (
 	// uninterpretable and saying so beats naming a cause that is not the cause. This is a defect or
 	// legacy/corrupt state, never a configuration an operator chose (D-0178).
 	AlertReasonLatchInconsistent = "latch_inconsistent"
+	// AlertReasonOnsetUndelivered: the announcement WAS made and reached nobody. The worker resolved
+	// zero recipients and stopped, because no retry reaches a channel that has been deleted, and the
+	// latch stays firing so no further edge is coming. Coverage means somebody was told (D-0179).
+	AlertReasonOnsetUndelivered = "onset_undelivered"
 )
 
 // ServiceSignalState is one signal's coverage.
@@ -106,6 +110,7 @@ const serviceCoverageClausesSQL = `
 	       (cardinality(s.page_on) > 0 OR s.page_on_unknown),
 	       COALESCE(` + livePageableStateSQL + `, false),
 	       COALESCE(` + liveOnsetCommittedSQL + `, false),
+	       COALESCE(` + liveOnsetDeliveredSQL + `, false),
 	       ` + routablePredicate + `,
 	       st.service_id IS NOT NULL,
 	       COALESCE(st.config_generation = s.alert_config_generation, false),
@@ -128,6 +133,12 @@ const serviceCoverageClausesSQL = `
 	                WHERE b.service_id = s.id AND b.project_id = s.project_id
 	                  AND ` + burnEligibleTargetSQL + `
 	                  AND b.last_verdict = 'fire' AND NOT (b.firing AND b.emitted_seq > 0)),
+	       EXISTS (SELECT 1 FROM service_burn_alert_state b
+	                 JOIN sla_targets t ON t.id = b.sla_target_id
+	                WHERE b.service_id = s.id AND b.project_id = s.project_id
+	                  AND ` + burnEligibleTargetSQL + `
+	                  AND b.last_verdict = 'fire' AND b.firing AND b.emitted_seq > 0
+	                  AND b.delivered_seq < b.emitted_seq),
 	       EXISTS (SELECT 1 FROM service_burn_alert_state b
 	                 JOIN sla_targets t ON t.id = b.sla_target_id
 	                WHERE b.service_id = s.id AND b.project_id = s.project_id
@@ -160,11 +171,12 @@ const burnEligibleTargetSQL = `t.service_id = s.id AND t.burn_alert_enabled`
 // serviceCoverageClauses is one service's answers, in the same order.
 type serviceCoverageClauses struct {
 	ownsPaging, policyPages, pageableState, onsetCommitted, routable bool
+	onsetDelivered                                                   bool
 	evaluated, genOK, revOK                                          bool
 	liveErr                                                          string
 	fresh                                                            bool
 	hasTarget, replacement, nothingBlind, allLatched                 bool
-	burnFresh, burnOnsetPending                                      bool
+	burnFresh, burnOnsetPending, burnOnsetUndelivered                bool
 	anyHold, anyGenMismatch                                          bool
 	burnErr                                                          string
 }
@@ -172,10 +184,11 @@ type serviceCoverageClauses struct {
 // scanInto returns the destinations for `serviceCoverageClausesSQL`, in its column order.
 func (c *serviceCoverageClauses) scanInto() []any {
 	return []any{
-		&c.ownsPaging, &c.policyPages, &c.pageableState, &c.onsetCommitted, &c.routable,
+		&c.ownsPaging, &c.policyPages, &c.pageableState, &c.onsetCommitted, &c.onsetDelivered,
+		&c.routable,
 		&c.evaluated, &c.genOK, &c.revOK, &c.liveErr, &c.fresh,
 		&c.hasTarget, &c.replacement, &c.nothingBlind, &c.allLatched,
-		&c.burnFresh, &c.burnOnsetPending,
+		&c.burnFresh, &c.burnOnsetPending, &c.burnOnsetUndelivered,
 		&c.anyHold, &c.anyGenMismatch, &c.burnErr,
 	}
 }
@@ -204,6 +217,8 @@ func (c serviceCoverageClauses) liveVerdict() (bool, string) {
 		return false, AlertReasonUnroutable
 	case !c.onsetCommitted:
 		return false, AlertReasonOnsetPending
+	case !c.onsetDelivered:
+		return false, AlertReasonOnsetUndelivered
 	default:
 		return true, ""
 	}
@@ -230,25 +245,40 @@ func (c serviceCoverageClauses) burnVerdict() (bool, string) {
 		return false, AlertReasonNoEnabledTarget
 	case !c.allLatched:
 		return false, AlertReasonRuleUnevaluated
-	case c.anyHold:
-		return false, AlertReasonHeld
-	case c.anyGenMismatch:
-		return false, AlertReasonGenerationChanged
-	case c.burnErr != "":
-		return false, AlertReasonEvaluationError
-	case !c.burnFresh:
-		return false, AlertReasonStaleLease
-	case c.burnOnsetPending && !c.routable:
-		return false, AlertReasonUnroutable
-	case c.burnOnsetPending:
-		return false, AlertReasonOnsetPending
+	case !c.replacement || !c.nothingBlind:
+		// ONE gate decides coverage — `burnRuleCoversSQL`, through these two clauses — and the
+		// switch below only NAMES the refusal. They were briefly parallel: the diagnostics were
+		// hoisted out to sit beside the gate, so each fact was decided twice and a mutation
+		// weakening the gate left the answer unchanged because the diagnostic still fired. Two
+		// implementations of one rule agree until they don't, which is the defect §34 fixed between
+		// the badge and delivery and then reintroduced here.
+		//
+		// Every case is a fact the gate already uses, so each is reachable only when the gate has
+		// refused, and the order is the gate's own.
+		switch {
+		case c.anyHold:
+			return false, AlertReasonHeld
+		case c.anyGenMismatch:
+			return false, AlertReasonGenerationChanged
+		case c.burnErr != "":
+			return false, AlertReasonEvaluationError
+		case !c.burnFresh:
+			return false, AlertReasonStaleLease
+		case c.burnOnsetPending && !c.routable:
+			// Routability before the pending onset, exactly as `liveVerdict` orders them: while
+			// there is no route the actionable truth is the route.
+			return false, AlertReasonUnroutable
+		case c.burnOnsetPending:
+			return false, AlertReasonOnsetPending
+		case c.burnOnsetUndelivered:
+			return false, AlertReasonOnsetUndelivered
+		default:
+			// Everything the evaluator can legitimately write is named above, so a latch that still
+			// fails the gate is in a shape it does not produce — `clear` while still marked firing.
+			return false, AlertReasonLatchInconsistent
+		}
 	case !c.routable:
 		return false, AlertReasonUnroutable
-	case !c.replacement || !c.nothingBlind:
-		// Everything the evaluator can legitimately write has been named above, so a latch that still
-		// fails the covers predicate is in a shape the evaluator does not produce — `clear` while
-		// still marked firing. Naming that beats picking one of the causes it is not.
-		return false, AlertReasonLatchInconsistent
 	default:
 		return true, ""
 	}

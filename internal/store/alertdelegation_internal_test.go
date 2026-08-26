@@ -938,9 +938,12 @@ func TestARestoredRouteDoesNotArmBeforeTheOnsetIsCommitted(t *testing.T) {
 			"silenced before the service's own onset exists")
 	}
 
-	// The evaluator commits the onset. ONLY now is there a replacement to suppress in favour of.
+	// The evaluator commits the onset and the worker credits a delivery that reached somebody. ONLY
+	// now is there a replacement to suppress in favour of — `delivered_seq` joined this fixture with
+	// D-0179, because an enqueue that resolves no recipients is not an announcement.
 	if _, err := st.pool.Exec(ctx, `
-		UPDATE service_alert_state SET live_firing = true, emitted_state = 'down', emitted_seq = 1
+		UPDATE service_alert_state
+		   SET live_firing = true, emitted_state = 'down', emitted_seq = 1, delivered_seq = 1
 		 WHERE service_id = $1`, f.serviceID); err != nil {
 		t.Fatalf("commit onset: %v", err)
 	}
@@ -1035,12 +1038,14 @@ func TestAnAmbiguousBurnRowArmsNothing(t *testing.T) {
 		seq     int64
 	}{
 		{"clear and not firing", "clear", false, 0},
-		{"fire, latched, announced", "fire", true, 3},
+		{"fire, latched, announced and delivered", "fire", true, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// `delivered_seq` tracks the sequence: D-0179 made "announced" mean "received", and a
+			// shape that only reached the outbox is covered by its own test above.
 			if _, err := st.pool.Exec(ctx, `
 				UPDATE service_burn_alert_state
-				   SET last_verdict = $2, firing = $3, emitted_seq = $4
+				   SET last_verdict = $2, firing = $3, emitted_seq = $4, delivered_seq = $4
 				 WHERE service_id = $1`, f.serviceID, tc.verdict, tc.firing, tc.seq); err != nil {
 				t.Fatalf("write the row: %v", err)
 			}
@@ -1423,5 +1428,192 @@ func TestTheRankOrderIsTheOneTheSpecPublishes(t *testing.T) {
 		t.Fatalf("monitor reason = %q, want %q — the published rank puts a service that HAS a verdict "+
 			"further along than one that has never been evaluated, and the spec's table must be "+
 			"written in that order", v.FailOpenReason, AlertReasonPolicyPagesNothing)
+	}
+}
+
+// The [61]/[84] swallow, end to end, at the arming side (D-0179).
+//
+//  1. The evaluator sees a route, announces, latches firing. Coverage is armed and the member is
+//     silent — correct, because somebody was told.
+//  2. Nobody was told after all: the channel went between the enqueue and the delivery, the worker
+//     resolved zero recipients and terminally succeeded. No delivery credit exists.
+//  3. The route comes back. The latch still says firing, so the evaluator has no edge to announce —
+//     and the OLD rule armed coverage here, silencing the member for a page that reached nobody.
+//
+// Coverage now requires a DELIVERED announcement, so step 3 keeps the member paging, and step 4
+// shows the credit is what re-arms it.
+func TestCoverageNeedsAnAnnouncementSomebodyReceived(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// The fixture's live latch stands in for an announced, DELIVERED onset in a pageable state.
+	exec(t, st, ctx, `UPDATE services SET page_on = '{down}' WHERE id = $1`, f.serviceID)
+	exec(t, st, ctx, `UPDATE service_alert_state
+	                     SET observed_state = 'down', candidate_state = 'down', live_firing = true,
+	                         emitted_state = 'down', emitted_seq = 4, delivered_seq = 4,
+	                         emitted_at = now()
+	                   WHERE service_id = $1`, f.serviceID)
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a delivered onset in a pageable state did not arm coverage")
+	}
+
+	// The delivery reached nobody. The worker credits nothing, so the latch's announcement stands
+	// unreceived — the state the old rule could not see.
+	exec(t, st, ctx, `UPDATE service_alert_state SET delivered_seq = 3 WHERE service_id = $1`, f.serviceID)
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("coverage armed for an onset NOBODY received: the member monitor falls silent for " +
+			"a page that was never delivered, which is the swallow the whole conjunction exists to " +
+			"prevent")
+	}
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationLive)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonOnsetUndelivered {
+		t.Fatalf("delivery reported %q, want %q — the route may be fine now, and the thing that is "+
+			"wrong is that the announcement reached nobody", v.FailOpenReason,
+			AlertReasonOnsetUndelivered)
+	}
+	if got := badgeReason(t, st, ctx, f.projectID, f.serviceID); got != AlertReasonOnsetUndelivered {
+		t.Fatalf("the badge says %q and delivery says %q for the same service", got,
+			AlertReasonOnsetUndelivered)
+	}
+
+	// A restored route is NOT enough on its own — this is exactly what step 3 used to get wrong.
+	exec(t, st, ctx, `UPDATE notification_channels SET enabled = true WHERE project_id = $1`, f.projectID)
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a restored route re-armed coverage without a new delivered announcement")
+	}
+
+	// The next announcement reaches somebody. NOW the service is covering.
+	exec(t, st, ctx, `UPDATE service_alert_state SET emitted_seq = 5, delivered_seq = 5
+	                   WHERE service_id = $1`, f.serviceID)
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a delivered announcement did not re-arm coverage")
+	}
+}
+
+// The same rule on the SEALED signal, which keeps its own latch per (target, rule).
+func TestBurnCoverageNeedsAnAnnouncementSomebodyReceived(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	exec(t, st, ctx, `UPDATE service_burn_alert_state
+	                     SET last_verdict = 'fire', firing = true, emitted_seq = 4, delivered_seq = 4,
+	                         emitted_at = now()
+	                   WHERE service_id = $1 AND sla_target_id = $2`, f.serviceID, f.targetID)
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("a delivered burn onset did not arm burn coverage")
+	}
+
+	exec(t, st, ctx, `UPDATE service_burn_alert_state SET delivered_seq = 3
+	                   WHERE service_id = $1 AND sla_target_id = $2`, f.serviceID, f.targetID)
+	if delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("burn coverage armed for an onset nobody received")
+	}
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationBurn)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonOnsetUndelivered {
+		t.Fatalf("burn delivery reported %q, want %q", v.FailOpenReason, AlertReasonOnsetUndelivered)
+	}
+	// And the LIVE signal is a different replacement, untouched by the burn latch's delivery.
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("an undelivered BURN onset dis-armed the LIVE signal too")
+	}
+}
+
+// The credit itself: monotonic, guarded by the sequence, and idempotent under the retries
+// at-least-once delivery guarantees will happen.
+func TestMarkServiceAlertDeliveredIsGuardedAndIdempotent(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	exec(t, st, ctx, `UPDATE service_alert_state SET emitted_seq = 5, delivered_seq = 0
+	                   WHERE service_id = $1`, f.serviceID)
+
+	live := domain.ServiceAlert{
+		ServiceID: f.serviceID, ProjectID: f.projectID,
+		Signal: domain.ServiceSignalHealth, Firing: true, Seq: 5,
+	}
+	deliveredSeq := func() int64 {
+		t.Helper()
+		var got int64
+		if err := st.pool.QueryRow(ctx,
+			`SELECT delivered_seq FROM service_alert_state WHERE service_id = $1`,
+			f.serviceID).Scan(&got); err != nil {
+			t.Fatalf("read delivered_seq: %v", err)
+		}
+		return got
+	}
+
+	// A retry of a SUPERSEDED onset must not credit the current one.
+	stale := live
+	stale.Seq = 4
+	if err := st.MarkServiceAlertDelivered(ctx, stale); err != nil {
+		t.Fatalf("stale credit: %v", err)
+	}
+	if got := deliveredSeq(); got != 0 {
+		t.Fatalf("delivered_seq = %d after a superseded retry, want 0 — an old delivery would "+
+			"silence members for the announcement that replaced it", got)
+	}
+
+	if err := st.MarkServiceAlertDelivered(ctx, live); err != nil {
+		t.Fatalf("credit: %v", err)
+	}
+	if got := deliveredSeq(); got != 5 {
+		t.Fatalf("delivered_seq = %d, want 5", got)
+	}
+	// Idempotent: the same delivery arriving twice changes nothing.
+	if err := st.MarkServiceAlertDelivered(ctx, live); err != nil {
+		t.Fatalf("second credit: %v", err)
+	}
+	if got := deliveredSeq(); got != 5 {
+		t.Fatalf("delivered_seq = %d after a duplicate, want 5", got)
+	}
+
+	// A CLOSE is refused by the store as well as by the worker.
+	closeEv := live
+	closeEv.Firing, closeEv.Seq = false, 6
+	exec(t, st, ctx, `UPDATE service_alert_state SET emitted_seq = 6 WHERE service_id = $1`, f.serviceID)
+	if err := st.MarkServiceAlertDelivered(ctx, closeEv); err != nil {
+		t.Fatalf("close credit: %v", err)
+	}
+	if got := deliveredSeq(); got != 5 {
+		t.Fatalf("a CLOSE advanced delivered_seq to %d: an ending confers no coverage", got)
+	}
+
+	// A burn payload with no target/rule identity is refused rather than crediting whichever row
+	// Postgres returns first — the same rule `ServiceAlertSequence` enforces.
+	burn := live
+	burn.Signal, burn.SLATargetID, burn.RuleKey = domain.ServiceSignalBurn, "", ""
+	if err := st.MarkServiceAlertDelivered(ctx, burn); err == nil {
+		t.Fatal("a burn credit with no target/rule identity was accepted")
+	}
+}
+
+// creditBurnDeliveries stands in for the outbox worker: it credits every burn latch's CURRENT
+// announcement as having reached somebody.
+//
+// Tests that drive the real evaluator and then ask about coverage need it since D-0179, because the
+// evaluator's job ends at the enqueue and coverage now begins at the delivery. Without it such a
+// test proves only that an un-delivered onset does not arm, which is a different (and separately
+// tested) fact from the one it means to assert.
+func creditBurnDeliveries(t *testing.T, st *Store, ctx context.Context, serviceID string) {
+	t.Helper()
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_burn_alert_state SET delivered_seq = emitted_seq WHERE service_id = $1`,
+		serviceID); err != nil {
+		t.Fatalf("credit burn deliveries: %v", err)
+	}
+}
+
+// creditLiveDelivery is the same for the health signal's single latch.
+func creditLiveDelivery(t *testing.T, st *Store, ctx context.Context, serviceID string) {
+	t.Helper()
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE service_alert_state SET delivered_seq = emitted_seq WHERE service_id = $1`,
+		serviceID); err != nil {
+		t.Fatalf("credit live delivery: %v", err)
 	}
 }

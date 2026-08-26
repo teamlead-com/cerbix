@@ -27,7 +27,7 @@ import (
 //     SINGLE batched call for the whole slice — one query per window would make the leader's cadence
 //     depend on how many rules an operator happened to configure;
 //   - a HOLD is a SUCCESSFUL evaluation that cannot speak. It keeps the level and records why, which
-//     is what dis-arms burn coverage in `activeBurnDelegationSQL`. Treating an unquotable window as
+//     is what dis-arms burn coverage in the arming conjunction. Treating an unquotable window as
 //     "burn = 0" would silently resolve a live alert, which is the most dangerous mistake available
 //     in this feature.
 //
@@ -273,7 +273,7 @@ func (s *Store) evaluateServiceBurnAlertsOn(
 		// The SAME arming rule the live arm applies (§16.1, D-0176): an ONSET nobody can receive is
 		// withheld and does not latch. Without this the burn signal keeps the swallow the live one
 		// just lost — emit to nobody, set firing=true, and when the route comes back there is no edge
-		// left to announce while `activeBurnDelegationSQL` has begun suppressing the member's own burn
+		// left to announce while the arming conjunction has begun suppressing the member's own burn
 		// alert. The member falls silent for an alert the service already spent on an empty route.
 		//
 		// A CLEAR is never withheld: polarity again. An announcement already made must be able to end.

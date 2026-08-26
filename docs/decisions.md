@@ -3908,9 +3908,18 @@ things were missing and both are now in:
   order. Rows enqueued BEFORE the upgrade stay in the legacy class with no sequence, and the delivery
   gate reads an absent sequence as "unknown, deliver".
 
-**What this still does NOT claim.** The gate makes a wrong ORDER unobservable by dropping the stale
-member of the pair; the claim keeps the pair in order; neither serializes a worker against a route
-that vanished between enqueue and delivery, which is its own open question. That is the same guarantee `service_alert` has, and
+**The delivery-time gate is GONE, and its removal is part of this decision.** It compared the event's
+sequence with the incident's CURRENT one and dropped the older, which failed in both directions. It
+dropped an OPENING that had never been delivered merely because a later fact existed, so a subscriber
+received the update — or the resolution — for an outage nobody had told them had begun: the same
+silence the fence exists to prevent, arriving by a different route. And it read that sequence BEFORE
+calling the deliverer, so two workers could interleave around it; a check whose answer can change
+while the thing it authorises is in flight is not a fence. The sequence stays in the payload for
+consumers and for diagnosis; ordering is the claim's job, where it is durable.
+
+**What this still does NOT claim.** The claim keeps an incident's events in order; it does not
+serialize a worker against a route that vanished between enqueue and delivery, which is its own open
+question. That is the same guarantee `service_alert` has, and
 it is enough for the failure that motivated it — nobody is told an outage began after it ended.
 Verified both ways: removing the gate delivers the superseded opening, and letting it apply to
 resolutions drops an ending.

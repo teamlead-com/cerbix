@@ -667,3 +667,59 @@ func TestADeadPredecessorHoldsTheIncidentStream(t *testing.T) {
 		}
 	}
 }
+
+// P1: the claim used to sort by the lease it had just written. A row on its second attempt earns a
+// longer backoff than a first-attempt one, so the older retry came back AFTER the newer event and the
+// batch was delivered in the reverse of the order it was owed in.
+func TestAClaimIsOrderedByWhenTheEventWasDueNotByItsNewLease(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+
+	// Two unrelated events so the causal predicate does not order them for us: the OLDER one has
+	// already been attempted, which is exactly what earns it the longer next lease.
+	older, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "older", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("older incident: %v", err)
+	}
+	newer, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "newer", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("newer incident: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE outbox_events SET attempts = 1, next_attempt_at = now() - interval '2 minutes'
+		 WHERE payload -> 'incident' ->> 'id' = $1`, older.ID); err != nil {
+		t.Fatalf("age the older event: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE outbox_events SET attempts = 0, next_attempt_at = now() - interval '1 minute'
+		 WHERE payload -> 'incident' ->> 'id' = $1`, newer.ID); err != nil {
+		t.Fatalf("age the newer event: %v", err)
+	}
+
+	claimed, err := st.ClaimDueOutbox(ctx, 50)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var order []string
+	for _, e := range claimed {
+		if e.Topic != domain.TopicIncidentEvent {
+			continue
+		}
+		var ev domain.IncidentEvent
+		if err := json.Unmarshal(e.Payload, &ev); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		order = append(order, ev.Incident.Title)
+	}
+	if len(order) != 2 || order[0] != "older" {
+		t.Fatalf("claim order = %v, want the event that was due first to come first — sorting on the "+
+			"lease this statement just wrote puts a retry behind a newer event", order)
+	}
+}

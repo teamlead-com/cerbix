@@ -74,39 +74,47 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 	// by a newer producer is never claimed, attempt-burned or dead-lettered by an
 	// owner that cannot handle it. It just waits for a capable one.
 	rows, err := s.pool.Query(ctx, `
-		UPDATE outbox_events
-		   SET attempts = attempts + 1,
+		WITH due AS (
+		    SELECT o.id, o.next_attempt_at AS was_due
+		      FROM outbox_events o
+		     WHERE (o.status = 'pending' OR (o.status = 'pending_fenced' AND o.topic = ANY($2)))
+		       AND o.next_attempt_at <= now()
+		       -- D-0177's CAUSAL half, and the only durable half there is. A successor is not handed
+		       -- out while an EARLIER event of the same incident is undelivered, so one batch cannot
+		       -- carry both ends of a lifecycle and two workers cannot race them. A CLAIMED row is
+		       -- not a delivered one, so a claim in flight keeps blocking until it succeeds.
+		       --
+		       -- A DEAD predecessor blocks too, deliberately: releasing past it delivers a resolution
+		       -- whose opening was parked for an operator, an ending to an announcement nobody
+		       -- received. The stream waits for the replay, and the dead row is already the thing an
+		       -- operator looks at.
+		       AND NOT EXISTS (
+		           SELECT 1 FROM outbox_events pr
+		            WHERE pr.topic = 'incident_event' AND o.topic = 'incident_event'
+		              AND pr.status <> 'delivered'
+		              AND pr.id <> o.id
+		              AND pr.payload -> 'incident' ->> 'id' = o.payload -> 'incident' ->> 'id'
+		              AND COALESCE((pr.payload ->> 'seq')::bigint, 0)
+		                  < COALESCE((o.payload ->> 'seq')::bigint, 0))
+		     ORDER BY o.next_attempt_at
+		     FOR UPDATE SKIP LOCKED
+		     LIMIT $1
+		)
+		UPDATE outbox_events e
+		   SET attempts = e.attempts + 1,
 		       next_attempt_at = now() + least(
 		           interval '1 hour',
-		           interval '10 seconds' * power(2, least(attempts, 12))),
+		           interval '10 seconds' * power(2, least(e.attempts, 12))),
 		       claim_token = gen_random_uuid(),
 		       updated_at = now()
-		 WHERE id IN (
-		     SELECT o.id FROM outbox_events o
-		      WHERE (o.status = 'pending' OR (o.status = 'pending_fenced' AND o.topic = ANY($2)))
-		        AND o.next_attempt_at <= now()
-		        -- D-0177's CAUSAL half. Dropping a superseded onset at delivery keeps a subscriber
-		        -- from being told an outage began after it ended; it does not keep the two events in
-		        -- order. This does: a successor is not handed out while an EARLIER event of the same
-		        -- incident is undelivered, so one batch cannot carry both ends of a lifecycle and two
-		        -- workers cannot race them.
-		        --
-		        -- A DEAD predecessor blocks too, deliberately. The alternative is delivering a
-		        -- resolution whose opening was parked for an operator — an ending to an announcement
-		        -- nobody received. The stream waits for the replay, and the dead row is the thing an
-		        -- operator already looks at.
-		        AND NOT EXISTS (
-		            SELECT 1 FROM outbox_events p
-		             WHERE p.topic = 'incident_event' AND o.topic = 'incident_event'
-		               AND p.status <> 'delivered'
-		               AND p.id <> o.id
-		               AND p.payload -> 'incident' ->> 'id' = o.payload -> 'incident' ->> 'id'
-		               AND COALESCE((p.payload ->> 'seq')::bigint, 0)
-		                   < COALESCE((o.payload ->> 'seq')::bigint, 0))
-		      ORDER BY o.next_attempt_at
-		      FOR UPDATE SKIP LOCKED
-		      LIMIT $1)
-		 RETURNING id, topic, payload, attempts, claim_token, next_attempt_at, created_at`,
+		  FROM due
+		 WHERE e.id = due.id
+		 -- was_due is the ORIGINAL due time, captured before this statement rewrote it. Returning
+		 -- the new next_attempt_at and sorting on that sorted the fresh LEASE instead: a row on its
+		 -- second attempt earns a longer backoff than a first-attempt one, so the older retry came
+		 -- back AFTER the newer event and the batch was delivered in the reverse of the order it was
+		 -- owed in.
+		 RETURNING e.id, e.topic, e.payload, e.attempts, e.claim_token, due.was_due, e.created_at`,
 		limit, domain.FencedTopics())
 	if err != nil {
 		return nil, fmt.Errorf("store: claim outbox: %w", err)

@@ -992,3 +992,61 @@ func TestACorruptScheduleParticipantIsRefusedAndSurfaced(t *testing.T) {
 			"a schedule nobody fixed, and a typo would page the wrong people forever")
 	}
 }
+
+// The burn verdict and the burn latch must AGREE. `clear` while still firing is a state no ordinary
+// evaluation writes: the rule either came back under the threshold and cleared its latch, or it did
+// not. Reading such a row as coverage would silence a member on the strength of a contradiction, so
+// it fails open — the same direction every other ambiguity in §16.1 takes.
+func TestAnAmbiguousBurnRowArmsNothing(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("the fixture is not armed for burn: the rest proves nothing")
+	}
+
+	for _, tc := range []struct {
+		name    string
+		verdict string
+		firing  bool
+		seq     int64
+	}{
+		{"clear while still firing", "clear", true, 1},
+		{"fire with no announcement", "fire", false, 0},
+		{"fire latched with no sequence", "fire", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := st.pool.Exec(ctx, `
+				UPDATE service_burn_alert_state
+				   SET last_verdict = $2, firing = $3, emitted_seq = $4
+				 WHERE service_id = $1`, f.serviceID, tc.verdict, tc.firing, tc.seq); err != nil {
+				t.Fatalf("write the row: %v", err)
+			}
+			if delegated(t, st, ctx, f, DelegationBurn) {
+				t.Fatalf("verdict=%s firing=%v seq=%d armed burn coverage", tc.verdict, tc.firing, tc.seq)
+			}
+		})
+	}
+
+	// And the two coherent shapes DO cover.
+	for _, tc := range []struct {
+		name    string
+		verdict string
+		firing  bool
+		seq     int64
+	}{
+		{"clear and not firing", "clear", false, 0},
+		{"fire, latched, announced", "fire", true, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := st.pool.Exec(ctx, `
+				UPDATE service_burn_alert_state
+				   SET last_verdict = $2, firing = $3, emitted_seq = $4
+				 WHERE service_id = $1`, f.serviceID, tc.verdict, tc.firing, tc.seq); err != nil {
+				t.Fatalf("write the row: %v", err)
+			}
+			if !delegated(t, st, ctx, f, DelegationBurn) {
+				t.Fatalf("verdict=%s firing=%v seq=%d did not cover", tc.verdict, tc.firing, tc.seq)
+			}
+		})
+	}
+}

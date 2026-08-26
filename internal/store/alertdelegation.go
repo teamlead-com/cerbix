@@ -152,8 +152,16 @@ const routableClause = `
 // The second question is newer and exists because of D-0176. A withheld onset leaves the service
 // pageable-in-principle and silent in fact, so restoring the route would arm delegation in the
 // instant BEFORE the next evaluation announces anything — the member falls silent first and the
-// service speaks second. Coverage for a pageable state therefore requires the announcement to have
-// been COMMITTED: `live_firing` set, and `emitted_state` equal to what is being observed now.
+// service speaks second. Coverage for a pageable state therefore requires an announcement to be OPEN:
+// `live_firing` set with an `emitted_state` that exists.
+//
+// It asks for an open onset rather than for `emitted_state = observed_state`, and the difference has
+// a cost either way. Equality also dis-arms during a confirmed pageable→pageable transition — the
+// service is already firing and already announced, the observation has moved on and the next
+// evaluation has not caught up — which pages the members a second time for an outage somebody is
+// already handling. Both directions fail OPEN, so neither loses a page; this one avoids the
+// duplicate. `live_firing` with no `emitted_state` is a contradiction no evaluation writes, and it
+// dis-arms.
 //
 // `healthy`/`excluded` cover without either: there is nothing service-level to announce, so there is
 // nothing a member's alert would be replacing.
@@ -173,7 +181,7 @@ const livePageableStateSQL = `(
 
 const liveOnsetCommittedSQL = `(
 		    st.observed_state IN ('healthy', 'excluded')
-		    OR (st.live_firing AND st.emitted_state = st.observed_state)
+		    OR (st.live_firing AND st.emitted_state IS NOT NULL)
 		)`
 
 // THE definition of "the revision that governs right now", written once and shared by every arming
@@ -229,14 +237,16 @@ var activeLiveDelegationSQL = `
 // successful evaluation that cannot fire), for the current target and config generations, error-free
 // and fresh. Written once because it is asked twice below, in opposite directions.
 // A CLEAR covers by itself: the rule looked and had nothing to announce. A FIRE covers only once the
-// announcement it implies has been COMMITTED — `firing` set and a sequence issued.
+// announcement it implies has been COMMITTED — `firing` set and a sequence issued. The verdict and the
+// latch must AGREE: `clear` while still firing is a state no ordinary evaluation produces, so it is
+// read as corruption and fails open rather than being treated as coverage.
 //
 // `last_verdict = 'fire'` alone was the same defect the live arm had, one signal over: D-0176
 // withholds a FIRE edge nobody can receive, leaving the verdict at `fire` with `firing` still false,
 // so restoring the route armed burn coverage in the instant BEFORE the next evaluation announced
 // anything. The member's own burn alert would fall silent for an onset that had never been sent.
 const burnRuleCoversSQL = `
-		           (bs.last_verdict = 'clear'
+		           ((bs.last_verdict = 'clear' AND NOT bs.firing)
 		            OR (bs.last_verdict = 'fire' AND bs.firing AND bs.emitted_seq > 0))
 		       AND bs.config_generation = s.alert_config_generation
 		       AND bs.target_generation = t.alert_generation
@@ -452,22 +462,4 @@ func (s *Store) MonitorDelegation(
 		return MonitorDelegation{}, err
 	}
 	return out, nil
-}
-
-// IncidentEventSequence returns an incident's CURRENT lifecycle sequence, which delivery compares
-// against the one stamped into an `incident_event` payload (D-0177).
-//
-// `ErrNotFound` means the incident is gone. The caller decides what that implies, and the answers
-// differ by direction exactly as they do for a service alert: a resolution still deserves delivery,
-// an opening for a vanished incident does not.
-func (s *Store) IncidentEventSequence(ctx context.Context, incidentID string) (int64, error) {
-	var seq int64
-	err := s.pool.QueryRow(ctx, `SELECT event_seq FROM incidents WHERE id = $1`, incidentID).Scan(&seq)
-	if noRows(err) {
-		return 0, ErrNotFound
-	}
-	if err != nil {
-		return 0, fmt.Errorf("store: incident event sequence: %w", err)
-	}
-	return seq, nil
 }

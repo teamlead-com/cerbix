@@ -50,13 +50,16 @@ type IncidentEvent struct {
 	Type     string          `json:"event"`
 	Incident Incident        `json:"incident"`
 	Update   *IncidentUpdate `json:"update,omitempty"`
-	// Seq is this incident's lifecycle sequence at the moment the event was enqueued. Delivery
-	// compares it with the incident's current one and drops a superseded ONSET, exactly as the
-	// service-alert topic does: the outbox is at-least-once and claims in no defined order, so
-	// without it a retried "opened" can arrive after the "resolved" it precedes and describe an
-	// outage as beginning after it ended. A resolution is never dropped by this gate.
+	// Seq is this incident's lifecycle sequence, and with `Incident.ID` it is the pair a RECEIVER
+	// dedupes and orders on: unique per event, monotonic per incident, and stable across the retries
+	// at-least-once delivery guarantees will happen.
 	//
-	// Absent (0) on payloads written before the fence existed, which the gate reads as "unknown, do
-	// not drop": the rule may never turn a missing sequence into a missing page.
+	// cerbix orders these events in DISPATCH — the outbox will not release one while an earlier event
+	// of the same incident is undelivered — and stops there, because it has to (D-0177). A request
+	// whose worker lost its lease mid-flight can still land, and nothing on this side reaches into a
+	// receiver's queue to reorder it. A receiver that keeps the highest seq it has applied per
+	// incident has an exact answer; one that ignores it accepts whatever order its transport gives.
+	//
+	// Absent (0) on payloads written before the fence existed. Those predate the contract.
 	Seq int64 `json:"seq,omitempty"`
 }

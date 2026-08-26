@@ -3923,9 +3923,26 @@ calling the deliverer, so two workers could interleave around it; a check whose 
 while the thing it authorises is in flight is not a fence. The sequence stays in the payload for
 consumers and for diagnosis; ordering is the claim's job, where it is durable.
 
-**What this still does NOT claim.** The claim keeps an incident's events in order; it does not
-serialize a worker against a route that vanished between enqueue and delivery, which is its own open
-question. That is the same guarantee `service_alert` has, and
+**The guarantee is DISPATCH order, and saying more than that would be a promise nobody can keep**
+(owner decision, 2026-08-26). Cerbix orders what it controls: which row a claim releases, and the
+order in which the worker calls the deliverer. It does not control arrival. A worker whose lease
+expires mid-call can still be inside an HTTP request or an SMTP session; cancelling it does not
+un-send bytes the far side has already accepted, and no CAS on our side reaches into a receiver's
+queue. A guarantee of "no subscriber ever sees `opened` after `resolved`" for an ARBITRARY webhook is
+not provable by any lease, and this decision does not make it.
+
+What the receiver gets instead is the means to order and dedupe for itself: every `incident_event`
+payload carries the incident's id and this event's `seq`, and the pair is unique per event, monotonic
+per incident, and stable across the retries that at-least-once delivery guarantees will happen. A
+receiver that keeps the highest `seq` it has applied per incident has an exact answer; one that does
+not is choosing to accept whatever order its own transport gives it.
+
+Payloads written before D-0177 carry no `seq`, so the pair is not unique for them — they predate the
+contract, and the fence never turns a missing number into a missing page.
+
+**What this still does NOT claim.** The claim keeps an incident's events in dispatch order; it does not
+serialize a worker against a route that vanished between enqueue and delivery, and it does not
+constrain what a remote system does with what it received. That is the same guarantee `service_alert` has, and
 it is enough for the failure that motivated it — nobody is told an outage began after it ended.
 Verified both ways: removing the gate delivers the superseded opening, and letting it apply to
 resolutions drops an ending.

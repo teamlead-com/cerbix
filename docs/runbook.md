@@ -611,6 +611,16 @@ rule label: this surface is reachable by anyone who can create a service.
 | Metric (type) | Meaning |
 | --- | --- |
 | `cerbix_service_alert_evaluations_total{signal,outcome}` (counter) | Units of work by outcome, `ok`\|`error`\|`skipped`. The unit is what gets a verdict: a SERVICE for `health`, a burn RULE for `burn`. `skipped` is where the burn arm's HOLDs land — a successful evaluation that cannot be quoted. A pass that failed wholesale counts one `error`. |
+**Incident webhook ordering, and where it stops.** cerbix orders an incident's lifecycle events in
+DISPATCH: the outbox will not release an event while an earlier event of the same incident is
+undelivered, and the worker calls the deliverer in that order (D-0177). It does NOT promise the order
+they ARRIVE in. Delivery is at-least-once and a receiver is a remote system: a request whose worker
+lost its lease mid-flight can still land, and a retry can land twice. Every payload therefore carries
+`incident.id` and `seq` — unique per event, monotonic per incident, stable across retries — so a
+receiver that records the highest `seq` it has applied can dedupe and order exactly. Payloads from
+before D-0177 have no `seq` and are delivered as they always were. If subscribers report an update for
+an outage they were never told began, look for a receiver that ignores `seq`, not for a lost row.
+
 | `cerbix_service_alert_withheld_total{signal,reason}` (counter) | ONSETS a successful evaluation refused to announce (D-0176), by REASON: `unroutable` (nothing could receive it — somebody's paging configuration is broken NOW) or `no_governing_revision` (no declaration governs the service yet — the paging configuration is fine and the declaration has not taken effect). The two have different owners, which is why one number would have sent the wrong person to look. Its own family rather than a fourth `outcome`, because that label partitions the units of work and this is something that did not happen to one. A persistent non-zero rate means somebody's paging configuration is broken, not that the services are fine: the members are paging for themselves meanwhile, and each service announces as soon as a route exists. Distinct from `..._undeliverable_total`, which is an announcement that WAS made to a route that has gone since. |
 | `cerbix_service_alert_emitted_total{signal,edge}` (counter) | Alert edges ENQUEUED (`onset`\|`close`) — not deliveries; the outbox owns those. |
 | `cerbix_service_incidents_total{action}` (counter) | Incidents a MACHINE opened or resolved for a SERVICE (`opened`\|`resolved`, FR-022). Deliberately NOT folded into the edge counter: an onset for a service whose incident is already open announces WITHOUT opening one, so a persistent gap between `emitted{edge="onset"}` and `incidents{action="opened"}` is a real signal — the open is being refused by the per-service index because something older never resolved. |

@@ -769,3 +769,60 @@ func TestLegacyRowsWithoutASequenceAreStillClaimedOneAtATime(t *testing.T) {
 		t.Fatalf("the claim released %q first, want the one written first", lifecycle[0].Type)
 	}
 }
+
+// D-0177's wire contract: `(incident.id, seq)` is what a receiver dedupes and orders on, so it has to
+// be unique per event and monotonic per incident across every path that enqueues one. cerbix promises
+// DISPATCH order and no more — this pair is what lets a receiver do the rest for itself.
+func TestEveryLifecycleEventCarriesAUniqueMonotonicSequence(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+
+	inc, err := st.CreateIncident(ctx, domain.Incident{
+		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	}, "opening", "author")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, st2 := range []domain.IncidentStatus{domain.IncidentIdentified, domain.IncidentMonitoring, domain.IncidentResolved} {
+		if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+			IncidentID: inc.ID, Status: st2, Body: string(st2), Author: "author",
+		}); err != nil {
+			t.Fatalf("update to %s: %v", st2, err)
+		}
+	}
+
+	rows, err := st.pool.Query(ctx, `
+		SELECT payload FROM outbox_events
+		 WHERE topic = $1 AND payload -> 'incident' ->> 'id' = $2
+		 ORDER BY created_at, id`, domain.TopicIncidentEvent, inc.ID)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	defer rows.Close()
+	var seqs []int64
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		var ev domain.IncidentEvent
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if ev.Incident.ID != inc.ID {
+			t.Fatalf("event names incident %s, want %s", ev.Incident.ID, inc.ID)
+		}
+		seqs = append(seqs, ev.Seq)
+	}
+	if len(seqs) != 4 {
+		t.Fatalf("%d lifecycle events, want one per write", len(seqs))
+	}
+	for i, got := range seqs {
+		if want := int64(i + 1); got != want {
+			t.Fatalf("sequences = %v: a receiver dedupes on (incident, seq), so they must be unique "+
+				"and monotonic per incident", seqs)
+		}
+	}
+}

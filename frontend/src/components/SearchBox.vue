@@ -54,16 +54,24 @@ function reset() {
   close();
 }
 
+// Every hit carries its own org and project, so EVERY hit switches the workspace to them before
+// navigating — not only the project hits.
+//
+// It used to switch for projects alone. A monitor or incident hit from another workspace then landed
+// on a detail page whose reads and permission checks still ran against the PREVIOUS tenant: the
+// successor and convert pickers listed a stranger's services, and `canWrite` compared the workspace's
+// org against the loaded subject's project, so a legitimate editor of the target saw acknowledge,
+// resolve and postmortem disappear. Both entrances were the same defect and are fixed in one place
+// rather than per detail view.
 async function go(hit: Hit) {
   reset();
+  if (hit.org_id && hit.org_id !== ws.orgId) await ws.selectOrg(hit.org_id);
+  if (hit.project_id && hit.project_id !== ws.projectId) ws.selectProject(hit.project_id);
   if (hit.type === "monitor") {
     router.push({ name: "monitor", params: { id: hit.id } });
   } else if (hit.type === "incident") {
     router.push({ name: "incident", params: { id: hit.id } });
   } else {
-    // project — switch workspace to it, then land on its dashboard
-    if (hit.org_id && hit.org_id !== ws.orgId) await ws.selectOrg(hit.org_id);
-    if (hit.project_id) ws.selectProject(hit.project_id);
     router.push({ name: "dashboard" });
   }
 }

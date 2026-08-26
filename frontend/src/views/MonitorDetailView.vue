@@ -37,7 +37,14 @@ const delegatedOwners = computed(() => {
   }
   return [...names];
 });
-const id = route.params.id as string;
+// The id is REACTIVE. It was read once, so the view kept loading and mutating the monitor it was
+// first mounted with while the URL said another — a search hit for a second monitor changed the
+// address bar and nothing else. The RouterView is keyed by path too; this is the layer that does not
+// depend on the shell remembering to remount.
+const id = computed(() => route.params.id as string);
+// Every load takes a ticket. A slower response for the PREVIOUS monitor must not overwrite the
+// current one's screen, which is the race a remount alone does not close.
+let loadTicket = 0;
 
 const loading = ref(true);
 const monitor = ref<Monitor | null>(null);
@@ -153,15 +160,18 @@ const dependsOn = computed(() =>
     .map((pid) => projectMonitors.value.find((m) => m.id === pid))
     .filter((m): m is Monitor => !!m),
 );
-const requiredBy = computed(() => projectMonitors.value.filter((m) => (m.depends_on ?? []).includes(id)));
+const requiredBy = computed(() => projectMonitors.value.filter((m) => (m.depends_on ?? []).includes(id.value)));
 
 async function load() {
+  const ticket = ++loadTicket;
+  const monitorID = id.value;
   loading.value = true;
   const [mon, sla, hb] = await Promise.all([
-    api.GET("/api/v1/monitors/{monitorID}", { params: { path: { monitorID: id } } }),
-    api.GET("/api/v1/monitors/{monitorID}/sla", { params: { path: { monitorID: id } } }),
-    api.GET("/api/v1/monitors/{monitorID}/heartbeats", { params: { path: { monitorID: id }, query: { limit: 60 } } }),
+    api.GET("/api/v1/monitors/{monitorID}", { params: { path: { monitorID } } }),
+    api.GET("/api/v1/monitors/{monitorID}/sla", { params: { path: { monitorID } } }),
+    api.GET("/api/v1/monitors/{monitorID}/heartbeats", { params: { path: { monitorID }, query: { limit: 60 } } }),
   ]);
+  if (ticket !== loadTicket) return;
   monitor.value = mon.data ?? null;
   windows.value = sla.data?.windows ?? [];
   heartbeats.value = hb.data ?? [];
@@ -170,13 +180,14 @@ async function load() {
   if (pid) {
     await ws.init();
     const [av, inc, mons] = await Promise.all([
-      api.GET("/api/v1/monitors/{monitorID}/availability", { params: { path: { monitorID: id }, query: { days: 90 } } }),
+      api.GET("/api/v1/monitors/{monitorID}/availability", { params: { path: { monitorID }, query: { days: 90 } } }),
       api.GET("/api/v1/projects/{projectID}/incidents", { params: { path: { projectID: pid } } }),
       api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID: pid } } }),
     ]);
+    if (ticket !== loadTicket) return;
     availability.value = av.data ?? [];
     projectMonitors.value = mons.data ?? [];
-    openIncident.value = (inc.data ?? []).find((i) => i.monitor_id === id && i.status !== "resolved") ?? null;
+    openIncident.value = (inc.data ?? []).find((i) => i.monitor_id === monitorID && i.status !== "resolved") ?? null;
     // Resolve the attached escalation policy's name for the Configuration card.
     if (monitor.value?.escalation_policy_id) {
       const pol = await api.GET("/api/v1/projects/{projectID}/escalation-policies", { params: { path: { projectID: pid } } });
@@ -196,7 +207,7 @@ async function togglePause() {
   pausing.value = true;
   try {
     const res = await api.PATCH("/api/v1/monitors/{monitorID}", {
-      params: { path: { monitorID: id } },
+      params: { path: { monitorID: id.value } },
       body: { enabled: !monitor.value.enabled },
     });
     if (res.data) monitor.value = res.data;
@@ -253,7 +264,7 @@ async function lifecycle(run: () => Promise<{ data?: unknown; error?: unknown }>
 async function saveSuccessor() {
   const ok = await lifecycle(async () => {
     const res = await api.PUT("/api/v1/monitors/{monitorID}/successor", {
-      params: { path: { monitorID: id } },
+      params: { path: { monitorID: id.value } },
       body: { service_id: successorChoice.value } as never,
     });
     if (res.data) monitor.value = res.data;
@@ -264,7 +275,7 @@ async function saveSuccessor() {
 
 async function retire() {
   await lifecycle(async () => {
-    const res = await api.POST("/api/v1/monitors/{monitorID}/retire", { params: { path: { monitorID: id } } });
+    const res = await api.POST("/api/v1/monitors/{monitorID}/retire", { params: { path: { monitorID: id.value } } });
     if (res.data) monitor.value = res.data;
     return res;
   });
@@ -273,7 +284,7 @@ async function retire() {
 
 async function reactivate() {
   await lifecycle(async () => {
-    const res = await api.POST("/api/v1/monitors/{monitorID}/reactivate", { params: { path: { monitorID: id } } });
+    const res = await api.POST("/api/v1/monitors/{monitorID}/reactivate", { params: { path: { monitorID: id.value } } });
     if (res.data) monitor.value = res.data;
     return res;
   });
@@ -306,7 +317,7 @@ async function convertToService() {
   }
   const ok = await lifecycle(async () => {
     const res = await api.POST("/api/v1/monitors/{monitorID}/convert-to-service", {
-      params: { path: { monitorID: id } },
+      params: { path: { monitorID: id.value } },
       body: { sli: chosenSLI.value },
     });
     if (res.data) {
@@ -326,7 +337,7 @@ async function convertToService() {
 async function remove() {
   deleting.value = true;
   try {
-    const res = await api.DELETE("/api/v1/monitors/{monitorID}", { params: { path: { monitorID: id } } });
+    const res = await api.DELETE("/api/v1/monitors/{monitorID}", { params: { path: { monitorID: id.value } } });
     if (!res.error) router.push({ name: "monitors" });
   } finally {
     deleting.value = false;
@@ -339,9 +350,14 @@ onMounted(() => {
   live.connect();
 });
 
+// Reload when the ROUTE identity changes, or when the workspace does — the pattern ServiceDetail
+// already used. Either one alone leaves an entrance open: a search hit changes both, a workspace
+// switcher changes only the second.
+watch(() => [id.value, ws.projectId], load);
+
 // Reflect live status changes for this monitor immediately.
 watch(
-  () => live.statuses[id],
+  () => live.statuses[id.value],
   (s) => {
     if (s && monitor.value) monitor.value = { ...monitor.value, status: s.status as Monitor["status"] };
   },

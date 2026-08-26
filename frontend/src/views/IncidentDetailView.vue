@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
@@ -18,7 +18,13 @@ type ImpactLink = components["schemas"]["ServiceImpactLink"];
 const route = useRoute();
 const ws = useWorkspace();
 const session = useSession();
-const id = route.params.id as string;
+// REACTIVE, for the same reason as the monitor page: read once, the view kept showing and mutating
+// the incident it was mounted with while the URL named another. `canWrite` compounded it — it
+// compares the WORKSPACE's org against the loaded incident's project, so a stale tenant hid
+// acknowledge, resolve and postmortem from a legitimate editor of the incident actually on screen.
+const id = computed(() => route.params.id as string);
+// A slower response for the previous incident must not overwrite the current one.
+let loadTicket = 0;
 
 const loading = ref(true);
 const incident = ref<Incident | null>(null);
@@ -48,7 +54,7 @@ async function acknowledge() {
   if (!incident.value) return;
   posting.value = true;
   const res = await api.POST("/api/v1/incidents/{incidentID}/acknowledge", {
-    params: { path: { incidentID: id } },
+    params: { path: { incidentID: id.value } },
   });
   // The acknowledge response is the BASE incident — it carries no impacts and no
   // impacts_unavailable ([298] P1-1). Assigning it wholesale would silently erase the
@@ -65,12 +71,15 @@ async function acknowledge() {
 }
 
 async function load() {
+  const ticket = ++loadTicket;
+  const incidentID = id.value;
   loading.value = true;
   const [inc, ups, pm] = await Promise.all([
-    api.GET("/api/v1/incidents/{incidentID}", { params: { path: { incidentID: id } } }),
-    api.GET("/api/v1/incidents/{incidentID}/updates", { params: { path: { incidentID: id } } }),
-    api.GET("/api/v1/incidents/{incidentID}/postmortem", { params: { path: { incidentID: id } } }),
+    api.GET("/api/v1/incidents/{incidentID}", { params: { path: { incidentID } } }),
+    api.GET("/api/v1/incidents/{incidentID}/updates", { params: { path: { incidentID } } }),
+    api.GET("/api/v1/incidents/{incidentID}/postmortem", { params: { path: { incidentID } } }),
   ]);
+  if (ticket !== loadTicket) return;
   incident.value = inc.data ?? null;
   updates.value = ups.data ?? [];
   postmortem.value = pm.error ? null : (pm.data ?? null);
@@ -118,7 +127,7 @@ async function addUpdate(forceResolve = false) {
   const body = forceResolve ? (composer.body || "Resolved.") : composer.body;
   try {
     const res = await api.POST("/api/v1/incidents/{incidentID}/updates", {
-      params: { path: { incidentID: id } },
+      params: { path: { incidentID: id.value } },
       body: { ...(status ? { status: status as IncidentUpdate["status"] } : {}), body },
     });
     if (res.error) {
@@ -158,7 +167,7 @@ async function publishPostmortem() {
   pmError.value = "";
   try {
     const res = await api.PUT("/api/v1/incidents/{incidentID}/postmortem", {
-      params: { path: { incidentID: id } },
+      params: { path: { incidentID: id.value } },
       body: { body: serializePostmortem(pm) },
     });
     if (res.error || !res.data) {
@@ -176,6 +185,9 @@ onMounted(() => {
   ws.init();
   load();
 });
+
+// The route identity and the workspace, the same pair ServiceDetail watches.
+watch(() => [id.value, ws.projectId], load);
 </script>
 
 <template>

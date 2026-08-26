@@ -49,10 +49,10 @@ type ServiceBurnEvaluation struct {
 	Closes  int
 	Holds   int
 	Errors  int
-	// Withheld counts FIRE edges not announced because the target had no resolvable recipient. Like
-	// the live arm's, it is neither an error nor an announcement, and counting it apart is what keeps
-	// "nobody could be told" from reading as "nothing is burning".
-	Withheld int
+	// Withheld counts FIRE edges not announced, BY REASON, in the live arm's vocabulary. The burn arm
+	// only ever withholds for one of them today, and it still carries the map so the two signals
+	// report through one shape rather than two that happen to agree.
+	Withheld map[string]int
 	// Lag is how far behind the oldest evaluated rule was, so a stalled evaluator reads as lag rather
 	// than as an absence of alerts — which is indistinguishable from "nothing is burning".
 	Lag time.Duration
@@ -99,7 +99,7 @@ type burnRuleLatch struct {
 func (s *Store) evaluateServiceBurnAlertsOn(
 	ctx context.Context, db alertConn, cadence time.Duration,
 ) (ServiceBurnEvaluation, error) {
-	var out ServiceBurnEvaluation
+	out := ServiceBurnEvaluation{Withheld: map[string]int{}}
 
 	// A READ-WRITE snapshot: every window in this slice is judged against ONE instant, because
 	// §11.3's staleness test compares the watermark to it and two instants would let two rules of one
@@ -283,7 +283,7 @@ func (s *Store) evaluateServiceBurnAlertsOn(
 				return out, rerr
 			}
 			if len(route) == 0 {
-				out.Withheld++
+				out.Withheld[WithheldUnroutable]++
 				// Neither the level nor the sequence moves: the next evaluation sees the same
 				// unannounced FIRE and announces it as soon as there is somebody to tell.
 				decision.Edge, decision.Firing = false, prev.firing

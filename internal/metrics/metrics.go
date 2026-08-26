@@ -49,7 +49,7 @@ type Registry struct {
 	// surface ever grows along, and it has exactly two values (health, burn) — no service, no
 	// target, no rule, no tenant.
 	serviceAlertEvals    map[string]map[string]uint64 // signal → outcome → count (ok|error|skipped)
-	serviceAlertWithheld map[string]uint64            // signal → onsets withheld for want of a route
+	serviceAlertWithheld map[string]map[string]uint64 // signal → reason → onsets withheld
 	serviceAlertEmitted  map[string]map[string]uint64 // signal → edge → count (onset|close)
 	serviceIncidents     map[string]uint64            // action → count (opened|resolved), FR-022
 	escalationSteps      map[string]uint64            // subject → count (monitor|service), FR-023
@@ -480,16 +480,19 @@ func (r *Registry) RecordServiceDelegation(signal, state string) {
 // It is also not `..._undeliverable_total`, which counts an announcement that WAS made to a route
 // that has gone since. The difference is the whole point: one says the paging configuration is broken
 // now, the other says it broke after somebody was already told.
-func (r *Registry) RecordServiceAlertWithheld(signal string, n int) {
+func (r *Registry) RecordServiceAlertWithheld(signal, reason string, n int) {
 	if n <= 0 {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.serviceAlertWithheld == nil {
-		r.serviceAlertWithheld = map[string]uint64{}
+		r.serviceAlertWithheld = map[string]map[string]uint64{}
 	}
-	r.serviceAlertWithheld[signal] += uint64(n)
+	if r.serviceAlertWithheld[signal] == nil {
+		r.serviceAlertWithheld[signal] = map[string]uint64{}
+	}
+	r.serviceAlertWithheld[signal][reason] += uint64(n)
 }
 
 // RecordServiceAlertUndeliverable counts an announcement with nobody left to tell — an empty
@@ -846,7 +849,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	serviceAlertUndeliver := maps.Clone(r.serviceAlertUndeliver)
 	serviceRecipientMissing := r.serviceRecipientMissing
 	serviceAlertEvals := copyCounts2(r.serviceAlertEvals)
-	serviceAlertWithheld := copyCounts(r.serviceAlertWithheld)
+	serviceAlertWithheld := copyCounts2(r.serviceAlertWithheld)
 	serviceAlertEmitted := copyCounts2(r.serviceAlertEmitted)
 	serviceIncidents := copyCounts(r.serviceIncidents)
 	escalationSteps := copyCounts(r.escalationSteps)
@@ -1059,7 +1062,10 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		out.println("# HELP cerbix_service_alert_withheld_total Onsets a successful evaluation refused to announce because nothing could receive them (D-0176).")
 		out.println("# TYPE cerbix_service_alert_withheld_total counter")
 		for _, signal := range sortedKeys(serviceAlertWithheld) {
-			out.printf("cerbix_service_alert_withheld_total{signal=%q} %d\n", signal, serviceAlertWithheld[signal])
+			for _, reason := range sortedKeys(serviceAlertWithheld[signal]) {
+				out.printf("cerbix_service_alert_withheld_total{signal=%q,reason=%q} %d\n",
+					signal, reason, serviceAlertWithheld[signal][reason])
+			}
 		}
 	}
 	if len(serviceAlertEmitted) > 0 {

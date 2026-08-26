@@ -124,7 +124,7 @@ type ServiceStatsSink interface {
 	// The §16.6b evaluator families. Counters come from what a slice DID, the pass gauges from
 	// each successful pass, the stats from the out-of-band sample.
 	RecordServiceAlertEvaluations(signal, outcome string, n int)
-	RecordServiceAlertWithheld(signal string, n int)
+	RecordServiceAlertWithheld(signal, reason string, n int)
 	RecordServiceAlertEmitted(signal, edge string, n int)
 	RecordServiceIncidents(action string, n int)
 	RecordEscalationSteps(subject string, n int)
@@ -459,11 +459,11 @@ type serviceAlertPass struct {
 	// burn rule for the sealed one. `skipped` is where the burn arm's HOLDs land: a hold is a
 	// successful evaluation that cannot speak, which is neither an error nor an answer.
 	ok, skipped, errors int
-	// withheld counts ONSETS a successful evaluation refused to announce because the service had no
-	// resolvable recipient (§16.6, amended by D-0176). It is its own outcome rather than `skipped`,
-	// which the burn arm uses for HOLDs: "cannot be quoted" and "cannot be delivered" are different
-	// facts, and an operator seeing silence needs to know which one produced it.
-	withheld       int
+	// withheld counts ONSETS a successful evaluation refused to announce, BY REASON (D-0176). The
+	// reasons are a fixed pair — a broken route and a declaration that has not taken effect — and
+	// they are different problems with different owners, so reporting one number would have named
+	// the second as the first.
+	withheld       map[string]int
 	onsets, closes int
 	// FR-022: incidents this pass OPENED and RESOLVED by machine. Counted apart from the edges
 	// because they are not the same event — an onset for a service whose incident is already open
@@ -486,7 +486,9 @@ func (s *Scheduler) observeServiceAlertPass(p serviceAlertPass) {
 	// Its OWN family, not a fourth `outcome`: that label partitions the units of work a pass did,
 	// and a withheld onset is not a fourth kind of unit — it is something that did not happen to
 	// one, so it would have overlapped `ok`.
-	s.serviceMetrics.RecordServiceAlertWithheld(p.signal, p.withheld)
+	for reason, n := range p.withheld {
+		s.serviceMetrics.RecordServiceAlertWithheld(p.signal, reason, n)
+	}
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "onset", p.onsets)
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "close", p.closes)
 	s.serviceMetrics.RecordServiceIncidents("opened", p.incidentsOpened)
@@ -951,14 +953,14 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					// onsets it refused to announce for want of a recipient.
 					s.observeServiceAlertPass(serviceAlertPass{
 						signal: string(domain.ServiceSignalHealth), cadence: serviceAlertEvery,
-						lag: ev.Lag, ok: ev.Evaluated, errors: ev.Errors, withheld: ev.Unroutable,
+						lag: ev.Lag, ok: ev.Evaluated, errors: ev.Errors, withheld: ev.Withheld,
 						onsets: ev.Onsets, closes: ev.Closes,
 						incidentsOpened: ev.IncidentsOpened, incidentsResolved: ev.IncidentsResolved,
 					})
 					// Logged whenever anything happened OR anything is behind: a stalled evaluator
 					// has to read as lag rather than as an absence of alerts, which is
 					// indistinguishable from "nothing is wrong" (§16.7).
-					if ev.Onsets > 0 || ev.Closes > 0 || ev.Errors > 0 || ev.Unroutable > 0 ||
+					if ev.Onsets > 0 || ev.Closes > 0 || ev.Errors > 0 || len(ev.Withheld) > 0 ||
 						ev.Lag > serviceAlertEvery {
 						s.logger.Info("service_alerts_evaluated", "evaluated", ev.Evaluated,
 							"onsets", ev.Onsets, "closes", ev.Closes, "errors", ev.Errors,

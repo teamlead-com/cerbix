@@ -3864,7 +3864,7 @@ since the onset, is counted there rather than mistaken for a page. That case is 
 the recipients were resolvable when the announcement was made.
 
 Withheld onsets are a different fact and get their own bounded counter,
-`cerbix_service_alert_withheld_total{signal}`, rather than a fourth value on the evaluations
+`cerbix_service_alert_withheld_total{signal,reason}` — the reason a fixed pair, `unroutable` and `no_governing_revision`, because a broken route and a declaration that has not taken effect are different problems with different owners — rather than a fourth value on the evaluations
 `outcome` label: that label partitions the units of work a pass performed, and a withheld onset is
 not a fourth kind of unit — it is something that did NOT happen to one. Folding it in would have made
 `ok` and `withheld` overlap, since `ok` counts every service evaluated.

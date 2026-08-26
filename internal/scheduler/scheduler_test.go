@@ -817,9 +817,9 @@ func (r *recordingServiceSink) RecordServiceSlice(string) {}
 // rewrite what those assertions are reading.
 func (r *recordingServiceSink) RecordServiceAlertEvaluations(string, string, int) {}
 func (r *recordingServiceSink) RecordServiceAlertEmitted(string, string, int)     {}
-func (r *recordingServiceSink) RecordServiceAlertWithheld(signal string, n int) {
+func (r *recordingServiceSink) RecordServiceAlertWithheld(signal, reason string, n int) {
 	if n > 0 {
-		r.log("withheld:" + signal)
+		r.log("withheld:" + signal + ":" + reason)
 	}
 }
 func (r *recordingServiceSink) RecordServiceIncidents(string, int)            {}

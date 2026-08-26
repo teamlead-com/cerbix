@@ -613,9 +613,9 @@ func TestBurnWithholdsAnOnsetNobodyCanReceiveAndDoesNotLatch(t *testing.T) {
 	if got.Onsets != 0 {
 		t.Fatalf("an unroutable burn FIRE announced %+v", got)
 	}
-	if got.Withheld == 0 {
-		t.Fatal("the withheld FIRE was not counted: silence that means 'nobody could be told' must " +
-			"not read as 'nothing is burning'")
+	if got.Withheld[WithheldUnroutable] != 1 {
+		t.Fatalf("the withheld FIRE was counted as %+v, want one under %q: silence that means "+
+			"'nobody could be told' must not read as 'nothing is burning'", got.Withheld, WithheldUnroutable)
 	}
 	var firing bool
 	var seq int64

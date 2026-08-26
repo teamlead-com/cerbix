@@ -43,10 +43,12 @@ type ServiceAlertEvaluation struct {
 	// per-service unique index absorbs.
 	IncidentsOpened   int
 	IncidentsResolved int
-	// Unroutable counts ONSETS withheld because the service's coverage was not ARMED — no resolvable
-	// recipient, or no governing declaration. They are neither errors nor announcements, and counting
-	// them separately is what keeps "nothing was wrong" distinguishable from "nobody could be told".
-	Unroutable int
+	// Withheld counts ONSETS this pass refused to announce, BY REASON. Two reasons exist and they are
+	// different problems with different owners: `unroutable` says somebody's paging configuration is
+	// broken right now, `no_governing_revision` says the declaration has not taken effect yet. A
+	// single number would have reported the second as the first, which is what the first version of
+	// this counter did.
+	Withheld map[string]int
 	// Lag is how far behind the oldest evaluated service was, so a stalled evaluator reads as lag
 	// rather than as an absence of alerts — which is indistinguishable from "nothing is wrong".
 	Lag time.Duration
@@ -57,10 +59,20 @@ type ServiceAlertEvaluation struct {
 // The state write and the outbox row commit in ONE transaction (invariant 80), so a delivered alert
 // can never be forgotten and a forgotten one can never be delivered twice. Everything else about
 // delivery is at-least-once and the payload's sequence is what keeps a duplicate from being a lie.
+// The bounded vocabulary of reasons an onset is withheld (D-0176). Two values, fixed: this labels a
+// metric, and a label that can grow with the data is a metric endpoint anybody can inflate.
+const (
+	// WithheldUnroutable: nothing could receive the announcement.
+	WithheldUnroutable = "unroutable"
+	// WithheldNoGoverningRevision: no declaration governs the service yet, so the verdict was
+	// computed from nothing.
+	WithheldNoGoverningRevision = "no_governing_revision"
+)
+
 func (s *Store) evaluateServiceAlertsOn(
 	ctx context.Context, db alertConn, cadence time.Duration,
 ) (ServiceAlertEvaluation, error) {
-	var out ServiceAlertEvaluation
+	out := ServiceAlertEvaluation{Withheld: map[string]int{}}
 
 	// A READ-WRITE snapshot: this path both evaluates (which the read-only report snapshot was built
 	// for) and writes its verdicts, and the two must see one instant.
@@ -231,16 +243,22 @@ func (s *Store) evaluateServiceAlertsOn(
 		// It also refuses to LATCH. Emitting nothing while advancing `live_firing` and `emitted_state`
 		// would leave the service looking announced, so restoring the route later produces no edge and
 		// the outage is never paged at all — a silence that outlives its cause.
-		armed := true
+		armed, withheldReason := true, ""
 		if decision.Notify && !decision.Close {
 			if c.revisionID == nil {
-				armed = false
+				// A different fact from a broken route, and it must not be reported as one: nothing
+				// governs this service yet, so there is no declaration the verdict was computed
+				// from. Somebody's paging configuration is fine; the declaration has not taken
+				// effect.
+				armed, withheldReason = false, WithheldNoGoverningRevision
 			} else {
 				route, rerr := resolveServiceRecipientsTx(ctx, tx, c.projectID, c.scheduleID, asOf)
 				if rerr != nil {
 					return out, rerr
 				}
-				armed = len(route) > 0
+				if armed = len(route) > 0; !armed {
+					withheldReason = WithheldUnroutable
+				}
 			}
 		}
 		if !decision.Notify || !armed {
@@ -248,7 +266,7 @@ func (s *Store) evaluateServiceAlertsOn(
 			// allowed to say. The state below records the observation and refreshes the lease, so the
 			// next pass sees the same candidate and the same streak.
 			if decision.Notify {
-				out.Unroutable++
+				out.Withheld[withheldReason]++
 			}
 			decision.Notify = false
 			decision.NextFiring = c.firing

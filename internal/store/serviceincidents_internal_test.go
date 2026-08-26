@@ -836,9 +836,10 @@ func TestAnUnroutableServiceOpensNothingAndDoesNotSwallowTheLaterOnset(t *testin
 		t.Fatalf("an UNROUTABLE service announced %+v — nobody could be told, and its members are "+
 			"already paging for themselves", got)
 	}
-	if got.Unroutable == 0 {
-		t.Fatal("the withheld onset was not counted: silence that reads as 'nothing was wrong' is " +
-			"indistinguishable from silence that means 'nobody could be told'")
+	if got.Withheld[WithheldUnroutable] != 1 {
+		t.Fatalf("the withheld onset was counted as %+v, want one under %q: a broken route and an "+
+			"absent declaration are different problems with different owners",
+			got.Withheld, WithheldUnroutable)
 	}
 	var incidents int
 	if err := st.pool.QueryRow(ctx,
@@ -900,5 +901,10 @@ func TestAServiceWithNoGoverningDeclarationOpensNothing(t *testing.T) {
 	if got.IncidentsOpened != 0 || incidents != 0 {
 		t.Fatalf("a service with no governing declaration opened %d incident(s) (%+v): the verdict "+
 			"was computed from no declaration at all", incidents, got)
+	}
+	if got.Withheld[WithheldNoGoverningRevision] != 1 {
+		t.Fatalf("withheld = %+v, want one under %q — reporting this as a broken route would send "+
+			"somebody to fix a paging configuration that is fine",
+			got.Withheld, WithheldNoGoverningRevision)
 	}
 }

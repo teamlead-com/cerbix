@@ -1534,3 +1534,25 @@ func TestASupersededIncidentOpeningIsNotDelivered(t *testing.T) {
 		t.Fatalf("a pre-fence payload was dropped: %+v", wh.got)
 	}
 }
+
+// `New` documents metrics as optional, and the delegation path grew several unconditional
+// `w.metrics.Record*` calls — so the contract was true of the constructor and false of the code, and
+// the panic waited for the first SUPPRESSED event. That is to say, for production.
+func TestAWorkerBuiltWithoutMetricsDeliversAndSuppresses(t *testing.T) {
+	fs := &fakeStore{
+		monitors: map[string]domain.Monitor{
+			"m1": {ID: "m1", ProjectID: "p1", Name: "API", Status: domain.StatusDown, StateSequence: 1},
+		},
+		// A service actively covers this monitor, which is what drives the metrics calls.
+		delegation: map[string]store.DelegationVerdict{
+			"m1|live": {Owners: []store.DelegationOwner{{ServiceID: "svc1", Slug: "checkout", Name: "Checkout"}}},
+		},
+		pending: []domain.OutboxEvent{{
+			ID: "e1", Topic: domain.TopicMonitorTransition,
+			Payload: transitionSeq(t, "m1", domain.StatusUp, domain.StatusDown, 1, false), Attempts: 1,
+		}},
+	}
+	// nil metrics — the documented case.
+	w := New(fs, &fakeWebhook{}, &fakeNotify{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w.drain(context.Background()) // must not panic
+}

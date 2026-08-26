@@ -128,8 +128,30 @@ func (w *Worker) alertSilenced() bool { return w.silenced != nil && w.silenced()
 // New builds a worker. webhooks and notifs may be nil (their events then fail and
 // eventually park as dead); metrics may be nil.
 func New(st Store, webhooks WebhookDeliverer, notifs NotifyDeliverer, metrics Metrics, logger *slog.Logger) *Worker {
+	// A nil registry becomes a no-op HERE rather than a guard at each call site. The delegation path
+	// grew several unconditional `w.metrics.Record*` calls, so "metrics may be nil" was true of the
+	// constructor and false of the code — and the panic waited for the first SUPPRESSED event, which
+	// is to say for production. One substitution makes the documented contract true everywhere,
+	// including at call sites nobody has written yet.
+	if metrics == nil {
+		metrics = noopMetrics{}
+	}
 	return &Worker{store: st, webhooks: webhooks, notifs: notifs, metrics: metrics, logger: logger}
 }
+
+// noopMetrics absorbs every counter for a worker built without a registry.
+type noopMetrics struct{}
+
+func (noopMetrics) RecordOutboxDelivered()                 {}
+func (noopMetrics) RecordOutboxDead()                      {}
+func (noopMetrics) RecordImpactLinks(string, int)          {}
+func (noopMetrics) RecordImpactFailure()                   {}
+func (noopMetrics) RecordAlertSuppressed(string, string)   {}
+func (noopMetrics) RecordDelegationFailOpen(string)        {}
+func (noopMetrics) RecordServiceDelegation(string, string) {}
+func (noopMetrics) RecordServiceAlertUndeliverable(string) {}
+func (noopMetrics) RecordServiceAlertRecipientMissing(int) {}
+func (noopMetrics) RecordImpactWitnessOverflow(int)        {}
 
 // Run polls until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {

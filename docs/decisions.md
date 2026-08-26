@@ -984,7 +984,7 @@ when unset, subscription endpoints report 503. Public endpoints:
 confirmation email), `POST /public/subscriptions/{token}/confirm`, `DELETE /public/subscriptions/{token}`.
 Incident emails ride the **existing transactional outbox**: an `internal/subscribe` notifier fans an
 `IncidentEvent` out to the confirmed subscribers of every page that surfaces the incident's project
-(`ConfirmedSubscriberEmailsForProject` joins subscribers→components→monitors), wired via a cli
+(`ConfirmedSubscriberEmailsForProject`; the join was subscribers→components→monitors, **superseded by D-0180** — it is now the inverse of the page's project axis), wired via a cli
 `incidentFanout` composite so the webhook result governs retry and subscriber email is best-effort. The public
 page gains a subscribe form and handles `?confirm=`/`?unsubscribe=` links. **Consequence:** end users self-serve
 email subscriptions with confirmation; incident lifecycle changes notify them, reusing the reliable outbox and
@@ -4081,3 +4081,40 @@ covers the superseded retry, the duplicate, the refused close and the unidentifi
 `TestAnAnnouncementNobodyReceivedIsNotCreditedAsDelivered` proves the worker leaves no credit for a
 zero-resolved delivery and does not retry it. Removing the delivered term from either arm's gate fails
 these with `coverage armed for an onset NOBODY received`.
+
+## D-0180 — a status page's project set is ONE axis, asked in both directions (2026-08-26)
+
+**Context.** Three surfaces decided which projects a status page reports, and all three decided it
+differently.
+
+- The public render seeded an empty set and added each component's resolved project. A
+  project-scoped page whose components are all MANUAL therefore reported none of its own project's
+  incidents.
+- The feed seeded the page's own project and then walked `components → monitors`, one `GetMonitor`
+  per component. A service-backed component contributed nothing, so a Service-only page rendered
+  incidents its own RSS did not carry.
+- The subscriber fan-out was that same monitor JOIN with neither half of the axis. A page made
+  entirely of Service components showed an incident and emailed nobody about it.
+
+The last one is the sharp edge: a reader who subscribed to a page sees the outage on it and never
+gets the mail. Webhooks fired; the people who asked to be told did not hear.
+
+**Decision.** `page.project_id` when the page is project-scoped, UNION every non-NULL
+`components.source_project`. One SQL owner, `store.StatusPageProjectIDs`, and
+`ConfirmedSubscriberEmailsForProject` is its exact INVERSE — a subscriber is entitled to mail about
+precisely the incidents their page shows them, so the two must be derived from one axis rather than
+kept in step by hand.
+
+**NOT filtered by `source`.** A conversion deliberately keeps a dormant binding's `source_project`,
+and `resolveComponents` still resolves such a component to that project, so the page goes on showing
+its incidents. Filtering here would narrow the mail below the page — the same disagreement in the
+other direction. Whether a manual component with a dormant binding *should* keep reporting that
+project is a separate question with its own owner; this decision preserves the current page
+semantics rather than changing them in a bug fix.
+
+**Verified:** `TestAPageProjectSetIsOneAxisInBothDirections` uses the two shapes the old spellings
+each lost, neither masked by a monitor component of the same project — a project-scoped page with
+only manual components, and a Service-only org page — and asserts the forward set AND the subscriber
+inverse for both. `TestADormantBindingKeepsThePageReportingItsProject` pins the no-`source`-filter
+rule. Dropping the own-project arm fails with `want its OWN project`; restoring the monitor JOIN in
+the inverse fails with `the mail about it went to nobody`.

@@ -81,16 +81,23 @@ func (s *Store) DeleteSubscriberByToken(ctx context.Context, token string) error
 	return nil
 }
 
-// ConfirmedSubscriberEmailsForProject lists the distinct confirmed subscriber
-// emails across every status page that includes a component tied to a monitor in
-// the given project — the recipients for that project's incident emails.
+// ConfirmedSubscriberEmailsForProject lists the distinct confirmed subscriber emails across every
+// status page that REPORTS this project — the recipients for that project's incident emails.
+//
+// It is the INVERSE of `StatusPageProjectIDs` and must stay so: a subscriber is entitled to mail
+// about exactly the incidents their page shows them. The old spelling was `components → monitors`,
+// which is neither half of that axis. It missed the page's own project, and it missed every
+// service-backed component — so a page made only of Service components rendered the incident and
+// emailed nobody, which is the worst of both.
 func (s *Store) ConfirmedSubscriberEmailsForProject(ctx context.Context, projectID string) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT DISTINCT sub.email
 		  FROM subscribers sub
-		  JOIN components c ON c.status_page_id = sub.status_page_id
-		  JOIN monitors m ON m.id = c.monitor_id
-		 WHERE m.project_id = $1 AND sub.confirmed_at IS NOT NULL`, projectID)
+		  JOIN status_pages sp ON sp.id = sub.status_page_id
+		 WHERE sub.confirmed_at IS NOT NULL
+		   AND (sp.project_id = $1
+		        OR EXISTS (SELECT 1 FROM components c
+		                    WHERE c.status_page_id = sp.id AND c.source_project = $1))`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: subscriber emails for project: %w", err)
 	}

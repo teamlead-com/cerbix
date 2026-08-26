@@ -123,30 +123,20 @@ func (h *Handler) buildFeed(r *http.Request, sp domain.StatusPage) (feed.Feed, e
 	return f, nil
 }
 
-// statusPageProjectIDs returns the set of project ids a page draws incidents from:
-// the page's own project (if any) plus the projects of its monitor-backed
-// components.
+// statusPageProjectIDs returns the set of project ids a page draws incidents from.
+//
+// It is `store.StatusPageProjectIDs` and nothing else. This used to be its own walk — the page's own
+// project plus `components → monitors`, one `GetMonitor` per component — which meant a service-backed
+// component contributed nothing, so a Service-only page rendered incidents its own feed did not
+// carry. One owner, asked by the render, the feed and the subscriber fan-out alike (D-0180).
 func (h *Handler) statusPageProjectIDs(ctx context.Context, sp domain.StatusPage) (map[string]struct{}, error) {
-	set := map[string]struct{}{}
-	if sp.ProjectID != "" {
-		set[sp.ProjectID] = struct{}{}
-	}
-	comps, err := h.store.ListComponentsByPage(ctx, sp.ID)
+	ids, err := h.store.StatusPageProjectIDs(ctx, sp.ID)
 	if err != nil {
 		return nil, err
 	}
-	for _, c := range comps {
-		if c.MonitorID == "" {
-			continue
-		}
-		mon, err := h.store.GetMonitor(ctx, c.MonitorID)
-		if errors.Is(err, store.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		set[mon.ProjectID] = struct{}{}
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
 	}
 	return set, nil
 }

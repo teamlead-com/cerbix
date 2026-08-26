@@ -513,7 +513,13 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	views := make([]componentView, 0, len(comps))
+	// The page's OWN project seeds the set (D-0180). Without it a project-scoped page whose
+	// components are all manual reported none of its project's incidents, while the feed for the
+	// same page reported them — the render and the mail disagreeing about what the page is about.
 	projSet := map[string]struct{}{}
+	if sp.ProjectID != "" {
+		projSet[sp.ProjectID] = struct{}{}
+	}
 	for _, c := range comps {
 		res := resolved[c.ID]
 		if res.Project != "" {

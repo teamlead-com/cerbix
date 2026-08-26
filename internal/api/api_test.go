@@ -1392,6 +1392,30 @@ func (f *fakeStore) ListMonitorsSupersededBy(_ context.Context, projectID, servi
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
+
+// The fake mirrors the real query's AXIS, not its SQL: the page's own project, UNION every
+// component's non-NULL source_project. Filtering by `source` here would let a handler test pass
+// against a rule the database does not apply.
+func (f *fakeStore) StatusPageProjectIDs(_ context.Context, pageID string) ([]string, error) {
+	set := map[string]struct{}{}
+	for _, sp := range f.pages {
+		if sp.ID == pageID && sp.ProjectID != "" {
+			set[sp.ProjectID] = struct{}{}
+		}
+	}
+	for _, c := range f.components {
+		if c.StatusPageID == pageID && c.SourceProject != "" {
+			set[c.SourceProject] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (f *fakeStore) ListComponentsByPage(_ context.Context, pageID string) ([]domain.Component, error) {
 	var out []domain.Component
 	for _, c := range f.components {

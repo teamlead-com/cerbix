@@ -127,6 +127,9 @@ type Store interface {
 	ListStatusPagesByOrg(ctx context.Context, orgID string) ([]domain.StatusPage, error)
 	CreateComponent(ctx context.Context, c domain.Component) (domain.Component, error)
 	ListComponentsByPage(ctx context.Context, pageID string) ([]domain.Component, error)
+	// StatusPageProjectIDs is the ONE owner of "which projects does this page report" (D-0180).
+	// The render, the feed and the subscriber fan-out all derive from it, in both directions.
+	StatusPageProjectIDs(ctx context.Context, pageID string) ([]string, error)
 	GetComponent(ctx context.Context, id string) (domain.Component, error)
 	DeleteComponent(ctx context.Context, id string) error
 	// FR-021 §15.0/§15.5 — the status-page service projection and the composite lifecycle.

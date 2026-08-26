@@ -46,6 +46,7 @@ type Store interface {
 	// monitor — armed, quotable, routable, generation-matched and fresh. An error here must page.
 	ActiveDelegation(ctx context.Context, monitorID, projectID string, signal store.DelegationSignal) (store.DelegationVerdict, error)
 	ServiceAlertSequence(ctx context.Context, a domain.ServiceAlert) (int64, error)
+	IncidentEventSequence(ctx context.Context, incidentID string) (int64, error)
 	RecordSuppression(ctx context.Context, eventID, monitorID, projectID, topic string, owners []store.DelegationOwner) error
 }
 
@@ -354,6 +355,26 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		var ev domain.IncidentEvent
 		if err := json.Unmarshal(e.Payload, &ev); err != nil {
 			return err
+		}
+		// The ORDERING gate (D-0177), the same shape `service_alert` has carried since §16.5. The
+		// outbox is at-least-once and claims in no defined order, so a retried OPENING can arrive
+		// after the RESOLUTION it precedes — telling a subscriber an outage began after it ended.
+		//
+		// A resolution is never dropped here, and neither is an event whose payload predates the
+		// fence (Seq == 0): this rule may turn a superseded announcement into silence, never a
+		// missing ending into one.
+		if ev.Seq > 0 && ev.Type != domain.EventIncidentResolved {
+			current, serr := w.store.IncidentEventSequence(ctx, ev.Incident.ID)
+			switch {
+			case errors.Is(serr, store.ErrNotFound):
+				return nil // the incident is gone; an opening has nothing to announce
+			case serr != nil:
+				return serr
+			case ev.Seq < current:
+				w.logger.Info("incident_event_superseded", "incident_id", ev.Incident.ID,
+					"event", ev.Type, "event_seq", ev.Seq, "current_seq", current)
+				return nil
+			}
 		}
 		if err := w.webhooks.Deliver(ctx, ev); err != nil {
 			return err

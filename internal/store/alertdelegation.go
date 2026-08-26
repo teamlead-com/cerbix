@@ -409,3 +409,21 @@ func (s *Store) MonitorDelegation(
 	}
 	return out, nil
 }
+
+// IncidentEventSequence returns an incident's CURRENT lifecycle sequence, which delivery compares
+// against the one stamped into an `incident_event` payload (D-0177).
+//
+// `ErrNotFound` means the incident is gone. The caller decides what that implies, and the answers
+// differ by direction exactly as they do for a service alert: a resolution still deserves delivery,
+// an opening for a vanished incident does not.
+func (s *Store) IncidentEventSequence(ctx context.Context, incidentID string) (int64, error) {
+	var seq int64
+	err := s.pool.QueryRow(ctx, `SELECT event_seq FROM incidents WHERE id = $1`, incidentID).Scan(&seq)
+	if noRows(err) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: incident event sequence: %w", err)
+	}
+	return seq, nil
+}

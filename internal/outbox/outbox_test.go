@@ -55,6 +55,7 @@ type fakeStore struct {
 	suppressRecords []string // "event|monitor|topic|owners"
 	suppressErr     error
 	alertSeq        map[string]int64 // "service|signal|target|rule" → current sequence
+	incidentSeq     map[string]int64 // incident id → current lifecycle sequence
 	alertSeqMissing bool
 
 	// impact-correlation fakes (FR-021 §14.3)
@@ -966,6 +967,16 @@ func (f *fakeStore) RecordSuppression(
 	return nil
 }
 
+// incidentSeq is the incident's CURRENT lifecycle sequence, keyed by incident id. Absent means the
+// incident is gone, which the gate must treat as "an opening has nothing to announce".
+func (f *fakeStore) IncidentEventSequence(_ context.Context, incidentID string) (int64, error) {
+	seq, ok := f.incidentSeq[incidentID]
+	if !ok {
+		return 0, store.ErrNotFound
+	}
+	return seq, nil
+}
+
 func (f *fakeStore) ServiceAlertSequence(
 	_ context.Context, a domain.ServiceAlert,
 ) (int64, error) {
@@ -1451,5 +1462,75 @@ func TestAServiceEscalationStepSkipsDelegationEntirely(t *testing.T) {
 	}
 	if len(silenced.delivered) != 1 {
 		t.Fatalf("a muted service step was not consumed (%v) — it would be redelivered forever", silenced.delivered)
+	}
+}
+
+// D-0177 — the ordering gate for `incident_event`, the shape `service_alert` has had since §16.5.
+//
+// The outbox is at-least-once and claims in no defined order, so a retried OPENING can arrive after
+// the RESOLUTION it precedes. Delivered as-is, a subscriber is told an outage began after it ended.
+func TestASupersededIncidentOpeningIsNotDelivered(t *testing.T) {
+	fs := &fakeStore{incidentSeq: map[string]int64{"inc-1": 4}}
+	wh := &fakeWebhook{}
+	w := newWorker(fs, wh, &fakeNotify{}, &fakeMetrics{})
+
+	stale, err := json.Marshal(domain.IncidentEvent{
+		Type: domain.EventIncidentOpened, Seq: 1,
+		Incident: domain.Incident{ID: "inc-1", ProjectID: "p1", Title: "down"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := w.deliver(context.Background(), domain.OutboxEvent{
+		ID: "e1", Topic: domain.TopicIncidentEvent, Payload: stale,
+	}); err != nil {
+		t.Fatalf("deliver stale opening: %v", err)
+	}
+	if len(wh.got) != 0 {
+		t.Fatalf("a superseded opening was delivered: %+v", wh.got)
+	}
+
+	// The CURRENT opening goes out.
+	current, _ := json.Marshal(domain.IncidentEvent{
+		Type: domain.EventIncidentOpened, Seq: 4,
+		Incident: domain.Incident{ID: "inc-1", ProjectID: "p1", Title: "down"},
+	})
+	if err := w.deliver(context.Background(), domain.OutboxEvent{
+		ID: "e2", Topic: domain.TopicIncidentEvent, Payload: current,
+	}); err != nil {
+		t.Fatalf("deliver current opening: %v", err)
+	}
+	if len(wh.got) != 1 {
+		t.Fatalf("the current opening was dropped: %+v", wh.got)
+	}
+
+	// A RESOLUTION is never dropped by this gate, however old its sequence: an ending that cannot be
+	// delivered leaves people watching something that finished.
+	resolved, _ := json.Marshal(domain.IncidentEvent{
+		Type: domain.EventIncidentResolved, Seq: 1,
+		Incident: domain.Incident{ID: "inc-1", ProjectID: "p1", Title: "down"},
+	})
+	if err := w.deliver(context.Background(), domain.OutboxEvent{
+		ID: "e3", Topic: domain.TopicIncidentEvent, Payload: resolved,
+	}); err != nil {
+		t.Fatalf("deliver resolution: %v", err)
+	}
+	if len(wh.got) != 2 || wh.got[1].Type != domain.EventIncidentResolved {
+		t.Fatalf("the resolution was dropped by the ordering gate: %+v", wh.got)
+	}
+
+	// A payload written before the fence existed carries no sequence, and the gate must not read
+	// that as "superseded".
+	old, _ := json.Marshal(domain.IncidentEvent{
+		Type:     domain.EventIncidentOpened,
+		Incident: domain.Incident{ID: "inc-1", ProjectID: "p1", Title: "down"},
+	})
+	if err := w.deliver(context.Background(), domain.OutboxEvent{
+		ID: "e4", Topic: domain.TopicIncidentEvent, Payload: old,
+	}); err != nil {
+		t.Fatalf("deliver pre-fence payload: %v", err)
+	}
+	if len(wh.got) != 3 {
+		t.Fatalf("a pre-fence payload was dropped: %+v", wh.got)
 	}
 }

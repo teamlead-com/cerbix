@@ -3865,3 +3865,31 @@ meaning (the burn arm's HOLDs: a verdict that cannot be QUOTED), because "cannot
 "cannot be delivered" are different facts and an operator reading silence needs to tell them apart.
 Verified both ways in both arms: dropping the gate opens an incident nobody received, and withholding
 while still latching leaves the restored route with no edge to announce.
+
+## D-0177 — `incident_event` gets the ordering fence `service_alert` has always had (2026-08-26)
+
+**Context.** The review refused to accept "narrow the claim" for the outbox's delivery order, and the
+owner agreed: a subscriber can be told an incident RESOLVED and then, from a retried older row, that
+it OPENED. FR-021 §16.5 solved this for `service_alert` with a per-service sequence and a delivery
+gate; `incident_event` — older, and the topic that reaches webhooks and status-page subscribers — had
+neither.
+
+**Two independent causes, and both are fixed here.** Within one claim, `UPDATE … RETURNING` has no
+defined row order: the `ORDER BY` inside its sub-select decides which rows are claimed, not the
+sequence they are returned in, so one batch holding an opening and its resolution could hand them to
+the dispatcher either way round. Across claims and workers, ordering is not available at all — a
+retry arrives minutes later, and another worker may be mid-delivery.
+
+**Decision.** `incidents.event_seq` (migration 00086) is advanced by every path that enqueues a
+lifecycle event, inside the transaction that writes the fact, and stamped into the payload. Delivery
+compares it with the incident's current sequence and drops a superseded ONSET. A RESOLUTION is never
+dropped, exactly as §16.5 never drops a close: this rule may turn a superseded announcement into
+silence, never a missing ending into one. A payload with no sequence (written before this existed)
+is treated as unknown and delivered. `ClaimDueOutbox` additionally sorts its batch by
+(`next_attempt_at`, `created_at`, `id`) before returning, which orders the in-batch half.
+
+**What this does NOT claim.** The gate makes a wrong ORDER unobservable by dropping the stale member
+of the pair; it does not serialize two workers. That is the same guarantee `service_alert` has, and
+it is enough for the failure that motivated it — nobody is told an outage began after it ended.
+Verified both ways: removing the gate delivers the superseded opening, and letting it apply to
+resolutions drops an ending.

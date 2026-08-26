@@ -50,4 +50,13 @@ type IncidentEvent struct {
 	Type     string          `json:"event"`
 	Incident Incident        `json:"incident"`
 	Update   *IncidentUpdate `json:"update,omitempty"`
+	// Seq is this incident's lifecycle sequence at the moment the event was enqueued. Delivery
+	// compares it with the incident's current one and drops a superseded ONSET, exactly as the
+	// service-alert topic does: the outbox is at-least-once and claims in no defined order, so
+	// without it a retried "opened" can arrive after the "resolved" it precedes and describe an
+	// outage as beginning after it ended. A resolution is never dropped by this gate.
+	//
+	// Absent (0) on payloads written before the fence existed, which the gate reads as "unknown, do
+	// not drop": the rule may never turn a missing sequence into a missing page.
+	Seq int64 `json:"seq,omitempty"`
 }

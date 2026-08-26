@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -87,23 +88,52 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		      ORDER BY next_attempt_at
 		      FOR UPDATE SKIP LOCKED
 		      LIMIT $1)
-		 RETURNING id, topic, payload, attempts, claim_token`, limit, domain.FencedTopics())
+		 RETURNING id, topic, payload, attempts, claim_token, next_attempt_at, created_at`,
+		limit, domain.FencedTopics())
 	if err != nil {
 		return nil, fmt.Errorf("store: claim outbox: %w", err)
 	}
 	defer rows.Close()
-	var out []domain.OutboxEvent
+	var out []claimed
 	for rows.Next() {
 		var e domain.OutboxEvent
-		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.Attempts, &e.ClaimToken); err != nil {
+		var due, created time.Time
+		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.Attempts, &e.ClaimToken, &due, &created); err != nil {
 			return nil, fmt.Errorf("store: scan outbox: %w", err)
 		}
-		out = append(out, e)
+		out = append(out, claimed{e, due, created})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: iterate outbox: %w", err)
 	}
-	return out, nil
+	// `UPDATE … RETURNING` has no defined row order: the ORDER BY inside the sub-select decides which
+	// rows are CLAIMED, not the sequence they come back in, so a batch holding an incident's opening
+	// and its resolution could hand them to the dispatcher either way round. Sorting here is what
+	// makes one claim deliver in the order the rows became due — the cross-worker half of the same
+	// question is the per-incident sequence gate in the outbox worker, which this does not replace.
+	sort.Slice(out, func(i, j int) bool {
+		switch {
+		case !out[i].due.Equal(out[j].due):
+			return out[i].due.Before(out[j].due)
+		case !out[i].created.Equal(out[j].created):
+			return out[i].created.Before(out[j].created)
+		default:
+			return out[i].OutboxEvent.ID < out[j].OutboxEvent.ID
+		}
+	})
+	events := make([]domain.OutboxEvent, 0, len(out))
+	for _, c := range out {
+		events = append(events, c.OutboxEvent)
+	}
+	return events, nil
+}
+
+// claimed carries the two timestamps the claim orders by. They are not part of the domain event: the
+// dispatcher has no business knowing when a row became due, only what to do with it.
+type claimed struct {
+	domain.OutboxEvent
+	due     time.Time
+	created time.Time
 }
 
 // MarkOutboxDelivered marks an event delivered (terminal success). The claimToken

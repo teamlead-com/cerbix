@@ -166,7 +166,13 @@ func (s *Store) CreateIncident(ctx context.Context, inc domain.Incident, opening
 	}
 	// Enqueue the webhook event in the same transaction — the event is durable iff
 	// the incident is (no dual-write).
-	payload, err := json.Marshal(domain.IncidentEvent{Type: domain.EventIncidentOpened, Incident: created})
+	seq, err := nextIncidentEventSeqTx(ctx, tx, created.ID)
+	if err != nil {
+		return domain.Incident{}, err
+	}
+	payload, err := json.Marshal(domain.IncidentEvent{
+		Type: domain.EventIncidentOpened, Incident: created, Seq: seq,
+	})
 	if err != nil {
 		return domain.Incident{}, fmt.Errorf("store: marshal incident event: %w", err)
 	}
@@ -360,7 +366,13 @@ func (s *Store) AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate
 	if upd.Status == domain.IncidentResolved {
 		eventType = domain.EventIncidentResolved
 	}
-	payload, err := json.Marshal(domain.IncidentEvent{Type: eventType, Incident: evInc, Update: &created})
+	seq, err := nextIncidentEventSeqTx(ctx, tx, upd.IncidentID)
+	if err != nil {
+		return domain.IncidentUpdate{}, err
+	}
+	payload, err := json.Marshal(domain.IncidentEvent{
+		Type: eventType, Incident: evInc, Update: &created, Seq: seq,
+	})
 	if err != nil {
 		return domain.IncidentUpdate{}, fmt.Errorf("store: marshal incident event: %w", err)
 	}
@@ -434,4 +446,17 @@ func (s *Store) GetPostmortem(ctx context.Context, incidentID string) (domain.Po
 		return domain.Postmortem{}, fmt.Errorf("store: get postmortem: %w", err)
 	}
 	return p, nil
+}
+
+// nextIncidentEventSeqTx advances the incident's lifecycle sequence and returns it. Every path that
+// enqueues an `incident_event` calls it inside the same transaction as the fact, so the number in the
+// payload and the number in the row can never disagree.
+func nextIncidentEventSeqTx(ctx context.Context, tx pgx.Tx, incidentID string) (int64, error) {
+	var seq int64
+	if err := tx.QueryRow(ctx,
+		`UPDATE incidents SET event_seq = event_seq + 1 WHERE id = $1 RETURNING event_seq`,
+		incidentID).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("store: advance incident event sequence: %w", err)
+	}
+	return seq, nil
 }

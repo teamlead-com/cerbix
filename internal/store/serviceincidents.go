@@ -99,7 +99,13 @@ func (s *Store) OpenServiceIncidentTx(
 	//
 	// It sits after the ON CONFLICT branch on purpose. A concurrent evaluator that lost the race
 	// returns above with `created == false` and enqueues nothing, so one opening announces once.
-	opened, err := json.Marshal(domain.IncidentEvent{Type: domain.EventIncidentOpened, Incident: inc})
+	seq, err := nextIncidentEventSeqTx(ctx, tx, inc.ID)
+	if err != nil {
+		return domain.Incident{}, false, err
+	}
+	opened, err := json.Marshal(domain.IncidentEvent{
+		Type: domain.EventIncidentOpened, Incident: inc, Seq: seq,
+	})
 	if err != nil {
 		return domain.Incident{}, false, fmt.Errorf("store: marshal service incident event: %w", err)
 	}
@@ -270,8 +276,12 @@ func resolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body st
 	// The closing half of the lifecycle, for the same audience as the opening half. An ending that
 	// never reaches the people who were told about the beginning is the worse of the two omissions:
 	// they are still watching an outage the system knows ended.
+	seq, err := nextIncidentEventSeqTx(ctx, tx, inc.ID)
+	if err != nil {
+		return false, err
+	}
 	payload, err := json.Marshal(domain.IncidentEvent{
-		Type: domain.EventIncidentResolved, Incident: inc, Update: &upd,
+		Type: domain.EventIncidentResolved, Incident: inc, Update: &upd, Seq: seq,
 	})
 	if err != nil {
 		return false, fmt.Errorf("store: marshal service incident event: %w", err)

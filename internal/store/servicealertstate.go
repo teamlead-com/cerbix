@@ -111,18 +111,34 @@ const serviceCoverageClausesSQL = `
 	       ` + burnReplacementExistsSQL + `,
 	       ` + burnNothingBlindSQL + `,
 	       ` + burnEveryRuleLatchedSQL + `,
-	       (SELECT count(*) FROM service_burn_alert_state b
-	         WHERE b.service_id = s.id AND b.project_id = s.project_id
-	           AND b.last_verdict = 'hold') > 0,
 	       EXISTS (SELECT 1 FROM service_burn_alert_state b
 	                 JOIN sla_targets t ON t.id = b.sla_target_id
 	                WHERE b.service_id = s.id AND b.project_id = s.project_id
+	                  AND ` + burnEligibleTargetSQL + `
+	                  AND b.last_verdict = 'hold'),
+	       EXISTS (SELECT 1 FROM service_burn_alert_state b
+	                 JOIN sla_targets t ON t.id = b.sla_target_id
+	                WHERE b.service_id = s.id AND b.project_id = s.project_id
+	                  AND ` + burnEligibleTargetSQL + `
 	                  AND (b.config_generation <> s.alert_config_generation
 	                       OR b.target_generation <> t.alert_generation)),
 	       COALESCE((SELECT string_agg(DISTINCT b.last_error, '; ')
 	                   FROM service_burn_alert_state b
+	                   JOIN sla_targets t ON t.id = b.sla_target_id
 	                  WHERE b.service_id = s.id AND b.project_id = s.project_id
+	                    AND ` + burnEligibleTargetSQL + `
 	                    AND b.last_error IS NOT NULL), '')`
+
+// burnEligibleTargetSQL is the SAME eligibility the burn conjunction uses (`burnReplacementExistsSQL`
+// and its two siblings): a target of THIS service with burn alerting on. The diagnostic aggregates
+// above must be scoped by it, not merely by service.
+//
+// They were not, and it made the reason lie in exactly the state where a reason matters. A latch left
+// behind on a DISABLED target — the supported write path prunes those, but nothing in the schema
+// enforces it, so legacy rows, a repair, or a half-finished migration can leave one — reported `held`
+// for a service whose ENABLED target was simply stale. The operator is then sent to look at a window
+// that cannot fire, for a target that is not part of the answer.
+const burnEligibleTargetSQL = `t.service_id = s.id AND t.burn_alert_enabled`
 
 // serviceCoverageClauses is one service's answers, in the same order.
 type serviceCoverageClauses struct {
@@ -196,9 +212,13 @@ var serviceAlertingStateSQL = `
 	SELECT` + serviceCoverageClausesSQL + `,
 	       st.evaluated_at, st.lease_until,
 	       (SELECT min(b.evaluated_at) FROM service_burn_alert_state b
-	         WHERE b.service_id = s.id AND b.project_id = s.project_id),
+	                 JOIN sla_targets t ON t.id = b.sla_target_id
+	         WHERE b.service_id = s.id AND b.project_id = s.project_id
+	           AND ` + burnEligibleTargetSQL + `),
 	       (SELECT min(b.lease_until) FROM service_burn_alert_state b
-	         WHERE b.service_id = s.id AND b.project_id = s.project_id)
+	                 JOIN sla_targets t ON t.id = b.sla_target_id
+	         WHERE b.service_id = s.id AND b.project_id = s.project_id
+	           AND ` + burnEligibleTargetSQL + `)
 	  FROM services s
 	  LEFT JOIN service_alert_state st ON st.service_id = s.id AND st.project_id = s.project_id
 	 WHERE s.id = $1 AND s.project_id = $2`

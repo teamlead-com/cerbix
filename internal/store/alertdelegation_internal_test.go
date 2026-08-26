@@ -1136,3 +1136,169 @@ func TestDeliveryReportsTheSameReasonTheBadgeShows(t *testing.T) {
 			v.FailOpenReason, AlertReasonNoOwningService)
 	}
 }
+
+// §16.6b's parity contract has a SELECTION step, and the selection needs its own evidence.
+//
+// With one candidate, the badge and the delivery reason are the same string trivially. With several,
+// each candidate is classified by the same shared evaluator and the monitor-level reason is the
+// FURTHEST any of them got — a documented order, not an arbitrary row. The claimed guarantee is
+// therefore not "the metric equals a given service's badge"; it is that the metric is always ONE of
+// the candidates' badge reasons, chosen by rank. The row order is deliberately made to DISAGREE with
+// the rank here (the alphabetically-first service is the further-along one), so a lookup returning
+// whatever came back first fails.
+func TestSeveralCandidatesReportTheFurthestMiss(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// A second service naming the SAME monitor as an SLI. Slug "aaa" sorts first; it is the one that
+	// gets the SHALLOWER miss, so first-row-wins and rank-wins give different answers.
+	second, err := st.CreateService(ctx, domain.Service{
+		ProjectID: f.projectID, Slug: "aaa-shallow", Name: "Shallow",
+	})
+	if err != nil {
+		t.Fatalf("second service: %v", err)
+	}
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, second.ID, domain.ServiceDeclaration{
+		Monitors: []string{f.monitorID}, SLI: []string{f.monitorID},
+	}, 0, DeclarationOptions{CreatedBy: "test"}); err != nil {
+		t.Fatalf("second declaration: %v", err)
+	}
+	exec(t, st, ctx, `UPDATE service_definition_revisions SET effective_at = now() - interval '1 hour'
+	                   WHERE service_id = $1`, second.ID)
+	exec(t, st, ctx, `UPDATE service_evaluation_epochs SET effective_at = now() - interval '1 hour'
+	                   WHERE service_id = $1`, second.ID)
+	// It does not own paging at all: the shallowest miss in the conjunction.
+	if got := badgeReason(t, st, ctx, f.projectID, second.ID); got != AlertReasonNotOwned {
+		t.Fatalf("second service badge = %q, want %q", got, AlertReasonNotOwned)
+	}
+
+	// The armed one loses its route — deep in the conjunction, and the more actionable of the two.
+	exec(t, st, ctx, `UPDATE notification_channels SET enabled = false WHERE project_id = $1`, f.projectID)
+	if got := badgeReason(t, st, ctx, f.projectID, f.serviceID); got != AlertReasonUnroutable {
+		t.Fatalf("first service badge = %q, want %q", got, AlertReasonUnroutable)
+	}
+
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationLive)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.Suppress() {
+		t.Fatal("neither candidate covers this monitor and delegation suppressed anyway")
+	}
+	if v.FailOpenReason != AlertReasonUnroutable {
+		t.Fatalf("monitor reason = %q, want %q — with several candidates the reported reason is the "+
+			"FURTHEST miss, and a broken route is a thing somebody can go and fix where "+
+			"%q is not", v.FailOpenReason, AlertReasonUnroutable, AlertReasonNotOwned)
+	}
+}
+
+// The same selection on the SEALED signal, which has its own verdict function and its own ordering.
+func TestSeveralCandidatesReportTheFurthestBurnMiss(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	second, err := st.CreateService(ctx, domain.Service{
+		ProjectID: f.projectID, Slug: "aaa-shallow", Name: "Shallow",
+	})
+	if err != nil {
+		t.Fatalf("second service: %v", err)
+	}
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, second.ID, domain.ServiceDeclaration{
+		Monitors: []string{f.monitorID}, SLI: []string{f.monitorID},
+	}, 0, DeclarationOptions{CreatedBy: "test"}); err != nil {
+		t.Fatalf("second declaration: %v", err)
+	}
+	exec(t, st, ctx, `UPDATE service_definition_revisions SET effective_at = now() - interval '1 hour'
+	                   WHERE service_id = $1`, second.ID)
+	exec(t, st, ctx, `UPDATE service_evaluation_epochs SET effective_at = now() - interval '1 hour'
+	                   WHERE service_id = $1`, second.ID)
+	// Owning, but with no enabled burn target: a shallow burn miss, on the alphabetically first row.
+	exec(t, st, ctx, `UPDATE services SET owns_paging = true WHERE id = $1`, second.ID)
+
+	// The armed service keeps its target and loses its route instead — the deepest burn miss.
+	exec(t, st, ctx, `UPDATE notification_channels SET enabled = false WHERE project_id = $1`, f.projectID)
+
+	if got := badgeBurnReason(t, st, ctx, f.projectID, second.ID); got != AlertReasonNoEnabledTarget {
+		t.Fatalf("second service burn badge = %q, want %q", got, AlertReasonNoEnabledTarget)
+	}
+	if got := badgeBurnReason(t, st, ctx, f.projectID, f.serviceID); got != AlertReasonUnroutable {
+		t.Fatalf("first service burn badge = %q, want %q", got, AlertReasonUnroutable)
+	}
+
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationBurn)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonUnroutable {
+		t.Fatalf("monitor burn reason = %q, want %q — the burn arm selects across candidates too",
+			v.FailOpenReason, AlertReasonUnroutable)
+	}
+}
+
+// A latch row on a target that is NOT part of the burn conjunction must not name the reason.
+//
+// The conjunction only looks at enabled targets. The diagnostic aggregates that turn "blind" into a
+// WORD looked at every latch row of the service, so a HOLD left behind on a disabled target answered
+// for an enabled target that was merely stale. The supported write path prunes those rows; nothing in
+// the schema enforces it, and legacy state, a repair or a half-finished migration is exactly where an
+// operator needs the reason to still be true.
+func TestADisabledTargetsLatchDoesNotNameTheReason(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("fixture is not armed for burn: the rest of this test proves nothing")
+	}
+
+	// A second target, DISABLED, carrying a HOLD latch.
+	var disabled string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled, burn_rules)
+		VALUES ($1,'7d',99.9,false,'[{"long_window_seconds":3600,"short_window_seconds":300,"threshold":14,"severity":"page"}]')
+		RETURNING id`, f.serviceID).Scan(&disabled); err != nil {
+		t.Fatalf("disabled target: %v", err)
+	}
+	armBurnRule(t, st, ctx, f, disabled, "rule-1", "hold")
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("a HOLD on a DISABLED target dis-armed burn coverage: the conjunction is reading a " +
+			"target that is not part of it")
+	}
+
+	// Now the ENABLED target goes blind for no named reason of its own — burn's default, `stale_lease`.
+	exec(t, st, ctx, `UPDATE service_burn_alert_state SET last_verdict = 'fire', firing = false
+	                   WHERE service_id = $1 AND sla_target_id = $2`, f.serviceID, f.targetID)
+	if delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("an unquotable ENABLED target armed burn coverage")
+	}
+
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationBurn)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonStaleLease {
+		t.Fatalf("delivery reported %q, want %q — the disabled target's HOLD is answering for a "+
+			"target the conjunction never looked at, and it sends the operator to a window that "+
+			"cannot fire", v.FailOpenReason, AlertReasonStaleLease)
+	}
+	if got := badgeBurnReason(t, st, ctx, f.projectID, f.serviceID); got != AlertReasonStaleLease {
+		t.Fatalf("the badge says %q and delivery says %q for the same service at the same instant",
+			got, AlertReasonStaleLease)
+	}
+}
+
+func badgeReason(t *testing.T, st *Store, ctx context.Context, projectID, serviceID string) string {
+	t.Helper()
+	state, err := st.ServiceAlertingState(ctx, projectID, serviceID)
+	if err != nil {
+		t.Fatalf("alerting state: %v", err)
+	}
+	return state.Live.Reason
+}
+
+func badgeBurnReason(t *testing.T, st *Store, ctx context.Context, projectID, serviceID string) string {
+	t.Helper()
+	state, err := st.ServiceAlertingState(ctx, projectID, serviceID)
+	if err != nil {
+		t.Fatalf("alerting state: %v", err)
+	}
+	return state.Burn.Reason
+}

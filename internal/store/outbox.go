@@ -140,10 +140,16 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		return nil, fmt.Errorf("store: iterate outbox: %w", err)
 	}
 	// `UPDATE … RETURNING` has no defined row order: the ORDER BY inside the sub-select decides which
-	// rows are CLAIMED, not the sequence they come back in, so a batch holding an incident's opening
-	// and its resolution could hand them to the dispatcher either way round. Sorting here is what
-	// makes one claim deliver in the order the rows became due — the cross-worker half of the same
-	// question is the per-incident sequence gate in the outbox worker, which this does not replace.
+	// rows are CLAIMED, not the sequence they come back in. Sorting here makes one claim deliver in
+	// the order the rows became DUE, which is fairness and determinism — the oldest waiting work goes
+	// first, and the same batch replays the same way.
+	//
+	// It is NOT what keeps an incident's lifecycle in order any more, and it never fully was. The
+	// causal NOT EXISTS in the claim above will not release an event while an earlier event of the
+	// same incident is undelivered, so the two ends of one incident cannot be in a batch together for
+	// this sort to get wrong (D-0177). The delivery-time sequence gate that used to be the other half
+	// of the answer is DELETED: it compared against a sequence that could change while the call it
+	// authorised was in flight, and it dropped openings nobody had received.
 	sort.Slice(out, func(i, j int) bool {
 		switch {
 		case !out[i].due.Equal(out[j].due):

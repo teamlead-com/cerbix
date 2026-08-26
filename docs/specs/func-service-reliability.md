@@ -2984,13 +2984,25 @@ by anyone who can make a service, and per-tenant labels would let them grow the 
 | `cerbix_service_alert_undeliverable_total` | `signal` |
 | `cerbix_service_alert_recipient_missing_total` | — |
 
-**The dis-arming vocabulary is normative and shared.** A member alert that pages because coverage
-could not be confirmed, and the badge on the service that would have covered it, MUST name the same
-clause. They are not two independent classifications of the same situation that happen to agree in
-testing: both are computed from ONE clause evaluation over the same row, so a screen reading
-`unroutable` while the counter reads something else about the same service at the same instant is not
-expressible. Each value is a different thing for an operator to go and fix, which is the whole reason
-the family carries a reason at all.
+**The dis-arming vocabulary is normative and shared, and the contract has two parts.**
+
+*Classification.* Each CANDIDATE service — one that names the monitor as an SLI of its effective
+definition — is classified by ONE clause evaluation, the same code that produces the service's badge.
+A candidate's badge reason and the reason delivery computes for that candidate are the same string by
+construction, not by agreeing in testing.
+
+*Selection.* The counter has no service label and cannot have one (this surface is reachable by anyone
+who can create a service). A monitor may have SEVERAL candidates and be covered by none of them, so
+the reported reason is one of theirs, chosen by a documented order: the FURTHEST any candidate got
+through the conjunction, which is the table's own order from top to bottom. What is guaranteed is that
+the reported value is ALWAYS some candidate's badge reason at that instant — never a value no candidate
+produced, and never an arbitrary row. It is NOT guaranteed to equal the badge of a service an operator
+happens to be looking at: with two candidates missing at different depths, one badge says `not_owned`,
+the other says `unroutable`, and the counter says `unroutable` because that is the one somebody can go
+and fix.
+
+Each value is a different thing for an operator to do, which is the whole reason the family carries a
+reason at all.
 
 | `reason` | What is unsatisfied | Ordinary fix |
 |---|---|---|
@@ -3009,7 +3021,16 @@ the family carries a reason at all.
 | `held` | Burn only: a rule's window could not be quoted, so the rule cannot fire (§16.4). | Look at the window's data availability. |
 | `unroutable` | Nothing this service could notify resolves right now: no participant channel that exists, is enabled and belongs to the project. | Fix or re-enable the channel. Until then members page for themselves, which is louder, not quieter. |
 
-A value may be added to this table only with a decision record. Removing or renaming one is a
+Three further values are emitted by the DELIVERY path and are NOT clause reasons — they say the
+question could not be asked, rather than answering it. They have no badge counterpart, by definition:
+
+| `reason` | What happened | Ordinary fix |
+|---|---|---|
+| `error` | The delegation lookup itself failed (the query errored). Distinct from `evaluation_error`, which is a lookup that SUCCEEDED and found a recorded evaluation failure — the two send an operator to different places, and the similar names are a known trap. | Read the `delegation_lookup_failed` warning; this is a database or connectivity fault. |
+| `record_failed` | Coverage WAS confirmed, and writing the suppression record failed. Delivery fails open on purpose: a suppression nobody can see is worse than a duplicate page. | Read the `suppression_record_failed` warning. The member is paging redundantly until it clears. |
+| `unspecified` | A dis-armed verdict arrived carrying no reason. This is a defect in cerbix, not a state of the operator's system. | Report it. Every dis-arming path is required to name itself. |
+
+A value may be added to either table only with a decision record. Removing or renaming one is a
 breaking change to both the metric and the UI, which renders these as translated text.
 
 **Readiness.** §21 already requires that wedged service work must not look ready. A live or burn

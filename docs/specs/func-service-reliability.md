@@ -2578,9 +2578,14 @@ active and current.** Concretely, delegation state is per signal:
 
 ```
 LIVE coverage is ARMED  ⟺  owns_paging
+                        ∧  the live policy pages SOMETHING (page_on ≠ {} ∨ page_on_unknown)
                         ∧  the live policy can page the CURRENT state
                            (observed_state ∈ page_on  ∨  (observed_state = unknown ∧ page_on_unknown)
                             ∨  observed_state is healthy/excluded — nothing to replace yet)
+                        ∧  the announcement for a pageable state is COMMITTED
+                           (live_firing ∧ emitted_state = observed_state; healthy/excluded need
+                            nothing — D-0176 withholds an onset nobody can receive, and coverage
+                            begins when the onset does, not when the route returns)
                         ∧  a SUCCESSFUL live evaluation exists for the CURRENT
                            (alert_config_generation, effective definition revision)
                         ∧  that evaluation is FRESH (DB-clock now() < lease_until)

@@ -868,3 +868,82 @@ func TestADeadScheduleTargetDoesNotArmAnythingWhenTheProjectHasNoChannels(t *tes
 		t.Fatalf("the resolver returned %v, want the project's live channel %s", route, other.ID)
 	}
 }
+
+// §16.1 asks whether the live policy can page the state the service is IN. The clause implemented
+// `cardinality(page_on) > 0 OR page_on_unknown` — "this policy pages SOMETHING" — and the gap between
+// those two questions is a lost page: a service sitting at DEGRADED with `page_on = {down}` announces
+// nothing at all, while its member's DOWN alert was suppressed on the strength of a policy that does
+// not cover what is happening.
+func TestAPolicyThatDoesNotCoverTheCurrentStateArmsNothing(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// The service is DOWN and the policy pages DOWN: armed, and the announcement is committed.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE service_alert_state
+		   SET observed_state = 'down', candidate_state = 'down', live_firing = true,
+		       emitted_state = 'down'
+		 WHERE service_id = $1`, f.serviceID); err != nil {
+		t.Fatalf("set down: %v", err)
+	}
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a DOWN service with page_on={down} and a committed onset must cover its members")
+	}
+
+	// Now it is DEGRADED, which this policy does not page. The LATCH IS LEFT COMMITTED AND MATCHING
+	// on purpose: clearing it would disarm through the committed-onset clause instead, and the test
+	// would pass without ever exercising the one it is about.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE service_alert_state
+		   SET observed_state = 'degraded', candidate_state = 'degraded', live_firing = true,
+		       emitted_state = 'degraded'
+		 WHERE service_id = $1`, f.serviceID); err != nil {
+		t.Fatalf("set degraded: %v", err)
+	}
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a DEGRADED service with page_on={down} silenced its member: it announces nothing " +
+			"for the state it is actually in")
+	}
+
+	// UNKNOWN with the opt-out off is the same shape, and the reason the switch exists at all.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE service_alert_state
+		   SET observed_state = 'unknown', candidate_state = 'unknown', emitted_state = 'unknown'
+		 WHERE service_id = $1`, f.serviceID); err != nil {
+		t.Fatalf("set unknown: %v", err)
+	}
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("an UNKNOWN service with page_on_unknown=false silenced its member")
+	}
+}
+
+// D-0176 opens a window on purpose: an onset withheld for want of a recipient leaves the service
+// pageable-in-principle and silent in fact. Restoring the route must NOT arm coverage before the next
+// evaluation announces anything, or the member falls silent first and the service speaks second.
+func TestARestoredRouteDoesNotArmBeforeTheOnsetIsCommitted(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// The shape a withheld onset leaves behind: observed DOWN, nothing announced.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE service_alert_state
+		   SET observed_state = 'down', candidate_state = 'down', streak = 3,
+		       live_firing = false, emitted_state = NULL
+		 WHERE service_id = $1`, f.serviceID); err != nil {
+		t.Fatalf("withheld shape: %v", err)
+	}
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("coverage armed for a DOWN service that has announced nothing: the member would be " +
+			"silenced before the service's own onset exists")
+	}
+
+	// The evaluator commits the onset. ONLY now is there a replacement to suppress in favour of.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE service_alert_state SET live_firing = true, emitted_state = 'down', emitted_seq = 1
+		 WHERE service_id = $1`, f.serviceID); err != nil {
+		t.Fatalf("commit onset: %v", err)
+	}
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("a committed onset did not arm coverage")
+	}
+}

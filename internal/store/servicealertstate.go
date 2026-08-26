@@ -27,9 +27,19 @@ import (
 const (
 	// AlertReasonNotOwned: the service does not declare ownership at all.
 	AlertReasonNotOwned = "not_owned"
-	// AlertReasonPolicyPagesNothing: `page_on = {}` with `page_on_unknown` off — legal, and it
-	// means the live signal replaces nothing.
+	// AlertReasonPolicyPagesNothing: `page_on = {}` with `page_on_unknown` off — legal, and it means
+	// the live signal replaces nothing whatever the service is doing.
 	AlertReasonPolicyPagesNothing = "policy_pages_nothing"
+	// AlertReasonStateNotPageable: the policy does not cover the state the service is IN. It may page
+	// plenty — `page_on = {down}` while the service sits at DEGRADED is the ordinary case — and the
+	// distinction matters because "pages nothing" and "does not page THIS" have different fixes.
+	// Supersedes the older `policy_pages_nothing`, which asked whether the policy pages anything at
+	// all and therefore armed coverage for states nobody had opted into (§16.1).
+	AlertReasonStateNotPageable = "state_not_pageable"
+	// AlertReasonOnsetPending: the state IS pageable and the announcement has not been committed yet
+	// — the window D-0176 opens deliberately when an onset is withheld for want of a recipient.
+	// Coverage begins when the onset does, not when the route comes back.
+	AlertReasonOnsetPending = "onset_pending"
 	// AlertReasonNeverEvaluated: no verdict exists yet. Absence of evidence is not coverage.
 	AlertReasonNeverEvaluated = "never_evaluated"
 	// AlertReasonGenerationChanged: the verdict is for a configuration that has been replaced.
@@ -79,6 +89,8 @@ type ServiceAlertingState struct {
 var serviceAlertingStateSQL = `
 	SELECT s.owns_paging,
 	       (cardinality(s.page_on) > 0 OR s.page_on_unknown),
+	       COALESCE(` + livePageableStateSQL + `, false),
+	       COALESCE(` + liveOnsetCommittedSQL + `, false),
 	       ` + routablePredicate + `,
 	       st.service_id IS NOT NULL,
 	       COALESCE(st.config_generation = s.alert_config_generation, false),
@@ -121,15 +133,15 @@ func (s *Store) ServiceAlertingState(
 ) (ServiceAlertingState, error) {
 	var out ServiceAlertingState
 	var (
-		ownsPaging, policyPages, routable            bool
-		evaluated, genOK, revOK, fresh               bool
-		liveErr                                      string
-		hasTarget, replacement, nothingBlind, allLat bool
-		anyHold, anyGenMismatch                      bool
-		burnErr                                      string
+		ownsPaging, policyPages, pageableState, onsetCommitted, routable bool
+		evaluated, genOK, revOK, fresh                                   bool
+		liveErr                                                          string
+		hasTarget, replacement, nothingBlind, allLat                     bool
+		anyHold, anyGenMismatch                                          bool
+		burnErr                                                          string
 	)
 	err := s.pool.QueryRow(ctx, serviceAlertingStateSQL, serviceID, projectID).Scan(
-		&ownsPaging, &policyPages, &routable,
+		&ownsPaging, &policyPages, &pageableState, &onsetCommitted, &routable,
 		&evaluated, &genOK, &revOK, &liveErr, &fresh,
 		&out.Live.EvaluatedAt, &out.Live.LeaseUntil,
 		&hasTarget, &replacement, &nothingBlind, &allLat, &anyHold, &anyGenMismatch,
@@ -147,10 +159,15 @@ func (s *Store) ServiceAlertingState(
 	switch {
 	case !ownsPaging:
 		out.Live.Reason = AlertReasonNotOwned
+	case !evaluated:
+		// Before the state-dependent clauses: with no verdict at all there is no observed state for
+		// them to be about, and "never evaluated" is the nearer cause.
+		out.Live.Reason = AlertReasonNeverEvaluated
 	case !policyPages:
 		out.Live.Reason = AlertReasonPolicyPagesNothing
-	case !evaluated:
-		out.Live.Reason = AlertReasonNeverEvaluated
+	case !pageableState:
+		// The policy pages plenty — just not what is happening now.
+		out.Live.Reason = AlertReasonStateNotPageable
 	case !genOK:
 		out.Live.Reason = AlertReasonGenerationChanged
 	case !revOK:
@@ -160,7 +177,13 @@ func (s *Store) ServiceAlertingState(
 	case !fresh:
 		out.Live.Reason = AlertReasonStaleLease
 	case !routable:
+		// Checked BEFORE the pending onset: an onset that is pending BECAUSE nothing can receive it
+		// should read as unroutable, which names the thing an operator has to fix.
 		out.Live.Reason = AlertReasonUnroutable
+	case !onsetCommitted:
+		// The state is pageable and the announcement has not been committed yet — the window D-0176
+		// creates on purpose. Coverage begins when the onset does, not when the route returns.
+		out.Live.Reason = AlertReasonOnsetPending
 	default:
 		out.Live.Armed = true
 	}

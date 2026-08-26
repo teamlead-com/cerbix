@@ -209,6 +209,7 @@ watch(
 const REASONS: Record<string, string> = {
   not_owned: "this service does not own paging",
   policy_pages_nothing: "the policy pages for no state",
+  state_not_pageable: "the policy does not page the state this service is in",
   never_evaluated: "no evaluation yet",
   generation_changed: "the configuration changed — re-arming on the next evaluation",
   revision_changed: "the definition changed — re-arming on the next evaluation",
@@ -218,6 +219,7 @@ const REASONS: Record<string, string> = {
   held: "a window cannot be quoted, so no rule can fire",
   rule_unevaluated: "a declared rule has no verdict yet",
   unroutable: "nothing to notify — no schedule and no enabled channel",
+  onset_pending: "the alert has not been announced yet — covering begins when it is",
 };
 
 // The approved grammar: `armed` borrows the UP hue, `pending` the PENDING hue with a dashed ring

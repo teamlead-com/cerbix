@@ -141,6 +141,41 @@ const routablePredicate = `(
 const routableClause = `
 		AND ` + routablePredicate
 
+// §16.1's live policy clause, as TWO questions, because they fail for different reasons and an
+// operator needs the difference.
+//
+// The old spelling was `cardinality(page_on) > 0 OR page_on_unknown` — "this policy pages SOMETHING".
+// §16.1 asks whether it can page the CURRENT state, and the gap between those is a lost page: a
+// service observed DEGRADED with `page_on = {down}` announces nothing at all, while its member's DOWN
+// alert was suppressed on the strength of a policy that does not cover what is actually happening.
+//
+// The second question is newer and exists because of D-0176. A withheld onset leaves the service
+// pageable-in-principle and silent in fact, so restoring the route would arm delegation in the
+// instant BEFORE the next evaluation announces anything — the member falls silent first and the
+// service speaks second. Coverage for a pageable state therefore requires the announcement to have
+// been COMMITTED: `live_firing` set, and `emitted_state` equal to what is being observed now.
+//
+// `healthy`/`excluded` cover without either: there is nothing service-level to announce, so there is
+// nothing a member's alert would be replacing.
+// The policy must page SOMETHING at all — `page_on = {}` with `page_on_unknown` off is legal and
+// replaces nothing, whatever the service is doing — AND it must cover the state the service is IN.
+// Both halves are needed: dropping the first would arm a page-for-nothing policy while the service
+// happens to be healthy, and a member going down would then be suppressed in the window before the
+// service's own verdict caught up.
+const livePageableStateSQL = `(
+		    (cardinality(s.page_on) > 0 OR s.page_on_unknown)
+		    AND (
+		        st.observed_state IN ('healthy', 'excluded')
+		        OR st.observed_state = ANY(s.page_on)
+		        OR (st.observed_state = 'unknown' AND s.page_on_unknown)
+		    )
+		)`
+
+const liveOnsetCommittedSQL = `(
+		    st.observed_state IN ('healthy', 'excluded')
+		    OR (st.live_firing AND st.emitted_state = st.observed_state)
+		)`
+
 // THE definition of "the revision that governs right now", written once and shared by every arming
 // clause. Two spellings of this question is how a membership check and a revision stamp come to
 // disagree about which declaration is in force, so there is only one. The ordering matches the epoch
@@ -182,7 +217,8 @@ var activeLiveDelegationSQL = `
 	  JOIN service_alert_state st ON st.service_id = s.id AND st.project_id = s.project_id
 	 WHERE s.project_id = $2
 	   AND s.owns_paging
-	   AND (cardinality(s.page_on) > 0 OR s.page_on_unknown)
+	   AND ` + livePageableStateSQL + `
+	   AND ` + liveOnsetCommittedSQL + `
 	   AND st.config_generation = s.alert_config_generation
 	   AND st.last_error IS NULL
 	   AND now() < st.lease_until` +

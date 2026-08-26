@@ -94,8 +94,15 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		              AND pr.status <> 'delivered'
 		              AND pr.id <> o.id
 		              AND pr.payload -> 'incident' ->> 'id' = o.payload -> 'incident' ->> 'id'
-		              AND COALESCE((pr.payload ->> 'seq')::bigint, 0)
-		                  < COALESCE((o.payload ->> 'seq')::bigint, 0))
+		              -- (sequence, created_at, id) as one order. A row written by a producer that
+		              -- predates the sequence carries none, so every such row of an incident ties at
+		              -- zero — and a tie is not a predecessor, which would release the whole legacy
+		              -- backlog of one incident in a single batch. The tie-break makes those rows
+		              -- ordered by when they were written, which is the only order they have.
+		              AND (COALESCE((pr.payload ->> 'seq')::bigint, 0),
+		                   pr.created_at, pr.id)
+		                < (COALESCE((o.payload ->> 'seq')::bigint, 0),
+		                   o.created_at, o.id))
 		     ORDER BY o.next_attempt_at
 		     FOR UPDATE SKIP LOCKED
 		     LIMIT $1

@@ -10,12 +10,16 @@ import (
 func TestDeadOutboxListAndReplay(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 
+	// A LEGACY topic, deliberately: this test is about replay restoring a row to its claimable class,
+	// and the two classes are different branches. `incident_event` became fenced with D-0177, so
+	// using it here would have quietly turned both cases into the same one — the fenced case is
+	// covered separately below.
 	seed := func(status string) string {
 		var id string
 		if err := st.pool.QueryRow(ctx,
 			`INSERT INTO outbox_events (topic, payload, status, attempts, last_error)
 			 VALUES ($1, '{}', $2, 10, 'boom') RETURNING id`,
-			domain.TopicIncidentEvent, status).Scan(&id); err != nil {
+			domain.TopicMonitorTransition, status).Scan(&id); err != nil {
 			t.Fatalf("seed %s: %v", status, err)
 		}
 		return id
@@ -72,4 +76,33 @@ func TestDeadOutboxListAndReplay(t *testing.T) {
 		t.Fatalf("dead remaining = %d, want 0", len(remaining))
 	}
 	_ = dead2
+}
+
+// A FENCED row replays into the fenced class, never into the legacy one. The class is restored from
+// the immutable `fenced` column rather than re-derived, so a replay cannot demote a row into a class
+// where a pre-fence worker would claim it — which for `incident_event` would put an incident's events
+// back in the hands of a worker that cannot order them.
+func TestReplayRestoresTheFencedClass(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+
+	var id string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO outbox_events (topic, payload, status, attempts, last_error)
+		VALUES ($1, '{"event":"incident.opened","incident":{"id":"i1"}}', 'dead', 10, 'boom')
+		RETURNING id`, domain.TopicIncidentEvent).Scan(&id); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := st.ReplayDeadOutbox(ctx, id); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	var status string
+	var fenced bool
+	if err := st.pool.QueryRow(ctx,
+		`SELECT status, fenced FROM outbox_events WHERE id = $1`, id).Scan(&status, &fenced); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if status != "pending_fenced" || !fenced {
+		t.Fatalf("a fenced row replayed as %q/fenced=%v: a pre-fence worker would claim it and "+
+			"deliver an incident's events in any order", status, fenced)
+	}
 }

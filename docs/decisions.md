@@ -3901,12 +3901,18 @@ things were missing and both are now in:
   predecessor blocks too: releasing past it would deliver a resolution whose opening was parked for an
   operator, an ending to an announcement nobody received. The stream waits for the replay, and the
   dead row is already the thing an operator looks at. Migration 00087 indexes the question;
-- `incident_event` became a FENCED topic. The ordering lives in the claim, so a pre-fence worker
-  running the old claim would take the rows and bypass it — fencing means such a worker never sees
-  them, because it does not list the topic. The cost is the fenced class's usual one: during a rolling
-  upgrade these events wait for a worker that can order them, which is a delay rather than a wrong
-  order. Rows enqueued BEFORE the upgrade stay in the legacy class with no sequence, and the delivery
-  gate reads an absent sequence as "unknown, deliver".
+- `incident_event` became a FENCED topic, and the class is enforced by the DATABASE (migration 00088)
+  rather than by whichever binary happens to be inserting. Fencing the consumer alone was only half a
+  barrier: `enqueueOutboxTx` reads `domain.FencedTopics()` of the RUNNING process, so an old api or
+  scheduler still alive through a rolling upgrade goes on writing legacy rows — for exactly the window
+  the barrier exists to cover. A BEFORE INSERT trigger settles it for every producer of every version,
+  and the rows an old one already wrote are promoted once. The topic list is duplicated into SQL on
+  purpose and guarded by a parity test, the same instrument the topic whitelist has.
+  The cost is the fenced class's usual one: during a rolling upgrade these events wait for a worker
+  that can order them, which is a delay rather than a wrong order.
+- Rows written before any of this carry NO sequence, so every such row of one incident ties at zero.
+  A tie is not a predecessor, which would have released a whole legacy backlog in one batch, so the
+  claim orders on (sequence, created_at, id) — the only order those rows have.
 
 **The delivery-time gate is GONE, and its removal is part of this decision.** It compared the event's
 sequence with the incident's CURRENT one and dropped the older, which failed in both directions. It

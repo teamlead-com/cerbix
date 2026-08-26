@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -128,5 +129,64 @@ func TestOnlyTheOutboxOwnerInsertsOutboxRows(t *testing.T) {
 		t.Fatalf("outbox rows inserted outside the enqueue owner in %v — a raw INSERT takes the "+
 			"legacy 'pending' default and files a fenced topic in the wrong claim class; call "+
 			"enqueueOutboxTx/EnqueueOutbox instead", offenders)
+	}
+}
+
+// The trigger in 00088 duplicates `domain.FencedTopics()` in SQL, because the class has to be the
+// DATABASE's rule: a producer of any version — including an old one still running through a rolling
+// upgrade — must not be able to write a fenced topic into the legacy class. Two copies are fine; two
+// copies that can drift are not, which is what this gate is for.
+func TestOutboxFencedClassMatchesTheBinary(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+
+	var body string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT prosrc FROM pg_proc WHERE proname = 'outbox_enforce_fenced_class'`).Scan(&body); err != nil {
+		t.Fatalf("read the trigger function: %v", err)
+	}
+	for _, topic := range domain.FencedTopics() {
+		if !strings.Contains(body, "'"+topic+"'") {
+			t.Fatalf("fenced topic %q is not in the trigger's list: a producer running an older "+
+				"binary would write it into the legacy class, where the ordering fence does not "+
+				"apply", topic)
+		}
+	}
+	// And the other direction: the trigger must not fence a topic the binary dispatches unfenced,
+	// which would strand it for every worker.
+	for _, quoted := range regexp.MustCompile(`'([a-z_]+)'`).FindAllStringSubmatch(body, -1) {
+		topic := quoted[1]
+		if topic == "pending" || topic == "pending_fenced" {
+			continue
+		}
+		if !domain.FencedTopic(topic) {
+			t.Fatalf("the trigger fences %q, which this binary dispatches as legacy: those rows would "+
+				"wait for a worker that never claims them", topic)
+		}
+	}
+}
+
+// A producer that predates the fence writes the legacy class; the DATABASE corrects it. This is the
+// rolling-upgrade window the consumer-side fence could not cover, because the class was chosen by
+// whichever binary happened to be inserting.
+func TestAnOldProducersRowIsFencedByTheDatabase(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+
+	// Exactly what an old binary's INSERT looks like: the legacy class, no sequence in the payload.
+	var status string
+	var fenced bool
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO outbox_events (topic, payload, status, fenced)
+		VALUES ($1, $2, 'pending', false)
+		RETURNING status, fenced`,
+		domain.TopicIncidentEvent,
+		`{"event":"incident.opened","incident":{"id":"`+proj.ID+`","project_id":"`+proj.ID+`"}}`).
+		Scan(&status, &fenced); err != nil {
+		t.Fatalf("legacy insert: %v", err)
+	}
+	if status != "pending_fenced" || !fenced {
+		t.Fatalf("an old producer's row landed as %q/fenced=%v: an old worker would claim it and "+
+			"deliver an incident's events in any order", status, fenced)
 	}
 }

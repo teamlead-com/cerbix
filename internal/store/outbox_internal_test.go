@@ -723,3 +723,49 @@ func TestAClaimIsOrderedByWhenTheEventWasDueNotByItsNewLease(t *testing.T) {
 			"lease this statement just wrote puts a retry behind a newer event", order)
 	}
 }
+
+// Rows written by a producer that predates the sequence carry none, so every such row of one incident
+// ties at zero — and a tie is not a predecessor, which would release the whole legacy backlog of an
+// incident in a single batch and preserve the exact order bug the fence exists for. Their order is
+// when they were written, which is the only order they have.
+func TestLegacyRowsWithoutASequenceAreStillClaimedOneAtATime(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+
+	// Exactly what an old producer writes: no `seq` in the payload at all.
+	for _, ev := range []string{domain.EventIncidentOpened, domain.EventIncidentResolved} {
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO outbox_events (topic, payload, status, fenced, created_at)
+			VALUES ($1, $2, 'pending', false, now() + ($3 || ' milliseconds')::interval)`,
+			domain.TopicIncidentEvent,
+			`{"event":"`+ev+`","incident":{"id":"`+proj.ID+`","project_id":"`+proj.ID+`"}}`,
+			map[string]string{domain.EventIncidentOpened: "0", domain.EventIncidentResolved: "10"}[ev]); err != nil {
+			t.Fatalf("legacy insert %s: %v", ev, err)
+		}
+	}
+
+	claimed, err := st.ClaimDueOutbox(ctx, 50)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var lifecycle []domain.IncidentEvent
+	for _, e := range claimed {
+		if e.Topic != domain.TopicIncidentEvent {
+			continue
+		}
+		var ev domain.IncidentEvent
+		if err := json.Unmarshal(e.Payload, &ev); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		lifecycle = append(lifecycle, ev)
+	}
+	if len(lifecycle) != 1 {
+		t.Fatalf("%d unsequenced lifecycle events claimed at once: without a tie-break the whole "+
+			"legacy backlog of one incident goes out in a single batch, in whatever order it comes "+
+			"back", len(lifecycle))
+	}
+	if lifecycle[0].Type != domain.EventIncidentOpened {
+		t.Fatalf("the claim released %q first, want the one written first", lifecycle[0].Type)
+	}
+}

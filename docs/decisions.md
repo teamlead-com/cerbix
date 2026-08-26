@@ -4151,3 +4151,62 @@ the LIVE policy, and an open incident climbs the ladder FROZEN when it opened (D
 the service arm a non-zero interval left it green. It now writes the snapshot and ASSERTS the frozen
 value before proceeding, and the mutation fails with `a finished service ladder fired 1 more step(s)
 with repeat_last on`.
+
+## D-0182 — repairing the rows the lifecycle fixes could not reach (2026-08-26)
+
+**Context.** Everything earlier in this arc stopped NEW damage: a resolved incident is terminal in the
+write rather than in a prior read, a service incident resolves with its episode, a member snapshot
+names the declaration that governed. None of it touched rows already written by the versions that did
+not, and the review was right that a future-write test is not evidence for a defect that has already
+written customer history.
+
+Four classes exist. Two are repairable from the row itself; two are not, and the difference is the
+decision.
+
+**Repaired.**
+
+*Resurrected incidents* — `resolved_at` set with a status that walked back off `resolved`. Before the
+CAS, a writer holding a stale status read could commit it after somebody else's resolve. These are
+not cosmetic: the row occupies the partial unique indexes that permit ONE open incident per subject,
+so the next outage cannot open one and the second failure is invisible in the timeline. `resolved_at`
+is the durable fact — only a resolve stamps it and nothing clears it — so the status is the field
+that lied, and it is corrected to match.
+
+*Stranded service incidents* — an open auto-incident whose health episode is closed (or never
+existed) and whose service is not firing now. Disowning used to end the alert and leave the incident
+open forever. The predicate is deliberately narrow: the service must still exist and must NOT be
+firing, because a repair that closes a live outage is worse than the defect it repairs.
+
+Both get a timeline note saying what happened, guarded by the `🔧 Repaired:` prefix so a rerun adds
+no second one — the same marker pattern the suppression notes use.
+
+**Counted, not repaired.**
+
+*Member snapshots possibly taken from a revision that was not yet governing.* Two obstacles, and the
+second is decisive. `incident_member_snapshots` stores the member LIST and no revision id, so a wrong
+snapshot cannot be recognised by inspection — nothing in the row says where it came from. And the
+obvious substitute, rebuilding from "the revision effective at `started_at`", is exactly the guess the
+review warned against: `started_at` defaults to the TRANSACTION clock while the evaluator chose its
+revision at `statement_timestamp()`, so a transaction crossing a boundary can carry a `started_at`
+earlier than the revision that actually governed. What the migration emits is a BOUND — snapshots on
+incidents whose service had any revision take effect afterwards — named as an upper bound and not as
+a defect count, because most of that set is correct.
+
+*Anchorless auto-incidents* — both the monitor and the service are gone, so nothing identifies what
+they were about. Attaching an owner would be attaching somebody else's history.
+
+Both are reported as migration warnings and carry a runbook procedure. Reporting is the honest
+outcome: an operator who knows the row exists can decide, and a migration that guesses cannot be
+un-guessed.
+
+**And the invariant becomes the database's.** `CHECK ((status = 'resolved') = (resolved_at IS NOT
+NULL))`, both directions, after the repair. Every path that resolves stamps the time and none
+un-resolves — that is true of the code today, and "resolved is terminal" was already once true in a
+read and false in the write, which is what a constraint is for.
+
+**Verified:** `TestTheRepairMigrationFixesWhatItCanAndLeavesWhatItCannot` migrates a throwaway
+database to 89, writes the shapes the old releases produced, runs the REAL 90 and asks what happened
+to each — including two negative controls, a service that is STILL FIRING and a HUMAN's incident, both
+of which must be untouched. Dropping the status correction fails the migration outright on the new
+CHECK; dropping the `live_firing = false` guard fails with `the repair closed an incident for a
+service that is STILL FIRING`.

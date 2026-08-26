@@ -693,6 +693,53 @@ Recovery: restart the leader (a standby takes over; readiness recovers on the ne
 the bound). There is nothing to replay — arming is DERIVED from the last verdict's freshness and
 generations, never stored as a decision, so a recovered evaluator re-arms by evaluating.
 
+### Incident rows the 00090 repair reported but did not fix (D-0182)
+
+Migration 00090 repairs two classes of durable damage and REPORTS two it will not guess at. Both
+warnings appear once, in the migration output of the upgrade that crosses it. If you missed them, the
+queries are below and are safe to run at any time.
+
+**Member snapshots that MIGHT name a revision that was not yet governing.** The migration prints an
+upper bound, not a defect count: the snapshot table stores the member list and no revision id, so a
+wrong one cannot be told from a right one by inspection, and most of the reported set is correct.
+
+```sql
+SELECT i.id, i.title, i.started_at, s.slug
+  FROM incident_member_snapshots ms
+  JOIN incidents i ON i.id = ms.incident_id
+  JOIN services  s ON s.id = i.service_id
+ WHERE EXISTS (SELECT 1 FROM service_definition_revisions r
+                WHERE r.service_id = i.service_id AND r.effective_at > i.started_at)
+ ORDER BY i.started_at DESC;
+```
+
+What to do: nothing, for an incident that is closed and read. The snapshot is a record of who was on
+the hook, and a wrong one over-states or under-states the membership by whatever the revision changed
+— compare it against `service_definition_members` for the revision you believe governed, and correct
+it BY HAND only where you know the answer. Do not derive the revision from `started_at`: that column
+is the transaction clock and the evaluator used `statement_timestamp()`, so the two can disagree
+across a boundary. That is the whole reason the migration does not do this for you.
+
+**Anchorless open auto-incidents.** Both the monitor and the service are gone, so nothing says what
+they were about.
+
+```sql
+SELECT id, title, started_at, project_id
+  FROM incidents
+ WHERE source = 'auto' AND status <> 'resolved'
+   AND service_id IS NULL AND monitor_id IS NULL
+ ORDER BY started_at;
+```
+
+These block nothing — the per-subject uniqueness indexes key on an anchor these rows do not have — so
+the only cost is a stale row on the incident list. Resolve them by hand once you are satisfied they
+are historical:
+
+```sql
+UPDATE incidents SET status = 'resolved', resolved_at = now(), updated_at = now()
+ WHERE id = '<id>';
+```
+
 ### Suggested alerts
 
 - `cerbix_service_wedged == 1 for 5m` — page: the subsystem needs an operator by definition.

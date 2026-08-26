@@ -3941,16 +3941,30 @@ not provable by any lease, and this decision does not make it.
 
 What the receiver gets instead is the means to order and dedupe for itself: every `incident_event`
 payload carries the incident's id and this event's `seq`, and the pair is unique per event, monotonic
-per incident, and stable across the retries that at-least-once delivery guarantees will happen. A
-receiver that keeps the highest `seq` it has applied per incident has an exact answer; one that does
-not is choosing to accept whatever order its own transport gives it.
+per incident, and stable across the retries that at-least-once delivery guarantees will happen.
+
+Two strategies rest on that pair, and they answer different questions. **Highest-seq-wins** — keep the
+greatest `seq` applied per incident, discard anything lower — is one integer, is idempotent under
+retry, and cannot regress; it is a CURRENT-STATE projection, and the discarded event is lost to the
+receiver, so it is always right about now and may never have shown a step it skipped. **Expected-next
+with buffering** — hold events that run ahead of the next `seq` due and apply as gaps fill —
+reconstructs the exact history, and needs a policy for a gap that never fills: an event can be
+dead-lettered on our side and will then never arrive, so an unbounded wait stalls that incident
+forever. Calling the first one "exact ordering" was wrong, and the correction is recorded rather than
+quietly edited: it dedupes and it monotonically advances, which is not the same thing.
 
 Payloads written before D-0177 carry no `seq`, so the pair is not unique for them — they predate the
 contract, and the fence never turns a missing number into a missing page.
 
 **What this still does NOT claim.** The claim keeps an incident's events in dispatch order; it does not
 serialize a worker against a route that vanished between enqueue and delivery, and it does not
-constrain what a remote system does with what it received. That is the same guarantee `service_alert` has, and
-it is enough for the failure that motivated it — nobody is told an outage began after it ended.
-Verified both ways: removing the gate delivers the superseded opening, and letting it apply to
-resolutions drops an ending.
+constrain what a remote system does with what it received. That is the same guarantee `service_alert`
+has.
+
+It is NOT the sentence an earlier draft of this decision ended on — "nobody is told an outage began
+after it ended". Under the owner's narrowing that claim is false, and it cited the mutations of the
+delivery gate this decision DELETED, so the evidence described a mechanism that is no longer in the
+tree. What is actually true: cerbix will not CALL a deliverer with an incident's events out of order,
+and a receiver that uses `seq` will not APPLY them out of order. Between those two lies the network,
+which nobody here owns. Verified by the committed sequence regression and the claim-ordering tests,
+not by a gate that no longer exists.

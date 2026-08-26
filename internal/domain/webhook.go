@@ -57,8 +57,14 @@ type IncidentEvent struct {
 	// cerbix orders these events in DISPATCH — the outbox will not release one while an earlier event
 	// of the same incident is undelivered — and stops there, because it has to (D-0177). A request
 	// whose worker lost its lease mid-flight can still land, and nothing on this side reaches into a
-	// receiver's queue to reorder it. A receiver that keeps the highest seq it has applied per
-	// incident has an exact answer; one that ignores it accepts whatever order its transport gives.
+	// receiver's queue to reorder it.
+	//
+	// Two different things can be built on this pair, and they are not interchangeable. Keeping the
+	// highest seq applied per incident gives CURRENT STATE that cannot regress — a retry is
+	// idempotent and a late lower seq is discarded — but the discarded event is gone, so that
+	// receiver is always right about now and may never show a step it skipped. Tracking the NEXT
+	// expected seq and buffering what runs ahead of it reconstructs the exact history, at the cost of
+	// needing a bounded wait: an event can be dead-lettered here and then never arrives at all.
 	//
 	// Absent (0) on payloads written before the fence existed. Those predate the contract.
 	Seq int64 `json:"seq,omitempty"`

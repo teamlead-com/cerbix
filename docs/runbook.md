@@ -644,16 +644,6 @@ rule label: this surface is reachable by anyone who can create a service.
 | Metric (type) | Meaning |
 | --- | --- |
 | `cerbix_service_alert_evaluations_total{signal,outcome}` (counter) | Units of work by outcome, `ok`\|`error`\|`skipped`. The unit is what gets a verdict: a SERVICE for `health`, a burn RULE for `burn`. `skipped` is where the burn arm's HOLDs land — a successful evaluation that cannot be quoted. A pass that failed wholesale counts one `error`. |
-**Incident webhook ordering, and where it stops.** cerbix orders an incident's lifecycle events in
-DISPATCH: the outbox will not release an event while an earlier event of the same incident is
-undelivered, and the worker calls the deliverer in that order (D-0177). It does NOT promise the order
-they ARRIVE in. Delivery is at-least-once and a receiver is a remote system: a request whose worker
-lost its lease mid-flight can still land, and a retry can land twice. Every payload therefore carries
-`incident.id` and `seq` — unique per event, monotonic per incident, stable across retries — so a
-receiver that records the highest `seq` it has applied can dedupe and order exactly. Payloads from
-before D-0177 have no `seq` and are delivered as they always were. If subscribers report an update for
-an outage they were never told began, look for a receiver that ignores `seq`, not for a lost row.
-
 | `cerbix_alert_delegation_fail_open_total{reason}` (counter) | A monitor alert that PAGED because coverage could not be confirmed, by the clause that failed. `no_owning_service` is the ordinary case — nothing claims this monitor — and the interesting values are the ones saying a replacement exists and went quiet: `stale_lease`, `evaluation_error`, `unroutable`, `onset_pending`, `held`, `generation_changed`, `revision_changed`, `never_evaluated`, `state_not_pageable`, `policy_pages_nothing`, `not_owned`, `no_enabled_target`, `rule_unevaluated`. The vocabulary is the service badge's, from the same clause evaluation, so the screen and the counter cannot disagree. |
 | `cerbix_service_alert_withheld_total{signal,reason}` (counter) | ONSETS a successful evaluation refused to announce (D-0176), by REASON: `unroutable` (nothing could receive it — somebody's paging configuration is broken NOW) or `no_governing_revision` (no declaration governs the service yet — the paging configuration is fine and the declaration has not taken effect). The two have different owners, which is why one number would have sent the wrong person to look. Its own family rather than a fourth `outcome`, because that label partitions the units of work and this is something that did not happen to one. A persistent non-zero rate means somebody's paging configuration is broken, not that the services are fine: the members are paging for themselves meanwhile, and each service announces as soon as a route exists. Distinct from `..._undeliverable_total`, which is an announcement that WAS made to a route that has gone since. |
 | `cerbix_service_alert_emitted_total{signal,edge}` (counter) | Alert edges ENQUEUED (`onset`\|`close`) — not deliveries; the outbox owns those. |
@@ -662,6 +652,32 @@ an outage they were never told began, look for a receiver that ignores `seq`, no
 | `cerbix_service_alert_backlog{signal}` (gauge) | Owning services (`health`) and enabled burn targets (`burn`) DUE for evaluation — DB-clock lease expired, or never evaluated. Saturates at 1000. |
 | `cerbix_service_alert_last_success_seconds{signal}` (gauge) | Unix time of the last SUCCESSFUL pass. A failed pass leaves it aging on purpose. |
 | `cerbix_service_alert_lag_seconds{signal}` (gauge) | How far behind the stalest verdict of that pass was. |
+
+**Incident webhook ordering, and where it stops.** cerbix orders an incident's lifecycle events in
+DISPATCH: the outbox will not release an event while an earlier event of the same incident is
+undelivered, and the worker calls the deliverer in that order (D-0177). It does NOT promise the order
+they ARRIVE in. Delivery is at-least-once and a receiver is a remote system: a request whose worker
+lost its lease mid-flight can still land, and a retry can land twice. Every payload therefore carries
+`incident.id` and `seq` — unique per event, monotonic per incident, stable across retries. Payloads
+from before D-0177 have no `seq` and are delivered as they always were.
+
+What a receiver can build on that is two different things, and they are not interchangeable:
+
+- **Current state, last-write-wins.** Keep the highest `seq` applied per incident and discard
+  anything lower. This is one integer and it cannot regress: a retry is idempotent, and a late
+  event that arrives after a newer one is dropped rather than applied backwards. It does not
+  reconstruct the history — the dropped event is GONE from the receiver's view, so a status page
+  built this way is always right about NOW and may never have shown a step it skipped.
+- **Exact causal history.** Track the next `seq` expected per incident, buffer anything ahead of
+  it, and apply in order as the gaps fill. This preserves every step, and it needs a policy for a
+  gap that never fills: an event can be dead-lettered here and will then never arrive, so a
+  receiver that waits forever stalls that incident. Bound the wait, then fall forward.
+
+If subscribers report an update for an outage they were never told began, the two candidates are a
+receiver doing neither of the above, and an opening event that genuinely never arrived (its delivery
+dead-lettered, or in flight from a worker that lost its lease). `seq` tells them apart: the opening
+event's `seq` is in the payload of the update they DID get, so a gap is visible at the receiver, and
+the outbox's own dead-letter state says which side it happened on.
 
 **The stall.** Symptom: `cerbix_service_alert_lag_seconds` climbing (with backlog that does not
 drain), the scheduler failing `/readyz`, and `cerbix_alert_delegation_fail_open_total` rising on

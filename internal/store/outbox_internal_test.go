@@ -773,6 +773,12 @@ func TestLegacyRowsWithoutASequenceAreStillClaimedOneAtATime(t *testing.T) {
 // D-0177's wire contract: `(incident.id, seq)` is what a receiver dedupes and orders on, so it has to
 // be unique per event and monotonic per incident across every path that enqueues one. cerbix promises
 // DISPATCH order and no more — this pair is what lets a receiver do the rest for itself.
+//
+// This one covers the HUMAN doors, `CreateIncident` and `AddIncidentUpdate`. The machine doors are
+// different code in `serviceincidents.go` and are covered by
+// `TestServiceAutoIncidentPathsCarryTheSameSequence`; "every path" is the two tests together, which
+// is worth saying because a claim of completeness resting on half the writers is how the other half
+// comes to ship without a sequence.
 func TestEveryLifecycleEventCarriesAUniqueMonotonicSequence(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
@@ -823,6 +829,83 @@ func TestEveryLifecycleEventCarriesAUniqueMonotonicSequence(t *testing.T) {
 		if want := int64(i + 1); got != want {
 			t.Fatalf("sequences = %v: a receiver dedupes on (incident, seq), so they must be unique "+
 				"and monotonic per incident", seqs)
+		}
+	}
+}
+
+// The same wire contract, on the paths a MACHINE uses. `CreateIncident`/`AddIncidentUpdate` are the
+// human doors; a service outage opens and resolves through `serviceincidents.go`, which is different
+// code with its own INSERTs. The evidence for "every path that enqueues one" has to reach those two,
+// or a dropped `nextIncidentEventSeqTx` there would ship a stream a receiver cannot order.
+func TestServiceAutoIncidentPathsCarryTheSameSequence(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	svc, err := st.CreateService(ctx, domain.Service{ProjectID: proj.ID, Slug: "checkout", Name: "Checkout"})
+	if err != nil {
+		t.Fatalf("service: %v", err)
+	}
+
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, svc.ID, proj.ID, "Checkout is down", 3, nil)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("open: %v", err)
+	}
+	if !created {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("the first open for a service did not create an incident")
+	}
+	if _, err := st.ResolveServiceIncidentTx(ctx, tx, svc.ID, "recovered"); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Ordered by the SEQUENCE, deliberately: both rows are written inside one transaction, so their
+	// `created_at` is the same instant and `id` is a random uuid — reading them in insert order is not
+	// possible from the row alone. That is precisely why the claim tie-breaks on the sequence FIRST,
+	// and asserting the TYPES come back opened-then-resolved in sequence order is the real question:
+	// does the number agree with what actually happened.
+	rows, err := st.pool.Query(ctx, `
+		SELECT payload FROM outbox_events
+		 WHERE topic = $1 AND payload -> 'incident' ->> 'id' = $2
+		 ORDER BY (payload ->> 'seq')::bigint`, domain.TopicIncidentEvent, inc.ID)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	defer rows.Close()
+	var kinds []string
+	var seqs []int64
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		var ev domain.IncidentEvent
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		kinds = append(kinds, ev.Type)
+		seqs = append(seqs, ev.Seq)
+	}
+	if len(seqs) != 2 {
+		t.Fatalf("%d lifecycle events for a machine-opened incident (%v), want the open and the "+
+			"resolve", len(seqs), kinds)
+	}
+	if kinds[0] != domain.EventIncidentOpened || kinds[1] != domain.EventIncidentResolved {
+		t.Fatalf("events in SEQUENCE order = %v, want opened then resolved: the number does not "+
+			"follow what happened, so a receiver ordering on it replays the outage backwards", kinds)
+	}
+	for i, got := range seqs {
+		if want := int64(i + 1); got != want {
+			t.Fatalf("sequences = %v on the SERVICE paths: a receiver dedupes on (incident, seq), so "+
+				"these must be unique and monotonic like the manual ones", seqs)
 		}
 	}
 }

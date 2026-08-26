@@ -123,6 +123,12 @@ func (s *Store) ActiveDelegation(
 
 // coverageReasonRank orders the reasons by how far a candidate got through the conjunction, so the
 // verdict can report the nearest MISS across several candidates rather than an arbitrary one.
+//
+// This list IS the normative order published in §16.6b, and the table there is written in exactly
+// this sequence with the rank in a column. They drifted apart once — the spec described "the table's
+// own order" while the table was grouped by readability instead — and the tests of the day happened
+// to choose pairs the two lists agreed on, so nothing noticed. `TestTheRankOrderIsTheOneTheSpecPublishes`
+// pins a pair where the previous spellings disagreed.
 func coverageReasonRank(reason string) int {
 	for i, r := range []string{
 		AlertReasonNoOwningService,
@@ -139,6 +145,7 @@ func coverageReasonRank(reason string) int {
 		AlertReasonStaleLease,
 		AlertReasonUnroutable,
 		AlertReasonOnsetPending,
+		AlertReasonLatchInconsistent,
 	} {
 		if r == reason {
 			return i

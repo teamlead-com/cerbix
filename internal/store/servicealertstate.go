@@ -63,6 +63,13 @@ const (
 	AlertReasonRuleUnevaluated = "rule_unevaluated"
 	// AlertReasonUnroutable: nothing this service could notify resolves right now.
 	AlertReasonUnroutable = "unroutable"
+	// AlertReasonLatchInconsistent: an eligible burn latch is in a state the evaluator does not
+	// write — today that means `clear` while still marked firing — so the row cannot be interpreted
+	// as either a live announcement or a finished one. It is also the classifier's LAST case: if the
+	// burn conjunction refused and no legitimate clause explains it, the latch is by construction
+	// uninterpretable and saying so beats naming a cause that is not the cause. This is a defect or
+	// legacy/corrupt state, never a configuration an operator chose (D-0178).
+	AlertReasonLatchInconsistent = "latch_inconsistent"
 )
 
 // ServiceSignalState is one signal's coverage.
@@ -111,6 +118,16 @@ const serviceCoverageClausesSQL = `
 	       ` + burnReplacementExistsSQL + `,
 	       ` + burnNothingBlindSQL + `,
 	       ` + burnEveryRuleLatchedSQL + `,
+	       NOT EXISTS (SELECT 1 FROM service_burn_alert_state b
+	                     JOIN sla_targets t ON t.id = b.sla_target_id
+	                    WHERE b.service_id = s.id AND b.project_id = s.project_id
+	                      AND ` + burnEligibleTargetSQL + `
+	                      AND now() >= b.lease_until),
+	       EXISTS (SELECT 1 FROM service_burn_alert_state b
+	                 JOIN sla_targets t ON t.id = b.sla_target_id
+	                WHERE b.service_id = s.id AND b.project_id = s.project_id
+	                  AND ` + burnEligibleTargetSQL + `
+	                  AND b.last_verdict = 'fire' AND NOT (b.firing AND b.emitted_seq > 0)),
 	       EXISTS (SELECT 1 FROM service_burn_alert_state b
 	                 JOIN sla_targets t ON t.id = b.sla_target_id
 	                WHERE b.service_id = s.id AND b.project_id = s.project_id
@@ -147,6 +164,7 @@ type serviceCoverageClauses struct {
 	liveErr                                                          string
 	fresh                                                            bool
 	hasTarget, replacement, nothingBlind, allLatched                 bool
+	burnFresh, burnOnsetPending                                      bool
 	anyHold, anyGenMismatch                                          bool
 	burnErr                                                          string
 }
@@ -157,6 +175,7 @@ func (c *serviceCoverageClauses) scanInto() []any {
 		&c.ownsPaging, &c.policyPages, &c.pageableState, &c.onsetCommitted, &c.routable,
 		&c.evaluated, &c.genOK, &c.revOK, &c.liveErr, &c.fresh,
 		&c.hasTarget, &c.replacement, &c.nothingBlind, &c.allLatched,
+		&c.burnFresh, &c.burnOnsetPending,
 		&c.anyHold, &c.anyGenMismatch, &c.burnErr,
 	}
 }
@@ -191,6 +210,18 @@ func (c serviceCoverageClauses) liveVerdict() (bool, string) {
 }
 
 // burnVerdict is the same for the SEALED signal.
+//
+// The cases below are `burnRuleCoversSQL` taken apart. That predicate folds FIVE independent facts
+// into one boolean — the verdict/firing/sequence shape, both generations, a recorded error and the
+// lease — and for a while the reason was re-derived from three aggregates that did not map onto them,
+// with `stale_lease` as the default for everything left over. So the ordinary D-0176 shape (a FIRE
+// withheld for want of a route: `fire`, not firing, fresh lease) was reported as a stalled evaluator,
+// which sends an operator to the scheduler when the thing to fix is a notification channel. Every
+// fact the covers predicate uses now has its own clause and its own name.
+//
+// Routability is checked BEFORE the pending onset, exactly as `liveVerdict` does: while there is no
+// route the actionable truth is the route, and `onset_pending` is what remains once it is back and
+// the next evaluation has yet to announce.
 func (c serviceCoverageClauses) burnVerdict() (bool, string) {
 	switch {
 	case !c.ownsPaging:
@@ -199,10 +230,25 @@ func (c serviceCoverageClauses) burnVerdict() (bool, string) {
 		return false, AlertReasonNoEnabledTarget
 	case !c.allLatched:
 		return false, AlertReasonRuleUnevaluated
-	case !c.replacement || !c.nothingBlind:
-		return false, burnBlindReason(c.anyHold, c.anyGenMismatch, c.burnErr)
+	case c.anyHold:
+		return false, AlertReasonHeld
+	case c.anyGenMismatch:
+		return false, AlertReasonGenerationChanged
+	case c.burnErr != "":
+		return false, AlertReasonEvaluationError
+	case !c.burnFresh:
+		return false, AlertReasonStaleLease
+	case c.burnOnsetPending && !c.routable:
+		return false, AlertReasonUnroutable
+	case c.burnOnsetPending:
+		return false, AlertReasonOnsetPending
 	case !c.routable:
 		return false, AlertReasonUnroutable
+	case !c.replacement || !c.nothingBlind:
+		// Everything the evaluator can legitimately write has been named above, so a latch that still
+		// fails the covers predicate is in a shape the evaluator does not produce — `clear` while
+		// still marked firing. Naming that beats picking one of the causes it is not.
+		return false, AlertReasonLatchInconsistent
 	default:
 		return true, ""
 	}
@@ -250,23 +296,4 @@ func (s *Store) ServiceAlertingState(
 	out.Burn.Armed, out.Burn.Reason = clauses.burnVerdict()
 
 	return out, nil
-}
-
-// burnBlindReason distinguishes the ways a latch can fail to be a replacement, in the order
-// `burnRuleCoversSQL` itself asks them: quotable, then the two generations, then the error, then the
-// lease. Naming them apart matters because they call for different actions — a HOLD means the window
-// cannot be quoted and will clear itself, a generation mismatch means the next evaluation of the NEW
-// configuration will re-arm, an error means somebody has to look, and a stale lease means the
-// evaluator is not running.
-func burnBlindReason(anyHold, anyGenMismatch bool, burnErr string) string {
-	switch {
-	case anyHold:
-		return AlertReasonHeld
-	case anyGenMismatch:
-		return AlertReasonGenerationChanged
-	case burnErr != "":
-		return AlertReasonEvaluationError
-	default:
-		return AlertReasonStaleLease
-	}
 }

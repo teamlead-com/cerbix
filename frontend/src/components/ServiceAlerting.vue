@@ -220,6 +220,7 @@ const REASONS: Record<string, string> = {
   rule_unevaluated: "a declared rule has no verdict yet",
   unroutable: "nothing to notify — no schedule and no enabled channel",
   onset_pending: "the alert has not been announced yet — covering begins when it is",
+  latch_inconsistent: "a burn rule is in a state the evaluator does not write — report this",
 };
 
 // The approved grammar: `armed` borrows the UP hue, `pending` the PENDING hue with a dashed ring

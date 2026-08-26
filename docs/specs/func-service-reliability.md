@@ -2994,7 +2994,7 @@ construction, not by agreeing in testing.
 *Selection.* The counter has no service label and cannot have one (this surface is reachable by anyone
 who can create a service). A monitor may have SEVERAL candidates and be covered by none of them, so
 the reported reason is one of theirs, chosen by a documented order: the FURTHEST any candidate got
-through the conjunction, which is the table's own order from top to bottom. What is guaranteed is that
+through the conjunction, given as an explicit RANK in the table below. What is guaranteed is that
 the reported value is ALWAYS some candidate's badge reason at that instant — never a value no candidate
 produced, and never an arbitrary row. It is NOT guaranteed to equal the badge of a service an operator
 happens to be looking at: with two candidates missing at different depths, one badge says `not_owned`,
@@ -3004,22 +3004,28 @@ and fix.
 Each value is a different thing for an operator to do, which is the whole reason the family carries a
 reason at all.
 
-| `reason` | What is unsatisfied | Ordinary fix |
-|---|---|---|
-| `no_owning_service` | No service in the project names this monitor as an SLI. Nothing could cover it; the monitor pages for itself. Delivery-side only — the badge is always asked about a service that exists. | None. This is the design, and it is the common value. |
-| `not_owned` | The service exists but does not declare `owns_paging`. | Turn ownership on, if it was meant to be on. |
-| `policy_pages_nothing` | `page_on = {}` and `page_on_unknown` off: the policy pages for no state at all. | Choose the states the service should page for. |
-| `state_not_pageable` | The policy pages for something, but not for the state the service is IN (`page_on = {down}` at DEGRADED). | Widen `page_on`, or accept that members page in this state. |
-| `onset_pending` | The state is pageable and the announcement is not committed yet — the window D-0176 opens when an onset is withheld for want of a recipient. | Fix the route. Coverage begins when the onset commits, not when the route returns. |
-| `never_evaluated` | No verdict exists yet for this service. | Wait one cadence. Absence of evidence is not coverage. |
-| `generation_changed` | The verdict is for a configuration that has been replaced. | Wait one cadence after the edit. |
-| `revision_changed` | The verdict was computed from a declaration that no longer governs. | Wait one cadence after the revision change. |
-| `evaluation_error` | The last evaluation failed and recorded why. | Read the recorded error; this one does not clear on its own. |
-| `stale_lease` | The last successful evaluation is too old to speak for now. | Look at the scheduler — this is the readiness symptom below. |
-| `no_enabled_target` | Burn only: no enabled burn target with rules. | Enable a target, or accept that burn delegates nothing. |
-| `rule_unevaluated` | Burn only: a declared rule has no verdict of its own yet. | Wait one cadence. |
-| `held` | Burn only: a rule's window could not be quoted, so the rule cannot fire (§16.4). | Look at the window's data availability. |
-| `unroutable` | Nothing this service could notify resolves right now: no participant channel that exists, is enabled and belongs to the project. | Fix or re-enable the channel. Until then members page for themselves, which is louder, not quieter. |
+| rank | `reason` | What is unsatisfied | Ordinary fix |
+|---|---|---|---|
+| 0 | `no_owning_service` | No service in the project names this monitor as an SLI. Nothing could cover it; the monitor pages for itself. Delivery-side only — the badge is always asked about a service that exists. | None. This is the design, and it is the common value. |
+| 1 | `not_owned` | The service exists but does not declare `owns_paging`. | Turn ownership on, if it was meant to be on. |
+| 2 | `never_evaluated` | No verdict exists yet for this service. | Wait one cadence. Absence of evidence is not coverage. |
+| 3 | `no_enabled_target` | Burn only: no enabled burn target with rules. | Enable a target, or accept that burn delegates nothing. |
+| 4 | `policy_pages_nothing` | `page_on = {}` and `page_on_unknown` off: the policy pages for no state at all. | Choose the states the service should page for. |
+| 5 | `state_not_pageable` | The policy pages for something, but not for the state the service is IN (`page_on = {down}` at DEGRADED). | Widen `page_on`, or accept that members page in this state. |
+| 6 | `rule_unevaluated` | Burn only: a declared rule has no verdict of its own yet. | Wait one cadence. |
+| 7 | `held` | Burn only: a rule's window could not be quoted, so the rule cannot fire (§16.4). | Look at the window's data availability. |
+| 8 | `generation_changed` | The verdict is for a configuration that has been replaced. | Wait one cadence after the edit. |
+| 9 | `revision_changed` | The verdict was computed from a declaration that no longer governs. | Wait one cadence after the revision change. |
+| 10 | `evaluation_error` | The last evaluation failed and recorded why. | Read the recorded error; this one does not clear on its own. |
+| 11 | `stale_lease` | The last successful evaluation is too old to speak for now. Burn reports it for an ELIGIBLE latch whose lease has expired, and for nothing else — it is not a catch-all. | Look at the scheduler — this is the readiness symptom below. |
+| 12 | `unroutable` | Nothing this service could notify resolves right now: no participant channel that exists, is enabled and belongs to the project. | Fix or re-enable the channel. Until then members page for themselves, which is louder, not quieter. |
+| 13 | `onset_pending` | The signal fires and the announcement has not been committed yet — the window D-0176 opens when an onset is withheld for want of a recipient. Burn's ordinary withheld shape (`fire`, not firing, fresh lease) lands here once the route is back. | Nothing, once the route exists. Coverage begins when the onset commits. |
+| 14 | `latch_inconsistent` | Burn only: an eligible latch is in a state the evaluator does not write (`clear` while still marked firing), so the row cannot be read as either a live announcement or a finished one. Also the classifier's last case — if the conjunction refused and nothing above explains it, the latch is uninterpretable by construction (D-0178). | Report it. This is a defect or legacy state, never a configuration somebody chose. |
+
+The `rank` column is NORMATIVE and is the selection order above: it is `coverageReasonRank` in
+`internal/store/alertdelegation.go`, and the rows are written in that sequence. Reading the order off
+the table's layout is what let the two drift apart once, with the tests of the day happening to pick
+pairs both spellings agreed on.
 
 Three further values are emitted by the DELIVERY path and are NOT clause reasons — they say the
 question could not be asked, rather than answering it. They have no badge counterpart, by definition:

@@ -3968,3 +3968,46 @@ tree. What is actually true: cerbix will not CALL a deliverer with an incident's
 and a receiver that uses `seq` will not APPLY them out of order. Between those two lies the network,
 which nobody here owns. Verified by the committed sequence regression and the claim-ordering tests,
 not by a gate that no longer exists.
+
+## D-0178 — the burn blindness reason gets its own facts, and one new name (2026-08-26)
+
+**Context.** `burnRuleCoversSQL` folds five independent facts into one boolean: the verdict/firing/
+sequence shape, the config generation, the target generation, a recorded error, and the lease. The
+badge and the delivery lookup then had to say WHY a rule was not quotable, and did it from three
+aggregates that did not map onto those five, with `stale_lease` as the default for anything left over.
+
+So the ordinary D-0176 shape was diagnosed as a stalled evaluator. A burn FIRE withheld for want of a
+route persists exactly as `last_verdict = 'fire'`, `firing = false`, `emitted_seq = 0`, with a FRESH
+lease — that is what the evaluator writes on purpose, so the next pass finds the same unannounced
+onset and announces it as soon as somebody can be told. The reason reported was `stale_lease`, which
+sends an operator to look at a scheduler that is working while the thing to fix is a notification
+channel. The review proved it on real Postgres against the committed tree, twice: `stale_lease` while
+the route was gone, and `stale_lease` again after it came back.
+
+**Decision.** Every fact the covers predicate uses gets its own clause and its own name, and the burn
+classifier is `burnRuleCoversSQL` taken apart in the conjunction's own order. `stale_lease` now means
+one thing — an eligible latch whose lease has expired — and never stands in for something unnamed.
+The withheld onset is diagnosed the way the LIVE arm diagnoses its own: `unroutable` while there is no
+route, because that is the actionable truth, then `onset_pending` once the route is back and the next
+evaluation has yet to announce.
+
+**One value is added: `latch_inconsistent`.** After every legitimate cause is named, a latch that
+still fails the covers predicate is in a shape the evaluator does not write — `clear` while still
+marked firing. It is also the classifier's last case, and that is deliberate: if the conjunction
+refused and nothing above explains it, the row is uninterpretable by construction, and saying so beats
+naming a cause that is not the cause. It is a defect or legacy/corrupt state, never a configuration
+somebody chose, and the UI says "report this". Adding it required a decision record because §16.6b
+makes the vocabulary normative — the metric's label set and the UI's translation table are both
+contracts.
+
+**The selection order is published as a RANK column**, not as "the table's own order". The spec said
+the latter while the table was grouped for readability, so the published order and
+`coverageReasonRank` disagreed on two pairs and nobody noticed: every selection test of the day had
+picked pairs the two spellings agreed on. The rank is now explicit in §16.6b, the rows are written in
+it, and `TestTheRankOrderIsTheOneTheSpecPublishes` pins a pair that used to disagree.
+
+**Verified:** `TestAWithheldBurnOnsetIsDiagnosedAsTheRouteAndThenAsPending` asserts the persisted latch
+really is `fire`/not-firing/`seq = 0`/FRESH before asking, then requires `unroutable` and then
+`onset_pending`; removing the two new clause cases fails it with `latch_inconsistent`.
+`TestADisabledTargetsLatchDoesNotNameTheReason` was rewritten to expire a lease for real — its first
+version wrote an unannounced FIRE and asserted `stale_lease`, which codified this very defect.

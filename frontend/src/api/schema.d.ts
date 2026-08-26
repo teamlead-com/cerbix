@@ -6791,7 +6791,7 @@ export interface components {
              * @description The FIRST unsatisfied clause, absent when armed. Fixed vocabulary — these are rendered and they name what to do about it.
              * @enum {string}
              */
-            reason?: "not_owned" | "policy_pages_nothing" | "state_not_pageable" | "never_evaluated" | "generation_changed" | "revision_changed" | "evaluation_error" | "stale_lease" | "no_enabled_target" | "held" | "rule_unevaluated" | "unroutable" | "onset_pending";
+            reason?: "not_owned" | "policy_pages_nothing" | "state_not_pageable" | "never_evaluated" | "generation_changed" | "revision_changed" | "evaluation_error" | "stale_lease" | "no_enabled_target" | "held" | "rule_unevaluated" | "unroutable" | "onset_pending" | "latch_inconsistent";
             /**
              * Format: date-time
              * @description The last SUCCESSFUL evaluation; absent when there has never been one.

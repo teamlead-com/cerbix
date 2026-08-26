@@ -1144,7 +1144,7 @@ func TestDeliveryReportsTheSameReasonTheBadgeShows(t *testing.T) {
 // FURTHEST any of them got — a documented order, not an arbitrary row. The claimed guarantee is
 // therefore not "the metric equals a given service's badge"; it is that the metric is always ONE of
 // the candidates' badge reasons, chosen by rank. The row order is deliberately made to DISAGREE with
-// the rank here (the alphabetically-first service is the further-along one), so a lookup returning
+// the rank here — the alphabetically-first service carries the SHALLOWER miss — so a lookup returning
 // whatever came back first fails.
 func TestSeveralCandidatesReportTheFurthestMiss(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
@@ -1263,8 +1263,11 @@ func TestADisabledTargetsLatchDoesNotNameTheReason(t *testing.T) {
 			"target that is not part of it")
 	}
 
-	// Now the ENABLED target goes blind for no named reason of its own — burn's default, `stale_lease`.
-	exec(t, st, ctx, `UPDATE service_burn_alert_state SET last_verdict = 'fire', firing = false
+	// Now the ENABLED target's lease expires — genuinely stale, and nothing else about it changes.
+	// It must be a REAL stale lease: an earlier version of this test wrote an unannounced FIRE here
+	// and asserted `stale_lease`, which was the classifier's catch-all rather than the truth, so the
+	// fixture codified the very defect §37 went on to fix.
+	exec(t, st, ctx, `UPDATE service_burn_alert_state SET lease_until = now() - interval '1 minute'
 	                   WHERE service_id = $1 AND sla_target_id = $2`, f.serviceID, f.targetID)
 	if delegated(t, st, ctx, f, DelegationBurn) {
 		t.Fatal("an unquotable ENABLED target armed burn coverage")
@@ -1301,4 +1304,124 @@ func badgeBurnReason(t *testing.T, st *Store, ctx context.Context, projectID, se
 		t.Fatalf("alerting state: %v", err)
 	}
 	return state.Burn.Reason
+}
+
+// The ORDINARY D-0176 shape, diagnosed. A burn FIRE withheld for want of a route persists as
+// `last_verdict = 'fire'`, `firing = false`, `emitted_seq = 0`, with a FRESH lease — that is what the
+// evaluator writes on purpose, so the next pass sees the same unannounced onset and announces it as
+// soon as there is somebody to tell.
+//
+// The blindness classifier had no fact for it and fell through to `stale_lease`, which is the one
+// answer that is certainly wrong: the evaluator is fine, and the operator is sent to look at the
+// scheduler instead of at the notification channel. Routability first, then the pending onset —
+// the same order `liveVerdict` uses, and for the same reason.
+func TestAWithheldBurnOnsetIsDiagnosedAsTheRouteAndThenAsPending(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	if !delegated(t, st, ctx, f, DelegationBurn) {
+		t.Fatal("fixture is not armed for burn: the rest of this test proves nothing")
+	}
+
+	// Exactly what `evaluateServiceBurnSlice` leaves behind when it withholds: the level does not
+	// move and the sequence does not move, and the lease is fresh because the pass SUCCEEDED.
+	exec(t, st, ctx, `UPDATE service_burn_alert_state
+	                     SET last_verdict = 'fire', firing = false, emitted_seq = 0,
+	                         evaluated_at = now(), lease_until = now() + interval '90 seconds',
+	                         last_error = NULL
+	                   WHERE service_id = $1 AND sla_target_id = $2`, f.serviceID, f.targetID)
+	exec(t, st, ctx, `UPDATE notification_channels SET enabled = false WHERE project_id = $1`, f.projectID)
+
+	// Assert the fixture really is the withheld shape and really is FRESH, or this test proves the
+	// wrong thing when the classifier next changes.
+	var verdict string
+	var firing, fresh bool
+	var seq int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT last_verdict, firing, emitted_seq, now() < lease_until
+		  FROM service_burn_alert_state WHERE service_id = $1 AND sla_target_id = $2`,
+		f.serviceID, f.targetID).Scan(&verdict, &firing, &seq, &fresh); err != nil {
+		t.Fatalf("read latch: %v", err)
+	}
+	if verdict != "fire" || firing || seq != 0 || !fresh {
+		t.Fatalf("fixture is not the withheld shape: verdict=%q firing=%v seq=%d fresh=%v",
+			verdict, firing, seq, fresh)
+	}
+
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationBurn)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonUnroutable {
+		t.Fatalf("delivery reported %q while the route is gone, want %q — %q would send an operator "+
+			"to a scheduler that is working", v.FailOpenReason, AlertReasonUnroutable,
+			AlertReasonStaleLease)
+	}
+	if got := badgeBurnReason(t, st, ctx, f.projectID, f.serviceID); got != AlertReasonUnroutable {
+		t.Fatalf("the badge says %q and delivery says %q for the same service", got, AlertReasonUnroutable)
+	}
+
+	// The route comes back. The onset has still not been announced — the next evaluation does that —
+	// and until it is, coverage has not begun (D-0176).
+	exec(t, st, ctx, `UPDATE notification_channels SET enabled = true WHERE project_id = $1`, f.projectID)
+	v, err = st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationBurn)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonOnsetPending {
+		t.Fatalf("delivery reported %q once the route was back, want %q", v.FailOpenReason,
+			AlertReasonOnsetPending)
+	}
+	if got := badgeBurnReason(t, st, ctx, f.projectID, f.serviceID); got != AlertReasonOnsetPending {
+		t.Fatalf("the badge says %q and delivery says %q for the same service", got, AlertReasonOnsetPending)
+	}
+}
+
+// The selection order is NORMATIVE (§16.6b publishes it with a rank column), so it needs a pair the
+// spec and the code once disagreed about. The spec's table was grouped for readability and listed
+// `policy_pages_nothing` above `never_evaluated`; `coverageReasonRank` ranks `never_evaluated` lower,
+// because a service with no verdict at all has got LESS far through the conjunction than one whose
+// verdict exists and whose policy pages nothing. Every earlier selection test happened to pick pairs
+// the two lists agreed on, so the drift was invisible.
+func TestTheRankOrderIsTheOneTheSpecPublishes(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// The armed service keeps its verdict and stops paging for anything: further along.
+	exec(t, st, ctx, `UPDATE services SET page_on = '{}', page_on_unknown = false WHERE id = $1`, f.serviceID)
+	armLive(t, st, ctx, f)
+
+	second, err := st.CreateService(ctx, domain.Service{
+		ProjectID: f.projectID, Slug: "aaa-never", Name: "Never",
+	})
+	if err != nil {
+		t.Fatalf("second service: %v", err)
+	}
+	if _, _, err := st.PutServiceDeclaration(ctx, f.projectID, second.ID, domain.ServiceDeclaration{
+		Monitors: []string{f.monitorID}, SLI: []string{f.monitorID},
+	}, 0, DeclarationOptions{CreatedBy: "test"}); err != nil {
+		t.Fatalf("second declaration: %v", err)
+	}
+	exec(t, st, ctx, `UPDATE service_definition_revisions SET effective_at = now() - interval '1 hour'
+	                   WHERE service_id = $1`, second.ID)
+	exec(t, st, ctx, `UPDATE service_evaluation_epochs SET effective_at = now() - interval '1 hour'
+	                   WHERE service_id = $1`, second.ID)
+	// Owning, and never evaluated: alphabetically first, and LESS far along.
+	exec(t, st, ctx, `UPDATE services SET owns_paging = true WHERE id = $1`, second.ID)
+
+	if got := badgeReason(t, st, ctx, f.projectID, second.ID); got != AlertReasonNeverEvaluated {
+		t.Fatalf("second service badge = %q, want %q", got, AlertReasonNeverEvaluated)
+	}
+	if got := badgeReason(t, st, ctx, f.projectID, f.serviceID); got != AlertReasonPolicyPagesNothing {
+		t.Fatalf("first service badge = %q, want %q", got, AlertReasonPolicyPagesNothing)
+	}
+
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationLive)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	if v.FailOpenReason != AlertReasonPolicyPagesNothing {
+		t.Fatalf("monitor reason = %q, want %q — the published rank puts a service that HAS a verdict "+
+			"further along than one that has never been evaluated, and the spec's table must be "+
+			"written in that order", v.FailOpenReason, AlertReasonPolicyPagesNothing)
+	}
 }

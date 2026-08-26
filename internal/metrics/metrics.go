@@ -448,24 +448,6 @@ func (r *Registry) RecordAlertSuppressed(topic, reason string) {
 	r.alertSuppressed[topic+"|"+reason]++
 }
 
-// RecordDelegationFailOpen counts a delivery that PAGED because coverage could not be confirmed, by
-// the CLAUSE that failed.
-//
-// It is not an error counter. `no_owning_service` is the overwhelmingly common value and means the
-// system is behaving exactly as designed: nothing claims this monitor, so it pages for itself. What
-// makes the family worth collecting is the other values — `stale_lease`, `evaluation_error`,
-// `unroutable`, `onset_pending` — which say a replacement EXISTS and went quiet, and each of them
-// names a different thing to go and fix.
-//
-// The clause vocabulary is the badge's, deliberately and by construction: both come from
-// `serviceCoverageClauses`, so a candidate service's badge and the reason computed for that candidate
-// are the same string. A monitor can have SEVERAL candidates, and the counter has no service label to
-// name which one, so it reports the FURTHEST miss — always one of the candidates' badge reasons,
-// never an arbitrary row, and not necessarily the badge on the screen in front of anyone.
-//
-// Three values are outside that vocabulary because they are not clause answers: `error` (the lookup
-// failed), `record_failed` (coverage confirmed, the suppression record could not be written) and
-// `unspecified` (a dis-armed verdict with no reason, which is a defect here). §16.6b tables both sets.
 // RecordServiceDelegation counts what delegation concluded for one signal: `armed` (a member's
 // alert was suppressed because a replacement is active), `disarmed` (no active replacement, so the
 // member paged for itself) or `degraded` (the lookup could not conclude, which also pages).
@@ -536,6 +518,24 @@ func (r *Registry) RecordServiceAlertRecipientMissing(n int) {
 	r.serviceRecipientMissing += uint64(n)
 }
 
+// RecordDelegationFailOpen counts a delivery that PAGED because coverage could not be confirmed, by
+// the CLAUSE that failed.
+//
+// It is not an error counter. `no_owning_service` is the overwhelmingly common value and means the
+// system is behaving exactly as designed: nothing claims this monitor, so it pages for itself. What
+// makes the family worth collecting is the other values — `stale_lease`, `evaluation_error`,
+// `unroutable`, `onset_pending` — which say a replacement EXISTS and went quiet, and each of them
+// names a different thing to go and fix.
+//
+// The clause vocabulary is the badge's, deliberately and by construction: both come from
+// `serviceCoverageClauses`, so a candidate service's badge and the reason computed for that candidate
+// are the same string. A monitor can have SEVERAL candidates, and the counter has no service label to
+// name which one, so it reports the FURTHEST miss — always one of the candidates' badge reasons,
+// never an arbitrary row, and not necessarily the badge on the screen in front of anyone.
+//
+// Three values are outside that vocabulary because they are not clause answers: `error` (the lookup
+// failed), `record_failed` (coverage confirmed, the suppression record could not be written) and
+// `unspecified` (a dis-armed verdict with no reason, which is a defect here). §16.6b tables both sets.
 func (r *Registry) RecordDelegationFailOpen(reason string) {
 	if reason == "" {
 		reason = "unspecified"

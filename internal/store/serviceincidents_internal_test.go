@@ -909,13 +909,20 @@ func TestAServiceWithNoGoverningDeclarationOpensNothing(t *testing.T) {
 	}
 }
 
-// The clock the lifecycle close stamps the incident with is the caller's post-lock instant, not the
-// transaction's start.
+// The clock the lifecycle close stamps with is read AFTER this function's own lock on the incident.
 //
 // D-0177's clock work fixed the manual paths — `AddIncidentUpdate`, `AcknowledgeIncident` — and this
-// one kept reading `now()`. A writer that waited on a row lock then stamped a resolution EARLIER than
-// the action that caused it, so the timeline claimed the incident ended before the close that ended
-// it, and `ListIncidentUpdates` (which orders by `created_at`) rendered them in that order.
+// one kept reading `now()`, the transaction's start. A writer that waited on a row lock then stamped
+// a resolution EARLIER than the action that caused it, so the timeline claimed the incident ended
+// before the close that ended it, and `ListIncidentUpdates` (which orders by `created_at`) rendered
+// them in that order.
+//
+// The first fix threaded the CALLER's `asOf` down, and that was not the same thing: a caller's
+// instant is post-ITS-locks and says nothing about this one — the evaluator takes it when it opens
+// its snapshot, before the config-row locks and long before this UPDATE can queue behind a manual
+// writer. There is no caller instant any more. The resolver takes the incident `FOR UPDATE` itself
+// and reads `statement_timestamp()` after that wait, which is the only clock provably later than
+// everything the transaction waited for.
 func TestAServiceIncidentResolvesAfterTheWaitItActuallyDid(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := armedService(t, st, ctx)

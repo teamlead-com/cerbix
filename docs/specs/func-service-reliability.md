@@ -2587,7 +2587,9 @@ LIVE coverage is ARMED  ⟺  owns_paging
                             healthy/excluded need nothing — D-0176 withholds an onset nobody can
                             receive, and coverage begins when the onset does, not when the route
                             returns)
-                        ∧  that announcement was DELIVERED (delivered_seq ≥ emitted_seq, D-0179):
+                        ∧  that announcement was DELIVERED — a send that SUCCEEDED for at least one
+                           recipient, not merely a channel row that exists (delivered_seq ≥
+                           emitted_seq, D-0179):
                            an onset the worker attempted and resolved to ZERO recipients is
                            terminal — no retry reaches a deleted channel — and the latch stays
                            firing, so without this a restored route re-arms coverage for a page
@@ -3164,8 +3166,8 @@ it is MADE.
 96. the selection RANK published in §16.6b IS `coverageReasonRank`; the table is written in that order
     and the two may not drift.
 97. coverage requires an announcement that REACHED somebody: `delivered_seq >= emitted_seq` on both
-    arms, credited only by a delivery that resolved ≥ 1 recipient, monotonic, sequence-guarded, and
-    never for a CLOSE (D-0179).
+    arms, credited only by a SEND THAT SUCCEEDED for ≥ 1 recipient (a resolved channel row is not a
+    delivery), monotonic, sequence-guarded, and never for a CLOSE (D-0179).
 98. the burn blindness diagnostics live INSIDE the coverage gate's branch, so the gate is the single
     decider and each diagnostic is reachable only when it has refused.
 99. a status page's project set is ONE axis — `page.project_id` when project-scoped UNION every

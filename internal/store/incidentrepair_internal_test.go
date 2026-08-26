@@ -195,10 +195,13 @@ func TestTheRepairMigrationFixesWhatItCanAndLeavesWhatItCannot(t *testing.T) {
 		t.Fatalf("the repair touched a HUMAN's incident (%q)", r.status)
 	}
 
-	// Each repaired row says what happened to it.
+	// Three classes are repaired and TWO of them get a note. The third — `resolved` with no
+	// resolution time — is stamped silently on purpose: nothing about that incident's history is
+	// wrong, and a timeline note would tell a reader it was.
 	notes := notesFor(t, db)
 	if notes != 2 {
-		t.Fatalf("%d repair notes, want one for each of the two repaired rows", notes)
+		t.Fatalf("%d repair notes, want one each for the resurrected and stranded rows and NONE for "+
+			"the silently stamped one", notes)
 	}
 
 	// The two REPORTED classes are left exactly as they were. This is the half the first version of

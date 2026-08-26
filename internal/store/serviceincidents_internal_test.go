@@ -212,7 +212,7 @@ func TestTheMachineLeavesAHumanIncidentAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "Resolved automatically.", time.Now())
+	resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "Resolved automatically.")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
 	}
 
 	inTx(func(tx pgx.Tx) {
-		resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "recovered", time.Now())
+		resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "recovered")
 		if err != nil || !resolved {
 			t.Fatalf("resolve: %v (resolved=%v)", err, resolved)
 		}
@@ -480,7 +480,7 @@ func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
 
 	// A second resolve has nothing to end, and must not announce an ending twice.
 	inTx(func(tx pgx.Tx) {
-		if resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "again", time.Now()); err != nil || resolved {
+		if resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "again"); err != nil || resolved {
 			t.Fatalf("second resolve: %v (resolved=%v, want false)", err, resolved)
 		}
 	})
@@ -916,39 +916,119 @@ func TestAServiceWithNoGoverningDeclarationOpensNothing(t *testing.T) {
 // one kept reading `now()`. A writer that waited on a row lock then stamped a resolution EARLIER than
 // the action that caused it, so the timeline claimed the incident ended before the close that ended
 // it, and `ListIncidentUpdates` (which orders by `created_at`) rendered them in that order.
-func TestAServiceIncidentResolvesOnTheCallersClockNotTheTransactionsStart(t *testing.T) {
+func TestAServiceIncidentResolvesAfterTheWaitItActuallyDid(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := armedService(t, st, ctx)
 
-	tx, err := st.pool.Begin(ctx)
+	// Open the incident and COMMIT it, so a second connection can hold it.
+	setup, err := st.pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("begin: %v", err)
+		t.Fatalf("begin setup: %v", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, _, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "down", 3, nil); err != nil {
+	if _, _, err := st.OpenServiceIncidentTx(ctx, setup, f.serviceID, f.projectID, "down", 3, nil); err != nil {
+		_ = setup.Rollback(ctx)
 		t.Fatalf("open: %v", err)
 	}
-
-	// A distinctive instant, far from any transaction clock this test could produce by accident.
-	asOf := time.Now().Add(90 * time.Minute).UTC().Truncate(time.Microsecond)
-	if _, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "recovered", asOf); err != nil {
-		t.Fatalf("resolve: %v", err)
+	if err := setup.Commit(ctx); err != nil {
+		t.Fatalf("commit setup: %v", err)
 	}
 
-	var resolvedAt, updatedAt, noteAt time.Time
+	// A BLOCKER holds the incident row, the way a manual writer does.
+	blocker, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	var held string
+	if err := blocker.QueryRow(ctx,
+		`SELECT id FROM incidents WHERE service_id = $1 FOR UPDATE`, f.serviceID).Scan(&held); err != nil {
+		_ = blocker.Rollback(ctx)
+		t.Fatalf("hold incident: %v", err)
+	}
+
+	// The resolver's transaction starts NOW — so its transaction clock is now — and then waits.
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin resolver: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Touch the transaction so its start clock is materialised before the wait begins.
+	var txStart time.Time
+	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&txStart); err != nil {
+		t.Fatalf("read transaction clock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, rerr := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "recovered")
+		done <- rerr
+	}()
+
+	// Wait until the resolver is genuinely BLOCKED on the row, not merely slow to start. Anything
+	// less makes this a sleep, and a sleep proves nothing about a lock.
+	waitUntilBlocked(t, st, ctx, held)
+
+	// The floor: every instant from here on is after the wait. Read on a third connection so the
+	// resolver's own transaction cannot supply it.
+	var floor time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&floor); err != nil {
+		t.Fatalf("read floor: %v", err)
+	}
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if rerr := <-done; rerr != nil {
+		t.Fatalf("resolve: %v", rerr)
+	}
+
+	var resolvedAt, updatedAt, noteAt, outboxCreated, outboxUpdated, outboxDue time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT i.resolved_at, i.updated_at, u.created_at
+		SELECT i.resolved_at, i.updated_at, u.created_at,
+		       o.created_at, o.updated_at, o.next_attempt_at
 		  FROM incidents i
 		  JOIN incident_updates u ON u.incident_id = i.id AND u.status = 'resolved'
-		 WHERE i.service_id = $1`, f.serviceID).Scan(&resolvedAt, &updatedAt, &noteAt); err != nil {
+		  JOIN outbox_events o ON o.topic = 'incident_event'
+		                      AND o.payload -> 'incident' ->> 'id' = i.id::text
+		                      AND o.payload ->> 'event' = 'incident.resolved'
+		 WHERE i.service_id = $1`, f.serviceID).Scan(
+		&resolvedAt, &updatedAt, &noteAt, &outboxCreated, &outboxUpdated, &outboxDue); err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	for name, got := range map[string]time.Time{
 		"resolved_at": resolvedAt, "updated_at": updatedAt, "the timeline note": noteAt,
+		"outbox created_at": outboxCreated, "outbox updated_at": outboxUpdated,
+		"outbox next_attempt_at": outboxDue,
 	} {
-		if !got.UTC().Equal(asOf) {
-			t.Fatalf("%s = %s, want the caller's post-lock instant %s — the transaction clock would "+
-				"date the resolution before the close that caused it", name, got.UTC(), asOf)
+		if got.UTC().Before(floor.UTC()) {
+			t.Fatalf("%s = %s is BEFORE the lock was released (%s): the resolver stamped an instant "+
+				"from before the wait it actually did, so the record says the incident ended before "+
+				"the close that ended it", name, got.UTC(), floor.UTC())
 		}
 	}
+}
+
+// waitUntilBlocked returns once a backend is waiting on a lock for this incident row. Polling
+// `pg_locks` is what makes the test deterministic: a timer would pass whether or not the resolver
+// ever queued.
+func waitUntilBlocked(t *testing.T, st *Store, ctx context.Context, incidentID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting bool
+		if err := st.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+			    SELECT 1 FROM pg_locks
+			     WHERE NOT granted AND locktype = 'tuple'
+			     UNION ALL
+			    SELECT 1 FROM pg_stat_activity
+			     WHERE wait_event_type = 'Lock' AND state = 'active'
+			       AND query ILIKE '%FROM incidents%FOR UPDATE%'
+			)`).Scan(&waiting); err != nil {
+			t.Fatalf("poll locks: %v", err)
+		}
+		if waiting {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the resolver never blocked on the incident row: this test would prove nothing about a wait")
 }

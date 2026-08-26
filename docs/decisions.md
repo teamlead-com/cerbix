@@ -4032,7 +4032,18 @@ the restoration: §16.4a deliberately keeps the ORIGINAL recipients for the clos
 recipient never heard the onset either.
 
 **Decision. `delivered_seq`, and arming requires it.** Both latch tables carry a delivered sequence
-(migration 00089), advanced by the outbox worker only when a delivery resolved at least one recipient.
+(migration 00089), advanced by the outbox worker only when a delivery SUCCEEDED for at least one
+recipient.
+
+**Amended 2026-08-27, and this was a P0 of its own.** The first version credited on
+`ChannelDelivery.Resolved`, which counts channel ROWS that exist and are enabled — it is set
+immediately after `EnabledChannelsByIDs`, before any SMTP session or HTTP request. So a service whose
+only channel returned 500 resolved one, delivered none, and was credited: the members' own alerts were
+suppressed for an announcement nobody received, and permanently, because once the outbox dead-letters
+the retry the latch stays firing and no further edge is coming. That is the very defect this decision
+exists to close, reintroduced inside its own fix. `ChannelDelivery` now carries THREE numbers —
+`Requested`, `Resolved`, `Delivered` — because "asked", "existed" and "succeeded" are three facts and
+collapsing any two loses the one that matters, and the credit reads `Delivered`.
 The arming conjunction's committed-onset clause becomes `delivered_seq >= emitted_seq`. Until an
 announcement is received, members keep paging for themselves — noisier, never silent, which is the
 direction §16.1 takes at every other ambiguity.
@@ -4073,6 +4084,10 @@ when `ActiveDelegation` moved to `candidateCoverageSQL`, and nothing said so: Go
 about an unused package-level var, and three comments in other files still pointed maintainers at them
 as the place where coverage is decided. Deleted, with their orphaned clauses, and the comments now
 name the conjunction itself.
+
+`TestATotalSendFailureIsNotAnAnnouncement` pins the case the fake could not previously express (one
+channel resolved, its send failed): no credit, and the event still retries. The fake had ONE field
+for both numbers, which is why a test asserting "somebody was told" passed on a delivery nobody got.
 
 **Verified:** `TestCoverageNeedsAnAnnouncementSomebodyReceived` and its burn twin walk the whole chain
 — delivered onset arms, lost delivery dis-arms with `onset_undelivered`, a restored route alone does
@@ -4176,7 +4191,10 @@ that lied, and it is corrected to match.
 
 *Resolved rows with no resolution time* — the mirror, reachable by older code. `updated_at` is the
 closest durable instant the row still carries and is never later than the resolve that set the
-status, so it is used rather than invented.
+status, so it is used rather than invented. This one is stamped SILENTLY, with no timeline note:
+nothing about that incident's history is wrong — it resolved, and the column recording when simply
+was not filled — so a note saying it was repaired would tell a reader something untrue. The other two
+get one, because in those the record itself said the wrong thing.
 
 *Stranded service incidents* — an open auto-incident whose health episode is closed (or never
 existed) and whose service is not firing now. Disowning used to end the alert and leave the incident

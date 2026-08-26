@@ -563,14 +563,17 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		// Somebody was told. THIS is what arms coverage: §16.1's committed onset is now a DELIVERED
 		// one, and until this lands the members keep paging for themselves.
 		//
-		// Credited on `Resolved > 0`, INDEPENDENTLY of `err`. A partial delivery — three channels
-		// reached, a fourth timing out — is an announcement people received, and D-0179's contract is
-		// "at least one recipient", not "a clean call". Gating this on `err == nil` meant the retry
-		// (which the error below still triggers) had to succeed before the service stopped paging its
-		// members redundantly. Safe, and noisier than the contract says.
+		// Credited on `Delivered > 0` — sends that SUCCEEDED — and not on `Resolved`, which counts
+		// channel rows that exist and are enabled. That distinction is the whole of this branch: a
+		// service whose only channel returns 500 resolves ONE and delivers NONE, and crediting it
+		// suppressed the members' own alerts for an announcement nobody got. Permanently, once the
+		// outbox dead-lettered the retry, because the latch stays firing and no further edge comes.
 		//
-		// The credit is monotonic and sequence-guarded, so crediting before a retry that re-delivers
-		// to everyone changes nothing the second time.
+		// Independent of `err` on purpose. A partial delivery — three channels reached, a fourth
+		// timing out — IS an announcement people received, and D-0179's contract is "at least one
+		// recipient", not "a clean call"; the error below still fails the event so the fourth is
+		// retried. The credit is monotonic and sequence-guarded, so the retry's re-delivery to
+		// everyone changes nothing the second time.
 		//
 		// A CLOSE never counts. Coverage is about an announcement that is LIVE, and crediting an
 		// ending would arm a service whose alert is over. The store refuses one too — a safety
@@ -579,7 +582,7 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		// A failure to RECORD does not fail the delivery: the page has gone out, and returning that
 		// error would send it again. It leaves coverage dis-armed, the direction every other
 		// ambiguity in the conjunction takes.
-		if a.Firing && res.Resolved > 0 {
+		if a.Firing && res.Delivered > 0 {
 			if derr := w.store.MarkServiceAlertDelivered(ctx, a); derr != nil {
 				w.logger.Warn("service_alert_delivery_unrecorded", "service_id", a.ServiceID,
 					"signal", string(a.Signal), "seq", a.Seq, "error", derr.Error())

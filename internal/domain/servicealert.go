@@ -384,15 +384,22 @@ func (a ServiceAlert) closeSuffix() string {
 }
 
 // ChannelDelivery is what one channel delivery actually REACHED, as opposed to what it was asked to
-// reach.
+// reach, in THREE numbers that answer three different questions.
 //
-// The two differ for a reason that matters (§16.4a): a service alert carries the recipient snapshot
-// taken when the announcement OPENED, and a channel in it may since have been deleted or disabled.
-// Resolving fewer channels than requested is not an error — there is nothing to retry — but it is
-// not success either, and §16.6b requires it to be COUNTED rather than silently absorbed or, worse,
-// replaced by whoever is on call now. Without this a caller cannot tell "told three people" from
-// "told nobody".
+// `Requested` and `Resolved` differ for a reason §16.4a cares about: a service alert carries the
+// recipient snapshot taken when the announcement OPENED, and a channel in it may since have been
+// deleted or disabled. Resolving fewer than requested is not an error — there is nothing to retry —
+// but it is not success either, and §16.6b requires it COUNTED rather than silently absorbed or,
+// worse, replaced by whoever is on call now.
+//
+// `Delivered` is the one that says somebody was TOLD, and it exists because `Resolved` was being read
+// as if it did. Resolving a channel means the row exists and is enabled; the send can still fail with
+// a 500, a refused SMTP session or a render error. D-0179 credits coverage on delivery, and crediting
+// it on `Resolved` meant a service whose only channel returned 500 suppressed its members' own alerts
+// — permanently, once the outbox dead-lettered the retry. Three numbers because "asked", "existed"
+// and "succeeded" are three facts and collapsing any two of them loses the one that matters.
 type ChannelDelivery struct {
 	Requested int
 	Resolved  int
+	Delivered int
 }

@@ -203,30 +203,80 @@ def check_spec_banners():
     return bad
 
 
-def highest_fr021_invariant():
-    """The highest numbered invariant STATED in the FR-021 spec, which is what the discharge map has
-    to cover exactly — no fewer (an unchecked requirement) and no more (a requirement nobody made)."""
+# The two sections of the FR-021 spec that STATE invariants. Named here so a heading rename is a
+# LOUD failure rather than a silently empty set — an earlier version derived a count and a renamed
+# heading would simply have produced zero, accepting anything.
+FR021_INV_SECTIONS = ('## 19.', '### 16.8')
+
+
+def fr021_invariant_numbers():
+    """The SET of invariant numbers the FR-021 spec states.
+
+    A set, not a maximum. `max()` checked 1..max and never noticed a discharge row above it, nor a
+    hole below it: adding traceability row 104 with no spec invariant, and deleting spec invariant
+    102 while keeping 103, both passed. The discharge map has to match this set EXACTLY — a missing
+    key is an unchecked requirement and an extra one is a requirement nobody made."""
     text = open('docs/specs/func-service-reliability.md', encoding='utf-8').read()
-    # Scoped to the two sections that STATE invariants, because the spec is full of other numbered
-    # lists and a bare max over the file would happily count one of those as an invariant.
-    total = 0
-    for start in ('## 19.', '### 16.8'):
+    numbers = set()
+    for start in FR021_INV_SECTIONS:
         i = text.find(start)
         if i < 0:
-            continue
+            raise SystemExit(f'check-docs-references: FR-021 invariant section {start!r} is gone; '
+                             'the invariant gate has nothing to compare the discharge map against')
         section = text[i:]
         end = re.search(r'\n#{2,3} (?!19\.|16\.8)', section)
         if end:
             section = section[:end.start()]
-        numbers = [int(m) for m in re.findall(r'^\s{0,4}(\d{1,3})\.\s', section, re.M)]
-        if numbers:
-            total = max(total, max(numbers))
-    return total
+        numbers.update(int(m) for m in re.findall(r'^\s{0,4}(\d{1,3})\.\s', section, re.M))
+    if not numbers:
+        raise SystemExit('check-docs-references: the FR-021 spec states no invariants at all')
+    return numbers
+
+
+def check_invariant_set(src, text, expected):
+    """The FR-021 invariant table's keys must EQUAL the spec's numbers — both directions.
+
+    Contiguity is checked too, because these are written as a numbered list and a hole in it is a
+    typo rather than a decision. Say which numbers, not merely that the counts differ: the point of
+    the map is that a reader can follow it."""
+    bad = []
+    rows = discharge_rows(text, INV_HEADING)
+    if rows is None:
+        return [(DISCHARGE_DOC, 0, 'discharge', 'the invariant table is missing entirely')]
+    holes = sorted(set(range(1, max(expected) + 1)) - expected)
+    if holes:
+        bad.append((DISCHARGE_DOC, 0, 'discharge',
+                    f'the FR-021 spec skips invariant number(s) {holes} — a numbered list with a '
+                    f'hole is a typo, and the gate cannot tell it from a deletion'))
+    for n in sorted(expected - set(rows)):
+        bad.append((DISCHARGE_DOC, 0, 'discharge',
+                    f'invariant {n} is stated in the spec and has no discharge row'))
+    for n in sorted(set(rows) - expected):
+        bad.append((DISCHARGE_DOC, 0, 'discharge',
+                    f'discharge row {n} names an invariant the FR-021 spec does not state'))
+    for n in sorted(expected & set(rows)):
+        bad += discharge_row_evidence(src, rows[n], n, 'invariant')
+    return bad
+
+
+def discharge_row_evidence(src, cell, n, label):
+    """A row must name a test that EXISTS or an INSPECTION: reason. Shared, so the set-compared
+    invariant table and the contiguous tables hold each other to the same standard."""
+    bad = []
+    names = re.findall(r'`(Test[A-Za-z0-9_]+)`', cell)
+    if names:
+        for name in names:
+            if not (re.search(r'\bfunc\s+' + re.escape(name) + r'\b', src) or name in src):
+                bad.append((DISCHARGE_DOC, 0, 'discharge', f'{label} {n} cites missing {name}'))
+    elif 'INSPECTION:' not in cell and 'spec.ts' not in cell:
+        bad.append((DISCHARGE_DOC, 0, 'discharge',
+                    f'{label} {n} names neither a test nor an INSPECTION: reason'))
+    return bad
 
 
 def check_discharge(src):
-    """FR-021 states 91 acceptance invariants and 24 required scenarios; FR-022 states 16. Every one
-    must have a row,
+    """FR-021's invariants are compared as a SET against the spec (see `check_invariant_set`); its 24
+    required scenarios and FR-022/FR-023's tables are contiguous 1..N. Every entry must have a row,
     and every row must name a test that exists or an INSPECTION: reason — that is what makes "done"
     a checkable claim instead of a memory of thirty iteration reports."""
     bad = []
@@ -234,8 +284,10 @@ def check_discharge(src):
     # The FR-021 invariant count is READ from the spec, not written here. Hard-coding 91 meant a
     # discharge row above that number was neither required nor checked, so twelve invariants existed
     # only in the map — a claim nobody had made in the requirement it was being checked against.
-    fr021_count = highest_fr021_invariant()
-    for heading, count, label in ((INV_HEADING, fr021_count, 'invariant'), (MATRIX_HEADING, 24, 'scenario'),
+    fr021 = fr021_invariant_numbers()
+    # The FR-021 invariants are compared as a SET; the other tables are still contiguous 1..N.
+    bad += check_invariant_set(src, text, fr021)
+    for heading, count, label in ((MATRIX_HEADING, 24, 'scenario'),
                                   (FR022_HEADING, 16, 'FR-022 invariant'),
                                   (FR022_MATRIX_HEADING, 16, 'FR-022 scenario'),
                                   (FR023_HEADING, 16, 'FR-023 invariant'),
@@ -249,14 +301,7 @@ def check_discharge(src):
             if cell is None:
                 bad.append((DISCHARGE_DOC, 0, 'discharge', f'{label} {n} has no row'))
                 continue
-            names = re.findall(r'`(Test[A-Za-z0-9_]+)`', cell)
-            if names:
-                for name in names:
-                    if not (re.search(r'\bfunc\s+' + re.escape(name) + r'\b', src) or name in src):
-                        bad.append((DISCHARGE_DOC, 0, 'discharge', f'{label} {n} cites missing {name}'))
-            elif 'INSPECTION:' not in cell and 'spec.ts' not in cell:
-                bad.append((DISCHARGE_DOC, 0, 'discharge',
-                            f'{label} {n} names neither a test nor an INSPECTION: reason'))
+            bad += discharge_row_evidence(src, cell, n, label)
     return bad
 
 
@@ -288,7 +333,8 @@ def main():
     bad += check_spec_banners()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
-              'and every acceptance map is complete (FR-021: 91+24, FR-022: 16+16, FR-023: 16+19); '
+              'and every acceptance map is complete (FR-021 invariants compared as a SET against '
+              'the spec, plus 24 scenarios; FR-022: 16+16, FR-023: 16+19); '
               'every requirement row states one of the three statuses, and no spec calls itself '
               'unbuilt while its requirement is DONE')
         return 0

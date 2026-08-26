@@ -246,30 +246,56 @@ func (s *Store) IncidentMemberSnapshot(ctx context.Context, incidentID string) (
 // `source = 'auto'` and `status <> 'resolved'` are both in the WHERE: an incident a HUMAN resolved, or one a
 // human opened, is left alone. A machine must not reopen or re-annotate a conclusion a person drew.
 func (s *Store) ResolveServiceIncidentTx(
-	ctx context.Context, tx pgx.Tx, serviceID, body string, asOf time.Time,
+	ctx context.Context, tx pgx.Tx, serviceID, body string,
 ) (bool, error) {
-	return resolveServiceIncidentTx(ctx, tx, serviceID, body, asOf)
+	return resolveServiceIncidentTx(ctx, tx, serviceID, body)
 }
 
 // resolveServiceIncidentTx is the same operation without a receiver, so the lifecycle closes — which
 // are package-level functions holding only a transaction — end the incident through the SAME code the
 // evaluator's recovery uses. Two spellings of "resolve the service's incident" is how one of them
 // comes to forget the lifecycle event.
-// `asOf` is the caller's post-lock instant, and it is a parameter for the reason D-0177's clock work
-// established for the manual paths: `now()` is the TRANSACTION's start, so a writer that waited on a
-// row lock stamps a resolution earlier than the action that caused it, and the timeline then claims
-// the incident ended before the lifecycle close that ended it. Both callers already hold the instant
-// they took after their locks; this one path was still reading the transaction clock.
+// The clock is taken HERE, after this function's own lock on the incident, and the caller's `asOf`
+// is deliberately not used for it.
+//
+// A caller's instant is post-ITS-locks, not post-THIS-one. The evaluator takes `asOf` when it opens
+// its snapshot — before the config-row locks and long before this UPDATE can queue behind a manual
+// writer holding the incident row. Passing it down produced a resolution stamped BEFORE the wait that
+// preceded it, which is the same defect D-0177 fixed for the manual paths wearing a parameter as a
+// disguise. `statement_timestamp()` read after the lock is the only instant that is provably later
+// than everything this transaction waited for.
+//
+// The `asOf` parameter is gone rather than ignored: a clock argument that the function overrides is
+// an invitation to believe it is being honoured.
 func resolveServiceIncidentTx(
-	ctx context.Context, tx pgx.Tx, serviceID, body string, asOf time.Time,
+	ctx context.Context, tx pgx.Tx, serviceID, body string,
 ) (bool, error) {
+	// Take the row FIRST and hold it, then read the clock. `FOR UPDATE` here is what makes the
+	// timestamp below post-wait: without it the UPDATE's own lock wait happens after
+	// `statement_timestamp()` has already been read.
+	var incidentID string
+	err := tx.QueryRow(ctx,
+		`SELECT id FROM incidents
+		  WHERE service_id = $1 AND source = 'auto' AND status <> 'resolved'
+		  FOR UPDATE`, serviceID).Scan(&incidentID)
+	if noRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: lock service incident: %w", err)
+	}
+	var asOf time.Time
+	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&asOf); err != nil {
+		return false, fmt.Errorf("store: post-lock clock: %w", err)
+	}
+
 	// The guarded write returns the whole resolved row, so the announcement below describes the
 	// incident as it now IS rather than as a second read hopes it is.
 	inc, err := scanIncident(tx.QueryRow(ctx,
 		`UPDATE incidents
 		    SET status = 'resolved', resolved_at = $2, updated_at = $2
-		  WHERE service_id = $1 AND source = 'auto' AND status <> 'resolved'
-		 RETURNING `+incidentColumns, serviceID, asOf))
+		  WHERE id = $1
+		 RETURNING `+incidentColumns, incidentID, asOf))
 	if err != nil {
 		if noRows(err) {
 			return false, nil
@@ -296,7 +322,11 @@ func resolveServiceIncidentTx(
 	if err != nil {
 		return false, fmt.Errorf("store: marshal service incident event: %w", err)
 	}
-	if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentEvent, payload); err != nil {
+	// The OUTBOX row too. Invariant 103 says "the incident, its timeline note and its outbox row",
+	// and this line was still `enqueueOutboxTx`, whose `created_at`/`updated_at`/`next_attempt_at`
+	// default to the transaction clock — so the event was scheduled before the close that produced
+	// it, and in an interleave could become due ahead of an earlier incident's.
+	if err := enqueueOutboxAtTx(ctx, tx, domain.TopicIncidentEvent, payload, asOf); err != nil {
 		return false, err
 	}
 	return true, nil

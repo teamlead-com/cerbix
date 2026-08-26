@@ -174,6 +174,7 @@ type fakeNotify struct {
 	called     int
 	err        error
 	resolved   *int
+	delivered  *int
 }
 
 func (f *fakeNotify) Deliver(_ context.Context, m domain.Monitor, up bool) error {
@@ -196,8 +197,14 @@ func (f *fakeNotify) DeliverChannels(_ context.Context, channelIDs []string, tex
 	return f.err
 }
 
-// resolved, when set, is how many of the requested channels still exist — the fake's way of
-// deleting a snapshot recipient out from under an announcement. Zero means "all of them".
+// resolved, when set, is how many of the requested channels still EXIST — the fake's way of deleting
+// a snapshot recipient out from under an announcement. delivered, when set, is how many sends
+// SUCCEEDED, which is a different number: a channel that exists can still return 500.
+//
+// They were one field, and the fake could therefore not express the case that mattered — one channel
+// resolved, its send failed — so a test asserting "somebody was told" passed on a delivery nobody
+// got. Zero means "all of them" for resolved; delivered defaults to resolved when the call did not
+// error, and to zero when it did.
 func (f *fakeNotify) DeliverChannelsReporting(
 	_ context.Context, channelIDs []string, text string,
 ) (domain.ChannelDelivery, error) {
@@ -205,6 +212,14 @@ func (f *fakeNotify) DeliverChannelsReporting(
 	out := domain.ChannelDelivery{Requested: len(channelIDs), Resolved: len(channelIDs)}
 	if f.resolved != nil {
 		out.Resolved = *f.resolved
+	}
+	switch {
+	case f.delivered != nil:
+		out.Delivered = *f.delivered
+	case f.err != nil:
+		out.Delivered = 0
+	default:
+		out.Delivered = out.Resolved
 	}
 	return out, f.err
 }
@@ -1667,8 +1682,10 @@ func TestAPartialDeliveryStillCountsAsAnAnnouncement(t *testing.T) {
 		alertSeq: map[string]int64{"svc-1|health||": 7},
 		pending:  []domain.OutboxEvent{{ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b}},
 	}
-	resolved := 1
-	nf := &fakeNotify{resolved: &resolved, err: errors.New("one channel timed out")}
+	resolved, delivered := 2, 1
+	nf := &fakeNotify{
+		resolved: &resolved, delivered: &delivered, err: errors.New("one channel timed out"),
+	}
 	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
 
 	if len(fs.alertDelivered) != 1 {
@@ -1679,5 +1696,43 @@ func TestAPartialDeliveryStillCountsAsAnAnnouncement(t *testing.T) {
 	if len(fs.failed) != 1 {
 		t.Fatalf("the event was not retried (%v): a channel that timed out has not been told yet",
 			fs.failed)
+	}
+}
+
+// The case the previous version of this file could not express, and the P0 it hid: the only channel
+// that still EXISTS returns 500.
+//
+// `Resolved` counts channel rows, not successful sends, and the credit was reading it as if it did.
+// So a service whose one webhook was returning errors suppressed every member's own alert for an
+// announcement nobody received — and permanently, because once the outbox dead-letters the retry the
+// latch stays firing and no further edge is coming.
+func TestATotalSendFailureIsNotAnAnnouncement(t *testing.T) {
+	b, err := json.Marshal(domain.ServiceAlert{
+		ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+		Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+		Seq: 7, ConfirmedOver: 2, Recipients: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	fs := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health||": 7},
+		pending:  []domain.OutboxEvent{{ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b}},
+	}
+	// The channel is there and enabled — RESOLVED — and the send fails.
+	resolved, delivered := 1, 0
+	nf := &fakeNotify{
+		resolved: &resolved, delivered: &delivered,
+		err: errors.New("the only resolved channel failed: 500"),
+	}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+	if n := len(fs.alertDelivered); n != 0 {
+		t.Fatalf("coverage received %d delivery credit(s), but the only resolved channel failed: the "+
+			"members are now silent for a page nobody got, and they stay silent once the retry "+
+			"dead-letters", n)
+	}
+	if len(fs.failed) != 1 {
+		t.Fatalf("the event was not retried (%v): a 500 is exactly what a retry is for", fs.failed)
 	}
 }

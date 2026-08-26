@@ -157,7 +157,9 @@ func (d *Dispatcher) DeliverChannelsReporting(
 		if ch.Type == domain.ChannelEmail {
 			if err := d.sendMail(ch, text); err != nil {
 				errs = append(errs, fmt.Errorf("channel %s: %w", ch.ID, err))
+				continue
 			}
+			out.Delivered++
 			continue
 		}
 		target, body, contentType, err := renderAlertText(ch, text)
@@ -167,7 +169,9 @@ func (d *Dispatcher) DeliverChannelsReporting(
 		}
 		if err := d.post(ctx, ch, target, contentType, body); err != nil {
 			errs = append(errs, fmt.Errorf("channel %s: %w", ch.ID, err))
+			continue
 		}
+		out.Delivered++
 	}
 	return out, errors.Join(errs...)
 }

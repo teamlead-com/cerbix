@@ -204,19 +204,20 @@ const routablePredicate = `(
 // The second question is newer and exists because of D-0176. A withheld onset leaves the service
 // pageable-in-principle and silent in fact, so restoring the route would arm delegation in the
 // instant BEFORE the next evaluation announces anything — the member falls silent first and the
-// service speaks second. Coverage for a pageable state therefore requires an announcement to be OPEN:
-// `live_firing` set with an `emitted_state` that exists.
+// service speaks second.
 //
-// It asks for an open onset rather than for `emitted_state = observed_state`, and the difference has
-// a cost either way. Equality also dis-arms during a confirmed pageable→pageable transition — the
-// service is already firing and already announced, the observation has moved on and the next
-// evaluation has not caught up — which pages the members a second time for an outage somebody is
-// already handling. Both directions fail OPEN, so neither loses a page; this one avoids the
-// duplicate. `live_firing` with no `emitted_state` is a contradiction no evaluation writes, and it
-// dis-arms.
+// This paragraph once argued for asking only whether an announcement was OPEN, on the grounds that
+// requiring `emitted_state = observed_state` dis-arms during a pageable→pageable transition and pages
+// the members a second time for an outage somebody is already handling. That trade was decided the
+// OTHER way, and the canonical §16.1 had said so all along: the duplicate page is noise, and the
+// alternative is silence — a delivered DEGRADED announcement covering a service that has since
+// observed DOWN and is still collecting its confirm streak, which hands the service's caution to the
+// members as quiet. The clause below requires equality, a real sequence, and a delivery. The argument
+// is kept as a record of what was weighed rather than deleted, because the cost it names is real and
+// somebody will propose the swap again.
 //
-// `healthy`/`excluded` cover without either: there is nothing service-level to announce, so there is
-// nothing a member's alert would be replacing.
+// `healthy`/`excluded` cover without any of it: there is nothing service-level to announce, so there
+// is nothing a member's alert would be replacing.
 // The policy must page SOMETHING at all — `page_on = {}` with `page_on_unknown` off is legal and
 // replaces nothing, whatever the service is doing — AND it must cover the state the service is IN.
 // Both halves are needed: dropping the first would arm a page-for-nothing policy while the service

@@ -8,9 +8,11 @@
 -- that governed. None of them touched the rows already written by the versions that did not. A
 -- future-write test is not evidence for a defect that has already written customer history.
 --
--- Two classes are repaired here because the correct value is DERIVABLE from the row itself. Two more
--- are only COUNTED, because repairing them would mean guessing at history, and the runbook carries
--- what to do about those instead. NO TRANSACTION plus guarded idempotent blocks is the house pattern
+-- FIVE classes, split three and two. THREE are repaired because the correct value is DERIVABLE from
+-- the row itself; only two of those three get a timeline note, because the third (`resolved` with no
+-- resolution time) has nothing wrong with its history and a note would tell a reader it did. TWO are
+-- only COUNTED, because repairing them would mean guessing at history, and the runbook carries what
+-- to do about those instead. NO TRANSACTION plus guarded idempotent blocks is the house pattern
 -- for a DDL-and-data migration (00043).
 
 -- +goose StatementBegin

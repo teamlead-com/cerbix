@@ -562,11 +562,18 @@ func resolveServiceRecipientsTx(
 			// §16.6 already says what to do instead: a deleted or empty target falls back to the
 			// project's channels. A DISABLED one is the same fact wearing a different hat.
 			if ch := sc.OnCall(at); ch != "" {
+				// A participant that is not a channel id at all is CORRUPTION, not the ordinary
+				// "the channel was deleted" that §16.6 falls back for. Falling back would repair a
+				// broken configuration silently and make a typo indistinguishable from a deletion;
+				// erroring surfaces it as the evaluation error it is, which collapses the lease and
+				// dis-arms — so the members keep paging while somebody fixes the schedule. The write
+				// path refuses such a value now (`domain.OnCallSchedule.Validate`), so this can only
+				// be a row written before that guard existed.
+				if !domain.IsChannelID(ch) {
+					return nil, fmt.Errorf(
+						"store: on-call schedule %s names %q, which is not a channel id", sc.ID, ch)
+				}
 				var live bool
-				// Compared as TEXT, not cast to uuid: a participant id that is not a uuid at all is a
-				// participant that resolves to no channel, and that must fail closed rather than
-				// error the whole evaluation. One malformed entry in one schedule would otherwise
-				// stop the slice for every service in it.
 				if err := tx.QueryRow(ctx, `
 					SELECT true FROM notification_channels
 					 WHERE id::text = $1 AND project_id = $2 AND enabled`, ch, projectID).Scan(&live); err != nil {

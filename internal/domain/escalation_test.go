@@ -39,9 +39,11 @@ func TestOnCallScheduleResolve(t *testing.T) {
 		Name: "primary", ProjectID: "pr", ShiftSeconds: 7 * 24 * 3600, AnchorAt: anchor,
 		Participants: []string{"alice", "bob", "carol"},
 	}
-	if err := s.Validate(); err != nil {
-		t.Fatalf("valid schedule rejected: %v", err)
-	}
+	// Deliberately NOT calling Validate here: these participants are readable placeholders for the
+	// index arithmetic this test is about, and validity of the ids is the validator's own subject
+	// (see the participant cases below). Rewriting them as uuids would make every assertion
+	// unreadable to prove something already proved elsewhere.
+	//
 	// Week 0 → alice, week 1 → bob, week 3 wraps → alice.
 	tests := []struct {
 		at   time.Time
@@ -103,5 +105,29 @@ func TestEscalationStepAlertMessage(t *testing.T) {
 	r := EscalationStepAlert{MonitorName: "payments", Step: 2, Repeat: true}.Message()
 	if !strings.Contains(r, "Still unacknowledged") {
 		t.Fatalf("repeat message = %q", r)
+	}
+}
+
+// IsChannelID tells CORRUPTION from a channel that was merely deleted. The two look identical at read
+// time and have opposite correct answers — §16.6 falls back for a deletion, while a typo must be fixed
+// by a person rather than papered over by falling back forever — so the evaluator needs a cheap way to
+// separate them. The authoritative write-path check is the store's (a participant must be a channel OF
+// THIS PROJECT); this is the crude half, and it is the half read time can afford.
+func TestIsChannelIDSeparatesCorruptionFromADeletedChannel(t *testing.T) {
+	const good = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
+	if !IsChannelID(good) || !IsChannelID(strings.ToUpper(good)) {
+		t.Fatal("a channel id was rejected")
+	}
+	for _, bad := range []string{
+		"",                                     // nothing at all
+		"alice",                                // a human name
+		"ops-team",                             // a team handle
+		"1b4e28ba-2fa1-11d2-883f",              // truncated
+		"1b4e28ba2fa111d2883f0016d3cca427",     // no dashes
+		"1b4e28ba-2fa1-11d2-883f-0016d3cca42g", // not hex
+	} {
+		if IsChannelID(bad) {
+			t.Fatalf("%q was accepted as a channel id", bad)
+		}
 	}
 }

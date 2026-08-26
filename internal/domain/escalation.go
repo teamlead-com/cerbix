@@ -149,6 +149,32 @@ func (s OnCallSchedule) Validate() error {
 	return nil
 }
 
+// IsChannelID reports whether s has the canonical 8-4-4-4-12 hexadecimal shape of a channel id. It
+// deliberately does not check variant or version bits: it exists to tell CORRUPTION from a channel
+// that was merely deleted, which are different facts with different answers (§16.6 falls back for the
+// second; the first is a configuration error nobody should paper over). The authoritative write-path
+// check is the store's — a participant must be a channel OF THIS PROJECT — and this is what the
+// evaluator uses at read time, where that check cannot be repeated cheaply.
+func IsChannelID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // OnCall returns the channel id on call at instant t. An active override wins;
 // otherwise the rotation index is floor((t - anchor)/shift) mod len, normalized so
 // instants before the anchor still resolve.

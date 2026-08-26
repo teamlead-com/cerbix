@@ -139,6 +139,9 @@ func (s *Store) CreateOnCallSchedule(ctx context.Context, sc domain.OnCallSchedu
 	if err := sc.Validate(); err != nil {
 		return domain.OnCallSchedule{}, fmt.Errorf("store: invalid on-call schedule: %w", err)
 	}
+	if err := assertParticipantsAreChannelsTx(ctx, s.pool, sc.ProjectID, sc.Participants); err != nil {
+		return domain.OnCallSchedule{}, err
+	}
 	participants, err := json.Marshal(sc.Participants)
 	if err != nil {
 		return domain.OnCallSchedule{}, fmt.Errorf("store: encode participants: %w", err)
@@ -650,4 +653,31 @@ func (p *EscalationPass) count(serviceID string) {
 		return
 	}
 	p.MonitorSteps++
+}
+
+// assertParticipantsAreChannelsTx refuses a rotation naming anything that is not a notification
+// channel of this project.
+//
+// The check belongs at the WRITE path because it is the only place the answer is unambiguous. At read
+// time a participant that names nothing is indistinguishable from a channel deleted since — and those
+// have opposite correct answers: §16.6 falls back for a deletion, while a typo must be fixed by a
+// person rather than papered over by falling back forever. The evaluator's own guard
+// (`domain.IsChannelID`) can only catch the crude case; this catches the real one, tenancy included.
+func assertParticipantsAreChannelsTx(ctx context.Context, q dbConn, projectID string, participants []string) error {
+	for i, p := range participants {
+		if !domain.IsChannelID(p) {
+			return fmt.Errorf("store: on-call schedule: participant %d (%q) is not a channel id", i+1, p)
+		}
+		var ok bool
+		err := q.QueryRow(ctx,
+			`SELECT true FROM notification_channels WHERE id::text = $1 AND project_id = $2`,
+			p, projectID).Scan(&ok)
+		if noRows(err) {
+			return fmt.Errorf("store: on-call schedule: participant %d (%s) is not a channel of this project", i+1, p)
+		}
+		if err != nil {
+			return fmt.Errorf("store: verify schedule participant: %w", err)
+		}
+	}
+	return nil
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -945,5 +946,49 @@ func TestARestoredRouteDoesNotArmBeforeTheOnsetIsCommitted(t *testing.T) {
 	}
 	if !delegated(t, st, ctx, f, DelegationLive) {
 		t.Fatal("a committed onset did not arm coverage")
+	}
+}
+
+// A participant that is not a channel id was never valid configuration, and it must not be treated
+// like the ordinary "the channel was deleted" that §16.6 falls back for. Falling back repairs a broken
+// schedule silently and makes a typo indistinguishable from a deletion.
+func TestACorruptScheduleParticipantIsRefusedAndSurfaced(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	// The write path refuses a value that is not a channel id at all...
+	_, err := st.CreateOnCallSchedule(ctx, domain.OnCallSchedule{
+		ProjectID: f.projectID, Name: "typo", ShiftSeconds: 86400,
+		Participants: []string{"ops-team"}, AnchorAt: time.Now(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "not a channel id") {
+		t.Fatalf("a schedule naming a non-channel participant: %v", err)
+	}
+	// ...and one that is well-formed but belongs to nobody here, which is the check that actually
+	// matters and the one only the write path can make.
+	_, err = st.CreateOnCallSchedule(ctx, domain.OnCallSchedule{
+		ProjectID: f.projectID, Name: "foreign", ShiftSeconds: 86400,
+		Participants: []string{"1b4e28ba-2fa1-11d2-883f-0016d3cca427"}, AnchorAt: time.Now(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "not a channel of this project") {
+		t.Fatalf("a schedule naming a foreign channel: %v", err)
+	}
+
+	// A row written before that guard existed surfaces as an evaluation error rather than quietly
+	// falling back to the project's channels.
+	var schedule string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO oncall_schedules (project_id, name, shift_seconds, anchor_at, participants)
+		VALUES ($1,'legacy',86400,now(),'["ops-team"]') RETURNING id`, f.projectID).Scan(&schedule); err != nil {
+		t.Fatalf("legacy row: %v", err)
+	}
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only probe
+	if _, err := resolveServiceRecipientsTx(ctx, tx, f.projectID, schedule, time.Now()); err == nil {
+		t.Fatal("a corrupt participant resolved silently: the project's channels would stand in for " +
+			"a schedule nobody fixed, and a typo would page the wrong people forever")
 	}
 }

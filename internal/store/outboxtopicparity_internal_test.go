@@ -1,13 +1,19 @@
 package store
 
 import (
+	"database/sql"
+	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/pressly/goose/v3"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
@@ -188,5 +194,134 @@ func TestAnOldProducersRowIsFencedByTheDatabase(t *testing.T) {
 	if status != "pending_fenced" || !fenced {
 		t.Fatalf("an old producer's row landed as %q/fenced=%v: an old worker would claim it and "+
 			"deliver an incident's events in any order", status, fenced)
+	}
+}
+
+// A DEAD row from before the barrier keeps its class in the `fenced` column, and `ReplayDeadOutbox`
+// restores from exactly that. Left at false, a replay months later would put an incident's event back
+// into the legacy class — into the hands of the worker the barrier exists to keep away from it.
+//
+// This runs the REAL migration rather than a copy of its statement. A test that re-types the SQL it
+// checks passes just as happily after somebody deletes the original, and this arc has already caught
+// itself doing that twice.
+func TestAPreBarrierDeadRowIsFencedByTheMigration(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+
+	dsn := os.Getenv("CERBIX_TEST_DATABASE_DSN")
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("CERBIX_TEST_DATABASE_DSN is not a URL (%q): %v", dsn, err)
+	}
+	name := fmt.Sprintf("cerbix_test_deadfence_%d_%d", os.Getpid(), time.Now().UnixNano())
+	if _, err := st.pool.Exec(ctx, `CREATE DATABASE `+name); err != nil {
+		t.Fatalf("create probe database: %v", err)
+	}
+	defer func() {
+		if _, err := st.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
+			t.Errorf("drop probe database: %v", err)
+		}
+	}()
+	u.Path = "/" + name
+	db, err := sql.Open("pgx", u.String())
+	if err != nil {
+		t.Fatalf("open probe: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	goose.SetBaseFS(migrationsFS)
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatalf("goose dialect: %v", err)
+	}
+	// Before the barrier there is no trigger, so a legacy insert stays legacy.
+	if err := goose.UpToContext(ctx, db, "migrations", 87); err != nil {
+		t.Fatalf("migrate to 87: %v", err)
+	}
+	var id string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO outbox_events (topic, payload, status, attempts, last_error, fenced)
+		VALUES ($1, '{"event":"incident.opened","incident":{"id":"i1"}}', 'dead', 10, 'boom', false)
+		RETURNING id::text`, domain.TopicIncidentEvent).Scan(&id); err != nil {
+		t.Fatalf("seed a pre-barrier dead row: %v", err)
+	}
+
+	if err := goose.UpToContext(ctx, db, "migrations", 88); err != nil {
+		t.Fatalf("migrate to 88: %v", err)
+	}
+
+	var status string
+	var fenced bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT status, fenced FROM outbox_events WHERE id = $1::uuid`, id).Scan(&status, &fenced); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !fenced {
+		t.Fatal("the barrier left a DEAD pre-barrier row unfenced: a replay restores the claimable " +
+			"class from this column, so an old worker would claim an incident's event and deliver it " +
+			"in any order")
+	}
+	if status != "dead" {
+		t.Fatalf("the backfill changed a dead row's status to %q: promoting a class is not "+
+			"resurrecting the row", status)
+	}
+}
+
+// A row an old worker had already CLAIMED when the barrier ran keeps that worker's token. Replacing it
+// during the promotion is what stops a pre-barrier claim from settling the row and releasing the
+// successor behind it. It cannot recall an external call that worker may already have made — nothing
+// on this side can, which is what D-0177 now says out loud.
+func TestTheMigrationInvalidatesAPreBarrierClaim(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+
+	dsn := os.Getenv("CERBIX_TEST_DATABASE_DSN")
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("CERBIX_TEST_DATABASE_DSN is not a URL (%q): %v", dsn, err)
+	}
+	name := fmt.Sprintf("cerbix_test_claimfence_%d_%d", os.Getpid(), time.Now().UnixNano())
+	if _, err := st.pool.Exec(ctx, `CREATE DATABASE `+name); err != nil {
+		t.Fatalf("create probe database: %v", err)
+	}
+	defer func() {
+		if _, err := st.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
+			t.Errorf("drop probe database: %v", err)
+		}
+	}()
+	u.Path = "/" + name
+	db, err := sql.Open("pgx", u.String())
+	if err != nil {
+		t.Fatalf("open probe: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	goose.SetBaseFS(migrationsFS)
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatalf("goose dialect: %v", err)
+	}
+	if err := goose.UpToContext(ctx, db, "migrations", 87); err != nil {
+		t.Fatalf("migrate to 87: %v", err)
+	}
+	// A legacy row an old worker has already claimed: it holds this token.
+	var id, oldToken string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO outbox_events (topic, payload, status, fenced, claim_token)
+		VALUES ($1, '{"event":"incident.opened","incident":{"id":"i1"}}', 'pending', false,
+		        gen_random_uuid())
+		RETURNING id::text, claim_token::text`, domain.TopicIncidentEvent).Scan(&id, &oldToken); err != nil {
+		t.Fatalf("seed a claimed pre-barrier row: %v", err)
+	}
+
+	if err := goose.UpToContext(ctx, db, "migrations", 88); err != nil {
+		t.Fatalf("migrate to 88: %v", err)
+	}
+
+	var token string
+	if err := db.QueryRowContext(ctx,
+		`SELECT claim_token::text FROM outbox_events WHERE id = $1::uuid`, id).Scan(&token); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if token == oldToken {
+		t.Fatal("the promotion left the pre-barrier claim token valid: that worker's " +
+			"MarkOutboxDelivered would still win the CAS, mark the event delivered and release the " +
+			"successor behind it")
 	}
 }

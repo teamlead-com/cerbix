@@ -86,9 +86,16 @@ func FencedTopics() []string {
 	// fenced class's usual one — during a rolling upgrade, incident events wait for a worker that can
 	// order them, which is a delay rather than a wrong order.
 	//
-	// Rows enqueued BEFORE the upgrade stay in the legacy 'pending' class and keep the old behaviour.
-	// They carry no sequence, and the delivery gate reads an absent sequence as "unknown, deliver" —
-	// the fence may never turn a missing number into a missing page.
+	// The class is settled by the DATABASE (migration 00088), not by this list alone: an old producer
+	// still running through the upgrade reads ITS OWN copy of this function and would otherwise keep
+	// writing legacy rows for exactly the window the fence exists to cover. Rows written before the
+	// barrier are promoted once, dead ones included, so a replay years later cannot put them back in
+	// a class the old claim can reach.
+	//
+	// What the barrier does NOT cover: work an old worker had ALREADY CLAIMED when it ran. Its token
+	// is replaced so it cannot settle the row, but an external call it has already made cannot be
+	// recalled by anything on this side (D-0177). Draining old workers before migrating is the
+	// operational answer; the guarantee here is about rows, not about calls in flight.
 	return []string{TopicIncidentCorrelation, TopicServiceAlert, TopicIncidentEvent}
 }
 

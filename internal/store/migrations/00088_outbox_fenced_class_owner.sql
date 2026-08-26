@@ -32,13 +32,28 @@ CREATE TRIGGER outbox_enforce_fenced_class_trg
     BEFORE INSERT ON outbox_events
     FOR EACH ROW EXECUTE FUNCTION outbox_enforce_fenced_class();
 
--- Rows an old producer already wrote in the legacy class during the rollout window: same treatment,
--- once. They are undelivered and unclaimed-by-anyone-capable, so promoting them is safe and is the
--- difference between "ordered after convergence" and "ordered".
+-- Rows an old producer already wrote in the legacy class during the rollout window.
+--
+-- `claim_token` is REPLACED as part of the promotion, because a row can already be claimed: an old
+-- worker that took it before this migration ran still holds the previous token, and without this its
+-- `MarkOutboxDelivered` would win the CAS and mark the row done. Replacing the token cannot recall an
+-- external call that worker may already have made — nothing here can, see D-0177 — but it stops a
+-- pre-barrier claim from also settling the row and releasing the successor behind it.
 UPDATE outbox_events
-   SET status = 'pending_fenced', fenced = true
+   SET status = 'pending_fenced', fenced = true, claim_token = gen_random_uuid()
  WHERE topic IN ('incident_correlation', 'service_alert', 'incident_event')
    AND status = 'pending';
+
+-- DEAD rows need the flag too, and they are not covered above. `ReplayDeadOutbox` restores a row's
+-- claimable class from the PERSISTED `fenced` column, so a dead pre-barrier row replayed months from
+-- now would come back as legacy `pending` — straight into the hands of exactly the worker the barrier
+-- exists to keep away from it. The status stays `dead`: this is about which class it returns to, not
+-- about resurrecting it.
+UPDATE outbox_events
+   SET fenced = true
+ WHERE topic IN ('incident_correlation', 'service_alert', 'incident_event')
+   AND status = 'dead'
+   AND NOT fenced;
 
 -- +goose Down
 DROP TRIGGER IF EXISTS outbox_enforce_fenced_class_trg ON outbox_events;

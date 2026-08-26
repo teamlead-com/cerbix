@@ -3886,12 +3886,11 @@ the dispatcher either way round. Across claims and workers, ordering is not avai
 retry arrives minutes later, and another worker may be mid-delivery.
 
 **Decision.** `incidents.event_seq` (migration 00086) is advanced by every path that enqueues a
-lifecycle event, inside the transaction that writes the fact, and stamped into the payload. Delivery
-compares it with the incident's current sequence and drops a superseded ONSET. A RESOLUTION is never
-dropped, exactly as §16.5 never drops a close: this rule may turn a superseded announcement into
-silence, never a missing ending into one. A payload with no sequence (written before this existed)
-is treated as unknown and delivered. `ClaimDueOutbox` additionally sorts its batch by
-(`next_attempt_at`, `created_at`, `id`) before returning, which orders the in-batch half.
+lifecycle event, inside the transaction that writes the fact, and stamped into the payload. Ordering
+is then enforced in the CLAIM: it will not release an event while an earlier event of the same
+incident is undelivered, and it returns its batch in the order the rows became DUE — the original due
+time, captured before the claim rewrites it into a lease. Nothing is dropped at delivery; a first
+version tried that and is dissected below.
 
 **Amended the same day, because dropping the stale member is not the same as keeping order.** Two
 things were missing and both are now in:

@@ -859,7 +859,7 @@ func TestServiceAutoIncidentPathsCarryTheSameSequence(t *testing.T) {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("the first open for a service did not create an incident")
 	}
-	if _, err := st.ResolveServiceIncidentTx(ctx, tx, svc.ID, "recovered"); err != nil {
+	if _, err := st.ResolveServiceIncidentTx(ctx, tx, svc.ID, "recovered", time.Now()); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("resolve: %v", err)
 	}

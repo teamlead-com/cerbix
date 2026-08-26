@@ -212,7 +212,7 @@ func TestTheMachineLeavesAHumanIncidentAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "Resolved automatically.")
+	resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "Resolved automatically.", time.Now())
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
 	}
 
 	inTx(func(tx pgx.Tx) {
-		resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "recovered")
+		resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "recovered", time.Now())
 		if err != nil || !resolved {
 			t.Fatalf("resolve: %v (resolved=%v)", err, resolved)
 		}
@@ -480,7 +480,7 @@ func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
 
 	// A second resolve has nothing to end, and must not announce an ending twice.
 	inTx(func(tx pgx.Tx) {
-		if resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "again"); err != nil || resolved {
+		if resolved, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "again", time.Now()); err != nil || resolved {
 			t.Fatalf("second resolve: %v (resolved=%v, want false)", err, resolved)
 		}
 	})
@@ -906,5 +906,49 @@ func TestAServiceWithNoGoverningDeclarationOpensNothing(t *testing.T) {
 		t.Fatalf("withheld = %+v, want one under %q — reporting this as a broken route would send "+
 			"somebody to fix a paging configuration that is fine",
 			got.Withheld, WithheldNoGoverningRevision)
+	}
+}
+
+// The clock the lifecycle close stamps the incident with is the caller's post-lock instant, not the
+// transaction's start.
+//
+// D-0177's clock work fixed the manual paths — `AddIncidentUpdate`, `AcknowledgeIncident` — and this
+// one kept reading `now()`. A writer that waited on a row lock then stamped a resolution EARLIER than
+// the action that caused it, so the timeline claimed the incident ended before the close that ended
+// it, and `ListIncidentUpdates` (which orders by `created_at`) rendered them in that order.
+func TestAServiceIncidentResolvesOnTheCallersClockNotTheTransactionsStart(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, _, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "down", 3, nil); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	// A distinctive instant, far from any transaction clock this test could produce by accident.
+	asOf := time.Now().Add(90 * time.Minute).UTC().Truncate(time.Microsecond)
+	if _, err := st.ResolveServiceIncidentTx(ctx, tx, f.serviceID, "recovered", asOf); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	var resolvedAt, updatedAt, noteAt time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT i.resolved_at, i.updated_at, u.created_at
+		  FROM incidents i
+		  JOIN incident_updates u ON u.incident_id = i.id AND u.status = 'resolved'
+		 WHERE i.service_id = $1`, f.serviceID).Scan(&resolvedAt, &updatedAt, &noteAt); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for name, got := range map[string]time.Time{
+		"resolved_at": resolvedAt, "updated_at": updatedAt, "the timeline note": noteAt,
+	} {
+		if !got.UTC().Equal(asOf) {
+			t.Fatalf("%s = %s, want the caller's post-lock instant %s — the transaction clock would "+
+				"date the resolution before the close that caused it", name, got.UTC(), asOf)
+		}
 	}
 }

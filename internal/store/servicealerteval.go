@@ -295,7 +295,7 @@ func (s *Store) evaluateServiceAlertsOn(
 			if decision.Close {
 				out.Closes++
 				resolved, rerr := s.ResolveServiceIncidentTx(ctx, tx, c.serviceID,
-					"Resolved automatically: the service is no longer in a pageable state.")
+					"Resolved automatically: the service is no longer in a pageable state.", asOf)
 				if rerr != nil {
 					return out, rerr
 				}

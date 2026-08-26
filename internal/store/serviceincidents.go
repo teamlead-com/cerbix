@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -244,22 +245,31 @@ func (s *Store) IncidentMemberSnapshot(ctx context.Context, incidentID string) (
 //
 // `source = 'auto'` and `status <> 'resolved'` are both in the WHERE: an incident a HUMAN resolved, or one a
 // human opened, is left alone. A machine must not reopen or re-annotate a conclusion a person drew.
-func (s *Store) ResolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body string) (bool, error) {
-	return resolveServiceIncidentTx(ctx, tx, serviceID, body)
+func (s *Store) ResolveServiceIncidentTx(
+	ctx context.Context, tx pgx.Tx, serviceID, body string, asOf time.Time,
+) (bool, error) {
+	return resolveServiceIncidentTx(ctx, tx, serviceID, body, asOf)
 }
 
 // resolveServiceIncidentTx is the same operation without a receiver, so the lifecycle closes — which
 // are package-level functions holding only a transaction — end the incident through the SAME code the
 // evaluator's recovery uses. Two spellings of "resolve the service's incident" is how one of them
 // comes to forget the lifecycle event.
-func resolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body string) (bool, error) {
+// `asOf` is the caller's post-lock instant, and it is a parameter for the reason D-0177's clock work
+// established for the manual paths: `now()` is the TRANSACTION's start, so a writer that waited on a
+// row lock stamps a resolution earlier than the action that caused it, and the timeline then claims
+// the incident ended before the lifecycle close that ended it. Both callers already hold the instant
+// they took after their locks; this one path was still reading the transaction clock.
+func resolveServiceIncidentTx(
+	ctx context.Context, tx pgx.Tx, serviceID, body string, asOf time.Time,
+) (bool, error) {
 	// The guarded write returns the whole resolved row, so the announcement below describes the
 	// incident as it now IS rather than as a second read hopes it is.
 	inc, err := scanIncident(tx.QueryRow(ctx,
 		`UPDATE incidents
-		    SET status = 'resolved', resolved_at = now(), updated_at = now()
+		    SET status = 'resolved', resolved_at = $2, updated_at = $2
 		  WHERE service_id = $1 AND source = 'auto' AND status <> 'resolved'
-		 RETURNING `+incidentColumns, serviceID))
+		 RETURNING `+incidentColumns, serviceID, asOf))
 	if err != nil {
 		if noRows(err) {
 			return false, nil
@@ -267,9 +277,9 @@ func resolveServiceIncidentTx(ctx context.Context, tx pgx.Tx, serviceID, body st
 		return false, fmt.Errorf("store: resolve service incident: %w", err)
 	}
 	upd, err := scanIncidentUpdate(tx.QueryRow(ctx,
-		`INSERT INTO incident_updates (incident_id, status, body, author)
-		 VALUES ($1, 'resolved', $2, 'system') RETURNING `+incidentUpdateColumns,
-		inc.ID, body))
+		`INSERT INTO incident_updates (incident_id, status, body, author, created_at)
+		 VALUES ($1, 'resolved', $2, 'system', $3) RETURNING `+incidentUpdateColumns,
+		inc.ID, body, asOf))
 	if err != nil {
 		return false, fmt.Errorf("store: resolve service incident note: %w", err)
 	}

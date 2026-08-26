@@ -163,7 +163,7 @@ func closeServiceEpisodesTx(
 	// BURN closes never touch it. A budget alert is not the outage record, and `burn_disabled` or
 	// `rule_removed` say nothing about whether the service is down.
 	if healthEnded {
-		if _, err := resolveServiceIncidentTx(ctx, tx, serviceID, lifecycleResolutionBody(reason)); err != nil {
+		if _, err := resolveServiceIncidentTx(ctx, tx, serviceID, lifecycleResolutionBody(reason), asOf); err != nil {
 			return 0, err
 		}
 	}

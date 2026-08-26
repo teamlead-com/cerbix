@@ -228,8 +228,16 @@ var activeLiveDelegationSQL = `
 // The predicate ONE burn rule's latch must satisfy to be a replacement: quotable (a HOLD is a
 // successful evaluation that cannot fire), for the current target and config generations, error-free
 // and fresh. Written once because it is asked twice below, in opposite directions.
+// A CLEAR covers by itself: the rule looked and had nothing to announce. A FIRE covers only once the
+// announcement it implies has been COMMITTED — `firing` set and a sequence issued.
+//
+// `last_verdict = 'fire'` alone was the same defect the live arm had, one signal over: D-0176
+// withholds a FIRE edge nobody can receive, leaving the verdict at `fire` with `firing` still false,
+// so restoring the route armed burn coverage in the instant BEFORE the next evaluation announced
+// anything. The member's own burn alert would fall silent for an onset that had never been sent.
 const burnRuleCoversSQL = `
-		           bs.last_verdict IN ('fire', 'clear')
+		           (bs.last_verdict = 'clear'
+		            OR (bs.last_verdict = 'fire' AND bs.firing AND bs.emitted_seq > 0))
 		       AND bs.config_generation = s.alert_config_generation
 		       AND bs.target_generation = t.alert_generation
 		       AND bs.last_error IS NULL

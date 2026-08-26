@@ -817,11 +817,16 @@ func (r *recordingServiceSink) RecordServiceSlice(string) {}
 // rewrite what those assertions are reading.
 func (r *recordingServiceSink) RecordServiceAlertEvaluations(string, string, int) {}
 func (r *recordingServiceSink) RecordServiceAlertEmitted(string, string, int)     {}
-func (r *recordingServiceSink) RecordServiceIncidents(string, int)                {}
-func (r *recordingServiceSink) RecordEscalationSteps(string, int)                 {}
-func (r *recordingServiceSink) SetServiceAlertPass(string, int64, float64)        {}
-func (r *recordingServiceSink) SetServiceAlertStats(metrics.ServiceAlertStat)     {}
-func (r *recordingServiceSink) SetServiceAlertStalled(string, bool, string)       {}
+func (r *recordingServiceSink) RecordServiceAlertWithheld(signal string, n int) {
+	if n > 0 {
+		r.log("withheld:" + signal)
+	}
+}
+func (r *recordingServiceSink) RecordServiceIncidents(string, int)            {}
+func (r *recordingServiceSink) RecordEscalationSteps(string, int)             {}
+func (r *recordingServiceSink) SetServiceAlertPass(string, int64, float64)    {}
+func (r *recordingServiceSink) SetServiceAlertStats(metrics.ServiceAlertStat) {}
+func (r *recordingServiceSink) SetServiceAlertStalled(string, bool, string)   {}
 func (r *recordingServiceSink) SetSchedulerLeader(leader bool) {
 	r.log(fmt.Sprintf("leader=%v", leader))
 }

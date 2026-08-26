@@ -629,14 +629,47 @@ func TestBurnWithholdsAnOnsetNobodyCanReceiveAndDoesNotLatch(t *testing.T) {
 			"would leave no edge and the member would be silenced for an alert nobody got", firing, seq)
 	}
 
-	// Route restored: exactly one onset, and only now may delegation suppress the member's own burn.
+	// Nothing was written, not merely nothing counted.
+	var episodes, events int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_alert_episodes WHERE signal = 'burn'`).Scan(&episodes); err != nil {
+		t.Fatalf("count episodes: %v", err)
+	}
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM outbox_events WHERE topic = 'service_alert'`).Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if episodes != 0 || events != 0 {
+		t.Fatalf("a withheld FIRE left %d episode(s) and %d event(s)", episodes, events)
+	}
+
+	// Route restored — and BEFORE the next evaluation, coverage must still be dis-armed. This is the
+	// half the live arm needed too: the verdict is still `fire` while nothing has been announced, so
+	// arming here would silence the member's own burn alert for an onset that was never sent.
 	if _, err := st.pool.Exec(ctx,
 		`UPDATE notification_channels SET enabled = true WHERE project_id = $1`, f.projectID); err != nil {
 		t.Fatalf("re-enable: %v", err)
+	}
+	if delegatedBurn(t, st, ctx, f) {
+		t.Fatal("burn coverage armed on a restored route before the withheld onset was announced")
 	}
 	got = burnEvalOnce(t, st, ctx)
 	if got.Onsets != 1 {
 		t.Fatalf("after the route came back the burn arm reported %+v, want the one onset that was "+
 			"waiting", got)
 	}
+	// ...and only NOW may it suppress the member's own burn alert.
+	if !delegatedBurn(t, st, ctx, f) {
+		t.Fatal("burn coverage did not arm after its onset was announced")
+	}
+}
+
+// delegatedBurn asks the real delegation lookup whether this fixture's monitor is covered for burn.
+func delegatedBurn(t *testing.T, st *Store, ctx context.Context, f burnFixture) bool {
+	t.Helper()
+	v, err := st.ActiveDelegation(ctx, f.monitorID, f.projectID, DelegationBurn)
+	if err != nil {
+		t.Fatalf("active delegation: %v", err)
+	}
+	return v.Suppress()
 }

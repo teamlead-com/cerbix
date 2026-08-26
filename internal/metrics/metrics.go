@@ -48,10 +48,11 @@ type Registry struct {
 	// The EVALUATOR half of the same §16.6b table. `signal` is the only dimension the alerting
 	// surface ever grows along, and it has exactly two values (health, burn) — no service, no
 	// target, no rule, no tenant.
-	serviceAlertEvals   map[string]map[string]uint64 // signal → outcome → count (ok|error|skipped)
-	serviceAlertEmitted map[string]map[string]uint64 // signal → edge → count (onset|close)
-	serviceIncidents    map[string]uint64            // action → count (opened|resolved), FR-022
-	escalationSteps     map[string]uint64            // subject → count (monitor|service), FR-023
+	serviceAlertEvals    map[string]map[string]uint64 // signal → outcome → count (ok|error|skipped)
+	serviceAlertWithheld map[string]uint64            // signal → onsets withheld for want of a route
+	serviceAlertEmitted  map[string]map[string]uint64 // signal → edge → count (onset|close)
+	serviceIncidents     map[string]uint64            // action → count (opened|resolved), FR-022
+	escalationSteps      map[string]uint64            // subject → count (monitor|service), FR-023
 	// The DELIVERY side of §16.6b: what delegation concluded per signal, and the two ways an
 	// announcement can fail to reach anybody without failing to deliver.
 	serviceDelegation       map[string]map[string]uint64 // signal → state → count
@@ -470,6 +471,27 @@ func (r *Registry) RecordServiceDelegation(signal, state string) {
 	r.serviceDelegation[signal][state]++
 }
 
+// RecordServiceAlertWithheld counts an ONSET a successful evaluation refused to announce because
+// nothing could receive it (D-0176). It is deliberately NOT a fourth value on the evaluations
+// `outcome` label: that label partitions the units of work a pass performed, and this is not a fourth
+// kind of unit — it is something that did not happen to one, so folding it in would have made it
+// overlap with `ok`.
+//
+// It is also not `..._undeliverable_total`, which counts an announcement that WAS made to a route
+// that has gone since. The difference is the whole point: one says the paging configuration is broken
+// now, the other says it broke after somebody was already told.
+func (r *Registry) RecordServiceAlertWithheld(signal string, n int) {
+	if n <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.serviceAlertWithheld == nil {
+		r.serviceAlertWithheld = map[string]uint64{}
+	}
+	r.serviceAlertWithheld[signal] += uint64(n)
+}
+
 // RecordServiceAlertUndeliverable counts an announcement with nobody left to tell — an empty
 // recipient snapshot, or one whose every channel has since gone. It is not a delivery failure and
 // there is nothing to retry, which is exactly why it needs a counter of its own: otherwise it is
@@ -824,6 +846,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	serviceAlertUndeliver := maps.Clone(r.serviceAlertUndeliver)
 	serviceRecipientMissing := r.serviceRecipientMissing
 	serviceAlertEvals := copyCounts2(r.serviceAlertEvals)
+	serviceAlertWithheld := copyCounts(r.serviceAlertWithheld)
 	serviceAlertEmitted := copyCounts2(r.serviceAlertEmitted)
 	serviceIncidents := copyCounts(r.serviceIncidents)
 	escalationSteps := copyCounts(r.escalationSteps)
@@ -1030,6 +1053,13 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 				out.printf("cerbix_service_alert_evaluations_total{signal=%q,outcome=%q} %d\n",
 					signal, outcome, serviceAlertEvals[signal][outcome])
 			}
+		}
+	}
+	if len(serviceAlertWithheld) > 0 {
+		out.println("# HELP cerbix_service_alert_withheld_total Onsets a successful evaluation refused to announce because nothing could receive them (D-0176).")
+		out.println("# TYPE cerbix_service_alert_withheld_total counter")
+		for _, signal := range sortedKeys(serviceAlertWithheld) {
+			out.printf("cerbix_service_alert_withheld_total{signal=%q} %d\n", signal, serviceAlertWithheld[signal])
 		}
 	}
 	if len(serviceAlertEmitted) > 0 {

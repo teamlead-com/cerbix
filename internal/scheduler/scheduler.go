@@ -124,6 +124,7 @@ type ServiceStatsSink interface {
 	// The §16.6b evaluator families. Counters come from what a slice DID, the pass gauges from
 	// each successful pass, the stats from the out-of-band sample.
 	RecordServiceAlertEvaluations(signal, outcome string, n int)
+	RecordServiceAlertWithheld(signal string, n int)
 	RecordServiceAlertEmitted(signal, edge string, n int)
 	RecordServiceIncidents(action string, n int)
 	RecordEscalationSteps(subject string, n int)
@@ -482,9 +483,10 @@ func (s *Scheduler) observeServiceAlertPass(p serviceAlertPass) {
 	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "ok", p.ok)
 	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "error", p.errors)
 	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "skipped", p.skipped)
-	// Recorded even at zero, like the others: a series that only appears when something goes wrong
-	// is one an alerting rule cannot be written against.
-	s.serviceMetrics.RecordServiceAlertEvaluations(p.signal, "withheld", p.withheld)
+	// Its OWN family, not a fourth `outcome`: that label partitions the units of work a pass did,
+	// and a withheld onset is not a fourth kind of unit — it is something that did not happen to
+	// one, so it would have overlapped `ok`.
+	s.serviceMetrics.RecordServiceAlertWithheld(p.signal, p.withheld)
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "onset", p.onsets)
 	s.serviceMetrics.RecordServiceAlertEmitted(p.signal, "close", p.closes)
 	s.serviceMetrics.RecordServiceIncidents("opened", p.incidentsOpened)
@@ -956,7 +958,8 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					// Logged whenever anything happened OR anything is behind: a stalled evaluator
 					// has to read as lag rather than as an absence of alerts, which is
 					// indistinguishable from "nothing is wrong" (§16.7).
-					if ev.Onsets > 0 || ev.Closes > 0 || ev.Errors > 0 || ev.Lag > serviceAlertEvery {
+					if ev.Onsets > 0 || ev.Closes > 0 || ev.Errors > 0 || ev.Unroutable > 0 ||
+						ev.Lag > serviceAlertEvery {
 						s.logger.Info("service_alerts_evaluated", "evaluated", ev.Evaluated,
 							"onsets", ev.Onsets, "closes", ev.Closes, "errors", ev.Errors,
 							"incidents_opened", ev.IncidentsOpened, "incidents_resolved", ev.IncidentsResolved,
@@ -980,7 +983,8 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					s.observeServiceAlertPass(serviceAlertPass{
 						signal: string(domain.ServiceSignalBurn), cadence: serviceBurnEvery,
 						lag: ev.Lag, ok: ev.Rules - ev.Holds, skipped: ev.Holds, errors: ev.Errors,
-						onsets: ev.Onsets, closes: ev.Closes,
+						withheld: ev.Withheld,
+						onsets:   ev.Onsets, closes: ev.Closes,
 					})
 					if ev.Onsets > 0 || ev.Closes > 0 || ev.Holds > 0 || ev.Errors > 0 || ev.Lag > serviceBurnEvery {
 						s.logger.Info("service_burn_alerts_evaluated", "targets", ev.Targets,

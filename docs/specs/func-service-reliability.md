@@ -2918,8 +2918,10 @@ than silently dropped.~~ **Superseded by D-0176 (2026-08-26):** an ONSET with no
 is WITHHELD — no episode, no outbox row — and does not latch, so the next evaluation announces it the
 moment somebody can be told. Recording it instead would have to latch it, and a latched announcement
 nobody received is an announcement that can never happen: restoring the route produces no edge, while
-delegation begins suppressing the member's own alert. Withheld onsets are counted as
-`cerbix_service_alert_evaluations_total{outcome="withheld"}`. CLOSES are never withheld. Instance-wide silence applies unchanged. Recovery/close goes to the same
+delegation begins suppressing the member's own alert. Withheld onsets are counted as `cerbix_service_alert_withheld_total{signal}`.
+`cerbix_service_alert_undeliverable_total` keeps its own, DIFFERENT job at delivery time: an
+announcement that WAS made to a resolvable route whose channels have gone since. CLOSES are never
+withheld. Instance-wide silence applies unchanged. Recovery/close goes to the same
 recipients the onset did.
 
 ### 16.6a The write surface, concretely

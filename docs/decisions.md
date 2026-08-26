@@ -3857,12 +3857,17 @@ documents' letters and writes an undeliverable episode plus an outbox row on EVE
 few seconds for as long as the route is broken — so the honest record becomes the noisiest table in
 the product, and the outbox worker retries deliveries that cannot succeed.
 
-**Consequence.** `cerbix_service_alert_undeliverable_total` is not implemented and its line in §16.6
-carries a superseding note. Withheld onsets are counted instead as
-`cerbix_service_alert_evaluations_total{outcome="withheld"}` — a new VALUE on an existing bounded
-label, next to `ok`/`error`/`skipped`, so no new series family appears. `skipped` keeps its own
-meaning (the burn arm's HOLDs: a verdict that cannot be QUOTED), because "cannot be quoted" and
-"cannot be delivered" are different facts and an operator reading silence needs to tell them apart.
+**Consequence.** What is superseded is the ENQUEUE-time half of §16.6's sentence, not the metric it
+names. `cerbix_service_alert_undeliverable_total` exists and keeps its own job at DELIVERY time
+(`outbox.go`): an announcement whose recipient snapshot is empty, or whose every channel has gone
+since the onset, is counted there rather than mistaken for a page. That case is real and unchanged —
+the recipients were resolvable when the announcement was made.
+
+Withheld onsets are a different fact and get their own bounded counter,
+`cerbix_service_alert_withheld_total{signal}`, rather than a fourth value on the evaluations
+`outcome` label: that label partitions the units of work a pass performed, and a withheld onset is
+not a fourth kind of unit — it is something that did NOT happen to one. Folding it in would have made
+`ok` and `withheld` overlap, since `ok` counts every service evaluated.
 Verified both ways in both arms: dropping the gate opens an incident nobody received, and withholding
 while still latching leaves the restored route with no edge to announce.
 

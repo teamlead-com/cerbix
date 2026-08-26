@@ -173,6 +173,32 @@ Distributed roles run as separate processes over the RabbitMQ dispatcher (`--rol
 types are implemented, including ICMP (`internal/prober/icmp.go`, D-0032; unprivileged-first
 socket) and push (dead-man's-switch, D-0028).
 
+### Stop the outbox owners before migrating across 00088
+
+**This is a step, not a precaution, and the rolling upgrade elsewhere in this document does not cover
+it.** Migration 00088 makes the fenced class the database's rule so that a producer of any version
+cannot write an incident's events where an old worker would claim them. It fixes ROWS. It cannot fix a
+CALL already in flight: a worker that claimed a legacy row seconds before the migration ran is holding
+that payload in memory, and nothing in the database recalls an HTTP request or an SMTP session it has
+already started (D-0177). The migration replaces such a worker's claim token, so it can no longer
+settle the row or release the event behind it — but the delivery it may already have made stands.
+
+So, when upgrading a deployment across 00088:
+
+1. **Stop every role that runs the outbox worker**: `all`, `api` and `scheduler`. A `worker` (prober)
+   and an `agent` do not deliver outbox events and can keep running — probing continues, results
+   queue, nothing is lost.
+2. Wait for those processes to exit. In-flight deliveries finish or fail on their own; either is fine,
+   because the rows they did not settle stay claimable.
+3. `cerbix migrate` with the NEW binary.
+4. Start the new `scheduler`, then `api` (or `all`).
+
+Skipping the stop does not corrupt anything and loses no event. What it risks is exactly one thing:
+an incident's events delivered out of order to a webhook or a subscriber, once, by the worker that was
+mid-flight — the defect 00088 exists to end. If a deployment cannot take the pause, the honest
+expectation is that the ordering guarantee begins after the last old worker exits, not when the
+migration commits.
+
 ### PostgreSQL 15 is a hard requirement (learned in production)
 
 An upgrade to `v0.1.5-beta.1` on **PostgreSQL 14** applies migrations `00061`…`00069` and then dies on

@@ -304,14 +304,22 @@ flowchart TB
 - **Observability** — `/metrics` (`cerbix_*`) from all roles into Prometheus; `/healthz`/`/readyz` for
   probes.
 
-**Rollout order:** `cerbix migrate` (one-off) → scheduler → workers → api. Every role
-fails fast on an invalid config/unreachable DB. Roles also auto-apply migrations at startup whenever
-`database.dsn` is set, and doing so concurrently is safe: `store.Migrate` holds a session
-`pg_advisory_lock` for the whole goose run, so roles starting together serialize instead of racing.
-**Recommended for distributed deployment anyway:** run `cerbix migrate` **as a separate one-off step
-before** starting the roles, using the NEW binary. Not as protection against a race, but to keep a
-schema change a deliberate act performed at a moment somebody chose — after it, the roles find no
-pending version and apply nothing.
+**Rollout order:** stop the outbox owners (`all`/`api`/`scheduler`) → `cerbix migrate` (one-off,
+NEW binary) → scheduler → workers → api. Probers (`worker`) and pull agents do not deliver outbox
+events and keep running throughout. Every role fails fast on an invalid config or unreachable DB.
+
+Roles also auto-apply migrations at startup whenever `database.dsn` is set, and doing so concurrently
+is safe from races: `store.Migrate` holds a session `pg_advisory_lock` for the whole goose run, so
+roles starting together serialize. Safe from races is not the same as safe to rely on here. Two
+reasons to keep the one-off step:
+
+- it makes a schema change a deliberate act performed at a moment somebody chose, rather than
+  something the first process to boot happens to do;
+- for upgrades crossing migration **00088** it is REQUIRED, together with the stop above. That
+  migration fences the rows an old producer writes so an old worker cannot claim an incident's events
+  and deliver them out of order — but it cannot reach a delivery such a worker already has in flight.
+  Letting a role auto-apply it while other old roles are still running is precisely the window it
+  exists to close. The runbook carries the procedure and what skipping it actually risks.
 
 ## 2.3 Traefik + embed (recommended default edge, no nginx)
 

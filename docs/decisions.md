@@ -4234,3 +4234,26 @@ to each — including two negative controls, a service that is STILL FIRING and 
 of which must be untouched. Dropping the status correction fails the migration outright on the new
 CHECK; dropping the `live_firing = false` guard fails with `the repair closed an incident for a
 service that is STILL FIRING`.
+
+## D-0183 — PostgreSQL 14 is not supported, and that is decided rather than pending (2026-08-27)
+
+**Context.** iter-0161 opened on a production upgrade that died on PostgreSQL 14: five migrations use
+the column-list `ON DELETE SET NULL (col)` form that arrived in 15, and the plain form cannot
+substitute — on a composite FK it nulls EVERY referencing column including the NOT NULL `project_id`,
+which is the bug `00070` exists to fix. `cerbix migrate` was made to refuse 14 before touching a file,
+and the runbook carries the recovery.
+
+What was left open was the product question underneath: SHOULD cerbix support 14 at all? It sat in
+`DoD-0161` as needing the owner's commission, which is the right place for it and the wrong place to
+leave it indefinitely — an open question in a status document reads as work someone is going to do.
+
+**Decision (owner, 2026-08-27): no.** PostgreSQL 15 is the floor and stays there.
+
+The cost of the alternative is what makes this easy: supporting 14 means emulating column-list
+`ON DELETE SET NULL` with triggers across five migrations and maintaining those triggers indefinitely,
+in the exact code path whose correctness the composite FKs exist to guarantee. A hand-written trigger
+that nulls one column of a composite key on delete is precisely the kind of thing that works until a
+cascade arrives from an unexpected direction — and it would carry the tenancy invariants.
+
+Nothing in the code changes: the version guard, its error message and the runbook already implement
+this decision. What changes is that the question is CLOSED, so no document describes it as pending.

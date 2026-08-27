@@ -229,6 +229,12 @@ ALTER TABLE monitors ALTER COLUMN slug DROP NOT NULL;
 requirement and the fact that nothing was applied. Upgrade the server to 15+ (16 matches every image and
 CI job here) rather than working around the syntax.
 
+Supporting 14 was considered and **declined** (D-0183, owner, 2026-08-27): the compatibility path means
+emulating column-list `ON DELETE SET NULL` with triggers across five migrations and maintaining them
+indefinitely, inside the code path whose correctness the composite foreign keys exist to guarantee. 15
+is the floor and there is no plan to lower it, so an operator reading this should budget the server
+upgrade rather than wait for a release that removes the requirement.
+
 ### RabbitMQ baseline and upgrade
 
 Compose requires `CERBIX_RABBITMQ_IMAGE` on every invocation: no default can safely describe both

@@ -175,6 +175,10 @@ const (
 	CloseBurnDisabled       ServiceAlertCloseReason = "burn_disabled"
 	CloseRuleRemoved        ServiceAlertCloseReason = "rule_removed"
 	CloseServiceDeleted     ServiceAlertCloseReason = "service_deleted"
+	// CloseUndelivered ends an episode whose announcement reached NOBODY, because a re-announcement
+	// is replacing it (D-0187). Its recipient snapshot names people who could not be reached; the
+	// episode that supersedes it carries whoever can be.
+	CloseUndelivered ServiceAlertCloseReason = "undelivered"
 )
 
 // ServiceAlertDecision is what one evaluation concluded.

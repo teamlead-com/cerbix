@@ -3189,6 +3189,11 @@ it is MADE.
 104. an outbox delivery is bounded by the lease of the claim that authorised it, and the SETTLING
     writes are not — a send that used its whole budget must still be able to record itself, or the
     row returns to the queue and the recipients are paged twice (D-0186).
+105. an announcement that reached NOBODY is announced again once a route exists, through the ordinary
+    onset path with a new sequence and a fresh recipient snapshot; the trigger is a CONDEMNED
+    sequence (attempted, reached nobody, no retry owed) and not merely an undelivered one; the
+    superseded episode is closed as `undelivered`; and the re-announcement is itself withheld while
+    there is still nobody to tell (D-0187).
 ### 16.9 What phase 5 does NOT do
 
 - **service incidents** — owner decision 3; a service-anchored incident touches the status page, the

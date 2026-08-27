@@ -475,3 +475,102 @@ func liveChannels(t *testing.T, st *Store, ctx context.Context, projectID string
 	}
 	return out
 }
+
+// D-0187 — the outage that nobody heard about gets told, once there is somebody to tell.
+//
+// D-0179 closed the swallow: an announcement that reached nobody stops arming coverage, so the
+// members keep paging for themselves. It stopped there deliberately, and the gap it left is this —
+// the incident is open, the outage is real, and the service's own alert was never received by anyone,
+// forever, because the latch says firing and the evaluator therefore sees no edge.
+func TestAnUndeliveredOnsetIsAnnouncedAgainOnceThereIsSomebodyToTell(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := alertingService(t, st, ctx)
+	setMemberHealth(t, st, ctx, f, true)
+	evalOnce(t, st, ctx)
+
+	setMemberHealth(t, st, ctx, f, false)
+	evalOnce(t, st, ctx)
+	if got := evalOnce(t, st, ctx); got.Onsets != 1 {
+		t.Fatalf("the confirmed DOWN did not announce (%+v)", got)
+	}
+	first := alertEvents(t, st, ctx)
+	if len(first) != 1 {
+		t.Fatalf("%d events, want the one onset", len(first))
+	}
+
+	// Still down, still announced: nothing further, which is the behaviour the re-announcement must
+	// not disturb.
+	setMemberHealth(t, st, ctx, f, false)
+	if got := evalOnce(t, st, ctx); got.Onsets != 0 {
+		t.Fatalf("a service that stayed down announced again (%+v)", got)
+	}
+
+	// The worker attempts it and reaches nobody, terminally. This is `MarkServiceAlertUndeliverable`
+	// through its own door, so the test exercises the same write the worker makes.
+	if err := st.MarkServiceAlertUndeliverable(ctx, domain.ServiceAlert{
+		ServiceID: f.serviceID, ProjectID: f.projectID,
+		Signal: domain.ServiceSignalHealth, Firing: true, Seq: first[0].Seq,
+	}); err != nil {
+		t.Fatalf("condemn: %v", err)
+	}
+
+	// With no route there is still nobody to tell, so the re-announcement is WITHHELD rather than
+	// enqueued into the same emptiness — D-0176's rule, and it must keep applying here.
+	exec(t, st, ctx, `UPDATE notification_channels SET enabled = false WHERE project_id = $1`, f.projectID)
+	got := evalOnce(t, st, ctx)
+	if got.Onsets != 0 {
+		t.Fatalf("a re-announcement went out with no route (%+v): that is the emptiness D-0176 "+
+			"refuses to announce into", got)
+	}
+	if got.Withheld[WithheldUnroutable] != 1 {
+		t.Fatalf("the withheld re-announcement was not counted: %+v", got.Withheld)
+	}
+	if len(alertEvents(t, st, ctx)) != 1 {
+		t.Fatal("a second event exists despite there being nobody to receive it")
+	}
+
+	// The operator fixes the channel. NOW it is announced again.
+	exec(t, st, ctx, `UPDATE notification_channels SET enabled = true WHERE project_id = $1`, f.projectID)
+	if got := evalOnce(t, st, ctx); got.Onsets != 1 {
+		t.Fatalf("the outage was not re-announced after the route came back (%+v): the incident is "+
+			"open, the service is down, and nobody has ever been told", got)
+	}
+	events := alertEvents(t, st, ctx)
+	if len(events) != 2 {
+		t.Fatalf("%d events, want the original and the re-announcement", len(events))
+	}
+	again := events[1]
+	if !again.Firing || again.State != domain.ServiceAlertDown {
+		t.Fatalf("the re-announcement is not an onset for the current state: %+v", again)
+	}
+	if again.Seq <= first[0].Seq {
+		t.Fatalf("the re-announcement carries sequence %d, not past the condemned %d — a receiver "+
+			"ordering on it would treat the new page as superseded", again.Seq, first[0].Seq)
+	}
+	if len(again.Recipients) == 0 {
+		t.Fatal("the re-announcement resolved no recipients")
+	}
+	if again.EpisodeID == first[0].EpisodeID {
+		t.Fatal("the re-announcement re-used the episode nobody heard: its recipient snapshot names " +
+			"people who could not be reached, and the close would go to them")
+	}
+
+	// The superseded episode says WHY it ended, and it is not a policy change.
+	var reason string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT close_reason FROM service_alert_episodes WHERE id = $1`,
+		first[0].EpisodeID).Scan(&reason); err != nil {
+		t.Fatalf("read superseded episode: %v", err)
+	}
+	if reason != string(domain.CloseUndelivered) {
+		t.Fatalf("the episode nobody heard was closed as %q, want %q — nothing about the policy "+
+			"changed, and a false cause in a record an operator reads is worse than none",
+			reason, domain.CloseUndelivered)
+	}
+
+	// And it does not loop: the re-announcement has not been condemned, so the next pass is quiet.
+	if got := evalOnce(t, st, ctx); got.Onsets != 0 {
+		t.Fatalf("the evaluator announced a third time (%+v): a re-announcement that repeats every "+
+			"cadence is a pager loop, not a fix", got)
+	}
+}

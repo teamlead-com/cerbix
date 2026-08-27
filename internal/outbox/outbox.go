@@ -47,6 +47,7 @@ type Store interface {
 	ActiveDelegation(ctx context.Context, monitorID, projectID string, signal store.DelegationSignal) (store.DelegationVerdict, error)
 	ServiceAlertSequence(ctx context.Context, a domain.ServiceAlert) (int64, error)
 	MarkServiceAlertDelivered(ctx context.Context, a domain.ServiceAlert) error
+	MarkServiceAlertUndeliverable(ctx context.Context, a domain.ServiceAlert) error
 	RecordSuppression(ctx context.Context, eventID, monitorID, projectID, topic string, owners []store.DelegationOwner) error
 }
 
@@ -285,6 +286,25 @@ func (w *Worker) dependencySuppressed(ctx context.Context, monitor domain.Monito
 		w.logger.Warn("suppression_note_failed", "monitor_id", monitor.ID, "error", err.Error())
 	}
 	return true
+}
+
+// condemn records that an announcement is KNOWN dead, so the evaluator can announce the outage again
+// once somebody can be told (D-0187).
+//
+// Called ONLY from the terminal paths — an empty recipient snapshot, or a delivery that resolved
+// nobody — never where a retry is still owed. The distinction is the whole point of the column: a
+// re-announcement triggered by "not delivered yet" would duplicate an event that was merely slow.
+//
+// A failure to record leaves the outage un-re-announced, which is the state it was already in, so it
+// is logged rather than retried: retrying would re-send the page.
+func (w *Worker) condemn(ctx context.Context, a domain.ServiceAlert) {
+	if !a.Firing {
+		return
+	}
+	if err := w.store.MarkServiceAlertUndeliverable(ctx, a); err != nil {
+		w.logger.Warn("service_alert_condemn_failed", "service_id", a.ServiceID,
+			"signal", string(a.Signal), "seq", a.Seq, "error", err.Error())
+	}
 }
 
 // serviceDelegationSuppressed reports whether a monitor's ONSET-like alert should stay quiet because
@@ -578,6 +598,7 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 			w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
 			w.logger.Warn("service_alert_undeliverable", "service_id", a.ServiceID,
 				"signal", string(a.Signal), "reason", "empty_recipient_snapshot")
+			w.condemn(ctx, a)
 			return nil
 		}
 		res, err := w.notifs.DeliverChannelsReporting(ctx, a.Recipients, a.Message())
@@ -594,6 +615,7 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 			// channel that is gone — but it must NOT look like an announcement from here on, or the
 			// service would go on covering members for an onset that reached no one (D-0179).
 			w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
+			w.condemn(ctx, a)
 			return nil
 		}
 		// Somebody was told. THIS is what arms coverage: §16.1's committed onset is now a DELIVERED

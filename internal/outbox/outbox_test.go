@@ -61,6 +61,7 @@ type fakeStore struct {
 	// D-0179: what the worker credited as an announcement somebody actually received. A LIST, so a
 	// test can prove an ABSENCE — an attempted delivery resolving zero recipients must leave nothing.
 	alertDelivered   []domain.ServiceAlert
+	condemned        []domain.ServiceAlert
 	markDeliveredErr error
 
 	// impact-correlation fakes (FR-021 §14.3)
@@ -1041,6 +1042,14 @@ func (f *fakeStore) MarkServiceAlertDelivered(_ context.Context, a domain.Servic
 	return nil
 }
 
+// condemned is the mirror of `alertDelivered`: announcements the worker declared KNOWN dead. A list
+// again, because the assertions that matter are about absence — a retry is still owed, so nothing
+// must be condemned yet.
+func (f *fakeStore) MarkServiceAlertUndeliverable(_ context.Context, a domain.ServiceAlert) error {
+	f.condemned = append(f.condemned, a)
+	return nil
+}
+
 func (f *fakeStore) ServiceAlertSequence(
 	_ context.Context, a domain.ServiceAlert,
 ) (int64, error) {
@@ -1863,3 +1872,67 @@ func TestDeliveryIsBoundedByTheClaimsLease(t *testing.T) {
 		}
 	})
 }
+
+// D-0187 — an announcement is CONDEMNED only when no retry is owed.
+//
+// The evaluator re-announces on that fact, so getting it wrong in either direction is a real defect:
+// condemning too eagerly sends a second copy of an event that was merely slow, and never condemning
+// leaves the outage un-announced forever, which is the state D-0179 deliberately left it in.
+func TestOnlyATerminalFailureCondemnsAnAnnouncement(t *testing.T) {
+	payload := func(recipients []string) []byte {
+		b, err := json.Marshal(domain.ServiceAlert{
+			ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+			Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+			Seq: 7, ConfirmedOver: 2, Recipients: recipients,
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	for _, tc := range []struct {
+		name          string
+		recipients    []string
+		resolved      *int
+		delivered     *int
+		err           error
+		wantCondemned int
+	}{
+		{
+			name: "the snapshot is empty — nothing to retry", recipients: nil, wantCondemned: 1,
+		},
+		{
+			name: "every channel in the snapshot has been deleted", recipients: []string{"ch-1"},
+			resolved: intp(0), wantCondemned: 1,
+		},
+		{
+			// A 500 IS retried, so the announcement is not dead yet. Condemning here would have the
+			// evaluator re-announce while the original is still owed an attempt.
+			name: "the only channel returned 500", recipients: []string{"ch-1"},
+			resolved: intp(1), delivered: intp(0), err: errors.New("500"), wantCondemned: 0,
+		},
+		{
+			name: "somebody was told", recipients: []string{"ch-1"}, wantCondemned: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeStore{
+				alertSeq: map[string]int64{"svc-1|health||": 7},
+				pending: []domain.OutboxEvent{
+					{ID: "e-1", Topic: domain.TopicServiceAlert, Payload: payload(tc.recipients)},
+				},
+			}
+			nf := &fakeNotify{resolved: tc.resolved, delivered: tc.delivered, err: tc.err}
+			newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+			if got := len(fs.condemned); got != tc.wantCondemned {
+				t.Fatalf("%d condemnation(s), want %d — the evaluator re-announces on this fact, so "+
+					"condemning a retryable failure duplicates a page and never condemning leaves "+
+					"the outage unannounced", got, tc.wantCondemned)
+			}
+		})
+	}
+}
+
+func intp(v int) *int { return &v }

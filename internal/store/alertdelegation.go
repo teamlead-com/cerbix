@@ -530,6 +530,45 @@ func (s *Store) MarkServiceAlertDelivered(ctx context.Context, a domain.ServiceA
 	return nil
 }
 
+// MarkServiceAlertUndeliverable records that this announcement is KNOWN dead: it was attempted and
+// reached nobody, and no retry is owed (D-0187).
+//
+// It is a different fact from "not delivered yet", which is also true of an event still sitting in
+// the outbox, and the difference is the whole reason for a second column. The evaluator re-announces
+// on THIS one; re-announcing on `delivered_seq < emitted_seq` would send a second copy of an event
+// that was merely slow.
+//
+// Guarded by the sequence and monotonic, exactly like the delivery credit, so a retry of a
+// superseded announcement cannot condemn the current one.
+func (s *Store) MarkServiceAlertUndeliverable(ctx context.Context, a domain.ServiceAlert) error {
+	if !a.Firing {
+		return nil
+	}
+	var err error
+	if a.Signal == domain.ServiceSignalBurn {
+		if a.SLATargetID == "" || a.RuleKey == "" {
+			return fmt.Errorf(
+				"store: mark burn alert undeliverable: payload carries no target/rule identity (service %s)",
+				a.ServiceID)
+		}
+		_, err = s.pool.Exec(ctx, `
+			UPDATE service_burn_alert_state SET undelivered_seq = $5
+			 WHERE service_id = $1 AND project_id = $2 AND sla_target_id = $3 AND rule_key = $4
+			   AND emitted_seq = $5 AND undelivered_seq < $5`,
+			a.ServiceID, a.ProjectID, a.SLATargetID, a.RuleKey, a.Seq)
+	} else {
+		_, err = s.pool.Exec(ctx, `
+			UPDATE service_alert_state SET undelivered_seq = $3
+			 WHERE service_id = $1 AND project_id = $2
+			   AND emitted_seq = $3 AND undelivered_seq < $3`,
+			a.ServiceID, a.ProjectID, a.Seq)
+	}
+	if err != nil {
+		return fmt.Errorf("store: mark service alert undeliverable: %w", err)
+	}
+	return nil
+}
+
 // MonitorDelegation is what BOTH signals conclude for one monitor, which is what a monitor's own
 // page has to show: FR-021's approved design keeps a delegated monitor at full strength — its real
 // status pill, plus a chip naming who pages instead of it — and that sentence needs the owner and

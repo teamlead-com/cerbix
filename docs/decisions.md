@@ -4383,3 +4383,54 @@ point rather than incidental. The notifier fake blocked on `ctx.Done()` with no 
 the bound HUNG the suite instead of failing it — a mutation that hangs teaches nothing. And the store
 fake ignored its context, so the settle mutation passed: a fake that does not model the property being
 asserted cannot witness its absence.
+
+## D-0187 — the outage nobody heard about gets announced again (2026-08-27)
+
+**Context.** D-0179 closed the swallow: an announcement that reached nobody no longer arms coverage,
+so the member monitors keep paging for themselves. It stopped there on purpose, and the gap it left
+was named in its own text as the option NOT taken — the incident stays open, the service is still
+down, and its own alert was never received by anyone. Forever: the latch says firing, so the
+evaluator sees no edge, and fixing the channel changes nothing.
+
+The reason it was deferred is the episode-identity question. `service_alert_episodes` permits ONE
+open episode per (service, signal, target, rule), so a second onset cannot simply be opened beside
+the first.
+
+**Decision. Re-announce through the ORDINARY onset path, superseding the episode nobody heard.**
+
+The onset path already closes an open episode before opening the next one, so the identity question
+answers itself: the re-announcement is an announcement in every respect — new sequence, fresh
+recipient snapshot, its own episode, its own outbox row — rather than a special case every handler of
+an announcement would have to remember. What it must NOT do is inherit the old episode's recipients:
+that snapshot names people who could not be reached, and §16.4a's rule that a close reaches whoever
+heard the onset is satisfied vacuously when nobody did.
+
+**The trigger is a CONDEMNED sequence, and that is a second column rather than a reuse of the first.**
+`delivered_seq < emitted_seq` is also true of an event still sitting in the outbox, and re-announcing
+on it would send a second copy of something merely slow. `undelivered_seq` (migration 00092) is set by
+the worker only on the terminal paths — an empty recipient snapshot, or a delivery that resolved
+nobody — never where a retry is still owed. A 500 is retried, so it does not condemn.
+
+**The superseded episode is closed as `undelivered`, a new reason.** The onset path's ordinary
+`policy_changed` would be a lie: nothing about the policy changed, and a false cause in a record an
+operator reads during an incident is worse than no record.
+
+**D-0176 keeps applying.** A re-announcement with no route is WITHHELD and counted, exactly like a
+first announcement — announcing into the same emptiness would be the defect this fixes, running in a
+loop.
+
+**It cannot loop.** The re-announcement's own sequence has not been condemned, so the next pass is
+quiet. A re-announcement that repeats every cadence would be a pager loop rather than a fix, and the
+test asserts the third pass is silent.
+
+**Verified:** `TestAnUndeliveredOnsetIsAnnouncedAgainOnceThereIsSomebodyToTell` walks the whole shape —
+announce, stay quiet while down, condemn, withhold while unroutable (counted), re-announce once the
+route returns with a NEW episode and a higher sequence, the old episode closed as `undelivered`, and
+silence afterwards. `TestOnlyATerminalFailureCondemnsAnAnnouncement` pins the boundary from the
+worker's side, including that a 500 does not condemn. Disabling the re-announcement fails with `the
+outage was not re-announced after the route came back`; triggering on "not delivered yet" instead of
+"condemned" fails with `a service that stayed down announced again`.
+
+**Not covered:** an event that dies by exhausting its retries and dead-letters. That path is generic
+to the outbox and does not know it is a service alert; an operator sees the dead letter. Naming it
+here rather than implying the class is closed.

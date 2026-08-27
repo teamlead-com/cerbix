@@ -100,6 +100,10 @@ func (s *Store) evaluateServiceAlertsOn(
 		firing         bool
 		emitted        domain.ServiceAlertState
 		emittedSeq     int64
+		// undeliveredSeq is the sequence of an announcement the worker CONDEMNED: attempted and
+		// reached nobody, with no retry owed. Equal to `emittedSeq` means the current announcement
+		// is known dead (D-0187).
+		undeliveredSeq int64
 		evaluatedAt    *time.Time
 	}
 	rows, err := tx.Query(ctx, `
@@ -107,7 +111,7 @@ func (s *Store) evaluateServiceAlertsOn(
 		       s.page_on, s.page_on_unknown, s.confirm_evaluations, s.alert_config_generation,
 		       COALESCE(s.oncall_schedule_id::text, ''), rev.id::text,
 		       st.candidate_state, st.streak, st.live_firing, st.emitted_state, st.emitted_seq,
-		       st.evaluated_at
+		       st.evaluated_at, COALESCE(st.undelivered_seq, 0)
 		  FROM services s
 		  LEFT JOIN service_alert_state st ON st.service_id = s.id
 		  -- The declaration governing THIS snapshot, resolved the one way the epoch owner resolves
@@ -136,7 +140,8 @@ func (s *Store) evaluateServiceAlertsOn(
 		if err := rows.Scan(&c.serviceID, &c.projectID, &c.name, &c.slug,
 			&pageOn, &c.policy.PageOnUnknown, &c.policy.ConfirmEvaluations, &c.configGeneration,
 			&c.scheduleID, &c.revisionID,
-			&candState, &streak, &firing, &emitted, &seq, &c.evaluatedAt); err != nil {
+			&candState, &streak, &firing, &emitted, &seq, &c.evaluatedAt,
+			&c.undeliveredSeq); err != nil {
 			rows.Close()
 			return out, fmt.Errorf("store: scan alert candidate: %w", err)
 		}
@@ -225,6 +230,32 @@ func (s *Store) evaluateServiceAlertsOn(
 		}
 		decision := domain.DecideServiceAlert(c.policy, candidateState, streak, c.firing, c.emitted)
 
+		// RE-ANNOUNCE an outage nobody heard about (D-0187).
+		//
+		// `DecideServiceAlert` compares the candidate state with what was emitted, so a service that
+		// is still down and already "announced" produces no edge — correct, and it is exactly why a
+		// failed announcement used to be the end of the story. D-0179 stopped the swallow by refusing
+		// to arm coverage, so the members keep paging; it did not tell anybody. The incident is open,
+		// the outage is real, and the service's own alert was never received.
+		//
+		// The trigger is the CONDEMNED sequence, not merely an undelivered one: an event still in the
+		// outbox is also undelivered, and re-announcing on that would send a second copy of something
+		// merely slow. `undelivered_seq = emitted_seq` means the worker attempted it, reached nobody,
+		// and owes no retry.
+		//
+		// It re-uses the ordinary onset path deliberately, so the new announcement is an announcement
+		// in every respect — new sequence, fresh recipient snapshot, its own episode — rather than a
+		// special case that has to be remembered everywhere an announcement is handled. The episode
+		// nobody heard is superseded as `undelivered`, which is a truthful reason where the onset
+		// path's `policy_changed` would not be.
+		reannounce := !decision.Notify && c.firing && c.emittedSeq > 0 &&
+			c.undeliveredSeq == c.emittedSeq && c.emitted == candidateState &&
+			c.policy.Pages(candidateState)
+		if reannounce {
+			decision.Notify, decision.Close = true, false
+			decision.NextEmitted, decision.NextFiring = candidateState, true
+		}
+
 		// FR-022 invariant 5: a service opens an incident ONLY while that signal's coverage is ARMED,
 		// and `owns_paging` — which the slice already filters on — is one of five conditions, not the
 		// whole of it. Two of the others can be false here and were never checked:
@@ -281,6 +312,7 @@ func (s *Store) evaluateServiceAlertsOn(
 				scheduleID: c.scheduleID, signal: domain.ServiceSignalHealth,
 				close: decision.Close, closeReason: decision.CloseReason,
 				episodeState: string(candidateState), seq: emittedSeq, asOf: asOf,
+				supersedeReason: supersedeReasonFor(reannounce),
 				// The live half of the payload. Target, window and rule stay empty: the schema's
 				// CHECK makes them exclusive to the burn signal.
 				alert: domain.ServiceAlert{State: candidateState, ConfirmedOver: streak},
@@ -444,6 +476,10 @@ type serviceAlertEmission struct {
 	// key: a `rule_removed` or target-deletion close routes THROUGH that row, so the identity has to
 	// survive the target it names.
 	targetID, targetWindow, ruleKey string
+	// supersedeReason is why the open episode this onset replaces was ended. Empty means the onset
+	// path's ordinary reason; a re-announcement sets `undelivered`, because nothing about the policy
+	// changed and saying so would put a false cause in a record an operator reads (D-0187).
+	supersedeReason domain.ServiceAlertCloseReason
 	// close marks an edge that ENDS an announcement; closeReason is never inferred.
 	close       bool
 	closeReason domain.ServiceAlertCloseReason
@@ -502,12 +538,17 @@ func (s *Store) emitServiceAlertTx(ctx context.Context, tx pgx.Tx, e serviceAler
 		// the old episode open would make "the close" ambiguous. For the burn signal this is the
 		// guard against an episode orphaned by a latch that cascaded away with its target: without
 		// it the next onset would collide with the open-episode unique index.
+		supersede := domain.ClosePolicyChanged
+		if e.supersedeReason != "" {
+			supersede = e.supersedeReason
+		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE service_alert_episodes SET closed_at = $2, close_reason = 'policy_changed'
+			UPDATE service_alert_episodes SET closed_at = $2, close_reason = $6
 			 WHERE service_id = $1 AND signal = $3 AND closed_at IS NULL
 			   AND COALESCE(rule_key, '') = $4
 			   AND COALESCE(target_snapshot_id::text, '') = $5`,
-			e.serviceID, e.asOf, string(e.signal), e.ruleKey, e.targetID); err != nil {
+			e.serviceID, e.asOf, string(e.signal), e.ruleKey, e.targetID,
+			string(supersede)); err != nil {
 			return fmt.Errorf("store: supersede alert episode: %w", err)
 		}
 		// `project_id` is the SERVICE'S own project, read in the same snapshot: the episode carries a
@@ -675,4 +716,13 @@ func (s *Store) beginAlertSnapshot(ctx context.Context, db alertConn) (pgx.Tx, t
 		return nil, time.Time{}, fmt.Errorf("store: alert clock: %w", err)
 	}
 	return tx, asOf.UTC(), nil
+}
+
+// supersedeReasonFor names why the episode an onset replaces was ended. A re-announcement ends one
+// whose announcement reached nobody; anything else keeps the onset path's ordinary reason.
+func supersedeReasonFor(reannounce bool) domain.ServiceAlertCloseReason {
+	if reannounce {
+		return domain.CloseUndelivered
+	}
+	return ""
 }

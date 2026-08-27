@@ -46,6 +46,9 @@ type serviceAlertingView struct {
 	PageOn             []string `json:"page_on"`
 	PageOnUnknown      bool     `json:"page_on_unknown"`
 	ConfirmEvaluations int      `json:"confirm_evaluations"`
+	// RenotifySeconds repeats the last escalation step while the incident is unresolved; 0 is off
+	// and is the default (D-0185).
+	RenotifySeconds int `json:"renotify_seconds"`
 }
 
 // serviceSignalStateView is one signal's COVERAGE, which is a different question from the
@@ -83,6 +86,7 @@ func newServiceAlertingView(p domain.ServiceAlertPolicy) serviceAlertingView {
 		OwnsPaging:         p.OwnsPaging,
 		PageOnUnknown:      p.PageOnUnknown,
 		ConfirmEvaluations: p.ConfirmEvaluations,
+		RenotifySeconds:    p.RenotifySeconds,
 		PageOn:             make([]string, 0, len(p.PageOn)),
 	}
 	for _, s := range p.PageOn {
@@ -105,6 +109,7 @@ type patchServiceAlertingRequest struct {
 	PageOn             *[]string `json:"page_on"`
 	PageOnUnknown      *bool     `json:"page_on_unknown"`
 	ConfirmEvaluations *int      `json:"confirm_evaluations"`
+	RenotifySeconds    *int      `json:"renotify_seconds"`
 }
 
 // alertActor carries the request's principal into the store, which writes the audit row INSIDE the
@@ -202,6 +207,7 @@ func (h *Handler) patchServiceAlerting(w http.ResponseWriter, r *http.Request) {
 		OwnsPaging:         body.OwnsPaging,
 		PageOnUnknown:      body.PageOnUnknown,
 		ConfirmEvaluations: body.ConfirmEvaluations,
+		RenotifySeconds:    body.RenotifySeconds,
 	}
 	if body.PageOn != nil {
 		states := make([]domain.ServiceAlertState, 0, len(*body.PageOn))

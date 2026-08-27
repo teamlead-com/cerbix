@@ -103,6 +103,11 @@ and never logs a fail-open it did not have.
 Monitors carry `renotify_seconds`; services do not, and adding one is a separate decision about a separate
 control surface. Stated as a non-goal rather than left as an omission a reader has to notice.
 
+> **SUPERSEDED 2026-08-27 by D-0185**, which adds `services.renotify_seconds` (0 = off, otherwise
+> 60..86400) and makes the repeat work. The non-goal is kept at its number because the correction
+> below is the useful part of it: the reasoning about WHY the original justification was false
+> outlives the decision it justified.
+>
 > **Corrected 2026-08-26 (D-0181).** This decision originally added "the policy's own steps (including its
 > repeat) are the repeat mechanism", and that sentence was false. The policy's repeat runs ON the monitor's
 > renotify interval — `RepeatLast && renotifySeconds > 0` — so with no interval a service ladder runs to its

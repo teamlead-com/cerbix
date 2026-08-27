@@ -452,7 +452,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		// the NEXT incident's ladder.
 		`SELECT i.id, i.service_id, i.started_at, i.escalation_step, i.last_escalated_at,
 		        s.name, COALESCE(esc.policy_id::text, ''), esc.policy_name, esc.repeat_last, esc.steps,
-		        esc.due_base
+		        esc.due_base, s.renotify_seconds
 		   FROM incidents i
 		   JOIN services s ON s.id = i.service_id
 		   JOIN service_alert_state st ON st.service_id = s.id
@@ -476,7 +476,8 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		var frozen domain.EscalationPolicy
 		var rawSteps []byte
 		if err := srows.Scan(&o.id, &o.serviceID, &o.startedAt, &o.step, &o.lastEscalated,
-			&o.name, &o.policyID, &frozen.Name, &frozen.RepeatLast, &rawSteps, &o.dueBase); err != nil {
+			&o.name, &o.policyID, &frozen.Name, &frozen.RepeatLast, &rawSteps, &o.dueBase,
+			&o.renotifySeconds); err != nil {
 			srows.Close()
 			return pass, fmt.Errorf("store: scan escalating service incident: %w", err)
 		}
@@ -486,8 +487,15 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		}
 		frozen.ID, frozen.ProjectID = o.policyID, ""
 		o.frozen = &frozen
-		// renotifySeconds stays ZERO: a service has no renotify knob (spec D8), and zero is what
-		// disables the repeat branch below — the non-goal is enforced by the value, not by a comment.
+		// `renotify_seconds` comes from the SERVICE, live, and is deliberately NOT part of the frozen
+		// ladder (D-0185). The snapshot exists so an incident climbs the steps it started with —
+		// editing a policy mid-outage must not re-time a page already in flight. A repeat cadence is
+		// a different kind of thing: it governs how often the LAST step recurs from here on, and an
+		// operator turning it down during a noisy incident means "stop paging me every ten minutes",
+		// which is an instruction about now rather than a rewrite of what already happened.
+		//
+		// Zero is off, and zero is the default, so a service nobody has configured behaves exactly as
+		// it did before the column existed.
 		incs = append(incs, o)
 	}
 	srows.Close()

@@ -852,3 +852,89 @@ func TestAServiceLadderDoesNotRepeatItsLastStep(t *testing.T) {
 			"cadence nobody configured", got)
 	}
 }
+
+// D-0185 — the knob FR-023's D8 declined, once an operator sets it.
+//
+// The default is zero and the test above pins what zero means. This one pins the other half: with a
+// cadence configured on the SERVICE, the frozen ladder's `repeat_last` finally does the thing its
+// name promises. Both tests matter, and the pair is the point — a control that cannot be shown to be
+// OFF by default is a cadence imposed on every existing installation.
+func TestAServiceRepeatsItsLastStepOnTheCadenceItWasGiven(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f, _ := escalatingService(t, st, ctx)
+	setFiring(t, st, ctx, f.serviceID, true, true)
+
+	exec(t, st, ctx, `UPDATE escalation_policies SET repeat_last = true WHERE id = $1`, f.policyID)
+	exec(t, st, ctx, `UPDATE incident_escalation_snapshots SET repeat_last = true
+	                   WHERE incident_id = (SELECT id FROM incidents WHERE service_id = $1)`, f.serviceID)
+	// Five minutes, on the SERVICE. Not on the snapshot: the cadence is read live, because turning it
+	// down mid-incident is an instruction about now rather than a rewrite of what already happened.
+	exec(t, st, ctx, `UPDATE services SET renotify_seconds = 300 WHERE id = $1`, f.serviceID)
+	// The paging edit bumped the DB-owned generation, so the latch has to catch up or the ladder is
+	// dis-armed for a reason this test is not about.
+	armLive(t, st, ctx, f.armFixture)
+	setFiring(t, st, ctx, f.serviceID, true, true)
+
+	n, err := st.AdvanceEscalations(ctx)
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if n.ServiceSteps != 1 {
+		t.Fatalf("first pass fired %d service steps, want the one step the ladder has", n.ServiceSteps)
+	}
+
+	// Not yet: four minutes is inside the cadence.
+	exec(t, st, ctx, `UPDATE incidents SET last_escalated_at = now() - interval '4 minutes'
+	                   WHERE service_id = $1`, f.serviceID)
+	if n, err = st.AdvanceEscalations(ctx); err != nil {
+		t.Fatalf("advance: %v", err)
+	} else if n.ServiceSteps != 0 {
+		t.Fatalf("the repeat fired %d step(s) after four minutes of a five-minute cadence",
+			n.ServiceSteps)
+	}
+
+	// Six minutes: due.
+	exec(t, st, ctx, `UPDATE incidents SET last_escalated_at = now() - interval '6 minutes'
+	                   WHERE service_id = $1`, f.serviceID)
+	if n, err = st.AdvanceEscalations(ctx); err != nil {
+		t.Fatalf("advance: %v", err)
+	} else if n.ServiceSteps != 1 {
+		t.Fatalf("the repeat fired %d step(s) after six minutes of a five-minute cadence, want 1 — "+
+			"`repeat_last` with a cadence is the whole feature", n.ServiceSteps)
+	}
+	if got := len(stepPayloads(t, st, ctx)); got != 2 {
+		t.Fatalf("%d step events, want the original plus one repeat", got)
+	}
+
+	// Acknowledging stops it, exactly as it stops the ladder itself.
+	exec(t, st, ctx, `UPDATE incidents SET acknowledged_at = now(),
+	                       last_escalated_at = now() - interval '6 minutes'
+	                   WHERE service_id = $1`, f.serviceID)
+	if n, err = st.AdvanceEscalations(ctx); err != nil {
+		t.Fatalf("advance: %v", err)
+	} else if n.ServiceSteps != 0 {
+		t.Fatalf("the repeat fired %d step(s) after an acknowledgement", n.ServiceSteps)
+	}
+}
+
+// The cadence is PAGING configuration, so changing it dis-arms delegation until the new generation
+// has been evaluated — the same rule every other paging field follows, and enforced by the database
+// rather than by whichever write path remembered (00082's trigger, extended by 00091).
+func TestChangingTheRenotifyCadenceDisarmsUntilReevaluated(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("fixture is not armed: the rest of this test proves nothing")
+	}
+
+	exec(t, st, ctx, `UPDATE services SET renotify_seconds = 600 WHERE id = $1`, f.serviceID)
+	if delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("changing the repeat cadence left coverage armed: a paging edit must dis-arm until " +
+			"the new generation has been evaluated, and the generation is the DATABASE's job")
+	}
+
+	armLive(t, st, ctx, f)
+	if !delegated(t, st, ctx, f, DelegationLive) {
+		t.Fatal("coverage did not return after the new generation was evaluated")
+	}
+}

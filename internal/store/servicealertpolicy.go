@@ -66,9 +66,9 @@ func (s *Store) ServiceAlertPolicy(
 	var p domain.ServiceAlertPolicy
 	var pageOn []string
 	err := s.pool.QueryRow(ctx, `
-		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds
 		  FROM services WHERE id = $1 AND project_id = $2`, serviceID, projectID).
-		Scan(&p.OwnsPaging, &pageOn, &p.PageOnUnknown, &p.ConfirmEvaluations)
+		Scan(&p.OwnsPaging, &pageOn, &p.PageOnUnknown, &p.ConfirmEvaluations, &p.RenotifySeconds)
 	if noRows(err) || isInvalidTextRepresentation(err) {
 		return domain.ServiceAlertPolicy{}, ErrNotFound
 	}
@@ -95,6 +95,7 @@ type ServiceAlertPolicyPatch struct {
 	PageOn             *[]domain.ServiceAlertState
 	PageOnUnknown      *bool
 	ConfirmEvaluations *int
+	RenotifySeconds    *int
 }
 
 // FullServiceAlertPolicyPatch is every field set, for callers that genuinely declare the whole
@@ -104,6 +105,7 @@ func FullServiceAlertPolicyPatch(p domain.ServiceAlertPolicy) ServiceAlertPolicy
 	return ServiceAlertPolicyPatch{
 		OwnsPaging: &p.OwnsPaging, PageOn: &states,
 		PageOnUnknown: &p.PageOnUnknown, ConfirmEvaluations: &p.ConfirmEvaluations,
+		RenotifySeconds: &p.RenotifySeconds,
 	}
 }
 
@@ -123,6 +125,9 @@ func (p ServiceAlertPolicyPatch) Merged(base domain.ServiceAlertPolicy) domain.S
 	if p.ConfirmEvaluations != nil {
 		base.ConfirmEvaluations = *p.ConfirmEvaluations
 	}
+	if p.RenotifySeconds != nil {
+		base.RenotifySeconds = *p.RenotifySeconds
+	}
 	return base
 }
 
@@ -137,6 +142,9 @@ func (p ServiceAlertPolicyPatch) Merged(base domain.ServiceAlertPolicy) domain.S
 //	                           pageable, `policy_changed`
 //	confirm_evaluations        NOTHING (§16.4a says so explicitly: confirmation governs the ONSET of
 //	                           an announcement, not an announcement that is already open)
+//	renotify_seconds           NOTHING, for the same reason: it governs how often an OPEN incident's
+//	                           last ladder step repeats, and changing the cadence of a repeat is not
+//	                           a statement that the thing being repeated has ended
 //	false → true ownership     NOTHING — there is nothing open to end
 //
 // It returns the canonical policy that was stored, so a caller can echo exactly what the database
@@ -158,9 +166,10 @@ func (s *Store) UpdateServiceAlertPolicy(
 	var slug string
 	var asOf time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, slug
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds, slug
 		  FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`, serviceID, projectID).
-		Scan(&before.OwnsPaging, &pageOn, &before.PageOnUnknown, &before.ConfirmEvaluations, &slug)
+		Scan(&before.OwnsPaging, &pageOn, &before.PageOnUnknown, &before.ConfirmEvaluations,
+			&before.RenotifySeconds, &slug)
 	if noRows(err) || isInvalidTextRepresentation(err) {
 		// Wrong tenant, unknown id, or an id that is not even a uuid: one answer for all three, so
 		// existence never leaks across a tenant boundary.
@@ -244,10 +253,10 @@ func (s *Store) UpdateServiceAlertPolicy(
 	if _, err := tx.Exec(ctx, `
 		UPDATE services
 		   SET owns_paging = $3, page_on = $4, page_on_unknown = $5, confirm_evaluations = $6,
-		       updated_at = now()
+		       renotify_seconds = $7, updated_at = now()
 		 WHERE id = $1 AND project_id = $2`,
 		serviceID, projectID, next.OwnsPaging, pageOnText(next.PageOn), next.PageOnUnknown,
-		next.ConfirmEvaluations); err != nil {
+		next.ConfirmEvaluations, next.RenotifySeconds); err != nil {
 		return domain.ServiceAlertPolicy{}, fmt.Errorf("store: write alert policy: %w", err)
 	}
 

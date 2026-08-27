@@ -61,6 +61,16 @@ type ServiceAlertPolicy struct {
 	// ConfirmEvaluations is how many consecutive evaluations a new state needs before it notifies.
 	// Counted in evaluations over a FIXED cadence so the delay is computable and printable.
 	ConfirmEvaluations int `json:"confirm_evaluations"`
+	// RenotifySeconds repeats the LAST escalation step while the service's incident is unresolved,
+	// for a policy that asks for it. ZERO is off and is the default, exactly as it is for a monitor
+	// (D-0185).
+	//
+	// It exists because FR-023's D8 declined the knob and then justified the refusal with a claim
+	// that the policy's own repeat covered it — which it did not, because the repeat branch needs an
+	// interval and a service had none, so `repeat_last` on a service-attached policy did nothing at
+	// all. Zero-by-default is what keeps this an added control rather than an imposed cadence: no
+	// existing service starts repeating because the column appeared.
+	RenotifySeconds int `json:"renotify_seconds"`
 }
 
 // DefaultServiceAlertPolicy is what an undeclared service has.
@@ -102,6 +112,13 @@ func (p ServiceAlertPolicy) Canonical() ServiceAlertPolicy {
 // has its own switch and the second is a declared silence, so accepting either here would create
 // two ways to say one thing and a third that contradicts the spec.
 func (p ServiceAlertPolicy) Validate() error {
+	// The same bounds a monitor's renotify carries, and for the same reason: a cadence shorter than a
+	// minute is a way to page somebody every few seconds by typing one number, and a negative one is
+	// nonsense the escalation loop would read as "off" while the operator believes otherwise.
+	if p.RenotifySeconds != 0 && (p.RenotifySeconds < 60 || p.RenotifySeconds > 86400) {
+		return fmt.Errorf("service alert policy: renotify_seconds must be 0 (off) or 60..86400, got %d",
+			p.RenotifySeconds)
+	}
 	if p.ConfirmEvaluations < 1 || p.ConfirmEvaluations > 10 {
 		return fmt.Errorf("service alert policy: confirm_evaluations must be 1..10, got %d",
 			p.ConfirmEvaluations)

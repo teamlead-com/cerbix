@@ -266,6 +266,7 @@ function changedFields(): Record<string, unknown> {
   if (before.owns_paging !== now.owns_paging) out.owns_paging = now.owns_paging;
   if (before.page_on_unknown !== now.page_on_unknown) out.page_on_unknown = now.page_on_unknown;
   if (before.confirm_evaluations !== now.confirm_evaluations) out.confirm_evaluations = now.confirm_evaluations;
+  if (before.renotify_seconds !== now.renotify_seconds) out.renotify_seconds = now.renotify_seconds;
   if (before.page_on.join(",") !== now.page_on.join(",")) out.page_on = now.page_on;
   return out;
 }
@@ -427,6 +428,31 @@ async function save() {
           @input="draft && (draft.confirm_evaluations = Number(($event.target as HTMLInputElement).value))"
         />
         <span class="text-ink-3">consecutive evaluations</span>
+      </label>
+
+      <!--
+        The repeat cadence for a service's own escalation ladder (D-0185). It sits here, with the
+        paging declaration, and not on the policy: the policy's `repeat_last` says WHETHER the last
+        step recurs and a monitor supplies the interval from its own field, so a service needed one
+        of its own or the toggle did nothing at all — which is exactly what it used to do.
+      -->
+      <label class="flex items-center gap-2">
+        <span class="text-ink-3">Repeat the last escalation step every</span>
+        <input
+          type="number"
+          min="0"
+          max="86400"
+          step="60"
+          class="w-20 rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-[12px]"
+          :value="draft?.renotify_seconds"
+          :disabled="readOnly || saving"
+          data-testid="alerting-renotify"
+          @input="draft && (draft.renotify_seconds = Number(($event.target as HTMLInputElement).value))"
+        />
+        <span class="text-ink-3">seconds</span>
+        <span class="text-[11.5px] text-ink-3">
+          (0 = never repeat; needs a policy with “repeat last step” on)
+        </span>
       </label>
 
       <p v-if="error" class="text-[12px] text-bad" data-testid="alerting-error">{{ error }}</p>

@@ -3624,7 +3624,7 @@ components:
         The paging DECLARATION of FR-021 §16.6a, and only the declaration. Latch, lease,
         generation and episode state have no field here by construction, so no future edit can
         leak one by forgetting to redact it.
-      required: [owns_paging, page_on, page_on_unknown, confirm_evaluations]
+      required: [owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds]
       additionalProperties: false
       properties:
         owns_paging:
@@ -3652,6 +3652,14 @@ components:
           maximum: 10
           default: 2
           description: Consecutive evaluations a new state needs before it notifies.
+        renotify_seconds:
+          type: integer
+          default: 0
+          description: >
+            Repeat the LAST escalation step every N seconds while the service's incident is
+            unresolved, for a policy whose `repeat_last` is on. 0 is off and is the default, so
+            adding this control changed no existing service. Otherwise 60..86400: a shorter
+            cadence is a way to page somebody every few seconds by typing one number.
 
     PatchServiceAlertingRequest:
       type: object
@@ -3668,6 +3676,9 @@ components:
           items: { type: string, enum: [down, degraded] }
         page_on_unknown: { type: boolean }
         confirm_evaluations: { type: integer, minimum: 1, maximum: 10 }
+        renotify_seconds:
+          type: integer
+          description: '0 disables the repeat; otherwise 60..86400 seconds.'
 
     BurnRuleDeclaration:
       type: object

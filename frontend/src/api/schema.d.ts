@@ -6829,6 +6829,11 @@ export interface components {
              * @default 2
              */
             confirm_evaluations: number;
+            /**
+             * @description Repeat the LAST escalation step every N seconds while the service's incident is unresolved, for a policy whose `repeat_last` is on. 0 is off and is the default, so adding this control changed no existing service. Otherwise 60..86400: a shorter cadence is a way to page somebody every few seconds by typing one number.
+             * @default 0
+             */
+            renotify_seconds: number;
         };
         /** @description Every field is OPTIONAL and an omitted one is UNCHANGED. `false` is a real edit, not absence. Server-owned fields — `alert_config_generation` and every latch, lease and episode column — are absent here and rejected by the decoder. */
         PatchServiceAlertingRequest: {
@@ -6837,6 +6842,8 @@ export interface components {
             page_on?: ("down" | "degraded")[];
             page_on_unknown?: boolean;
             confirm_evaluations?: number;
+            /** @description 0 disables the repeat; otherwise 60..86400 seconds. */
+            renotify_seconds?: number;
         };
         /** @description A burn rule as a CLIENT may state it: the four declared fields and nothing else. The `firing` latch of `BurnRule` is deliberately missing — it is server-owned (§16.4b) and a body carrying it is a 400. Two rules with the same canonical key (severity, both windows, threshold) are also a 400: one latch cannot answer for two rules. */
         BurnRuleDeclaration: {

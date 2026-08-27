@@ -4257,3 +4257,81 @@ cascade arrives from an unexpected direction — and it would carry the tenancy 
 
 Nothing in the code changes: the version guard, its error message and the runbook already implement
 this decision. What changes is that the question is CLOSED, so no document describes it as pending.
+
+## D-0184 — a dormant binding keeps reporting its project, and that is chosen (2026-08-27)
+
+**Context.** Converting a status-page component from monitor-backed to manual keeps the old binding
+DORMANT so the change is reversible, and `resolveComponents` sets `Project = c.SourceProject` before
+it branches on source, so a manual component with a dormant binding still brings that project's
+incidents onto the page. D-0180 made the subscriber fan-out the exact inverse of that axis, so the
+question moves both surfaces together — which is what having one axis is for.
+
+D-0180 recorded this as inherited behaviour preserved by a bug fix, and said the question belonged to
+its own owner. It does, and leaving it in a document as pending was itself a cost: an open question
+in a living document reads as work somebody is going to do.
+
+**Decision (owner, 2026-08-27): it keeps reporting.** The axis stays `page.project_id` UNION every
+non-NULL `components.source_project`, unfiltered by `source`.
+
+Three reasons, in order of weight.
+
+*Narrowing has the sharper failure.* Flipping a component to manual during an outage is an ordinary
+move — the automated signal is wrong or noisy and an operator wants to narrate it themselves — and
+under a narrow axis that act would silently remove the in-flight incident from the page and cut the
+subscriber mail mid-event. A change that can make a live outage disappear from a status page is the
+worse of the two directions, and it would do it at the moment the page matters most.
+
+*Retiring a system from a page already has an explicit act:* delete the component. If conversion to
+manual also meant "stop reporting this project", two different intentions would share one control,
+and the reversibility the dormant binding exists to provide would stop being harmless.
+
+*The confusion the narrow option fixes is a presentation problem.* "A reader sees an incident about a
+project with no visible component" is real and mild, and the answer to it is how the page renders,
+not throwing the incident away. Losing data to remove an ambiguity is a bad trade.
+
+**Reversible, and cheap to reverse:** one predicate in `statusPageProjectsSQL` plus its inverse in
+`statusPageReportsProjectSQL`. If an installation's operators use conversion to mean "removed from
+the page", this is the line to change — and `TestADormantBindingKeepsThePageReportingItsProject`
+already pins the behaviour either way, so the change would announce itself.
+
+## D-0185 — services get the renotify cadence D8 declined (2026-08-27)
+
+**Context.** FR-023's D8 said "no renotify knob for services" and justified it with a sentence that
+was false: that the policy's own repeat was the mechanism. It is not — the repeat branch is
+`RepeatLast && renotifySeconds > 0`, and a service had no interval to supply, so `repeat_last` on a
+service-attached policy did nothing whatever. D-0181 corrected the claim, said the non-goal itself
+still stood, and left the knob to a separate decision, because inventing a cadence in a bug fix is
+exactly the "random cadence" the review warned against.
+
+**Decision (owner, 2026-08-27): add it, mirroring the monitor exactly.** `services.renotify_seconds`
+(migration 00091), 0 = off, otherwise 60..86400. It supersedes D8's non-goal; D8's corrected note
+stays, because the reasoning it carries about the false justification is still worth reading.
+
+Three properties make this an added control rather than an imposed cadence, and each is a deliberate
+choice:
+
+*Zero is the default and zero is off.* No existing service starts repeating because a column appeared.
+`TestAServiceLadderDoesNotRepeatItsLastStep` — written when the non-goal was the whole answer — keeps
+pinning that, and it is now half of a pair rather than the last word.
+
+*The floor is 60 seconds.* A cadence shorter than a minute is a way to page somebody every few
+seconds by typing one number, and the validator refuses it with the range in the message. Same bounds
+as the monitor's.
+
+*The cadence is read LIVE from the service, not frozen into the incident's ladder.* The snapshot
+(D-0175) exists so an incident climbs the steps it started with — re-timing a page already in flight
+is the defect it prevents. A repeat cadence is a different kind of thing: it governs how often the
+last step recurs FROM NOW ON, and an operator turning it down during a noisy incident means "stop
+paging me every ten minutes", which is an instruction about the present rather than a rewrite of what
+already happened.
+
+It is PAGING configuration, so it joins the DB-owned alerting generation: changing it dis-arms
+delegation until the new generation has been evaluated, like every other paging field, enforced by
+00082's trigger rather than by whichever write path remembered.
+
+**Verified:** `TestAServiceRepeatsItsLastStepOnTheCadenceItWasGiven` (not before the cadence, yes
+after it, and an acknowledgement stops it) paired with the existing off-by-default test, and
+`TestChangingTheRenotifyCadenceDisarmsUntilReevaluated`. Reading a constant zero instead of the column
+fails the first with `the repeat fired 0 step(s) after six minutes of a five-minute cadence`; dropping
+the column from the generation trigger fails the second with `changing the repeat cadence left
+coverage armed`.

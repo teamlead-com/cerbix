@@ -35,6 +35,9 @@ type fakeStore struct {
 	failReasons []string
 	monitors    map[string]domain.Monitor
 	claimErr    error
+	// claimDelay makes the claim itself slow, which is the case that showed the lease was being
+	// counted from the wrong instant.
+	claimDelay time.Duration
 
 	// incident-context fakes
 	ictx       domain.IncidentContext
@@ -116,6 +119,9 @@ func (f *fakeStore) AppendIncidentContext(_ context.Context, incidentID, body st
 }
 
 func (f *fakeStore) ClaimDueOutbox(_ context.Context, limit int) ([]domain.OutboxEvent, error) {
+	if f.claimDelay > 0 {
+		time.Sleep(f.claimDelay)
+	}
 	if f.claimErr != nil {
 		return nil, f.claimErr
 	}
@@ -2178,5 +2184,45 @@ func TestAnAnnouncementThatDeadLettersIsCondemned(t *testing.T) {
 		err: errors.New("500")}, &fakeMetrics{}).drain(context.Background())
 	if len(fs2.condemned) != 0 {
 		t.Fatalf("%d condemnations while a retry was still owed", len(fs2.condemned))
+	}
+}
+
+// The lease starts inside `ClaimDueOutbox`, so the statement's OWN time is lease already spent.
+//
+// Marking the batch start after the call returns hands that time back as budget the worker does not
+// have — a slow claim then delivers past the lease it believes it is inside, which is the overlap the
+// budget exists to bound.
+func TestTheClaimsOwnDurationIsChargedToTheLease(t *testing.T) {
+	b, err := json.Marshal(domain.ServiceAlert{
+		ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+		Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+		Seq: 7, Recipients: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dbNow := time.Now()
+	fs := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health||": 7},
+		// The lease is deliberately LONGER than `leaseHeadroom`, and the claim's own duration is what
+		// pushes the budget below zero. A shorter lease would be refused by the headroom alone and
+		// the test would pass whether or not the claim's time was charged — which the first version
+		// of it did, and the mutation went green.
+		claimDelay: 500 * time.Millisecond,
+		pending: []domain.OutboxEvent{{
+			ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b, ClaimToken: "tok",
+			ClaimedAt: dbNow, LeaseUntil: dbNow.Add(leaseHeadroom + 300*time.Millisecond),
+		}},
+	}
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+	if nf.called != 0 {
+		t.Fatalf("the deliverer was called %d time(s) although the claim alone outlasted the lease: "+
+			"the statement's own time is lease already spent, and counting from after it returns "+
+			"invents budget the worker does not have", nf.called)
+	}
+	if len(fs.released) != 1 {
+		t.Fatalf("released = %v, want the unattempted row handed back", fs.released)
 	}
 }

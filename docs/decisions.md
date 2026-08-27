@@ -4390,6 +4390,20 @@ perfectly good, which is a poor look for a monitoring product. The claim returns
 `now()` alongside the lease, the budget is their difference, and the worker spends it against its own
 elapsed time: only the two clocks' RATES are assumed equal.
 
+**Amended again 2026-08-27.** Two of the three fixes above were incomplete in the same direction.
+
+The budget was still counted from AFTER `ClaimDueOutbox` returned, and the lease starts at the
+database's `now()` INSIDE that statement — so its planning, scan and round trip were lease already
+spent, handed back to the worker as budget it does not have. A slow claim then delivers past the lease
+it believes it is inside. The batch clock is taken before the call.
+
+And condemnation ignored `delivered_seq`. A partial delivery credits on the first attempt and can
+still fail the event — three channels reached, a fourth timing out — and when the retries run out,
+`condemnDead` fires unconditionally. That said nobody heard an announcement three people received, and
+the evaluator would have paged all of them again. The guard is in the SQL of
+`MarkServiceAlertUndeliverable`, both arms, because there are two call sites and they fail
+differently.
+
 **One more, from the same review: a claim taken and never attempted must be handed back.**
 `ClaimDueOutbox` increments `attempts` for every row in the batch and the worker delivers them one at
 a time, so a slow event at the front leaves the ones behind it past their lease before their turn.

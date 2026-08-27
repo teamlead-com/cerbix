@@ -113,7 +113,7 @@ type DesiredService struct {
 	//
 	// Nil is not "the default policy". A service that has ownership ON and whose declaration
 	// loses its `alerting:` block must not be disowned by that silence, and a service that
-	// never had ownership must not gain it — so the apply writes the four columns only when
+	// never had ownership must not gain it — so the apply writes the declaration's columns only when
 	// this is non-nil, exactly as §15.2's format gate treats a format-1 bundle's silence about
 	// `services` as no statement rather than as "delete them all".
 	Alerting *domain.ServiceAlertPolicy

@@ -252,7 +252,7 @@ func (s *Store) UpdateServiceAlertPolicy(
 		}
 	}
 
-	// ── The write. Four columns, and never `alert_config_generation`: the trigger owns it. ───
+	// ── The write. FIVE columns, and never `alert_config_generation`: the trigger owns it. ───
 	if _, err := tx.Exec(ctx, `
 		UPDATE services
 		   SET owns_paging = $3, page_on = $4, page_on_unknown = $5, confirm_evaluations = $6,

@@ -284,7 +284,8 @@ func (s *Store) evaluateServiceBurnAlertsOn(
 		//
 		// The trigger is the CONDEMNED sequence, not merely an undelivered one — an event still in
 		// the outbox is also undelivered, and re-announcing on that duplicates something slow.
-		if !decision.Edge && prev.firing && prev.seq > 0 && prev.undelivered == prev.seq {
+		reannounce := !decision.Edge && prev.firing && prev.seq > 0 && prev.undelivered == prev.seq
+		if reannounce {
 			decision.Edge, decision.Firing = true, true
 		}
 
@@ -339,6 +340,11 @@ func (s *Store) evaluateServiceBurnAlertsOn(
 				episodeState: key,
 				seq:          seq,
 				asOf:         asOf,
+				// The episode this replaces was heard by nobody, so it is closed as `undelivered`
+				// and not with the onset path's default. Saying `policy_changed` there would put a
+				// cause in the record that never happened — the same lie the live arm refuses, and
+				// the burn arm inherited it by simply not passing the field.
+				supersedeReason: supersedeReasonFor(reannounce),
 				alert: domain.ServiceAlert{
 					// Window (the target's name for itself) is stamped by the emission from the
 					// same value the episode snapshots, so it is absent here on purpose.

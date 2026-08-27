@@ -180,15 +180,17 @@ func (w *Worker) drain(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// BEFORE the call, not after it. The lease starts ticking at the database's `now()` inside
+		// `ClaimDueOutbox`, so the statement's own time — planning, the scan, the network round trip
+		// — is lease already spent. Marking the batch start after the call returns hands that time
+		// back as budget the worker does not have, and a slow claim then delivers past the lease it
+		// believes it is inside.
+		claimedAt := time.Now()
 		events, err := w.store.ClaimDueOutbox(ctx, batchLimit)
 		if err != nil {
 			w.logger.Error("outbox_claim_failed", "error", err.Error())
 			return
 		}
-		// The batch's own start, on the WORKER's clock. Every lease below is measured as a span in
-		// DATABASE time and then spent against elapsed time here, so the two clocks are never
-		// compared to each other — only their rates are assumed equal.
-		claimedAt := time.Now()
 		for i := range events {
 			w.process(ctx, events[i], claimedAt)
 		}

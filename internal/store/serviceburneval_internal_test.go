@@ -758,9 +758,28 @@ func TestAnUndeliveredBurnFireIsAnnouncedAgainOnceThereIsSomebodyToTell(t *testi
 	if len(events) != 2 {
 		t.Fatalf("%d events, want the original and the re-announcement", len(events))
 	}
-	if again := events[1]; !again.Firing || again.Seq <= first[0].Seq {
+	again := events[1]
+	if !again.Firing || again.Seq <= first[0].Seq {
 		t.Fatalf("the re-announcement is %+v, want a FIRE with a sequence past %d",
 			again, first[0].Seq)
+	}
+	if again.EpisodeID == first[0].EpisodeID {
+		t.Fatal("the burn re-announcement re-used the episode nobody heard: its recipient snapshot " +
+			"names people who could not be reached, and the close would go to them")
+	}
+
+	// And the superseded episode says WHY, which the burn arm silently got wrong by not passing the
+	// reason at all — the shared emission then defaulted to `policy_changed`, a cause that never
+	// happened, in a record an operator reads during an incident.
+	var reason string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT close_reason FROM service_alert_episodes WHERE id = $1`,
+		first[0].EpisodeID).Scan(&reason); err != nil {
+		t.Fatalf("read superseded episode: %v", err)
+	}
+	if reason != string(domain.CloseUndelivered) {
+		t.Fatalf("the burn episode nobody heard was closed as %q, want %q", reason,
+			domain.CloseUndelivered)
 	}
 
 	// And it does not loop.

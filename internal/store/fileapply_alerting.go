@@ -35,10 +35,10 @@ import (
 // requires EVERY paging-config change to carry its actor and its before/after, and "gen=7
 // update=1" does not say that ownership was switched off.
 //
-// NOT YET REACHED FROM THE RECONCILE. `applyBundleServicesTx` is the only caller this belongs
-// to — once on the create branch and once on the changed branch, after the service row exists —
-// and that call site is one line in `fileapply_services.go`, which a concurrent changeset owns.
-// Delete this paragraph with the wiring.
+// Called from `applyBundleServicesTx` on all three branches — create, changed, and the unchanged-hash
+// branch, which is the one an alerting-only edit arrives on, since the declaration hash deliberately
+// excludes paging. The paragraph that used to stand here said this function was not yet wired; it was
+// wired in the changeset that followed and the note outlived it by several iterations.
 
 // applyServiceAlertingTx writes one service's paging declaration inside the transaction that is
 // already applying its bundle, and ends any announcement the new declaration no longer covers.

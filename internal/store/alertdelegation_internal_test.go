@@ -1695,3 +1695,68 @@ func TestAStateWithNoSequenceIsNotAnAnnouncement(t *testing.T) {
 		t.Fatalf("delivery reported %q, want %q", v.FailOpenReason, AlertReasonOnsetPending)
 	}
 }
+
+// An announcement that ALREADY reached somebody can never be condemned, whatever happens to the
+// attempt afterwards.
+//
+// A partial delivery credits on the first attempt and can still fail the event — three channels
+// reached, a fourth timing out — and the retries then run out. Condemning at that point would say
+// nobody heard an announcement three people received, and the evaluator would page all of them
+// again. The guard is in the SQL because there are two call sites and they fail differently.
+func TestADeliveredAnnouncementCannotBeCondemned(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	live := domain.ServiceAlert{
+		ServiceID: f.serviceID, ProjectID: f.projectID,
+		Signal: domain.ServiceSignalHealth, Firing: true, Seq: 5,
+	}
+	exec(t, st, ctx, `UPDATE service_alert_state SET emitted_seq = 5, delivered_seq = 0
+	                   WHERE service_id = $1`, f.serviceID)
+
+	// Somebody was told.
+	if err := st.MarkServiceAlertDelivered(ctx, live); err != nil {
+		t.Fatalf("credit: %v", err)
+	}
+	// The event fails anyway and eventually exhausts its retries.
+	if err := st.MarkServiceAlertUndeliverable(ctx, live); err != nil {
+		t.Fatalf("condemn: %v", err)
+	}
+
+	var delivered, undelivered int64
+	if err := st.pool.QueryRow(ctx,
+		`SELECT delivered_seq, undelivered_seq FROM service_alert_state WHERE service_id = $1`,
+		f.serviceID).Scan(&delivered, &undelivered); err != nil {
+		t.Fatalf("read latch: %v", err)
+	}
+	if delivered != 5 {
+		t.Fatalf("delivered_seq = %d, want 5", delivered)
+	}
+	if undelivered != 0 {
+		t.Fatalf("undelivered_seq = %d for an announcement somebody received: the outage would be "+
+			"announced a second time to people who already heard it", undelivered)
+	}
+
+	// The burn arm carries the same guard, on its own row.
+	burn := domain.ServiceAlert{
+		ServiceID: f.serviceID, ProjectID: f.projectID, Signal: domain.ServiceSignalBurn,
+		Firing: true, Seq: 5, SLATargetID: f.targetID, RuleKey: "rule-1",
+	}
+	exec(t, st, ctx, `UPDATE service_burn_alert_state SET emitted_seq = 5, delivered_seq = 0
+	                   WHERE service_id = $1 AND sla_target_id = $2`, f.serviceID, f.targetID)
+	if err := st.MarkServiceAlertDelivered(ctx, burn); err != nil {
+		t.Fatalf("burn credit: %v", err)
+	}
+	if err := st.MarkServiceAlertUndeliverable(ctx, burn); err != nil {
+		t.Fatalf("burn condemn: %v", err)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT delivered_seq, undelivered_seq FROM service_burn_alert_state
+		 WHERE service_id = $1 AND sla_target_id = $2`,
+		f.serviceID, f.targetID).Scan(&delivered, &undelivered); err != nil {
+		t.Fatalf("read burn latch: %v", err)
+	}
+	if delivered != 5 || undelivered != 0 {
+		t.Fatalf("burn latch = delivered %d / undelivered %d, want 5 / 0", delivered, undelivered)
+	}
+}

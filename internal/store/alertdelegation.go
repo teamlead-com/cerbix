@@ -540,6 +540,13 @@ func (s *Store) MarkServiceAlertDelivered(ctx context.Context, a domain.ServiceA
 //
 // Guarded by the sequence and monotonic, exactly like the delivery credit, so a retry of a
 // superseded announcement cannot condemn the current one.
+//
+// And guarded by `delivered_seq`: an announcement that ALREADY reached somebody can never be
+// condemned, whatever happens to the attempt afterwards. A partial delivery credits on the first
+// attempt and can still fail the event — three channels reached, a fourth timing out — and the
+// retries then run out. Condemning there would say nobody heard an announcement three people
+// received, and the evaluator would page them all again. The guard is in the SQL rather than at the
+// call site because there are two call sites and they fail differently.
 func (s *Store) MarkServiceAlertUndeliverable(ctx context.Context, a domain.ServiceAlert) error {
 	if !a.Firing {
 		return nil
@@ -554,13 +561,15 @@ func (s *Store) MarkServiceAlertUndeliverable(ctx context.Context, a domain.Serv
 		_, err = s.pool.Exec(ctx, `
 			UPDATE service_burn_alert_state SET undelivered_seq = $5
 			 WHERE service_id = $1 AND project_id = $2 AND sla_target_id = $3 AND rule_key = $4
-			   AND emitted_seq = $5 AND undelivered_seq < $5`,
+			   AND emitted_seq = $5 AND undelivered_seq < $5
+			   AND delivered_seq < $5`,
 			a.ServiceID, a.ProjectID, a.SLATargetID, a.RuleKey, a.Seq)
 	} else {
 		_, err = s.pool.Exec(ctx, `
 			UPDATE service_alert_state SET undelivered_seq = $3
 			 WHERE service_id = $1 AND project_id = $2
-			   AND emitted_seq = $3 AND undelivered_seq < $3`,
+			   AND emitted_seq = $3 AND undelivered_seq < $3
+			   AND delivered_seq < $3`,
 			a.ServiceID, a.ProjectID, a.Seq)
 	}
 	if err != nil {

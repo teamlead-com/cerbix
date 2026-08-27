@@ -137,6 +137,15 @@ type OutboxEvent struct {
 	// which is the duplicate the fence cannot see, because it happens outside the database. Zero
 	// means the caller did not supply one and delivery falls back to its own timeout.
 	LeaseUntil time.Time
+	// ClaimedAt is the DATABASE's clock at the moment of the claim, returned alongside the lease so
+	// the two can be subtracted from each other.
+	//
+	// The lease is a database timestamp and the worker has its own clock. Comparing them directly —
+	// `time.Until(LeaseUntil)` — is a cross-clock comparison, and under skew it either lets a worker
+	// deliver after the lease really ended or makes it skip a claim that was perfectly valid. The
+	// SPAN (`LeaseUntil - ClaimedAt`) is entirely in database time, and the worker measures its own
+	// elapsed time against that span, which only assumes the two clocks tick at the same rate.
+	ClaimedAt time.Time
 }
 
 // OutboxEventView is an outbox row exposed to operators (the dead-letter admin

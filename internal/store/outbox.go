@@ -122,7 +122,7 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		 -- back AFTER the newer event and the batch was delivered in the reverse of the order it was
 		 -- owed in.
 		 RETURNING e.id, e.topic, e.payload, e.attempts, e.claim_token, due.was_due, e.created_at,
-		           e.next_attempt_at`,
+		           e.next_attempt_at, now()`,
 		limit, domain.FencedTopics())
 	if err != nil {
 		return nil, fmt.Errorf("store: claim outbox: %w", err)
@@ -133,7 +133,7 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		var e domain.OutboxEvent
 		var due, created time.Time
 		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.Attempts, &e.ClaimToken, &due, &created,
-			&e.LeaseUntil); err != nil {
+			&e.LeaseUntil, &e.ClaimedAt); err != nil {
 			return nil, fmt.Errorf("store: scan outbox: %w", err)
 		}
 		out = append(out, claimed{e, due, created})
@@ -175,6 +175,31 @@ type claimed struct {
 	domain.OutboxEvent
 	due     time.Time
 	created time.Time
+}
+
+// ReleaseOutboxClaim gives a claim back UNATTEMPTED: the attempt it consumed is refunded and the row
+// becomes due immediately.
+//
+// A claim takes up to `batchLimit` rows at once and increments every one's `attempts`, but the worker
+// delivers them one at a time. A slow event at the front can leave the ones behind it past their
+// lease before their turn comes — and returning without delivering, which is correct, used to leave
+// the attempt spent. Enough of those in a row and an event dead-letters having NEVER been sent, which
+// is the opposite of what a retry budget is for.
+//
+// Guarded by the claim token, so a row somebody else has already re-claimed is left alone: the CAS
+// simply matches nothing, which is the right answer, because the new owner's attempt is not ours to
+// refund.
+func (s *Store) ReleaseOutboxClaim(ctx context.Context, id, claimToken string) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE outbox_events
+		   SET attempts = greatest(attempts - 1, 0), next_attempt_at = now(),
+		       claim_token = NULL, updated_at = now()
+		 WHERE id = $1 AND claim_token = $2 AND status IN ('pending', 'pending_fenced')`,
+		id, claimToken)
+	if err != nil {
+		return false, fmt.Errorf("store: release outbox claim: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // MarkOutboxDelivered marks an event delivered (terminal success). The claimToken

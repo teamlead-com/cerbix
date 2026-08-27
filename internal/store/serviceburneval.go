@@ -89,6 +89,10 @@ type burnCandidate struct {
 type burnRuleLatch struct {
 	firing bool
 	seq    int64
+	// undelivered is the sequence the worker CONDEMNED: attempted, reached nobody, no retry owed
+	// (D-0187). Equal to `seq` means the announcement this rule is holding was never received by
+	// anybody, and the rule must announce again once there is somebody to tell.
+	undelivered int64
 }
 
 // EvaluateServiceBurnAlerts evaluates ONE slice of service burn targets and emits the edges it finds.
@@ -270,6 +274,20 @@ func (s *Store) evaluateServiceBurnAlertsOn(
 		long := windows[sl.long]
 		decision := domain.DecideBurnRule(long, windows[sl.short], rule.Threshold, prev.firing)
 
+		// RE-ANNOUNCE the FIRE nobody heard (D-0187), the burn mirror of the live arm's branch.
+		//
+		// `DecideBurnRule` compares the burn rate with the threshold and the PREVIOUS level, so a rule
+		// that is still firing and already "announced" produces no edge. When that announcement
+		// reached nobody the rule holds it forever: the members' own burn alerts stay un-suppressed
+		// (D-0179 sees to that), and the service's own page is never sent to anyone, before or after
+		// the route is fixed.
+		//
+		// The trigger is the CONDEMNED sequence, not merely an undelivered one — an event still in
+		// the outbox is also undelivered, and re-announcing on that duplicates something slow.
+		if !decision.Edge && prev.firing && prev.seq > 0 && prev.undelivered == prev.seq {
+			decision.Edge, decision.Firing = true, true
+		}
+
 		// The SAME arming rule the live arm applies (§16.1, D-0176): an ONSET nobody can receive is
 		// withheld and does not latch. Without this the burn signal keeps the swallow the live one
 		// just lost — emit to nobody, set firing=true, and when the route comes back there is no edge
@@ -400,7 +418,7 @@ func burnLatchTx(
 ) (map[burnLatchKey]burnRuleLatch, error) {
 	out := make(map[burnLatchKey]burnRuleLatch, len(targetIDs))
 	rows, err := tx.Query(ctx, `
-		SELECT sla_target_id, rule_key, firing, emitted_seq
+		SELECT sla_target_id, rule_key, firing, emitted_seq, COALESCE(undelivered_seq, 0)
 		  FROM service_burn_alert_state
 		 WHERE sla_target_id = ANY($1::uuid[])`, targetIDs)
 	if err != nil {
@@ -410,7 +428,7 @@ func burnLatchTx(
 	for rows.Next() {
 		var k burnLatchKey
 		var l burnRuleLatch
-		if err := rows.Scan(&k.targetID, &k.ruleKey, &l.firing, &l.seq); err != nil {
+		if err := rows.Scan(&k.targetID, &k.ruleKey, &l.firing, &l.seq, &l.undelivered); err != nil {
 			return nil, fmt.Errorf("store: scan burn latch: %w", err)
 		}
 		out[k] = l

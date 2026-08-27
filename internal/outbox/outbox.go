@@ -27,6 +27,7 @@ const (
 // Store is the persistence surface the worker needs.
 type Store interface {
 	ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error)
+	ReleaseOutboxClaim(ctx context.Context, id, claimToken string) (bool, error)
 	MarkOutboxDelivered(ctx context.Context, id, claimToken string) (applied bool, err error)
 	FailOutbox(ctx context.Context, id, claimToken, lastErr string, maxAttempts int) (applied bool, err error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
@@ -71,8 +72,12 @@ type NotifyDeliverer interface {
 
 // MailSender delivers a plain-text email (status-page subscription confirmations).
 // Optional; when nil, subscriber-confirm events fail and eventually park as dead.
+//
+// `SendContext` and not `Send`, because this runs under the claim's delivery budget (D-0186): a
+// sender that ignores the context can hold an SMTP session past the lease that authorised it, which
+// is the one branch that still did after the budget landed.
 type MailSender interface {
-	Send(to, subject, body string) error
+	SendContext(ctx context.Context, to, subject, body string) error
 }
 
 // Metrics counts delivery outcomes. Optional and nil-safe.
@@ -180,8 +185,12 @@ func (w *Worker) drain(ctx context.Context) {
 			w.logger.Error("outbox_claim_failed", "error", err.Error())
 			return
 		}
+		// The batch's own start, on the WORKER's clock. Every lease below is measured as a span in
+		// DATABASE time and then spent against elapsed time here, so the two clocks are never
+		// compared to each other — only their rates are assumed equal.
+		claimedAt := time.Now()
 		for i := range events {
-			w.process(ctx, events[i])
+			w.process(ctx, events[i], claimedAt)
 		}
 		if len(events) < batchLimit {
 			return
@@ -194,7 +203,7 @@ func (w *Worker) drain(ctx context.Context) {
 // the instant it tried to mark it delivered, turning a success into a lost CAS and a duplicate send.
 const leaseHeadroom = 2 * time.Second
 
-func (w *Worker) process(ctx context.Context, e domain.OutboxEvent) {
+func (w *Worker) process(ctx context.Context, e domain.OutboxEvent, claimedAt time.Time) {
 	// DELIVERY is bounded by the claim's own lease (D-0186).
 	//
 	// The claim token already stops a deposed worker from SETTLING a row it no longer owns. What it
@@ -213,20 +222,35 @@ func (w *Worker) process(ctx context.Context, e domain.OutboxEvent) {
 	// the queue and the recipients would be paged twice. That is the failure this whole change
 	// exists to reduce, and it would have been introduced by the fix.
 	deliverCtx := ctx
-	if !e.LeaseUntil.IsZero() {
-		budget := time.Until(e.LeaseUntil) - leaseHeadroom
+	if !e.LeaseUntil.IsZero() && !e.ClaimedAt.IsZero() {
+		// The lease as a SPAN in database time, spent against elapsed time on this clock. Never
+		// `time.Until(e.LeaseUntil)`: that subtracts a database timestamp from a worker timestamp,
+		// and under skew it either delivers after the lease really ended or skips a claim that was
+		// perfectly good.
+		budget := e.LeaseUntil.Sub(e.ClaimedAt) - time.Since(claimedAt) - leaseHeadroom
 		if budget <= 0 {
-			// Already past it before the first byte. Do not send: this row belongs to somebody else
-			// now, and the duplicate would be one whose settle is guaranteed to lose the CAS anyway.
+			// Past it before the first byte — a batch takes up to `batchLimit` rows at once and this
+			// one waited its turn behind the others. Do not send: the row belongs to somebody else
+			// now, and the duplicate's settle would lose the CAS anyway.
+			//
+			// But GIVE THE CLAIM BACK. `ClaimDueOutbox` already spent an attempt on every row in the
+			// batch, and an event that was never tried must not pay for that: enough turns like this
+			// and it dead-letters having never been sent, which is the opposite of a retry budget.
 			w.logger.Warn("outbox_lease_expired_before_delivery", "id", e.ID, "topic", e.Topic,
 				"lease_until", e.LeaseUntil)
+			if released, rerr := w.store.ReleaseOutboxClaim(ctx, e.ID, e.ClaimToken); rerr != nil {
+				w.logger.Error("outbox_release_failed", "id", e.ID, "error", rerr.Error())
+			} else if !released {
+				// Somebody else already owns it, and their attempt is not ours to refund.
+				w.logger.Info("outbox_release_skipped", "id", e.ID, "reason", "reclaimed")
+			}
 			return
 		}
 		var cancel context.CancelFunc
 		deliverCtx, cancel = context.WithTimeout(ctx, budget)
 		defer cancel()
 	}
-	err := w.deliver(deliverCtx, e)
+	err := w.deliver(deliverCtx, ctx, e)
 	if err == nil {
 		applied, merr := w.store.MarkOutboxDelivered(ctx, e.ID, e.ClaimToken)
 		if merr != nil {
@@ -259,6 +283,12 @@ func (w *Worker) process(ctx context.Context, e domain.OutboxEvent) {
 		if w.metrics != nil {
 			w.metrics.RecordOutboxDead()
 		}
+		// Dead is terminal, so a service alert that dies here reached nobody and no retry is owed —
+		// which is exactly the condition D-0187 re-announces on. It was left out at first and named
+		// as not covered, and the reviewer was right that "no retry owed" already includes this: an
+		// announcement that exhausted its attempts is as permanently unheard as one whose channels
+		// were all deleted, and leaving it uncondemned means the outage is never announced again.
+		w.condemnDead(ctx, e)
 	} else {
 		w.logger.Warn("outbox_delivery_retry", "id", e.ID, "topic", e.Topic, "attempt", e.Attempts, "error", err.Error())
 	}
@@ -286,6 +316,24 @@ func (w *Worker) dependencySuppressed(ctx context.Context, monitor domain.Monito
 		w.logger.Warn("suppression_note_failed", "monitor_id", monitor.ID, "error", err.Error())
 	}
 	return true
+}
+
+// condemnDead is `condemn` for an event that died by exhausting its retries. It has to decode the
+// payload itself, because the delivery path that would have parsed it is the one that just failed.
+//
+// Only `service_alert` matters here: it is the topic whose delivery arms coverage and whose absence
+// the evaluator can act on. Anything else that dead-letters is an operator's problem and says so
+// through the dead-letter surface.
+func (w *Worker) condemnDead(ctx context.Context, e domain.OutboxEvent) {
+	if e.Topic != domain.TopicServiceAlert {
+		return
+	}
+	var a domain.ServiceAlert
+	if err := json.Unmarshal(e.Payload, &a); err != nil {
+		w.logger.Warn("service_alert_condemn_undecodable", "id", e.ID, "error", err.Error())
+		return
+	}
+	w.condemn(ctx, a)
 }
 
 // condemn records that an announcement is KNOWN dead, so the evaluator can announce the outage again
@@ -384,7 +432,13 @@ func (w *Worker) attachIncidentContext(ctx context.Context, inc domain.Incident)
 }
 
 // deliver dispatches one event by topic. A nil error means the event is done.
-func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
+// `settleCtx` is the caller's UNBOUNDED context, separate from `ctx`, which carries the delivery
+// budget (D-0186). Every write that RECORDS what a delivery did — the coverage credit, the
+// condemnation — takes it, for the same reason `MarkOutboxDelivered` does: a send that used its whole
+// budget must still be able to say so. Recording on the bounded context loses the credit for a page
+// that went out, which re-arms nothing and pages the members redundantly, and loses the condemnation
+// for a page that reached nobody, which means the outage is never re-announced (D-0187).
+func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) error {
 	switch e.Topic {
 	case domain.TopicIncidentCorrelation:
 		// FR-021 §14.3: the impact-graph correlation attempt, on its OWN topic —
@@ -598,7 +652,7 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 			w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
 			w.logger.Warn("service_alert_undeliverable", "service_id", a.ServiceID,
 				"signal", string(a.Signal), "reason", "empty_recipient_snapshot")
-			w.condemn(ctx, a)
+			w.condemn(settleCtx, a)
 			return nil
 		}
 		res, err := w.notifs.DeliverChannelsReporting(ctx, a.Recipients, a.Message())
@@ -615,7 +669,7 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 			// channel that is gone — but it must NOT look like an announcement from here on, or the
 			// service would go on covering members for an onset that reached no one (D-0179).
 			w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
-			w.condemn(ctx, a)
+			w.condemn(settleCtx, a)
 			return nil
 		}
 		// Somebody was told. THIS is what arms coverage: §16.1's committed onset is now a DELIVERED
@@ -641,7 +695,7 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		// error would send it again. It leaves coverage dis-armed, the direction every other
 		// ambiguity in the conjunction takes.
 		if a.Firing && res.Delivered > 0 {
-			if derr := w.store.MarkServiceAlertDelivered(ctx, a); derr != nil {
+			if derr := w.store.MarkServiceAlertDelivered(settleCtx, a); derr != nil {
 				w.logger.Warn("service_alert_delivery_unrecorded", "service_id", a.ServiceID,
 					"signal", string(a.Signal), "seq", a.Seq, "error", derr.Error())
 			}
@@ -712,7 +766,7 @@ func (w *Worker) deliver(ctx context.Context, e domain.OutboxEvent) error {
 		}
 		// A confirmation email is transactional, not an alert — instance-wide
 		// alert silence does not suppress it.
-		return w.mail.Send(sc.To, sc.Subject, sc.Body)
+		return w.mail.SendContext(ctx, sc.To, sc.Subject, sc.Body)
 
 	default:
 		return errors.New("unknown outbox topic: " + e.Topic)

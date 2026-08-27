@@ -60,6 +60,12 @@ type rawServiceAlerting struct {
 	PageOn             []string `yaml:"page_on"`
 	PageOnUnknown      *bool    `yaml:"page_on_unknown"`
 	ConfirmEvaluations *int     `yaml:"confirm_evaluations"`
+	// RenotifySeconds is the repeat cadence for the service's own escalation ladder (D-0185). A
+	// pointer for the same reason as the field above: `renotify_seconds: 0` is a MEANINGFUL value —
+	// it says "never repeat" — and it must be distinguishable from an omitted key, which takes the
+	// same default. They agree today, and encoding them identically would make a future change of
+	// default silently rewrite what every bundle meant.
+	RenotifySeconds *int `yaml:"renotify_seconds"`
 }
 
 type rawServiceOwner struct {
@@ -343,6 +349,9 @@ func decodeServiceAlerting(slug string, ra *rawServiceAlerting) (*domain.Service
 	}
 	if ra.ConfirmEvaluations != nil {
 		p.ConfirmEvaluations = *ra.ConfirmEvaluations
+	}
+	if ra.RenotifySeconds != nil {
+		p.RenotifySeconds = *ra.RenotifySeconds
 	}
 	p = p.Canonical()
 	if err := p.Validate(); err != nil {

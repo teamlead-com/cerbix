@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1367,3 +1369,82 @@ func TestServiceAlertPolicyReadIsCanonicalAndTenantScoped(t *testing.T) {
 		})
 	}
 }
+
+// Every field of the declaration goes through the WRITE PATH, not just the ones a test happened to
+// set with direct SQL.
+//
+// `alertPolicyDiff` is both the audit line and the no-op gate: a field missing from it means an edit
+// to that field reports 200, echoes the new value back, and commits nothing. `renotify_seconds`
+// shipped that way, and every test of it wrote the column with `UPDATE services` — so the feature was
+// pinned everywhere except the one place an operator uses it.
+//
+// This walks each field through `UpdateServiceAlertPolicy` and reads the row back, which is the shape
+// that would have caught it.
+func TestEveryPolicyFieldSurvivesTheWritePath(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := armedService(t, st, ctx)
+
+	stored := func(t *testing.T) domain.ServiceAlertPolicy {
+		t.Helper()
+		p, err := st.ServiceAlertPolicy(ctx, f.projectID, f.serviceID)
+		if err != nil {
+			t.Fatalf("read policy: %v", err)
+		}
+		return p
+	}
+
+	for _, tc := range []struct {
+		name  string
+		patch ServiceAlertPolicyPatch
+		want  func(domain.ServiceAlertPolicy) bool
+		got   func(domain.ServiceAlertPolicy) string
+	}{
+		{
+			name:  "renotify_seconds",
+			patch: ServiceAlertPolicyPatch{RenotifySeconds: intPtr(900)},
+			want:  func(p domain.ServiceAlertPolicy) bool { return p.RenotifySeconds == 900 },
+			got:   func(p domain.ServiceAlertPolicy) string { return strconv.Itoa(p.RenotifySeconds) },
+		},
+		{
+			name:  "confirm_evaluations",
+			patch: ServiceAlertPolicyPatch{ConfirmEvaluations: intPtr(5)},
+			want:  func(p domain.ServiceAlertPolicy) bool { return p.ConfirmEvaluations == 5 },
+			got:   func(p domain.ServiceAlertPolicy) string { return strconv.Itoa(p.ConfirmEvaluations) },
+		},
+		{
+			name:  "page_on_unknown",
+			patch: ServiceAlertPolicyPatch{PageOnUnknown: boolPtr(true)},
+			want:  func(p domain.ServiceAlertPolicy) bool { return p.PageOnUnknown },
+			got:   func(p domain.ServiceAlertPolicy) string { return fmt.Sprint(p.PageOnUnknown) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, tc.patch,
+				AlertActor{}); err != nil {
+				t.Fatalf("update: %v", err)
+			}
+			if p := stored(t); !tc.want(p) {
+				t.Fatalf("%s reads back as %s after a write that returned success: the field is "+
+					"missing from `alertPolicyDiff`, so the write was short-circuited as a no-op",
+					tc.name, tc.got(p))
+			}
+		})
+	}
+
+	// And the audit trail names the field, which is the other half of the same function: the diff
+	// text IS the audit target, so a field missing from it is invisible in the log as well as
+	// unwritten.
+	var target string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT target FROM audit_logs
+		 WHERE action LIKE 'service%alert%'
+		 ORDER BY created_at DESC LIMIT 1`).Scan(&target); err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if !strings.Contains(target, "page_on_unknown") {
+		t.Fatalf("the last paging edit was audited as %q, which does not name what changed", target)
+	}
+}
+
+func intPtr(v int) *int    { return &v }
+func boolPtr(v bool) *bool { return &v }

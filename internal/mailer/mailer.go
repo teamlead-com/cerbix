@@ -221,8 +221,19 @@ func (m *Mailer) Enabled() bool { return m.settings().deliverable() }
 // BaseURL returns the public origin (no trailing slash).
 func (m *Mailer) BaseURL() string { return strings.TrimRight(m.settings().PublicBaseURL, "/") }
 
-// Send delivers a plain-text email to one recipient.
+// Send delivers a plain-text email to one recipient, on the background context. Kept for callers
+// with no deadline to offer; anything running under a lease should use `SendContext` (D-0186).
 func (m *Mailer) Send(to, subject, body string) error {
+	return m.SendContext(context.Background(), to, subject, body)
+}
+
+// SendContext is the same delivery bounded by the caller's deadline.
+//
+// The outbox gives every delivery a budget derived from its claim's lease, and this branch — the
+// status-page subscription confirmation — was the one that still dialled on `context.Background()`.
+// A hung SMTP endpoint could therefore outlive the claim that authorised the send, which is exactly
+// the overlap the budget exists to bound.
+func (m *Mailer) SendContext(ctx context.Context, to, subject, body string) error {
 	s := m.settings()
 	if !s.deliverable() {
 		return errors.New("mailer: not configured")
@@ -241,6 +252,6 @@ func (m *Mailer) Send(to, subject, body string) error {
 		"MIME-Version: 1.0\r\n" +
 		"Content-Type: text/plain; charset=UTF-8\r\n" +
 		"\r\n" + body + "\r\n"
-	return sendMailFunc(context.Background(), fmt.Sprintf("%s:%d", s.Host, port), auth, s.From,
+	return sendMailFunc(ctx, fmt.Sprintf("%s:%d", s.Host, port), auth, s.From,
 		[]string{to}, []byte(msg))
 }

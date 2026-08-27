@@ -206,7 +206,10 @@ func (s *Store) UpdateServiceAlertPolicy(
 		return domain.ServiceAlertPolicy{}, fmt.Errorf("store: %w", err)
 	}
 
-	// A declaration identical to the stored one is NOT a write. The trigger would not bump the
+	// A declaration identical to the stored one is NOT a write. Every field of the declaration has to be
+	// compared here, or a change to the one that was forgotten reports 200, echoes the new value and
+	// commits nothing — which is what a renotify-only PATCH did until D-0185 was reviewed. The diff is
+	// the audit line AND the no-op gate, so a missing field is silently two defects. The trigger would not bump the
 	// generation for it either, but an UPDATE still stamps `updated_at` and burns an MVCC row
 	// version — and a UI that saves an unchanged form, or a client that PUTs on a timer, would then
 	// show a service as freshly edited by nobody. Checked AFTER the lock, so the comparison is
@@ -486,6 +489,10 @@ func alertPolicyDiff(before, next domain.ServiceAlertPolicy) string {
 	if before.ConfirmEvaluations != next.ConfirmEvaluations {
 		parts = append(parts, "confirm_evaluations:"+strconv.Itoa(before.ConfirmEvaluations)+"→"+
 			strconv.Itoa(next.ConfirmEvaluations))
+	}
+	if before.RenotifySeconds != next.RenotifySeconds {
+		parts = append(parts, "renotify_seconds:"+strconv.Itoa(before.RenotifySeconds)+"→"+
+			strconv.Itoa(next.RenotifySeconds))
 	}
 	return strings.Join(parts, " ")
 }

@@ -92,9 +92,10 @@ func applyServiceAlertingTx(
 	var pageOn []string
 	var slug string
 	err := tx.QueryRow(ctx, `
-		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, slug
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds, slug
 		  FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`, serviceID, projectID).
-		Scan(&before.OwnsPaging, &pageOn, &before.PageOnUnknown, &before.ConfirmEvaluations, &slug)
+		Scan(&before.OwnsPaging, &pageOn, &before.PageOnUnknown, &before.ConfirmEvaluations,
+			&before.RenotifySeconds, &slug)
 	if noRows(err) {
 		return false, ErrNotFound
 	}
@@ -164,14 +165,14 @@ func applyServiceAlertingTx(
 		}
 	}
 
-	// ── The write. Four columns, and never `alert_config_generation`: the trigger owns it. ────
+	// ── The write. Five columns, and never `alert_config_generation`: the trigger owns it. ────
 	if _, err := tx.Exec(ctx, `
 		UPDATE services
 		   SET owns_paging = $3, page_on = $4, page_on_unknown = $5, confirm_evaluations = $6,
-		       updated_at = now()
+		       renotify_seconds = $7, updated_at = now()
 		 WHERE id = $1 AND project_id = $2`,
 		serviceID, projectID, next.OwnsPaging, pageOnText(next.PageOn), next.PageOnUnknown,
-		next.ConfirmEvaluations); err != nil {
+		next.ConfirmEvaluations, next.RenotifySeconds); err != nil {
 		return false, fmt.Errorf("store: write file alerting declaration: %w", err)
 	}
 
@@ -196,9 +197,10 @@ func alertPolicyMatchesTx(
 	var have domain.ServiceAlertPolicy
 	var pageOn []string
 	err := tx.QueryRow(ctx, `
-		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds
 		  FROM services WHERE id = $1 AND project_id = $2`, serviceID, projectID).
-		Scan(&have.OwnsPaging, &pageOn, &have.PageOnUnknown, &have.ConfirmEvaluations)
+		Scan(&have.OwnsPaging, &pageOn, &have.PageOnUnknown, &have.ConfirmEvaluations,
+			&have.RenotifySeconds)
 	if noRows(err) {
 		return false, ErrNotFound
 	}

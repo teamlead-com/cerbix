@@ -31,6 +31,7 @@ type fakeStore struct {
 	pending     []domain.OutboxEvent
 	delivered   []string
 	failed      []string
+	released    []string
 	failReasons []string
 	monitors    map[string]domain.Monitor
 	claimErr    error
@@ -141,6 +142,17 @@ func (f *fakeStore) MarkOutboxDelivered(ctx context.Context, id, _ string) (bool
 	f.delivered = append(f.delivered, id)
 	return true, nil
 }
+
+// released records claims handed back UNATTEMPTED. The batch spends an attempt on every row it
+// claims, so an event that never got its turn has to be refunded or it dead-letters unsent.
+func (f *fakeStore) ReleaseOutboxClaim(ctx context.Context, id, _ string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	f.released = append(f.released, id)
+	return true, nil
+}
+
 func (f *fakeStore) FailOutbox(ctx context.Context, id, _, lastErr string, _ int) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -161,9 +173,16 @@ func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, er
 type fakeMail struct {
 	sent []domain.SubscriberConfirm
 	err  error
+	// sawDeadline records whether the confirmation send was given the delivery budget. It was the
+	// one branch that dialled on `context.Background()` after D-0186 landed, so a fake that dropped
+	// the context could not have noticed.
+	sawDeadline bool
 }
 
-func (f *fakeMail) Send(to, subject, body string) error {
+func (f *fakeMail) SendContext(ctx context.Context, to, subject, body string) error {
+	if _, ok := ctx.Deadline(); ok {
+		f.sawDeadline = true
+	}
 	f.sent = append(f.sent, domain.SubscriberConfirm{To: to, Subject: subject, Body: body})
 	return f.err
 }
@@ -1034,7 +1053,13 @@ func (f *fakeStore) IncidentEventSequence(_ context.Context, incidentID string) 
 // delivered records what the worker credited as an announcement somebody actually received. It is a
 // LIST rather than a flag on purpose: the point of D-0179 is that an attempted delivery resolving
 // zero recipients must leave NO trace here, and a set that only ever grows cannot prove an absence.
-func (f *fakeStore) MarkServiceAlertDelivered(_ context.Context, a domain.ServiceAlert) error {
+func (f *fakeStore) MarkServiceAlertDelivered(ctx context.Context, a domain.ServiceAlert) error {
+	// Refuses a dead context, because the real one does. A fake that ignores it cannot witness the
+	// difference between recording on the delivery budget and recording on the caller's context —
+	// and a mutation moving the credit onto the bounded one passed cleanly until this line existed.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if f.markDeliveredErr != nil {
 		return f.markDeliveredErr
 	}
@@ -1045,7 +1070,10 @@ func (f *fakeStore) MarkServiceAlertDelivered(_ context.Context, a domain.Servic
 // condemned is the mirror of `alertDelivered`: announcements the worker declared KNOWN dead. A list
 // again, because the assertions that matter are about absence — a retry is still owed, so nothing
 // must be condemned yet.
-func (f *fakeStore) MarkServiceAlertUndeliverable(_ context.Context, a domain.ServiceAlert) error {
+func (f *fakeStore) MarkServiceAlertUndeliverable(ctx context.Context, a domain.ServiceAlert) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.condemned = append(f.condemned, a)
 	return nil
 }
@@ -1557,7 +1585,7 @@ func TestAnUndeliveredOpeningIsNeverDroppedForBeingOld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := w.deliver(context.Background(), domain.OutboxEvent{
+	if err := w.deliver(context.Background(), context.Background(), domain.OutboxEvent{
 		ID: "e1", Topic: domain.TopicIncidentEvent, Payload: opening,
 	}); err != nil {
 		t.Fatalf("deliver opening: %v", err)
@@ -1796,7 +1824,7 @@ func TestDeliveryIsBoundedByTheClaimsLease(t *testing.T) {
 			alertSeq: map[string]int64{"svc-1|health||": 7},
 			pending: []domain.OutboxEvent{{
 				ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b,
-				LeaseUntil: time.Now().Add(-time.Minute),
+				LeaseUntil: time.Now().Add(-time.Minute), ClaimedAt: time.Now(),
 			}},
 		}
 		nf := &fakeNotify{}
@@ -1817,7 +1845,7 @@ func TestDeliveryIsBoundedByTheClaimsLease(t *testing.T) {
 			alertSeq: map[string]int64{"svc-1|health||": 7},
 			pending: []domain.OutboxEvent{{
 				ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b,
-				LeaseUntil: time.Now().Add(30 * time.Second),
+				LeaseUntil: time.Now().Add(30 * time.Second), ClaimedAt: time.Now(),
 			}},
 		}
 		nf := &fakeNotify{captureDeadline: true}
@@ -1842,7 +1870,7 @@ func TestDeliveryIsBoundedByTheClaimsLease(t *testing.T) {
 			alertSeq: map[string]int64{"svc-1|health||": 7},
 			pending: []domain.OutboxEvent{{
 				ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b,
-				LeaseUntil: time.Now().Add(3 * time.Second),
+				LeaseUntil: time.Now().Add(3 * time.Second), ClaimedAt: time.Now(),
 			}},
 		}
 		nf := &fakeNotify{burnBudget: true}
@@ -1936,3 +1964,219 @@ func TestOnlyATerminalFailureCondemnsAnAnnouncement(t *testing.T) {
 }
 
 func intp(v int) *int { return &v }
+
+// Every branch that RECORDS what a delivery did runs on the unbounded context, and every branch that
+// SENDS runs on the bounded one. Both halves of D-0186, and the review found the gaps in each.
+func TestTheBudgetBoundsSendingAndNeverRecording(t *testing.T) {
+	alert := func() []byte {
+		b, err := json.Marshal(domain.ServiceAlert{
+			ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+			Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+			Seq: 7, ConfirmedOver: 2, Recipients: []string{"ch-1"},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	t.Run("a delivery that burns its budget still records the credit", func(t *testing.T) {
+		// The credit was taken on the DELIVERY context, so a send that used its whole budget lost
+		// it — the page went out, coverage never armed, and the members kept paging redundantly for
+		// an announcement everybody received.
+		fs := &fakeStore{
+			alertSeq: map[string]int64{"svc-1|health||": 7},
+			pending: []domain.OutboxEvent{{
+				ID: "e-1", Topic: domain.TopicServiceAlert, Payload: alert(),
+				LeaseUntil: time.Now().Add(3 * time.Second), ClaimedAt: time.Now(),
+			}},
+		}
+		nf := &fakeNotify{burnBudget: true}
+		newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+		if len(fs.alertDelivered) != 1 {
+			t.Fatalf("%d delivery credits after a send that used its whole budget: the page went "+
+				"out and coverage never armed, so the members page for an announcement everybody "+
+				"received", len(fs.alertDelivered))
+		}
+	})
+
+	t.Run("a condemnation survives a burnt budget too", func(t *testing.T) {
+		// The mirror, and the worse half: losing the condemnation means the outage is NEVER
+		// re-announced (D-0187), because the evaluator's trigger never appears.
+		b, err := json.Marshal(domain.ServiceAlert{
+			ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+			Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+			Seq: 7, Recipients: nil,
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		fs := &fakeStore{
+			alertSeq: map[string]int64{"svc-1|health||": 7},
+			pending: []domain.OutboxEvent{{
+				ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b,
+				// Already spent for DELIVERY purposes would return early, so give it a live lease
+				// and let the recording path be the only thing under test.
+				LeaseUntil: time.Now().Add(30 * time.Second), ClaimedAt: time.Now(),
+			}},
+		}
+		newWorker(fs, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).drain(context.Background())
+		if len(fs.condemned) != 1 {
+			t.Fatalf("%d condemnations for an empty recipient snapshot", len(fs.condemned))
+		}
+	})
+
+	t.Run("the subscriber confirmation is bounded like every other send", func(t *testing.T) {
+		b, err := json.Marshal(domain.SubscriberConfirm{To: "a@x.com", Subject: "confirm", Body: "hi"})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		fs := &fakeStore{pending: []domain.OutboxEvent{{
+			ID: "e-1", Topic: domain.TopicSubscriberConfirm, Payload: b,
+			LeaseUntil: time.Now().Add(30 * time.Second), ClaimedAt: time.Now(),
+		}}}
+		mail := &fakeMail{}
+		newWorker(fs, &fakeWebhook{}, &fakeNotify{}, &fakeMetrics{}).WithMailer(mail).
+			drain(context.Background())
+
+		if len(mail.sent) != 1 {
+			t.Fatalf("%d confirmations sent", len(mail.sent))
+		}
+		if !mail.sawDeadline {
+			t.Fatal("the confirmation was sent on an unbounded context: a hung SMTP endpoint can " +
+				"hold the session past the claim that authorised it, which is the overlap the " +
+				"budget exists to bound")
+		}
+	})
+}
+
+// A claim spends an attempt on EVERY row in the batch, and the worker delivers them one at a time.
+// An event whose turn comes after its lease has gone must get that attempt back.
+//
+// Without the refund a slow event at the front of a batch charges the ones behind it for deliveries
+// that never happened, and enough turns like that dead-letter an event that was never sent once —
+// the opposite of what a retry budget is for.
+func TestAnUnattemptedClaimIsGivenBack(t *testing.T) {
+	b, err := json.Marshal(domain.ServiceAlert{
+		ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+		Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+		Seq: 7, Recipients: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	now := time.Now()
+	fs := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health||": 7},
+		pending: []domain.OutboxEvent{{
+			ID: "e-late", Topic: domain.TopicServiceAlert, Payload: b, ClaimToken: "tok",
+			// Claimed with a lease that was already gone by the time this row's turn came.
+			ClaimedAt: now, LeaseUntil: now.Add(-time.Second),
+		}},
+	}
+	nf := &fakeNotify{}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+	if nf.called != 0 {
+		t.Fatalf("the deliverer was called %d time(s) past the lease", nf.called)
+	}
+	if len(fs.released) != 1 || fs.released[0] != "e-late" {
+		t.Fatalf("released = %v, want the unattempted row: the batch already charged it an attempt, "+
+			"and an event that was never tried must not pay for one", fs.released)
+	}
+	if len(fs.failed) != 0 || len(fs.delivered) != 0 {
+		t.Fatalf("the row was settled (failed=%v delivered=%v) rather than handed back",
+			fs.failed, fs.delivered)
+	}
+}
+
+// The lease is spent as a SPAN in database time, never by subtracting a database timestamp from a
+// worker one. Under skew the latter delivers after the lease really ended, or skips a claim that was
+// perfectly good — and a monitoring product whose own clock handling is naive is a poor advertisement.
+func TestTheLeaseIsSpentAsASpanNotAcrossTwoClocks(t *testing.T) {
+	b, err := json.Marshal(domain.ServiceAlert{
+		ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+		Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+		Seq: 7, Recipients: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The database is an hour BEHIND this worker. The lease is a healthy 30 seconds in its own
+	// terms; compared against the worker's clock it looks an hour stale.
+	dbNow := time.Now().Add(-time.Hour)
+	fs := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health||": 7},
+		pending: []domain.OutboxEvent{{
+			ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b, ClaimToken: "tok",
+			ClaimedAt: dbNow, LeaseUntil: dbNow.Add(30 * time.Second),
+		}},
+	}
+	nf := &fakeNotify{captureDeadline: true}
+	newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+	if nf.called != 1 {
+		t.Fatalf("a valid 30-second lease was skipped because the database clock differs from this "+
+			"one (called=%d)", nf.called)
+	}
+	if !nf.sawDeadline {
+		t.Fatal("no deadline was applied")
+	}
+	if left := time.Until(nf.deadline); left <= 0 || left > 29*time.Second {
+		t.Fatalf("the budget is %s: it should be the lease's own span minus headroom, measured on "+
+			"this clock, not a difference between two clocks", left)
+	}
+}
+
+// An announcement that dies by exhausting its retries reached nobody and is owed no further attempt,
+// so it is condemned like any other terminal failure (D-0187).
+//
+// It was left out of the first version and named as "not covered". The reviewer was right that
+// invariant 105's own words — "no retry owed" — already include this: an announcement that ran out of
+// attempts is as permanently unheard as one whose channels were all deleted, and leaving it
+// uncondemned means the outage is never announced again.
+func TestAnAnnouncementThatDeadLettersIsCondemned(t *testing.T) {
+	b, err := json.Marshal(domain.ServiceAlert{
+		ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+		Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+		Seq: 7, Recipients: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	fs := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health||": 7},
+		pending: []domain.OutboxEvent{{
+			ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b, ClaimToken: "tok",
+			// One short of the cap, so THIS attempt is the last one.
+			Attempts: maxAttempts,
+		}},
+	}
+	resolved, delivered := 1, 0
+	nf := &fakeNotify{resolved: &resolved, delivered: &delivered, err: errors.New("500 again")}
+	m := &fakeMetrics{}
+	newWorker(fs, &fakeWebhook{}, nf, m).drain(context.Background())
+
+	if m.dead != 1 {
+		t.Fatalf("the event did not dead-letter (dead=%d)", m.dead)
+	}
+	if len(fs.condemned) != 1 {
+		t.Fatalf("%d condemnations for an announcement that exhausted its retries: no attempt is "+
+			"owed, nobody was told, and the evaluator has no trigger to announce again",
+			len(fs.condemned))
+	}
+
+	// A NON-terminal failure of the same shape still condemns nothing: the retry is owed.
+	fs2 := &fakeStore{
+		alertSeq: map[string]int64{"svc-1|health||": 7},
+		pending: []domain.OutboxEvent{{
+			ID: "e-2", Topic: domain.TopicServiceAlert, Payload: b, ClaimToken: "tok", Attempts: 0,
+		}},
+	}
+	newWorker(fs2, &fakeWebhook{}, &fakeNotify{resolved: &resolved, delivered: &delivered,
+		err: errors.New("500")}, &fakeMetrics{}).drain(context.Background())
+	if len(fs2.condemned) != 0 {
+		t.Fatalf("%d condemnations while a retry was still owed", len(fs2.condemned))
+	}
+}

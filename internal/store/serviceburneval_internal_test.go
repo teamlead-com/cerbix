@@ -697,3 +697,74 @@ func delegatedBurn(t *testing.T, st *Store, ctx context.Context, f burnFixture) 
 	}
 	return v.Suppress()
 }
+
+// D-0187 on the SEALED signal. The health arm got this and the burn arm did not, which left exactly
+// the failure the decision exists to remove, on the signal nobody was looking at.
+//
+// A FIRE that reached nobody is held by the latch forever: `DecideBurnRule` sees the rule already
+// firing and produces no edge, so fixing the channel changes nothing and the service's own burn page
+// is never sent to anyone.
+func TestAnUndeliveredBurnFireIsAnnouncedAgainOnceThereIsSomebodyToTell(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, oneBurnRule)
+	plantBurn(t, st, ctx, f, 5, 2*minute/60)
+	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
+		t.Fatalf("the fixture did not fire (%+v)", got)
+	}
+	first := alertEvents(t, st, ctx)
+	if len(first) != 1 {
+		t.Fatalf("%d events, want the one onset", len(first))
+	}
+
+	// Still burning, already announced: no further edge, which is the behaviour the re-announcement
+	// must not disturb.
+	if got := burnEvalOnce(t, st, ctx); got.Onsets != 0 {
+		t.Fatalf("a rule that stayed firing announced again (%+v)", got)
+	}
+
+	// The worker attempts it and reaches nobody, terminally.
+	var targetID, ruleKey string
+	var seq int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT sla_target_id, rule_key, emitted_seq FROM service_burn_alert_state
+		 WHERE service_id = $1`, f.serviceID).Scan(&targetID, &ruleKey, &seq); err != nil {
+		t.Fatalf("read latch: %v", err)
+	}
+	if err := st.MarkServiceAlertUndeliverable(ctx, domain.ServiceAlert{
+		ServiceID: f.serviceID, ProjectID: f.projectID, Signal: domain.ServiceSignalBurn,
+		Firing: true, Seq: seq, SLATargetID: targetID, RuleKey: ruleKey,
+	}); err != nil {
+		t.Fatalf("condemn: %v", err)
+	}
+
+	// With no route it is WITHHELD, exactly as a first FIRE would be — announcing into the same
+	// emptiness every cadence is a loop, not a fix.
+	exec(t, st, ctx, `UPDATE notification_channels SET enabled = false WHERE project_id = $1`, f.projectID)
+	got := burnEvalOnce(t, st, ctx)
+	if got.Onsets != 0 {
+		t.Fatalf("a burn re-announcement went out with no route (%+v)", got)
+	}
+	if got.Withheld[WithheldUnroutable] != 1 {
+		t.Fatalf("the withheld burn re-announcement was not counted: %+v", got.Withheld)
+	}
+
+	// Route restored: announced again, with a sequence past the condemned one.
+	exec(t, st, ctx, `UPDATE notification_channels SET enabled = true WHERE project_id = $1`, f.projectID)
+	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
+		t.Fatalf("the burn FIRE was not re-announced after the route came back (%+v): the budget is "+
+			"still burning and nobody has ever been told", got)
+	}
+	events := alertEvents(t, st, ctx)
+	if len(events) != 2 {
+		t.Fatalf("%d events, want the original and the re-announcement", len(events))
+	}
+	if again := events[1]; !again.Firing || again.Seq <= first[0].Seq {
+		t.Fatalf("the re-announcement is %+v, want a FIRE with a sequence past %d",
+			again, first[0].Seq)
+	}
+
+	// And it does not loop.
+	if got := burnEvalOnce(t, st, ctx); got.Onsets != 0 {
+		t.Fatalf("the burn arm announced a third time (%+v)", got)
+	}
+}

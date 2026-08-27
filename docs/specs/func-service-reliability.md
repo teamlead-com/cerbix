@@ -2746,7 +2746,8 @@ close names its reason and the UI and payload carry it.
 **Bootstrap and lifecycle**, each stated because each is a way to page wrongly: enabling ownership
 while the service is ALREADY down emits an onset on the first confirmed evaluation (it is news to
 the operator); disabling ownership closes an open firing with reason `ownership_disabled`; editing
-`page_on`, `page_on_unknown` or `confirm_evaluations` bumps `alert_config_generation`, which
+`page_on`, `page_on_unknown`, `confirm_evaluations` or `renotify_seconds` bumps
+`alert_config_generation`, which
 DIS-ARMS delegation until the next successful evaluation of the new generation — the safe direction,
 since dis-armed means members page for themselves; a change of effective definition revision does
 the same; leader failover leaves a stale `evaluated_at`, which dis-arms rather than silences.
@@ -2942,6 +2943,7 @@ recipients the onset did.
 | `services.page_on` | `text[]`, `<@ {down,degraded}` | `{down}` | omitted = unchanged; `[]` = explicitly page for no state (legal, and dis-arms LIVE) |
 | `services.page_on_unknown` | boolean | `false` | omitted = unchanged |
 | `services.confirm_evaluations` | integer, `1..10` | `2` | omitted = unchanged |
+| `services.renotify_seconds` | integer, `0` or `60..86400` | `0` (off) | omitted = unchanged. Repeats the LAST escalation step while the incident is unresolved, for a policy with `repeat_last` on (D-0185) |
 | `services.alert_config_generation` | bigint | `0` | SERVER-OWNED; rejected in any request body |
 | service `sla_targets.burn_alert_enabled` / `burn_rules` | existing columns | `false` / `[]` | the existing SLA write path, with the phase-2 rejection lifted |
 
@@ -2961,6 +2963,7 @@ services:
       page_on: [down]
       page_on_unknown: false
       confirm_evaluations: 2
+      renotify_seconds: 0
 ```
 
 A file-managed service refuses UI paging edits with `409` and renders read-only, exactly as its
@@ -3173,8 +3176,10 @@ it is MADE.
 99. a status page's project set is ONE axis — `page.project_id` when project-scoped UNION every
     non-NULL `components.source_project`, not filtered by `source` — and the subscriber fan-out is its
     exact inverse (D-0180).
-100. a SERVICE ladder ends at its last step: the repeat runs on the monitor's renotify interval and a
-    service has none (FR-023 D8, corrected by D-0181).
+100. a service's ladder repeats its last step ONLY on a cadence the SERVICE carries —
+    `services.renotify_seconds`, 0 = off and the default, 60..86400 otherwise, read LIVE rather than
+    frozen into the incident's ladder, and part of the DB-owned alerting generation so changing it
+    dis-arms (FR-023 D8 → D-0181 → D-0185).
 101. a search hit carries its tenant — every hit type switches org and project before navigating — and
     a detail view follows the id in the route rather than the one it mounted with.
 102. durable damage predating the lifecycle fixes is REPAIRED where the correct value is derivable
@@ -3186,14 +3191,18 @@ it is MADE.
     and `next_attempt_at`. Not the caller's instant: a caller's clock is post-ITS-locks and says
     nothing about this one.
 
-104. an outbox delivery is bounded by the lease of the claim that authorised it, and the SETTLING
-    writes are not — a send that used its whole budget must still be able to record itself, or the
-    row returns to the queue and the recipients are paged twice (D-0186).
-105. an announcement that reached NOBODY is announced again once a route exists, through the ordinary
-    onset path with a new sequence and a fresh recipient snapshot; the trigger is a CONDEMNED
-    sequence (attempted, reached nobody, no retry owed) and not merely an undelivered one; the
-    superseded episode is closed as `undelivered`; and the re-announcement is itself withheld while
-    there is still nobody to tell (D-0187).
+104. an outbox delivery is bounded by the lease of the claim that authorised it, measured as a SPAN
+    in database time rather than by comparing a database timestamp with the worker's clock; the
+    SETTLING and RECORDING writes are not bounded — a send that used its whole budget must still be
+    able to record itself, or the row returns to the queue and the recipients are paged twice; every
+    sending branch honours the budget, including SMTP; and a claim whose turn came after its lease is
+    handed back with its attempt refunded rather than burned unattempted (D-0186).
+105. an announcement that reached NOBODY is announced again once a route exists, on BOTH signals,
+    through the ordinary onset path with a new sequence and a fresh recipient snapshot; the trigger
+    is a CONDEMNED sequence — attempted, reached nobody, no retry owed, which covers an empty
+    recipient snapshot, a delivery that resolved nobody, AND an event that exhausted its attempts —
+    and not merely an undelivered one; the superseded episode is closed as `undelivered`; and the
+    re-announcement is itself withheld while there is still nobody to tell (D-0187).
 ### 16.9 What phase 5 does NOT do
 
 - **service incidents** — owner decision 3; a service-anchored incident touches the status page, the

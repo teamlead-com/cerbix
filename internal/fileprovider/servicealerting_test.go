@@ -19,6 +19,7 @@ const specAlerting = `    alerting:
       page_on: [down]
       page_on_unknown: false
       confirm_evaluations: 2
+      renotify_seconds: 0
 `
 
 func alertingOf(t *testing.T, y string) *domain.ServiceAlertPolicy {
@@ -36,7 +37,7 @@ func TestServiceAlertingDeclarationParses(t *testing.T) {
 	if p == nil {
 		t.Fatal("the declared `alerting:` block parsed to nil")
 	}
-	if !p.OwnsPaging || p.PageOnUnknown || p.ConfirmEvaluations != 2 {
+	if !p.OwnsPaging || p.PageOnUnknown || p.ConfirmEvaluations != 2 || p.RenotifySeconds != 0 {
 		t.Errorf("policy = %+v", *p)
 	}
 	if len(p.PageOn) != 1 || p.PageOn[0] != domain.ServiceAlertDown {
@@ -210,5 +211,37 @@ func TestEmptyPageOnIsADeclaration(t *testing.T) {
 	omitted := alertingOf(t, alertingYAML("    alerting:\n      owns_paging: true\n"))
 	if len(omitted.PageOn) != 1 {
 		t.Errorf("omitting page_on gave %v, want the default [down]", omitted.PageOn)
+	}
+}
+
+// A file-managed service must be able to declare its repeat cadence, because it cannot use the UI:
+// paging edits on a file-managed service are refused with 409 by design. A field the API accepts and
+// the bundle does not is a field those operators simply cannot set (D-0185).
+func TestServiceAlertingDeclaresTheRenotifyCadence(t *testing.T) {
+	p := alertingOf(t, alertingYAML(`    alerting:
+      owns_paging: true
+      page_on: [down]
+      renotify_seconds: 900
+`))
+	if p == nil {
+		t.Fatal("the declared `alerting:` block parsed to nil")
+	}
+	if p.RenotifySeconds != 900 {
+		t.Fatalf("renotify_seconds = %d, want 900 — a file-managed service cannot use the UI, so a "+
+			"field missing from the bundle is one those operators cannot set at all", p.RenotifySeconds)
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("the decoded policy fails the shared validator: %v", err)
+	}
+
+	// The bounds are the shared validator's, not the parser's own opinion: `decodeErr` fails the
+	// test itself if the bundle is accepted.
+	be := decodeErr(t, alertingYAML(`    alerting:
+      owns_paging: true
+      renotify_seconds: 30
+`))
+	if !strings.Contains(be.Error(), "renotify_seconds") {
+		t.Fatalf("a 30-second cadence was rejected as %q, which does not name the field or its "+
+			"bounds", be.Error())
 	}
 }

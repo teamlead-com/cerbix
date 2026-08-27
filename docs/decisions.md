@@ -4371,6 +4371,32 @@ entry point; `SendMailTimeout` stays for callers with no deadline to offer.
 Bounded fanout comes for free: the deadline is on the whole call, so channel N+1 fails once it passes
 and the event retries.
 
+**Amended 2026-08-27, in review.** Three gaps in the same decision, all of them the shape it was
+written to prevent.
+
+The RECORDING writes were still on the bounded context, one layer below the settle: the coverage
+credit and the condemnation live inside `deliver`, which receives the budget. A send that used its
+whole budget therefore lost its credit — the page went out and coverage never armed — and lost its
+condemnation, which means the outage is never re-announced. `deliver` now takes both contexts and the
+recording writes take the caller's.
+
+The subscriber confirmation still dialled on `context.Background()`, so a hung SMTP endpoint could
+outlive the claim. `MailSender` is `SendContext` now, and `Mailer.Send` keeps its signature for
+callers with no deadline.
+
+And the budget was computed as `time.Until(LeaseUntil)` — a database timestamp minus a worker
+timestamp. Under skew that either delivers after the lease really ended or skips a claim that was
+perfectly good, which is a poor look for a monitoring product. The claim returns the database's
+`now()` alongside the lease, the budget is their difference, and the worker spends it against its own
+elapsed time: only the two clocks' RATES are assumed equal.
+
+**One more, from the same review: a claim taken and never attempted must be handed back.**
+`ClaimDueOutbox` increments `attempts` for every row in the batch and the worker delivers them one at
+a time, so a slow event at the front leaves the ones behind it past their lease before their turn.
+Returning without delivering is right; leaving the attempt spent is not — enough turns like that and
+an event dead-letters having never been sent once. `ReleaseOutboxClaim` refunds the attempt and makes
+the row due, guarded by the claim token so a row somebody else already owns is left alone.
+
 **Verified:** `TestDeliveryIsBoundedByTheClaimsLease` — a spent lease sends nothing and settles
 nothing; the deliverer receives a deadline strictly inside the lease; a delivery that burns its whole
 budget is still SETTLED; and an event with no lease gets no deadline. Removing the bound fails with
@@ -4431,6 +4457,16 @@ worker's side, including that a 500 does not condemn. Disabling the re-announcem
 outage was not re-announced after the route came back`; triggering on "not delivered yet" instead of
 "condemned" fails with `a service that stayed down announced again`.
 
-**Not covered:** an event that dies by exhausting its retries and dead-letters. That path is generic
-to the outbox and does not know it is a service alert; an operator sees the dead letter. Naming it
-here rather than implying the class is closed.
+**Amended 2026-08-27, in review.** Two gaps, and both were mine to see.
+
+The BURN arm had none of this. The migration added `undelivered_seq` to both latch tables and the
+worker could condemn either signal, but only the live evaluator gained a re-announce branch — so an
+undelivered burn FIRE stayed firing forever on exactly the signal nobody was looking at. The burn
+mirror is `TestAnUndeliveredBurnFireIsAnnouncedAgainOnceThereIsSomebodyToTell`.
+
+And "not covered: an event that dies by exhausting its retries" does not survive its own invariant.
+105 says the trigger is "no retry owed", and an announcement that ran out of attempts is as
+permanently unheard as one whose channels were all deleted — the class was closed by the words and
+open in the code. `condemnDead` handles it, decoding the payload itself because the delivery path
+that would have parsed it is the one that just failed. Only `service_alert` is condemned there;
+anything else that dead-letters is an operator's problem and says so through the dead-letter surface.

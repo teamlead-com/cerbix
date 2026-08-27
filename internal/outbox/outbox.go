@@ -188,8 +188,44 @@ func (w *Worker) drain(ctx context.Context) {
 	}
 }
 
+// leaseHeadroom is subtracted from the lease so the settling writes below still fit inside the claim
+// this worker holds. A delivery that used the whole lease would hand the row to the next worker at
+// the instant it tried to mark it delivered, turning a success into a lost CAS and a duplicate send.
+const leaseHeadroom = 2 * time.Second
+
 func (w *Worker) process(ctx context.Context, e domain.OutboxEvent) {
-	err := w.deliver(ctx, e)
+	// DELIVERY is bounded by the claim's own lease (D-0186).
+	//
+	// The claim token already stops a deposed worker from SETTLING a row it no longer owns. What it
+	// cannot do is stop that worker from still being inside an HTTP request or an SMTP session while
+	// the new owner delivers the same event — the fence lives in the database and this happens
+	// outside it. Cancelling the call does not un-send bytes a receiver already accepted, which is
+	// the part D-0177 admitted nobody can fix; bounding the call is the part that IS ours, and it
+	// makes the overlap window a decision rather than an accident.
+	//
+	// Zero means the claim did not carry a lease — an older store, or a caller that built the event
+	// itself — and then delivery keeps whatever timeout it had, which is the previous behaviour.
+	//
+	// The bound is on DELIVERY ONLY. The settling writes below run on the caller's context, because
+	// a delivery that used its whole budget would otherwise reach `MarkOutboxDelivered` with a
+	// cancelled context and turn a successful send into an unrecorded one — the row would go back to
+	// the queue and the recipients would be paged twice. That is the failure this whole change
+	// exists to reduce, and it would have been introduced by the fix.
+	deliverCtx := ctx
+	if !e.LeaseUntil.IsZero() {
+		budget := time.Until(e.LeaseUntil) - leaseHeadroom
+		if budget <= 0 {
+			// Already past it before the first byte. Do not send: this row belongs to somebody else
+			// now, and the duplicate would be one whose settle is guaranteed to lose the CAS anyway.
+			w.logger.Warn("outbox_lease_expired_before_delivery", "id", e.ID, "topic", e.Topic,
+				"lease_until", e.LeaseUntil)
+			return
+		}
+		var cancel context.CancelFunc
+		deliverCtx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
+	err := w.deliver(deliverCtx, e)
 	if err == nil {
 		applied, merr := w.store.MarkOutboxDelivered(ctx, e.ID, e.ClaimToken)
 		if merr != nil {

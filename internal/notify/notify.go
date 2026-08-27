@@ -26,7 +26,7 @@ var telegramAPI = "https://api.telegram.org"
 // Timeout-bounded so a dead SMTP endpoint fails fast instead of hanging the
 // single outbox worker (which would freeze the whole alert pipeline). Stdlib
 // smtp.SendMail has no dial timeout; mailer.SendMailTimeout adds one.
-var sendMailFunc = mailer.SendMailTimeout
+var sendMailFunc = mailer.SendMailContext
 
 // Store is the persistence surface the dispatcher needs.
 type Store interface {
@@ -62,7 +62,7 @@ func (d *Dispatcher) Deliver(ctx context.Context, monitor domain.Monitor, up boo
 	var errs []error
 	for _, ch := range channels {
 		if ch.Type == domain.ChannelEmail {
-			if err := d.sendEmail(ch, monitor, up); err != nil {
+			if err := d.sendEmail(ctx, ch, monitor, up); err != nil {
 				errs = append(errs, fmt.Errorf("channel %s: %w", ch.ID, err))
 			}
 			continue
@@ -90,7 +90,7 @@ func (d *Dispatcher) DeliverText(ctx context.Context, monitor domain.Monitor, te
 	var errs []error
 	for _, ch := range channels {
 		if ch.Type == domain.ChannelEmail {
-			if err := d.sendMail(ch, text); err != nil {
+			if err := d.sendMail(ctx, ch, text); err != nil {
 				errs = append(errs, fmt.Errorf("channel %s: %w", ch.ID, err))
 			}
 			continue
@@ -117,7 +117,7 @@ func (d *Dispatcher) DeliverProjectText(ctx context.Context, projectID, text str
 	var errs []error
 	for _, ch := range channels {
 		if ch.Type == domain.ChannelEmail {
-			if err := d.sendMail(ch, text); err != nil {
+			if err := d.sendMail(ctx, ch, text); err != nil {
 				errs = append(errs, fmt.Errorf("channel %s: %w", ch.ID, err))
 			}
 			continue
@@ -155,7 +155,7 @@ func (d *Dispatcher) DeliverChannelsReporting(
 	var errs []error
 	for _, ch := range channels {
 		if ch.Type == domain.ChannelEmail {
-			if err := d.sendMail(ch, text); err != nil {
+			if err := d.sendMail(ctx, ch, text); err != nil {
 				errs = append(errs, fmt.Errorf("channel %s: %w", ch.ID, err))
 				continue
 			}
@@ -196,12 +196,14 @@ func renderAlertText(ch domain.NotificationChannel, text string) (string, []byte
 }
 
 // sendEmail delivers a monitor transition email via SMTP.
-func (d *Dispatcher) sendEmail(ch domain.NotificationChannel, monitor domain.Monitor, up bool) error {
-	return d.sendMail(ch, Message(monitor, up))
+func (d *Dispatcher) sendEmail(
+	ctx context.Context, ch domain.NotificationChannel, monitor domain.Monitor, up bool,
+) error {
+	return d.sendMail(ctx, ch, Message(monitor, up))
 }
 
 // sendMail delivers a plain-text email (subject == body == text) via SMTP.
-func (d *Dispatcher) sendMail(ch domain.NotificationChannel, text string) error {
+func (d *Dispatcher) sendMail(ctx context.Context, ch domain.NotificationChannel, text string) error {
 	host := ch.Config["smtp_host"]
 	port := ch.Config["smtp_port"]
 	if port == "" {
@@ -223,7 +225,7 @@ func (d *Dispatcher) sendMail(ch domain.NotificationChannel, text string) error 
 	}
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n",
 		from, strings.Join(to, ", "), text, text)
-	if err := sendMailFunc(host+":"+port, auth, from, to, []byte(msg)); err != nil {
+	if err := sendMailFunc(ctx, host+":"+port, auth, from, to, []byte(msg)); err != nil {
 		return fmt.Errorf("smtp: %w", err)
 	}
 	return nil

@@ -43,7 +43,19 @@ func SetEgressDial(d func(ctx context.Context, network, addr string) (net.Conn, 
 // deadlines instead of stdlib smtp.SendMail's unbounded blocking (which would
 // stall the single outbox worker on a dead SMTP host).
 func SendMailTimeout(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
-	return sendMailTimeout(addr, auth, from, to, msg)
+	return sendMailTimeout(context.Background(), addr, auth, from, to, msg)
+}
+
+// SendMailContext is the same send bounded by the CALLER's deadline as well as its own (D-0186).
+//
+// The outbox gives a delivery a budget derived from the claim's lease, and a branch that ignores it
+// is a branch where a deposed worker is still holding an SMTP session while the row's new owner
+// sends the same mail. `sessionDeadline` alone cannot express that: it is a fixed span from now, and
+// the budget is a point in time that may be nearer.
+func SendMailContext(
+	ctx context.Context, addr string, auth smtp.Auth, from string, to []string, msg []byte,
+) error {
+	return sendMailTimeout(ctx, addr, auth, from, to, msg)
 }
 
 // sendMailTimeout mirrors smtp.SendMail (EHLO → STARTTLS if offered → AUTH →
@@ -52,27 +64,42 @@ func SendMailTimeout(addr string, auth smtp.Auth, from string, to []string, msg 
 // treated as implicit TLS (SMTPS): the connection is wrapped in TLS before the
 // SMTP greeting, since the server never speaks plaintext there (STARTTLS on 465
 // deadlocks — client waits for a greeting, server waits for a TLS handshake).
-func sendMailTimeout(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+func sendMailTimeout(
+	ctx context.Context, addr string, auth smtp.Auth, from string, to []string, msg []byte,
+) error {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
+		return err
+	}
+	// The caller's deadline caps the dial and the session both. Without a deadline of its own the
+	// context contributes nothing and the fixed spans below govern, which is the previous behaviour.
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	// Route the TCP connect through the SSRF egress guard when installed (resolve →
 	// policy check → pinned IP), so a malicious smtp_host can't reach loopback/
 	// link-local/metadata/(disallowed) private addresses. TLS ServerName below stays
 	// the configured host, so cert validation is unaffected by the pinned dial.
+	dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
+	defer cancelDial()
 	var conn net.Conn
 	if egressDial != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
-		defer cancel()
-		conn, err = egressDial(ctx, "tcp", addr)
+		conn, err = egressDial(dialCtx, "tcp", addr)
 	} else {
-		conn, err = net.DialTimeout("tcp", addr, dialTimeout)
+		var d net.Dialer
+		conn, err = d.DialContext(dialCtx, "tcp", addr)
 	}
 	if err != nil {
 		return err
 	}
-	_ = conn.SetDeadline(time.Now().Add(sessionDeadline))
+	// The EARLIER of the session span and the caller's deadline. Taking the minimum rather than one
+	// or the other is the point: a long budget must not extend a session past its own limit, and a
+	// short one must not be ignored because the session limit happens to be generous.
+	deadline := time.Now().Add(sessionDeadline)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = conn.SetDeadline(deadline)
 
 	implicitTLS := portStr == "465"
 	if implicitTLS {
@@ -214,5 +241,6 @@ func (m *Mailer) Send(to, subject, body string) error {
 		"MIME-Version: 1.0\r\n" +
 		"Content-Type: text/plain; charset=UTF-8\r\n" +
 		"\r\n" + body + "\r\n"
-	return sendMailFunc(fmt.Sprintf("%s:%d", s.Host, port), auth, s.From, []string{to}, []byte(msg))
+	return sendMailFunc(context.Background(), fmt.Sprintf("%s:%d", s.Host, port), auth, s.From,
+		[]string{to}, []byte(msg))
 }

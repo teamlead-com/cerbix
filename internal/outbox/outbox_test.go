@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
@@ -127,11 +128,22 @@ func (f *fakeStore) ClaimDueOutbox(_ context.Context, limit int) ([]domain.Outbo
 	f.pending = f.pending[n:]
 	return batch, nil
 }
-func (f *fakeStore) MarkOutboxDelivered(_ context.Context, id, _ string) (bool, error) {
+
+// The settling writes REFUSE a cancelled context, because the real ones do: pgx fails a query on a
+// dead context, and a settle that runs on the delivery's own bounded context is exactly the bug
+// D-0186's fix could have introduced. A fake that ignores ctx cannot express the difference, and a
+// mutation moving the settle onto the bounded context passed against the previous version of this.
+func (f *fakeStore) MarkOutboxDelivered(ctx context.Context, id, _ string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	f.delivered = append(f.delivered, id)
 	return true, nil
 }
-func (f *fakeStore) FailOutbox(_ context.Context, id, _, lastErr string, _ int) (bool, error) {
+func (f *fakeStore) FailOutbox(ctx context.Context, id, _, lastErr string, _ int) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	f.failed = append(f.failed, id)
 	f.failReasons = append(f.failReasons, lastErr)
 	return true, nil
@@ -175,6 +187,12 @@ type fakeNotify struct {
 	err        error
 	resolved   *int
 	delivered  *int
+	// captureDeadline records whether the delivery context carried one, and burnBudget spends it —
+	// the two halves of "bounded by the lease" that a test can otherwise only assert about itself.
+	captureDeadline bool
+	sawDeadline     bool
+	deadline        time.Time
+	burnBudget      bool
 }
 
 func (f *fakeNotify) Deliver(_ context.Context, m domain.Monitor, up bool) error {
@@ -206,9 +224,21 @@ func (f *fakeNotify) DeliverChannels(_ context.Context, channelIDs []string, tex
 // got. Zero means "all of them" for resolved; delivered defaults to resolved when the call did not
 // error, and to zero when it did.
 func (f *fakeNotify) DeliverChannelsReporting(
-	_ context.Context, channelIDs []string, text string,
+	ctx context.Context, channelIDs []string, text string,
 ) (domain.ChannelDelivery, error) {
 	f.channelIDs, f.text, f.called = channelIDs, text, f.called+1
+	if d, ok := ctx.Deadline(); ok {
+		f.sawDeadline, f.deadline = true, d
+	}
+	if f.burnBudget {
+		// Spend the whole budget — but never block forever. A fake that waits on a context with no
+		// deadline turns "the bound is missing" into a hung test instead of a failing one, and a
+		// mutation that hangs teaches nothing. The cap is well above any budget a test sets.
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+	}
 	out := domain.ChannelDelivery{Requested: len(channelIDs), Resolved: len(channelIDs)}
 	if f.resolved != nil {
 		out.Resolved = *f.resolved
@@ -1735,4 +1765,101 @@ func TestATotalSendFailureIsNotAnAnnouncement(t *testing.T) {
 	if len(fs.failed) != 1 {
 		t.Fatalf("the event was not retried (%v): a 500 is exactly what a retry is for", fs.failed)
 	}
+}
+
+// D-0186 — a delivery is bounded by the claim's own lease.
+//
+// The claim token stops a deposed worker from SETTLING a row it no longer owns. It cannot stop that
+// worker from still being inside an HTTP request while the new owner sends the same event: the fence
+// is in the database and this happens outside it. Bounding the call is the half that is ours.
+func TestDeliveryIsBoundedByTheClaimsLease(t *testing.T) {
+	b, err := json.Marshal(domain.ServiceAlert{
+		ServiceID: "svc-1", ProjectID: "p-1", ServiceName: "Checkout",
+		Signal: domain.ServiceSignalHealth, Firing: true, State: domain.ServiceAlertDown,
+		Seq: 7, ConfirmedOver: 2, Recipients: []string{"ch-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	t.Run("a lease already spent sends nothing at all", func(t *testing.T) {
+		fs := &fakeStore{
+			alertSeq: map[string]int64{"svc-1|health||": 7},
+			pending: []domain.OutboxEvent{{
+				ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b,
+				LeaseUntil: time.Now().Add(-time.Minute),
+			}},
+		}
+		nf := &fakeNotify{}
+		newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+		if nf.called != 0 {
+			t.Fatalf("the deliverer was called %d time(s) for a row this worker no longer owns: the "+
+				"send would be a duplicate whose settle is guaranteed to lose the CAS", nf.called)
+		}
+		if len(fs.delivered) != 0 || len(fs.failed) != 0 {
+			t.Fatalf("the row was settled (delivered=%v failed=%v) by a worker past its lease",
+				fs.delivered, fs.failed)
+		}
+	})
+
+	t.Run("the deliverer receives a deadline drawn from the lease", func(t *testing.T) {
+		fs := &fakeStore{
+			alertSeq: map[string]int64{"svc-1|health||": 7},
+			pending: []domain.OutboxEvent{{
+				ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b,
+				LeaseUntil: time.Now().Add(30 * time.Second),
+			}},
+		}
+		nf := &fakeNotify{captureDeadline: true}
+		newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+		if !nf.sawDeadline {
+			t.Fatal("the delivery context carried no deadline: an unbounded call can outlive the " +
+				"claim that authorised it, and then two workers are sending the same event")
+		}
+		// Headroom is subtracted so the settle still fits inside the claim. A budget of the WHOLE
+		// lease would hand the row over at the instant we tried to mark it delivered.
+		if left := time.Until(nf.deadline); left > 29*time.Second {
+			t.Fatalf("the delivery budget is %s of a 30s lease: nothing is left for the settling "+
+				"write, so a successful send would be recorded as a failure and sent again", left)
+		}
+	})
+
+	t.Run("settling is NOT bounded by the delivery budget", func(t *testing.T) {
+		// A delivery that consumed its whole budget must still be able to record itself. Otherwise
+		// the fix introduces the exact duplicate it exists to reduce.
+		fs := &fakeStore{
+			alertSeq: map[string]int64{"svc-1|health||": 7},
+			pending: []domain.OutboxEvent{{
+				ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b,
+				LeaseUntil: time.Now().Add(3 * time.Second),
+			}},
+		}
+		nf := &fakeNotify{burnBudget: true}
+		newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+		if len(fs.delivered) != 1 {
+			t.Fatalf("a delivery that used its whole budget was not settled (delivered=%v failed=%v): "+
+				"the row goes back to the queue and the recipients are paged a second time",
+				fs.delivered, fs.failed)
+		}
+	})
+
+	t.Run("no lease means the previous behaviour", func(t *testing.T) {
+		fs := &fakeStore{
+			alertSeq: map[string]int64{"svc-1|health||": 7},
+			pending:  []domain.OutboxEvent{{ID: "e-1", Topic: domain.TopicServiceAlert, Payload: b}},
+		}
+		nf := &fakeNotify{captureDeadline: true}
+		newWorker(fs, &fakeWebhook{}, nf, &fakeMetrics{}).drain(context.Background())
+
+		if nf.called != 1 {
+			t.Fatalf("an event with no lease was not delivered (called=%d)", nf.called)
+		}
+		if nf.sawDeadline {
+			t.Fatal("a deadline was imposed on an event carrying no lease: an older store, or a " +
+				"caller that built the event itself, must keep the behaviour it had")
+		}
+	})
 }

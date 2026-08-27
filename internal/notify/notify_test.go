@@ -91,7 +91,7 @@ func TestEmailDelivery(t *testing.T) {
 	}
 	captured := make(chan sent, 1)
 	orig := sendMailFunc
-	sendMailFunc = func(addr string, _ smtp.Auth, from string, to []string, msg []byte) error {
+	sendMailFunc = func(_ context.Context, addr string, _ smtp.Auth, from string, to []string, msg []byte) error {
 		captured <- sent{addr: addr, from: from, to: to, msg: string(msg)}
 		return nil
 	}
@@ -244,7 +244,7 @@ func TestChannelDeliveryReportsAskedExistedAndSucceeded(t *testing.T) {
 func TestChannelDeliveryCountsEmailSendsThatSucceeded(t *testing.T) {
 	var fail bool
 	orig := sendMailFunc
-	sendMailFunc = func(_ string, _ smtp.Auth, _ string, _ []string, _ []byte) error {
+	sendMailFunc = func(_ context.Context, _ string, _ smtp.Auth, _ string, _ []string, _ []byte) error {
 		if fail {
 			return errors.New("smtp refused")
 		}

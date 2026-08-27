@@ -121,7 +121,8 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		 -- second attempt earns a longer backoff than a first-attempt one, so the older retry came
 		 -- back AFTER the newer event and the batch was delivered in the reverse of the order it was
 		 -- owed in.
-		 RETURNING e.id, e.topic, e.payload, e.attempts, e.claim_token, due.was_due, e.created_at`,
+		 RETURNING e.id, e.topic, e.payload, e.attempts, e.claim_token, due.was_due, e.created_at,
+		           e.next_attempt_at`,
 		limit, domain.FencedTopics())
 	if err != nil {
 		return nil, fmt.Errorf("store: claim outbox: %w", err)
@@ -131,7 +132,8 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 	for rows.Next() {
 		var e domain.OutboxEvent
 		var due, created time.Time
-		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.Attempts, &e.ClaimToken, &due, &created); err != nil {
+		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.Attempts, &e.ClaimToken, &due, &created,
+			&e.LeaseUntil); err != nil {
 			return nil, fmt.Errorf("store: scan outbox: %w", err)
 		}
 		out = append(out, claimed{e, due, created})

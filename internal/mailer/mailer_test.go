@@ -1,6 +1,7 @@
 package mailer
 
 import (
+	"context"
 	"net/smtp"
 	"testing"
 )
@@ -11,7 +12,7 @@ func TestLiveMailerResolvesPerSend(t *testing.T) {
 		to         []string
 	}
 	orig := sendMailFunc
-	sendMailFunc = func(addr string, _ smtp.Auth, from string, to []string, _ []byte) error {
+	sendMailFunc = func(_ context.Context, addr string, _ smtp.Auth, from string, to []string, _ []byte) error {
 		captured.addr, captured.from, captured.to = addr, from, to
 		return nil
 	}

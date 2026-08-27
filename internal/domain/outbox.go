@@ -128,6 +128,15 @@ type OutboxEvent struct {
 	// mark-delivered/fail so a stale claim (lease expired, row re-claimed) can't
 	// overwrite the current owner's terminal state.
 	ClaimToken string
+	// LeaseUntil is when this claim stops being ours: the `next_attempt_at` the claim wrote, which
+	// doubles as the lease. After it, another worker may take the row.
+	//
+	// It is carried so DELIVERY can be bounded by it (D-0186). The claim token already stops a
+	// deposed worker from SETTLING a row it no longer owns, but nothing stopped it from still being
+	// inside an HTTP request or an SMTP session while the new owner delivered the same event —
+	// which is the duplicate the fence cannot see, because it happens outside the database. Zero
+	// means the caller did not supply one and delivery falls back to its own timeout.
+	LeaseUntil time.Time
 }
 
 // OutboxEventView is an outbox row exposed to operators (the dead-letter admin

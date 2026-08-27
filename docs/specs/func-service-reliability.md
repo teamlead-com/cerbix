@@ -3186,6 +3186,9 @@ it is MADE.
     and `next_attempt_at`. Not the caller's instant: a caller's clock is post-ITS-locks and says
     nothing about this one.
 
+104. an outbox delivery is bounded by the lease of the claim that authorised it, and the SETTLING
+    writes are not — a send that used its whole budget must still be able to record itself, or the
+    row returns to the queue and the recipients are paged twice (D-0186).
 ### 16.9 What phase 5 does NOT do
 
 - **service incidents** — owner decision 3; a service-anchored incident touches the status page, the

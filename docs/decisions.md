@@ -4335,3 +4335,51 @@ after it, and an acknowledgement stops it) paired with the existing off-by-defau
 fails the first with `the repeat fired 0 step(s) after six minutes of a five-minute cadence`; dropping
 the column from the generation trigger fails the second with `changing the repeat cadence left
 coverage armed`.
+
+## D-0186 — a delivery is bounded by the claim that authorised it (2026-08-27)
+
+**Context.** D-0177 narrowed the outbox's guarantee to DISPATCH order and said plainly that arrival is
+not ours: cancelling a call does not un-send bytes a receiver has already accepted. The review
+sketched what IS ours and iter-0161 §31 recorded it as available rather than done — one whole-call
+deadline drawn from the claim's lease, every branch context-aware including SMTP.
+
+The gap it closes: the claim token stops a deposed worker from SETTLING a row it no longer owns, and
+that fence lives in the database. It cannot stop that worker from still being inside an HTTP request
+or an SMTP session while the row's new owner sends the same event, because that happens outside the
+database entirely. The overlap window was however long a delivery happened to take.
+
+**Decision.** `ClaimDueOutbox` returns the `next_attempt_at` it wrote — the lease — on the event, and
+`process` derives the delivery context's deadline from it, minus two seconds of headroom. A lease
+already spent sends NOTHING: the row belongs to somebody else, and the duplicate's settle would lose
+the CAS anyway. A zero lease means the previous behaviour, for an older store or a caller that built
+the event itself.
+
+**The bound is on DELIVERY only, and that is the load-bearing detail.** The settling writes run on the
+caller's context. A delivery that used its whole budget would otherwise reach `MarkOutboxDelivered`
+with a cancelled context, and a successful send recorded as a failure goes back to the queue and pages
+the recipients twice — the exact duplicate this decision exists to reduce, introduced by its own fix.
+The headroom is the same concern from the other side: a budget of the WHOLE lease hands the row over
+at the instant we try to mark it delivered.
+
+**SMTP was the branch that ignored it.** `sendMailTimeout` dialled on `context.Background()` and set a
+fixed session deadline, so a mail send could outlive any budget. It now takes the caller's context,
+dials with it, and sets the connection deadline to the EARLIER of the session span and the context's
+deadline — the minimum, because a long budget must not extend a session past its own limit and a short
+one must not be ignored because the session limit is generous. `mailer.SendMailContext` is the new
+entry point; `SendMailTimeout` stays for callers with no deadline to offer.
+
+Bounded fanout comes for free: the deadline is on the whole call, so channel N+1 fails once it passes
+and the event retries.
+
+**Verified:** `TestDeliveryIsBoundedByTheClaimsLease` — a spent lease sends nothing and settles
+nothing; the deliverer receives a deadline strictly inside the lease; a delivery that burns its whole
+budget is still SETTLED; and an event with no lease gets no deadline. Removing the bound fails with
+`the deliverer was called 1 time(s) for a row this worker no longer owns`; removing the headroom fails
+with `the delivery budget is 29.99s of a 30s lease`; moving the settle onto the bounded context fails
+with `a delivery that used its whole budget was not settled`.
+
+**Two fakes had to be corrected to make those mutations meaningful**, and both corrections are the
+point rather than incidental. The notifier fake blocked on `ctx.Done()` with no fallback, so removing
+the bound HUNG the suite instead of failing it — a mutation that hangs teaches nothing. And the store
+fake ignored its context, so the settle mutation passed: a fake that does not model the property being
+asserted cannot witness its absence.

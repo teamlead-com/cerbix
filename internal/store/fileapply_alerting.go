@@ -13,7 +13,7 @@ import (
 // FR-021 §16.6a — applying the `alerting:` declaration of a format-2 bundle.
 //
 // The UI's writer, `UpdateServiceAlertPolicy`, REFUSES a file-managed service on purpose: these
-// four fields are part of the desired state, so the file owns them and the UI renders them
+// fields are part of the desired state, so the file owns them and the UI renders them
 // read-only. The file apply therefore needs its own write, and it lives in its own file rather
 // than beside the UI one so that the refusal there stays unconditional — a shared entry point
 // with an "is this the file provider?" flag is exactly how a UI path eventually slips through.

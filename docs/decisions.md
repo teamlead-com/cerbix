@@ -4487,6 +4487,12 @@ anything else that dead-letters is an operator's problem and says so through the
 
 ## D-0188 — FR-024 Reliability Gate: the design gate is closed (2026-08-27 → 2026-08-28)
 
+> **Partly SUPERSEDED the same day by the design review (D-0189, D-0190).** Two clauses below are no
+> longer the contract: the `budget_below` threshold as a remaining ratio with default 0.10 (an error of
+> units — it is `budget_consumed_percent >= N`, default 90, spec D3), and CLI exit 3 for `UNKNOWN`
+> (the exit follows `action`, spec D4/D16). The effective contract is the spec's D3, D4 and D16; this
+> record keeps its text so the correction can be read against what it corrected.
+
 **Context.** After iter-0161 closed, the independent reviewer proposed the next direction — closing the
 SRE loop from measured reliability to a release decision — as Change Intelligence plus an error-budget
 release gate. The adversarial pass in the party reduced it: the gate is a DECISION over facts cerbix
@@ -4547,3 +4553,35 @@ named by severity.
 statement about the code — I named an owner without reading what it returned. And the review caught my
 own evidence again: revision 1's threat model asserted a mitigation ("existing rate limiting") that does
 not exist in the tree. Same class as iter-0161 §47, now in a document rather than a test.
+
+## D-0190 — FR-024 revision 3: the seal lag is bounded, and an override does not rewrite the fact (2026-08-28)
+
+**Context.** Design review round 2 of `func-reliability-gate.md` (revision 2, `113308f`) returned 2 P0,
+5 P1 and 4 P2. Round 1 was closed on substance; these were new.
+
+**The P0 that matters.** Revision 2 called the seal lag "an accepted cost" and did not bound it. A
+30-day window stays quotable when the materializer has been stopped for a week — the window simply ends
+at an old watermark — so a gate would go on saying `ALLOW` on a budget nobody had measured since, and a
+policy that ignores burn clauses has nothing left to notice. **Owner decision:** `max_seal_lag` is a
+policy field, `1m..24h`, default **15 minutes** — the seal cadence is one minute, so fifteen catches a
+stopped materializer without firing on one missed tick. Past it, every budget clause is UNAVAILABLE with
+`seal_stale`. The lag is stated by the REPORT PATH and shown on the service page, so the gate and the
+screen read one number; the alternative of a single product-wide constant was declined because a service
+probed every second and one probed hourly should not share a bound that only a release can change.
+
+**The other P0.** An override was written to flip `state` as well as `action`, with an `original_state`
+kept alongside. That rewrote the observed fact for the operator's convenience, and the ledger would have
+recorded a history that did not happen. An override changes ONLY `action`; `state` and `reasons[]` stay
+what reliability said; `unoverridden_action` carries what the pipeline would otherwise have been told;
+the metric sees `state="BLOCK",action="ALLOW",overridden="true"`.
+
+**The rest, author's fixes:** an expired override releases its slot (the create transaction closes it as
+`expired` under the service lock, since a partial unique index cannot consult `now()`), and a policy
+DELETE revokes like an edit; the ledger read is a PROJECT-scoped route with no service-existence check,
+proven by an HTTP read after the service is deleted; an explicit presence table for the response, since
+`NOT_CONFIGURED` has no policy revision and a deleted target has no objective; a process-wide AND
+per-principal load bound checked before any transaction opens, plus a begin-through-commit budget; D4's
+closing sentence brought into line with its own algorithm; the API strict — the request carries every
+assignment, the server fills nothing, the defaults are the UI's template; "no new store" narrowed to
+what is true; the live `status.md` NFR-019 row corrected from revision 1's false owner; and D-0188's two
+superseded clauses marked as such rather than left as a second live answer.

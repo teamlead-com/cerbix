@@ -1,6 +1,10 @@
 # func-reliability-gate — a deploy asks whether the error budget allows it (FR-024 / NFR-019)
 
-> **Lifecycle: DESIGN APPROVED at revision 13 (party [47], 2026-08-28) — design only, no code yet.** The
+> **Lifecycle: DEFERRED by the owner on 2026-08-28 (D-0202) — design approved at revision 13 (party [47]),
+> UI mock static-contract approved (party [59]), no implementation scheduled.** The requirement was proposed
+> by the reviewer as a continuation of FR-021, not asked for by cerbix's users; the owner parked it until a
+> CI-side ask exists. Everything below stays the approved design and needs no re-approval to resume — only
+> a fresh focused review of the codebase it lands on. The
 > reviewer re-read the working tree independently: no findings remain. Conditions carried forward: the
 > owner-approved UI mock gate precedes any SPA code; implementation must discharge all 21 invariants of §6
 > and the full §7 matrix with named tests and mutations; the PostgreSQL 15.8 prepared-statement case is a

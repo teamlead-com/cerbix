@@ -5037,3 +5037,32 @@ D-0190, D-0193, D-0194), eight implementer-authority revisions (D-0191, D-0192, 
 reviewer retractions (overlapping `sed` ranges, each recorded), and a stale-spelling guard that retired
 the vocabulary of every superseded revision and caught its own author in prose seven times before a
 commit.
+
+## D-0202 — FR-024/NFR-019 deferred: an approved design, parked until somebody asks for it (2026-08-28)
+
+**Context.** The design gate was approved at revision 13 (D-0201) and the UI mock passed the reviewer's
+static contract pass at its third revision (party [59]; visual approval by the owner still pending). Asked
+what the requirement is for, the owner heard the plain answer — a deploy gate a CI pipeline asks before
+releasing a service, driven by the service's error budget and live alerts, every answer recorded — and
+where it came from: the reviewer proposed it in the party as the logical continuation of FR-021, and the
+owner said yes to writing it as a design gate. No cerbix user had asked for it.
+
+**Decision (owner, 2026-08-28): option 2 of three — defer.** The specification stays approved at revision
+13; the mock stays in `docs/design/` with its notes section marked deferred, neither approved nor rejected
+visually; no code is written, no migration is added, no Vue file is touched. FR-024 and NFR-019 stay
+`TODO` in the status — the deferral is stated in the row text, not as a fourth status value: the
+owner declined to widen a vocabulary `docs-check` deliberately keeps to three states for one row. The alternatives were to build it in full (a phase the size of FR-021) or to
+build a minimum (policy + `gate check` + ledger, no overrides and no history UI); both were declined for
+now because the effort would go into a capability nobody has asked to use, while approved-but-unbuilt
+surfaces from iter-0155 still wait on the owner.
+
+**What deferral preserves.** Thirteen spec revisions, thirteen owner and implementer decisions
+(D-0188 … D-0201), the stale-spelling guard and its 18 fixtures — all of it stays in the tree and keeps
+being checked by `make docs-check`, so the design cannot rot silently. What it does not preserve is
+currency: the codebase the spec cites (`LeaderSession`, `serviceFactMaintenanceLoop`, `subCadenceTimeout`,
+the storage-mode branches) will move, so **resuming means a fresh focused review against the then-current
+code before any implementation**, then the owner's visual approval of the mock, then the §6/§7 discharge.
+
+**Recorded for the process.** The question "what is this spec for?" arrived after twelve review rounds.
+It should have been asked — by me — before the first one: a design gate opened on a reviewer's proposal
+needs the owner's *why* stated in the spec's first paragraph, not inferred from a "давайте".

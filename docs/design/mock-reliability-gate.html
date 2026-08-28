@@ -1,0 +1,791 @@
+<title>Cerbix Release Gate</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). FR-024 adds
+   NO new colour: the five decision states are said with the hues the language already has —
+   ALLOW borrows --up, WARN borrows --degraded, BLOCK borrows --down, and UNKNOWN / NOT_CONFIGURED
+   borrow --pending with the DASHED ring phases 2–5 gave to "deficient evidence" and "a different
+   kind of thing". An override is an operator's ACT in force, not a state of the service, so it is
+   the accent chip ("declared here" grammar) and never a status hue. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+a{color:var(--accent); text-decoration:none} a:hover{text-decoration:underline}
+.top{
+  position:sticky; top:0; z-index:20; height:56px; display:flex; align-items:center; gap:12px;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.brand{display:flex; align-items:center; gap:9px}
+.brand .wm{font-size:15px; font-weight:600; letter-spacing:-.01em}
+.top .spacer{flex:1}
+.tbtn{border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:12.5px; color:var(--ink-2); background:var(--surface)}
+.tbtn.on{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.screens{
+  position:sticky; top:56px; z-index:19; display:flex; gap:2px; overflow-x:auto;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.screens button{padding:10px 12px 9px; font-size:13px; color:var(--ink-3); border-bottom:2px solid transparent; white-space:nowrap}
+.screens button.on{color:var(--ink); border-bottom-color:var(--accent); font-weight:550}
+.screens .n{font-size:10.5px; color:var(--ink-3); margin-right:5px}
+.wrap{padding:22px; max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+.head h1{font-size:21px; font-weight:650; letter-spacing:-.015em}
+.head .sub{margin-top:3px; font-size:13px; color:var(--ink-3)}
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.card > header{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card > header h2{font-size:14px; font-weight:600}
+.card .body{padding:16px}
+.card .spacer{flex:1}
+.stack{display:flex; flex-direction:column; gap:14px}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:760px){.grid2{grid-template-columns:1fr}}
+
+/* Decision-state pills. Status is never colour alone: dot + text, always. */
+.pill{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px 0 7px; border-radius:999px; font-size:12px; font-weight:600; letter-spacing:.01em}
+.pill .dot{width:7px; height:7px; border-radius:50%; flex:none}
+.pill.allow{color:var(--up); background:var(--up-weak)} .pill.allow .dot{background:var(--up)}
+.pill.warn{color:var(--degraded); background:var(--degraded-weak)} .pill.warn .dot{background:var(--degraded)}
+.pill.block{color:var(--down); background:var(--down-weak)} .pill.block .dot{background:var(--down)}
+/* UNKNOWN and NOT_CONFIGURED: pending hue + DASHED ring. Deficient evidence reads as deficient. */
+.pill.unk{color:var(--ink-2); background:var(--pending-weak); border:1px dashed var(--border-strong)} .pill.unk .dot{background:var(--pending)}
+.pill.nc{color:var(--ink-3); background:var(--inset); border:1px dashed var(--border-strong)} .pill.nc .dot{background:transparent; border:1.5px dashed var(--pending)}
+.pill.big{height:30px; font-size:13.5px; padding:0 12px 0 9px} .pill.big .dot{width:9px; height:9px}
+
+.chip{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:11.5px; color:var(--ink-2); background:var(--surface)}
+.chip.mono{font-family:ui-monospace,Menlo,monospace; font-size:10.5px}
+.chip.file{background:var(--inset)}
+.chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.chip.dorm{border-style:dashed; color:var(--ink-3)}
+.chip.warnc{border-color:var(--degraded); color:var(--degraded); background:var(--degraded-weak)}
+.chip.downc{border-color:var(--down); color:var(--down); background:var(--down-weak)}
+
+.row{display:flex; flex-wrap:wrap; align-items:center; gap:9px; padding:11px 16px; border-bottom:1px solid var(--border)}
+.row:last-child{border-bottom:0}
+.row .nm{font-weight:550; font-size:13.5px}
+.row .spacer{flex:1}
+.row .sub{font-size:12.5px; color:var(--ink-3); width:100%}
+
+/* Segmented control for a clause assignment. `ignore` is outlined only: it is not a state. */
+.seg{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden}
+.seg span{padding:3px 10px; font-size:11.5px; color:var(--ink-3); border-right:1px solid var(--border)}
+.seg span:last-child{border-right:0}
+.seg span.block.on{background:var(--down-weak); color:var(--down); font-weight:600}
+.seg span.warn.on{background:var(--degraded-weak); color:var(--degraded); font-weight:600}
+.seg span.ignore.on{background:var(--inset); color:var(--ink-2); font-weight:600}
+
+.kv{display:grid; grid-template-columns:max-content 1fr; gap:6px 18px; font-size:13px}
+.kv .k{color:var(--ink-3)}
+.kpi{font-size:26px; font-weight:500; letter-spacing:-.01em}
+.kpi small{font-size:12px; color:var(--ink-3); font-weight:400; margin-left:6px; letter-spacing:0}
+
+.field{display:flex; flex-direction:column; gap:5px}
+.field label{font-size:12.5px; color:var(--ink-2); font-weight:500}
+.inp{display:inline-flex; align-items:center; gap:8px; height:30px; border:1px solid var(--border); border-radius:6px; padding:0 10px; font-size:13px; background:var(--surface); color:var(--ink)}
+.inp.err{border-color:var(--down)}
+.inp .unit{color:var(--ink-3); font-size:12px}
+.inp.sel::after{content:"⌄"; color:var(--ink-3); margin-left:auto}
+.hint{font-size:12px; color:var(--ink-3)}
+.hint.bad{color:var(--down)}
+
+.btn{display:inline-flex; align-items:center; gap:6px; height:30px; border:1px solid var(--border); border-radius:6px; padding:0 12px; font-size:13px; color:var(--ink); background:var(--surface)}
+.btn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:550}
+.btn.danger{border-color:var(--down); color:var(--down)}
+.btn.sm{height:26px; font-size:12.5px; padding:0 10px}
+.btn[disabled]{opacity:.5; cursor:not-allowed}
+
+.err{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--down); background:var(--down-weak); color:var(--down); border-radius:6px; padding:9px 12px; font-size:13px}
+.err b{font-weight:650}
+.err .fix{margin-left:auto; flex:none; border:1px solid var(--down); border-radius:5px; padding:2px 8px; font-size:11.5px; background:var(--surface)}
+.warnb{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--degraded); background:var(--degraded-weak); color:var(--degraded); border-radius:6px; padding:9px 12px; font-size:13px}
+.info{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--border-strong); background:var(--surface-2); color:var(--ink-2); border-radius:6px; padding:9px 12px; font-size:13px}
+
+pre.code{
+  margin:0; padding:12px 14px; border:1px solid var(--border); border-radius:6px; background:var(--inset);
+  font:12.5px/1.55 ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; color:var(--ink); overflow-x:auto;
+  font-variant-numeric:tabular-nums;
+}
+pre.code .c{color:var(--ink-3)}
+pre.code .k{color:var(--accent)}
+pre.code .n{color:var(--ink-2)}
+
+table.tbl{width:100%; border-collapse:collapse; font-size:13px}
+table.tbl th{text-align:left; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3); padding:9px 12px; border-bottom:1px solid var(--border); white-space:nowrap}
+table.tbl td{padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:top}
+table.tbl tr:last-child td{border-bottom:0}
+table.tbl tr:hover td{background:var(--surface-2)}
+.tblwrap{overflow-x:auto}
+.reasons{display:flex; flex-wrap:wrap; gap:4px}
+
+.legend{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px}
+.legend > div{border:1px solid var(--border); border-radius:7px; padding:11px 12px; display:flex; flex-direction:column; gap:7px; font-size:12.5px; color:var(--ink-2)}
+.legend .mono{font-size:12px}
+
+.note{
+  border:1px dashed var(--note-border); border-left:3px solid var(--note);
+  background:var(--note-bg); border-radius:6px; padding:10px 12px; font-size:12.5px; color:var(--ink-2);
+  display:flex; gap:10px; align-items:flex-start;
+}
+.note .ref{flex:none; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--note); border:1px solid var(--note-border); border-radius:4px; padding:1px 6px; margin-top:1px; white-space:nowrap}
+.note b{color:var(--ink); font-weight:600}
+body.hide-notes .note{display:none}
+
+.foot{padding:18px 22px 36px; font-size:12px; color:var(--ink-3); max-width:1080px; margin:0 auto}
+.foot b{color:var(--ink-2)}
+@media (prefers-reduced-motion: no-preference){ .card{transition:border-color .12s} }
+</style>
+
+<header class="top">
+  <div class="brand">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/></svg>
+    <span class="wm mono">cerbix</span>
+  </div>
+  <span class="chip mono">FR-024 · release gate</span>
+  <div class="spacer"></div>
+  <button class="tbtn on" id="notesBtn" aria-pressed="true">Spec notes</button>
+  <button class="tbtn" id="themeBtn">Theme</button>
+</header>
+
+<nav class="screens" id="screens" aria-label="Mocked screens"></nav>
+<div class="wrap" id="view"></div>
+<footer class="foot">
+  FR-024 / NFR-019 <b>design track</b> · mock for the owner's approval BEFORE any frontend code · tokens verbatim from
+  <span class="mono">frontend/src/style.css</span> · behaviour follows
+  <span class="mono">docs/specs/func-reliability-gate.md</span> revision 13 (design approved at party [47], D-0201).
+</footer>
+
+<script>
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const note = (ref, html) => `<div class="note"><span class="ref">${esc(ref)}</span><div>${html}</div></div>`;
+const pill = (k, t, big) => `<span class="pill ${k}${big ? " big" : ""}"><span class="dot"></span>${esc(t)}</span>`;
+const seg = (on) => `<span class="seg">
+  <span class="block ${on === "block" ? "on" : ""}">block</span>
+  <span class="warn ${on === "warn" ? "on" : ""}">warn</span>
+  <span class="ignore ${on === "ignore" ? "on" : ""}">ignore</span></span>`;
+const STATE = { ALLOW: "allow", WARN: "warn", BLOCK: "block", UNKNOWN: "unk", NOT_CONFIGURED: "nc" };
+const st = (s, big) => pill(STATE[s], s === "NOT_CONFIGURED" ? "not configured" : s, big);
+
+/* ── 1. The card on the service, before anyone configured anything ─────────────────── */
+function sEmpty() {
+  return `
+  <div class="head">
+    <h1>Checkout · release gate</h1>
+    <p class="sub">Payments · service <span class="mono">checkout</span> · a new card on the service detail, between <b>Alerting</b> and <b>Dependencies</b></p>
+  </div>
+
+  ${note("D13 · §1", `The gate is an <b>operational control</b> of the service, like paging ownership — not part of the
+    declaration, not part of bundle format 2, owned by the UI/API even for a file-managed service. So it lives on the
+    service detail as its own card, after <b>Alerting</b> (who is paged) and before <b>Dependencies</b>: the order says
+    facts → who is woken → who may deploy. Until somebody configures it, every answer is <span class="mono">NOT_CONFIGURED</span>
+    and a pipeline gets exit&nbsp;4 — never a silent ALLOW.`)}
+
+  <div class="card">
+    <header><h2>Release gate</h2>${st("NOT_CONFIGURED")}<span class="spacer"></span>
+      <span class="chip dorm">no policy</span></header>
+    <div class="body stack">
+      <p style="color:var(--ink-2); max-width:62ch">
+        Nothing asks this service before a release yet. A gate policy names <b>one SLO window</b> of this service and
+        says, for each release-risk fact, whether it <b>blocks</b>, <b>warns</b> or is <b>ignored</b>. A pipeline then
+        asks <span class="mono">cerbix gate check</span> immediately before the protected step and gets one of
+        <span class="mono">ALLOW · WARN · BLOCK · UNKNOWN</span>, with the evidence it rests on.
+      </p>
+      <div class="row" style="border:1px solid var(--border); border-radius:7px; padding:11px 13px">
+        <span class="lbl" style="min-width:140px">Windows with a target</span>
+        <span class="chip mono">30d · 99.90 %</span>
+        <span class="chip mono">7d · 99.50 %</span>
+        <span class="spacer"></span>
+        <span class="chip">a policy picks exactly one</span>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+        <button class="btn pri">Configure gate</button>
+        <span class="hint">shown to <span class="mono">editor</span> and above (<span class="mono">gate:policy:write</span>) · a viewer sees this card without the button</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Latest decision <span style="color:var(--ink-3); font-weight:500">· last 30 days</span></h2><span class="spacer"></span><a class="mono" href="#" style="font-size:11.5px">all decisions →</a></header>
+    <div class="body" style="display:flex; gap:12px; align-items:center; color:var(--ink-3); font-size:13px">
+      <span class="pill nc"><span class="dot"></span>no decision yet</span>
+      <span>No pipeline has asked in the last 30 days. This card reads the project ledger; it never asks the gate itself.</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>What a pipeline sees today</h2><span class="spacer"></span><span class="chip mono">exit 4</span></header>
+    <div class="body stack">
+<pre class="code">$ CERBIX_URL=https://cerbix.internal CERBIX_TOKEN=… cerbix gate check --project payments --service checkout
+<span class="k">state=NOT_CONFIGURED decision=0191c2a4-6b3e-7a10-8f2e-3c9d1a7e5b04</span>          <span class="c">← stdout: ONE line</span>
+<span class="n">not_configured: payments/checkout has no gate policy — https://cerbix.internal/docs/gate#not-configured</span>  <span class="c">← stderr: reasons</span>
+$ echo $?
+4
+$ cerbix gate check --project payments --service checkout --json | jq .reasons
+[ { "code": "not_configured", "docs": "https://cerbix.internal/docs/gate#not-configured" } ]   <span class="c">← jq projecting reasons out of the verbatim --json response</span></pre>
+      <p class="hint">The stdout line is <span class="mono">state=… [action=…] [override=…] decision=…</span>, greppable and stable; reasons and diagnostics go to stderr. <span class="mono">--json</span> emits the API response verbatim (<span class="mono">jq .reasons</span> above only projects it). <span class="mono">reasons[]</span> is never empty for NOT_CONFIGURED — it carries its own reason and the documentation link.</p>
+      <div class="legend">
+        <div><span class="mono">exit 0</span><span>ALLOW or WARN — the step may proceed; WARN is printed in full</span></div>
+        <div><span class="mono">exit 2</span><span>BLOCK — the step must not proceed</span></div>
+        <div><span class="mono">exit 4</span><span>NOT_CONFIGURED — nobody has said what matters here</span></div>
+        <div><span class="mono">exit 1</span><span>transport — auth, timeout, 429 (Retry-After printed), 503 — never a decision</span></div>
+      </div>
+    </div>
+  </div>
+
+  ${note("D16 · §5a", `The CLI takes <span class="mono">CERBIX_URL</span> and <span class="mono">CERBIX_TOKEN</span> from the
+    environment only — never a flag, because flags land in shell history. It does <b>not retry a 429</b>: a pipeline that
+    retries into a rate limit is the load the limit exists to shed. It prints <span class="mono">Retry-After</span> and exits 1.`)}
+
+  <div class="card">
+    <header><h2>Who sees which controls</h2><span class="spacer"></span><span class="chip">the existing rule: never a button that can only 403</span></header>
+    <div class="tblwrap">
+      <table class="tbl">
+        <thead><tr><th>Role on Payments</th><th>Gate card &amp; decision</th><th>Policy</th><th>Override</th><th>Histories</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mono">viewer</span> · <span class="mono">gate:evaluate</span></td><td>read — state, reasons, evidence</td><td>read-only rendering of the policy; <b>no</b> Configure / Save / Delete</td><td>reads the active override; <b>no</b> Create / Revoke</td><td>both, read</td></tr>
+          <tr><td><span class="mono">editor</span> · <span class="mono">gate:policy:write</span></td><td>read</td><td>Configure, Save, Delete… shown</td><td>reads the active override; the <i>Add an override</i> card is <b>absent</b>, with one line saying who can</td><td>both, read</td></tr>
+          <tr><td><span class="mono">project_admin</span> · <span class="mono">gate:override</span></td><td>read</td><td>all controls</td><td>Create, Revoke shown</td><td>both, read</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="row"><span class="hint">Controls a role cannot use are <b>not rendered</b> — the pattern <span class="mono">ServiceAlerting.vue</span> already follows (<span class="mono">readOnly</span> = not <span class="mono">canWrite</span>). A file-managed service does NOT make the gate read-only: D13 keeps the gate UI/API-owned even there.</span></div>
+  </div>
+
+  ${note("D12", `Three central <span class="mono">authz.Action</span>s mapped to the existing roles — <span class="mono">viewer+</span> evaluates
+    and reads the ledger, <span class="mono">editor+</span> writes the policy, <span class="mono">project_admin+</span> overrides — and no ad-hoc
+    role comparison in the handlers. An API token asks the gate with the role it already has.`)}`;
+}
+
+/* ── 2. The policy editor ─────────────────────────────────────────────────────────── */
+function sEditor() {
+  return `
+  <div class="head">
+    <h1>Checkout · release gate</h1>
+    <p class="sub">Configure — the whole policy document, every field explicit, saved as one revision</p>
+  </div>
+
+  ${note("D11 · D14", `The form is the <b>UI's create template</b>, and the request carries <b>every</b> field: the version,
+    the window, all five clause assignments, the threshold, the seal-lag bound and the unknown behaviour. The server fills
+    nothing in — an omitted field is a refused request, not a default — so a stored policy means exactly what somebody
+    typed. Saving sends <span class="mono">PUT …/gate/policy</span> with <span class="mono">expected_revision</span>.`)}
+
+  <div class="card">
+    <header><h2>Gate policy</h2><span class="chip mono">schema_version 1</span><span class="chip mono">revision 6</span>
+      <span class="spacer"></span><span class="chip file">file-managed service</span><span class="chip acc">gate owned here</span></header>
+    <div class="body stack">
+
+      <div class="grid2">
+        <div class="field">
+          <label>SLO window</label>
+          <span class="inp sel mono">30d · objective 99.90 %</span>
+          <span class="hint">only windows this service has a target for · the budget below is this window's</span>
+        </div>
+        <div class="field">
+          <label>When a fact is unavailable</label>
+          <span class="inp sel">warn — proceed, say why</span>
+          <span class="hint"><span class="mono">unknown_behavior</span>: <b>warn</b> lets a release through with the reasons printed; <b>block</b> holds it</span>
+        </div>
+      </div>
+
+      <div>
+        <div class="lbl" style="margin-bottom:8px">Release-risk facts · each must be assigned</div>
+        <div style="border:1px solid var(--border); border-radius:7px">
+          <div class="row"><span class="nm mono">budget_exhausted</span><span class="spacer"></span>${seg("block")}
+            <span class="sub">the window's error budget is spent — burned ≥ 100 %</span></div>
+          <div class="row"><span class="nm mono">budget_consumed</span>
+            <span class="inp mono" style="height:26px"><input value="90" style="width:34px; border:0; background:none; font:inherit; color:inherit; text-align:right" aria-label="threshold percent"><span class="unit">% burned</span></span>
+            <span class="spacer"></span>${seg("warn")}
+            <span class="sub">burned ≥ the threshold · 1..100, an integer</span></div>
+          <div class="row"><span class="nm mono">page_burn_firing</span><span class="spacer"></span>${seg("block")}
+            <span class="sub">a <b>page</b>-severity burn rule of this window is firing right now</span></div>
+          <div class="row"><span class="nm mono">ticket_burn_firing</span><span class="spacer"></span>${seg("warn")}
+            <span class="sub">a <b>ticket</b>-severity burn rule of this window is firing</span></div>
+          <div class="row"><span class="nm mono">service_incident_open</span><span class="spacer"></span>${seg("warn")}
+            <span class="sub">an unresolved incident opened automatically on this service — warns by default: the deploy is often the fix</span></div>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div class="field">
+          <label>Trust sealed facts up to</label>
+          <span class="inp mono" style="width:180px"><input value="15" style="width:40px; border:0; background:none; font:inherit; color:inherit; text-align:right" aria-label="max seal lag minutes"><span class="unit">minutes behind now</span></span>
+          <span class="hint"><span class="mono">max_seal_lag_seconds</span> · whole minutes, 5 min – 24 h · past it every budget fact is <b>unavailable</b> (<span class="mono">seal_stale</span>)</span>
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <div class="info" style="font-size:12.5px">A healthy service seals about 3 minutes behind now (bucket 60 s + late-arrival grace 120 s). The floor of 5 minutes is that plus two buckets of headroom — a bound below it would say <span class="mono">seal_stale</span> about a system doing exactly what it should.</div>
+        </div>
+      </div>
+
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding-top:4px; border-top:1px solid var(--border); padding-top:14px">
+        <button class="btn pri">Save policy</button>
+        <button class="btn">Discard changes</button>
+        <span class="spacer"></span>
+        <button class="btn danger">Delete policy…</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>Refused before the request</h2><span class="spacer"></span><span class="chip">client mirrors the server's rule</span></header>
+      <div class="body stack">
+        <div class="field">
+          <label>Trust sealed facts up to</label>
+          <span class="inp err mono" style="width:180px"><input value="4" style="width:40px; border:0; background:none; font:inherit; color:inherit; text-align:right" aria-label="max seal lag minutes"><span class="unit">minutes behind now</span></span>
+          <span class="hint bad">Minimum is 5 minutes (300 s): bucket 60 s + grace 120 s + two buckets of headroom.</span>
+        </div>
+        <div class="field">
+          <label>budget_consumed threshold</label>
+          <span class="inp err mono" style="width:120px"><input value="0" style="width:34px; border:0; background:none; font:inherit; color:inherit; text-align:right" aria-label="threshold percent"><span class="unit">%</span></span>
+          <span class="hint bad">Must be a whole number from 1 to 100.</span>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>Refused by the server</h2><span class="spacer"></span><span class="chip mono">409</span></header>
+      <div class="body stack">
+        <div class="err"><span>⚠</span><div><b>This policy changed while you were editing it.</b> Somebody saved revision 7 at 14:01. Your changes were not applied. Reload to see the current policy, then re-apply what you still want.</div><button class="fix">Reload</button></div>
+        <p class="hint">Sent <span class="mono">expected_revision: 6</span>, current is <span class="mono">7</span> → <span class="mono">409 revision_conflict</span>. The same 409 comes back for an <i>identical</i> body with a stale revision — the check runs before the no-op comparison, so a stale screen always learns it is stale.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>Delete the gate policy for checkout?</h2><span class="spacer"></span><span class="chip mono">DELETE …/gate/policy?expected_revision=7</span></header>
+      <div class="body stack">
+        <p style="font-size:13px; color:var(--ink-2)">This is what changes, in one transaction:</p>
+        <div style="border:1px solid var(--border); border-radius:7px">
+          <div class="row"><span class="chip dorm">then</span><span style="font-size:13px">Every later <span class="mono">gate check</span> answers <b>NOT_CONFIGURED</b> (exit 4) until a policy is saved again.</span></div>
+          <div class="row"><span class="chip dorm">then</span><span style="font-size:13px">The active override by <span class="mono">token:deploy-bot</span> is closed as <span class="mono">policy_deleted</span> and reads as <b>inert</b> in the history.</span></div>
+          <div class="row"><span class="chip dorm">kept</span><span style="font-size:13px">Every decision already in the ledger stays exactly as recorded.</span></div>
+          <div class="row"><span class="chip dorm">kept</span><span style="font-size:13px">The revision count continues: this delete makes the tombstone <b>revision 8</b>, and the next saved policy is <b>revision 9</b> — never 1 again.</span></div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center">
+          <button class="btn danger">Delete policy</button>
+          <button class="btn">Keep it</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>… refused</h2><span class="spacer"></span><span class="chip mono">409 revision_conflict</span></header>
+      <div class="body stack">
+        <div class="err"><span>⚠</span><div><b>The policy changed while this dialog was open.</b> You were about to delete revision 7; revision 8 was saved at 14:06. Nothing was deleted. Reload, read what changed, then decide again.</div><button class="fix">Reload</button></div>
+        <p class="hint">Delete carries <span class="mono">expected_revision</span> exactly like Save. Without it → <span class="mono">400 expected_revision_required</span>; with a non-integer → <span class="mono">400 expected_revision_invalid</span>; on an unconfigured service → <span class="mono">404 not_configured</span>.</p>
+      </div>
+    </div>
+  </div>
+
+  ${note("D13a", `<b>Revision is a generation and is never reused.</b> Deleting the policy tombstones the row and bumps the
+    revision; a later re-create continues the count. A screen that still holds revision 6 after a delete-and-recreate
+    cannot write over the new policy and cannot raise an override against it — both are 409. Delete asks for the revision
+    too, and makes every later decision <span class="mono">NOT_CONFIGURED</span> without touching the ledger.`)}`;
+}
+
+/* ── 3. The current decision and the override panel ───────────────────────────────── */
+function sDecision() {
+  return `
+  <div class="head">
+    <h1>Checkout · release gate</h1>
+    <p class="sub">The latest decision, the evidence it rests on, and the one operator act the gate allows</p>
+  </div>
+
+  ${note("D4 · D7", `A decision is one snapshot: the report, the burn latch and the coverage are read in <b>one</b>
+    transaction and the row is written in it, so the answer, the ledger and the metric never disagree. Every
+    <span class="mono">reasons[]</span> entry names the clause, its assignment and the value it was judged on;
+    a clause whose fact is <b>unavailable</b> is listed too, with its own reason code.`)}
+
+  <div class="card">
+    <header><h2>Latest decision <span style="color:var(--ink-3); font-weight:500">· last 30 days</span></h2>${st("BLOCK", true)}<span class="chip acc">override applied → action ALLOW</span>
+      <span class="spacer"></span><span class="chip mono">0191c2a4-…-5b04</span><span class="chip mono">policy rev 7</span><a class="mono" href="#" style="font-size:11.5px">all decisions →</a></header>
+    <div class="body stack">
+      <div class="grid2">
+        <div class="kv">
+          <span class="k">Evaluated</span><span class="mono">2026-08-28 14:03:02.417 Z</span>
+          <span class="k">Facts sealed through</span><span class="mono">14:00:00 Z <span style="color:var(--ink-3)">· seal lag 3 m 02 s of 15 m allowed</span></span>
+          <span class="k">Window</span><span class="mono">30d · objective 99.90 % · target updated 2026-08-01</span>
+          <span class="k">Facts fresh until</span><span class="mono">13:58:00 Z <span style="color:var(--degraded)">· already past</span> <span style="color:var(--ink-3)">· the earliest constraining horizon: the ticket burn lease that expired at 13:58, not the seal horizon at 14:15</span></span>
+        </div>
+        <div>
+          <div class="lbl">Error budget · 30d</div>
+          <div class="kpi mono" style="color:var(--down)">96.4 %<small>burned · 3.6 % remaining</small></div>
+          <div class="hint" style="margin-top:6px">the same number the service's reliability page shows — one owner, one snapshot</div>
+        </div>
+      </div>
+
+      <div>
+        <div class="lbl" style="margin-bottom:8px">Reasons · every clause that matched or was unavailable</div>
+        <div style="border:1px solid var(--border); border-radius:7px">
+          <div class="row"><span class="chip downc mono">block</span><span class="nm mono">budget_consumed</span><span class="mono" style="color:var(--ink-2)">96.4 % ≥ 90 %</span><span class="spacer"></span><span class="hint">assigned <b>block</b> in revision 7</span></div>
+          <div class="row"><span class="chip warnc mono">warn</span><span class="nm mono">service_incident_open</span><span class="mono" style="color:var(--ink-2)">INC-2041 · opened automatically 13:41</span><span class="spacer"></span><a href="#">open incident</a></div>
+          <div class="row"><span class="chip dorm mono">unavailable</span><span class="nm mono">ticket_burn_firing</span><span class="mono" style="color:var(--ink-2)">facts_stale · lease expired 13:58</span><span class="spacer"></span><span class="hint">would make the state UNKNOWN, but the known BLOCK takes precedence (D4 step 2)</span></div>
+        </div>
+      </div>
+
+      <div class="info"><span>ℹ</span><div><b>Without the override the pipeline would have been told BLOCK</b> (<span class="mono">unoverridden_action</span>). The override changes the action only: state, reasons and the ledger row say BLOCK, and the metric counts it as overridden.</div></div>
+      <p class="hint">Source: the project ledger, read — <span class="mono">GET …/projects/{p}/gate/decisions?service_id=…&amp;from=now−30d&amp;to=now&amp;limit=1</span>. Opening this page never asks the gate: a decision is written only when a pipeline runs <span class="mono">cerbix gate check</span>.</p>
+    </div>
+  </div>
+
+  ${note("D10 · §9", `<b>The SPA never POSTs a decision.</b> There is no "latest decision" endpoint on purpose: the card is the newest row
+    of the project-scoped list filtered to this service over the last 30 days (<span class="mono">limit=1</span>), the same read
+    the history screen uses. Evaluating on page load would turn viewing a service into a decision — an immutable ledger row, a
+    rate-limit token, a metric — which is exactly the "no preview" rationale of §9. Older than 30 days, or never asked, the card
+    shows its empty state (screen 1).`)}
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>Active override</h2><span class="chip acc">in force</span><span class="spacer"></span><span class="chip mono">bound to rev 7</span></header>
+      <div class="body stack">
+        <div class="kv">
+          <span class="k">Reason</span><span>Hotfix for INC-2041 — the release <i>is</i> the fix; approved in #payments-oncall.</span>
+          <span class="k">Created by</span><span class="mono">token:deploy-bot</span>
+          <span class="k">Created</span><span class="mono">2026-08-28 13:52 Z</span>
+          <span class="k">Expires</span><span class="mono">2026-08-28 19:52 Z <span style="color:var(--ink-3)">· in 5 h 49 m</span></span>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center">
+          <button class="btn danger sm">Revoke this override</button>
+          <span class="hint">needs <span class="mono">project_admin</span> · <span class="mono">gate:override</span></span>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>Add an override</h2><span class="spacer"></span><span class="chip mono">POST …/gate/override</span></header>
+      <div class="body stack">
+        <div class="field"><label>Why the next BLOCK may pass</label><span class="inp" style="height:auto; padding:8px 10px; color:var(--ink-3)">Required. Recorded on every decision it changes and in the audit log.</span></div>
+        <div class="field"><label>Until</label><span class="inp mono" style="width:220px">2026-08-29 13:52 Z <span class="unit">· max 7 days</span></span></div>
+        <div class="warnb"><span>⚠</span><div><b>One override at a time.</b> An active override exists (deploy-bot, until 19:52). Revoke it first — creating another returns <span class="mono">409 override_active</span>.</div></div>
+        <button class="btn pri" disabled>Create override</button>
+      </div>
+    </div>
+  </div>
+
+  ${note("D9 · D13a", `An override turns a <b>BLOCK into ALLOW</b> and leaves WARN and ALLOW alone — the form has no
+    "action" to choose because D9 fixes what it does. It is bound to the policy revision the operator saw; if the policy
+    changes or is deleted, the override is closed as <span class="mono">policy_changed</span> / <span class="mono">policy_deleted</span>
+    in the same transaction and reads as <b>inert</b>. The actor is server-derived and stored twice — typed
+    (<span class="mono">actor_user_id</span> + <span class="mono">via_token</span>) and as an immutable label — so a machine
+    principal still has a name for as long as the row exists. <b>Revoke is by the override's id</b>, never "the current one":
+    a stale screen revoking an override that already expired gets <span class="mono">409 override_not_active</span>, and
+    whatever was created since is untouched.`)}`;
+}
+
+/* ── 4. Decision history (the ledger, project-scoped) ─────────────────────────────── */
+function sHistory() {
+  const row = (t, s, act, reasons, rev, ovr, id, svc) => `
+    <tr>
+      <td class="mono" style="white-space:nowrap">${esc(t)}</td>
+      <td>${svc || '<span class="mono">checkout</span>'}</td>
+      <td>${st(s)}</td>
+      <td class="mono">${act === null ? '<span style="color:var(--ink-3)">—</span>' : esc(act)}</td>
+      <td><div class="reasons">${reasons.map((r) => `<span class="chip mono ${r[1]}">${esc(r[0])}</span>`).join("")}</div></td>
+      <td class="mono">${rev === null ? '<span style="color:var(--ink-3)">—</span>' : esc(rev)}</td>
+      <td>${ovr ? `<span class="chip acc mono">${esc(ovr)}</span>` : '<span style="color:var(--ink-3)">—</span>'}</td>
+      <td><a class="mono" href="#">${esc(id)}</a></td>
+    </tr>`;
+  return `
+  <div class="head">
+    <h1>Payments · gate decisions</h1>
+    <p class="sub">Every answer the gate gave, immutable, project-wide · <span class="mono">GET /api/v1/projects/{p}/gate/decisions</span></p>
+  </div>
+
+  ${note("D10", `The ledger is <b>project-scoped, not service-nested</b>: a decision outlives its service (the row keeps the
+    slug and name it had), so a deleted service's history stays readable — a route under the service would answer 404 at
+    exactly the moment the evidence is wanted. A row is never edited and never deleted by hand; it ages out by retention
+    (default 90 days), one whole day at a time.`)}
+
+  <div class="card">
+    <header>
+      <h2>Decisions</h2>
+      <span class="inp sel mono" style="height:26px; font-size:12px">2026-07-29 → 2026-08-28 <span class="unit">· 30 days</span></span>
+      <span class="inp sel" style="height:26px; font-size:12px">All services</span>
+      <span class="inp sel" style="height:26px; font-size:12px">Any state</span>
+      <span class="spacer"></span>
+      <span class="hint">newest first · 50 per page</span>
+    </header>
+    <div class="tblwrap">
+      <table class="tbl">
+        <thead><tr><th>Evaluated</th><th>Service</th><th>State</th><th>Action</th><th>Reasons</th><th>Policy</th><th>Override</th><th>Decision</th></tr></thead>
+        <tbody>
+          ${row("08-28 14:03:02", "BLOCK", "ALLOW", [["budget_consumed", "downc"], ["service_incident_open", "warnc"], ["facts_stale", "dorm"]], "rev 7", "deploy-bot", "0191c2a4…5b04")}
+          ${row("08-28 13:47:19", "BLOCK", "BLOCK", [["budget_consumed", "downc"], ["service_incident_open", "warnc"]], "rev 7", null, "0191c295…e1a0")}
+          ${row("08-28 11:20:44", "WARN", "WARN", [["service_incident_open", "warnc"]], "rev 7", null, "0191c20f…7c33")}
+          ${row("08-28 09:02:10", "UNKNOWN", "WARN", [["seal_stale", "dorm"], ["budget_consumed", "dorm"], ["budget_exhausted", "dorm"]], "rev 7", null, "0191c191…0d8f")}
+          ${row("08-27 17:31:55", "ALLOW", "ALLOW", [], "rev 6", null, "0191bc3a…9a21")}
+          ${row("08-27 16:58:03", "ALLOW", "ALLOW", [], "rev 2", null, "0191bc1c…41be", '<span class="mono">search-api</span>')}
+          ${row("08-27 10:12:40", "NOT_CONFIGURED", null, [["not_configured", "dorm"]], null, null, "0191ba9d…c002", '<span class="mono">ledger-sync</span>')}
+          ${row("08-26 08:40:12", "WARN", "WARN", [["ticket_burn_firing", "warnc"]], "rev 3", null, "0191b528…88e7", '<span class="mono" style="color:var(--ink-3)">billing-legacy</span> <span class="chip dorm">service deleted</span>')}
+        </tbody>
+      </table>
+    </div>
+    <div class="row" style="justify-content:center; gap:14px">
+      <button class="btn sm">Show 50 more</button>
+      <span class="hint">decisions made while you page may appear later or not at all — the list is live, not a snapshot; a pipeline that needs a fixed record reads its decision by id</span>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>A range wider than a month</h2><span class="spacer"></span><span class="chip mono">400 range_too_wide</span></header>
+      <div class="body stack">
+        <span class="inp err sel mono" style="width:280px; font-size:12px">2026-06-01 → 2026-08-28 <span class="unit">· 88 days</span></span>
+        <p class="hint bad">Pick at most 31 days at a time. The ledger is read one day-partition at a time, and a month is the most one page may span.</p>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>One decision, by id</h2><span class="spacer"></span><span class="chip mono">GET …/gate/decisions/{id}</span></header>
+      <div class="body">
+<pre class="code">{
+  <span class="k">"schema_version"</span>: 1,
+  <span class="k">"decision_id"</span>: "0191ba9d-1e00-7c22-9b1a-4d0e8f11c002",
+  <span class="k">"evaluated_at"</span>: "2026-08-27T10:12:40.104Z",
+  <span class="k">"state"</span>: "NOT_CONFIGURED",
+  <span class="k">"reasons"</span>: [ { <span class="k">"code"</span>: "not_configured", <span class="k">"docs"</span>: "https://cerbix.internal/docs/gate#not-configured" } ],
+  <span class="k">"service_id"</span>: "8c1f…", <span class="k">"service_slug"</span>: "ledger-sync", <span class="k">"service_name"</span>: "Ledger sync"
+}
+<span class="c">// no action, no policy_revision, no override: ABSENT, never null — nothing applied.</span>
+<span class="c">// reasons[] is never empty: NOT_CONFIGURED carries its own reason and the documentation link.</span></pre>
+      </div>
+    </div>
+  </div>
+
+  ${note("D7 · §5", `Presence says what happened: <span class="mono">action</span> and <span class="mono">policy_revision</span>
+    exist only when a policy existed; <span class="mono">override</span> only when one applied. A deleted service's
+    <span class="mono">service_id</span> is present and <b>null</b> — "the referent is gone" — which is not the same as absent,
+    "never applied". The table renders both the same way on purpose (a dash), and the raw record keeps them apart.`)}`;
+}
+
+/* ── 5. Override history ──────────────────────────────────────────────────────────── */
+function sOverrides() {
+  return `
+  <div class="head">
+    <h1>Checkout · override history</h1>
+    <p class="sub">Every override this service ever had, newest first · <span class="mono">GET …/services/{s}/gate/overrides</span></p>
+  </div>
+
+  ${note("D13a", `<b>Status is a function of facts, not of which housekeeping has run.</b> A manual revoke reads
+    <span class="mono">revoked</span>; a policy edit or delete — or a policy revision that is no longer current — reads
+    <span class="mono">inert</span>; an expiry by time or by record reads <span class="mono">expired</span>; otherwise
+    <span class="mono">active</span>. The mismatch outranks a recorded expiry, so the same row reads the same before and after
+    the system writes its closure.`)}
+
+  <div class="card">
+    <header><h2>Overrides</h2><span class="spacer"></span><span class="hint">newest 50 · the audit log is the full record</span></header>
+    <div class="tblwrap">
+      <table class="tbl">
+        <thead><tr><th>Status</th><th>Created</th><th>By</th><th>Reason</th><th>Until</th><th>Closed</th><th>Policy</th></tr></thead>
+        <tbody>
+          <tr><td><span class="chip acc">active</span></td><td class="mono">08-28 13:52</td><td class="mono">token:deploy-bot</td><td>Hotfix for INC-2041 — the release is the fix; approved in #payments-oncall.</td><td class="mono">08-28 19:52</td><td style="color:var(--ink-3)">—</td><td class="mono">rev 7</td></tr>
+          <tr><td><span class="chip dorm">revoked</span></td><td class="mono">08-26 09:10</td><td class="mono">anna@payments</td><td>Canary rollback verified; unblocking the re-deploy.</td><td class="mono">08-26 21:10</td><td class="mono">08-26 11:04 · by token:release-bot</td><td class="mono">rev 6</td></tr>
+          <tr><td><span class="chip dorm">inert</span></td><td class="mono">08-19 15:30</td><td class="mono">marek@payments</td><td>Budget spent by the 08-18 outage; product accepted the risk for v4.2.</td><td class="mono">08-22 15:30</td><td class="mono">08-20 10:12 · policy changed → rev 6</td><td class="mono">rev 5</td></tr>
+          <tr><td><span class="chip dorm">expired</span></td><td class="mono">08-04 12:00</td><td class="mono">token:deploy-bot</td><td>Rolling forward the config fix for INC-1988.</td><td class="mono">08-04 18:00</td><td class="mono">08-05 08:21 · expired</td><td class="mono">rev 5</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>One override, by id</h2><span class="chip dorm">revoked</span><span class="spacer"></span><span class="chip mono">GET …/gate/overrides/{id}</span></header>
+      <div class="body">
+<pre class="code">{
+  <span class="k">"id"</span>: "b7e2…", <span class="k">"policy_revision"</span>: 6, <span class="k">"status"</span>: "revoked",
+  <span class="k">"reason"</span>: "Canary rollback verified; unblocking the re-deploy.",
+  <span class="k">"created_at"</span>: "2026-08-26T09:10:31Z", <span class="k">"expires_at"</span>: "2026-08-26T21:10:31Z",
+  <span class="k">"actor_label"</span>: "anna@payments", <span class="k">"actor_user_id"</span>: "3f9a…", <span class="k">"via_token"</span>: false,
+  <span class="k">"revoked_at"</span>: "2026-08-26T11:04:07Z", <span class="k">"revoked_reason"</span>: "manual",
+  <span class="k">"revoked_by_label"</span>: "token:release-bot", <span class="k">"revoked_by_user_id"</span>: null, <span class="k">"revoked_via_token"</span>: true
+}
+<span class="c">// every field always present: a token revoker has a null user id and via_token true;</span>
+<span class="c">// a system closure (expired, policy_changed, policy_deleted) has revoked_at + reason and null attribution</span></pre>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>A stale screen</h2><span class="spacer"></span><span class="chip mono">409 override_not_active</span></header>
+      <div class="body stack">
+        <div class="err"><span>⚠</span><div><b>This override is no longer active.</b> It expired at 18:00 on 08-04. Nothing was changed — the override that is active now (deploy-bot, until 19:52) was created after this screen loaded.</div><button class="fix">Reload</button></div>
+        <p class="hint">Revocation is by the override's own id. A "revoke the current one" button would have hit the newer override from a screen that never saw it — that is the race this 409 exists to refuse, and a revoke of an already-closed override is never a silent success.</p>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ── 6. Unknown, refusals, and what the pipeline prints ───────────────────────────── */
+function sUnknown() {
+  return `
+  <div class="head">
+    <h1>Checkout · when the gate cannot know</h1>
+    <p class="sub">UNKNOWN is about the facts, not the pipeline — and it says which fact</p>
+  </div>
+
+  ${note("D4 · D8a", `Step 1: an <b>ignored</b> clause contributes nothing, available or not. Step 2: a <b>known</b> BLOCK wins over
+    everything. Step 3: otherwise an unavailable block/warn clause makes the state <span class="mono">UNKNOWN</span>, and the
+    action is whatever <span class="mono">unknown_behavior</span> says. The budget facts become unavailable together the moment
+    the seal lag passes the policy's bound — a stalled materializer is the most common way to get here.`)}
+
+  <div class="card">
+    <header><h2>Latest decision <span style="color:var(--ink-3); font-weight:500">· last 30 days</span></h2>${st("UNKNOWN", true)}<span class="chip warnc mono">action WARN · exit 0</span><span class="spacer"></span><span class="chip mono">policy rev 7</span><a class="mono" href="#" style="font-size:11.5px">all decisions →</a></header>
+    <div class="body stack">
+      <div class="grid2">
+        <div class="kv">
+          <span class="k">Evaluated</span><span class="mono">2026-08-28 09:02:10.221 Z</span>
+          <span class="k">Facts sealed through</span><span class="mono">08:40:00 Z <span style="color:var(--down)">· seal lag 22 m 10 s — over the 15 m allowed</span></span>
+          <span class="k">Window</span><span class="mono">30d · objective 99.90 %</span>
+          <span class="k">Facts fresh until</span><span class="mono">08:55:00 Z <span style="color:var(--degraded)">· already past</span> <span style="color:var(--ink-3)">· the seal horizon, sealed_through + 15 m — stale is a horizon in the past, not an absence</span></span>
+        </div>
+        <div>
+          <div class="lbl">Error budget · 30d</div>
+          <div class="kpi mono" style="color:var(--ink-3)">—<small>withheld · facts too old to quote</small></div>
+          <div class="hint" style="margin-top:6px">the reliability page shows the same watermark and the same lag</div>
+        </div>
+      </div>
+      <div style="border:1px solid var(--border); border-radius:7px">
+        <div class="row"><span class="chip dorm mono">unavailable</span><span class="nm mono">seal_stale</span><span class="mono" style="color:var(--ink-2)">22 m 10 s &gt; 15 m</span><span class="spacer"></span><span class="hint">every budget clause below is unavailable for this one reason</span></div>
+        <div class="row"><span class="chip dorm mono">unavailable</span><span class="nm mono">budget_exhausted</span><span class="mono" style="color:var(--ink-3)">assigned block</span></div>
+        <div class="row"><span class="chip dorm mono">unavailable</span><span class="nm mono">budget_consumed</span><span class="mono" style="color:var(--ink-3)">assigned warn</span></div>
+      </div>
+      <div class="warnb"><span>⚠</span><div><b>Facts are 22 minutes behind.</b> The service's materializer is not sealing; the gate will keep answering UNKNOWN until it catches up to within 15 minutes. With <span class="mono">unknown_behavior: block</span> this same decision keeps <b>state UNKNOWN</b> — the word stays on this card and in the ledger — with <b>action BLOCK</b> and <b>exit 2</b>. Deficient evidence is never rewritten as a known block.</div></div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>Never sealed</h2>${st("UNKNOWN")}<span class="spacer"></span><span class="chip mono">never_sealed</span></header>
+      <div class="body stack">
+        <p style="color:var(--ink-2); font-size:13px">A service created an hour ago has no sealed facts yet. There is no <span class="mono">sealed_through</span> to show, so the card says so instead of showing a watermark of 0.</p>
+        <div class="kv"><span class="k">Facts sealed through</span><span style="color:var(--ink-3)">not yet — first seal expected within ~3 minutes of the first heartbeat</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>Not a decision</h2><span class="chip mono">exit 1</span><span class="spacer"></span><span class="chip">transport</span></header>
+      <div class="body">
+<pre class="code">$ cerbix gate check --project payments --service checkout
+<span class="k">state=UNKNOWN action=WARN decision=0191c191-2a7e-7b31-8d44-0d8f6e2a1c55</span>    <span class="c">← stdout</span>
+<span class="n">seal_stale: facts sealed through 08:40:00Z, 22m10s behind (policy allows 15m)</span>       <span class="c">← stderr</span>
+<span class="n">budget_exhausted (block), budget_consumed (warn): unavailable — seal_stale</span>
+$ echo $?
+0
+
+$ cerbix gate check --project payments --service checkout
+<span class="n">cerbix: gate: 429 Too Many Requests — retry after 7 s (principal_rate)</span>          <span class="c">← stderr; no stdout line: no decision</span>
+$ echo $?
+1
+
+$ cerbix gate check --project payments --service checkout
+<span class="n">cerbix: gate: 503 ledger_unwritable — the decision could not be recorded, so none was made</span>
+$ echo $?
+1</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>The five answers</h2><span class="spacer"></span><span class="chip">no new colour · status never colour alone</span></header>
+    <div class="body legend">
+      <div>${st("ALLOW")}<span>Nothing matched. <span class="mono">exit 0</span>.</span></div>
+      <div>${st("WARN")}<span>A <b>warn</b> clause matched; nothing blocked. Printed in full, <span class="mono">exit 0</span>.</span></div>
+      <div>${st("BLOCK")}<span>A <b>block</b> clause matched — known, not guessed. <span class="mono">exit 2</span> unless an override is in force.</span></div>
+      <div>${st("UNKNOWN")}<span>A block/warn clause's fact is unavailable. Action per <span class="mono">unknown_behavior</span>. Dashed: deficient evidence.</span></div>
+      <div>${st("NOT_CONFIGURED")}<span>No policy. Nothing allowed, nothing blocked, <span class="mono">exit 4</span>. Dashed: a different kind of answer.</span></div>
+    </div>
+  </div>
+
+  ${note("§9 · non-goals", `Not on these screens and not built: a "what would the gate say" preview (that is a decision, and
+    decisions are recorded), a per-environment policy (one service, one policy), a change-intelligence feed (FR-025), and any
+    reading of raw heartbeats from the decision path — the gate quotes only sealed facts, which is what makes the number
+    here the same number as everywhere else.`)}`;
+}
+
+const SCREENS = [
+  ["empty", "Release gate · not configured", sEmpty],
+  ["editor", "Policy editor", sEditor],
+  ["decision", "Decision & override", sDecision],
+  ["history", "Decision history", sHistory],
+  ["overrides", "Override history", sOverrides],
+  ["unknown", "Unknown & refusals", sUnknown],
+];
+let active = "empty";
+const nav = document.getElementById("screens");
+const view = document.getElementById("view");
+nav.innerHTML = SCREENS.map(([k, t], i) =>
+  `<button data-k="${k}" class="${k === active ? "on" : ""}"><span class="n">${i + 1}</span>${esc(t)}</button>`).join("");
+function render() {
+  const [, , fn] = SCREENS.find(([k]) => k === active);
+  view.innerHTML = fn();
+  nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.k === active));
+  window.scrollTo(0, 0);
+}
+nav.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-k]");
+  if (!b) return;
+  active = b.dataset.k;
+  render();
+});
+document.getElementById("themeBtn").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = getComputedStyle(root).getPropertyValue("--bg").trim() === "#0b0b0f";
+  root.setAttribute("data-theme", dark ? "light" : "dark");
+});
+const notesBtn = document.getElementById("notesBtn");
+notesBtn.addEventListener("click", () => {
+  const off = document.body.classList.toggle("hide-notes");
+  notesBtn.classList.toggle("on", !off);
+  notesBtn.setAttribute("aria-pressed", String(!off));
+});
+render();
+</script>

@@ -289,10 +289,12 @@ timestamp: two implementations of "fresh" is how a badge says armed while delive
 Screen 1's held-burn warning is the mandatory case — a green ownership toggle beside a dis-armed burn
 signal is the exact confusion the badges exist to remove.
 
-## Instance audit — the global admin's own history (iter-0155, AWAITING OWNER APPROVAL)
+## Instance audit — the global admin's own history (iter-0155 — APPROVED by the owner 2026-08-18, built in `5ecde7c`)
 
-Source: `docs/design/mock-instance-audit.html`. **Not approved yet** — the backend of this item is
-landed and tested, and no Vue file is touched until the owner signs the mock off, per the process gate.
+Source: `docs/design/mock-instance-audit.html`. **Approved by the owner on 2026-08-18 and built the same day** —
+`InstanceAuditPanel.vue` + spec, live E2E scenario in `settings.spec.ts` (iter-0155 §2.1, AC-0155-1). This heading
+read "AWAITING OWNER APPROVAL" until 2026-08-28, ten days after the approval and the build: a stale record that
+made the implementer report the item as pending twice. The brief below is as written before approval.
 
 `RecordAudit` stores an empty `OrgID` as NULL, and those rows are what a GLOBAL admin's actions leave
 behind (`user.global_admin`, `user.delete`, file-provider and outbox operations). They have been
@@ -316,10 +318,12 @@ What the mock decides, so the implementation invents nothing:
   The API enforces the same split: `GET /api/v1/admin/audit` is a distinct read (`org_id IS NULL`),
   not the org listing with a wider filter, so no authz slip can widen one into the other.
 
-## Project objective — the promise about the whole, not the mean of its parts (iter-0155, AWAITING OWNER APPROVAL)
+## Project objective — the promise about the whole, not the mean of its parts (iter-0155 — APPROVED by the owner 2026-08-18, built in `2e2eec4`)
 
-Source: `docs/design/mock-project-objective.html`. **Not approved yet** — the backend and migration 00083
-are landed and tested, and no Vue file is touched until the owner signs it off.
+Source: `docs/design/mock-project-objective.html`. **Approved by the owner on 2026-08-18 and built the same day** —
+the objective editor with the Clear the mock demanded, in `SlaView.vue` (iter-0155 §2.3). This heading read
+"AWAITING OWNER APPROVAL" until 2026-08-28; same stale record as the instance audit's. The brief below is as
+written before approval.
 
 The SLA page already shows an "Error budget remaining · 30d" card that is a MEAN across monitors which
 happen to have objectives. That answers "how are my monitors doing". A project objective answers a

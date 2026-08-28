@@ -91,6 +91,28 @@ test.describe("alerting ownership", () => {
     expect(after.owns_paging, "a confirm-only edit must not disown the service").toBe(true);
     expect(after.confirm_evaluations).toBe(4);
 
+    // The repeat cadence, THROUGH THE CONTROL an operator uses (D-0185). It shipped unable to save:
+    // the field was missing from the store's diff, which is both the audit line and the no-op gate,
+    // so the write returned 200 and committed nothing. Every unit test set the column with direct
+    // SQL and none of them noticed. Typing it into the form and reading the server back is the shape
+    // that would have.
+    await page.reload();
+    await expect(panel).toBeVisible();
+    // A value DIFFERENT from whatever is stored, computed rather than hard-coded. A literal made the
+    // assertion depend on what earlier runs had left behind: when the service already held it the
+    // form was not dirty, Save stayed disabled, and the test passed or failed by accident of order.
+    // It failed in the full suite and passed on its own, which is the signature of exactly that.
+    const wantCadence = Number(after.renotify_seconds ?? 0) + 900;
+    await page.getByTestId("alerting-renotify").fill(String(wantCadence));
+    await expect(page.getByTestId("alerting-save"), "a changed cadence must make the form dirty")
+      .toBeEnabled();
+    await page.getByTestId("alerting-save").click();
+    await expect(page.getByTestId("alerting-save")).toBeDisabled();
+    const cadence = await apiGet(page, `/api/v1/projects/${projectID}/services/${svcID}/alerting`);
+    expect(cadence.renotify_seconds, "the cadence typed into the form must reach the database")
+      .toBe(wantCadence);
+    expect(cadence.confirm_evaluations, "a cadence edit must not disturb the rest").toBe(4);
+
     // And the monitor's own page answers "why did nothing page me": not delegated, with a reason.
     await page.goto(`/monitors/${mon.id}`);
     await expect(page.getByTestId("monitor-delegation-live")).toContainText("still alerts for itself");

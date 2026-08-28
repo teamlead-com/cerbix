@@ -104,6 +104,82 @@ class StaleSpellingGuard(unittest.TestCase):
         ):
             self.assertEqual(flagged(SPEC, line), [], line)
 
+    def test_revision_nine_vocabulary_is_retired(self):
+        for line in (
+            "the two indexes and fill factor sit outside",
+            "INDEX (id), INDEX (project_id, evaluated_at DESC);",
+            "`detached_at` is older than one `decision_purge_every` AND",
+            "the D7 always-present fields plus `state`, `action`, `service_id`",
+            "so creation costs at most `2 × 2 s × create_max` of the 30 s pass",
+            "within the rate and concurrency bounds above",
+        ):
+            self.assertTrue(flagged(SPEC, line), line)
+        for line in (
+            "the four indexes per partition (§5: the PK, the local unique id, the two listing paths",
+            "`CREATE UNIQUE INDEX (id)` + `COMMENT ON TABLE` — the LOCAL UNIQUE INDEX (id) is current vocabulary",
+            "`detached_at <= now() − decision_purge_every` on the database clock",
+            "evaluation under rate AND concurrency, ledger reads under concurrency only",
+        ):
+            self.assertEqual(flagged(SPEC, line), [], line)
+
+    def test_revision_ten_vocabulary_is_retired(self):
+        for line in (
+            "the extra row's existence, not a count, produces `next_cursor`",
+            "produces `next_cursor` from the `LIMIT + 1` row and `null`",
+            "body {policy_revision, action, reason, expires_at}",
+            "and the pool holds one connection fewer after a dead-connection release",
+            "Each page is ONE index-range scan (review round 9 P1-3)",
+            "Removal therefore begins no later than t = 12 s with budget for at least one",
+            "reads as inert in `GET …/override` history",
+        ):
+            self.assertTrue(flagged(SPEC, line), line)
+        for line in (
+            "encodes the cursor from the last of THOSE — never from the extra row",
+            "body {policy_revision, reason, expires_at}",
+            "an Append or Merge Append with one scan per surviving child",
+        ):
+            self.assertEqual(flagged(SPEC, line), [], line)
+
+    def test_revision_eleven_vocabulary_is_retired(self):
+        for line in (
+            "(`lock_timeout + statement_timeout`) fits before the deadline",
+            "the six policy/override routes of D13a",
+            "revoked_via_token (null until revoked)}",
+            "one-active, seven-day regime keeps that small",
+            "skips the pass. Each pass is bounded to `subCadenceTimeout`.",
+            "each pass bounded to `subCadenceTimeout` |",
+        ):
+            self.assertTrue(flagged(SPEC, line), line)
+        for line in (
+            "`lock_timeout = min(2 s, statement_timeout)`",
+            "the eight policy/override routes of D13a",
+            "a pass's whole lifecycle (work ≤ 27 s + cleanup ≤ 3 s) fits `subCadenceTimeout`",
+        ):
+            self.assertEqual(flagged(SPEC, line), [], line)
+
+    def test_revision_twelve_vocabulary_is_retired(self):
+        for line in (
+            "the revoker triple is non-null for `manual` and null for `expired`",
+            "only a `manual` closure has a human revoker",
+            "the same row reads the same status before and after that closure",
+            "Concurrent inserts cannot duplicate or skip an item: a new row has a later `evaluated_at`",
+        ):
+            self.assertTrue(flagged(SPEC, line), line)
+        for line in (
+            "only a `manual` closure carries attribution",
+            "a key returned once is never returned again",
+        ):
+            self.assertEqual(flagged(SPEC, line), [], line)
+
+    def test_pre_approval_lifecycle_wording_is_retired(self):
+        for line in (
+            "Two gates remain before code: the review's focused confirmation of THIS revision, and",
+            "## 6. Acceptance invariants (FR-024) — draft, numbered on acceptance",
+        ):
+            self.assertTrue(flagged(SPEC, line), line)
+        self.assertTrue(flagged("docs/status.md", "| FR-024 | … Ahead of code: the review's focused confirmation and an approved UI mock. | TODO | x |"))
+        self.assertEqual(flagged(SPEC, "## 6. Acceptance invariants (FR-024) — approved design contract, discharged on implementation"), [])
+
     def test_duplicate_schema_headers_are_caught(self):
         text = "service_gate_decisions  (a)\nservice_gate_overrides  (b)\nservice_gate_decisions  (c)\n"
         self.assertEqual(cdr.gate_duplicate_headers(text), ["service_gate_decisions"])

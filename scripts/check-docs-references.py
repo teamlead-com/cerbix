@@ -191,6 +191,37 @@ GATE_STALE = [
     (re.compile(r'retention \+ 1 day \+ (decision_)?purge_every'), 'revision-8 lifetime formula (it is two boundaries, see D10)'),
     (re.compile(r'ledger_identity|without touching the database|\bunbudgeted\b'), 'revision-8 read/creation contract'),
     (re.compile(r'evaluate_errors_total\{kind="partition_identity"\}'), 'partition_identity belongs to cerbix_gate_maintenance_errors_total'),
+    # revision 9 (party [39]): index inventory, strict drop predicate, list item shape, count-only
+    # creation bound, and a threat row that rate-bounded reads.
+    (re.compile(r'the two indexes|(?<!UNIQUE )INDEX \(id\)'), 'revision-9 index inventory (four per partition, no parent (id) index)'),
+    (re.compile(r'older than one `decision_purge_every`'), 'revision-9 strict drop predicate (it is <= one cadence, inclusive)'),
+    (re.compile(r'plus `state`, `action`'), 'revision-9 list item shape (state is always present; action absent for NOT_CONFIGURED)'),
+    (re.compile(r'2 × 2 s × create_max'), 'revision-9 count-only creation bound (creation is time-reserved at 12 s)'),
+    (re.compile(r'within the rate and concurrency bounds'), 'revision-9 threat row (ledger reads take no rate token)'),
+    # revision 10 (party [41]): the row-skipping cursor, the client-chosen override action, the unstable
+    # release oracle, the one-scan EXPLAIN claim, the between-operations time check, and "history" for
+    # the active-only read.
+    (re.compile(r"the extra row's existence|from the `LIMIT \+ 1` row"), 'revision-10 cursor (encode from the last RETURNED row)'),
+    (re.compile(r'policy_revision, action, reason'), 'revision-10 override body (no client action)'),
+    (re.compile(r'pool holds one connection fewer'), 'revision-10 release oracle (pid never re-borrowed + successor acquires)'),
+    (re.compile(r'ONE index-range scan'), 'revision-10 EXPLAIN claim (Append with matching child indexes)'),
+    (re.compile(r'no later than t = 12 s with budget'), 'revision-10 between-operations check (clamped per statement)'),
+    (re.compile(r'`GET …/override` history'), 'revision-10 called the active-only read history'),
+    # revision 11 (party [43]): additive timer admission, a stale route count, revoker fields "null
+    # until revoked", a false row bound on override history, and a 30 s + 3 s timeline.
+    (re.compile(r'lock_timeout \+ statement_timeout'), 'revision-11 additive admission (the clamp is a wall bound)'),
+    (re.compile(r'six policy/override routes'), 'revision-11 route count (there are eight)'),
+    (re.compile(r'null until revoked'), 'revision-11 revoker fields (system closures set revoked_at; the human triple is manual-only)'),
+    (re.compile(r'seven-day regime keeps that small'), 'revision-11 false row bound on override history'),
+    (re.compile(r'[Ee]ach pass (is )?bounded to `subCadenceTimeout`'), 'revision-11 timeline (work ≤ 27 s + cleanup ≤ 3 s in one 30 s lifecycle)'),
+    # revision 12 (party [45]): attribution wording wrong for token revokers, a status that moved with
+    # housekeeping, and revision 9's snapshot claim for the listing.
+    (re.compile(r'non-null for `manual`|has a human revoker'), 'revision-12 attribution wording (present for manual; user id nullable for tokens)'),
+    (re.compile(r'same status before and after|cannot duplicate or skip an item'), 'revision-12 status claim / revision-9 snapshot claim'),
+    (re.compile(r'a new row has a later `evaluated_at`'), 'revision-9 false pagination proof (evaluated_at is not commit time)'),
+    # post-approval (party [49]): the design was confirmed in [47]; living text must not say a
+    # confirmation is still pending or that the acceptance map is a draft.
+    (re.compile(r'Two gates remain before code|focused confirmation of THIS revision|the review\'s focused confirmation and an approved UI mock|draft, numbered on acceptance'), 'pre-approval lifecycle wording (design approved at revision 13, D-0201)'),
 ]
 GATE_SPEC = 'docs/specs/func-reliability-gate.md'
 GATE_FIXTURE_FENCE = '```retired-spellings'

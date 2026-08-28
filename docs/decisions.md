@@ -4864,3 +4864,176 @@ cursor, empty page for a foreign service, and a test that pages under a concurre
 kept its end marker) and the *Ledger* matrix line that still said "rows older than retention are
 purged". The reported repeat of "Revision 5 gave numbers…" on consecutive lines of §5a does not
 reproduce at `63c1d57` (`grep -c` gives one) — recorded, as the earlier two were.
+
+## D-0197 — FR-024 revision 10: session settings that stay in the session, the policy/override routes, indexes that match the listing, and reservations instead of counts (2026-08-28)
+
+**Context.** Focused confirmation of revision 9 (`80a89ff`) returned 6 P1 and a set of P2 (party [39]),
+and retracted round 8's third overlapping-`sed` finding; the reviewer has stopped using adjacent
+inclusive ranges. None of the items needed the owner. From this revision the spec text lives in the
+working tree until the gate is confirmed — the owner asked that revisions not be committed one by one
+(2026-08-28), which the standing commit policy already said and this arc had ignored.
+
+**Session poisoning.** `DETACH … CONCURRENTLY` cannot run in a transaction, so its timeouts are
+session-level `SET`s, and revision 9 returned that pinned connection to the shared `pgxpool` with them
+in place — the next borrower would have inherited a 2 s lock timeout at random. Every session `SET` is
+now paired with a `RESET` on every path, `Release()` resets again, and a connection whose reset cannot
+be proved is hijacked and closed rather than returned; the matrix reacquires and reads `SHOW` on the
+clean, lock-timeout, statement-timeout and dead-connection paths. The gate's advisory key is slot 3 of
+the `"cerbix" + slot` namespace, with a distinctness test the repository did not have.
+
+**The routes.** Policy was "a write" and override a shorthand for nine revisions. D13a pins six routes
+with `expected_revision` on policy `PUT`/`DELETE`, one active override bound to the revision the caller
+saw, and revocation by immutable override id — because "delete the current override" from a stale
+screen would have revoked a newer one. The A-expired/B-created race is in the matrix.
+
+**Indexes the listing actually uses.** The keyset order was `(project_id, evaluated_at DESC, id DESC)`
+over an index on `(project_id, evaluated_at DESC)`, and an optional `service_id` would have filtered a
+busy project's whole 31-day range for a sparse service's 50 rows. Two indexes now match the two paths;
+the redundant parent `(id)` index is gone; each partition carries exactly four indexes, and the
+physical-size estimate is stated over that set. The range is half-open, `from < to`, the cursor binds
+strictly below by row comparison, `LIMIT + 1` produces `next_cursor`, a malformed cursor is 400.
+
+**Reservations, not counts.** Revision 9 bounded creation by a count whose own arithmetic
+(`2 × 2 s × 8 = 32 s`) exceeded the 30 s pass. Creation now stops at its count or at 12 s, whichever is
+first, so removal always has a reserved slice; the convergence arithmetic is labelled the healthy,
+uncontended claim it is. The drop predicate is inclusive (`<=` one cadence), which is what makes
+"physical retention `≤ 2 × purge_every`" arithmetic rather than hope.
+
+**Drift.** The threat row said reads were rate-bounded — they take concurrency permits only; list items
+listed `state` and `action` as additions — `state` is already always present and `action` is absent for
+`NOT_CONFIGURED`, never `null`. Both fixed and their spellings retired.
+
+## D-0198 — FR-024 revision 11: a revision that is a generation, bodies that carry everything, a cursor that skips nothing, and a release that is a proof (2026-08-28)
+
+**Context.** Focused confirmation of revision 10 (working tree over `80a89ff`) returned 7 P1 and 2 P2
+(party [41]), no retractions and no sed artefacts. None of the items needed the owner; the text stays in
+the working tree.
+
+**The generation.** Revision 10's CAS was defeated by its own schema: `DELETE` removed the only policy
+row and a re-create started at revision 1 again, so a screen holding the old revision 1 could write over
+— or override — a different policy. The policy row is now never deleted: `DELETE` tombstones it and bumps
+the revision in the same statement, a re-create is an `UPDATE` at `revision + 1`, `expected_revision:
+null` matches only absent-or-tombstoned, and the CAS runs before D14's no-op comparison so an identical
+body with a stale revision is 409. The delete-recreate race joins the stale-UI race in the matrix.
+
+**The bodies.** Revision 10's "exact" policy body omitted `schema_version` and `budget_consumed_percent`
+while D11 says the server fills nothing in, and the override body carried an `action` D9 does not let a
+client choose. The fence now lists every D11/D14 field, bodies are decoded strictly, and the override
+body has no `action`.
+
+**History.** Revision 10 promised inert overrides "remain readable history" and gave only an active-only
+`GET`. There is now a by-id read of any override with both actor triples and a derived status, and a
+bounded list of the last 50; invariant 17's "later read" names the route.
+
+**The cursor.** `LIMIT + 1` fetched the extra row and revision 10 encoded the cursor from it, so with a
+strict lower bound that row was returned on neither page. The probe now only answers "is there more";
+the cursor comes from the last returned row; `limit = 2` over three rows yields 2 + 1.
+
+**Reservations enforced per statement.** Checking elapsed time between operations let an attach started
+at 11.9 s run a 10 s statement timeout into the removal slice. Timeouts are clamped to the slice deadline
+per statement and a step does not start unless its clamped worst case fits.
+
+**Release as a proof.** `LeaderSession.Release()` today unlocks on `context.Background()`, ignores the
+unlock's boolean and returns the connection; a blackholed `RESET` would have held shutdown forever and an
+unknown unlock outcome could have pooled a lock-owning connection. Cleanup now runs under its own 3 s
+deadline, must observe both `RESET`s and `pg_advisory_unlock`'s boolean, and hijacks-and-closes on any
+unknown. The test oracle is the poisoned pid never re-borrowed and the successor's acquisition, not pool
+cardinality, which `MinConns` replenishment makes unstable.
+
+**Smaller truths.** A 31-day query over daily partitions plans an Append with one child scan per
+surviving partition; the EXPLAIN contract asserts matching child indexes and no post-filter, not "one
+scan". Item presence in the listing equals the by-id response, with present-and-null `service_id` for a
+deleted service distinct from absent `override_id` for "never applied".
+
+## D-0199 — FR-024 revision 12: timers that are wall bounds, one 30-second timeline, an override status that is a function, and a history that is a window (2026-08-28)
+
+**Context.** Focused confirmation of revision 11 (working tree) returned 4 P1 and 3 P2 (party [43]),
+all consequences of revision 11's own new text. None needed the owner; the text stays in the working
+tree.
+
+**Timers are not additive.** Revision 11 admitted a creation statement only if `lock_timeout +
+statement_timeout` fit before the slice deadline. PostgreSQL's `statement_timeout` measures the whole
+command, lock wait included, and `lock_timeout` is a narrower timer inside it — so after the first fast
+statement of the create transaction the 12 s sum no longer fit and the transaction would have rolled
+back on every pass. The clamp is now a wall bound: `statement_timeout = min(10 s, remaining)`,
+`lock_timeout = min(2 s, statement_timeout)`, the transaction's context deadline at the boundary, no
+start under 500 ms remaining; the matrix runs a whole create transaction under a fake clock advanced
+between statements.
+
+**One timeline.** Revision 11 bounded the pass at 30 s and then gave cleanup an independent 3 s, making
+33. Work now ends at 27 s (creation to 12, removal to 27) and the release proof owns `[27, 30]`;
+invariant 18 measures acquire→cleanup as one 30 s lifecycle, including the case where removal spends its
+budget and a `RESET` blackholes.
+
+**Status as a function.** Revision 11's four override statuses overlapped its own write lifecycle: D9
+closes an override as `policy_changed` when the policy is edited, yet the text called that row inert; B's
+creation closes A as `expired`, yet the matrix expected A without `revoked_at`. Every closure now sets
+`revoked_at` and `revoked_reason`; only `manual` carries a human revoker; `status` is a six-row
+precedence table over reason, expiry and revision match, table-tested with a precedence mutation.
+
+**History is a window over unbounded storage.** Revision 11's claim that the one-active, seven-day
+regime keeps override history small was false — a project admin can create and revoke in a loop forever. The list is a bounded read, newest 50 by
+`created_at DESC, id DESC` over a matching index so a hot service never sorts and equal timestamps order
+deterministically; the audit log is the record.
+
+**Smaller truths.** §4 still counted six routes (there are eight, and the guard now retires "six");
+`DELETE` without or with a malformed `expected_revision`, a malformed override id and a non-positive
+`limit` each have a pinned 400; the EXPLAIN index assertions are made on populated, analysed children
+only, since the planner may rightly seq-scan an empty one.
+
+## D-0200 — FR-024 revision 13: a status over facts, a traversal that says what it is, and a timeline that includes acquiring it (2026-08-28)
+
+**Context.** Focused confirmation of revision 12 (working tree) returned 2 P1 and 3 P2 (party [45]);
+the timer algebra, the 27/3 split, the history index, the 400s and the populated-only EXPLAIN proof were
+accepted. None of the remaining items needed the owner; the text stays in the working tree.
+
+**Status over facts.** Revision 12's precedence ranked a recorded `expired` reason above a policy
+mismatch, so an unrevoked, expired, mismatched row read `inert` — and then read `expired` after an
+unrelated override's creation wrote the `expired` reason onto it. The same persisted row changed status
+because housekeeping ran, contradicting the sentence beneath the table. The precedence now joins each
+reason with the live fact it records — manual → revoked; mismatch or tombstone or a policy reason → inert;
+expiry by reason or by clock → expired; else active — so a closure that records what was already true
+cannot move a status, and the matrix asserts the overlapping case on both sides of its closure.
+
+**The traversal says what it is.** Revision 9 "proved" that a concurrently inserted decision cannot be
+skipped because its `evaluated_at` is later than page 1's first item. It is taken near the start of the
+decision transaction, not at commit; a decision begun before page 1 and committed after lands inside the
+traversal, and a partition detached between pages removes rows. The listing is now stated as live keyset:
+a returned key never repeats, rows committed before page 1 and still attached appear exactly once,
+concurrent commits and detaches are outside the guarantee, and the matrix holds a decision transaction
+open across page 1 to make the limitation visible. A pipeline that needs a fixed set reads by id.
+
+**The timeline includes acquiring it.** `pool.Acquire` blocks; a pass whose authority arrives at 13 s
+cannot begin removal at 12 s. Slices are now relative to acquisition — late authority skips creation and
+starts removal at once if ≥ 500 ms remain before 27 s — and the cleanup deadline is the absolute
+`min(now + 3 s, passStart + 30 s)`.
+
+**Attribution and nullability.** "Non-null for manual" was wrong for a manual revoke by an API token,
+whose `revoked_by_user_id` is intentionally null under the typed-token contract. Attribution is PRESENT
+for `manual` only, with the label always set and the user id nullable; every field of the override
+record is always present, never absent — active rows carry the five closure fields as null, system
+closures set the two lifecycle fields and leave attribution null.
+
+## D-0201 — FR-024 design gate APPROVED at revision 13; what the approval does and does not cover (2026-08-28)
+
+**Context.** Focused confirmation of revision 13 (working tree over `80a89ff`) returned no findings
+(party [47]). The reviewer re-read the working-tree text independently rather than the disposition, ran
+`git diff --check` and `make docs-check` (17 guard fixtures, the full references and acceptance-map
+check), and recorded that no FR-024 code exists.
+
+**Decision.** The design is approved as written in `docs/specs/func-reliability-gate.md` at revision 13.
+Revisions 10–13, which lived in the working tree at the owner's instruction, are committed together as
+ONE accepted design phase — the commit-per-review-round pattern of revisions 6–9 (`4e5bd15`, `476643a`,
+`63c1d57`, `80a89ff`) is the exception this record closes, not the rule.
+
+**What the approval is not.** It is not implementation approval: FR-024 and NFR-019 stay `TODO` until
+implementation discharges every one of the 21 invariants of §6 and the full §7 matrix with named tests
+and mutations. The UI mock gate named in the lifecycle — an owner-approved mock of the policy editor and
+the decision history before any SPA code — still stands. The PostgreSQL 15.8 prepared-statement case is
+approved as a REQUIRED implementation gate to run, not as something claimed done.
+
+**Record of the arc.** Thirteen revisions, twelve review rounds, five owner decisions (D-0188, D-0189,
+D-0190, D-0193, D-0194), eight implementer-authority revisions (D-0191, D-0192, D-0195 … D-0200), three
+reviewer retractions (overlapping `sed` ranges, each recorded), and a stale-spelling guard that retired
+the vocabulary of every superseded revision and caught its own author in prose seven times before a
+commit.

@@ -1,19 +1,26 @@
 # func-reliability-gate — a deploy asks whether the error budget allows it (FR-024 / NFR-019)
 
-> **Lifecycle: DESIGN GATE, revision 9 — awaiting focused confirmation, no code.** Revision 1
+> **Lifecycle: DESIGN APPROVED at revision 13 (party [47], 2026-08-28) — design only, no code yet.** The
+> reviewer re-read the working tree independently: no findings remain. Conditions carried forward: the
+> owner-approved UI mock gate precedes any SPA code; implementation must discharge all 21 invariants of §6
+> and the full §7 matrix with named tests and mutations; the PostgreSQL 15.8 prepared-statement case is a
+> required implementation gate to RUN, not a claim; FR-024/NFR-019 stay TODO until then. Revisions 10–13
+> were committed together as one accepted design phase, per the owner. Revision 1
 > (`46379fa`, `c65ea5d`) was rejected with 4 P0, 9 P1, 3 P2 (party [15]); revision 2 (`113308f`) with
 > 2 P0, 5 P1, 4 P2 (party [20]); revision 3 (`a16ea70`) with 4 P1, 4 P2 (party [25]); revision 4
 > (`d540ae4`) with 3 P1, 5 P2 (party [27]); revision 5 (`3771622`) with 3 P1, 3 P2 (party [30]);
 > revision 6 (`4e5bd15`) with 5 P1, 2 P2 (party [33]); revision 7 (`476643a`) with 1 P0, 7 P1, 3 P2
-> (party [35]); revision 8 (`63c1d57`) with 8 P1 and a P2 set (party [37]). Every finding of every round
-> is addressed below and named where it changed the text. The owner closed D9–D13 (D-0188), the four
-> questions of round 1 (D-0189), the seal-lag bound of round 2 (D-0190), the ledger's capacity contract
-> of round 5 (D-0193) and its partition period of round 6 (D-0194); rounds 3, 4, 7 and 8 raised no owner
-> question (D-0191, D-0192, D-0195, D-0196). `make docs-check`
+> (party [35]); revision 8 (`63c1d57`) with 8 P1 and a P2 set (party [37]); revision 9 (`80a89ff`) with
+> 6 P1 and a P2 set (party [39]); revision 10 (working tree) with 7 P1, 2 P2 (party [41]); revision 11
+> (working tree) with 4 P1, 3 P2 (party [43]); revision 12 (working tree) with 2 P1, 3 P2 (party [45]).
+> Every finding of every round is addressed below and named where it changed the text. The owner closed
+> D9–D13 (D-0188), the four questions of round 1 (D-0189), the seal-lag bound of round 2 (D-0190), the
+> ledger's capacity contract of round 5 (D-0193) and its partition period of round 6 (D-0194); rounds 3,
+> 4 and 7–12 raised no owner question (D-0191, D-0192, D-0195, D-0196, D-0197, D-0198, D-0199, D-0200). `make docs-check`
 > refuses the retired spellings of every earlier revision, inside the normative schema block too, and
-> its guard has fixture tests (§10). Two gates remain before code: the review's focused
-> confirmation of THIS revision, and — because the policy editor and the decision history are SPA
-> surfaces — an approved UI mock before any frontend code. Change Intelligence is **FR-025** and is not
+> its guard has fixture tests (§10). One gate remains before SPA code: the owner-approved UI mock of the policy editor and the decision
+> history. Backend implementation may begin under the approved design; FR-024/NFR-019 stay TODO until
+> implementation discharges every invariant of §6 and the §7 matrix. Change Intelligence is **FR-025** and is not
 > part of this requirement.
 
 ## 1. What this is, in one paragraph
@@ -294,13 +301,45 @@ own goroutine, off the dispatch loop, but its AUTHORITY is not the scheduler's l
 scheduler's advisory lock lives on one pinned connection while its work uses the pool, so a node whose
 lock connection has died can still issue statements for up to a watchdog interval, and "cancelled and
 joined before `lead` returns" does not close that window. Gate maintenance instead takes **its own
-`store.LeaderSession`** on key `gateMaintenanceLockKey` — the fenced shape file-provider apply already
-uses (`TryBecomeLeaderSession`, `RunServiceRepairSlice`): the session-level advisory lock and EVERY
+`store.LeaderSession`** on key `gateMaintenanceLockKey = 0x6365726269780003` — slot 3 of the
+repository's `"cerbix" + slot` advisory-key namespace (slot 1 scheduler leadership, slot 2 migrations),
+with a test that the three constants are distinct — the fenced shape file-provider apply already uses
+(`TryBecomeLeaderSession`, `RunServiceRepairSlice`): the session-level advisory lock and EVERY
 statement of the pass — DDL and registry writes — run on that one pinned connection, autocommit, which
 `DETACH … CONCURRENTLY` requires anyway. If the connection dies PostgreSQL releases the lock AND the
 connection can carry no further statement, so a deposed node cannot detach or drop anything after the
 loss — not by convention, by construction; a successor acquires only once the lock is free. A node
-that fails to acquire the session skips the pass. Each pass is bounded to `subCadenceTimeout`.
+that fails to acquire the session skips the pass. **One timeline** (review round 11 P1-2; round 12 P2-1): the whole
+lifecycle of a pass — acquire, work, cleanup — fits `subCadenceTimeout` (30 s) measured from `passStart`:
+work has a deadline at `passStart + 27 s` (creation `[0, 12 s)`, removal `[12 s, 27 s)`), and the release
+proof below owns `[27 s, 30 s]`; revision 11 let a 3 s cleanup follow a 30 s pass and quietly made 33.
+Acquisition is INSIDE the timeline — `pool.Acquire` blocks even though `pg_try_advisory_lock` does not —
+so the slices are stated relative to it: when authority is acquired before t = 12 s, creation runs to the
+boundary and removal begins by it; when authority arrives later, creation is skipped for this pass and
+removal begins at once, provided ≥ 500 ms remain before t = 27 s, otherwise the pass does only its
+cleanup. The cleanup deadline is the ABSOLUTE `min(now + 3 s, passStart + 30 s)`, never `now + 3 s`
+after a late work return.
+
+**Session settings never leave the session** (review round 9 P1-1). `DETACH … CONCURRENTLY` and
+`FINALIZE` run autocommit, so their `lock_timeout` and `statement_timeout` are session-level `SET`s —
+`SET LOCAL` is unavailable outside a transaction — while the transactional steps (create, attach, drop)
+use `SET LOCAL` inside their transactions. Every session-level `SET` is paired with `RESET lock_timeout;
+RESET statement_timeout` immediately after the statement it guarded, on success and on every error
+path, and the gate session's release resets both again before the pinned connection goes back to the
+pool. **Release is a proof, under its own clock** (review round 10 P1-5): cleanup runs under its own deadline, `min(now + 3 s, passStart + 30 s)` — the `[27 s, 30 s]` slice of
+the pass timeline, absolute, never `context.Background()`, never the work context that may already be
+cancelled — and must observe BOTH `RESET`s succeed and `pg_advisory_unlock` return a boolean (`true`
+released, `false` "not held": both are known outcomes; an error or a timeout is UNKNOWN). On any unknown
+the connection is hijacked from the pool and closed, never `Release()`d back, so neither a lock-owning
+nor a timeout-carrying connection can reach an unrelated borrower (the session-poisoning class
+AC-0127-3 already treats as an invariant for `SET LOCAL` bounds), and a blackholed `RESET` or unlock
+cannot hold pass shutdown past 3 s. Tested in §7: pass → release → reacquire → `SHOW lock_timeout` and
+`SHOW statement_timeout` are `0` after a clean pass, after a lock-timeout refusal and after a
+statement-timeout abort; the poisoned backend's `pg_backend_pid()` is never borrowed again and a
+successor acquires the gate lock (the oracle is the pid and the acquisition, not pool cardinality —
+`TotalConns` is asserted only under `MinConns = 0`, review round 10 P2-2); a `RESET` blackhole and an
+unlock error each end shutdown within the deadline with the backend terminated; and the mutations that
+restore `context.Background()` or ignore the unlock's result fail.
 
 *Creation under the weaker lock* (review round 7 P1-1). `CREATE TABLE … PARTITION OF` takes `ACCESS
 EXCLUSIVE` on the parent (PostgreSQL 15 `CREATE TABLE` reference: "creating a partition using PARTITION
@@ -314,15 +353,29 @@ round 8 P1-8 — revision 8 left creation without a budget, and at the maximum l
 two-statement sequences whose lock refusals alone could exceed the pass): `gate.decision_partition_create_max`
 (default 3, `1..8`) days per pass, **nearest horizon first** — contiguous from the newest attached day
 forward, because the horizon is what fails inserts — each a create transaction and an attach transaction
-under `lock_timeout 2s`, so creation costs at most `2 × 2 s × create_max` of the 30 s pass before removal
-begins, and load refuses `create_max × floor(86 400 / decision_purge_every_seconds) < 2` (one day's
-partition plus catch-up) naming both keys. Removal is `ALTER TABLE … DETACH PARTITION … CONCURRENTLY`
+and the work is split into a creation slice `[0, 12 s)` and a removal slice `[12 s, 27 s)` that are
+ENFORCED per statement, not checked between them (review round 9 P1-5; round 10 P1-4 — a check of elapsed
+time between operations lets an attach started at t = 11.9 s run its 10 s statement timeout into the
+removal slice). The clamp is a WALL bound, not a sum of timers (review round 11 P1-1: PostgreSQL's
+`statement_timeout` measures the whole command from arrival to completion, lock wait INCLUDED, and
+`lock_timeout` is a narrower competing timer inside it, so revision 11's additive admission would have
+starved the four-statement create transaction after its first statement): before each statement,
+`statement_timeout = min(10 s, slice deadline − now)`, `lock_timeout = min(2 s, statement_timeout)`, and
+the transaction's context deadline is the slice boundary itself, so a statement blocked at the boundary
+is cancelled and its transaction rolled back by 12 s; a statement is not started at all when fewer than
+500 ms remain, because a bound below that cannot complete useful work. Creation therefore ends by t = 12 s
+and the first removal statement begins by then, with `[12 s, 27 s)` reserved for at least one stage-op; a
+blocked attach can delay a due detach by at most the creation slice. The convergence arithmetic in this section is a
+healthy, uncontended claim and is labelled as one. Load refuses `create_max × floor(86 400 / decision_purge_every_seconds) < 2` (one day's partition plus
+catch-up) naming both keys. Removal is `ALTER TABLE … DETACH PARTITION … CONCURRENTLY`
 (also `SHARE UPDATE EXCLUSIVE`), `FINALIZE` on the next pass for one left detach-pending, and a `DROP
 TABLE` of the standalone table that is **deferred to a later pass and gated on snapshots** (review round
 7 P1-7): PostgreSQL 15.9's release notes fix "possible crashes and 'could not open relation' errors in
 queries on a partitioned table occurring concurrently with a DETACH CONCURRENTLY and immediate drop of a
 partition", and cerbix's enforced floor is 15.0 (`minServerVersionNum`), so the drop runs only when
-`detached_at` is older than one `decision_purge_every` AND no backend in this database has
+`detached_at <= now() − decision_purge_every` on the database clock — INCLUSIVE, so at exactly one cadence
+the drop runs and physical retention is `≤ 2 × purge_every`, not a third pass (review round 9 P1-6) — AND
+no backend in this database has
 `xact_start < detached_at` (`pg_stat_activity`) — a sequence safe on every supported 15.x; the runbook
 recommends ≥ 15.9 without raising the floor. **Stage accounting** (review round 8 P1-4): `FINALIZE`,
 `DROP` and `DETACH` are each one stage-op; a pass performs at most `decision_purge_max_partitions`
@@ -447,6 +500,113 @@ service's declaration. *The review recommended the opposite* — policy as a dec
 with file-managed services refusing API writes — and that position is recorded here as the alternative
 the owner declined, so it can be revisited with evidence rather than rediscovered.
 
+**D13a — the policy and override HTTP contract (review round 9 P1-2; round 10 P1-1, P1-2, P1-6).**
+Revision 9 named the decision route and the ledger routes and left policy as "a write" and override as a
+shorthand; a stale UI could have revoked "the current override" and hit a newer one. The routes, all
+under the service with `serviceIDParam` semantics (400 malformed, 404 foreign or unknown); every request
+body is decoded STRICTLY — an unknown field, a missing field or a wrong type is 400 naming the field, the
+server fills nothing in (D11, D14):
+
+```
+GET    /api/v1/projects/{p}/services/{s}/gate/policy
+       → 200 {schema_version, window, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior,
+              revision, updated_at, updated_by}  |  404 not_configured
+PUT    /api/v1/projects/{p}/services/{s}/gate/policy
+       body {expected_revision (null = "nothing configured"), schema_version, window,
+             clauses (EVERY clause of the version), budget_consumed_percent, max_seal_lag_seconds, unknown_behavior}
+       → 200 {revision}  |  409 revision_conflict  |  400 validation (names the field and the range)
+DELETE /api/v1/projects/{p}/services/{s}/gate/policy?expected_revision=N
+       → 204  |  409 revision_conflict  |  404 not_configured
+       |  400 expected_revision_required (absent)  |  400 expected_revision_invalid (non-integer or negative)
+GET    /api/v1/projects/{p}/services/{s}/gate/override                      -- the ACTIVE override only, not history
+       → 200 {id, reason, expires_at, created_at, actor_label, policy_revision}  |  404 none_active
+GET    /api/v1/projects/{p}/services/{s}/gate/overrides                     -- history: the newest 50, ORDER BY created_at DESC, id DESC
+       → 200 {items: [override records as below]}
+GET    /api/v1/projects/{p}/services/{s}/gate/overrides/{override_id}       -- one record, whatever its status
+       → 200 {id, reason, expires_at, created_at, policy_revision,
+              actor_label, actor_user_id, via_token,
+              status: active | expired | revoked | inert,           -- the function below, computed at read time
+              revoked_at, revoked_reason,                            -- lifecycle: null while active; set by ANY closure
+              revoked_by_label, revoked_by_user_id, revoked_via_token} -- attribution: present only for `manual`
+       |  404 unknown or foreign  |  400 malformed id (the `serviceIDParam` convention)
+       -- every field is ALWAYS PRESENT, never absent: an active row carries the five closure fields as null;
+       -- a system closure (expired, policy_changed, policy_deleted) carries revoked_at + revoked_reason and the
+       -- three attribution fields null; a manual closure carries all five, with revoked_by_user_id null and
+       -- revoked_via_token true when the revoker was an API token (the typed-token contract of D9)
+POST   /api/v1/projects/{p}/services/{s}/gate/override
+       body {policy_revision, reason, expires_at}                            -- no action: an override's only effect is D9's
+       → 201 {id}  |  409 override_active  |  409 revision_conflict  |  400 validation (> 7 days, past expiry, empty reason)
+DELETE /api/v1/projects/{p}/services/{s}/gate/overrides/{override_id}
+       → 204  |  404 unknown or foreign  |  409 override_not_active
+```
+
+**`revision` is a generation, never reused** (review round 10 P1-1). Revision 10 let a first create be
+revision 1 and a DELETE remove the row, so a delete-and-recreate produced revision 1 again and a stale
+screen holding the old 1 could `PUT` over — or `POST` an override against — a different policy. The
+policy row is never deleted: `DELETE` sets `deleted_at` and bumps `revision` in the same statement, and
+a re-create is an `UPDATE` that clears `deleted_at` with `revision + 1`. `expected_revision` is REQUIRED
+on `PUT` and `DELETE`; `null` means "I believe nothing is configured" and matches only a row that is
+absent or tombstoned; any mismatch is 409 and changes nothing — and the CAS runs BEFORE the no-op
+comparison of D14, so an identical body with a stale `expected_revision` is 409, never a silent 200
+(review round 10's added mutation). Test: A reads revision N, the policy is deleted (N+1), B recreates
+(N+2); A's `PUT` with N and A's `POST …/override` with `policy_revision: N` are both 409 and the new
+policy and B's state are untouched.
+
+**The bodies carry everything** (review round 10 P1-2): the policy body is the full D11/D14 document —
+`schema_version`, `window`, every clause of the version, `budget_consumed_percent`,
+`max_seal_lag_seconds`, `unknown_behavior` — and revision 10's fence, which omitted the version and the
+threshold, was wrong against D11's "the server fills nothing in". The override body has NO `action`
+field: D9 fixes what an override does — a `BLOCK` decision's `action` becomes `ALLOW`, `WARN` and `ALLOW`
+are left alone — so a client-supplied action could only contradict it; the read shapes carry no `action`
+either.
+
+Deleting the policy makes later decisions `NOT_CONFIGURED` (exit 4), leaves the ledger untouched, and
+closes the active override as `policy_deleted` — it stays readable through the history routes and reads
+as `inert`. An override is bound to the policy revision the caller saw (`policy_revision` in the
+body; 409 `revision_conflict` if it is not current), one active per service (409 `override_active`), at
+most 7 days. **Revocation is by the override's immutable id, never "the current one"**: a UI that held
+override A — expired meanwhile, B created since — sends `DELETE …/overrides/{A}` and receives 409
+`override_not_active`; B is untouched, and a revoke of an already-revoked or expired override is that
+same 409, never a silent 204, so a stale screen learns it is stale.
+
+**History is readable, and `status` is a function** (review round 10 P1-6; round 11 P1-3). Revision 10
+promised that inert overrides "remain readable history" and offered only an active-only `GET`; revision
+11 added the reads but let `status` overlap with the write lifecycle (a row D9 closes as
+`policy_changed` was also called inert; a row B's creation closes as `expired` was expected with no
+`revoked_at`). Every closure — human or system — sets `revoked_at` and `revoked_reason`; only a `manual`
+closure carries attribution, and that attribution follows D9's typed-token contract — `revoked_by_label`
+always, `revoked_by_user_id` null with `revoked_via_token = true` when the revoker was an API token
+(review round 12 P2-2); the three attribution fields are null for `expired`, `policy_changed` and
+`policy_deleted`. `status` is computed at read time over SEMANTIC FACTS rather than over which
+housekeeping has run (review round 12 P1-1: revision 12 ranked a recorded `expired` reason above a
+revision mismatch, so a row that read `inert` before B's creation read `expired` after it — the same
+persisted override changing status because an unrelated override was created). The precedence, exhaustive
+and table-tested with a mutation of the order:
+
+| # | condition | status |
+|---|---|---|
+| 1 | `revoked_reason = manual` | `revoked` |
+| 2 | `revoked_reason IN (policy_changed, policy_deleted)` OR `policy_revision ≠` the service's current live revision OR the policy is tombstoned | `inert` |
+| 3 | `revoked_reason = expired` OR `expires_at <= now()` | `expired` |
+| 4 | otherwise | `active` |
+
+Rows 2 and 3 each join a recorded reason with the live fact it records, so the in-lock closure that later
+writes `expired` or `policy_changed` onto a row cannot move it: a mismatched, expired, unrevoked row is
+`inert` before the next `POST` closes it as `expired` and `inert` after. A status DOES move when a
+semantic fact moves — a manual revoke, a policy edit, the clock passing `expires_at` — and on nothing
+else.
+The by-id route returns any override with the full actor triple, the revoker triple as above and
+`status`; the list returns the newest 50 by `created_at DESC, id DESC` over a matching index
+`(service_id, created_at DESC, id DESC)` (§5), so a hot service never sorts its history and equal
+timestamps order deterministically. **Storage is unbounded and the product history is a window**
+(review round 11 P1-4): nothing in the regime bounds rows — a project admin can create and revoke in a
+loop — so the list is a bounded READ over an indexed order, the audit log is the record, and the
+expiry window is not a row bound. Invariant 17's "later read of the override" is this by-id route. Authorization: `gate:policy` for the policy
+`PUT`/`DELETE`, `gate:override` for the override `POST`/`DELETE`, the read action of D12 for every
+`GET`; every mutation is audited with the actor triple (D-0188). File-managed services expose the same
+routes — D13 makes gate policy UI/API-owned even there. The SPA's policy editor and override panel read
+exactly these shapes and nothing else.
+
 **D14 — policy evolution and concurrency. DECIDED; review P1-8.**
 The policy document carries `schema_version`; the server accepts only versions it knows. A write must
 assign EVERY clause of that version exactly once — unknown, missing or duplicate clauses are refused with
@@ -512,7 +672,7 @@ identity, and closed enums with no free payload. None of it is needed for a deci
   `make docs-check` compares the two exactly.
 - `func-service-reliability.md` §16.6a — the documented exception: gate policy is writable on a
   file-managed service (D13).
-- `openapi.yaml` — decision, policy, override and ledger schemas; regenerate `frontend/src/api/schema.d.ts`.
+- `openapi.yaml` — the decision route, the eight policy/override routes of D13a, the by-id and listing ledger routes and their schemas; regenerate `frontend/src/api/schema.d.ts`.
 - `docs/specs/README.md` — this file is listed (review P2-3, done in revision 2).
 - README — one sentence: cerbix decides, the pipeline acts.
 
@@ -524,14 +684,18 @@ service_gate_policies   (service_id PK, project_id, window text, schema_version 
                          budget_consumed_percent int CHECK 1..100,
                          max_seal_lag_seconds int CHECK 300..86400 AND % 60 = 0,
                          unknown_behavior CHECK IN (warn, block),
-                         revision bigint DB-owned, updated_at, updated_by)
+                         revision bigint DB-owned, MONOTONIC PER SERVICE, never reused: the row is never deleted —
+                         DELETE sets deleted_at and bumps revision in the same statement; a re-create is an UPDATE
+                         that clears deleted_at with revision + 1 (D13a);
+                         deleted_at NULL, updated_at, updated_by)
 service_gate_overrides  (id, service_id, project_id, policy_revision,
                          actor_user_id NULL, via_token bool, actor_label text NOT NULL,   -- typed + immutable label
                          reason text CHECK length 1..500, created_at, expires_at NOT NULL,
                          revoked_at NULL, revoked_reason NULL CHECK IN (manual, expired, policy_changed, policy_deleted),
                          revoked_by_user_id NULL, revoked_via_token bool NULL, revoked_by_label text NULL;
                          at most one row per service with revoked_at IS NULL — enforced under the service lock,
-                         with expired rows closed as `expired` in the same lock before an insert)
+                         with expired rows closed as `expired` in the same lock before an insert;
+                         INDEX (service_id, created_at DESC, id DESC)   -- the history list's order, no sort)
 service_gate_decisions  (id uuid NOT NULL — UUIDv7 built from evaluated_at's DB-clock milliseconds + 74 random bits;
                          CHECK (gate_uuid_ms(id) = floor(extract(epoch from evaluated_at) * 1000)) binds id to row;
                          each day partition carries a LOCAL UNIQUE INDEX (id), created standalone before attach;
@@ -542,7 +706,10 @@ service_gate_decisions  (id uuid NOT NULL — UUIDv7 built from evaluated_at's D
                          override_id NULL, evaluated_at NOT NULL, sealed_through NULL; -- per the D7 presence table
                          PARTITION BY RANGE (evaluated_at), one partition per UTC day, NO DEFAULT partition;
                          PRIMARY KEY (evaluated_at, id);                                -- the partition key must be in it
-                         INDEX (id), INDEX (project_id, evaluated_at DESC);            -- partitioned indexes, one child each
+                         INDEX (project_id, evaluated_at DESC, id DESC);                -- the listing's keyset path
+                         INDEX (project_id, service_id, evaluated_at DESC, id DESC);    -- the per-service listing path
+                         -- no parent (id) index: day pruning + the per-partition local UNIQUE (id) make it redundant;
+                         -- per child exactly FOUR indexes: PK (evaluated_at, id), local UNIQUE (id), the two above
                          CHECK (octet_length(evidence::text) <= 4096
                                 AND octet_length(reasons::text) <= 1024
                                 AND (policy_snapshot IS NULL OR octet_length(policy_snapshot::text) <= 4096));
@@ -584,17 +751,39 @@ SPA's decision history had nothing to implement):
 GET /api/v1/projects/{p}/gate/decisions?from=<RFC3339>&to=<RFC3339>[&service_id=<uuid>][&cursor=<opaque>][&limit=<n>]
 ```
 
-`from` and `to` are REQUIRED and `to − from ≤ 31 days` (400 `range_required` / `range_too_wide`);
-`limit` defaults to 50 and is capped at 200 (400 above it); order is `evaluated_at DESC, id DESC`; the
-cursor is an opaque base64 keyset `(evaluated_at µs, id)` of the last item, so a page is one index-range
-query over `(project_id, evaluated_at DESC)` pruned to at most 32 partitions with `LIMIT ≤ 200` — the
-bound on one response is the page size, not a permit. The response is `{items: [...], next_cursor}` with
-each item carrying the D7 always-present fields plus `state`, `action`, `service_id`, `service_slug`,
-`service_name`, `policy_revision`, `override_id`; `next_cursor` is `null` on the last page. Tenant
+`from` and `to` are REQUIRED, the range is half-open `[from, to)`, `from < to` and `to − from ≤ 31 days`
+(400 `range_required` / `range_invalid` / `range_too_wide`); `limit` defaults to 50, must be a positive integer (400 `limit_invalid` for `0`, negative or
+non-integer) and is capped at 200 (400 above it); order is `evaluated_at DESC, id DESC`; the cursor is an opaque base64 keyset
+`(evaluated_at µs, id)` of the LAST RETURNED item and the next page is bound STRICTLY below it by row
+comparison, `(evaluated_at, id) < ($ts, $id)`; a cursor that does not decode is 400 `cursor_invalid`.
+The page fetches `LIMIT + 1` rows only to learn whether a next page exists: it returns the first `limit`
+and encodes the cursor from the last of THOSE — never from the extra row, which is not returned and
+would be skipped by the strict bound (review round 10 P1-3; the mutation encoding the extra row fails the
+`limit = 2` over three rows test). Each page is ONE SQL statement (review round 9 P1-3; round 10 P2-1):
+the planner prunes to at most 32 children and produces an Append or Merge Append with one scan per
+surviving child — every one of those scans on the matching child index, `(project_id, evaluated_at
+DESC, id DESC)` without `service_id` or `(project_id, service_id, evaluated_at DESC, id DESC)` with it,
+and no post-filter over the other path's columns — so a sparse service on a busy project never filters
+the project's rows to find its 50; the bound on one response is the page size, not a permit. The response
+is `{items: [...], next_cursor}`, `next_cursor` `null` on the last page. **An item's presence contract is
+the by-id response's** (review round 10 P1-7): the D7 always-present fields (`schema_version`,
+`decision_id`, `evaluated_at`, `state`, `reasons[]`); `action` and `policy_revision` present exactly when
+`state ≠ NOT_CONFIGURED`, absent otherwise, never `null`; `override_id` present exactly when an override
+was applied; `service_slug` and `service_name` always present (they are snapshots); `service_id` always
+present and `null` once the service has been deleted (`ON DELETE SET NULL`) — present-and-null means "the
+referent is gone", absent means "never applied", and the two are not interchangeable. Tenant
 behaviour: the route is project-scoped like the by-id read; a `service_id` foreign to the project yields
 an EMPTY page, not 404, because the ledger outlives services. The action is the one the by-id read uses.
-Concurrent inserts cannot duplicate or skip an item: a new row has a later `evaluated_at` than page 1's
-first item and sorts before the whole traversal (tested under a writer). The SPA's decision history is
+**The traversal is LIVE keyset, not a snapshot** (review round 12 P1-2 — revision 9 had "proved" that
+concurrent inserts cannot be skipped because a new row's `evaluated_at` is later than page 1's first
+item; `evaluated_at` is taken near the start of the decision transaction, not at commit, so a decision
+begun before page 1 and committed after it lands INSIDE the traversal with no such guarantee, and a
+partition detached between pages removes rows). The contract is exactly this: a key returned once is
+never returned again; every row committed before the first page and still attached at the time its
+page is read is returned exactly once; rows that commit during the traversal may appear on a later page
+or not at all, and rows whose partition is detached during the traversal disappear — both explicitly
+outside the guarantee. For an operator's history screen those live semantics are the honest ones; a
+pipeline that needs a fixed set reads by decision id. The SPA's decision history is
 this endpoint and nothing else.
 
 Tenant-composite FKs to `(services.id, project_id)` where the service reference is NOT NULL, as every
@@ -620,7 +809,7 @@ capacity they imply is written next to them so nobody has to derive it (owner de
 | `decision_retention_days` | 90 | 7 | 365 | ledger retention (D10): daily partitions whose upper bound is at or before `now − retention` are detached, then dropped a pass later; readable until detach (`retention + <1 day + ≤ purge_every`), on disk until drop (`… + ≤ 2 × purge_every`) under a healthy pass |
 | `decision_partition_lead_days` | 7 | 2 | 30 | days of partitions kept created ahead; the writable horizon the gauge measures against |
 | `decision_partition_create_max` | 3 | 1 | 8 | days created (create + attach) per pass, nearest horizon first; load refuses `create_max × floor(86 400 / every_seconds) < 2` naming both keys |
-| `decision_purge_every` | 1h | 5m | 24h | maintenance cadence, on the gate's own fenced session; each pass bounded to `subCadenceTimeout` |
+| `decision_purge_every` | 1h | 5m | 24h | maintenance cadence, on the gate's own fenced session; a pass's whole lifecycle (work ≤ 27 s + cleanup ≤ 3 s) fits `subCadenceTimeout` |
 | `decision_purge_max_partitions` | 8 | 1 | 48 | removal STAGE-OPS (finalize, drop, detach) per pass; steady state is two a day; load refuses `max × floor(86 400 / every_seconds) < 4` naming both keys |
 
 **Acquisition order, so a rejection costs nothing it should not** (review round 5 P2-3): the in-flight
@@ -649,7 +838,8 @@ with a synthetic 5 KiB evidence.
 
 **Capacity at the permitted ingest**, per replica — what the table above actually allows, in rows and in
 PAYLOAD bytes (typical 1.5 KiB / CHECK bound 10 KiB per row). Payload is not disk: tuple headers, TOAST,
-the two indexes and fill factor sit outside the three JSON CHECKs, so physical size is roughly 2–3×
+the four indexes per partition (§5: the PK, the local unique id, the two listing paths — about 240 B
+of index entries per 1.5 KiB row) and fill factor sit outside the three JSON CHECKs, so physical size is roughly 2–3×
 payload (review round 7 P2); the runbook sizes disk from `cerbix_gate_decisions_bytes` after the first
 week of real traffic, and from 3× the bound column before it.
 
@@ -682,7 +872,7 @@ bound protects — and is declined here; an installation that needs a hard clust
 per-process numbers with its replica count in mind. The threat model (§8) is written against these
 numbers, not against a limiter that does not exist.
 
-## 6. Acceptance invariants (FR-024) — draft, numbered on acceptance
+## 6. Acceptance invariants (FR-024) — approved design contract, discharged on implementation
 
 1. the gate computes NO reliability fact: budget comes from the report path for the policy's window,
    withholding from `decideServiceWindow` inside it, burn from that window's latches, coverage from
@@ -753,7 +943,14 @@ numbers, not against a limiter that does not exist.
     tick firing on cadence — proven by a scheduler test whose fake store blocks the pass while dispatch
     calls keep arriving, and by a fencing test in which the old side's backend is terminated while its
     detach is blocked, a successor acquires, and the old side can issue no further statement (its next
-    one fails on the dead connection; the partition is removed exactly once, by the successor);
+    one fails on the dead connection; the partition is removed exactly once, by the successor); and no
+    session-level setting of the pass survives it — `RESET` after every guarded statement and at
+    release, the cleanup owning the last 3 s of ONE 30 s lifecycle (work deadline 27 s), with
+    `pg_advisory_unlock`'s boolean as the proof of release and the connection hijacked and closed on
+    any unknown outcome — `SHOW` = 0 after reacquire on the clean, lock-timeout and statement-timeout
+    paths, the poisoned pid never borrowed again, a successor able to acquire, and the WHOLE
+    acquire→cleanup lifecycle measured at ≤ `subCadenceTimeout` even when removal spends its full
+    budget and a reset blackholes;
 19. a decision the ledger cannot hold is not a decision: with no partition for `evaluated_at` the
     insert fails, the API answers 503 `ledger_unwritable`, nothing is emitted, the CLI exits 1 — and the
     lead of `decision_partition_lead_days` plus the `writable_horizon_seconds` gauge make that failure
@@ -767,8 +964,18 @@ numbers, not against a limiter that does not exist.
     when the marker matches a new OID (a stale-OID mutation and a `pg_dump`/`pg_restore` on the live
     stack both pass clean), and only a marker or shape mismatch or an unreconcilable state refuses — that
     day alone — counted in `cerbix_gate_maintenance_errors_total{kind="partition_identity"}` and paged; a
-    drop happens only one cadence after its detach and only when no backend holds a transaction older
-    than the detach;
+    drop happens once `detached_at <= now() − purge_every` (inclusive, on the database clock) and only
+    when no backend holds a transaction older than the detach;
+21. policy and override are managed through the eight routes of D13a and nothing else: `PUT`/`DELETE`
+    of the policy require `expected_revision`, `revision` is a per-service generation that a
+    delete-and-recreate never reuses, and a mismatch — including an identical body with a stale
+    revision — changes nothing (409, CAS before no-op); bodies are decoded strictly and carry every
+    D11/D14 field, the override body no `action`; an override binds to the policy revision the caller
+    saw, one active per service, at most 7 days; revocation is by immutable override id and a revoke of
+    an expired, revoked or foreign override is 409/404, never 204; any override is readable by id with
+    both actor triples and its status — proven by the stale-UI race (A expired, B created, `DELETE
+    …/overrides/{A}` leaves B active) and the delete-recreate race (A holds N, policy deleted and
+    recreated, A's `PUT` and `POST` with N are both 409 and nothing moves);
 
 ## 7. Required test matrix (written before the code)
 
@@ -862,9 +1069,24 @@ path the 15.9 note names) · stage accounting: with `purge_max = 3` and one fina
 two eligible detaches pending, the pass does finalize, drop, oldest detach and stops · load refuses
 `purge_every = 24h` with `purge_max_partitions` 1, 2 and 3, accepts 4, and refuses `create_max = 1` at
 `24h` · a detach or attach held behind an `ACCESS EXCLUSIVE` lock is refused by `lock_timeout` in ≤ 2 s,
-counted `maintenance_errors_total{kind="lock_timeout"}`, and a decision insert during it commits · with
-the horizon exhausted the decision transaction fails, the API answers 503 `ledger_unwritable`, no state
-is emitted and no row exists · in both storage modes.
+counted `maintenance_errors_total{kind="lock_timeout"}`, and a decision insert during it commits · the
+drop runs on the pass where `detached_at` is EXACTLY `now − purge_every` and not on the pass one second
+before (exact boundary and just-before, on the database clock) · with `create_max = 8` and every attach
+blocked behind a held lock — INCLUDING the attach started immediately before the 12 s boundary — the
+last creation statement is refused by its clamped timeout at the boundary, the first removal statement
+begins by t = 12 s (+ one scheduler tick of slack), and an eligible detach completes in the same pass ·
+a whole create transaction — CREATE, unique index, COMMENT, registry INSERT, COMMIT — completes with a
+fake clock advanced between every statement, each statement's `statement_timeout` equal to the
+remaining slice and `lock_timeout = min(2 s, that)` (the mutation that admits by the SUM of the two
+timers starves the second statement and fails) · a statement blocked at the
+boundary is cancelled by the transaction's context deadline and its transaction rolled back by t = 12 s ·
+with fewer than 500 ms of slice left no statement is started · a pass whose removal spends the full
+`[12 s, 27 s)` and whose `RESET` blackholes measures ≤ 30 s from `passStart` to cleanup end (the declared
+total, not the cleanup alone) · `pool.Acquire` delayed to t = 13 s (fault-injected): creation is skipped,
+the first removal statement begins immediately, and cleanup still ends by `passStart + 30 s`; delayed to
+t = 26.8 s: no work statement starts and cleanup ends by 30 s ·
+with the horizon exhausted the decision transaction fails, the API answers 503 `ledger_unwritable`, no
+state is emitted and no row exists · in both storage modes.
 
 *Ownership:* the pass is crashed (fault-injected exit) after EACH statement of create, attach, detaching,
 detach, detached, drop, and the next pass converges every time with registry and catalog agreeing and
@@ -883,7 +1105,48 @@ are computed from the refreshed `relid`, and renaming a partition by hand change
 `ACCESS EXCLUSIVE` holder; `pg_terminate_backend` on its pid; a successor acquires the gate session and
 completes the removal; the old side's next statement fails on the dead connection and the partition was
 removed exactly once · a scheduler test whose fake store blocks the pass for longer than one tick sees
-the dispatch tick fire on cadence.
+the dispatch tick fire on cadence · after a clean pass, after a lock-timeout refusal and after a
+statement-timeout abort, the released connection is reacquired and `SHOW lock_timeout` and `SHOW
+statement_timeout` are both `0` · after a dead-connection release the poisoned backend's
+`pg_backend_pid()` is never handed out again (compared over 50 reacquisitions), a successor acquires the
+gate lock, and — under `MinConns = 0` only — `TotalConns` drops by one before any replenishment · a
+`RESET` that blackholes (fault-injected wait) and an unlock that errors each end release within the 3 s
+cleanup deadline, terminate the backend and let a successor acquire; the mutations that restore
+`context.Background()` or ignore the unlock's boolean fail · the three `cerbix`-namespace advisory keys
+(scheduler, migrations, gate maintenance) are pairwise distinct (a test over the constants).
+
+*Policy and override routes (D13a):* `PUT` with `expected_revision` one behind → 409 and the policy
+unchanged; an IDENTICAL body with a stale `expected_revision` → 409, not 200 (CAS before no-op); `PUT`
+with `null` on a never-configured service creates revision 1; `DELETE` with the wrong `expected_revision`
+→ 409; `DELETE` then evaluate → `NOT_CONFIGURED`, exit 4, and the earlier override reads as `inert`
+through `GET …/overrides/{id}` with `revoked_reason: policy_deleted`, `revoked_at` set and a null
+revoker triple · `DELETE` without `expected_revision` → 400 `expected_revision_required`; with `abc` or
+`-1` → 400 `expected_revision_invalid`; a malformed `override_id` → 400 on every override route;
+`limit=0` and `limit=-5` → 400 `limit_invalid` · **the delete-recreate race**: A reads N, `DELETE` (N+1), `PUT null`
+recreates (N+2), A's `PUT` with N → 409 and A's `POST …/override` with `policy_revision: N` → 409, the
+recreated policy and its override state untouched · a body missing `budget_consumed_percent`, a body
+with an unknown field, a body with `clauses` missing one clause of the version, and an override body
+carrying `action` → 400 naming the field · `POST …/override` with a stale `policy_revision` → 409
+`revision_conflict`; a second active → 409 `override_active`; 7 days + 1 s → 400 · **the stale-UI race**:
+A created, A expires, B created, `DELETE …/overrides/{A}` → 409 `override_not_active` and B is still
+returned by `GET …/override`; `DELETE …/overrides/{B}` → 204 and a second `DELETE …/overrides/{B}` →
+409 · `GET …/overrides/{A}` after that sequence → `status: expired`, `revoked_at` set by B's creating
+transaction, `revoked_reason: expired`, the actor triple present and the revoker triple null;
+`GET …/overrides/{B}` → `status: revoked` with both triples and `revoked_by_label` equal to the revoker's
+`AuditLabel` (invariant 17's later read) · the status function is table-tested over every combination of
+`revoked_reason` × expiry × revision match, and the overlapping case is asserted on BOTH sides of its
+closure: an unrevoked, expired, revision-mismatched row reads `inert`, a `POST` then closes it as
+`revoked_reason: expired`, and it still reads `inert` — the mutation that ranks a recorded `expired`
+above the mismatch fails this stable-pair assertion, not merely one pre-closure read · raw JSON of a
+manual revocation by an API token: `revoked_by_label: "token:<name>"`, `revoked_via_token: true`,
+`revoked_by_user_id: null`, `revoked_at` and `revoked_reason: manual` set; of an active row: all five
+closure fields present and `null`; of a system closure: two lifecycle fields set, three attribution
+fields `null` — no field ever absent · `GET …/overrides` after 120
+rapid create-and-revoke rounds, 40 of them sharing one `created_at` (fixed clock), returns exactly the
+newest 50 in `created_at DESC, id DESC` order, identical across ten calls, and `EXPLAIN` on the analyzed
+fixture shows the `(service_id, created_at DESC, id DESC)` index and no Sort node · a foreign or unknown override id → 404 on every override route · every `GET` shape equals the
+fence of D13a field for field (raw-JSON schema test) · authz: `gate:policy` cannot `POST` an override
+and `gate:override` cannot `PUT` a policy (403 each).
 
 *Identity and reads:* an id's embedded millisecond equals `evaluated_at`'s for a row written 1 ms before
 midnight with the application clock 5 s ahead (the id is built from the DB timestamp) · an INSERT whose
@@ -891,9 +1154,29 @@ id millisecond differs from `evaluated_at` (planted) is refused by the CHECK · 
 into one day are refused by the local unique index · the id-only read prunes to one partition (`EXPLAIN`
 shows one child) and to zero children for a day that was detached or never created, answering 404 in
 both cases with no application-side date check (the fake-store test asserts the query is issued) ·
-the listing refuses a missing range and a 32-day range, caps `limit` at 200, orders `evaluated_at DESC,
-id DESC`, pages by keyset cursor, and — with a writer inserting throughout the traversal — yields every
-pre-traversal row exactly once and no duplicates · a foreign `service_id` yields an empty page, not 404 ·
+the listing refuses a missing range, `from ≥ to` and a 32-day range, treats the range as `[from, to)` (a
+row at exactly `to` is excluded, one at exactly `from` included), caps `limit` at 200, orders
+`evaluated_at DESC, id DESC`, binds the next page strictly below the cursor's `(evaluated_at, id)` so a
+row equal to the cursor never repeats, refuses a malformed cursor with 400 `cursor_invalid`, encodes
+`next_cursor` from the LAST RETURNED row and sets it `null` when the `LIMIT + 1` probe finds nothing —
+`limit = 2` over three fixed rows yields 2 + 1 with no gap, and the mutation encoding the extra row fails
+— and, with a writer inserting throughout the traversal, yields every row committed before page 1 and
+still attached exactly once and never repeats a returned key · a decision transaction that takes its
+`statement_timestamp()` before page 1 is read and commits after it is NOT asserted to appear — the test
+holds it open across page 1, commits it, and asserts only that the traversal has no duplicate and that
+the row is readable by id afterwards, making the live-keyset limitation explicit rather than hidden · `EXPLAIN` of a 31-day page is one statement whose Append/Merge Append has ≤ 32 children (pruning
+asserted on every fixture); the INDEX assertions run on populated, `ANALYZE`d representative children
+only (review round 11 P2-3 — the planner may rightly seq-scan an empty or tiny child, and plan-node
+choice for such a child is not a product invariant): with 100 000 project rows per child, each child
+scans `(project_id, evaluated_at DESC, id DESC)` with no post-filter; with a `service_id` that owns 10
+rows, each child scans `(project_id, service_id, evaluated_at DESC, id DESC)` with no filter on
+`service_id` after the scan, and `pg_stat_statements` counts one statement; a range inside one day shows
+exactly one child; semantic correctness (same rows, same order) is tested separately over empty and
+tiny children · raw-JSON presence over four rows — `NOT_CONFIGURED`
+(no `action`, no `policy_revision`, no `override_id`), non-overridden (`action`, `policy_revision`, no
+`override_id`), overridden (all three), deleted-service (`service_id: null`, slug and name present) —
+matches the by-id response byte for byte in field set · a foreign `service_id` yields an empty page, not
+404 ·
 ledger reads are refused with 429 `process_inflight` when the in-flight permits are exhausted and consume
 no rate token · a synthetic 5 KiB evidence fails the decision at the CHECK and a canonical 1 KiB
 evidence's bytes equal the fixture's byte for byte.
@@ -912,7 +1195,7 @@ accepted · transport timeout → exit 1 · TLS with an unknown CA fails; with `
 | Threat | Mitigation |
 |---|---|
 | Pipeline approves itself | override is not a request parameter (D9); it needs `gate:override`, leaves an audit row, is bound to the policy revision, and is counted |
-| Stolen CI token | can evaluate the gate and read the ledger — facts the token could already read on the service page — within the rate and concurrency bounds above, and nothing more unless it also holds `gate:override`. A narrower token capability is a recorded follow-up, not a v1 promise |
+| Stolen CI token | can evaluate the gate and read the ledger — facts the token could already read on the service page — within the bounds of §5a — evaluation under rate AND concurrency, ledger reads under concurrency only above, and nothing more unless it also holds `gate:override`. A narrower token capability is a recorded follow-up, not a v1 promise |
 | Policy deleted or loosened mid-pipeline | deletion → `NOT_CONFIGURED`, which has no action and its own exit; every policy write is audited and bumps a revision the decision cites |
 | Override outlives a policy tightening | a policy edit or deletion revokes the active override in the same transaction (D9) |
 | Override rewrites history | an override changes only `action`; `state` and `reasons[]` in the response, the ledger and the metric stay the observed facts (D9) |
@@ -966,6 +1249,25 @@ CREATE TABLE IF NOT EXISTS … PARTITION OF                            (revision
 retention + 1 day + purge_every / + decision_purge_every                (revision 8's one-cadence-short formula)
 ledger_identity / without touching the database / unbudgeted            (revision 8's read and creation contract)
 evaluate_errors_total{kind="partition_identity"}                        (revision 8 counted maintenance in the evaluation family)
+the two indexes / INDEX (id)                                            (revision 9's index inventory)
+older than one `decision_purge_every`                                   (revision 9's strict drop predicate)
+plus `state`, `action`                                                  (revision 9's list item shape)
+2 × 2 s × create_max                                                    (revision 9's count-only creation bound)
+within the rate and concurrency bounds                                  (revision 9's threat row; reads take no rate token)
+the extra row's existence / from the `LIMIT + 1` row                   (revision 10's cursor, which skipped a row)
+policy_revision, action, reason                                         (revision 10's override body with a client action)
+pool holds one connection fewer                                         (revision 10's unstable release oracle)
+ONE index-range scan                                                    (revision 10's EXPLAIN claim over 32 children)
+no later than t = 12 s with budget                                      (revision 10's between-operations check)
+`GET …/override` history                                                (revision 10 called the active-only read history)
+lock_timeout + statement_timeout                                        (revision 11's additive admission; the clamp is a wall bound)
+six policy/override routes                                              (revision 11's §4 count; there are eight)
+null until revoked                                                      (revision 11's revoker fields; system closures set revoked_at)
+seven-day regime keeps that small                                       (revision 11's false row bound on override history)
+each pass bounded to `subCadenceTimeout` / Each pass is bounded to      (revision 11's 30 s + 3 s timeline)
+non-null for `manual` / has a human revoker                             (revision 12's attribution wording; token revokers have a null user id)
+same status before and after / cannot duplicate or skip an item         (revision 12's status claim; revision 9's snapshot claim)
+a new row has a later `evaluated_at`                                    (revision 9's false pagination proof)
 ```
 
 It also refuses a duplicated table header in §5. **The guard has fixture tests**

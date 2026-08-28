@@ -5063,6 +5063,8 @@ currency: the codebase the spec cites (`LeaderSession`, `serviceFactMaintenanceL
 the storage-mode branches) will move, so **resuming means a fresh focused review against the then-current
 code before any implementation**, then the owner's visual approval of the mock, then the §6/§7 discharge.
 
+**Closed as iter-0162** (docs only; the reviewer's [63] named that the arc had run outside the iteration workflow).
+
 **Recorded for the process.** The question "what is this spec for?" arrived after twelve review rounds.
 It should have been asked — by me — before the first one: a design gate opened on a reviewer's proposal
 needs the owner's *why* stated in the spec's first paragraph, not inferred from a "давайте".

@@ -33,6 +33,7 @@ exists in the product. They diverge in both directions — an area can ship on t
 | File | Area | Spec | Feature |
 | --- | --- | --- | --- |
 | `func-service-incidents.md` | A Service can own an incident (FR-022/NFR-017, opened by D-0169) | design-gate input | not commissioned |
+| `func-reliability-gate.md` | A deploy asks whether the error budget allows it (FR-024/NFR-019, opened after iter-0161) | design gate, revision 2 under review | not commissioned |
 | `func-service-reliability.md` | Service as a reliability-domain resource: two axes, sealed facts, impact graph, status-page projection, alerting ownership (FR-021/NFR-016, D-0159/0166/0167/0168) | full (91 invariants) | phases 1–5 shipped; §16.9 items deferred by owner decision |
 | `func-secret-inventory.md` | Project-scoped write-only secrets, typed refs, encrypted dispatch (FR-020/NFR-015, D-0155) | full | shipped |
 | `func-monitoring-as-code.md` | Hot-reconciled, tenant-scoped Monitoring-as-Code file provider (FR-017, D-0145) | full | shipped |

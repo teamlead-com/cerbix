@@ -4506,3 +4506,44 @@ with bounded retention and a read endpoint, because an id that cannot be looked 
 **What this does not decide.** Nothing about implementation order beyond "backend on the reviewed
 contract; SPA after an approved mock". The independent design review of the document is in progress and
 may reopen a DECIDED item with new facts, which is the review's job and not a defect of the gate.
+
+## D-0189 — FR-024 revision 2: what the design review found, and the four owner calls (2026-08-28)
+
+**Context.** The independent design review rejected revision 1 of `func-reliability-gate.md` with 4 P0,
+9 P1 and 3 P2, every finding checked against the code before it was accepted. The P0s were all of one
+kind — a claim the code does not support: the named budget owner (`decideServiceWindow`) owns
+withholding and the budget is computed after it, per window, so a policy without a window had no
+defined fact and a "0.10 remaining" threshold was an error of units; `UNKNOWN` sat outside the decision
+order and the CLI would have exited non-zero against an operator who chose `warn`; five separate reads
+were presented as one instant; and "every decision audited", "decisions persisted" and "O(1) reads"
+cannot all be true.
+
+**Four of the findings were the owner's to close, and were, the same day:**
+
+- *the window is part of the policy* (mandatory `window`; burn clauses read only that target; worst-of-all
+  declined because the answer would depend on which windows somebody added);
+- *the threshold is `budget_consumed_percent >= N`*, default 90, because `BurnedPercent` already owns
+  that quantity and `RemainingRatio` is an absolute share of time;
+- *decisions are a bounded ledger, and only policy/override mutations are audited* — a busy pipeline must
+  not bury the audit log under its own heartbeat;
+- *authorisation is three central `authz.Action`s over the existing roles*; a token-scoped gate
+  capability is a follow-up requirement, because `domain.Role` is shared by memberships and tokens and a
+  narrower token is a change to RBAC, not an addition;
+- *gate policy is owned by the UI/API even on a file-managed service* — the reviewer recommended the
+  opposite (declarative, in format 2), and that alternative is recorded in the spec as declined rather
+  than forgotten.
+
+**The rest was the author's to fix and is fixed in revision 2:** `state` and `action` split with a total
+algebra; one `REPEATABLE READ` transaction with `evaluated_at` as its first statement; `as_of` and
+`sealed_through` given their real meanings; `valid_until` replaced by `facts_fresh_until` with a stated
+non-promise; override lifecycle (7-day maximum, one active, bound to policy revision, server-derived
+actor); ledger lifecycle (immutable snapshot, survives rename and delete, retention); policy evolution
+(`schema_version`, exhaustive clause set, CAS); the tenant contract corrected to 400/404 as the code
+actually behaves; the CLI as a security surface (token by environment only, TLS verify, no skip flag);
+the threat model corrected — there is no API rate limiter and a decision is not one row; burn clauses
+named by severity.
+
+**Two things worth keeping from this round.** The worst finding was not a design error but a wrong
+statement about the code — I named an owner without reading what it returned. And the review caught my
+own evidence again: revision 1's threat model asserted a mitigation ("existing rate limiting") that does
+not exist in the tree. Same class as iter-0161 §47, now in a document rather than a test.

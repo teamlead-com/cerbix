@@ -149,6 +149,7 @@ lint:
 ## as runnable and is not. Iteration reports, review snapshots and `docs/decisions.md` are excluded
 ## on purpose: they are immutable or historical, and a later rename does not make them wrong.
 docs-check:
+	python3 -m unittest -q scripts/check_docs_references_test.py
 	python3 scripts/check-docs-references.py
 
 version: build

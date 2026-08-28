@@ -4601,7 +4601,7 @@ superseded clauses marked as such rather than left as a second live answer.
 **Context.** Focused confirmation of revision 3 (`a16ea70`) returned 4 P1 and 4 P2 (party [25]). No
 owner question this round; the per-policy `max_seal_lag_seconds` (then still spelled `max_seal_lag`; renamed in revision 4) stays the owner's authority.
 
-**The floor.** Revision 3 allowed a `max_seal_lag` of one minute. The code cannot satisfy that: buckets
+**The floor.** Revision 3 allowed a `max_seal_lag` (the field's name at the time) of one minute. The code cannot satisfy that: buckets
 are 60 s, the late-arrival grace is 120 s, the sealer seals up to `FloorToBucket(now − grace)`, so a
 healthy pipeline's lag is `[2m, 3m)` before queueing. A one- or two-minute policy would be `seal_stale`
 on a system doing exactly what it should, and a strict API must not accept a value that is unreachable.
@@ -4611,7 +4611,7 @@ domain beside the constants it depends on, with a live-materializer boundary tes
 
 **One freshness formula.** `facts_fresh_until` was defined over leases alone, so a budget-only policy had
 an expiry the field could omit, and a burn lease later than the seal horizon could name an instant the
-budget was already stale. It is now the minimum over the seal horizon (`sealed_through + max_seal_lag`)
+budget was already stale. It is now the minimum over the seal horizon (`sealed_through + max_seal_lag`, as the field was named at the time)
 and every lease the policy depends on, present whenever any of them exists.
 
 **Bounds on rate, not only concurrency.** An in-flight cap bounds how many reports run at once; it does
@@ -4668,3 +4668,38 @@ in the gate because the review has had to be that guard five times.
 **On P2-4.** The review reported two mechanical duplicates in revision 4. Neither reproduces by `grep`
 against `d540ae4` (each string occurs once in the spec and nowhere else); the duplicate-header guard is
 added regardless, because a check that would have caught it is cheaper than a second look.
+
+## D-0193 — FR-024 revision 6: a ledger sized for what a deploy gate is, aged out by dropping partitions (2026-08-28)
+
+**Context.** Focused confirmation of revision 5 (`3771622`) returned 3 P1 and 3 P2 (party [30]). One was
+the owner's.
+
+**The capacity contract (owner, 2026-08-28).** Revision 5 finally gave the resource bounds numbers, and
+the numbers defeated the bounds' purpose: a default of 600 decisions per minute PERMITTED 77.8 million
+immutable rows per replica over the retention, the hard maximum 7.8 billion, and a row-level batch
+DELETE had to keep pace with that forever. The owner chose both halves of the fix. The rates are re-sized
+to what a deploy gate is — 10 per minute per principal, 60 per minute per process by default, 600 the
+hard maximum — and §5a now prints the rows per day and per retention those numbers permit, per replica,
+so nobody raises a limit without seeing the table it is raising. And the ledger is RANGE-partitioned by
+`evaluated_at`, one partition per month, in both storage modes; retention is the DROP of whole
+partitions at or before the cutoff — one catalog operation regardless of rows, no dead tuples, no DELETE
+WAL — so the purge outruns any permitted ingest by construction rather than by a load test that would
+have to be repeated at every change of the numbers.
+
+**The guard's scope was the hole it was meant to close.** The first stale-spelling guard skipped every
+fenced block, and the normative schema of §5 IS a fenced block — so a retired column name in the very
+definition of the column would have passed. It also let any line mentioning a revision number through,
+and did not read `docs/status.md`, which had kept a retired spelling and outranks the decisions. The
+guard now scans the spec entirely except one fence explicitly marked as the fixture, the FR-024/NFR-019
+status rows, and decision sections by heading; exemptions are blockquotes and the two phrases a
+supersession note uses. And it has fixture tests run by `make docs-check`, because the author of the
+guard had, the same hour, announced a revision with a red gate hidden behind a pipe.
+
+**The rest.** The purge is a partition-maintenance pass on the scheduler leader inside
+`subCadenceTimeout`, off the dispatch loop like every other leader sub-cadence, with two catalog gauges
+that never count rows; the limiters get `rejected_total{reason}`, a duration histogram and
+`errors_total{kind}`, no principal labels, and runbook thresholds against those names. Limiter
+acquisition order is pinned — permit first, token second, a refusal never costs what it did not use —
+and `Retry-After` is `ceil`, never below 1. `LateArrivalGrace` moves to the domain beside
+`CanonicalBucket` so `MinSealLag` can be derived there without an import cycle or a copied constant.
+D6a's doubled "first" is gone.

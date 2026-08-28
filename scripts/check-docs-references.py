@@ -165,44 +165,77 @@ BANNER_LINES = 30
 
 
 # Spellings that FR-024's earlier revisions used for contracts that have since changed. A normative
-# sentence carrying one of them offers an implementer the wrong contract, and four review rounds each
-# found one. Checked in the gate spec everywhere, and in decisions.md outside passages that quote the
-# old spelling on purpose (a supersession note names what it supersedes).
+# sentence carrying one of them offers an implementer the wrong contract, and five review rounds each
+# found one. Scope (revision 6): the gate spec ENTIRELY, including the normative schema fence — only a
+# fence opened with the info-string `retired-spellings` is a quotation and is skipped; the FR-024 and
+# NFR-019 rows of docs/status.md; and docs/decisions.md within any `## D-` section whose heading names
+# FR-024. A line is exempt only as a blockquote or when it uses the phrases a supersession note uses to
+# quote what it supersedes.
 GATE_STALE = [
-    (re.compile(r'`max_seal_lag`(?!_)'), 'max_seal_lag without _seconds'),
-    (re.compile(r'max_seal_lag\b(?!_seconds)(?!`)'), 'max_seal_lag without _seconds'),
+    (re.compile(r'max_seal_lag\b(?!_seconds)'), 'max_seal_lag without _seconds'),
     (re.compile(r'1m\.\.24h'), '1m..24h (the floor is derived, 300..86400 s)'),
     (re.compile(r'minimum of (the )?applicable leases'), 'lease-only facts_fresh_until'),
     (re.compile(r'first statement supplies'), '"first statement" (it is the first SNAPSHOT-BEARING statement)'),
 ]
 GATE_SPEC = 'docs/specs/func-reliability-gate.md'
-GATE_ALLOWED_CONTEXT = re.compile(r'superseded|SUPERSEDED|corrected|Corrected|revision [1-4]|Revision [1-4]|wrote "|once said|earlier revisions|retired', re.I)
+GATE_FIXTURE_FENCE = '```retired-spellings'
+GATE_QUOTING = re.compile(r'at the time|renamed in revision', re.I)
+GATE_STATUS_ROWS = re.compile(r'^\| (FR-024|NFR-019) \|')
+GATE_DECISION_HEADING = re.compile(r'^## D-\d+ .*FR-024')
+
+
+def gate_stale_findings(path, lines):
+    """The retired-spelling findings for one document, as (path, line, kind, message). Pure, so the
+    fixture tests can drive it without files."""
+    bad = []
+    in_fixture = False
+    in_fence = False
+    in_gate_section = False
+    for n, line in enumerate(lines, 1):
+        if line.startswith('```'):
+            if in_fence or in_fixture:
+                in_fence = in_fixture = False
+            elif line.strip() == GATE_FIXTURE_FENCE:
+                in_fixture = True
+            else:
+                in_fence = True
+            continue
+        if in_fixture:
+            continue
+        if path.endswith('decisions.md'):
+            if line.startswith('## '):
+                in_gate_section = bool(GATE_DECISION_HEADING.match(line))
+            if not in_gate_section:
+                continue
+        elif path.endswith('status.md'):
+            if not GATE_STATUS_ROWS.match(line):
+                continue
+        if line.startswith('>') or GATE_QUOTING.search(line):
+            continue
+        for rx, label in GATE_STALE:
+            if rx.search(line):
+                bad.append((path, n, 'stale', f'retired FR-024 spelling: {label}'))
+    return bad
+
+
+def gate_duplicate_headers(text):
+    heads = re.findall(r'^(service_gate_\w+)\s+\(', text, re.M)
+    return [h for h in sorted(set(heads)) if heads.count(h) > 1]
 
 
 def check_gate_stale_spellings():
-    """FR-024's retired spellings may not appear as live text, and the schema block may not declare a
-    table twice."""
     bad = []
-    for path in (GATE_SPEC, 'docs/decisions.md'):
+    for path in (GATE_SPEC, 'docs/status.md', 'docs/decisions.md'):
         try:
             lines = open(path, encoding='utf-8').read().split('\n')
         except FileNotFoundError:
             continue
-        fenced = False
-        for n, line in enumerate(lines, 1):
-            if line.startswith('```'):
-                fenced = not fenced
-                continue
-            if fenced:
-                continue  # code blocks quote; they do not state
-            if path == 'docs/decisions.md' and 'FR-024' not in ''.join(lines[max(0, n - 40):n]):
-                continue
-            for rx, label in GATE_STALE:
-                if rx.search(line) and not GATE_ALLOWED_CONTEXT.search(line) and not line.startswith('>'):
-                    bad.append((path, n, 'stale', f'retired FR-024 spelling: {label}'))
-    text = open(GATE_SPEC, encoding='utf-8').read()
-    heads = re.findall(r'^(service_gate_\w+)\s+\(', text, re.M)
-    for h in sorted({x for x in heads if heads.count(x) > 1}):
+        bad += gate_stale_findings(path, lines)
+    try:
+        text = open(GATE_SPEC, encoding='utf-8').read()
+    except FileNotFoundError:
+        return bad
+    for h in gate_duplicate_headers(text):
         bad.append((GATE_SPEC, 0, 'stale', f'schema table {h} declared more than once'))
     return bad
 

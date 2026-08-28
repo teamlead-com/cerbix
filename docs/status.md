@@ -2,7 +2,18 @@
 
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. Every `DONE` links to code, tests, and metrics.
 
-## Current iteration (iter-0161 — CLOSED 2026-08-28. A production upgrade failed on PostgreSQL 14, then an adversarial review of FR-022/FR-023 turned into the arc that runs from §7 to §54: incident lifecycle, service escalation, alert routability, and the outbox's delivery order. See [iter-0161](iterations/iter-0161.md))
+## Current iteration (iter-0162 — CLOSED 2026-08-28. Docs only: the FR-024 design gate (thirteen revisions, approved at [47]), its UI mock (three revisions, static contract approved at [59]), and the owner's decision to defer the requirement (D-0202). No product code. See [iter-0162](iterations/iter-0162.md))
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0162-1 | The FR-024/NFR-019 design is APPROVED as a specification before any code, by an independent reviewer who re-read the working tree rather than the implementer's disposition, with every owner decision recorded. | DONE | [`func-reliability-gate.md`](specs/func-reliability-gate.md) revision 13; party [47]; D-0188, D-0189, D-0190, D-0193, D-0194 (owner), D-0191, D-0192, D-0195 … D-0201 (implementer authority) in [decisions.md](decisions.md). |
+| AC-0162-2 | A UI mock exists BEFORE any frontend code, drawn from the approved specification with the repository's design language (tokens verbatim, no new colour), and its static contract — routes, presence, states, RBAC rendering — agrees with the specification. | DONE | [`mock-reliability-gate.html`](design/mock-reliability-gate.html), three revisions; static contract approved at party [59]; the mock's section in [`notes.md`](design/notes.md). Not visually approved by the owner — stated, not hidden. |
+| AC-0162-3 | The retired vocabulary of every superseded specification revision is refused by `make docs-check`, in the spec, the FR-024 decision sections and the status rows, and the guard's own scope is fixture-tested. | DONE | [`check-docs-references.py`](../scripts/check-docs-references.py) `GATE_STALE`, [`check_docs_references_test.py`](../scripts/check_docs_references_test.py) (18 cases); §10 of the spec. |
+| AC-0162-4 | The owner's deferral is recorded where a reader will meet it — spec banner, status rows, decision, traceability, design notes — with the resume path stated, and WITHOUT widening the three-state status vocabulary. | DONE | D-0202 in [decisions.md](decisions.md); the FR-024/NFR-019 rows below stay `TODO`; [`traceability.md`](traceability.md) FR-024 row; §5 of [iter-0162](iterations/iter-0162.md) records the reverted `DEFERRED` value. |
+| AC-0162-5 | The arc's own process defects are corrected on the record, not edited away: per-round commits against the commit policy, the fourth status value, the late "why", and the work having run outside the iteration workflow. | DONE | §5 of [iter-0162](iterations/iter-0162.md); D-0201 and D-0202. |
+| DoD-0162 | The design gate is closed as approved, the mock exists, the deferral is written down with its resume path, and every role has a stated output — including "none, by decision". | DONE | §3 of [iter-0162](iterations/iter-0162.md): Agent A none (D-0202), Agent B the guard's 18 fixtures + `docs-check` green, Agent C the canonical docs, Agent D no runtime delta. FR-024/NFR-019 remain `TODO`. |
+
+## Previous iteration (iter-0161 — CLOSED 2026-08-28. A production upgrade failed on PostgreSQL 14, then an adversarial review of FR-022/FR-023 turned into the arc that runs from §7 to §54: incident lifecycle, service escalation, alert routability, and the outbox's delivery order. See [iter-0161](iterations/iter-0161.md))
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |

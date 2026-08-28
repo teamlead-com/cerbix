@@ -4601,7 +4601,7 @@ superseded clauses marked as such rather than left as a second live answer.
 **Context.** Focused confirmation of revision 3 (`a16ea70`) returned 4 P1 and 4 P2 (party [25]). No
 owner question this round; the per-policy `max_seal_lag_seconds` (then still spelled `max_seal_lag`; renamed in revision 4) stays the owner's authority.
 
-**The floor.** Revision 3 allowed a `max_seal_lag` of one minute. The code cannot satisfy that: buckets
+**The floor.** Revision 3 allowed a `max_seal_lag` (the field's name at the time) of one minute. The code cannot satisfy that: buckets
 are 60 s, the late-arrival grace is 120 s, the sealer seals up to `FloorToBucket(now − grace)`, so a
 healthy pipeline's lag is `[2m, 3m)` before queueing. A one- or two-minute policy would be `seal_stale`
 on a system doing exactly what it should, and a strict API must not accept a value that is unreachable.
@@ -4611,7 +4611,7 @@ domain beside the constants it depends on, with a live-materializer boundary tes
 
 **One freshness formula.** `facts_fresh_until` was defined over leases alone, so a budget-only policy had
 an expiry the field could omit, and a burn lease later than the seal horizon could name an instant the
-budget was already stale. It is now the minimum over the seal horizon (`sealed_through + max_seal_lag`)
+budget was already stale. It is now the minimum over the seal horizon (`sealed_through + max_seal_lag`, as the field was named at the time)
 and every lease the policy depends on, present whenever any of them exists.
 
 **Bounds on rate, not only concurrency.** An in-flight cap bounds how many reports run at once; it does
@@ -4668,3 +4668,199 @@ in the gate because the review has had to be that guard five times.
 **On P2-4.** The review reported two mechanical duplicates in revision 4. Neither reproduces by `grep`
 against `d540ae4` (each string occurs once in the spec and nowhere else); the duplicate-header guard is
 added regardless, because a check that would have caught it is cheaper than a second look.
+
+## D-0193 — FR-024 revision 6: a ledger sized for what a deploy gate is, aged out by dropping partitions (2026-08-28)
+
+> **Superseded in part by D-0194 (2026-08-28).** The partition period below is one month; revision 7
+> makes it one UTC day, because month-sized partitions kept a row up to 31 days past the retention
+> knob. The capacity table, the lower rates and the partition-removal principle stand.
+
+**Context.** Focused confirmation of revision 5 (`3771622`) returned 3 P1 and 3 P2 (party [30]). One was
+the owner's.
+
+**The capacity contract (owner, 2026-08-28).** Revision 5 finally gave the resource bounds numbers, and
+the numbers defeated the bounds' purpose: a default of 600 decisions per minute PERMITTED 77.8 million
+immutable rows per replica over the retention, the hard maximum 7.8 billion, and a row-level batch
+DELETE had to keep pace with that forever. The owner chose both halves of the fix. The rates are re-sized
+to what a deploy gate is — 10 per minute per principal, 60 per minute per process by default, 600 the
+hard maximum — and §5a now prints the rows per day and per retention those numbers permit, per replica,
+so nobody raises a limit without seeing the table it is raising. And the ledger is RANGE-partitioned by
+`evaluated_at`, one partition per month, in both storage modes; retention is the DROP of whole
+partitions at or before the cutoff — one catalog operation regardless of rows, no dead tuples, no DELETE
+WAL — so the purge outruns any permitted ingest by construction rather than by a load test that would
+have to be repeated at every change of the numbers.
+
+**The guard's scope was the hole it was meant to close.** The first stale-spelling guard skipped every
+fenced block, and the normative schema of §5 IS a fenced block — so a retired column name in the very
+definition of the column would have passed. It also let any line mentioning a revision number through,
+and did not read `docs/status.md`, which had kept a retired spelling and outranks the decisions. The
+guard now scans the spec entirely except one fence explicitly marked as the fixture, the FR-024/NFR-019
+status rows, and decision sections by heading; exemptions are blockquotes and the two phrases a
+supersession note uses. And it has fixture tests run by `make docs-check`, because the author of the
+guard had, the same hour, announced a revision with a red gate hidden behind a pipe.
+
+**The rest.** The purge is a partition-maintenance pass on the scheduler leader inside
+`subCadenceTimeout`, off the dispatch loop like every other leader sub-cadence, with two catalog gauges
+that never count rows; the limiters get `rejected_total{reason}`, a duration histogram and
+`errors_total{kind}`, no principal labels, and runbook thresholds against those names. Limiter
+acquisition order is pinned — permit first, token second, a refusal never costs what it did not use —
+and `Retry-After` is `ceil`, never below 1. `LateArrivalGrace` moves to the domain beside
+`CanonicalBucket` so `MinSealLag` can be derived there without an import cycle or a copied constant.
+D6a's doubled "first" is gone.
+
+## D-0194 — FR-024 revision 7: daily partitions, a detach that never blocks an insert, and a ledger that refuses rather than strands (2026-08-28)
+
+**Context.** Focused confirmation of revision 6 (`4e5bd15`) returned 5 P1 and 2 P2 (party [33]). One was
+the owner's; one did not reproduce.
+
+**The partition period (owner, 2026-08-28).** D-0193 chose partitions a month wide. The reviewer showed
+what that does to the knob: with whole-partition removal a row lives until its partition's upper bound
+passes the cutoff, so `retention_days = 7` keeps rows up to 38 days and `90` up to 121, while §6 promised
+"older than retention is purged" — and the rows carry `actor_label`, which makes the ceiling matter, not
+only the floor. Offered daily partitions (exact to within a day; precedent `heartbeats`, 00017) or
+keeping monthly ones with the knob re-specified as a minimum, the owner chose daily. At the 365-day
+maximum that is at most 373 attached partitions (the figure at the time; D-0195 corrects it to 396 with the maximum lead), which PostgreSQL carries without comment and which
+`DETACH … CONCURRENTLY` makes irrelevant to inserts.
+
+**Removal that cannot block a write, and a ledger that refuses rather than strands.** Revision 6 said
+"DROP" and left the locks unsaid; a plain `DROP TABLE` of a partition takes `ACCESS EXCLUSIVE` on the
+parent and would have queued every decision insert behind it. Revision 7 detaches CONCURRENTLY (`SHARE
+UPDATE EXCLUSIVE` on the parent only) and drops the standalone table afterwards, finalizes an
+interrupted detach on the next pass, and runs every DDL under `lock_timeout 2s` / `statement_timeout
+10s`, retried next pass rather than waited out. It also declines the DEFAULT partition heartbeats have:
+the decision row is written in the decision transaction, so a decision the ledger cannot hold is not a
+decision — the insert fails, the API answers 503 `ledger_unwritable`, nothing is emitted. A lead of
+created-ahead days (default 7) and a `writable_horizon_seconds` gauge make that failure need a leader
+absent for the whole lead, by which time `max_seal_lag_seconds` has long since turned every decision
+into `UNKNOWN`. Stranding rows in a DEFAULT partition would instead have needed a row-level DELETE to
+honour retention — the very thing D-0193 removed.
+
+**Off the dispatch loop, this time actually.** Revision 6 claimed the purge ran "inside
+`subCadenceTimeout`, off the dispatch loop". The scheduler's `withTimeout` runs its function inline on
+the ticker; a slow DDL there would have held monitor dispatch for up to 30 s. The maintenance pass now
+runs in the leader's own goroutine in the shape `serviceFactMaintenanceLoop` already has — started with
+leadership, cancelled and joined before `lead` returns — and invariant 18 requires a test that blocks the
+detach while the dispatch tick keeps firing.
+
+**Identity on a partitioned table.** A primary key on a RANGE-partitioned table must contain the
+partition key, so it is `(evaluated_at, id)` and `id` is not database-unique across partitions. The
+route stays id-only and honest about it: `gen_random_uuid()` ids, a read that probes the `(id)` child
+index of every attached partition without pretending to prune, and a 500 `ledger_identity` (the contract at the time) rather than a
+choice if two rows ever share an id. No registry table, no sequence.
+
+**Bytes.** The capacity table counted rows; each row carried JSON evidence with an unbounded list of
+definition revisions. The list is now `{count, first_id, last_id, digest}` — recoverable, this record said at the time, from the retained
+revisions by the window the evidence names — evidence is canonical JSON, the row is CHECK-bounded (4 KiB
++ 1 KiB + 4 KiB), and the table gained byte columns at 1.5 KiB typical and 10 KiB bound, with a realistic
+200-decisions-a-day row so the saturated numbers read as what they are.
+
+**The guard's vocabulary.** Revision 6's matrix still required `decision_purge_batch` (the name at the time)
+and two metric names §5a no longer defined, and the guard passed because its retired list stopped at revision
+5. The list now retires revision 6's spellings too, with fixtures for each.
+
+**Not reproduced.** The review reported the D8a heading duplicated at spec lines 205–206 of `4e5bd15`;
+at that hash line 205 is the heading and 206 is prose, and the heading occurs once. Recorded so the
+claim is not re-litigated.
+
+## D-0195 — FR-024 revision 8: a fence made of the connection, creation under the weaker lock, a registry of what is ours, and an id that names its day (2026-08-28)
+
+**Context.** Focused confirmation of revision 7 (`476643a`) returned 1 P0, 7 P1 and 3 P2 (party [35]),
+and retracted round 6's D8a duplicate (two overlapping `sed` ranges). Every item is a runtime fact of
+PostgreSQL or of this codebase, verified before it changed the text; none needed the owner.
+
+**The fence is the connection.** Revision 7 ran the maintenance pass in a goroutine of the scheduler
+leader and called "cancelled and joined before `lead` returns" a fence. It is not one: the scheduler's
+advisory lock sits on a pinned connection while its work uses the pool, so when that connection dies
+PostgreSQL frees the lock at once, a successor may start, and the old node keeps issuing statements
+until its next watchdog tick. The pass now takes the gate's own `store.LeaderSession` — the shape
+file-provider apply already uses for exactly this reason — and every statement of a pass runs on the
+lock-owning connection. A dead connection has no lock and can carry no statement; the deposed side is
+silenced by construction. The test terminates the old backend mid-detach and requires the successor to
+remove the partition exactly once.
+
+**Creation under the weaker lock.** The PostgreSQL 15 reference says it plainly: creating a partition
+with `PARTITION OF` requires `ACCESS EXCLUSIVE` on the parent. Revision 7's creation would have queued
+decision inserts behind it for up to the statement timeout. Partitions are built standalone (`LIKE …
+INCLUDING …` plus a bounds CHECK) and `ATTACH`ed under `SHARE UPDATE EXCLUSIVE`. Every missing day in
+the lead is created every pass, unbudgeted at the time; the removal budget is separate; and configuration load
+refuses a cadence-and-budget pair that cannot remove two partitions a day.
+
+**A lifetime bound that is true.** Daily granularity adds up to a day, the cadence up to another, and a
+refused lock or a lost session adds what it adds. The spec now promises `retention + 1 day +
+purge_every` under a healthy pass and calls everything past it backlog — gauged and alerted, not
+promised away.
+
+**The deferred drop.** PostgreSQL 15.9's release notes fix "possible crashes and 'could not open
+relation' errors in queries on a partitioned table occurring concurrently with a DETACH CONCURRENTLY
+and immediate drop of a partition"; cerbix enforces 15.0. Rather than raise the floor, the drop waits a
+cadence and runs only when no backend holds a transaction older than the detach — safe on every
+supported 15.x, with ≥ 15.9 recommended in the runbook.
+
+**A registry of what is ours.** `IF NOT EXISTS` proves nothing about the relation that exists, and a
+table left standalone by a crash between detach and drop has no parent link to prove it was ever ours.
+`service_gate_decision_partitions` records day, deterministic name, OID and state; every act validates
+the catalog against it on the same connection and refuses the whole day on any disagreement, counted
+and paged. A crash after a completed detach is the ordinary reconciled case.
+
+**The id names its day.** Revision 7's id-only read probed every attached partition — up to 396 with
+the maximum lead, not the 373 written at the time — with no limiter on reads. The id is now a UUIDv7 whose timestamp is
+`evaluated_at`'s millisecond, taken from the database clock inside the decision transaction so it cannot
+disagree with the partition key; the read prunes to one partition, refuses out-of-window ids without a
+query, and shares the in-flight permits.
+
+**Two smaller truths.** The revision digest is the complete surviving evidence: `service_definition_revisions`
+cascades with its service and `DeleteService` cascades the rest, so revision 7's "recoverable from the
+retained revisions" was false on a path D10 expressly supports. And the two rate buckets are debited as a
+unit or not at all; revision 7 debited the principal's before finding the process bucket empty.
+
+**Not reproduced.** "`two different limiters` repeated twice in §5a": at `476643a` the phrase occurs once
+(the §5a opening paragraph). The §8 "eight bounds" was real and is nine.
+
+## D-0196 — FR-024 revision 9: a registry that survives its own crashes, ownership by marker, two lifetime boundaries, and a listing the SPA can build (2026-08-28)
+
+**Context.** Focused confirmation of revision 8 (`63c1d57`) returned 8 P1 and a set of P2 (party [37]),
+and retracted round 7's "two different limiters twice" (the same overlapping-`sed` cause as the D8a
+retraction). Every item is a contract or runtime fact; none needed the owner.
+
+**Crash consistency.** Revision 8's registry had four states and declared every registry/catalog
+disagreement terminal — yet an ordinary crash between a DDL and its registry write produces exactly
+such a disagreement, and a refused day with no DEFAULT partition eats the writable horizon. Revision 9
+makes every transition PostgreSQL allows inside a transaction atomic with its registry write (create +
+unique index + comment + insert; attach + state; drop + state) and gives the one non-transactional
+statement, `DETACH … CONCURRENTLY`, a write-ahead `detaching` intent with all three crash outcomes
+reconciled. The matrix crashes the pass after every statement.
+
+**Ownership by marker.** An OID is a locator, not an identity: `pg_dump`/restore renumbers every
+relation and OIDs are reused after DROP, so revision 8 would have refused every partition of a restored
+installation. Each partition carries `COMMENT ON TABLE … 'cerbix:gate-ledger:<owner_token>'`, written in
+the creating transaction; the pass validates marker and shape and refreshes `relid` when the marker
+matches a new OID. Refusal is reserved for what no crash produces, skips only that day, and is counted in
+a maintenance error family of its own rather than the evaluation one.
+
+**Two boundaries.** Revision 8's single lifetime formula was a cadence short — the drop it deferred
+added a second one — and let "lifetime" mean parent visibility while the gauges counted the detached
+table. The spec now states logical readability (until detach: `retention + <1 day + ≤ purge_every`) and
+physical retention (until the deferred drop: `… + ≤ 2 × purge_every`) separately, and the application-
+side "404 without a query" prefilter is gone: it needed a `today` no API node owns and contradicted
+backlog, and PostgreSQL prunes the decoded-day predicate to zero children anyway.
+
+**Budgets that converge.** Steady state is two removal stage-ops a day (detach today's eligible day,
+drop yesterday's detached one); revision 8 accepted exactly that and called it catch-up. Load now
+refuses fewer than four a day, and creation — left without a budget in revision 8, up to 31
+two-statement sequences at the maximum lead — has its own budget, nearest horizon first, with its own
+convergence check.
+
+**The id, enforced.** Revision 8 pruned the read to one partition by the id's day while still specifying
+a 500 for "two rows with one id in two partitions" — a case that query could never see — and trusted the
+writer to keep id and `evaluated_at` in step. The database now CHECKs the id's millisecond against
+`evaluated_at` and each partition carries a local unique index on `id`, so the case is impossible and
+the 500 is gone.
+
+**The listing.** The SPA decision history had a query note and no contract. It has a route now:
+required range of at most 31 days, page size at most 200, keyset order `(evaluated_at, id) DESC`, opaque
+cursor, empty page for a foreign service, and a test that pages under a concurrent writer.
+
+**Mechanical drift fixed.** The doubled `cerbix_gate_decisions_bytes` clause in D10 (a replacement that
+kept its end marker) and the *Ledger* matrix line that still said "rows older than retention are
+purged". The reported repeat of "Revision 5 gave numbers…" on consecutive lines of §5a does not
+reproduce at `63c1d57` (`grep -c` gives one) — recorded, as the earlier two were.

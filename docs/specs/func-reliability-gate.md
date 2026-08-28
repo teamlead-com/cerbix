@@ -601,10 +601,10 @@ alters the observed state (D9).
 ## 10. Stale-spelling guard
 
 Four review rounds each found a normative sentence still carrying the previous revision's contract —
-`max_seal_lag` after it became `max_seal_lag_seconds`, `1m..24h` after the floor was derived, a
-lease-only `facts_fresh_until` after the seal horizon joined it, "first statement" after it became the
-first snapshot-bearing one. An implementer or the discharge map could legitimately have picked the wrong
-sentence. `make docs-check` therefore refuses, in THIS file and in `docs/decisions.md` outside the
+the seal-lag field without its unit suffix after it gained one, the old duration range after the floor
+was derived, a lease-only `facts_fresh_until` after the seal horizon joined it, "first statement" after
+it became the first snapshot-bearing one. An implementer or the discharge map could legitimately have
+picked the wrong sentence. `make docs-check` therefore refuses, in THIS file and in `docs/decisions.md` outside the
 explicitly superseded passages, the spellings that earlier revisions used and that mean something
 different now. Quoted here in a code block, which the guard does not scan — prose that repeated them
 would trip it, as this section's first draft did:

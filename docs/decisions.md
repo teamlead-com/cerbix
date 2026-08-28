@@ -4484,3 +4484,25 @@ permanently unheard as one whose channels were all deleted — the class was clo
 open in the code. `condemnDead` handles it, decoding the payload itself because the delivery path
 that would have parsed it is the one that just failed. Only `service_alert` is condemned there;
 anything else that dead-letters is an operator's problem and says so through the dead-letter surface.
+
+## D-0188 — FR-024 Reliability Gate: the design gate is closed (2026-08-27 → 2026-08-28)
+
+**Context.** After iter-0161 closed, the independent reviewer proposed the next direction — closing the
+SRE loop from measured reliability to a release decision — as Change Intelligence plus an error-budget
+release gate. The adversarial pass in the party reduced it: the gate is a DECISION over facts cerbix
+already computes and needs no new store; change events are a separate, later requirement. The owner
+approved the direction and `docs/specs/func-reliability-gate.md` was written as a design gate — fourteen
+decisions, nine settled in the pass and five left to the owner.
+
+**The owner closed the five the same day.** No dedicated `gate` token role in v1 (additive later, not
+removable later). CLI exit 0 for both `ALLOW` and `WARN`, 2/3/4/1 for `BLOCK`/`UNKNOWN`/`NOT_CONFIGURED`/
+error — fixed now because changing it breaks every pipeline. An open incident WARNS rather than blocks,
+because the deploy is very often the fix. `budget_below` takes a per-policy threshold, default 0.10.
+`coverage_not_armed` is REMOVED from the clause vocabulary: it is a fact about who is paging, not about
+reliability, and letting it decide would confuse the two questions this product keeps apart — it stays
+in the response as evidence only. Policy is per service with no inheritance. Decisions are PERSISTED
+with bounded retention and a read endpoint, because an id that cannot be looked up is not evidence.
+
+**What this does not decide.** Nothing about implementation order beyond "backend on the reviewed
+contract; SPA after an approved mock". The independent design review of the document is in progress and
+may reopen a DECIDED item with new facts, which is the review's job and not a defect of the gate.

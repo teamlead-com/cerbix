@@ -1,10 +1,12 @@
 # func-reliability-gate — a deploy asks whether the error budget allows it (FR-024 / NFR-019)
 
-> **Lifecycle: DESIGN GATE — no code.** This document exists to close decisions, not to describe an
-> implementation. Sections marked **DECIDED** were settled in the design pass of 2026-08-28 (owner,
-> `cerbix-dev`, `cerbix-reviewer`); sections marked **OPEN** are the owner's to close, and the first line
-> of code waits on them. Change Intelligence — deployment events, service timeline, incident correlation
-> — is **FR-025**, a separate requirement that this one does not depend on and must not grow into.
+> **Lifecycle: DESIGN GATE CLOSED (2026-08-28) — implementation may begin.** D1–D8 and D14 were settled
+> in the design pass (owner, `cerbix-dev`, `cerbix-reviewer`); D9–D13 were closed by the owner the same
+> day (D-0188). Two gates remain in front of code, per the project's process: the independent design
+> review of this document, which is in progress, and — because the policy editor and the decision history
+> are SPA surfaces — an approved UI mock before any frontend code. Backend work may start on the
+> reviewed contract. Change Intelligence — deployment events, service timeline, incident correlation —
+> is **FR-025**, a separate requirement that this one does not depend on and must not grow into.
 
 ## 1. What this is, in one paragraph
 
@@ -103,50 +105,59 @@ policy depends on cannot be answered, and only a declared policy can produce it.
 and "fast burn firing" are separate clauses with separate reason codes and are never inferred from one
 another.
 
-**D9 — who may do what. OPEN (owner).**
-Proposed: any token with `viewer` or above on the project may ASK the gate (it is a read of facts the
-token could already read on the service page); `project_admin` or above may create and revoke an
-override; `editor` or above may write the policy. The open question is whether a dedicated
-`gate` token role is wanted so a CI token can ask without being able to read anything else — it is more
-surface, and the case for it is a CI system whose secrets are less trusted than an operator's.
+**D9 — who may do what. DECIDED (owner, 2026-08-28).**
+Any token with `viewer` or above on the project may ASK the gate — it is a read of facts the token could
+already read on the service page. `editor` or above writes the policy. `project_admin` or above creates
+and revokes an override. **No dedicated `gate` token role in v1.** It would be new surface for a scenario
+we do not have; if CI secrets prove less trusted than operator ones, a narrower role can be added
+additively without breaking anything, whereas taking reads away from existing tokens later cannot.
 
-**D10 — CLI exit codes and shape. OPEN (owner).**
-Proposed: `cerbix gate check --project <p> --service <s> [--json]`, exit 0 `ALLOW`/`WARN`, 2 `BLOCK`,
-3 `UNKNOWN` (unless `unknown_behavior: block`, then 2), 4 `NOT_CONFIGURED`, 1 transport/auth error.
-`WARN` at exit 0 with reasons on stderr is the conventional choice; an owner who wants `WARN` to be
-distinguishable by exit code alone should say so now, because changing it later breaks every pipeline.
+**D10 — CLI exit codes and shape. DECIDED (owner, 2026-08-28).**
+`cerbix gate check --project <p> --service <s> [--json]`. Exit **0** for `ALLOW` and `WARN` — the
+warning's reasons go to stderr and into the JSON; **2** `BLOCK`; **3** `UNKNOWN` (or 2 when the policy's
+`unknown_behavior` is `block`); **4** `NOT_CONFIGURED`; **1** transport or auth error. `WARN` shares exit
+0 by the shell convention that non-zero means "do not continue": a warning is by definition "continue,
+but know this", and a distinct code would turn every warning into pipeline handling that people would
+soon silence. This is fixed now because changing it later breaks every pipeline that reads it.
 
-**D11 — what a policy may say. OPEN (owner) — this is the one that shapes the product.**
-A policy is a small closed vocabulary of clauses, each assigned `block`, `warn` or `ignore`:
+**D11 — what a policy may say. DECIDED (owner, 2026-08-28) — this is the one that shapes the product.**
+A policy is a small closed vocabulary of clauses, each assigned `block`, `warn` or `ignore`. The shipped
+defaults are the first column of assignments below:
 
 | Clause | Source (D1) | Proposed default |
 |---|---|---|
 | `budget_exhausted` — remaining ratio ≤ 0 | `decideServiceWindow` | block |
-| `budget_below` — remaining ratio below a policy threshold (e.g. 0.10) | `decideServiceWindow` | warn |
+| `budget_below` — remaining ratio below the policy's threshold (`budget_below_ratio`, default 0.10) | `decideServiceWindow` | warn |
 | `fast_burn_firing` — a `page`-severity burn rule is FIRING | burn latch | block |
 | `slow_burn_firing` — a `ticket`-severity burn rule is FIRING | burn latch | warn |
 | `service_incident_open` — an unresolved auto-incident for this service | incidents | warn |
-| `coverage_not_armed` — the service is paging THROUGH its members | `serviceCoverageClauses` | ignore |
 | `budget_withheld` — the number exists but may not be quoted (`withheld_reason`) | `decideServiceWindow` | → UNKNOWN |
 | `facts_stale` — a lease expired or no evaluation exists | both leases | → UNKNOWN |
 | `no_objective` — no service-scoped SLA target | `decideServiceWindow` | → UNKNOWN |
 
-The owner decides: (a) the shipped default assignment above, especially whether an open incident blocks
-or warns; (b) whether `budget_below` takes a per-policy threshold or a fixed one; (c) whether
-`coverage_not_armed` belongs in the vocabulary at all — it says "the service is not the one paging right
-now", which is a fact about alerting rather than about reliability, and including it may confuse the two.
+Three choices inside it, each with its reason:
 
-**D12 — policy scope. OPEN (owner).**
-Proposed: per service, no inheritance. A project-level default policy that services inherit is a
-reasonable second step and a trap as a first one (which revision does a gate response cite when the
-policy is inherited and then overridden?). Recommend per-service only for v1.
+- **An open incident WARNS, it does not block.** An open incident is very often the reason a deploy is
+  happening — the fix. A gate that blocks the fix because of the incident it fixes works against its own
+  purpose. An installation that wants the stricter reading sets `block` in its policy.
+- **`budget_below` carries a per-policy threshold**, default 0.10. One fixed number cannot serve a 99.99
+  service and a 99.5 one alike.
+- **`coverage_not_armed` is NOT in the vocabulary.** It states who is paging right now, which is a fact
+  about alert delivery and not about reliability; admitting it would let a policy confuse the two
+  questions this product keeps apart. `coverage_state` stays in the response as EVIDENCE (D5), because
+  an operator reading a decision wants to know it — it just cannot decide anything.
 
-**D13 — are decisions persisted? OPEN (owner).**
-`decision_id` is meant to be stored by the pipeline as evidence, which implies it can later be looked up.
-Persisting every decision is a table that grows with deploy frequency; a stateless signed id proves the
-response was ours but not what it said. Proposed: persist, with a bounded retention (the SLA-report
-retention already exists as a precedent), and a read endpoint `GET …/gate/decisions/{id}`. The owner
-decides whether the storage is acceptable or whether v1 ships stateless ids and defers lookup.
+**D12 — policy scope. DECIDED (owner, 2026-08-28).**
+Per service, no inheritance. A project-level default that services inherit is a reasonable second step
+and a trap as a first one: it adds a three-level resolution and the question of which revision a gate
+response cites when the inherited policy is later overridden. v1 answers with one row and one revision.
+
+**D13 — decisions are persisted. DECIDED (owner, 2026-08-28).**
+A `decision_id` that cannot be looked up is evidence that cannot be produced, which is not evidence.
+Every decision is stored — state, reasons, evidence, policy revision, override id, `evaluated_at`,
+`as_of` — with a bounded retention on the SLA-report precedent, and read back through
+`GET /api/v1/projects/{p}/services/{s}/gate/decisions/{id}`. The row is small; the table grows with deploy
+frequency, which is the thing it exists to account for.
 
 **D14 — Change Intelligence is FR-025 and is not started by this requirement. DECIDED.**
 Deployment/rollback/flag events, the service timeline, incident correlation and before/after SLI comparison
@@ -166,7 +177,7 @@ payload. None of that is needed for a decision and none of it ships here.
 - `openapi.yaml` — the decision, policy and override schemas; regenerate `frontend/src/api/schema.d.ts`.
 - README — one sentence under the reliability platform positioning: cerbix decides, the pipeline acts.
 
-## 5. Schema (draft — to be confirmed against D11–D13, not to be built yet)
+## 5. Schema (draft — decided against D11–D13; column-level detail belongs to the implementation)
 
 ```
 service_gate_policies      (service_id PK → services, project_id, unknown_behavior CHECK IN (warn, block),
@@ -175,7 +186,7 @@ service_gate_policies      (service_id PK → services, project_id, unknown_beha
 service_gate_overrides     (id, service_id, project_id, actor_user_id NULL, via_token bool, reason text NOT NULL,
                             created_at, expires_at NOT NULL, revoked_at NULL, revoked_by NULL)
 service_gate_decisions     (id, service_id, project_id, policy_revision, state, reasons jsonb, evidence jsonb,
-                            override_id NULL, evaluated_at, as_of)             -- only if D13 = persist
+                            override_id NULL, evaluated_at, as_of)             -- retained, bounded (D13)
 ```
 
 Tenant-composite FKs to `(services.id, project_id)` as every service-scoped table since 00085; a foreign

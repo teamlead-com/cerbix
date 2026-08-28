@@ -176,6 +176,11 @@ GATE_STALE = [
     (re.compile(r'1m\.\.24h'), '1m..24h (the floor is derived, 300..86400 s)'),
     (re.compile(r'minimum of (the )?applicable leases'), 'lease-only facts_fresh_until'),
     (re.compile(r'first statement supplies'), '"first statement" (it is the first SNAPSHOT-BEARING statement)'),
+    # revision 6 (party [33] P1-4): the row-DELETE purge and its metrics, the month-wide partitions,
+    # and the unbounded revision list were all replaced in revision 7.
+    (re.compile(r'decision_purge_batch|purge_backlog_rows|oldest_eligible_seconds'), 'revision-6 purge vocabulary'),
+    (re.compile(r'partition per calendar month|monthly RANGE'), 'revision-6 partition period (it is one UTC day)'),
+    (re.compile(r'fact_revision_ids'), 'fact_revision_ids (it is the bounded fact_revisions object)'),
 ]
 GATE_SPEC = 'docs/specs/func-reliability-gate.md'
 GATE_FIXTURE_FENCE = '```retired-spellings'

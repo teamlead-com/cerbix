@@ -59,6 +59,19 @@ class StaleSpellingGuard(unittest.TestCase):
     def test_mentioning_a_revision_number_is_not_an_exemption(self):
         self.assertTrue(flagged(SPEC, "Revision 3 allowed `max_seal_lag` of one minute, which is wrong."))
 
+    def test_revision_six_vocabulary_is_retired(self):
+        # Round 6 P1-4: the guard passed while §7 still required the names §5a had dropped.
+        for line in (
+            "the purge runs in batches of `decision_purge_batch`",
+            "`…_purge_backlog_rows` moves",
+            "`…_oldest_eligible_seconds` moves",
+            "one partition per calendar month",
+            "lives in a monthly RANGE partition",
+            "`fact_revision_ids[]` — the revisions",
+        ):
+            self.assertTrue(flagged(SPEC, line), line)
+        self.assertEqual(flagged(SPEC, "`decision_purge_max_partitions`, `fact_revisions`, one partition per UTC day"), [])
+
     def test_duplicate_schema_headers_are_caught(self):
         text = "service_gate_decisions  (a)\nservice_gate_overrides  (b)\nservice_gate_decisions  (c)\n"
         self.assertEqual(cdr.gate_duplicate_headers(text), ["service_gate_decisions"])

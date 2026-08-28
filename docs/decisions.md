@@ -4671,6 +4671,10 @@ added regardless, because a check that would have caught it is cheaper than a se
 
 ## D-0193 — FR-024 revision 6: a ledger sized for what a deploy gate is, aged out by dropping partitions (2026-08-28)
 
+> **Superseded in part by D-0194 (2026-08-28).** The partition period below is one month; revision 7
+> makes it one UTC day, because month-sized partitions kept a row up to 31 days past the retention
+> knob. The capacity table, the lower rates and the partition-removal principle stand.
+
 **Context.** Focused confirmation of revision 5 (`3771622`) returned 3 P1 and 3 P2 (party [30]). One was
 the owner's.
 
@@ -4703,3 +4707,57 @@ acquisition order is pinned — permit first, token second, a refusal never cost
 and `Retry-After` is `ceil`, never below 1. `LateArrivalGrace` moves to the domain beside
 `CanonicalBucket` so `MinSealLag` can be derived there without an import cycle or a copied constant.
 D6a's doubled "first" is gone.
+
+## D-0194 — FR-024 revision 7: daily partitions, a detach that never blocks an insert, and a ledger that refuses rather than strands (2026-08-28)
+
+**Context.** Focused confirmation of revision 6 (`4e5bd15`) returned 5 P1 and 2 P2 (party [33]). One was
+the owner's; one did not reproduce.
+
+**The partition period (owner, 2026-08-28).** D-0193 chose partitions a month wide. The reviewer showed
+what that does to the knob: with whole-partition removal a row lives until its partition's upper bound
+passes the cutoff, so `retention_days = 7` keeps rows up to 38 days and `90` up to 121, while §6 promised
+"older than retention is purged" — and the rows carry `actor_label`, which makes the ceiling matter, not
+only the floor. Offered daily partitions (exact to within a day; precedent `heartbeats`, 00017) or
+keeping monthly ones with the knob re-specified as a minimum, the owner chose daily. At the 365-day
+maximum that is at most 373 attached partitions, which PostgreSQL carries without comment and which
+`DETACH … CONCURRENTLY` makes irrelevant to inserts.
+
+**Removal that cannot block a write, and a ledger that refuses rather than strands.** Revision 6 said
+"DROP" and left the locks unsaid; a plain `DROP TABLE` of a partition takes `ACCESS EXCLUSIVE` on the
+parent and would have queued every decision insert behind it. Revision 7 detaches CONCURRENTLY (`SHARE
+UPDATE EXCLUSIVE` on the parent only) and drops the standalone table afterwards, finalizes an
+interrupted detach on the next pass, and runs every DDL under `lock_timeout 2s` / `statement_timeout
+10s`, retried next pass rather than waited out. It also declines the DEFAULT partition heartbeats have:
+the decision row is written in the decision transaction, so a decision the ledger cannot hold is not a
+decision — the insert fails, the API answers 503 `ledger_unwritable`, nothing is emitted. A lead of
+created-ahead days (default 7) and a `writable_horizon_seconds` gauge make that failure need a leader
+absent for the whole lead, by which time `max_seal_lag_seconds` has long since turned every decision
+into `UNKNOWN`. Stranding rows in a DEFAULT partition would instead have needed a row-level DELETE to
+honour retention — the very thing D-0193 removed.
+
+**Off the dispatch loop, this time actually.** Revision 6 claimed the purge ran "inside
+`subCadenceTimeout`, off the dispatch loop". The scheduler's `withTimeout` runs its function inline on
+the ticker; a slow DDL there would have held monitor dispatch for up to 30 s. The maintenance pass now
+runs in the leader's own goroutine in the shape `serviceFactMaintenanceLoop` already has — started with
+leadership, cancelled and joined before `lead` returns — and invariant 18 requires a test that blocks the
+detach while the dispatch tick keeps firing.
+
+**Identity on a partitioned table.** A primary key on a RANGE-partitioned table must contain the
+partition key, so it is `(evaluated_at, id)` and `id` is not database-unique across partitions. The
+route stays id-only and honest about it: `gen_random_uuid()` ids, a read that probes the `(id)` child
+index of every attached partition without pretending to prune, and a 500 `ledger_identity` rather than a
+choice if two rows ever share an id. No registry table, no sequence.
+
+**Bytes.** The capacity table counted rows; each row carried JSON evidence with an unbounded list of
+definition revisions. The list is now `{count, first_id, last_id, digest}` — recoverable from the retained
+revisions by the window the evidence names — evidence is canonical JSON, the row is CHECK-bounded (4 KiB
++ 1 KiB + 4 KiB), and the table gained byte columns at 1.5 KiB typical and 10 KiB bound, with a realistic
+200-decisions-a-day row so the saturated numbers read as what they are.
+
+**The guard's vocabulary.** Revision 6's matrix still required `decision_purge_batch` (the name at the time)
+and two metric names §5a no longer defined, and the guard passed because its retired list stopped at revision
+5. The list now retires revision 6's spellings too, with fixtures for each.
+
+**Not reproduced.** The review reported the D8a heading duplicated at spec lines 205–206 of `4e5bd15`;
+at that hash line 205 is the heading and 206 is prose, and the heading occurs once. Recorded so the
+claim is not re-litigated.

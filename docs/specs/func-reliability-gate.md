@@ -1,14 +1,15 @@
 # func-reliability-gate — a deploy asks whether the error budget allows it (FR-024 / NFR-019)
 
-> **Lifecycle: DESIGN GATE, revision 6 — awaiting focused confirmation, no code.** Revision 1
+> **Lifecycle: DESIGN GATE, revision 7 — awaiting focused confirmation, no code.** Revision 1
 > (`46379fa`, `c65ea5d`) was rejected with 4 P0, 9 P1, 3 P2 (party [15]); revision 2 (`113308f`) with
 > 2 P0, 5 P1, 4 P2 (party [20]); revision 3 (`a16ea70`) with 4 P1, 4 P2 (party [25]); revision 4
-> (`d540ae4`) with 3 P1, 5 P2 (party [27]); revision 5 (`3771622`) with 3 P1, 3 P2 (party [30]). Every
-> finding of every round is addressed below and named where it changed the text. The owner closed
-> D9–D13 (D-0188), the four questions of round 1 (D-0189), the seal-lag bound of round 2 (D-0190) and
-> the ledger's capacity contract of round 5 (D-0193); rounds 3 and 4 raised no owner question (D-0191,
-> D-0192). `make docs-check` refuses the retired spellings of earlier revisions, including inside the
-> normative schema block, and its guard has fixture tests (§10). Two gates remain before code: the review's focused
+> (`d540ae4`) with 3 P1, 5 P2 (party [27]); revision 5 (`3771622`) with 3 P1, 3 P2 (party [30]);
+> revision 6 (`4e5bd15`) with 5 P1, 2 P2 (party [33]). Every finding of every round is addressed below
+> and named where it changed the text. The owner closed D9–D13 (D-0188), the four questions of round 1
+> (D-0189), the seal-lag bound of round 2 (D-0190), the ledger's capacity contract of round 5 (D-0193)
+> and its partition period of round 6 (D-0194); rounds 3 and 4 raised no owner question (D-0191,
+> D-0192). `make docs-check` refuses the retired spellings of earlier revisions — revision 6's included —
+> inside the normative schema block too, and its guard has fixture tests (§10). Two gates remain before code: the review's focused
 > confirmation of THIS revision, and — because the policy editor and the decision history are SPA
 > surfaces — an approved UI mock before any frontend code. Change Intelligence is **FR-025** and is not
 > part of this requirement.
@@ -153,7 +154,7 @@ columns are nullable exactly where it says so:
 | `action`, `unoverridden_action` | every state except `NOT_CONFIGURED` |
 | `policy_revision`, `window`, `unknown_behavior`, `max_seal_lag_seconds` | when a policy exists |
 | `target_id`, `objective`, `objective_updated_at` | when the window's target exists; absent with reason `window_target_missing` |
-| `sealed_through`, `seal_lag`, `fact_revision_ids[]` | when any fact has been sealed; absent with reason `never_sealed` |
+| `sealed_through`, `seal_lag`, `fact_revisions` | when any fact has been sealed; absent with reason `never_sealed` |
 | `governing_revision` | when a declaration governs at `evaluated_at`; absent with reason `no_governing_revision` |
 | `burn_leases[]` | one per rule of the target; empty when the target has no rules |
 | `coverage_lease_until`, `coverage_state` | when the service has been evaluated; absent with reason `never_evaluated` |
@@ -171,7 +172,9 @@ The fields themselves:
   `max_seal_lag_seconds` (D8a);
 - `window`, `target_id`, `objective`, `objective_updated_at`;
 - `governing_revision` — the service definition revision in force at `evaluated_at`, nullable when
-  none is; and `fact_revision_ids[]` — the revisions the sealed facts in the window were computed under,
+  none is; and `fact_revisions` — `{count, first_id, last_id, digest}` over the revisions the sealed facts in the
+  window were computed under (the bounded form of §5a; the full list is recoverable from the retained
+  definition revisions by the window the evidence names),
   which may be several (the report's own `spans_definition_revisions` withholding exists precisely
   because they can be);
 - `coverage_lease_until`, and `burn_leases[]` — one per rule of the policy's target, because a target
@@ -270,20 +273,39 @@ that, one expired override would refuse every later one forever.
 Revision 1 promised "every decision audited", "decisions persisted" and "O(1) reads with no write" at
 once; they are incompatible. The resolution: every decision is one row in `service_gate_decisions`, an
 append-only ledger with a bounded retention — `gate.decision_retention_days`, configuration-validated
-within `7..365`, default 90. **The ledger is RANGE-partitioned by `evaluated_at`, one partition per
-calendar month, in BOTH storage modes** (it is our own small-row table and needs nothing from a
-hypertable; the precedent is `00017_partition_heartbeats.sql`), and retention is the DROP of every
-partition whose upper bound is at or before the cutoff — never a row-level DELETE. That is the whole
-answer to "can the purge keep up with the permitted ingest" (review round 5 P1-1): a partition drop is
-one catalog operation whatever the row count, produces no dead tuples and no DELETE WAL, and so is
-faster than any ingest by construction; the current month is never touched. A maintenance pass on the
-scheduler leader creates the next month's partition ahead of time (as `EnsureHeartbeatPartitions` does)
-and drops eligible ones, at most `decision_purge_max_partitions` per pass, inside the leader's
-`subCadenceTimeout` (30 s) — off the dispatch loop, exactly the isolation the service slices already
-have (review round 5 P1-3). Two gauges, read from the catalog and never by counting rows:
-`cerbix_gate_decisions_partitions_pending_drop` (eligible partitions not yet dropped) and
-`cerbix_gate_decisions_oldest_partition_age_seconds` (age of the oldest partition's upper bound; 0 when
-none is eligible) — no labels. And a read endpoint that is **project-scoped, not service-nested**:
+within `7..365`, default 90. **The ledger is RANGE-partitioned by `evaluated_at`, one partition per UTC
+day, in BOTH storage modes** (our own small-row table that needs nothing from a hypertable; the precedent
+is `heartbeats` in 00017 and `EnsureHeartbeatPartitions`), and retention is the removal of every
+partition whose upper bound is at or before `now − retention` — never a row-level DELETE — so a row lives
+at most `retention + 1 day` and the knob means what it says to within a day (owner decision D-0194;
+revision 6's month-sized partitions would have kept rows up to 31 days past the knob — review round 6
+P1-2). Removal is two autocommit statements per partition: `ALTER TABLE … DETACH PARTITION …
+CONCURRENTLY`, which takes only `SHARE UPDATE EXCLUSIVE` on the parent and therefore never blocks a
+decision insert, then `DROP TABLE` of the detached standalone table, which locks nothing but itself. An
+interrupted detach leaves the partition in PostgreSQL's detach-pending state; the next pass runs `…
+DETACH PARTITION … FINALIZE` and then drops. Every DDL statement runs under `SET lock_timeout = '2s'` and
+`SET statement_timeout = '10s'`; a refusal is logged and retried on the next pass, never escalated to a
+longer wait. **There is no DEFAULT partition** (unlike heartbeats): the decision row is written in the
+decision transaction (D6a), so a decision the ledger cannot hold is not a decision — the insert fails
+with SQLSTATE 23514 ("no partition of relation found"), the API answers 503 `ledger_unwritable`, no
+state is emitted, the CLI exits 1. Partitions are created ahead so that this failure needs a leader
+absent for the whole lead time: the migration creates `[today, today + 7 d]`, the maintenance pass keeps
+`gate.decision_partition_lead_days` (default 7, `2..30`) days ahead with `CREATE TABLE IF NOT EXISTS …
+PARTITION OF`, and the gauge `cerbix_gate_decisions_writable_horizon_seconds` (time until the upper bound
+of the newest attached partition, from the catalog) has a runbook alert at 2 days — and a leader absent
+that long has already pushed every policy past `max_seal_lag_seconds`, so the gate is saying `UNKNOWN`
+before it stops recording. The pass runs on the scheduler leader **in its own goroutine, off the dispatch
+loop** — the shape `serviceFactMaintenanceLoop` already has: started with leadership, cancelled AND
+joined before `lead` returns, so a deposed leader cannot finish a DDL after its step-down (review round 6
+P1-1: revision 6 said "inside `subCadenceTimeout`", and `withTimeout` runs its function inline on the
+ticker, so a slow DDL there would have held dispatch). Idempotent DDL (`IF NOT EXISTS`, `IF EXISTS`,
+`FINALIZE`, the same cutoff arithmetic on both sides) makes a race between a deposed and a new leader
+harmless. Each pass is bounded to `subCadenceTimeout` and creates or removes at most
+`gate.decision_purge_max_partitions` partitions. Three gauges besides the horizon, all read from the
+catalog and never by counting rows: `cerbix_gate_decisions_partitions_pending_drop` (attached partitions
+past the cutoff plus detached ones not yet dropped), `cerbix_gate_decisions_oldest_partition_age_seconds`
+(age of the oldest attached partition's upper bound; 0 when none is past the cutoff) and
+`cerbix_gate_decisions_bytes` (sum of `pg_total_relation_size` over the partitions) — no labels. And a read endpoint that is **project-scoped, not service-nested**:
 `GET /api/v1/projects/{p}/gate/decisions/{id}`, authorised by the row's persisted `project_id` under
 `gate:evaluate`, with NO service-existence check on the path (review round 2 P1-2 — a service-nested
 route would answer 404 forever once the service is deleted, which is exactly the moment the evidence is
@@ -393,10 +415,13 @@ identity, and closed enums with no free payload. None of it is needed for a deci
   reliability section.
 - `docs/runbook.md` — "the gate says UNKNOWN" (it is about the facts, not the pipeline); the override
   procedure and the metric; the decision-ledger retention knob and the capacity table of §5a; the CLI's
-  environment contract; and the alert thresholds for the new metrics — `partitions_pending_drop ≥ 2 for
-  1h` (the maintenance pass is not running), `rate(evaluate_rejected_total[5m]) > 0 sustained for 15m`
-  (a pipeline is looping into the limit), `evaluate_errors_total{kind="snapshot_conflict"}` rising
-  (contention the retry is not absorbing).
+  environment contract; and the alert thresholds for the new metrics — `writable_horizon_seconds < 2 d`
+  (the maintenance goroutine or the leader is gone; the gate stops recording when it reaches 0),
+  `partitions_pending_drop ≥ 2 for 6h` (removal refused by `lock_timeout` pass after pass),
+  `evaluate_errors_total{kind="ledger_unwritable"} > 0` (page: the horizon was exhausted),
+  `rate(evaluate_rejected_total[5m]) > 0 sustained for 15m` (a pipeline is looping into the limit),
+  `evaluate_errors_total{kind="snapshot_conflict"}` rising (contention the retry is not absorbing); disk
+  sizing from the bound column of the §5a capacity table.
 - `internal/domain` — `LateArrivalGrace` moves here beside `CanonicalBucket` and `MinSealLag` is declared
   next to both; `internal/store` consumes them (D8a).
 - `func-service-reliability.md` §16.8 — invariant 106 (the gate consumes the owners and derives
@@ -424,13 +449,32 @@ service_gate_overrides  (id, service_id, project_id, policy_revision,
                          revoked_by_user_id NULL, revoked_via_token bool NULL, revoked_by_label text NULL;
                          at most one row per service with revoked_at IS NULL — enforced under the service lock,
                          with expired rows closed as `expired` in the same lock before an insert)
-service_gate_decisions  (id, project_id NOT NULL → projects CASCADE, service_id NULL → services SET NULL,
-                         service_slug, service_name,
+service_gate_decisions  (id uuid DEFAULT gen_random_uuid(), project_id NOT NULL → projects CASCADE,
+                         service_id NULL → services SET NULL, service_slug, service_name,
                          state, action NULL, reasons jsonb, evidence jsonb,           -- action NULL only for NOT_CONFIGURED
                          policy_revision NULL, window NULL, policy_snapshot jsonb NULL, -- NULL for NOT_CONFIGURED
-                         override_id NULL, evaluated_at, sealed_through NULL;          -- per the D7 presence table
-                         retained `gate.decision_retention_days`, default 90)
+                         override_id NULL, evaluated_at NOT NULL, sealed_through NULL; -- per the D7 presence table
+                         PARTITION BY RANGE (evaluated_at), one partition per UTC day, NO DEFAULT partition;
+                         PRIMARY KEY (evaluated_at, id);                                -- the partition key must be in it
+                         INDEX (id), INDEX (project_id, evaluated_at DESC);            -- partitioned indexes, one child each
+                         CHECK (octet_length(evidence::text) <= 4096
+                                AND octet_length(reasons::text) <= 1024
+                                AND (policy_snapshot IS NULL OR octet_length(policy_snapshot::text) <= 4096));
+                         retained `gate.decision_retention_days`, default 90, by partition removal (D10))
 ```
+
+**Identity on a partitioned ledger** (review round 6 P1-3). PostgreSQL enforces a primary key on a
+RANGE-partitioned table only when the partition key is part of it, so the key is `(evaluated_at, id)` and
+`id` alone is NOT database-unique across partitions. The contract that keeps the id-only route sound:
+`id` is `gen_random_uuid()` (122 random bits) assigned by the insert; the project-scoped read is
+`SELECT … WHERE id = $1 AND project_id = $2` against the parent — one probe of the `(id)` child index in
+every attached partition (at most `retention + lead + 1` of them, 373 at the 365-day maximum, each probe
+one index lookup), with no partition pruning, because a decision id carries no time and the route must
+not pretend it does. If the probe returns more than one row the read answers 500 `ledger_identity` and
+never picks one — a duplicate id is a generator fault to surface, not a tie to break. Listing (the UI's
+decision history) goes through `(project_id, evaluated_at DESC)` with a mandatory time range that prunes
+to the partitions it covers, default the last 30 days. No sequence and no registry table: a registry
+would be a second write in the decision transaction and a second thing to keep in step with retention.
 
 Tenant-composite FKs to `(services.id, project_id)` where the service reference is NOT NULL, as every
 service-scoped table since 00085.
@@ -452,36 +496,51 @@ capacity they imply is written next to them so nobody has to derive it (owner de
 | `evaluate_rate_principal_per_minute` | 10 | 1 | 600 | token bucket per principal: capacity = the value, refill = value/60 tokens per second; drained → 429 `principal_rate` |
 | `evaluate_rate_process_per_minute` | 60 | 1 | 600 | token bucket for the process, same algorithm; drained → 429 `process_rate` |
 | `evaluate_tx_budget_ms` | 5 000 | 500 | 30 000 | begin-through-commit budget for the decision transaction, applied through the store's deadline wrapper with the remainder per statement |
-| `decision_retention_days` | 90 | 7 | 365 | ledger retention (D10): partitions whose upper bound is at or before `now − retention` are dropped |
-| `decision_purge_every` | 1h | 5m | 24h | partition-maintenance cadence, scheduler leader only, inside `subCadenceTimeout` |
-| `decision_purge_max_partitions` | 3 | 1 | 12 | partitions dropped per pass — a bound on one pass's catalog work, not a throughput limit, since one pass at any cadence above a month clears a month |
+| `decision_retention_days` | 90 | 7 | 365 | ledger retention (D10): daily partitions whose upper bound is at or before `now − retention` are detached and dropped, so a row lives at most `retention + 1 day` |
+| `decision_partition_lead_days` | 7 | 2 | 30 | how many days of partitions are kept created ahead; the writable horizon the gauge measures against |
+| `decision_purge_every` | 1h | 5m | 24h | partition-maintenance cadence on the scheduler leader's own maintenance goroutine, each pass bounded to `subCadenceTimeout` |
+| `decision_purge_max_partitions` | 8 | 1 | 48 | partitions created or removed per pass — a bound on one pass's catalog work; a retention shortened by N days drains at this many per pass |
 
 **Acquisition order, so a rejection costs nothing it should not** (review round 5 P2-3): the in-flight
 permit is taken FIRST — process, then principal — and a refusal there consumes no rate token; the rate
 token is taken second — principal, then process — and a refusal there RELEASES the permit already held.
 `Retry-After` is `ceil(seconds until the next token)` for a rate refusal and `1` for an in-flight
 refusal, and is never below 1, so two identical bursts see identical headers and a refused request never
-burns quota. A 429 runs no report and writes no ledger row (invariant 14). All eight keys are validated
+burns quota. A 429 runs no report and writes no ledger row (invariant 14). All nine keys are validated
 at configuration load; a value outside its range refuses to start, naming the key and the range.
 
-**Capacity at the permitted ingest**, per replica — the numbers the table above actually allows:
+**Bytes, not only rows** (review round 6 P2). A row is bounded by the CHECKs of §5: evidence ≤ 4 KiB,
+reasons ≤ 1 KiB, policy snapshot ≤ 4 KiB, so a row is at most ≈ 10 KiB with its fixed columns and
+typically ≈ 1.5 KiB. The one input that had no bound was the list of definition revisions overlapping the
+window — a definition revised often enough would have grown every row; the evidence now carries
+`fact_revisions: {count, first_id, last_id, digest}` with `digest` the SHA-256 over the sorted ids, and the
+full list is recoverable from the definition revisions (retained as the reliability record, never
+purged) by the window the evidence already names. Evidence JSON is canonical — sorted keys, no
+whitespace — so equal facts give equal bytes and the bound is testable. The writer never truncates: a
+row that would exceed a CHECK is a bug, fails the decision as error kind `error`, and a test proves it
+with a synthetic 5 KiB evidence.
 
-| | rows / day | rows / 90 d (default retention) | rows / 365 d (max retention) |
-|---|---|---|---|
-| defaults (`60/min` process) | 86 400 | 7 776 000 | 31 536 000 |
-| hard maximum (`600/min` process) | 864 000 | 77 760 000 | 315 360 000 |
+**Capacity at the permitted ingest**, per replica — what the table above actually allows, in rows and in
+bytes (typical 1.5 KiB / bound 10 KiB per row):
 
-Multiply by the replica count for a cluster (below). At defaults a monthly partition holds ≈ 2.6 million
-rows per replica; at the hard maximum ≈ 26 million — both dropped in one catalog operation when they
-age out. An installation that raises `evaluate_rate_process_per_minute` is raising THIS table and should
-read it first; the runbook says so.
+| | rows / day | rows / 90 d | bytes / 90 d typical → bound | rows / 365 d | bytes / 365 d typical → bound |
+|---|---|---|---|---|---|
+| a real installation (≈ 200 decisions/day) | 200 | 18 000 | 27 MB → 180 MB | 73 000 | 110 MB → 730 MB |
+| defaults saturated (`60/min` process) | 86 400 | 7 776 000 | 11.7 GB → 78 GB | 31 536 000 | 47 GB → 315 GB |
+| hard maximum saturated (`600/min` process) | 864 000 | 77 760 000 | 117 GB → 778 GB | 315 360 000 | 473 GB → 3.2 TB |
+
+Multiply by the replica count for a cluster (below). One daily partition at saturated defaults holds
+86 400 rows ≈ 130 MB typical, and is removed in two catalog operations when it ages out. An installation
+that raises `evaluate_rate_process_per_minute` is raising THIS table and should read it first; the
+runbook says so and sizes the disk from the bound column, not the typical one.
 
 **Observability of the bounds themselves** (review round 5 P1-3), all low-cardinality and none carrying a
 principal: `cerbix_gate_evaluate_rejected_total{reason}` with exactly the four reasons above;
 `cerbix_gate_decision_duration_seconds` as a histogram over fixed buckets (0.05 … 30 s); and
-`cerbix_gate_evaluate_errors_total{kind}` with `snapshot_conflict | timeout | error`. Together with the
-two partition gauges of D10, that is the whole metric surface of this requirement; the runbook thresholds
-(§4) are written against these names.
+`cerbix_gate_evaluate_errors_total{kind}` with `snapshot_conflict | timeout | ledger_unwritable |
+ledger_identity | error`. Together with the four ledger gauges of D10 — `partitions_pending_drop`,
+`oldest_partition_age_seconds`, `writable_horizon_seconds`, `bytes` — that is the whole metric surface of
+this requirement; the runbook thresholds (§4) are written against these names.
 
 **These bounds are process-local, on purpose, and that is the v1 contract.** Every `api` or `all` replica
 enforces its own copies, so the cluster-wide allowance scales with the replica count — and so does the
@@ -523,15 +582,17 @@ numbers, not against a limiter that does not exist.
 11. policy writes are exhaustive over the version's clause set, refuse unknown/missing/duplicate
     clauses by name, bump a DB-owned revision only on real change, are CAS'd on `expected_revision`,
     and are audited with before/after and actor;
-12. a decision row is immutable, survives service rename and deletion, lives in a monthly RANGE
-    partition on `evaluated_at` in both storage modes, ages out by partition DROP and never by row
-    DELETE, and is readable under `gate:evaluate` through the PROJECT-scoped ledger route with no
-    service-existence check — proven by an HTTP read after the service is deleted, not by a SELECT;
+12. a decision row is immutable, survives service rename and deletion, lives in a daily RANGE
+    partition on `evaluated_at` in both storage modes under the key `(evaluated_at, id)`, ages out by
+    partition detach and drop within one day past retention and never by row DELETE, and is readable
+    under `gate:evaluate` through the PROJECT-scoped ledger route with no service-existence check — an
+    id-only read that probes every partition and answers 500 `ledger_identity` rather than choose
+    between two rows — proven by an HTTP read after the service is deleted, not by a SELECT;
 13. the gate policy of a file-managed service is writable through the API (D13) and is absent from the
     bundle hash;
-14. a decision request is bounded in CONCURRENCY and in RATE by the eight keys of §5a — process and
+14. a decision request is bounded in CONCURRENCY and in RATE by the nine keys of §5a — process and
     per-principal in-flight caps, per-principal and process token-bucket rates, a begin-through-commit
-    transaction budget, and a validated retention enforced by dropping whole monthly partitions — all
+    transaction budget, and a validated retention enforced by removing whole daily partitions — all
     checked BEFORE a transaction opens, so a 429 runs no report, writes no ledger row, and carries a
     `Retry-After` of `ceil(seconds to the next token)`, never below 1; an in-flight refusal consumes no
     rate token and a rate refusal releases its permit; the bounds are process-local and the cluster
@@ -549,6 +610,15 @@ numbers, not against a limiter that does not exist.
 17. override actor and revoker are stored as typed attribution PLUS an immutable server-derived label,
     and a later read of the override or of a decision that applied it names the same label; no
     client-supplied actor is accepted.
+18. ledger maintenance never holds dispatch: it runs in the leader's own maintenance goroutine, is
+    cancelled and joined before step-down completes, and a `DETACH` blocked behind a lock leaves the
+    dispatch tick firing on cadence — proven by a scheduler test whose fake store blocks the detach
+    while dispatch calls keep arriving, and by a step-down test that finds no DDL after `lead` returned;
+19. a decision the ledger cannot hold is not a decision: with no partition for `evaluated_at` the
+    insert fails, the API answers 503 `ledger_unwritable`, nothing is emitted, the CLI exits 1 — and the
+    lead of `decision_partition_lead_days` plus the `writable_horizon_seconds` gauge make that failure
+    need a leader absent for the whole lead time, which `max_seal_lag_seconds` has already turned into
+    `UNKNOWN`;
 
 ## 7. Required test matrix (written before the code)
 
@@ -592,7 +662,7 @@ paging write is still 409.
 
 *Presence:* raw JSON pinned for `NOT_CONFIGURED` (no `action`, no policy fields), for
 `window_target_missing` (policy fields present, no target/objective) and for `never_sealed` (no
-`sealed_through`, no `fact_revision_ids`) — the D7 table is the assertion.
+`sealed_through`, no `fact_revisions`) — the D7 table is the assertion.
 
 *Tenant:* malformed id 400, foreign well-formed id 404, on decide, policy, override and ledger alike.
 
@@ -605,10 +675,11 @@ rejects the (n+1)th concurrent request from one token as 429 with `Retry-After: 
 ledger row · the process-wide cap rejects across TWO tokens the same way · **a sequential flood from one
 principal at concurrency 1 is rate-limited** (429 with `Retry-After` = seconds to the next token, no
 report run, no ledger row) — the mutation removing the rate bound lets it through and fails · each of the
-eight keys refuses a value one below its minimum and one above its maximum at configuration load, naming
-the key · the purge runs in batches of `decision_purge_batch`, and `…_purge_backlog_rows` and
-`…_oldest_eligible_seconds` move · the CLI on a 429 prints `Retry-After` to stderr and exits 1 without
-retrying.
+nine keys refuses a value one below its minimum and one above its maximum at configuration load, naming
+the key · the maintenance pass detaches and drops the eligible partitions and
+`…_partitions_pending_drop`, `…_oldest_partition_age_seconds`, `…_writable_horizon_seconds` and
+`…_bytes` move as the catalog changes, with no row count in any of the four queries · the CLI on a 429
+prints `Retry-After` to stderr and exits 1 without retrying.
 
 *Domain:* `MinSealLag == LateArrivalGrace + CanonicalBucket + 2*CanonicalBucket` asserted as an
 expression over the constants, all three resolved from `internal/domain`; a write of
@@ -619,12 +690,23 @@ refusal releases the in-flight permit (the next request is not refused for concu
 for a rate refusal equals `ceil` of the time to the next token and is `1` at minimum · two identical
 bursts against a fresh bucket receive identical `Retry-After` sequences.
 
-*Partitions:* a decision written on the last second of a month lands in that month's partition · the
-maintenance pass creates next month's partition before it is needed · with retention 7 d, a partition
-whose upper bound is 8 d old is dropped and the current one is not · at most
-`decision_purge_max_partitions` are dropped per pass · both gauges are answered from the catalog with no
-row count, in both storage modes · the maintenance pass runs inside `subCadenceTimeout` and a slow drop
-does not delay dispatch.
+*Partitions and identity:* a decision written on the last second of a UTC day lands in that day's
+partition · the migration leaves `[today, today + 7 d]` attached and the pass keeps
+`decision_partition_lead_days` ahead · with retention 7 d, a partition whose upper bound is 8 d old is
+detached CONCURRENTLY and dropped, the one at 7 d is not, and a row is never seen to outlive
+`retention + 1 day` · an interrupted detach (detach-pending in the catalog) is `FINALIZE`d and dropped on
+the next pass · at most `decision_purge_max_partitions` are created or removed per pass · a detach held
+behind an `ACCESS EXCLUSIVE` lock is refused by `lock_timeout` in ≤ 2 s and a decision insert during
+that detach commits · with the horizon exhausted the decision transaction fails, the API answers 503
+`ledger_unwritable`, no state is emitted and no row exists · the id-only read finds a row in the oldest
+attached partition and a row in the newest; two rows sharing an id (planted directly, two partitions)
+make the read answer 500 `ledger_identity` · the listing route refuses a missing time range and prunes
+to the partitions of the range it is given · a synthetic 5 KiB evidence fails the decision at the CHECK
+and a canonical 1 KiB evidence's bytes equal the fixture's byte for byte · in both storage modes.
+
+*Off the loop:* a scheduler test whose fake store blocks the detach for longer than one tick sees the
+dispatch tick fire on cadence; a step-down test sees the maintenance goroutine joined before `lead`
+returns and no DDL issued afterwards.
 
 *Attribution:* an override created by an API token is read back — on the override and on a decision that
 applied it — with `actor_label = token:<name>`, after the token is deleted too · a token REVOKER is read
@@ -669,7 +751,9 @@ the seal-lag field without its unit suffix after it gained one, the old duration
 was derived, a lease-only `facts_fresh_until` after the seal horizon joined it, "first statement" after
 it became the first snapshot-bearing one. An implementer or the discharge map could legitimately have
 picked the wrong sentence. `make docs-check` therefore refuses the spellings that earlier revisions used and that mean something
-different now, in three places (review round 5 P1-2 corrected the scope): **this file entirely,
+different now — revision 6's own vocabulary included, since a guard whose retired list stops at the
+revision before last lets the last one through (review round 6 P1-4) — in three places (review round 5
+P1-2 corrected the scope): **this file entirely,
 including the normative schema fence of §5** — a fence is skipped ONLY when it opens with the literal
 info-string `retired-spellings`, which marks the one fixture block below; **the FR-024 and NFR-019 rows
 of `docs/status.md`**, because the live status outranks the decisions and had kept a retired spelling of
@@ -683,6 +767,9 @@ max_seal_lag            (not followed by _seconds)
 1m..24h
 minimum of applicable leases / minimum of the applicable leases
 first statement supplies
+decision_purge_batch / purge_backlog_rows / oldest_eligible_seconds   (revision 6's row-DELETE purge)
+partition per calendar month / monthly RANGE                          (revision 6's partition period)
+fact_revision_ids                                                     (the unbounded revision list)
 ```
 
 It also refuses a duplicated table header in §5. **The guard has fixture tests**

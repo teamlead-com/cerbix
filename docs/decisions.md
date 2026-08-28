@@ -4745,7 +4745,7 @@ detach while the dispatch tick keeps firing.
 **Identity on a partitioned table.** A primary key on a RANGE-partitioned table must contain the
 partition key, so it is `(evaluated_at, id)` and `id` is not database-unique across partitions. The
 route stays id-only and honest about it: `gen_random_uuid()` ids, a read that probes the `(id)` child
-index of every attached partition without pretending to prune, and a 500 `ledger_identity` rather than a
+index of every attached partition without pretending to prune, and a 500 `ledger_identity` (the contract at the time) rather than a
 choice if two rows ever share an id. No registry table, no sequence.
 
 **Bytes.** The capacity table counted rows; each row carried JSON evidence with an unbounded list of
@@ -4782,7 +4782,7 @@ remove the partition exactly once.
 with `PARTITION OF` requires `ACCESS EXCLUSIVE` on the parent. Revision 7's creation would have queued
 decision inserts behind it for up to the statement timeout. Partitions are built standalone (`LIKE …
 INCLUDING …` plus a bounds CHECK) and `ATTACH`ed under `SHARE UPDATE EXCLUSIVE`. Every missing day in
-the lead is created every pass, unbudgeted; the removal budget is separate; and configuration load
+the lead is created every pass, unbudgeted at the time; the removal budget is separate; and configuration load
 refuses a cadence-and-budget pair that cannot remove two partitions a day.
 
 **A lifetime bound that is true.** Daily granularity adds up to a day, the cadence up to another, and a
@@ -4815,3 +4815,52 @@ unit or not at all; revision 7 debited the principal's before finding the proces
 
 **Not reproduced.** "`two different limiters` repeated twice in §5a": at `476643a` the phrase occurs once
 (the §5a opening paragraph). The §8 "eight bounds" was real and is nine.
+
+## D-0196 — FR-024 revision 9: a registry that survives its own crashes, ownership by marker, two lifetime boundaries, and a listing the SPA can build (2026-08-28)
+
+**Context.** Focused confirmation of revision 8 (`63c1d57`) returned 8 P1 and a set of P2 (party [37]),
+and retracted round 7's "two different limiters twice" (the same overlapping-`sed` cause as the D8a
+retraction). Every item is a contract or runtime fact; none needed the owner.
+
+**Crash consistency.** Revision 8's registry had four states and declared every registry/catalog
+disagreement terminal — yet an ordinary crash between a DDL and its registry write produces exactly
+such a disagreement, and a refused day with no DEFAULT partition eats the writable horizon. Revision 9
+makes every transition PostgreSQL allows inside a transaction atomic with its registry write (create +
+unique index + comment + insert; attach + state; drop + state) and gives the one non-transactional
+statement, `DETACH … CONCURRENTLY`, a write-ahead `detaching` intent with all three crash outcomes
+reconciled. The matrix crashes the pass after every statement.
+
+**Ownership by marker.** An OID is a locator, not an identity: `pg_dump`/restore renumbers every
+relation and OIDs are reused after DROP, so revision 8 would have refused every partition of a restored
+installation. Each partition carries `COMMENT ON TABLE … 'cerbix:gate-ledger:<owner_token>'`, written in
+the creating transaction; the pass validates marker and shape and refreshes `relid` when the marker
+matches a new OID. Refusal is reserved for what no crash produces, skips only that day, and is counted in
+a maintenance error family of its own rather than the evaluation one.
+
+**Two boundaries.** Revision 8's single lifetime formula was a cadence short — the drop it deferred
+added a second one — and let "lifetime" mean parent visibility while the gauges counted the detached
+table. The spec now states logical readability (until detach: `retention + <1 day + ≤ purge_every`) and
+physical retention (until the deferred drop: `… + ≤ 2 × purge_every`) separately, and the application-
+side "404 without a query" prefilter is gone: it needed a `today` no API node owns and contradicted
+backlog, and PostgreSQL prunes the decoded-day predicate to zero children anyway.
+
+**Budgets that converge.** Steady state is two removal stage-ops a day (detach today's eligible day,
+drop yesterday's detached one); revision 8 accepted exactly that and called it catch-up. Load now
+refuses fewer than four a day, and creation — left without a budget in revision 8, up to 31
+two-statement sequences at the maximum lead — has its own budget, nearest horizon first, with its own
+convergence check.
+
+**The id, enforced.** Revision 8 pruned the read to one partition by the id's day while still specifying
+a 500 for "two rows with one id in two partitions" — a case that query could never see — and trusted the
+writer to keep id and `evaluated_at` in step. The database now CHECKs the id's millisecond against
+`evaluated_at` and each partition carries a local unique index on `id`, so the case is impossible and
+the 500 is gone.
+
+**The listing.** The SPA decision history had a query note and no contract. It has a route now:
+required range of at most 31 days, page size at most 200, keyset order `(evaluated_at, id) DESC`, opaque
+cursor, empty page for a foreign service, and a test that pages under a concurrent writer.
+
+**Mechanical drift fixed.** The doubled `cerbix_gate_decisions_bytes` clause in D10 (a replacement that
+kept its end marker) and the *Ledger* matrix line that still said "rows older than retention are
+purged". The reported repeat of "Revision 5 gave numbers…" on consecutive lines of §5a does not
+reproduce at `63c1d57` (`grep -c` gives one) — recorded, as the earlier two were.

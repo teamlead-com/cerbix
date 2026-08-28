@@ -82,10 +82,25 @@ class StaleSpellingGuard(unittest.TestCase):
         ):
             self.assertTrue(flagged(SPEC, line), line)
         for line in (
-            "lifetime `retention + 1 day + decision_purge_every` under a healthy pass",
+            "readable until detach (`retention + <1 day + ≤ purge_every`)",
             "PARTITION BY RANGE (evaluated_at)",
             "`CREATE TABLE … PARTITION OF` takes `ACCESS EXCLUSIVE` on the parent, which is why it is not used",
             "up to `retention + lead + 1 = 396` of them",
+        ):
+            self.assertEqual(flagged(SPEC, line), [], line)
+
+    def test_revision_eight_vocabulary_is_retired(self):
+        for line in (
+            "lifetime `retention + 1 day + decision_purge_every` under a healthy pass",
+            "the read answers 500 `ledger_identity` and never picks one",
+            "answers 404 without touching the database",
+            "at most `lead + 1` cheap operations, unbudgeted, so",
+            '`cerbix_gate_evaluate_errors_total{kind="partition_identity"}` counts it',
+        ):
+            self.assertTrue(flagged(SPEC, line), line)
+        for line in (
+            "`retention + <1 day + ≤ decision_purge_every` after `evaluated_at`",
+            '`cerbix_gate_maintenance_errors_total{kind="partition_identity"}` and pages',
         ):
             self.assertEqual(flagged(SPEC, line), [], line)
 

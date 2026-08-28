@@ -185,7 +185,12 @@ GATE_STALE = [
     # creation under ACCESS EXCLUSIVE, and a lifetime "bound" that ignored cadence and backlog.
     (re.compile(r'carries no time|\b373\b|full list is recoverable'), 'revision-7 identity/evidence claim'),
     (re.compile(r'IF NOT EXISTS[^\n]{0,60}PARTITION OF'), 'CREATE … IF NOT EXISTS … PARTITION OF (partitions are built standalone and ATTACHed)'),
-    (re.compile(r'retention \+ 1 day`'), 'retention + 1 day as a bound (it is retention + 1 day + purge_every, healthy)'),
+    (re.compile(r'retention \+ 1 day`'), 'retention + 1 day as a bound (revision 7)'),
+    # revision 8 (party [37]): one-cadence-short lifetime, the impossible-duplicate 500, the clockless
+    # prefilter, unbudgeted creation, and maintenance errors counted in the evaluation family.
+    (re.compile(r'retention \+ 1 day \+ (decision_)?purge_every'), 'revision-8 lifetime formula (it is two boundaries, see D10)'),
+    (re.compile(r'ledger_identity|without touching the database|\bunbudgeted\b'), 'revision-8 read/creation contract'),
+    (re.compile(r'evaluate_errors_total\{kind="partition_identity"\}'), 'partition_identity belongs to cerbix_gate_maintenance_errors_total'),
 ]
 GATE_SPEC = 'docs/specs/func-reliability-gate.md'
 GATE_FIXTURE_FENCE = '```retired-spellings'

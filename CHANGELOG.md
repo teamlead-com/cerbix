@@ -8,54 +8,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [v0.1.5] - 2026-08-28
 
-### ⚠️ Upgrade notes
+### ⚠️ Upgrade Notes
 
-- **Stop the outbox owners before migrating.** Roles `all`, `api`, `scheduler` run the outbox worker (`worker` and `agent` don't — leave them). Then `cerbix migrate` once with the new binary, then start them. Migration `00088` hands ownership of a class of outbox rows to the database; it can't reach a delivery an old worker already has in flight. Skipping the stop loses nothing — it risks out-of-order delivery for at most one already-claimed batch (≤50 rows) per old owner.
-- **Migration `00090` repairs incident data.** Incidents that were resolved and then walked backwards, and service incidents stranded open after their alert ended, are resolved with a `🔧 Repaired:` timeline note. Two classes are *reported* (in the migration output) but not touched, because fixing them would mean guessing at history: member snapshots that may name a not-yet-governing revision, and auto-incidents with no monitor or service left. Queries and the manual procedure are in `docs/runbook.md`. On a database that never hit the races, this is a no-op.
-- **PostgreSQL 15+ is required.** 14 is not supported and won't be; the version guard refuses before applying anything.
-- Existing armed services keep their coverage across the upgrade (`00089` seeds delivery tracking as "delivered").
+- **Stop the outbox owners before migrating.** Roles `all`, `api` and `scheduler` run the outbox worker; `worker` and `agent` do not and can keep running. Run `cerbix migrate` once with the new binary, then start the owners. Migration `00088` hands ownership of a class of outbox rows to the database and cannot reach a delivery an old worker already has in flight. Skipping the stop loses nothing; it risks out-of-order delivery for at most one already-claimed batch (≤50 rows) per old owner ([fc6608d](https://github.com/teamlead-com/cerbix/commit/fc6608d), [88ec4ad](https://github.com/teamlead-com/cerbix/commit/88ec4ad))
+- **Migration `00090` repairs incident data written by earlier versions.** Incidents resolved and then walked backwards, and service incidents stranded open after their alert ended, are resolved with a `🔧 Repaired:` timeline note. Two classes are reported in the migration output but deliberately left alone — member snapshots that may name a not-yet-governing revision, and auto-incidents with no monitor or service left — because fixing them would mean guessing at history. Queries and the manual procedure are in `docs/runbook.md`. On a database that never hit the races the migration is a no-op ([af7a7a2](https://github.com/teamlead-com/cerbix/commit/af7a7a2))
+- **PostgreSQL 15 or newer is required.** 14 is not supported and will not be; `cerbix migrate` refuses before applying anything ([e53244b](https://github.com/teamlead-com/cerbix/commit/e53244b))
+- **Armed services keep their coverage across the upgrade.** `00089` seeds delivery tracking as "delivered" for existing rows, so no member monitors start paging in the minute after the upgrade ([7a9e87d](https://github.com/teamlead-com/cerbix/commit/7a9e87d))
 
-### Alerting & coverage
+### New Features
 
-- A schedule pointing at a deleted or disabled channel no longer counts as a route — members keep paging instead of being silenced in favour of a replacement that can reach nobody.
-- An alert nobody can receive is **withheld**, not sent to the void: counted in `cerbix_service_alert_withheld_total{signal,reason}` and announced as soon as a route exists.
-- Coverage now requires an announcement that was **actually delivered** to at least one recipient — a channel row that exists is not a delivery. A DEGRADED announcement no longer covers a service that has since gone DOWN.
-- An outage nobody heard about (channel deleted mid-flight, every send failed, retries exhausted) is **announced again** once there is somebody to tell, on both signals, with a fresh recipient list.
-- The service badge and `cerbix_alert_delegation_fail_open_total{reason}` speak one vocabulary: `no_owning_service`, `onset_pending`, `onset_undelivered`, `latch_inconsistent` are new; `stale_lease` on the burn arm means an expired lease and nothing else.
-- Services get a **repeat cadence** for their escalation ladder — `renotify_seconds`, 0 = off (default), otherwise 60..86400 — in the UI, the API and monitoring-as-code bundles. Previously `repeat_last` on a service-attached policy did nothing.
+**Service Alerting: Coverage Means Somebody Was Told**
 
-### Incidents
+- **A route must name a live channel.** A schedule pointing at a deleted or disabled channel no longer counts as a route; members keep paging instead of being silenced in favour of a replacement that can reach nobody ([fb9e94b](https://github.com/teamlead-com/cerbix/commit/fb9e94b), [08a8b31](https://github.com/teamlead-com/cerbix/commit/08a8b31))
+- **An alert nobody can receive is withheld, not sent into the void.** Counted as `cerbix_service_alert_withheld_total{signal,reason}` with `unroutable` or `no_governing_revision`, and announced as soon as a route exists — on both the health and burn signals ([44dfdad](https://github.com/teamlead-com/cerbix/commit/44dfdad), [a3aecfc](https://github.com/teamlead-com/cerbix/commit/a3aecfc), [19d4943](https://github.com/teamlead-com/cerbix/commit/19d4943))
+- **Coverage requires a delivered announcement.** A service suppresses its members only once its own alert *reached* at least one recipient — a channel row that exists is not a delivery, and a 500 from the only channel is not a delivery either ([7a9e87d](https://github.com/teamlead-com/cerbix/commit/7a9e87d), [5ec101b](https://github.com/teamlead-com/cerbix/commit/5ec101b), [35de54d](https://github.com/teamlead-com/cerbix/commit/35de54d))
+- **Coverage follows the state the service is in.** A delivered DEGRADED announcement no longer covers a service that has since observed DOWN and is still confirming it ([6e6339f](https://github.com/teamlead-com/cerbix/commit/6e6339f), [46c50de](https://github.com/teamlead-com/cerbix/commit/46c50de))
+- **An outage nobody heard about is announced again** once there is somebody to tell — channel deleted mid-flight, every send failed, or retries exhausted — with a fresh recipient list and a new episode. A partial delivery that reached some recipients is never re-sent to them ([23aa3cc](https://github.com/teamlead-com/cerbix/commit/23aa3cc), [425a59f](https://github.com/teamlead-com/cerbix/commit/425a59f), [2b2594c](https://github.com/teamlead-com/cerbix/commit/2b2594c))
+- **One vocabulary for "why did my monitor page".** The service badge and `cerbix_alert_delegation_fail_open_total{reason}` are computed from the same clause evaluation. New values `no_owning_service`, `onset_pending`, `onset_undelivered`, `latch_inconsistent`; `stale_lease` on the burn arm now means an expired lease and nothing else ([18e3aef](https://github.com/teamlead-com/cerbix/commit/18e3aef), [3192ebb](https://github.com/teamlead-com/cerbix/commit/3192ebb), [6e0b6a4](https://github.com/teamlead-com/cerbix/commit/6e0b6a4), [4c4bae3](https://github.com/teamlead-com/cerbix/commit/4c4bae3))
 
-- `resolved` is terminal and status only moves forward, enforced in the write, not in a stale read. A plain comment keeps the current status.
-- Service incidents announce open *and* resolve (webhooks, status-page subscribers) and resolve when their alert ends — including through disown and delete, which used to leave them open forever.
-- The postmortem names the declaration that governed the outage, not the newest one.
-- An incident climbs the escalation ladder it **started with**: editing a policy mid-outage no longer re-times a page already in flight. Incidents open across the upgrade start their ladder at the upgrade instant instead of firing every overdue step at once.
-- Every incident write — human or machine — stamps its times after the row lock, so a writer that waited can't date its action before the wait.
+**Service Escalation: Repeat Cadence**
 
-### Outbox
+- **Services can repeat the last escalation step.** `renotify_seconds` on the service — 0 is off and the default, otherwise 60..86400 — read live, so turning it down mid-incident takes effect immediately. Available in the UI, the API and monitoring-as-code bundles (`alerting.renotify_seconds`). Previously `repeat_last` on a service-attached policy did nothing ([90bf146](https://github.com/teamlead-com/cerbix/commit/90bf146), [425a59f](https://github.com/teamlead-com/cerbix/commit/425a59f))
+- **An incident climbs the ladder it started with.** The escalation policy is snapshotted when the incident opens, so editing a policy mid-outage cannot re-time a page already in flight. Incidents open across the upgrade start their ladder at the upgrade instant instead of firing every overdue step at once ([0c6e5dd](https://github.com/teamlead-com/cerbix/commit/0c6e5dd), [d3f428f](https://github.com/teamlead-com/cerbix/commit/d3f428f), [118c55c](https://github.com/teamlead-com/cerbix/commit/118c55c))
 
-- An incident's lifecycle events are **dispatched in order**: `seq` is stamped into every webhook payload, and the claim won't release an event while an earlier one for the same incident is undelivered. Arrival order can't be promised over the network — `(incident.id, seq)` is what lets a receiver dedupe and order.
-- A delivery is **bounded by the lease** of the claim that authorised it, so a deposed worker can't keep sending while the new owner does. SMTP honours it too. A claim whose turn came after its lease is handed back with its attempt refunded.
+**Outbox: Ordered and Bounded Delivery**
 
-### Status pages
+- **Incident webhooks are dispatched in order.** Every `incident.*` payload carries `seq`; the claim will not release an event while an earlier one for the same incident is undelivered, and a dead predecessor blocks too. Arrival order over the network is not promised — `(incident.id, seq)` is what lets a receiver dedupe and order, and the runbook describes two receiver strategies ([554e609](https://github.com/teamlead-com/cerbix/commit/554e609), [8ed191a](https://github.com/teamlead-com/cerbix/commit/8ed191a), [02bc005](https://github.com/teamlead-com/cerbix/commit/02bc005), [4762f1a](https://github.com/teamlead-com/cerbix/commit/4762f1a), [64349a0](https://github.com/teamlead-com/cerbix/commit/64349a0))
+- **A delivery is bounded by the lease that authorised it.** A deposed worker can no longer keep an HTTP request or SMTP session open while the new owner sends the same event. The lease is measured in database time, the settle is never bounded, and a claim whose turn came after its lease is handed back with its attempt refunded ([b17e0e2](https://github.com/teamlead-com/cerbix/commit/b17e0e2), [425a59f](https://github.com/teamlead-com/cerbix/commit/425a59f), [2b2594c](https://github.com/teamlead-com/cerbix/commit/2b2594c))
 
-- A page, its RSS/Atom feed and its subscriber mail now agree on which projects the page reports. A page made only of Service components used to show an incident and email nobody about it.
+### Improvements
 
-### UI
+**Incident Lifecycle**
 
-- A search hit for a monitor or incident in another workspace switches to that workspace; detail views follow the URL when navigating between two of the same kind (they used to keep showing the previous one).
-- A partly unmeasured hour no longer renders green on the Reliability card.
-- The escalation form explains what "repeat last step" does on a service.
+- **`resolved` is terminal and status only moves forward**, enforced in the write rather than in a stale read. A plain comment keeps the current status instead of carrying whatever the client last saw ([b21b09f](https://github.com/teamlead-com/cerbix/commit/b21b09f), [183b9f8](https://github.com/teamlead-com/cerbix/commit/183b9f8), [451406b](https://github.com/teamlead-com/cerbix/commit/451406b))
+- **Service incidents are a full lifecycle.** They announce open *and* resolve to webhooks and status-page subscribers, and resolve when their alert ends — including through disown and delete, which used to leave them open forever ([e405d85](https://github.com/teamlead-com/cerbix/commit/e405d85), [744980f](https://github.com/teamlead-com/cerbix/commit/744980f))
+- **The postmortem names the declaration that governed the outage**, not the newest one; a foreign revision is refused ([0a8ba9b](https://github.com/teamlead-com/cerbix/commit/0a8ba9b), [335d4db](https://github.com/teamlead-com/cerbix/commit/335d4db))
+- **Every incident write stamps its times after the row lock**, so a writer that waited cannot date its action before the wait ([3ad2a4b](https://github.com/teamlead-com/cerbix/commit/3ad2a4b), [5ec101b](https://github.com/teamlead-com/cerbix/commit/5ec101b))
 
-### API · metrics · schema
+**Status Pages**
+
+- **A page, its feed and its subscriber mail agree on what the page reports.** A page made only of Service components used to show an incident and email nobody about it. One project axis now, with the subscriber query as its exact inverse ([c7ce059](https://github.com/teamlead-com/cerbix/commit/c7ce059))
+
+**UI**
+
+- **Search hits bring their workspace.** Opening a monitor or incident from another project switches to it, so edit controls are not hidden from a legitimate editor; detail views follow the URL when navigating between two of the same kind ([2dbc7ce](https://github.com/teamlead-com/cerbix/commit/2dbc7ce))
+- **A partly unmeasured hour no longer renders green** on the Reliability card ([27c63f7](https://github.com/teamlead-com/cerbix/commit/27c63f7))
+- **The service picker in status-page components works again**, and the escalation form says what "repeat last step" does on a service ([a26260d](https://github.com/teamlead-com/cerbix/commit/a26260d), [a331af0](https://github.com/teamlead-com/cerbix/commit/a331af0))
+
+**Documentation & Gates**
+
+- `make docs-check` compares the FR-021 invariant set in the spec against the discharge map exactly — missing, extra, duplicate or skipped numbers all fail; invariants 92–105 moved into the spec ([46c50de](https://github.com/teamlead-com/cerbix/commit/46c50de), [35de54d](https://github.com/teamlead-com/cerbix/commit/35de54d))
+- Four documents that still described the product as it was before FR-022/FR-023 shipped are corrected, and a gate catches the class ([afc8cd1](https://github.com/teamlead-com/cerbix/commit/afc8cd1))
+
+### API · Metrics · Schema
 
 - **API:** `ServiceAlertPolicy.renotify_seconds`; alerting-state `reason` gains `onset_pending`, `onset_undelivered`, `latch_inconsistent`; `incident.*` webhook payloads carry `seq`.
 - **Metrics:** new `cerbix_service_alert_withheld_total{signal,reason}`; `cerbix_alert_delegation_fail_open_total{reason}` also emits `error`, `record_failed`, `unspecified` for lookup-level failures.
 - **Schema:** migrations `00085`–`00092` — incident escalation snapshots, `incidents.event_seq`, `CHECK ((status = 'resolved') = (resolved_at IS NOT NULL))`, `delivered_seq`/`undelivered_seq` on both service latch tables, `services.renotify_seconds`, `undelivered` as an episode close reason.
 
-### Under the hood
-
-57 commits · decisions D-0175…D-0187 · invariants 92–105 (now stated in the spec, and `make docs-check` compares the discharge map against it exactly). Product approved by independent review at `35de54d`, follow-on work at `eba2b69`. Full account: `docs/iterations/iter-0161.md`.
+<sub>57 commits · decisions D-0175…D-0187 · independent review: product approved at `35de54d`, follow-on work at `eba2b69` · full account in `docs/iterations/iter-0161.md`</sub>
 
 ---
 

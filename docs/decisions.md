@@ -5068,3 +5068,31 @@ code before any implementation**, then the owner's visual approval of the mock, 
 **Recorded for the process.** The question "what is this spec for?" arrived after twelve review rounds.
 It should have been asked — by me — before the first one: a design gate opened on a reviewer's proposal
 needs the owner's *why* stated in the spec's first paragraph, not inferred from a "давайте".
+
+## D-0203 — the four per-round FR-024 commits squashed; the hashes the record cites stay resolvable (2026-08-28)
+
+**Context.** Revisions 6–9 of the FR-024 specification were committed one per review round (`4e5bd15`,
+`476643a`, `63c1d57`, `80a89ff`), against the commit policy of 2026-08-16 (iter-0162 §5). The owner asked
+for them to be squashed. All of it was local and unpushed; nothing after `v0.1.5` has left this machine.
+
+**Decision (owner, 2026-08-28).** The four commits are squashed into one, `ef88535` ("design revisions 6–9,
+squashed"), and the three commits that followed are replayed on top of it unchanged in content. Because
+their parents changed, their hashes changed too:
+
+| Record cites | Now |
+| --- | --- |
+| `4e5bd15`, `476643a`, `63c1d57`, `80a89ff` (revisions 6–9) | `ef88535` |
+| `07a1e9b` (design approved at revision 13, D-0201) | `5df6ed2` |
+| `9877d30` (deferred, D-0202) | `ad31309` |
+| `0b9c525` (iter-0162) | `36f3134` |
+
+**What keeps the record honest.** The spec banner, D-0201, D-0202, iter-0162 and the party transcript cite
+the OLD hashes, and iter-0162 is immutable, so they are not rewritten. Instead the old tip is kept under
+the tag `backup/pre-squash-2026-08-28`: every cited hash stays a real, `git show`-able object in this
+repository, and this table is the map from citation to current history. The tree at the new tip is
+byte-identical to the old one (`git diff 0b9c525 36f3134` is empty), `make docs-check` passed on it before
+`main` moved, and the reviewer's approved range `9877d30..0b9c525` is now `ad31309..36f3134` with the same
+content.
+
+**Not done.** Revisions 1–5 (`46379fa` … `3771622`) were left as they are — they predate the owner's
+repeated instruction and the party's verified ranges start after them — and nothing was pushed.

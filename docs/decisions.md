@@ -4563,9 +4563,15 @@ not exist in the tree. Same class as iter-0161 §47, now in a document rather th
 30-day window stays quotable when the materializer has been stopped for a week — the window simply ends
 at an old watermark — so a gate would go on saying `ALLOW` on a budget nobody had measured since, and a
 policy that ignores burn clauses has nothing left to notice. **Owner decision:** `max_seal_lag` is a
-policy field, `1m..24h`, default **15 minutes** — the seal cadence is one minute, so fifteen catches a
-stopped materializer without firing on one missed tick. Past it, every budget clause is UNAVAILABLE with
-`seal_stale`. The lag is stated by the REPORT PATH and shown on the service page, so the gate and the
+policy field, default **15 minutes**. Past it, every budget clause is UNAVAILABLE with `seal_stale`.
+
+> **Rationale corrected by D-0191.** This record originally said "`1m..24h`" and justified the default
+> with "the seal cadence is one minute". Both were wrong about the code: the one-minute constant is the
+> daily heartbeat ROLLUP (`rollupEvery`), not the service seal — the sealer runs every second and seals
+> up to `FloorToBucket(now − LateArrivalGrace)` over 60 s buckets with a 120 s grace, so a healthy
+> pipeline's lag sits in `[2m, 3m)` and a one-minute policy would be stale forever. The floor is derived
+> (300 s) and the per-policy choice stands for the reason that was true all along: it is a BUSINESS
+> tolerance for stale data, not a property of how often anything runs. The lag is stated by the REPORT PATH and shown on the service page, so the gate and the
 screen read one number; the alternative of a single product-wide constant was declined because a service
 probed every second and one probed hourly should not share a bound that only a release can change.
 
@@ -4585,3 +4591,41 @@ closing sentence brought into line with its own algorithm; the API strict — th
 assignment, the server fills nothing, the defaults are the UI's template; "no new store" narrowed to
 what is true; the live `status.md` NFR-019 row corrected from revision 1's false owner; and D-0188's two
 superseded clauses marked as such rather than left as a second live answer.
+
+## D-0191 — FR-024 revision 4: a floor you can reach, one freshness formula, bounds on rate, and an actor you can name (2026-08-28)
+
+**Context.** Focused confirmation of revision 3 (`a16ea70`) returned 4 P1 and 4 P2 (party [25]). No
+owner question this round; the per-policy `max_seal_lag` stays the owner's authority.
+
+**The floor.** Revision 3 allowed a `max_seal_lag` of one minute. The code cannot satisfy that: buckets
+are 60 s, the late-arrival grace is 120 s, the sealer seals up to `FloorToBucket(now − grace)`, so a
+healthy pipeline's lag is `[2m, 3m)` before queueing. A one- or two-minute policy would be `seal_stale`
+on a system doing exactly what it should, and a strict API must not accept a value that is unreachable.
+The floor is now DERIVED — `CanonicalBucket + LateArrivalGrace + one bucket = 300 s` — stated in the
+domain beside the constants it depends on, with a live-materializer boundary test. D-0190's rationale
+("the seal cadence is one minute") was about a different mechanism and is corrected in place.
+
+**One freshness formula.** `facts_fresh_until` was defined over leases alone, so a budget-only policy had
+an expiry the field could omit, and a burn lease later than the seal horizon could name an instant the
+budget was already stale. It is now the minimum over the seal horizon (`sealed_through + max_seal_lag`)
+and every lease the policy depends on, present whenever any of them exists.
+
+**Bounds on rate, not only concurrency.** An in-flight cap bounds how many reports run at once; it does
+not bound how many run in a row. One principal at concurrency 1 could create expensive reports and
+immutable ledger rows without limit, so "evaluate and read and nothing more" was not a bound. Per-principal
+and process-wide RATE limits join the caps, all checked before any transaction opens; retention is
+validated within `7..365` days, purged in bounded batches, with a backlog metric; the rate bound has a
+mutation.
+
+**An actor you can name.** For an API-token principal the typed attribution the audit log uses is
+`actor_user_id = NULL, via_token = true` — after commit that reads as "some token". Overrides now store
+an immutable server-derived `actor_label` (`token:<name>`, or the user) beside the typed half, for the
+revoker too, and a client-supplied actor field is refused.
+
+**Smaller:** `max_seal_lag_seconds` as the one wire and storage type (integer seconds, whole minutes); D4's
+wording aligned with its own vocabulary; D6a's "first statement" made precise — the first
+SNAPSHOT-BEARING statement, after the deadline wrapper's `SET LOCAL`s, which establish no snapshot.
+
+**What this round says about the author.** Two of the four P1s were claims about the code that the code
+does not support — the seal cadence and the reachability of the floor — the same failure as revisions 1
+and 2, and the same one iter-0161 closed on. The review has now caught it in a document five times.

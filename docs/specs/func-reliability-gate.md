@@ -1,15 +1,16 @@
 # func-reliability-gate — a deploy asks whether the error budget allows it (FR-024 / NFR-019)
 
-> **Lifecycle: DESIGN GATE, revision 7 — awaiting focused confirmation, no code.** Revision 1
+> **Lifecycle: DESIGN GATE, revision 8 — awaiting focused confirmation, no code.** Revision 1
 > (`46379fa`, `c65ea5d`) was rejected with 4 P0, 9 P1, 3 P2 (party [15]); revision 2 (`113308f`) with
 > 2 P0, 5 P1, 4 P2 (party [20]); revision 3 (`a16ea70`) with 4 P1, 4 P2 (party [25]); revision 4
 > (`d540ae4`) with 3 P1, 5 P2 (party [27]); revision 5 (`3771622`) with 3 P1, 3 P2 (party [30]);
-> revision 6 (`4e5bd15`) with 5 P1, 2 P2 (party [33]). Every finding of every round is addressed below
-> and named where it changed the text. The owner closed D9–D13 (D-0188), the four questions of round 1
-> (D-0189), the seal-lag bound of round 2 (D-0190), the ledger's capacity contract of round 5 (D-0193)
-> and its partition period of round 6 (D-0194); rounds 3 and 4 raised no owner question (D-0191,
-> D-0192). `make docs-check` refuses the retired spellings of earlier revisions — revision 6's included —
-> inside the normative schema block too, and its guard has fixture tests (§10). Two gates remain before code: the review's focused
+> revision 6 (`4e5bd15`) with 5 P1, 2 P2 (party [33]); revision 7 (`476643a`) with 1 P0, 7 P1, 3 P2
+> (party [35]). Every finding of every round is addressed below and named where it changed the text.
+> The owner closed D9–D13 (D-0188), the four questions of round 1 (D-0189), the seal-lag bound of round
+> 2 (D-0190), the ledger's capacity contract of round 5 (D-0193) and its partition period of round 6
+> (D-0194); rounds 3, 4 and 7 raised no owner question (D-0191, D-0192, D-0195). `make docs-check`
+> refuses the retired spellings of every earlier revision, inside the normative schema block too, and
+> its guard has fixture tests (§10). Two gates remain before code: the review's focused
 > confirmation of THIS revision, and — because the policy editor and the decision history are SPA
 > surfaces — an approved UI mock before any frontend code. Change Intelligence is **FR-025** and is not
 > part of this requirement.
@@ -172,9 +173,9 @@ The fields themselves:
   `max_seal_lag_seconds` (D8a);
 - `window`, `target_id`, `objective`, `objective_updated_at`;
 - `governing_revision` — the service definition revision in force at `evaluated_at`, nullable when
-  none is; and `fact_revisions` — `{count, first_id, last_id, digest}` over the revisions the sealed facts in the
-  window were computed under (the bounded form of §5a; the full list is recoverable from the retained
-  definition revisions by the window the evidence names),
+  none is; and `fact_revisions` — `{count, first_id, last_id, digest}` over the revisions the sealed facts
+  in the window were computed under: the COMPLETE surviving evidence, since the revisions themselves are
+  deleted with their service (§5a),
   which may be several (the report's own `spans_definition_revisions` withholding exists precisely
   because they can be);
 - `coverage_lease_until`, and `burn_leases[]` — one per rule of the policy's target, because a target
@@ -275,37 +276,80 @@ once; they are incompatible. The resolution: every decision is one row in `servi
 append-only ledger with a bounded retention — `gate.decision_retention_days`, configuration-validated
 within `7..365`, default 90. **The ledger is RANGE-partitioned by `evaluated_at`, one partition per UTC
 day, in BOTH storage modes** (our own small-row table that needs nothing from a hypertable; the precedent
-is `heartbeats` in 00017 and `EnsureHeartbeatPartitions`), and retention is the removal of every
-partition whose upper bound is at or before `now − retention` — never a row-level DELETE — so a row lives
-at most `retention + 1 day` and the knob means what it says to within a day (owner decision D-0194;
-revision 6's month-sized partitions would have kept rows up to 31 days past the knob — review round 6
-P1-2). Removal is two autocommit statements per partition: `ALTER TABLE … DETACH PARTITION …
-CONCURRENTLY`, which takes only `SHARE UPDATE EXCLUSIVE` on the parent and therefore never blocks a
-decision insert, then `DROP TABLE` of the detached standalone table, which locks nothing but itself. An
-interrupted detach leaves the partition in PostgreSQL's detach-pending state; the next pass runs `…
-DETACH PARTITION … FINALIZE` and then drops. Every DDL statement runs under `SET lock_timeout = '2s'` and
-`SET statement_timeout = '10s'`; a refusal is logged and retried on the next pass, never escalated to a
-longer wait. **There is no DEFAULT partition** (unlike heartbeats): the decision row is written in the
-decision transaction (D6a), so a decision the ledger cannot hold is not a decision — the insert fails
-with SQLSTATE 23514 ("no partition of relation found"), the API answers 503 `ledger_unwritable`, no
-state is emitted, the CLI exits 1. Partitions are created ahead so that this failure needs a leader
-absent for the whole lead time: the migration creates `[today, today + 7 d]`, the maintenance pass keeps
-`gate.decision_partition_lead_days` (default 7, `2..30`) days ahead with `CREATE TABLE IF NOT EXISTS …
-PARTITION OF`, and the gauge `cerbix_gate_decisions_writable_horizon_seconds` (time until the upper bound
-of the newest attached partition, from the catalog) has a runbook alert at 2 days — and a leader absent
-that long has already pushed every policy past `max_seal_lag_seconds`, so the gate is saying `UNKNOWN`
-before it stops recording. The pass runs on the scheduler leader **in its own goroutine, off the dispatch
-loop** — the shape `serviceFactMaintenanceLoop` already has: started with leadership, cancelled AND
-joined before `lead` returns, so a deposed leader cannot finish a DDL after its step-down (review round 6
-P1-1: revision 6 said "inside `subCadenceTimeout`", and `withTimeout` runs its function inline on the
-ticker, so a slow DDL there would have held dispatch). Idempotent DDL (`IF NOT EXISTS`, `IF EXISTS`,
-`FINALIZE`, the same cutoff arithmetic on both sides) makes a race between a deposed and a new leader
-harmless. Each pass is bounded to `subCadenceTimeout` and creates or removes at most
-`gate.decision_purge_max_partitions` partitions. Three gauges besides the horizon, all read from the
-catalog and never by counting rows: `cerbix_gate_decisions_partitions_pending_drop` (attached partitions
-past the cutoff plus detached ones not yet dropped), `cerbix_gate_decisions_oldest_partition_age_seconds`
-(age of the oldest attached partition's upper bound; 0 when none is past the cutoff) and
-`cerbix_gate_decisions_bytes` (sum of `pg_total_relation_size` over the partitions) — no labels. And a read endpoint that is **project-scoped, not service-nested**:
+is `heartbeats` in 00017), and retention is the removal of whole partitions — never a row-level DELETE
+(owner decision D-0194; revision 6's month-sized partitions would have kept rows up to 31 days past the
+knob — review round 6 P1-2). **A row's lifetime is therefore `retention + 1 day + decision_purge_every`
+under a healthy maintenance pass** — a day of partition granularity plus at most one cadence until the
+pass that removes it — and anything beyond that is BACKLOG, visible in `partitions_pending_drop` and
+`oldest_partition_age_seconds` and alerted on in the runbook, not a bound the product can promise while
+a lock refusal or a lost session can delay a pass (review round 7 P1-2 corrected revision 7's
+hard-bound claim, which ignored cadence and backlog).
+
+*The maintenance pass and its fence* (review round 7 P0). The pass runs on the scheduler leader in its
+own goroutine, off the dispatch loop, but its AUTHORITY is not the scheduler's leadership: the
+scheduler's advisory lock lives on one pinned connection while its work uses the pool, so a node whose
+lock connection has died can still issue statements for up to a watchdog interval, and "cancelled and
+joined before `lead` returns" does not close that window. Gate maintenance instead takes **its own
+`store.LeaderSession`** on key `gateMaintenanceLockKey` — the fenced shape file-provider apply already
+uses (`TryBecomeLeaderSession`, `RunServiceRepairSlice`): the session-level advisory lock and EVERY
+statement of the pass — DDL and registry writes — run on that one pinned connection, autocommit, which
+`DETACH … CONCURRENTLY` requires anyway. If the connection dies PostgreSQL releases the lock AND the
+connection can carry no further statement, so a deposed node cannot detach or drop anything after the
+loss — not by convention, by construction; a successor acquires only once the lock is free. A node
+that fails to acquire the session skips the pass. Each pass is bounded to `subCadenceTimeout`.
+
+*Creation under the weaker lock* (review round 7 P1-1). `CREATE TABLE … PARTITION OF` takes `ACCESS
+EXCLUSIVE` on the parent (PostgreSQL 15 `CREATE TABLE` reference: "creating a partition using PARTITION
+OF requires taking an ACCESS EXCLUSIVE lock on the parent partitioned table"), which would hold decision
+inserts behind the very pass D10 says never blocks them. A day's partition is therefore built STANDALONE
+— `CREATE TABLE service_gate_decisions_pYYYYMMDD (LIKE service_gate_decisions INCLUDING DEFAULTS
+INCLUDING CONSTRAINTS INCLUDING INDEXES)` plus a `CHECK (evaluated_at >= day AND evaluated_at < day + 1)`
+so the attach needs no scan — and then `ALTER TABLE service_gate_decisions ATTACH PARTITION … FOR VALUES
+FROM (day) TO (day + 1)`, which takes `SHARE UPDATE EXCLUSIVE`. Every pass creates EVERY missing day in
+`[today, today + decision_partition_lead_days]` — at most `lead + 1` cheap operations, unbudgeted, so
+creation can never starve behind removal. Removal is `ALTER TABLE … DETACH PARTITION … CONCURRENTLY`
+(also `SHARE UPDATE EXCLUSIVE`), `FINALIZE` on the next pass for one left detach-pending, and a `DROP
+TABLE` of the standalone table that is **deferred to a later pass and gated on snapshots** (review round
+7 P1-7): PostgreSQL 15.9's release notes fix "possible crashes and 'could not open relation' errors in
+queries on a partitioned table occurring concurrently with a DETACH CONCURRENTLY and immediate drop of a
+partition", and cerbix's enforced floor is 15.0 (`minServerVersionNum`), so the drop runs only when
+`detached_at` is older than one `decision_purge_every` AND no backend in this database has
+`xact_start < detached_at` (`pg_stat_activity`) — a sequence safe on every supported 15.x; the runbook
+recommends ≥ 15.9 without raising the floor. Removals are bounded to `decision_purge_max_partitions`
+per pass, and configuration load refuses a pair of knobs that cannot keep up with one day's partition
+plus catch-up: `decision_purge_max_partitions × floor(86 400 / decision_purge_every_seconds) ≥ 2`,
+naming both keys. Every DDL statement runs under `SET lock_timeout = '2s'` and `SET statement_timeout =
+'10s'`; a refusal is logged, counted and retried next pass, never escalated to a longer wait.
+
+*Ownership: the registry* (review round 7 P1-3). `IF NOT EXISTS` is not idempotence — PostgreSQL does
+not guarantee an existing relation resembles the one that would have been created — and a standalone
+table left by a crash between detach and drop has no parent link, so a name alone cannot prove a
+relation is ours. Every partition therefore has a row in `service_gate_decision_partitions` (§5):
+`day` (PK), the deterministic `relname`, the `relid` captured right after creation, and a `state` in
+`created → attached → detached → dropped`. Before every act the pass validates the catalog against the
+registry ON THE SAME CONNECTION: `to_regclass(relname)::oid = relid`, membership in `pg_inherits` (or its
+absence) as the state predicts, and for attached partitions `pg_get_expr(relpartbound)` equal to the
+day's bounds. Any mismatch — a same-named relation with a different OID or shape, a partition attached
+that the registry has as detached, a registry row whose relation is gone without `dropped` — is REFUSED:
+nothing is created, attached, detached or dropped on that day, `cerbix_gate_evaluate_errors_total
+{kind="partition_identity"}` counts it, the runbook pages. A crash between detach and drop is the
+ordinary case, not a mismatch: the registry says `detached`, the catalog shows a standalone relation
+with that OID, and the deferred drop proceeds when its gates open. The gauges are computed from the
+registry JOINed to the catalog by `relid`, never from names.
+
+*No DEFAULT partition* (unlike heartbeats): the decision row is written in the decision transaction
+(D6a), so a decision the ledger cannot hold is not a decision — the insert fails with SQLSTATE 23514
+("no partition of relation found"), the API answers 503 `ledger_unwritable`, no state is emitted, the
+CLI exits 1. The migration creates and registers `[today, today + 7 d]`; the lead keeps
+`decision_partition_lead_days` (default 7, `2..30`) days ahead; the gauge
+`cerbix_gate_decisions_writable_horizon_seconds` (time until the upper bound of the newest attached
+partition, from the registry and catalog) has a runbook alert at 2 days — and a leader absent that long
+has already pushed every policy past `max_seal_lag_seconds`, so the gate is saying `UNKNOWN` before it
+stops recording. Four gauges, none by counting rows: `cerbix_gate_decisions_partitions_pending_drop`
+(attached past the cutoff plus detached not yet dropped), `cerbix_gate_decisions_oldest_partition_age_seconds`
+(age of the oldest attached partition's upper bound; 0 when none is past the cutoff),
+`cerbix_gate_decisions_writable_horizon_seconds`, and `cerbix_gate_decisions_bytes` (sum of
+`pg_total_relation_size(relid)` over registry rows not `dropped`) — no labels.`cerbix_gate_decisions_bytes` (sum of `pg_total_relation_size` over the partitions) — no labels. And a read endpoint that is **project-scoped, not service-nested**:
 `GET /api/v1/projects/{p}/gate/decisions/{id}`, authorised by the row's persisted `project_id` under
 `gate:evaluate`, with NO service-existence check on the path (review round 2 P1-2 — a service-nested
 route would answer 404 forever once the service is deleted, which is exactly the moment the evidence is
@@ -419,9 +463,14 @@ identity, and closed enums with no free payload. None of it is needed for a deci
   (the maintenance goroutine or the leader is gone; the gate stops recording when it reaches 0),
   `partitions_pending_drop ≥ 2 for 6h` (removal refused by `lock_timeout` pass after pass),
   `evaluate_errors_total{kind="ledger_unwritable"} > 0` (page: the horizon was exhausted),
+  `evaluate_errors_total{kind="partition_identity"} > 0` (page: a relation under our name is not ours,
+  or the registry and catalog disagree — nothing is touched until a human looks),
   `rate(evaluate_rejected_total[5m]) > 0 sustained for 15m` (a pipeline is looping into the limit),
   `evaluate_errors_total{kind="snapshot_conflict"}` rising (contention the retry is not absorbing); disk
-  sizing from the bound column of the §5a capacity table.
+  sizing from `cerbix_gate_decisions_bytes` after a week, 3× the §5a payload bound before; and the
+  recommendation to run PostgreSQL ≥ 15.9, whose release notes fix crashes and "could not open relation"
+  errors around `DETACH CONCURRENTLY` followed by an immediate drop — the deferred, snapshot-gated drop of
+  D10 is what keeps every supported 15.x safe, the recommendation is belt to those braces.
 - `internal/domain` — `LateArrivalGrace` moves here beside `CanonicalBucket` and `MinSealLag` is declared
   next to both; `internal/store` consumes them (D8a).
 - `func-service-reliability.md` §16.8 — invariant 106 (the gate consumes the owners and derives
@@ -449,7 +498,8 @@ service_gate_overrides  (id, service_id, project_id, policy_revision,
                          revoked_by_user_id NULL, revoked_via_token bool NULL, revoked_by_label text NULL;
                          at most one row per service with revoked_at IS NULL — enforced under the service lock,
                          with expired rows closed as `expired` in the same lock before an insert)
-service_gate_decisions  (id uuid DEFAULT gen_random_uuid(), project_id NOT NULL → projects CASCADE,
+service_gate_decisions  (id uuid NOT NULL — UUIDv7 built from evaluated_at's DB-clock milliseconds + 74 random bits,
+                         project_id NOT NULL → projects CASCADE,
                          service_id NULL → services SET NULL, service_slug, service_name,
                          state, action NULL, reasons jsonb, evidence jsonb,           -- action NULL only for NOT_CONFIGURED
                          policy_revision NULL, window NULL, policy_snapshot jsonb NULL, -- NULL for NOT_CONFIGURED
@@ -461,20 +511,29 @@ service_gate_decisions  (id uuid DEFAULT gen_random_uuid(), project_id NOT NULL 
                                 AND octet_length(reasons::text) <= 1024
                                 AND (policy_snapshot IS NULL OR octet_length(policy_snapshot::text) <= 4096));
                          retained `gate.decision_retention_days`, default 90, by partition removal (D10))
+
+service_gate_decision_partitions  (day date PRIMARY KEY, relname text NOT NULL UNIQUE, relid oid NOT NULL,
+                         state text NOT NULL CHECK (state IN ('created','attached','detached','dropped')),
+                         created_at NOT NULL, attached_at NULL, detached_at NULL, dropped_at NULL;
+                         the ownership registry of D10 — every act on a partition validates the catalog against it)
 ```
 
-**Identity on a partitioned ledger** (review round 6 P1-3). PostgreSQL enforces a primary key on a
-RANGE-partitioned table only when the partition key is part of it, so the key is `(evaluated_at, id)` and
-`id` alone is NOT database-unique across partitions. The contract that keeps the id-only route sound:
-`id` is `gen_random_uuid()` (122 random bits) assigned by the insert; the project-scoped read is
-`SELECT … WHERE id = $1 AND project_id = $2` against the parent — one probe of the `(id)` child index in
-every attached partition (at most `retention + lead + 1` of them, 373 at the 365-day maximum, each probe
-one index lookup), with no partition pruning, because a decision id carries no time and the route must
-not pretend it does. If the probe returns more than one row the read answers 500 `ledger_identity` and
-never picks one — a duplicate id is a generator fault to surface, not a tie to break. Listing (the UI's
-decision history) goes through `(project_id, evaluated_at DESC)` with a mandatory time range that prunes
-to the partitions it covers, default the last 30 days. No sequence and no registry table: a registry
-would be a second write in the decision transaction and a second thing to keep in step with retention.
+**Identity on a partitioned ledger** (review round 6 P1-3, round 7 P1-5). PostgreSQL enforces a primary
+key on a RANGE-partitioned table only when the partition key is part of it, so the key is
+`(evaluated_at, id)` and `id` alone is not database-unique across partitions. Revision 7 made the id-only
+read probe every attached partition; with up to `retention + lead + 1 = 396` of them and no limiter on
+reads, that was a cheap read-amplification endpoint. **The id now names its partition**: it is a UUIDv7
+whose 48-bit timestamp is the millisecond of `evaluated_at` — the DB clock the row is partitioned by,
+read in the decision transaction before the id is generated, so no application-clock skew can put an id
+in one day and its row in another — with 74 random bits after the version and variant. The
+project-scoped read derives the day from the id and prunes to ONE partition: `WHERE evaluated_at >= day
+AND evaluated_at < day + 1 AND id = $1 AND project_id = $2`, one index probe; an id whose embedded day
+lies outside `[today − retention − 1, today + 1]` answers 404 without touching the database. If the probe
+returns more than one row the read answers 500 `ledger_identity` and never picks one. Ledger reads —
+by id and listing — take the in-flight permits of §5a (process, then principal), not the rate tokens.
+Listing goes through `(project_id, evaluated_at DESC)` with a mandatory time range that prunes to the
+partitions it covers, default the last 30 days. No registry of decisions and no sequence: the partition
+registry above owns relations, not rows.
 
 Tenant-composite FKs to `(services.id, project_id)` where the service reference is NOT NULL, as every
 service-scoped table since 00085.
@@ -496,14 +555,16 @@ capacity they imply is written next to them so nobody has to derive it (owner de
 | `evaluate_rate_principal_per_minute` | 10 | 1 | 600 | token bucket per principal: capacity = the value, refill = value/60 tokens per second; drained → 429 `principal_rate` |
 | `evaluate_rate_process_per_minute` | 60 | 1 | 600 | token bucket for the process, same algorithm; drained → 429 `process_rate` |
 | `evaluate_tx_budget_ms` | 5 000 | 500 | 30 000 | begin-through-commit budget for the decision transaction, applied through the store's deadline wrapper with the remainder per statement |
-| `decision_retention_days` | 90 | 7 | 365 | ledger retention (D10): daily partitions whose upper bound is at or before `now − retention` are detached and dropped, so a row lives at most `retention + 1 day` |
-| `decision_partition_lead_days` | 7 | 2 | 30 | how many days of partitions are kept created ahead; the writable horizon the gauge measures against |
-| `decision_purge_every` | 1h | 5m | 24h | partition-maintenance cadence on the scheduler leader's own maintenance goroutine, each pass bounded to `subCadenceTimeout` |
-| `decision_purge_max_partitions` | 8 | 1 | 48 | partitions created or removed per pass — a bound on one pass's catalog work; a retention shortened by N days drains at this many per pass |
+| `decision_retention_days` | 90 | 7 | 365 | ledger retention (D10): daily partitions whose upper bound is at or before `now − retention` are detached, then dropped; healthy lifetime `retention + 1 day + decision_purge_every` |
+| `decision_partition_lead_days` | 7 | 2 | 30 | days of partitions kept created ahead — EVERY missing day is created each pass, unbudgeted; the writable horizon the gauge measures against |
+| `decision_purge_every` | 1h | 5m | 24h | maintenance cadence, on the gate's own fenced session; each pass bounded to `subCadenceTimeout` |
+| `decision_purge_max_partitions` | 8 | 1 | 48 | REMOVALS (detach, finalize, drop) per pass; load refuses `max × floor(86 400 / every_seconds) < 2` naming both keys |
 
 **Acquisition order, so a rejection costs nothing it should not** (review round 5 P2-3): the in-flight
-permit is taken FIRST — process, then principal — and a refusal there consumes no rate token; the rate
-token is taken second — principal, then process — and a refusal there RELEASES the permit already held.
+permit is taken FIRST — process, then principal — and a refusal there consumes no rate token; the two
+rate buckets are then checked and debited under ONE lock, as a unit — if either is empty, neither is
+debited (review round 7 P1-6: revision 7 debited the principal bucket before finding the process bucket
+empty, and called that "never burns quota") — and a rate refusal RELEASES the permit already held.
 `Retry-After` is `ceil(seconds until the next token)` for a rate refusal and `1` for an in-flight
 refusal, and is never below 1, so two identical bursts see identical headers and a refused request never
 burns quota. A 429 runs no report and writes no ledger row (invariant 14). All nine keys are validated
@@ -513,17 +574,23 @@ at configuration load; a value outside its range refuses to start, naming the ke
 reasons ≤ 1 KiB, policy snapshot ≤ 4 KiB, so a row is at most ≈ 10 KiB with its fixed columns and
 typically ≈ 1.5 KiB. The one input that had no bound was the list of definition revisions overlapping the
 window — a definition revised often enough would have grown every row; the evidence now carries
-`fact_revisions: {count, first_id, last_id, digest}` with `digest` the SHA-256 over the sorted ids, and the
-full list is recoverable from the definition revisions (retained as the reliability record, never
-purged) by the window the evidence already names. Evidence JSON is canonical — sorted keys, no
+`fact_revisions: {count, first_id, last_id, digest}` with `digest` the SHA-256 over the sorted ids. That
+object is the COMPLETE surviving evidence (review round 7 P1-4): `service_definition_revisions` cascades
+with its service (00064, `ON DELETE CASCADE`) and `DeleteService` takes declarations, epochs and facts
+with it, while D10 promises the decision outlives the service — so after a deletion nothing more than
+count, ends and digest can exist, and the spec does not pretend otherwise; while the service exists the
+digest is verifiable against the revisions the window names. Evidence JSON is canonical — sorted keys, no
 whitespace — so equal facts give equal bytes and the bound is testable. The writer never truncates: a
 row that would exceed a CHECK is a bug, fails the decision as error kind `error`, and a test proves it
 with a synthetic 5 KiB evidence.
 
 **Capacity at the permitted ingest**, per replica — what the table above actually allows, in rows and in
-bytes (typical 1.5 KiB / bound 10 KiB per row):
+PAYLOAD bytes (typical 1.5 KiB / CHECK bound 10 KiB per row). Payload is not disk: tuple headers, TOAST,
+the two indexes and fill factor sit outside the three JSON CHECKs, so physical size is roughly 2–3×
+payload (review round 7 P2); the runbook sizes disk from `cerbix_gate_decisions_bytes` after the first
+week of real traffic, and from 3× the bound column before it.
 
-| | rows / day | rows / 90 d | bytes / 90 d typical → bound | rows / 365 d | bytes / 365 d typical → bound |
+| | rows / day | rows / 90 d | payload / 90 d typical → bound | rows / 365 d | payload / 365 d typical → bound |
 |---|---|---|---|---|---|
 | a real installation (≈ 200 decisions/day) | 200 | 18 000 | 27 MB → 180 MB | 73 000 | 110 MB → 730 MB |
 | defaults saturated (`60/min` process) | 86 400 | 7 776 000 | 11.7 GB → 78 GB | 31 536 000 | 47 GB → 315 GB |
@@ -532,13 +599,13 @@ bytes (typical 1.5 KiB / bound 10 KiB per row):
 Multiply by the replica count for a cluster (below). One daily partition at saturated defaults holds
 86 400 rows ≈ 130 MB typical, and is removed in two catalog operations when it ages out. An installation
 that raises `evaluate_rate_process_per_minute` is raising THIS table and should read it first; the
-runbook says so and sizes the disk from the bound column, not the typical one.
+runbook says so.
 
 **Observability of the bounds themselves** (review round 5 P1-3), all low-cardinality and none carrying a
 principal: `cerbix_gate_evaluate_rejected_total{reason}` with exactly the four reasons above;
 `cerbix_gate_decision_duration_seconds` as a histogram over fixed buckets (0.05 … 30 s); and
 `cerbix_gate_evaluate_errors_total{kind}` with `snapshot_conflict | timeout | ledger_unwritable |
-ledger_identity | error`. Together with the four ledger gauges of D10 — `partitions_pending_drop`,
+ledger_identity | partition_identity | error`. Together with the four ledger gauges of D10 — `partitions_pending_drop`,
 `oldest_partition_age_seconds`, `writable_horizon_seconds`, `bytes` — that is the whole metric surface of
 this requirement; the runbook thresholds (§4) are written against these names.
 
@@ -583,11 +650,13 @@ numbers, not against a limiter that does not exist.
     clauses by name, bump a DB-owned revision only on real change, are CAS'd on `expected_revision`,
     and are audited with before/after and actor;
 12. a decision row is immutable, survives service rename and deletion, lives in a daily RANGE
-    partition on `evaluated_at` in both storage modes under the key `(evaluated_at, id)`, ages out by
-    partition detach and drop within one day past retention and never by row DELETE, and is readable
-    under `gate:evaluate` through the PROJECT-scoped ledger route with no service-existence check — an
-    id-only read that probes every partition and answers 500 `ledger_identity` rather than choose
-    between two rows — proven by an HTTP read after the service is deleted, not by a SELECT;
+    partition on `evaluated_at` in both storage modes under the key `(evaluated_at, id)` with a UUIDv7
+    id whose timestamp is `evaluated_at`'s millisecond, ages out by partition detach and deferred drop
+    within `retention + 1 day + decision_purge_every` under a healthy pass and never by row DELETE, and
+    is readable under `gate:evaluate` through the PROJECT-scoped ledger route with no service-existence
+    check — an id-only read that prunes to the one partition the id names and answers 500
+    `ledger_identity` rather than choose between two rows — proven by an HTTP read after the service is
+    deleted, not by a SELECT;
 13. the gate policy of a file-managed service is writable through the API (D13) and is absent from the
     bundle hash;
 14. a decision request is bounded in CONCURRENCY and in RATE by the nine keys of §5a — process and
@@ -595,8 +664,9 @@ numbers, not against a limiter that does not exist.
     transaction budget, and a validated retention enforced by removing whole daily partitions — all
     checked BEFORE a transaction opens, so a 429 runs no report, writes no ledger row, and carries a
     `Retry-After` of `ceil(seconds to the next token)`, never below 1; an in-flight refusal consumes no
-    rate token and a rate refusal releases its permit; the bounds are process-local and the cluster
-    allowance scales with replicas, by contract;
+    rate token, the two rate buckets are debited as a unit or not at all, and a rate refusal releases
+    its permit; the bounds are process-local and the cluster allowance scales with replicas, by
+    contract;
 15. the seal lag is bounded: `evaluated_at − sealed_through > max_seal_lag_seconds` makes every budget
     clause UNAVAILABLE with `seal_stale`; the floor is the derived constant
     `MinSealLag = LateArrivalGrace + CanonicalBucket + 2 × CanonicalBucket = 300 s`, and the domain test
@@ -610,15 +680,24 @@ numbers, not against a limiter that does not exist.
 17. override actor and revoker are stored as typed attribution PLUS an immutable server-derived label,
     and a later read of the override or of a decision that applied it names the same label; no
     client-supplied actor is accepted.
-18. ledger maintenance never holds dispatch: it runs in the leader's own maintenance goroutine, is
-    cancelled and joined before step-down completes, and a `DETACH` blocked behind a lock leaves the
-    dispatch tick firing on cadence — proven by a scheduler test whose fake store blocks the detach
-    while dispatch calls keep arriving, and by a step-down test that finds no DDL after `lead` returned;
+18. ledger maintenance never holds dispatch and never outlives its authority: it runs in its own
+    goroutine, every statement of a pass runs on the pinned connection that holds the gate's own
+    session-level advisory lock, and a `DETACH` or `ATTACH` blocked behind a lock leaves the dispatch
+    tick firing on cadence — proven by a scheduler test whose fake store blocks the pass while dispatch
+    calls keep arriving, and by a fencing test in which the old side's backend is terminated while its
+    detach is blocked, a successor acquires, and the old side can issue no further statement (its next
+    one fails on the dead connection; the partition is removed exactly once, by the successor);
 19. a decision the ledger cannot hold is not a decision: with no partition for `evaluated_at` the
     insert fails, the API answers 503 `ledger_unwritable`, nothing is emitted, the CLI exits 1 — and the
     lead of `decision_partition_lead_days` plus the `writable_horizon_seconds` gauge make that failure
     need a leader absent for the whole lead time, which `max_seal_lag_seconds` has already turned into
     `UNKNOWN`;
+20. the pass touches only relations the registry owns: a same-named relation with a different OID or
+    shape, a partition whose catalog state contradicts its registry state, or a registry row whose
+    relation vanished without `dropped` is refused whole — no create, attach, detach or drop that day —
+    counted as `partition_identity` and paged; a crash after a completed detach is reconciled, not
+    refused; and a drop happens only one cadence after its detach and only when no backend holds a
+    transaction older than the detach;
 
 ## 7. Required test matrix (written before the code)
 
@@ -688,25 +767,48 @@ expression over the constants, all three resolved from `internal/domain`; a writ
 *Limiter boundaries (§5a):* an in-flight refusal leaves the principal's token count unchanged · a rate
 refusal releases the in-flight permit (the next request is not refused for concurrency) · `Retry-After`
 for a rate refusal equals `ceil` of the time to the next token and is `1` at minimum · two identical
-bursts against a fresh bucket receive identical `Retry-After` sequences.
+bursts against a fresh bucket receive identical `Retry-After` sequences · **process bucket empty,
+principal bucket available: the principal's token count is unchanged after the 429** (the mutation
+debiting the buckets one after the other fails this).
 
-*Partitions and identity:* a decision written on the last second of a UTC day lands in that day's
-partition · the migration leaves `[today, today + 7 d]` attached and the pass keeps
-`decision_partition_lead_days` ahead · with retention 7 d, a partition whose upper bound is 8 d old is
-detached CONCURRENTLY and dropped, the one at 7 d is not, and a row is never seen to outlive
-`retention + 1 day` · an interrupted detach (detach-pending in the catalog) is `FINALIZE`d and dropped on
-the next pass · at most `decision_purge_max_partitions` are created or removed per pass · a detach held
-behind an `ACCESS EXCLUSIVE` lock is refused by `lock_timeout` in ≤ 2 s and a decision insert during
-that detach commits · with the horizon exhausted the decision transaction fails, the API answers 503
-`ledger_unwritable`, no state is emitted and no row exists · the id-only read finds a row in the oldest
-attached partition and a row in the newest; two rows sharing an id (planted directly, two partitions)
-make the read answer 500 `ledger_identity` · the listing route refuses a missing time range and prunes
-to the partitions of the range it is given · a synthetic 5 KiB evidence fails the decision at the CHECK
-and a canonical 1 KiB evidence's bytes equal the fixture's byte for byte · in both storage modes.
+*Partitions:* a decision written on the last second of a UTC day lands in that day's partition · the
+migration leaves `[today, today + 7 d]` attached AND registered, and a pass with lead 7 and three days
+missing creates all three · a partition is built standalone and attached: while a decision insert holds
+its row lock the attach completes (it needs no `ACCESS EXCLUSIVE`), and a `CREATE … PARTITION OF` (the
+mutation) is not in the code (asserted by grep over the store) · with retention 7 d and a pass every 5 m,
+a partition whose upper bound is 8 d old is detached CONCURRENTLY, the one at 7 d is not, and after the
+pass no attached partition has an upper bound at or before the cutoff — the row-lifetime claim is
+`retention + 1 day + purge_every`, tested as "gone within one cadence after eligibility", not "never seen
+past" · an interrupted detach (detach-pending in the catalog) is `FINALIZE`d on the next pass · a
+detached partition is NOT dropped on the pass that detached it, is dropped on a later pass, and is
+skipped while a planted transaction with `xact_start` before the detach stays open · at most
+`decision_purge_max_partitions` removals per pass while creation of all missing days still happens ·
+load refuses `purge_every = 24h, purge_max_partitions = 1` naming both keys · a detach or attach held
+behind an `ACCESS EXCLUSIVE` lock is refused by `lock_timeout` in ≤ 2 s and a decision insert during it
+commits · with the horizon exhausted the decision transaction fails, the API answers 503
+`ledger_unwritable`, no state is emitted and no row exists · in both storage modes.
 
-*Off the loop:* a scheduler test whose fake store blocks the detach for longer than one tick sees the
-dispatch tick fire on cadence; a step-down test sees the maintenance goroutine joined before `lead`
-returns and no DDL issued afterwards.
+*Ownership:* a relation planted under next day's name with a different shape makes the pass refuse the
+day, count `partition_identity`, and leave the relation untouched · a registry row flipped to `attached`
+for a relation the catalog shows standalone is refused · a registry row whose relation was dropped by
+hand is refused, never re-created silently · a crash simulated after `DETACH` completed (registry
+`detached`, catalog standalone, same OID) is reconciled: the deferred drop proceeds · the four gauges
+are computed from `relid`, and renaming a partition by hand changes none of them.
+
+*Fencing and the loop:* the old side holds the gate session and is blocked in a detach behind an
+`ACCESS EXCLUSIVE` holder; `pg_terminate_backend` on its pid; a successor acquires the gate session and
+completes the removal; the old side's next statement fails on the dead connection and the partition was
+removed exactly once · a scheduler test whose fake store blocks the pass for longer than one tick sees
+the dispatch tick fire on cadence.
+
+*Identity:* an id's embedded day equals the UTC day of `evaluated_at` for a row written 1 ms before
+midnight with the application clock 5 s ahead (the id is built from the DB timestamp) · the id-only read
+prunes to one partition (`EXPLAIN` shows one child) · an id whose day is older than
+`retention + 1` answers 404 with no query issued (fake store asserts) · two rows sharing an id (planted
+directly) make the read answer 500 `ledger_identity` · the listing route refuses a missing time range ·
+ledger reads are refused with 429 `process_inflight` when the in-flight permits are exhausted and
+consume no rate token · a synthetic 5 KiB evidence fails the decision at the CHECK and a canonical
+1 KiB evidence's bytes equal the fixture's byte for byte.
 
 *Attribution:* an override created by an API token is read back — on the override and on a decision that
 applied it — with `actor_label = token:<name>`, after the token is deleted too · a token REVOKER is read
@@ -731,7 +833,7 @@ accepted · transport timeout → exit 1 · TLS with an unknown CA fails; with `
 | Replaying an old `ALLOW` | a decision is not a capability and carries no authorisation; the pipeline asks immediately before the step (D6); a replayed id resolves in the ledger to its own `evaluated_at` and is visibly old |
 | Reading unsealed facts to "improve" freshness | forbidden by D8, invariant 6; no heartbeat access from the decision path |
 | Cross-tenant probing | 400 malformed / 404 foreign (D15), the existing transport contract |
-| Load amplification from busy pipelines | **there is no API-token rate limiter today** (only the login IP limiter), and a decision is NOT one row: the report path runs bounded but real scans over sealed buckets and segments. A per-token cap alone is bypassed by a second token, a viewer cookie or an OIDC client. Concurrency caps alone do not bound WRITE amplification: one principal at concurrency 1 can still create expensive reports and immutable ledger rows without limit (review round 3 P1-3). Mitigations: the eight bounds of §5a — process and per-principal in-flight caps, per-principal and process token-bucket rates, a transaction budget, validated retention with bounded purge — all checked BEFORE any transaction opens (429 with `Retry-After`, no report, no row); the window fixed by the policy so the scan is bounded by it; **no cache**, which would be a second semantics owner. The bounds are process-local and the cluster allowance scales with replicas, stated as the contract. Every bound is tested, and the rate bound has a mutation |
+| Load amplification from busy pipelines | **there is no API-token rate limiter today** (only the login IP limiter), and a decision is NOT one row: the report path runs bounded but real scans over sealed buckets and segments. A per-token cap alone is bypassed by a second token, a viewer cookie or an OIDC client. Concurrency caps alone do not bound WRITE amplification: one principal at concurrency 1 can still create expensive reports and immutable ledger rows without limit (review round 3 P1-3). Mitigations: the nine bounds of §5a — process and per-principal in-flight caps, per-principal and process token-bucket rates debited as a unit, a transaction budget, validated retention with bounded removals and an unbudgeted lead, and ledger reads under the same in-flight permits — all checked BEFORE any transaction opens (429 with `Retry-After`, no report, no row); the window fixed by the policy so the scan is bounded by it; **no cache**, which would be a second semantics owner. The bounds are process-local and the cluster allowance scales with replicas, stated as the contract. Every bound is tested, and the rate bound has a mutation |
 | `UNKNOWN` silently read as green | `unknown_behavior` is the operator's declared choice (D5); the CLI exit follows `action`; the word `UNKNOWN` is in the output regardless (D16) |
 
 ## 9. Non-goals of FR-024
@@ -770,6 +872,9 @@ first statement supplies
 decision_purge_batch / purge_backlog_rows / oldest_eligible_seconds   (revision 6's row-DELETE purge)
 partition per calendar month / monthly RANGE                          (revision 6's partition period)
 fact_revision_ids                                                     (the unbounded revision list)
+carries no time / 373 / full list is recoverable                     (revision 7's id, partition count, evidence claim)
+CREATE TABLE IF NOT EXISTS … PARTITION OF                            (revision 7's creation under ACCESS EXCLUSIVE)
+`retention + 1 day`   (with the closing backtick right after "day")   (revision 7's lifetime "bound")
 ```
 
 It also refuses a duplicated table header in §5. **The guard has fixture tests**

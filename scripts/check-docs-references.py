@@ -181,6 +181,11 @@ GATE_STALE = [
     (re.compile(r'decision_purge_batch|purge_backlog_rows|oldest_eligible_seconds'), 'revision-6 purge vocabulary'),
     (re.compile(r'partition per calendar month|monthly RANGE'), 'revision-6 partition period (it is one UTC day)'),
     (re.compile(r'fact_revision_ids'), 'fact_revision_ids (it is the bounded fact_revisions object)'),
+    # revision 7 (party [35]): the unpruned id, the wrong partition count, the false recovery claim,
+    # creation under ACCESS EXCLUSIVE, and a lifetime "bound" that ignored cadence and backlog.
+    (re.compile(r'carries no time|\b373\b|full list is recoverable'), 'revision-7 identity/evidence claim'),
+    (re.compile(r'IF NOT EXISTS[^\n]{0,60}PARTITION OF'), 'CREATE … IF NOT EXISTS … PARTITION OF (partitions are built standalone and ATTACHed)'),
+    (re.compile(r'retention \+ 1 day`'), 'retention + 1 day as a bound (it is retention + 1 day + purge_every, healthy)'),
 ]
 GATE_SPEC = 'docs/specs/func-reliability-gate.md'
 GATE_FIXTURE_FENCE = '```retired-spellings'

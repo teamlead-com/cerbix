@@ -72,6 +72,23 @@ class StaleSpellingGuard(unittest.TestCase):
             self.assertTrue(flagged(SPEC, line), line)
         self.assertEqual(flagged(SPEC, "`decision_purge_max_partitions`, `fact_revisions`, one partition per UTC day"), [])
 
+    def test_revision_seven_vocabulary_is_retired(self):
+        for line in (
+            "because a decision id carries no time",
+            "373 at the 365-day maximum",
+            "the full list is recoverable from the retained",
+            "with `CREATE TABLE IF NOT EXISTS … PARTITION OF`",
+            "a row lives at most `retention + 1 day` and",
+        ):
+            self.assertTrue(flagged(SPEC, line), line)
+        for line in (
+            "lifetime `retention + 1 day + decision_purge_every` under a healthy pass",
+            "PARTITION BY RANGE (evaluated_at)",
+            "`CREATE TABLE … PARTITION OF` takes `ACCESS EXCLUSIVE` on the parent, which is why it is not used",
+            "up to `retention + lead + 1 = 396` of them",
+        ):
+            self.assertEqual(flagged(SPEC, line), [], line)
+
     def test_duplicate_schema_headers_are_caught(self):
         text = "service_gate_decisions  (a)\nservice_gate_overrides  (b)\nservice_gate_decisions  (c)\n"
         self.assertEqual(cdr.gate_duplicate_headers(text), ["service_gate_decisions"])

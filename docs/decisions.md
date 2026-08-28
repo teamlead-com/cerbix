@@ -4719,7 +4719,7 @@ passes the cutoff, so `retention_days = 7` keeps rows up to 38 days and `90` up 
 "older than retention is purged" — and the rows carry `actor_label`, which makes the ceiling matter, not
 only the floor. Offered daily partitions (exact to within a day; precedent `heartbeats`, 00017) or
 keeping monthly ones with the knob re-specified as a minimum, the owner chose daily. At the 365-day
-maximum that is at most 373 attached partitions, which PostgreSQL carries without comment and which
+maximum that is at most 373 attached partitions (the figure at the time; D-0195 corrects it to 396 with the maximum lead), which PostgreSQL carries without comment and which
 `DETACH … CONCURRENTLY` makes irrelevant to inserts.
 
 **Removal that cannot block a write, and a ledger that refuses rather than strands.** Revision 6 said
@@ -4749,7 +4749,7 @@ index of every attached partition without pretending to prune, and a 500 `ledger
 choice if two rows ever share an id. No registry table, no sequence.
 
 **Bytes.** The capacity table counted rows; each row carried JSON evidence with an unbounded list of
-definition revisions. The list is now `{count, first_id, last_id, digest}` — recoverable from the retained
+definition revisions. The list is now `{count, first_id, last_id, digest}` — recoverable, this record said at the time, from the retained
 revisions by the window the evidence names — evidence is canonical JSON, the row is CHECK-bounded (4 KiB
 + 1 KiB + 4 KiB), and the table gained byte columns at 1.5 KiB typical and 10 KiB bound, with a realistic
 200-decisions-a-day row so the saturated numbers read as what they are.
@@ -4761,3 +4761,57 @@ and two metric names §5a no longer defined, and the guard passed because its re
 **Not reproduced.** The review reported the D8a heading duplicated at spec lines 205–206 of `4e5bd15`;
 at that hash line 205 is the heading and 206 is prose, and the heading occurs once. Recorded so the
 claim is not re-litigated.
+
+## D-0195 — FR-024 revision 8: a fence made of the connection, creation under the weaker lock, a registry of what is ours, and an id that names its day (2026-08-28)
+
+**Context.** Focused confirmation of revision 7 (`476643a`) returned 1 P0, 7 P1 and 3 P2 (party [35]),
+and retracted round 6's D8a duplicate (two overlapping `sed` ranges). Every item is a runtime fact of
+PostgreSQL or of this codebase, verified before it changed the text; none needed the owner.
+
+**The fence is the connection.** Revision 7 ran the maintenance pass in a goroutine of the scheduler
+leader and called "cancelled and joined before `lead` returns" a fence. It is not one: the scheduler's
+advisory lock sits on a pinned connection while its work uses the pool, so when that connection dies
+PostgreSQL frees the lock at once, a successor may start, and the old node keeps issuing statements
+until its next watchdog tick. The pass now takes the gate's own `store.LeaderSession` — the shape
+file-provider apply already uses for exactly this reason — and every statement of a pass runs on the
+lock-owning connection. A dead connection has no lock and can carry no statement; the deposed side is
+silenced by construction. The test terminates the old backend mid-detach and requires the successor to
+remove the partition exactly once.
+
+**Creation under the weaker lock.** The PostgreSQL 15 reference says it plainly: creating a partition
+with `PARTITION OF` requires `ACCESS EXCLUSIVE` on the parent. Revision 7's creation would have queued
+decision inserts behind it for up to the statement timeout. Partitions are built standalone (`LIKE …
+INCLUDING …` plus a bounds CHECK) and `ATTACH`ed under `SHARE UPDATE EXCLUSIVE`. Every missing day in
+the lead is created every pass, unbudgeted; the removal budget is separate; and configuration load
+refuses a cadence-and-budget pair that cannot remove two partitions a day.
+
+**A lifetime bound that is true.** Daily granularity adds up to a day, the cadence up to another, and a
+refused lock or a lost session adds what it adds. The spec now promises `retention + 1 day +
+purge_every` under a healthy pass and calls everything past it backlog — gauged and alerted, not
+promised away.
+
+**The deferred drop.** PostgreSQL 15.9's release notes fix "possible crashes and 'could not open
+relation' errors in queries on a partitioned table occurring concurrently with a DETACH CONCURRENTLY
+and immediate drop of a partition"; cerbix enforces 15.0. Rather than raise the floor, the drop waits a
+cadence and runs only when no backend holds a transaction older than the detach — safe on every
+supported 15.x, with ≥ 15.9 recommended in the runbook.
+
+**A registry of what is ours.** `IF NOT EXISTS` proves nothing about the relation that exists, and a
+table left standalone by a crash between detach and drop has no parent link to prove it was ever ours.
+`service_gate_decision_partitions` records day, deterministic name, OID and state; every act validates
+the catalog against it on the same connection and refuses the whole day on any disagreement, counted
+and paged. A crash after a completed detach is the ordinary reconciled case.
+
+**The id names its day.** Revision 7's id-only read probed every attached partition — up to 396 with
+the maximum lead, not the 373 written at the time — with no limiter on reads. The id is now a UUIDv7 whose timestamp is
+`evaluated_at`'s millisecond, taken from the database clock inside the decision transaction so it cannot
+disagree with the partition key; the read prunes to one partition, refuses out-of-window ids without a
+query, and shares the in-flight permits.
+
+**Two smaller truths.** The revision digest is the complete surviving evidence: `service_definition_revisions`
+cascades with its service and `DeleteService` cascades the rest, so revision 7's "recoverable from the
+retained revisions" was false on a path D10 expressly supports. And the two rate buckets are debited as a
+unit or not at all; revision 7 debited the principal's before finding the process bucket empty.
+
+**Not reproduced.** "`two different limiters` repeated twice in §5a": at `476643a` the phrase occurs once
+(the §5a opening paragraph). The §8 "eight bounds" was real and is nine.

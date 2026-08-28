@@ -6,6 +6,140 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [v0.1.5-beta.3] - 2026-08-28
+
+An adversarial review of service incidents (FR-022) and service escalation (FR-023) that grew into a
+correction arc across the whole alerting spine: incident lifecycle and its clocks, escalation ladders,
+alert routability, outbox delivery order, and what it means for a service to *cover* its members. Two
+independent review rounds under contract; product approved at `35de54d`, the follow-on work at `eba2b69`.
+Decisions D-0175 through D-0187, invariants 92 through 105, migrations `00085`…`00092`. 57 commits.
+
+**Read the upgrade notes before rolling this out.** One of the migrations needs the outbox owners stopped.
+
+### Upgrade notes
+
+- **Stop the outbox owners before migrating across `00088`.** Roles `all`, `api` and `scheduler` run the
+  outbox worker; `worker` and `agent` do not and keep running. Run `cerbix migrate` once with the NEW
+  binary, then start the new owners. The migration fences a class of outbox rows the database now owns;
+  it cannot reach a delivery an old worker already has in flight. Skipping the stop loses no event and
+  corrupts nothing — it risks the out-of-order delivery this migration exists to end, bounded by one
+  already-claimed batch (≤50 rows) per old owner. `docs/runbook.md` carries the procedure.
+- **Migration `00090` repairs durable incident data and reports what it will not touch.** Resurrected
+  incidents (a resolution time with a status that walked back) and stranded service incidents are
+  resolved, each with a `🔧 Repaired:` timeline note. Two classes are only *counted*, in the migration's
+  output, because repairing them would mean guessing at history: member snapshots that may have named a
+  not-yet-governing revision, and anchorless auto-incidents. The runbook has the queries and the manual
+  procedure. On a database that never hit the races, the repair is a no-op.
+- **Existing service latches keep their coverage across the upgrade.** `00089` seeds `delivered_seq =
+  emitted_seq` for rows that predate delivery tracking, so no armed service is declared undelivered at
+  once. The new rule governs from the first announcement after the upgrade.
+- **PostgreSQL 14 is not supported, and that is now decided rather than pending** (D-0183). 15 is the
+  floor; the version guard from beta.2 already enforces it. Budget the server upgrade rather than waiting
+  for a release that removes the requirement.
+
+### Fixed
+
+*Incidents*
+
+- **`resolved` is terminal in the write, not in a prior read.** Two overlapping writers could commit an
+  incident backwards, and nothing at all stopped `identified → investigating` even in sequence. Status
+  transitions are now `CanFollow`-checked inside the store's transaction; a plain comment sends no status
+  and keeps the current one server-side. The clock moved with it: `statement_timestamp()` after the row
+  lock, one instant across the incident, its timeline entry and its outbox row.
+- **A service incident announces both ends** — webhooks and status-page subscribers, not only the
+  operator's screen — and resolves when the health episode that owns it ends, including through disown
+  and delete, which used to close the alert and leave the incident open forever.
+- **The postmortem names the declaration that governed the outage**, not the newest one; snapshotting
+  refuses a foreign revision fail-closed.
+- **An incident climbs the ladder it started with.** The escalation policy is snapshotted at open
+  (`00085`); editing a policy mid-outage cannot re-time a page already in flight. Incidents open across
+  the upgrade start their ladder at the upgrade instant rather than firing every overdue step at once
+  (D-0175, a named legacy exception).
+- **Repeat cadence for a service's own ladder** (`services.renotify_seconds`, D-0185). FR-023's D8 had
+  declined the knob with a claim that the policy's own repeat covered it — false, so `repeat_last` on a
+  service-attached policy did nothing. Zero is off and the default; 60..86400 otherwise; read live rather
+  than frozen into the ladder; part of the alerting generation so a change dis-arms until re-evaluated.
+  Declarable from a bundle (`alerting.renotify_seconds`), because file-managed services cannot use the UI.
+
+*Alerting and coverage*
+
+- **A route must name a live channel.** Routability was decided by counting array entries, so a schedule
+  naming a deleted or disabled channel armed coverage and a member's page was suppressed in favour of a
+  replacement that could notify nobody. Both delegation and the recipient resolver now require a channel
+  that exists, is enabled and belongs to the project.
+- **An onset nobody can receive is withheld, not latched** (D-0176), counted as
+  `cerbix_service_alert_withheld_total{signal,reason}` with `unroutable` or `no_governing_revision` —
+  different owners, so one number would have sent the wrong person to look.
+- **Coverage follows the state the service is IN, and requires an announcement that was DELIVERED**
+  (D-0179). A delivered DEGRADED announcement no longer covers a service that has since observed DOWN.
+  And an announcement that reached nobody — channel deleted between enqueue and delivery, or every
+  send failed — no longer arms coverage: `delivered_seq` is credited only when a send *succeeded* for at
+  least one recipient. A channel row that exists is not a delivery.
+- **The outage nobody heard about is announced again once there is somebody to tell** (D-0187), on both
+  signals. The worker condemns an announcement only on the terminal paths — empty snapshot, zero
+  recipients resolved, or retries exhausted — never while a retry is owed, and never one that already
+  reached somebody. The evaluator re-announces through the ordinary onset path with a fresh recipient
+  snapshot; the episode nobody heard closes as `undelivered`, a new reason.
+- **One vocabulary for why a member paged.** The service badge named the failing clause; the delivery
+  metric said `no_active_owner` whatever had failed. Both now come from one clause evaluation. New values
+  `no_owning_service`, `onset_pending`, `onset_undelivered`, `latch_inconsistent`; `stale_lease` on the
+  burn arm means an expired lease and nothing else. §16.6b carries the vocabulary as a normative table
+  with an explicit rank column and the fix for each value.
+
+*Outbox*
+
+- **An incident's lifecycle events cannot be dispatched out of order** (D-0177). `incidents.event_seq`
+  is stamped into every payload; the claim will not release an event while an earlier event of the same
+  incident is undelivered; a dead predecessor blocks too. The fenced class is enforced by the database
+  (`00088`), not by whichever binary is inserting. Arrival order is *not* claimed — cerbix orders what it
+  controls, and `(incident.id, seq)` in every webhook payload is what lets a receiver dedupe and order.
+- **A delivery is bounded by the lease of the claim that authorised it** (D-0186). A deposed worker can
+  no longer sit inside an HTTP request or an SMTP session while the row's new owner sends the same
+  event. The lease is measured as a span in database time, not by comparing the database's clock with
+  the worker's; the settling and recording writes are deliberately *not* bounded; a claim whose turn
+  came after its lease is handed back with its attempt refunded.
+
+*Status pages*
+
+- **A page, its feed and its subscriber mail agree about which projects the page reports** (D-0180).
+  Three surfaces decided it three ways; a page made only of Service components rendered an incident and
+  emailed nobody about it. One axis now — `page.project_id` UNION every component's `source_project`,
+  not filtered by source — with the subscriber query as its exact inverse. A manual component with a
+  dormant binding keeps reporting its project (D-0184, chosen rather than inherited).
+
+*UI*
+
+- **A search hit brings its tenant, and a detail view follows the URL.** A monitor or incident hit from
+  another workspace landed on a page whose reads and permission checks ran against the previous tenant,
+  hiding acknowledge, resolve and postmortem from a legitimate editor. Navigating between two of the same
+  kind changed the address bar and nothing else. Both detail views now watch the route and the workspace,
+  guard against a slower response for the previous subject, and the `RouterView` is keyed by path.
+- **A partly unmeasured hour no longer renders green** on the Reliability card.
+- **The escalation form says what `repeat_last` does on a service** beside the control.
+
+### Changed
+
+- **API:** `ServiceAlertPolicy` gains `renotify_seconds`; the alerting-state `reason` enum gains
+  `onset_pending`, `onset_undelivered`, `latch_inconsistent`; webhook `incident.*` payloads carry `seq`.
+- **Metrics:** `cerbix_service_alert_withheld_total{signal,reason}` is new;
+  `cerbix_alert_delegation_fail_open_total{reason}` uses the shared clause vocabulary plus three
+  operational values (`error`, `record_failed`, `unspecified`) that have no badge counterpart.
+- **Schema:** `incidents` gains `event_seq` and `CHECK ((status = 'resolved') = (resolved_at IS NOT
+  NULL))`; both service latch tables gain `delivered_seq` and `undelivered_seq`; `services` gains
+  `renotify_seconds`; `service_alert_episodes.close_reason` admits `undelivered`.
+- **Documentation gate:** `check-docs-references` now derives the FR-021 invariant set from the spec and
+  compares it exactly with the discharge map — missing rows, extra rows, holes and duplicate numbers all
+  fail. Invariants 92–105 moved into `func-service-reliability.md` §16.8, where a requirement lives.
+
+### Known limits
+
+- Two classes of pre-existing incident damage are reported by `00090` and not repaired; see the upgrade
+  notes and `docs/runbook.md`.
+- The outbox bounds *dispatch*; it cannot bound *arrival*. A receiver that wants exact ordering needs
+  the `seq` field (`docs/runbook.md` describes two receiver strategies and what each loses).
+
+---
+
 ## [v0.1.5-beta.2] - 2026-08-19
 
 Three defects found by running `v0.1.5-beta.1` in production rather than by a test. The first blocked the

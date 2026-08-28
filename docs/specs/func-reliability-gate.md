@@ -1,11 +1,12 @@
 # func-reliability-gate — a deploy asks whether the error budget allows it (FR-024 / NFR-019)
 
-> **Lifecycle: DESIGN GATE, revision 4 — awaiting focused confirmation, no code.** Revision 1
+> **Lifecycle: DESIGN GATE, revision 5 — awaiting focused confirmation, no code.** Revision 1
 > (`46379fa`, `c65ea5d`) was rejected with 4 P0, 9 P1, 3 P2 (party [15]); revision 2 (`113308f`) with
-> 2 P0, 5 P1, 4 P2 (party [20]); revision 3 (`a16ea70`) with 4 P1, 4 P2 (party [25]). Every finding of
-> all three rounds is addressed below and named where it changed the text. The owner closed D9–D13
-> (D-0188), the four questions of round 1 (D-0189) and the seal-lag bound of round 2 (D-0190); round 3
-> raised no owner question (D-0191). Two gates remain before code: the review's focused
+> 2 P0, 5 P1, 4 P2 (party [20]); revision 3 (`a16ea70`) with 4 P1, 4 P2 (party [25]); revision 4
+> (`d540ae4`) with 3 P1, 5 P2 (party [27]). Every finding of every round is addressed below and named
+> where it changed the text. The owner closed D9–D13 (D-0188), the four questions of round 1 (D-0189)
+> and the seal-lag bound of round 2 (D-0190); rounds 3 and 4 raised no owner question (D-0191, D-0192).
+> `make docs-check` now refuses the stale spellings earlier revisions left behind (§10). Two gates remain before code: the review's focused
 > confirmation of THIS revision, and — because the policy editor and the decision history are SPA
 > surfaces — an approved UI mock before any frontend code. Change Intelligence is **FR-025** and is not
 > part of this requirement.
@@ -155,7 +156,7 @@ columns are nullable exactly where it says so:
 | `burn_leases[]` | one per rule of the target; empty when the target has no rules |
 | `coverage_lease_until`, `coverage_state` | when the service has been evaluated; absent with reason `never_evaluated` |
 | `override` | when one was applied |
-| `facts_fresh_until` | whenever ANY horizon exists: the seal horizon (`sealed_through + max_seal_lag`) or a lease |
+| `facts_fresh_until` | whenever any DECISION-CONSTRAINING horizon exists: the seal horizon (`sealed_through + max_seal_lag_seconds`) when a budget clause is assigned `block`/`warn`, or a burn lease of a rule whose clause is assigned `block`/`warn` |
 
 The fields themselves:
 
@@ -165,7 +166,7 @@ The fields themselves:
   two are different facts;
 - `sealed_through` — the end of the sealed data the budget rests on — and `seal_lag`, the distance
   from it to `evaluated_at`, stated by the report path (D1) and compared against the policy's
-  `max_seal_lag` (D8a);
+  `max_seal_lag_seconds` (D8a);
 - `window`, `target_id`, `objective`, `objective_updated_at`;
 - `governing_revision` — the service definition revision in force at `evaluated_at`, nullable when
   none is; and `fact_revision_ids[]` — the revisions the sealed facts in the window were computed under,
@@ -182,13 +183,16 @@ The fields themselves:
 There is **no `valid_until`**. Revision 1 offered one derived from leases; the review is right that the
 incident, the policy and the override can all change a microsecond later regardless of any lease, so
 the field would have promised a validity the decision does not have. `facts_fresh_until` is present
-instead, with ONE formula: the minimum over every horizon the policy actually depends on —
-`sealed_through + max_seal_lag` for the budget clauses (D8a), each `burn_leases[]` entry the policy
-assigns, and `coverage_lease_until` when coverage evidence is present. Revision 3 defined it over leases
-alone, so a budget-only policy had an expiry the field could omit, and a burn lease later than the seal
-horizon could name a moment the budget was already stale (review round 3 P1-2). It is present whenever
-any of those horizons exists, and the response documents it as "when the FACTS go stale", explicitly not
-as a lifetime of the decision.
+instead, with ONE formula over the DECISION-CONSTRAINING inputs only: the minimum of
+`sealed_through + max_seal_lag_seconds` when any budget clause is assigned `block` or `warn`, and of the
+`burn_leases[]` entries whose rule's clause is assigned `block` or `warn`. Coverage is evidence and never
+a clause, so `coverage_lease_until` is NOT in the formula; an `ignore`d burn clause's lease is not either.
+Revision 3 defined the field over leases alone, so a budget-only policy had an expiry the field could
+omit; revision 4 then mixed in coverage and ignored rules, so an `ALLOW` could sit beside a
+`facts_fresh_until` already in the past for a fact that decided nothing (review round 4 P2-1, option b).
+It is present whenever any constraining horizon exists — absent for a policy whose every clause is
+`ignore` — and the response documents it as "when the facts this decision RESTS ON go stale",
+explicitly not as a lifetime of the decision.
 
 **D8 — the sealed contract has a price, and the price is stated. DECIDED.**
 The SLO window ends at the seal watermark, never at `now`. A gate asked at 14:03 answers with the budget
@@ -205,13 +209,17 @@ nothing left to notice. Therefore every policy carries `max_seal_lag_seconds` �
 seconds, a whole number of minutes, on the wire and in storage; the UI renders it as a duration (review
 round 3 P2-4) — with **default 900 (15 minutes)**, the owner's choice (D-0190).
 
-**The floor is derived, not chosen** (review round 3 P1-1). Revision 3 allowed `1m`, which a healthy
-pipeline can never satisfy: `domain.CanonicalBucket` is 60 s, `LateArrivalGrace` is 120 s, and the
-materializer seals up to `FloorToBucket(now − grace)`, so in steady state the lag sits in `[2m, 3m)`
-before queueing and commit — a policy of one or two minutes would be `seal_stale` forever on a system
-doing exactly what it should. The minimum is therefore `bucket + grace + one bucket of headroom =
-300 s` (5 minutes), stated in the domain as a derived constant next to the two it depends on, so a
-future change to either moves it; the maximum stays 24 h. The seal work itself runs every second
+**The floor is derived, not chosen** (review round 3 P1-1; formula corrected round 4 P1-1). Revision 3
+allowed `1m`, which a healthy pipeline can never satisfy: `domain.CanonicalBucket` is 60 s,
+`LateArrivalGrace` is 120 s, and the materializer seals up to `FloorToBucket(now − grace)`, so in steady
+state the lag sits in `[2m, 3m)` before queueing and commit — a policy of one or two minutes would be
+`seal_stale` forever on a system doing exactly what it should. Revision 4 wrote "bucket + grace + one
+bucket of headroom = 300 s", which is 240 s: the arithmetic did not produce the number beside it, so a
+future change to the constants would have moved the floor wrongly. The formula is
+`MinSealLag = LateArrivalGrace + CanonicalBucket + 2 × CanonicalBucket = 120 + 60 + 120 = 300 s` — the
+healthy upper bound (`< 180 s`) plus two buckets of headroom for queueing and commit — stated in the
+domain as a derived constant next to the constants it depends on, and the domain test asserts the
+FORMULA against the constants, not the literal 300. The maximum stays 86 400 s. The seal work itself runs every second
 (`serviceSliceEvery`), so the floor is about DATA finality, not about how often the sealer runs — the
 rationale revision 3 gave ("the seal cadence is one minute") described the daily heartbeat rollup, a
 different mechanism, and is corrected in D-0191.
@@ -228,8 +236,10 @@ attribution the audit log already uses (`actor_user_id` nullable + `via_token`, 
 `authz.Principal.AuditUserID()`) AND an immutable `actor_label` — the principal's `AuditLabel`
 (`token:<name>` for an API token, the user for a person) — because for a machine principal the typed
 half is `NULL + true`, which after commit reads as "some token", and the evidence has to name which one
-for as long as the row exists (review round 3 P1-4). The revoker is stored the same way
-(`revoked_by`, `revoked_by_label`). Any client-supplied actor field on either endpoint is refused as
+for as long as the row exists (review round 3 P1-4). The revoker is stored as the same COMPLETE triple
+— `revoked_by_user_id` (nullable), `revoked_via_token`, `revoked_by_label` — because revision 4 wrote
+"the same way" and then gave the schema only two of the three columns, so a token revoker would have lost
+its typed half exactly as the actor once did (review round 4 P2-3). Any client-supplied actor field on either endpoint is refused as
 unknown-field. A `reason` (bounded, 1..500 chars) and an `expires_at` are mandatory; `expires_at` must be after the database's `now()` and at most **7 days**
 ahead (a hard maximum, not a default — there is no default). At most ONE unrevoked override exists per
 service at a time: creation locks the service row and refuses a second with 409 `override_active`;
@@ -253,9 +263,11 @@ that, one expired override would refuse every later one forever.
 Revision 1 promised "every decision audited", "decisions persisted" and "O(1) reads with no write" at
 once; they are incompatible. The resolution: every decision is one row in `service_gate_decisions`, an
 append-only ledger with a bounded retention — `gate.decision_retention_days`, configuration-validated
-within `7..365`, default 90 — purged on a scheduler cadence in bounded batches like heartbeat retention,
-with `cerbix_gate_decisions_purge_backlog` saying how far behind the purge is (review round 3 P1-3),
-and a read endpoint that is **project-scoped, not service-nested**:
+within `7..365`, default 90 — purged by the scheduler leader every 5 minutes in batches of at most
+1 000 rows per statement until no eligible row remains or the slice budget ends, with two gauges whose
+units are in their names: `cerbix_gate_decisions_purge_backlog_rows` (eligible rows not yet purged) and
+`cerbix_gate_decisions_oldest_eligible_seconds` (age of the oldest eligible row; 0 when none) — no
+labels. And a read endpoint that is **project-scoped, not service-nested**:
 `GET /api/v1/projects/{p}/gate/decisions/{id}`, authorised by the row's persisted `project_id` under
 `gate:evaluate`, with NO service-existence check on the path (review round 2 P1-2 — a service-nested
 route would answer 404 forever once the service is deleted, which is exactly the moment the evidence is
@@ -273,7 +285,7 @@ cannot be looked up later.)
 **D11 — the clause vocabulary. DECIDED (owner, 2026-08-28); names per review P2-1.**
 Closed, versioned (`schema_version: 1`), exhaustive: a policy write must assign every clause in the
 version's set, or it is refused (D14). The "shipped defaults" below are the **UI's create template and
-nothing more**: the API request must carry every assignment, the threshold and `max_seal_lag` explicitly,
+nothing more**: the API request must carry every assignment, the threshold and `max_seal_lag_seconds` explicitly,
 and the server fills nothing in — one strict contract, the repository's rule against silent server
 defaults, and the only way a stored policy means exactly what somebody typed (review round 2 P2-3). Each
 clause is `block`, `warn` or `ignore`:
@@ -326,7 +338,8 @@ The policy document carries `schema_version`; the server accepts only versions i
 assign EVERY clause of that version exactly once — unknown, missing or duplicate clauses are refused with
 the offending name, so adding a clause in a later version cannot silently reinterpret stored policies:
 they keep their version and are evaluated under it until rewritten. Thresholds must be finite integers
-within bounds and are stored canonically; `max_seal_lag` is a duration in `1m..24h`. Nothing is filled
+within bounds and are stored canonically; `max_seal_lag_seconds` is an integer, a whole number of minutes,
+in `300..86400` (D8a). Nothing is filled
 in server-side — an omitted field is a refused request, not a default. A write identical to the stored
 policy is a no-op: no revision
 bump, no audit row, no override revocation (the `alertPolicyDiff` pattern). Concurrent writes are
@@ -346,7 +359,9 @@ and process lists. TLS verifies by default; `CERBIX_CA_FILE` adds a CA; there is
 v1. The decision goes to stdout — one line of text, or the response JSON with `--json` — and reasons and
 diagnostics go to stderr. The JSON is the API response verbatim and carries `schema_version`. Exit
 codes follow `action`: **0** `ALLOW` and `WARN`; **2** `BLOCK`; **4** `NOT_CONFIGURED`; **1** transport,
-auth, timeout or snapshot conflict. `UNKNOWN` therefore exits 0 or 2 by the operator's declared
+auth, timeout, snapshot conflict or a 429 from the bounds of §5a — the CLI does NOT retry on 429 itself
+(a pipeline that retries into a rate limit is the load the limit exists to shed); it prints the
+`Retry-After` value on stderr and exits 1. `UNKNOWN` therefore exits 0 or 2 by the operator's declared
 `unknown_behavior`, and the word `UNKNOWN` is in the output regardless — revision 1's exit 3 would have
 had a plain shell block against an operator who chose `warn`.
 
@@ -384,7 +399,7 @@ service_gate_overrides  (id, service_id, project_id, policy_revision,
                          actor_user_id NULL, via_token bool, actor_label text NOT NULL,   -- typed + immutable label
                          reason text CHECK length 1..500, created_at, expires_at NOT NULL,
                          revoked_at NULL, revoked_reason NULL CHECK IN (manual, expired, policy_changed, policy_deleted),
-                         revoked_by NULL, revoked_by_label NULL;
+                         revoked_by_user_id NULL, revoked_via_token bool NULL, revoked_by_label text NULL;
                          at most one row per service with revoked_at IS NULL — enforced under the service lock,
                          with expired rows closed as `expired` in the same lock before an insert)
 service_gate_decisions  (id, project_id NOT NULL → projects CASCADE, service_id NULL → services SET NULL,
@@ -397,6 +412,35 @@ service_gate_decisions  (id, project_id NOT NULL → projects CASCADE, service_i
 
 Tenant-composite FKs to `(services.id, project_id)` where the service reference is NOT NULL, as every
 service-scoped table since 00085.
+
+## 5a. Resource bounds — the numbers, the algorithm and what they mean on a cluster
+
+Revision 4 named the bounds and left every number, key and algorithm to the implementer; two authors
+would have built two different limiters and the config loader would not have known what to validate
+(review round 4 P1-2). The contract:
+
+| Key (`gate.*`) | Default | Min | Max | Semantics |
+|---|---|---|---|---|
+| `evaluate_inflight_process` | 8 | 1 | 64 | decisions in flight per PROCESS; the (n+1)th is 429 before any transaction |
+| `evaluate_inflight_principal` | 2 | 1 | 16 | decisions in flight per principal (token id or user id) |
+| `evaluate_rate_principal_per_minute` | 60 | 1 | 6 000 | token bucket, capacity = the value, refill = value/60 per second; a drained bucket is 429 |
+| `evaluate_rate_process_per_minute` | 600 | 1 | 60 000 | the same algorithm across the process |
+| `evaluate_tx_budget_ms` | 5 000 | 500 | 30 000 | begin-through-commit budget for the decision transaction, applied through the store's deadline wrapper with the remainder per statement |
+| `decision_retention_days` | 90 | 7 | 365 | ledger retention (D10) |
+| `decision_purge_every` | 5m | 1m | 1h | purge cadence, scheduler leader only |
+| `decision_purge_batch` | 1 000 | 100 | 10 000 | rows per purge statement |
+
+Every 429 carries `Retry-After` in seconds: for a rate bound, the time until one token refills; for an
+in-flight bound, 1. A 429 runs no report and writes no ledger row (invariant 14). All eight keys are
+validated at configuration load and a value outside its range refuses to start, naming the key and the
+range.
+
+**These bounds are process-local, on purpose, and that is the v1 contract.** Every `api` or `all` replica
+enforces its own copies, so the cluster-wide allowance scales with the replica count. A cluster-wide
+limiter would need shared state — in the database, which is what the bound protects — and is declined
+here; an installation that needs a hard cluster ceiling sets the per-process numbers with its replica
+count in mind. The threat model (§8) is written against these numbers, not against a limiter that
+does not exist.
 
 ## 6. Acceptance invariants (FR-024) — draft, numbered on acceptance
 
@@ -412,10 +456,11 @@ service-scoped table since 00085.
    algebra of D4 exactly;
 5. the response follows the D7 presence table exactly: `schema_version`, `decision_id`, `evaluated_at`,
    `state` and `reasons[]` always; every other field present when its condition holds and absent with
-   the named reason otherwise; `facts_fresh_until` is the minimum of applicable leases and there is no
-   `valid_until`;
+   the named reason otherwise; `facts_fresh_until` follows the ONE formula of D7 (invariant 16) and there
+   is no `valid_until`;
 6. the decision path reads only SEALED facts and has no heartbeat access by construction;
-7. all reads and the ledger INSERT happen in ONE `REPEATABLE READ` transaction whose first statement
+7. all reads and the ledger INSERT happen in ONE `REPEATABLE READ` transaction whose first
+   SNAPSHOT-BEARING statement — after the deadline wrapper's `SET LOCAL`s, which establish no snapshot —
    supplies `evaluated_at`; a serialization failure is retried once and then reported as a transport
    error, never as a decision;
 8. an override is created only through its own endpoint by a principal holding `gate:override`, with
@@ -435,19 +480,21 @@ service-scoped table since 00085.
     check — proven by an HTTP read after the service is deleted, not by a SELECT;
 13. the gate policy of a file-managed service is writable through the API (D13) and is absent from the
     bundle hash;
-14. a decision request is bounded in CONCURRENCY and in RATE — a process-wide in-flight cap, a
-    per-principal in-flight cap, a per-principal rate bound and a process-wide rate bound, all
-    configuration-validated and all checked BEFORE a transaction opens, so a rejected request (429) runs
-    no report and writes no ledger row; the transaction itself runs under a begin-through-commit budget
-    with the remainder applied per statement; the ledger's retention is validated within `7..365` days
-    and purged in bounded batches with a backlog metric;
+14. a decision request is bounded in CONCURRENCY and in RATE by the eight keys of §5a — process and
+    per-principal in-flight caps, per-principal and process token-bucket rates, a begin-through-commit
+    transaction budget, and a validated retention with bounded purge batches — all checked BEFORE a
+    transaction opens, so a 429 runs no report, writes no ledger row, and carries `Retry-After`; the
+    bounds are process-local and the cluster allowance scales with replicas, by contract;
 15. the seal lag is bounded: `evaluated_at − sealed_through > max_seal_lag_seconds` makes every budget
-    clause UNAVAILABLE with `seal_stale`; the bound's floor is DERIVED from `CanonicalBucket` and
-    `LateArrivalGrace` plus one bucket of headroom (300 s) so a healthy pipeline can always satisfy it;
-    the lag is stated by the report path and shown on the service page; a quotable 30-day report whose
-    watermark is older than the bound never yields `ALLOW` on budget;
-16. `facts_fresh_until` has ONE formula — the minimum over the seal horizon and every lease the policy
-    depends on — and is present whenever any such horizon exists;
+    clause UNAVAILABLE with `seal_stale`; the floor is the derived constant
+    `MinSealLag = LateArrivalGrace + CanonicalBucket + 2 × CanonicalBucket = 300 s`, and the domain test
+    asserts that FORMULA against the constants rather than the literal; the lag is stated by the report
+    path and shown on the service page; a quotable 30-day report whose watermark is older than the bound
+    never yields `ALLOW` on budget;
+16. `facts_fresh_until` has ONE formula — the minimum of the seal horizon (when a budget clause is
+    assigned `block`/`warn`) and of the burn leases of rules whose clause is assigned `block`/`warn`;
+    coverage and `ignore`d clauses are never in it — and it is present whenever any such constraining
+    horizon exists;
 17. override actor and revoker are stored as typed attribution PLUS an immutable server-derived label,
     and a later read of the override or of a decision that applied it names the same label; no
     client-supplied actor is accepted.
@@ -466,13 +513,15 @@ with two targets: the policy's `window` selects one, and the OTHER window's firi
 *Owners and parity:* the badge says `unroutable` and `coverage_state` says `unroutable` — the same
 string from the same snapshot · the report withholds availability and the gate reports
 `budget_withheld`, quotes no number · a gate that recomputes `BurnedPercent` locally fails the parity
-test (mutation) · **a quotable 30d report whose `sealed_through` is older than `max_seal_lag` gives
+test (mutation) · **a quotable 30d report whose `sealed_through` is older than `max_seal_lag_seconds` gives
 `seal_stale`, never `ALLOW` on budget**; the same report one second inside the bound gives `ALLOW` ·
 `ignore`d burn clauses with STALE burn latches do not produce `UNKNOWN` · **live materializer at the
 floor:** a policy with `max_seal_lag_seconds = 300` on a healthy stack (sealer running, lag in
 `[2m, 3m)`) is NOT `seal_stale`; a write of 240 is refused with the derived floor in the message ·
-`facts_fresh_until` equals the seal horizon when that is earlier than every lease, and equals the
-earliest lease otherwise.
+`facts_fresh_until` equals the seal horizon when that is earlier than every constraining burn lease, and
+the earliest such lease otherwise · a policy whose burn clauses are all `ignore` and whose budget clauses
+are `block`: `facts_fresh_until` = the seal horizon alone, whatever the burn leases say · a policy with
+every clause `ignore`: no `facts_fresh_until` · a stale COVERAGE lease moves nothing.
 
 *One snapshot:* an incident opened, a policy edited and a latch flipped BETWEEN what would be separate
 reads all land on one side of `evaluated_at` (real Postgres, a blocker connection) · a forced
@@ -500,16 +549,23 @@ paging write is still 409.
 rename the row keeps the old slug and name · after service DELETE the row survives with `service_id
 NULL` and the HTTP read still answers 200 · rows older than retention are purged.
 
-*Bounds:* the begin-through-commit budget fires and is exit 1 · the per-principal in-flight cap rejects
-the (n+1)th concurrent request from one token as 429 with no transaction opened and no ledger row · the
-process-wide cap rejects across TWO tokens the same way · **a sequential flood from one principal at
-concurrency 1 is rate-limited** (429, no report run, no ledger row) — the mutation removing the rate
-bound lets it through and fails · a retention value of 3 days is refused at configuration load · the
-purge runs in bounded batches and the backlog metric moves.
+*Bounds (§5a):* the begin-through-commit budget fires and is exit 1 · the per-principal in-flight cap
+rejects the (n+1)th concurrent request from one token as 429 with `Retry-After: 1`, no transaction, no
+ledger row · the process-wide cap rejects across TWO tokens the same way · **a sequential flood from one
+principal at concurrency 1 is rate-limited** (429 with `Retry-After` = seconds to the next token, no
+report run, no ledger row) — the mutation removing the rate bound lets it through and fails · each of the
+eight keys refuses a value one below its minimum and one above its maximum at configuration load, naming
+the key · the purge runs in batches of `decision_purge_batch`, and `…_purge_backlog_rows` and
+`…_oldest_eligible_seconds` move · the CLI on a 429 prints `Retry-After` to stderr and exits 1 without
+retrying.
+
+*Domain:* `MinSealLag == LateArrivalGrace + CanonicalBucket + 2*CanonicalBucket` asserted as an
+expression over the constants; a write of `max_seal_lag_seconds = 240` is refused naming 300.
 
 *Attribution:* an override created by an API token is read back — on the override and on a decision that
-applied it — with `actor_label = token:<name>`, after the token is deleted too · a client `actor` field
-on the override endpoint is refused as unknown-field.
+applied it — with `actor_label = token:<name>`, after the token is deleted too · a token REVOKER is read
+back as `revoked_via_token = true`, `revoked_by_label = token:<name>` · a client `actor` field on either
+endpoint is refused as unknown-field.
 
 *CLI:* `CERBIX_TOKEN` absent → exit 1 with a message naming the variable · a `--token` flag is not
 accepted · transport timeout → exit 1 · TLS with an unknown CA fails; with `CERBIX_CA_FILE` succeeds ·
@@ -524,12 +580,12 @@ accepted · transport timeout → exit 1 · TLS with an unknown CA fails; with `
 | Policy deleted or loosened mid-pipeline | deletion → `NOT_CONFIGURED`, which has no action and its own exit; every policy write is audited and bumps a revision the decision cites |
 | Override outlives a policy tightening | a policy edit or deletion revokes the active override in the same transaction (D9) |
 | Override rewrites history | an override changes only `action`; `state` and `reasons[]` in the response, the ledger and the metric stay the observed facts (D9) |
-| Stopped materializer, stale budget quoted as good | `max_seal_lag` makes budget clauses unavailable past the bound (D8a); the lag is on the service page too |
+| Stopped materializer, stale budget quoted as good | `max_seal_lag_seconds` makes budget clauses unavailable past the bound (D8a); the lag is on the service page too |
 | Time skew between pipeline and cerbix | every timestamp in the response is DATABASE time; the pipeline compares nothing against its own clock |
 | Replaying an old `ALLOW` | a decision is not a capability and carries no authorisation; the pipeline asks immediately before the step (D6); a replayed id resolves in the ledger to its own `evaluated_at` and is visibly old |
 | Reading unsealed facts to "improve" freshness | forbidden by D8, invariant 6; no heartbeat access from the decision path |
 | Cross-tenant probing | 400 malformed / 404 foreign (D15), the existing transport contract |
-| Load amplification from busy pipelines | **there is no API-token rate limiter today** (only the login IP limiter), and a decision is NOT one row: the report path runs bounded but real scans over sealed buckets and segments. A per-token cap alone is bypassed by a second token, a viewer cookie or an OIDC client. Concurrency caps alone do not bound WRITE amplification: one principal at concurrency 1 can still create expensive reports and immutable ledger rows without limit (review round 3 P1-3). Mitigations: **process-wide and per-principal in-flight caps AND per-principal and process-wide rate bounds**, all configuration-validated, all checked BEFORE any transaction opens (429 runs no report and writes nothing); a begin-through-commit budget on the transaction with the remainder applied per statement; the window fixed by the policy so the scan is bounded by it; retention validated within `7..365` days with bounded purge batches and a backlog metric; **no cache**, which would be a second semantics owner. Every bound is tested, and the rate bound has a mutation |
+| Load amplification from busy pipelines | **there is no API-token rate limiter today** (only the login IP limiter), and a decision is NOT one row: the report path runs bounded but real scans over sealed buckets and segments. A per-token cap alone is bypassed by a second token, a viewer cookie or an OIDC client. Concurrency caps alone do not bound WRITE amplification: one principal at concurrency 1 can still create expensive reports and immutable ledger rows without limit (review round 3 P1-3). Mitigations: the eight bounds of §5a — process and per-principal in-flight caps, per-principal and process token-bucket rates, a transaction budget, validated retention with bounded purge — all checked BEFORE any transaction opens (429 with `Retry-After`, no report, no row); the window fixed by the policy so the scan is bounded by it; **no cache**, which would be a second semantics owner. The bounds are process-local and the cluster allowance scales with replicas, stated as the contract. Every bound is tested, and the rate bound has a mutation |
 | `UNKNOWN` silently read as green | `unknown_behavior` is the operator's declared choice (D5); the CLI exit follows `action`; the word `UNKNOWN` is in the output regardless (D16) |
 
 ## 9. Non-goals of FR-024
@@ -541,3 +597,24 @@ second step); a token-scoped gate capability (D12, follow-up requirement); worst
 evaluation (D2); vendor-specific CI integrations — one generic endpoint and one CLI verb are the whole
 surface; reading raw heartbeats from the decision path (D8); a decision cache (§8); an override that
 alters the observed state (D9).
+
+## 10. Stale-spelling guard
+
+Four review rounds each found a normative sentence still carrying the previous revision's contract —
+`max_seal_lag` after it became `max_seal_lag_seconds`, `1m..24h` after the floor was derived, a
+lease-only `facts_fresh_until` after the seal horizon joined it, "first statement" after it became the
+first snapshot-bearing one. An implementer or the discharge map could legitimately have picked the wrong
+sentence. `make docs-check` therefore refuses, in THIS file and in `docs/decisions.md` outside the
+explicitly superseded passages, the spellings that earlier revisions used and that mean something
+different now. Quoted here in a code block, which the guard does not scan — prose that repeated them
+would trip it, as this section's first draft did:
+
+```
+max_seal_lag            (not followed by _seconds)
+1m..24h
+minimum of applicable leases / minimum of the applicable leases
+first statement supplies
+```
+
+It also refuses a duplicated table header in §5. The list lives in `scripts/check-docs-references.py` beside the invariant-set check and
+grows when a later revision retires another spelling.

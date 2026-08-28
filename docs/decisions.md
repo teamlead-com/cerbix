@@ -4562,7 +4562,7 @@ not exist in the tree. Same class as iter-0161 §47, now in a document rather th
 **The P0 that matters.** Revision 2 called the seal lag "an accepted cost" and did not bound it. A
 30-day window stays quotable when the materializer has been stopped for a week — the window simply ends
 at an old watermark — so a gate would go on saying `ALLOW` on a budget nobody had measured since, and a
-policy that ignores burn clauses has nothing left to notice. **Owner decision:** `max_seal_lag` is a
+policy that ignores burn clauses has nothing left to notice. **Owner decision:** `max_seal_lag_seconds` (named `max_seal_lag` at the time, renamed in revision 4) is a
 policy field, default **15 minutes**. Past it, every budget clause is UNAVAILABLE with `seal_stale`.
 
 > **Rationale corrected by D-0191.** This record originally said "`1m..24h`" and justified the default
@@ -4571,9 +4571,13 @@ policy field, default **15 minutes**. Past it, every budget clause is UNAVAILABL
 > up to `FloorToBucket(now − LateArrivalGrace)` over 60 s buckets with a 120 s grace, so a healthy
 > pipeline's lag sits in `[2m, 3m)` and a one-minute policy would be stale forever. The floor is derived
 > (300 s) and the per-policy choice stands for the reason that was true all along: it is a BUSINESS
-> tolerance for stale data, not a property of how often anything runs. The lag is stated by the REPORT PATH and shown on the service page, so the gate and the
-screen read one number; the alternative of a single product-wide constant was declined because a service
-probed every second and one probed hourly should not share a bound that only a release can change.
+> tolerance for stale data, not a property of how often anything runs. The sentence that once followed
+> this note — a service "probed every second and one probed hourly should not share a bound" — was the
+> same false reason in other words (probe frequency does not change when buckets seal) and is removed
+> rather than left as a second answer (D-0192). The lag is stated by the REPORT PATH and shown on the service page, so the gate and the
+screen read one number; the alternative of a single product-wide constant was declined because the
+tolerance for stale data is a property of the SERVICE's business, and one number for every service could
+only be changed by a release.
 
 **The other P0.** An override was written to flip `state` as well as `action`, with an `original_state`
 kept alongside. That rewrote the observed fact for the operator's convenience, and the ledger would have
@@ -4595,7 +4599,7 @@ superseded clauses marked as such rather than left as a second live answer.
 ## D-0191 — FR-024 revision 4: a floor you can reach, one freshness formula, bounds on rate, and an actor you can name (2026-08-28)
 
 **Context.** Focused confirmation of revision 3 (`a16ea70`) returned 4 P1 and 4 P2 (party [25]). No
-owner question this round; the per-policy `max_seal_lag` stays the owner's authority.
+owner question this round; the per-policy `max_seal_lag_seconds` (then still spelled `max_seal_lag`; renamed in revision 4) stays the owner's authority.
 
 **The floor.** Revision 3 allowed a `max_seal_lag` of one minute. The code cannot satisfy that: buckets
 are 60 s, the late-arrival grace is 120 s, the sealer seals up to `FloorToBucket(now − grace)`, so a
@@ -4629,3 +4633,38 @@ SNAPSHOT-BEARING statement, after the deadline wrapper's `SET LOCAL`s, which est
 **What this round says about the author.** Two of the four P1s were claims about the code that the code
 does not support — the seal cadence and the reachability of the floor — the same failure as revisions 1
 and 2, and the same one iter-0161 closed on. The review has now caught it in a document five times.
+
+## D-0192 — FR-024 revision 5: arithmetic that produces its own number, bounds with numbers, and a guard against my own stale sentences (2026-08-28)
+
+**Context.** Focused confirmation of revision 4 (`d540ae4`) returned 3 P1 and 5 P2 (party [27]). No owner
+question. The fixes of revision 4 were right in substance; the residue was precision and consistency.
+
+**Arithmetic.** Revision 4 wrote "`CanonicalBucket + LateArrivalGrace + one bucket of headroom = 300 s`",
+and 60 + 120 + 60 is 240. A derived constant whose formula does not produce it is not derived: a future
+change to the constants would have moved the floor wrongly. The formula is now
+`LateArrivalGrace + CanonicalBucket + 2 × CanonicalBucket = 300 s` — the healthy upper bound plus two
+buckets of headroom — and the domain test asserts the expression, not the literal.
+
+**Bounds with numbers.** Revision 4 named eight resource bounds and gave none a key, a default, a range
+or an algorithm. Two authors would have built two limiters and the config loader could validate nothing.
+§5a is a table: eight `gate.*` keys with default/min/max, token-bucket semantics with `Retry-After`, a
+purge cadence and batch, metric names with units. And a sentence the table needed: the bounds are
+PROCESS-LOCAL, so a cluster's allowance scales with its replicas — a shared limiter would live in the
+database the bound protects, and is declined.
+
+**One freshness set, option (b).** `facts_fresh_until` is over decision-constraining inputs only —
+the seal horizon when a budget clause can decide, the burn leases of rules whose clause can decide.
+Coverage is evidence and never a clause; an `ignore`d rule decides nothing. Revision 4 had mixed both
+in, so an `ALLOW` could sit beside a freshness already in the past for a fact that decided nothing.
+
+**The revoker gets the whole triple** (`revoked_by_user_id`, `revoked_via_token`, `revoked_by_label`);
+revision 4 said "the same way" and gave two columns.
+
+**A guard.** Four rounds in a row found a normative sentence still carrying the previous contract.
+`make docs-check` now refuses the retired spellings in the spec and in `decisions.md` outside superseded
+passages, and a duplicated schema header. It is a guard against a specific author — this one — and it is
+in the gate because the review has had to be that guard five times.
+
+**On P2-4.** The review reported two mechanical duplicates in revision 4. Neither reproduces by `grep`
+against `d540ae4` (each string occurs once in the spec and nowhere else); the duplicate-header guard is
+added regardless, because a check that would have caught it is cheaper than a second look.

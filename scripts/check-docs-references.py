@@ -164,6 +164,49 @@ REQ_RE = re.compile(r'\b((?:FR|NFR)-\d{3,})\b')
 BANNER_LINES = 30
 
 
+# Spellings that FR-024's earlier revisions used for contracts that have since changed. A normative
+# sentence carrying one of them offers an implementer the wrong contract, and four review rounds each
+# found one. Checked in the gate spec everywhere, and in decisions.md outside passages that quote the
+# old spelling on purpose (a supersession note names what it supersedes).
+GATE_STALE = [
+    (re.compile(r'`max_seal_lag`(?!_)'), 'max_seal_lag without _seconds'),
+    (re.compile(r'max_seal_lag\b(?!_seconds)(?!`)'), 'max_seal_lag without _seconds'),
+    (re.compile(r'1m\.\.24h'), '1m..24h (the floor is derived, 300..86400 s)'),
+    (re.compile(r'minimum of (the )?applicable leases'), 'lease-only facts_fresh_until'),
+    (re.compile(r'first statement supplies'), '"first statement" (it is the first SNAPSHOT-BEARING statement)'),
+]
+GATE_SPEC = 'docs/specs/func-reliability-gate.md'
+GATE_ALLOWED_CONTEXT = re.compile(r'superseded|SUPERSEDED|corrected|Corrected|revision [1-4]|Revision [1-4]|wrote "|once said|earlier revisions|retired', re.I)
+
+
+def check_gate_stale_spellings():
+    """FR-024's retired spellings may not appear as live text, and the schema block may not declare a
+    table twice."""
+    bad = []
+    for path in (GATE_SPEC, 'docs/decisions.md'):
+        try:
+            lines = open(path, encoding='utf-8').read().split('\n')
+        except FileNotFoundError:
+            continue
+        fenced = False
+        for n, line in enumerate(lines, 1):
+            if line.startswith('```'):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue  # code blocks quote; they do not state
+            if path == 'docs/decisions.md' and 'FR-024' not in ''.join(lines[max(0, n - 40):n]):
+                continue
+            for rx, label in GATE_STALE:
+                if rx.search(line) and not GATE_ALLOWED_CONTEXT.search(line) and not line.startswith('>'):
+                    bad.append((path, n, 'stale', f'retired FR-024 spelling: {label}'))
+    text = open(GATE_SPEC, encoding='utf-8').read()
+    heads = re.findall(r'^(service_gate_\w+)\s+\(', text, re.M)
+    for h in sorted({x for x in heads if heads.count(x) > 1}):
+        bad.append((GATE_SPEC, 0, 'stale', f'schema table {h} declared more than once'))
+    return bad
+
+
 def check_spec_banners():
     """No spec says it is unbuilt while status.md marks one of its requirements DONE."""
     status_path = 'docs/status.md'
@@ -339,6 +382,7 @@ def main():
     bad += check_discharge(src)
     bad += check_row_statuses()
     bad += check_spec_banners()
+    bad += check_gate_stale_spellings()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
               'and every acceptance map is complete (FR-021 invariants compared as a SET against '

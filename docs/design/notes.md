@@ -394,3 +394,69 @@ standing instruction; the backend of FR-023 is already in the branch and needed 
   page nobody could explain from the record afterwards), a pause control (the ladder pauses itself and
   acknowledgement is the operator's stop — a third mechanism would give three answers to "why is it quiet"),
   and any graph hint (§14 annotates, never suppresses, and the ladder does not consult it).
+
+## FR-024 — Release gate (mock, DEFERRED WITH THE REQUIREMENT — D-0202, 2026-08-28)
+
+> **Deferred, not approved and not rejected.** The owner parked FR-024 on 2026-08-28 (D-0202) before looking at
+> the mock visually. The reviewer's static contract pass approved revision 3 (party [59]); the visual/contrast/
+> reflow pass never happened. If the requirement resumes, this mock needs the owner's look in both themes before
+> any Vue code — the standing gate — and a check that the API it draws still matches the spec.
+
+Source: `docs/design/mock-reliability-gate.html` (artifact `c8a2fca8-dbb6-4519-b11e-58f0b0c3d0ec`). Produced
+**after** the design gate was approved at spec revision 13 (party [47], D-0201) and **before** any frontend code, per the
+standing gate. Tokens are lifted VERBATIM from `frontend/src/style.css`; the shell, the `.note` overlay and the screen
+switcher are 1:1 with `mock-alerting-ownership.html`. **No new colour.**
+
+Six screens: Release gate · not configured (the new card on the service detail, the CLI's exit 4) · Policy editor (the
+whole D11/D14 document: window, five clause assignments, threshold, seal-lag bound in minutes, unknown behaviour;
+client-side refusals mirroring the server; the 409 `revision_conflict` banner) · Decision & override (latest decision with
+its `reasons[]` and evidence, `unoverridden_action`, the active override, the create form refused by `override_active`) ·
+Decision history (the project-scoped ledger listing, live-keyset note, range-too-wide refusal, one record by id) ·
+Override history (the status function's four statuses, the by-id record's nullability, the stale-screen 409) · Unknown &
+refusals (`seal_stale`, `never_sealed`, 429/503 as transport, the five-answer legend).
+
+### What the mock decides, so the implementation invents nothing
+
+- **Placement:** a card on the service detail between **Alerting** and **Dependencies** — facts → who is woken → who may
+  deploy. The gate is an operational control (D13), not part of the declaration, so it is not inside the Declaration card.
+- **The five states borrow existing hues:** ALLOW `--up`, WARN `--degraded`, BLOCK `--down`; UNKNOWN and NOT_CONFIGURED
+  are `--pending` with the DASHED ring (phase-2 "deficient evidence" / phase-4 "different kind of thing"). Status is dot +
+  text, never colour alone.
+- **An override is the accent chip**, never a status hue: it is an operator's act in force ("declared here" grammar).
+  Closed overrides (expired, revoked, inert) are dashed chips — no longer in force.
+- **Clause assignments are a three-way segmented control** with `ignore` OUTLINED only (it is not a state); `block` and
+  `warn` carry their own hues when selected.
+- **The seal-lag bound is entered in minutes**, stored as `max_seal_lag_seconds`; the floor (5 min) is explained where it is
+  refused, with the derivation (bucket 60 s + grace 120 s + two buckets).
+- **The decision history is a PROJECT screen**, not a service tab: the ledger outlives services (D10), and a deleted
+  service's rows render with the snapshotted name and a dashed `service deleted` chip.
+- **Absent and null render the same in the table (a dash) and differently in the raw record** — the D7 presence contract is
+  kept where it is machine-read, and not turned into a UI puzzle.
+- **Not shown and not built:** a "preview the decision" button (a decision is recorded), an override `action` picker (D9
+  fixes it), a per-environment policy, and anything reading raw heartbeats.
+
+The **Spec notes** toggle is a review affordance overlaying the D-numbers each screen renders; it does not ship.
+
+### Revision 2 (party [55], static contract pass by the reviewer — not a sign-off)
+
+Seven corrections before the owner is asked: `facts_fresh_until` now follows D7's ONE formula in both examples (13:58 —
+the expired ticket lease, not the 14:15 seal horizon; 08:55 — a seal horizon in the past is a horizon, not a dash);
+NOT_CONFIGURED carries `reason: not_configured` + the documentation link in the raw record and the CLI; the CLI shows D16's
+contract literally — ONE stdout line `state=… [action=…] [override=…] decision=…`, reasons on stderr, `--json` verbatim; a
+role matrix decides that controls a role cannot use are NOT rendered (the `ServiceAlerting.vue` `readOnly` pattern) —
+viewer read-only, editor without the override card, project_admin everything; the UNKNOWN copy keeps the word UNKNOWN
+("state UNKNOWN, action BLOCK, exit 2"); **Delete policy…** has its continuation — a confirmation stating the four
+consequences and the `409 revision_conflict` refusal; the by-id JSON is valid; `--focus` is in all three token scopes and
+drives `:focus-visible`; the self-correcting hint on screen 3 is direct copy.
+
+### Revision 3 (party [57])
+
+- **The "Latest decision" card is a READ, never a POST.** There is no latest-decision endpoint on purpose: the card is the
+  newest row of the project ledger filtered to the service over the last 30 days (`GET …/gate/decisions?service_id&from&to
+  &limit=1`), titled "Latest decision · last 30 days", with an empty state ("no decision yet") on screen 1 and a link to the
+  history. Opening a service page must never evaluate the gate — that would write an immutable row, spend a rate token and
+  move a metric, the very "no preview" rationale of §9. SPA code invents nothing here.
+- Delete arithmetic stated in two steps: the tombstone is revision 8, the next saved policy revision 9.
+- The NOT_CONFIGURED history row carries `not_configured` in its Reasons column like the by-id record.
+- The override by-id JSON is valid (comments outside the object); the D16 hint says "reasons and diagnostics go to stderr"
+  and distinguishes `--json` (verbatim) from `jq` (a projection).

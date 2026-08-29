@@ -288,7 +288,7 @@ test.describe("reliability gate", () => {
     expect(orphanFilter.items).toEqual([]);
   });
 
-  test("tenant (D15): malformed -> 400; UNKNOWN (random UUID) -> 404; FOREIGN (another project's real service) -> 404 and nothing there changes", async ({ page }) => {
+  test("tenant (D15): malformed -> 400; UNKNOWN (random UUID) -> 404; FOREIGN (another project's real service, and its real override id under our own service) -> 404 and nothing there changes", async ({ page }) => {
     await page.goto("/services");
     const { orgID, projectID } = await ensureE2EWorkspace(page);
     const svcID = await createGovernedService(page, projectID, `${SLUG}-tenant`);
@@ -394,6 +394,17 @@ test.describe("reliability gate", () => {
         expect(r.status(), `FOREIGN ${method.toUpperCase()} ${path}`).toBe(404);
         expect((await r.json()).error, `FOREIGN ${method.toUpperCase()} ${path} body`).toBe("not found");
       }
+      // The foreign override's REAL id under the FIRST project's OWN real service: the service check
+      // passes, so this pair is the only HTTP route that reaches the override-id scoping itself —
+      // a missing service/project predicate in the by-id read or the revoke would answer 200/204
+      // here and show up in the after-snapshot below. 404 `not found`, both.
+      const crossGet = await page.request.get(`${base}/${svcID}/gate/overrides/${foreignOverride}`);
+      expect(crossGet.status(), "FOREIGN override id under the first project's own service").toBe(404);
+      expect((await crossGet.json()).error).toBe("not found");
+      const crossRevoke = await apiSend(page, "delete", `${base}/${svcID}/gate/overrides/${foreignOverride}`);
+      expect(crossRevoke.status(), "FOREIGN override id revoked through the first project's own service").toBe(404);
+      expect((await crossRevoke.json()).error).toBe("not found");
+
       // The project-scoped ledger: the foreign decision by id is 404, and a `service_id` filter
       // naming the foreign service is an EMPTY page (§5: never a 404, because the ledger
       // outlives services — but never another project's rows either).

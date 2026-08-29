@@ -426,3 +426,35 @@ func TestGateMaintReleaseProvedExportedPath(t *testing.T) {
 	}
 	ls2.Release()
 }
+
+// Review [33]: the release proof's close spent a 200 ms floor PAST the absolute deadline, so a
+// blackholed RESET expiring at passStart + 30 s held the pass until +30.2 s. The deadline is
+// absolute: with a 400 ms budget and a RESET that never answers, release must return by the
+// deadline plus scheduling slack — the old floor puts it at ≥ 600 ms and fails this.
+func TestGateMaintUnprovenReleaseEndsAtTheAbsoluteDeadline(t *testing.T) {
+	st, ctx := gateMaintStore(t)
+	ls, acquired, err := st.TryBecomeLeaderSession(ctx, GateMaintenanceLockKey)
+	if err != nil || !acquired {
+		t.Fatalf("acquire gate session: acquired=%v err=%v", acquired, err)
+	}
+	var pid int
+	if err := ls.conn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	const budget = 400 * time.Millisecond
+	hooks := &gateMaintenanceHooks{beforeRelease: func(ctx context.Context, conn *pgxpool.Conn) error {
+		_, err := conn.Exec(ctx, `SELECT pg_sleep(30)`) // never answers within the budget
+		return err
+	}}
+	start := time.Now()
+	err = ls.releaseProved(start.Add(budget), time.Now, hooks)
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "release unproven") {
+		t.Fatalf("release reported proven: %v", err)
+	}
+	if elapsed > budget+150*time.Millisecond {
+		t.Fatalf("release with a blackholed RESET took %s against an absolute deadline of %s: time was minted past the deadline", elapsed, budget)
+	}
+	waitFor(t, 5*time.Second, "the poisoned backend to be terminated", func() bool { return !backendAlive(t, st, ctx, pid) })
+	waitGateLockFree(t, st, ctx)
+}

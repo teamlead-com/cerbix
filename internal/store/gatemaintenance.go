@@ -1258,13 +1258,21 @@ func (ls *LeaderSession) releaseProved(deadline time.Time, now func() time.Time,
 		return nil
 	}
 	raw := ls.conn.Hijack()
+	// The close may spend only what is left of the ABSOLUTE deadline (D10: min(now + 3 s,
+	// passStart + 30 s)) — never a floor minted past it. Review [33]: a 200 ms floor let a blackholed
+	// RESET that expired exactly at passStart + 30 s hold the pass until +30.2 s. With nothing left
+	// the connection is closed without waiting: the socket is shut, which is what fences the
+	// backend (PostgreSQL ends the session and drops its locks); the polite Terminate is skipped.
 	closeBudget := deadline.Sub(now())
-	if closeBudget < 200*time.Millisecond {
-		closeBudget = 200 * time.Millisecond
+	if closeBudget <= 0 {
+		_ = raw.PgConn().Conn().Close()
+		return fmt.Errorf("store: gate session release unproven, connection closed (no time left for a graceful close): %w", err)
 	}
 	cctx, ccancel := context.WithTimeout(context.Background(), closeBudget)
 	defer ccancel()
-	_ = raw.Close(cctx)
+	if cerr := raw.Close(cctx); cerr != nil {
+		_ = raw.PgConn().Conn().Close() // the graceful close ran out of deadline too: shut the socket
+	}
 	return fmt.Errorf("store: gate session release unproven, connection closed: %w", err)
 }
 

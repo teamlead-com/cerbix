@@ -313,8 +313,16 @@ func gateDecodeEmptyBody(w http.ResponseWriter, r *http.Request) bool {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return false
 	}
-	if len(bytes.TrimSpace(raw)) == 0 {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
 		return true
+	}
+	// The wire contract is "no body or {}" (D6, §7): a non-object payload — `null`, an array, a
+	// scalar — is refused before any decode, because encoding/json would accept `null` into a struct
+	// as success and the narrow protocol would quietly widen (review [41]).
+	if trimmed[0] != '{' {
+		writeError(w, http.StatusBadRequest, "request body must be an empty JSON object")
+		return false
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()

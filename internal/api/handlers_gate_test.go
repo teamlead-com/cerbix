@@ -218,9 +218,12 @@ func TestGateDecisionBodyIsStrict(t *testing.T) {
 		`{"override":"` + gateOvID + `"}`: "override",
 		`{"actor":"me"}`:                  "actor",
 		`{"action":"ALLOW"}`:              "action",
-		`[]`:                              "body",
+		`[]`:                              "empty JSON object",
+		`null`:                            "empty JSON object", // review [41]: encoding/json accepts null into a struct
+		`1`:                               "empty JSON object",
+		`"x"`:                             "empty JSON object",
 		`{}{}`:                            "single JSON value",
-		`nope`:                            "invalid request body",
+		`nope`:                            "empty JSON object",
 	} {
 		rec := do(h, gateViewer, http.MethodPost, gateP(gateSvcID), body)
 		wantStatus(t, rec, http.StatusBadRequest, want)

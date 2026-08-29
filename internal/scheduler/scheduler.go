@@ -98,6 +98,14 @@ type Store interface {
 	// ServiceAlertStats samples what an evaluation SLICE cannot see: the alerts that are open
 	// right now and the work waiting to be evaluated (FR-021 §16.6b).
 	ServiceAlertStats(ctx context.Context) (metrics.ServiceAlertStat, error)
+	// RunGateLedgerMaintenancePass is one whole decision-ledger maintenance lifecycle on the
+	// gate's OWN fenced session (FR-024 D10): acquire the gate lock on a pinned connection,
+	// work under passStart + 27 s, release as a proof by passStart + 30 s. It lives on the
+	// Store rather than on LeaderSession because its authority is NOT scheduler leadership —
+	// the scheduler's lock connection may already be dead while its pool still answers.
+	// acquired=false: the lock is held elsewhere and the pass was skipped.
+	RunGateLedgerMaintenancePass(ctx context.Context, passStart time.Time, cfg store.GateMaintenanceConfig,
+		clock func() time.Time, metrics store.GateMaintenanceMetrics) (store.GateMaintenanceReport, bool, error)
 }
 
 // PullStatsSink receives the leader's per-region pull-queue gauge snapshot.
@@ -294,6 +302,10 @@ type Scheduler struct {
 	reconciler          *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
 	credentialEnvelopes bool
 	secretResolution    SecretResolutionSink
+	// gateCfg / gateMetrics drive the decision-ledger maintenance loop (gatemaintenance.go);
+	// a zero PurgeEvery means the loop is not started.
+	gateCfg     store.GateMaintenanceConfig
+	gateMetrics GateMaintenanceSink
 }
 
 // WithCredentialEnvelopes switches the scheduler to the decrypt-free snapshot plus
@@ -770,6 +782,22 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 		defer func() {
 			stopMaint()
 			<-maintDone
+		}()
+	}
+	// Decision-ledger maintenance (FR-024 D10) runs off the loop too, on its OWN fenced session:
+	// a DETACH or ATTACH waiting behind a lock must leave the dispatch tick firing on cadence.
+	// Same caller-owned lifecycle — cancelled AND joined before lead returns — so its step-down
+	// clear cannot race a pass completing mid-cancellation.
+	if s.gateMaintenanceEnabled() {
+		gateCtx, stopGate := context.WithCancel(ctx)
+		gateDone := make(chan struct{})
+		go func() {
+			defer close(gateDone)
+			s.gateLedgerMaintenanceLoop(gateCtx)
+		}()
+		defer func() {
+			stopGate()
+			<-gateDone
 		}()
 	}
 	nextRun := map[string]time.Time{}

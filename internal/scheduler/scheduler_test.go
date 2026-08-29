@@ -56,6 +56,9 @@ type fakeStore struct {
 	alertStats     metrics.ServiceAlertStat
 	alertStatsErr  error
 	escalationPass store.EscalationPass
+	// gatePasses counts RunGateLedgerMaintenancePass calls; gatePassFn, when set, is its body.
+	gatePasses int32
+	gatePassFn func(ctx context.Context, passStart time.Time, cfg store.GateMaintenanceConfig) (store.GateMaintenanceReport, bool, error)
 }
 
 type staticCredentialRegions map[string]bool
@@ -187,6 +190,17 @@ func (f *fakeStore) EnsureHeartbeatPartitions(_ context.Context, _ int) error {
 func (f *fakeStore) EnsureServiceFactPartitions(ctx context.Context, aheadMonths int) error {
 	atomic.AddInt32(&f.factEnsured, 1)
 	return nil
+}
+
+// RunGateLedgerMaintenancePass is the FR-024 D10 pass. gatePassFn, when set, is the pass body
+// (a test blocks it to prove dispatch keeps ticking); otherwise the pass reports "not acquired".
+func (f *fakeStore) RunGateLedgerMaintenancePass(ctx context.Context, passStart time.Time, cfg store.GateMaintenanceConfig,
+	clock func() time.Time, metrics store.GateMaintenanceMetrics) (store.GateMaintenanceReport, bool, error) {
+	atomic.AddInt32(&f.gatePasses, 1)
+	if f.gatePassFn != nil {
+		return f.gatePassFn(ctx, passStart, cfg)
+	}
+	return store.GateMaintenanceReport{}, false, nil
 }
 
 func (f *fakeStore) ServiceReliabilityStats(ctx context.Context) (metrics.ServiceReliabilityStat, error) {

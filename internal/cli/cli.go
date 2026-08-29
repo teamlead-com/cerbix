@@ -1017,7 +1017,14 @@ func runServe(args []string) int {
 				WithLocalCredentialRegions(domain.DefaultRegion).
 				WithPullRegions(cfg.Pull.Regions). // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
 				WithPullMetrics(registry).
-				WithServiceMetrics(registry).                                       // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges
+				WithServiceMetrics(registry).                    // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges
+				WithGateMaintenance(store.GateMaintenanceConfig{ // FR-024 D10: the ledger's fenced partition pass, on its own advisory session
+					RetentionDays:      cfg.Gate.DecisionRetentionDays,
+					LeadDays:           cfg.Gate.DecisionPartitionLeadDays,
+					CreateMax:          cfg.Gate.DecisionPartitionCreateMax,
+					PurgeEvery:         time.Duration(cfg.Gate.DecisionPurgeEvery),
+					PurgeMaxPartitions: cfg.Gate.DecisionPurgeMaxPartitions,
+				}, registry).
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → SSE + incident
 				WithConfirmSignals(confirmSignals()).
@@ -1039,7 +1046,14 @@ func runServe(args []string) int {
 				WithSecretResolutionMetrics(registry).
 				WithPullRegions(cfg.Pull.Regions). // pull-served regions get jobs via pull_jobs, not AMQP
 				WithPullMetrics(registry).
-				WithServiceMetrics(registry).                                       // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges
+				WithServiceMetrics(registry).                    // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges
+				WithGateMaintenance(store.GateMaintenanceConfig{ // FR-024 D10: the ledger's fenced partition pass, on its own advisory session
+					RetentionDays:      cfg.Gate.DecisionRetentionDays,
+					LeadDays:           cfg.Gate.DecisionPartitionLeadDays,
+					CreateMax:          cfg.Gate.DecisionPartitionCreateMax,
+					PurgeEvery:         time.Duration(cfg.Gate.DecisionPurgeEvery),
+					PurgeMaxPartitions: cfg.Gate.DecisionPurgeMaxPartitions,
+				}, registry).
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → incident/outbox (SSE only if this process serves it)
 				WithConfirmSignals(confirmSignals()).                               // accelerated failure-confirmation probes

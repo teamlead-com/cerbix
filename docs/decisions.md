@@ -5145,3 +5145,32 @@ is reopened.
 `docs/specs/README.md` row for `func-service-incidents.md` still called it "not commissioned" after
 FR-022 closed at iter-0156 (D-0171), and `docs/overview.md`'s FR-021 paragraph still said the budget and
 burn numbers were "phase 2 and absent from the API" long after phase 2 shipped.
+
+## D-0206 — FR-024 ledger maintenance at implementation: three deviations from D10's letter, each toward its intent (2026-08-29)
+
+**Context.** Changeset 3 (the fenced partition pass, `internal/store/gatemaintenance.go`, iter-0163) met
+three PostgreSQL facts the specification did not name. Each is resolved toward what D10 protects —
+inserts never blocked, authority never outliving its connection, a refusal never wider than one day.
+
+1. **The client-side deadline is the slice end plus a 100 ms net.** D10 says the transaction's context
+   deadline "is the slice boundary itself". The server's `statement_timeout` is clamped to the slice, so
+   the server speaks first; a client deadline at the SAME instant would race it and turn an orderly
+   `57014` into a context cancellation on the pinned connection — after which pgx closes the connection,
+   which is the fence, but the pass would lose the server's classified error. The net is the repository's
+   existing pattern (the deadline wrapper reserves the same way); a silent server still falls to the net.
+2. **Shape is checked per act, not in the survey.** `pg_get_expr(relpartbound)`, `pg_get_constraintdef`
+   and `pg_total_relation_size` take `ACCESS SHARE` on the relation (and `pg_get_expr` on the parent), so
+   a survey that read every partition's shape would stall on one hand-locked partition and refuse the
+   whole pass. The survey reads only marker, state and `pg_inherits`; the shape of ONE day is checked
+   right before acting on it, under that day's clamps, so a locked partition refuses its day by
+   `lock_timeout` and the other days proceed — D10's "that day alone", kept.
+3. **Gauges are non-fatal when a partition is locked.** For the same reason `pg_total_relation_size` can
+   block; a pass whose gauge query hits `lock_timeout` publishes NO gauges for that pass
+   (`GaugesValid = false`, the failure listed, not counted as an error), rather than failing the pass or
+   publishing a partial sum. The previous values stay exported until the next successful pass.
+
+**Also decided here.** The scheduler calls ONE store method, `RunGateLedgerMaintenancePass`, which owns
+acquire → work → release as a single lifecycle: authority is the gate session, never scheduler
+leadership. The gate advisory key is `0x6365726269780003` — slot 3 of the `"cerbix" + slot` namespace —
+with a pairwise-distinctness test. Wiring: `--role all` and `--role scheduler` construct the loop from
+the five `gate.decision_*` keys; the gate session pins one pool connection for at most 30 s per pass.

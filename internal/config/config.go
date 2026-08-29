@@ -38,6 +38,7 @@ type Config struct {
 	Mail               MailConfig               `yaml:"mail"`
 	Pull               PullConfig               `yaml:"pull"`
 	Providers          ProvidersConfig          `yaml:"providers"`
+	Gate               GateConfig               `yaml:"gate"`
 }
 
 // PullConfig configures the HTTP-pull transport (an alternative to RabbitMQ for a geo
@@ -201,6 +202,50 @@ type ServicesConfig struct {
 // the frozen rollup rows).
 type HeartbeatsConfig struct {
 	RetentionDays int `yaml:"retention_days"`
+}
+
+// GateConfig bounds the reliability gate (func-reliability-gate §5a): how many decisions a
+// process and a principal may have in flight, how fast either may ask, how long a decision
+// transaction may run, and how the decision ledger's daily partitions are created and
+// removed. Every key has a default, a minimum and a maximum the spec owns, and Validate
+// REJECTS a value outside them at startup, naming the key and the range — the config the
+// operator wrote is the config that runs. The bounds are PROCESS-LOCAL by contract: every
+// api/all replica enforces its own copies, so the cluster allowance scales with replicas.
+type GateConfig struct {
+	// EvaluateInflightProcess caps decisions in flight per PROCESS; the (n+1)th is 429
+	// `process_inflight` before any transaction. Default 8, range 1..64.
+	EvaluateInflightProcess int `yaml:"evaluate_inflight_process"`
+	// EvaluateInflightPrincipal caps decisions in flight per principal (token or user);
+	// 429 `principal_inflight`. Default 2, range 1..16.
+	EvaluateInflightPrincipal int `yaml:"evaluate_inflight_principal"`
+	// EvaluateRatePrincipalPerMinute is a token bucket per principal: capacity = the value,
+	// refill = value/60 per second; drained → 429 `principal_rate`. Default 10, range 1..600.
+	EvaluateRatePrincipalPerMinute int `yaml:"evaluate_rate_principal_per_minute"`
+	// EvaluateRateProcessPerMinute is the process-wide bucket, same algorithm; drained → 429
+	// `process_rate`. Default 60, range 1..600. Raising it raises the ledger's capacity
+	// table (§5a) — read that first.
+	EvaluateRateProcessPerMinute int `yaml:"evaluate_rate_process_per_minute"`
+	// EvaluateTxBudgetMs is the begin-through-commit budget of the decision transaction,
+	// applied through the store's deadline wrapper. Default 5000, range 500..30000.
+	EvaluateTxBudgetMs int `yaml:"evaluate_tx_budget_ms"`
+	// DecisionRetentionDays is the ledger retention (D10): daily partitions whose upper bound
+	// is at or before now − retention are detached, then dropped a pass later. Default 90,
+	// range 7..365.
+	DecisionRetentionDays int `yaml:"decision_retention_days"`
+	// DecisionPartitionLeadDays is how many days of partitions are kept created ahead — the
+	// writable horizon the gauge measures against. Default 7, range 2..30.
+	DecisionPartitionLeadDays int `yaml:"decision_partition_lead_days"`
+	// DecisionPartitionCreateMax is how many days are created (create + attach) per
+	// maintenance pass, nearest horizon first. Default 3, range 1..8; load refuses
+	// create_max × floor(86400 / purge_every seconds) < 2.
+	DecisionPartitionCreateMax int `yaml:"decision_partition_create_max"`
+	// DecisionPurgeEvery is the maintenance cadence on the gate's own fenced session.
+	// Default 1h, range 5m..24h.
+	DecisionPurgeEvery Duration `yaml:"decision_purge_every"`
+	// DecisionPurgeMaxPartitions is how many removal STAGE-OPS (finalize, drop, detach) a
+	// pass performs; steady state is two a day. Default 8, range 1..48; load refuses
+	// max × floor(86400 / purge_every seconds) < 4.
+	DecisionPurgeMaxPartitions int `yaml:"decision_purge_max_partitions"`
 }
 
 // SecurityConfig controls encryption of secrets stored at rest (webhook signing
@@ -437,6 +482,18 @@ func defaults() *Config {
 			MaxMembersPerRevision: domain.DefaultMaxMembersPerRevision,
 			MaxServicesPerMonitor: domain.DefaultMaxServicesPerMonitor,
 		},
+		Gate: GateConfig{
+			EvaluateInflightProcess:        8,
+			EvaluateInflightPrincipal:      2,
+			EvaluateRatePrincipalPerMinute: 10,
+			EvaluateRateProcessPerMinute:   60,
+			EvaluateTxBudgetMs:             5000,
+			DecisionRetentionDays:          90,
+			DecisionPartitionLeadDays:      7,
+			DecisionPartitionCreateMax:     3,
+			DecisionPurgeEvery:             Duration(time.Hour),
+			DecisionPurgeMaxPartitions:     8,
+		},
 	}
 }
 
@@ -489,6 +546,9 @@ func (c *Config) Validate() error {
 		if cap.v > cap.hard {
 			return fmt.Errorf("%s must not exceed the hard maximum %d, got %d", cap.name, cap.hard, cap.v)
 		}
+	}
+	if err := c.validateGate(); err != nil {
+		return err
 	}
 
 	if c.Local.Enabled {
@@ -543,6 +603,62 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(c.Mail.PublicBaseURL) == "" {
 			return fmt.Errorf("mail.public_base_url is required when mail is enabled (it builds confirm/unsubscribe links)")
 		}
+	}
+	return nil
+}
+
+// Gate bounds (func-reliability-gate §5a). The purge cadence is bounded separately because it
+// is a duration; the two cross-checks below it are the spec's, and each names both keys.
+const (
+	gatePurgeEveryMin = 5 * time.Minute
+	gatePurgeEveryMax = 24 * time.Hour
+	// gateCreatePerDayMin: create_max × passes per day must cover one day's partition plus
+	// catch-up.
+	gateCreatePerDayMin = 2
+	// gatePurgePerDayMin: purge_max × passes per day must be STRICTLY more than the two
+	// stage-ops a day of steady state (detach today's eligible day, drop yesterday's detached
+	// one), so a backlog converges instead of holding still.
+	gatePurgePerDayMin = 4
+)
+
+// validateGate refuses any of the ten gate.* keys outside its range, then the two cross-checks
+// of §5a, naming the key(s) and the range every time.
+func (c *Config) validateGate() error {
+	g := c.Gate
+	for _, b := range []struct {
+		name     string
+		v        int
+		min, max int
+	}{
+		{"gate.evaluate_inflight_process", g.EvaluateInflightProcess, 1, 64},
+		{"gate.evaluate_inflight_principal", g.EvaluateInflightPrincipal, 1, 16},
+		{"gate.evaluate_rate_principal_per_minute", g.EvaluateRatePrincipalPerMinute, 1, 600},
+		{"gate.evaluate_rate_process_per_minute", g.EvaluateRateProcessPerMinute, 1, 600},
+		{"gate.evaluate_tx_budget_ms", g.EvaluateTxBudgetMs, 500, 30000},
+		{"gate.decision_retention_days", g.DecisionRetentionDays, 7, 365},
+		{"gate.decision_partition_lead_days", g.DecisionPartitionLeadDays, 2, 30},
+		{"gate.decision_partition_create_max", g.DecisionPartitionCreateMax, 1, 8},
+		{"gate.decision_purge_max_partitions", g.DecisionPurgeMaxPartitions, 1, 48},
+	} {
+		if b.v < b.min || b.v > b.max {
+			return fmt.Errorf("%s must be between %d and %d, got %d", b.name, b.min, b.max, b.v)
+		}
+	}
+	every := g.DecisionPurgeEvery.Std()
+	if every < gatePurgeEveryMin || every > gatePurgeEveryMax {
+		return fmt.Errorf("gate.decision_purge_every must be between %s and %s, got %s", gatePurgeEveryMin, gatePurgeEveryMax, every)
+	}
+	// floor(86 400 / every_seconds): the maintenance passes one day holds.
+	passesPerDay := int((24 * time.Hour) / every)
+	if n := g.DecisionPartitionCreateMax * passesPerDay; n < gateCreatePerDayMin {
+		return fmt.Errorf("gate.decision_partition_create_max × floor(86400 / gate.decision_purge_every) must be at least %d "+
+			"(one day's partition plus catch-up), got %d × %d = %d: raise gate.decision_partition_create_max or shorten gate.decision_purge_every",
+			gateCreatePerDayMin, g.DecisionPartitionCreateMax, passesPerDay, n)
+	}
+	if n := g.DecisionPurgeMaxPartitions * passesPerDay; n < gatePurgePerDayMin {
+		return fmt.Errorf("gate.decision_purge_max_partitions × floor(86400 / gate.decision_purge_every) must be at least %d "+
+			"(strictly more than the two stage-ops a day of steady state), got %d × %d = %d: raise gate.decision_purge_max_partitions or shorten gate.decision_purge_every",
+			gatePurgePerDayMin, g.DecisionPurgeMaxPartitions, passesPerDay, n)
 	}
 	return nil
 }

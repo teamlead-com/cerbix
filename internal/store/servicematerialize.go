@@ -20,13 +20,9 @@ import (
 // serviceingest.go; the leader loop that decides which ranges to run arrives with durable
 // ranges.
 
-// LateArrivalGrace is how long after a bucket ends its accounting stays open (§10.10).
-//
-// It is deliberately NOT `result.allowed_skew`. That bounds a worker clock running FAST —
-// ingest rejects `ts > now + skew` — and says nothing about how late a result may arrive.
-// Old results are accepted up to raw retention and an agent's historical backfill can land
-// much later still, so finality needs its own policy rather than a borrowed one.
-const LateArrivalGrace = 2 * time.Minute
+// The late-arrival grace this file seals against is `domain.LateArrivalGrace`: it moved to
+// the domain beside `CanonicalBucket` so `domain.MinSealLag` can be derived from both
+// without an import cycle (func-reliability-gate D8a).
 
 // MaterializeServiceRange computes every canonical bucket in [from, to) for one service and
 // seals the ones whose grace has elapsed.
@@ -207,7 +203,7 @@ func (s *Store) materializeBucketTx(ctx context.Context, tx pgx.Tx, projectID, s
 	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&now); err != nil {
 		return false, fmt.Errorf("store: read clock: %w", err)
 	}
-	seal := !now.Before(end.Add(LateArrivalGrace))
+	seal := !now.Before(end.Add(domain.LateArrivalGrace))
 
 	var maintenanceGeneration int64
 	if err := tx.QueryRow(ctx,
@@ -567,7 +563,7 @@ func (s *Store) AdvanceServiceMaterializationOn(ctx context.Context, db dbConn, 
 	// Only buckets whose accounting window has closed are worth walking: an earlier one
 	// would be written provisional and rewritten on the next pass, for every service, every
 	// minute.
-	horizon := domain.FloorToBucket(now.Add(-LateArrivalGrace))
+	horizon := domain.FloorToBucket(now.Add(-domain.LateArrivalGrace))
 
 	var (
 		serviceID, projectID string

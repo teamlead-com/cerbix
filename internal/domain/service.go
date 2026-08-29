@@ -408,6 +408,32 @@ type EvaluationEpoch struct {
 // CanonicalBucket is the fixed width every fact is keyed by (phase 1).
 const CanonicalBucket = time.Minute
 
+// LateArrivalGrace is how long after a bucket ends its accounting stays open
+// (func-service-reliability §10.10); the materializer seals up to
+// FloorToBucket(now − LateArrivalGrace).
+//
+// It is deliberately NOT `result.allowed_skew`. That bounds a worker clock running FAST —
+// ingest rejects `ts > now + skew` — and says nothing about how late a result may arrive.
+// Old results are accepted up to raw retention and an agent's historical backfill can land
+// much later still, so finality needs its own policy rather than a borrowed one.
+//
+// It lives HERE, beside CanonicalBucket, rather than in the store that seals with it,
+// because MinSealLag below is derived from both and the store already imports the domain
+// (func-reliability-gate D8a, review round 5 P2-2).
+const LateArrivalGrace = 2 * time.Minute
+
+// MinSealLag is the floor of a gate policy's `max_seal_lag_seconds` (func-reliability-gate
+// D8a): "MinSealLag = LateArrivalGrace + CanonicalBucket + 2 × CanonicalBucket = 120 + 60 +
+// 120 = 300 s — the healthy upper bound (< 180 s) plus two buckets of headroom for queueing
+// and commit". A healthy materializer's lag sits in [2m, 3m) before queueing and commit, so
+// any smaller bound would be `seal_stale` forever on a system doing exactly what it should.
+// It is a FORMULA over the constants it depends on, never a literal, so a change to either
+// constant moves the floor with it.
+const MinSealLag = LateArrivalGrace + CanonicalBucket + 2*CanonicalBucket
+
+// MaxSealLag is the ceiling of `max_seal_lag_seconds` (D8a, D14: 86 400 s).
+const MaxSealLag = 24 * time.Hour
+
 // CeilToBucket rounds an instant UP to a canonical bucket boundary, which is what an
 // ordinary prospective write uses for its EffectiveAt.
 //

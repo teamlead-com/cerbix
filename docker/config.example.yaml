@@ -107,6 +107,25 @@ services:
   max_members_per_revision: 50
   max_services_per_monitor: 10
 
+# Reliability gate bounds (func-reliability-gate §5a, FR-024). A deploy gate sees a few
+# decisions per service per day, tens per minute on a busy installation, and these numbers
+# are sized for that. Every key has a minimum and a maximum; a value outside them is REJECTED
+# at startup naming the key and the range. The limits are PROCESS-LOCAL: every api/all
+# replica enforces its own copies, so the cluster allowance — and the decision ledger's
+# growth — scales with the replica count. Raising evaluate_rate_process_per_minute raises the
+# ledger's capacity table in §5a; read it first. The block is optional; absent → defaults.
+gate:
+  evaluate_inflight_process: 8              # [1, 64]   decisions in flight per process; more → 429 process_inflight
+  evaluate_inflight_principal: 2            # [1, 16]   per token or user; more → 429 principal_inflight
+  evaluate_rate_principal_per_minute: 10    # [1, 600]  token bucket per principal; drained → 429 principal_rate
+  evaluate_rate_process_per_minute: 60      # [1, 600]  token bucket for the process; drained → 429 process_rate
+  evaluate_tx_budget_ms: 5000               # [500, 30000] begin-through-commit budget of one decision transaction
+  decision_retention_days: 90               # [7, 365]  ledger retention, enforced by removing whole daily partitions
+  decision_partition_lead_days: 7           # [2, 30]   days of ledger partitions kept created ahead (the writable horizon)
+  decision_partition_create_max: 3          # [1, 8]    days created per maintenance pass; create_max × passes/day must be >= 2
+  decision_purge_every: 1h                  # [5m, 24h] maintenance cadence on the gate's own fenced session
+  decision_purge_max_partitions: 8          # [1, 48]   removal stage-ops per pass; max × passes/day must be >= 4
+
 # Encryption of secrets stored at rest (webhook signing secrets, notification
 # channel credentials). encryption_key is base64 of 32 bytes (AES-256); generate
 # with `head -c 32 /dev/urandom | base64`. Empty disables encryption (plaintext,

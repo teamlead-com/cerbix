@@ -3215,6 +3215,28 @@ it is MADE.
     recipient snapshot, a delivery that resolved nobody, AND an event that exhausted its attempts —
     and not merely an undelivered one; the superseded episode is closed as `undelivered`; and the
     re-announcement is itself withheld while there is still nobody to tell (D-0187).
+
+**Added by FR-024** (`func-reliability-gate.md` §4, iter-0163): the reliability gate is a CONSUMER of
+this specification's owners, and these two invariants state what it may and may not do with them.
+They are stated here because a gate that quoted a number the service page would not is a second
+owner, and this file is where ownership is decided.
+
+106. the reliability GATE consumes the owners above and derives NOTHING: its budget is the report
+    path's `BurnedPercent` for the policy's window, with withholding decided by `decideServiceWindow`
+    inside that path; its burn facts are that window's latches (§16.4b); its incident fact is the
+    open-auto-incident predicate (`FindOpenAutoIncidentByService`); its coverage evidence is
+    `serviceCoverageClauses` (§16.6b); and the decision path reads only SEALED facts — it has no
+    heartbeat access by construction, and a gate response never quotes a number the service page
+    would withhold (FR-024 invariants 1 and 6). A gate that recomputed any of these locally would
+    be the second owner §16.4b and §16.6b forbid for the alerting arms;
+107. one snapshot: every read of a gate decision and its ledger INSERT happen in ONE
+    `REPEATABLE READ` transaction whose first SNAPSHOT-BEARING statement — after the deadline
+    wrapper's `SET LOCAL`s, which establish no snapshot — is the clock read that supplies
+    `evaluated_at`, so the budget, burn, incident and coverage facts in one response are the values
+    the service page and the alerting badge would show for that SAME instant; a serialization
+    failure is retried once and then reported as a transport error, never as a decision (FR-024
+    invariant 7).
+
 ### 16.9 What phase 5 does NOT do
 
 - **service incidents** — owner decision 3; a service-anchored incident touches the status page, the

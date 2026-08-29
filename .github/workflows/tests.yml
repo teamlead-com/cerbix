@@ -92,7 +92,9 @@ jobs:
       - name: Tests (-race, DB-gated suites against the service container)
         env:
           CERBIX_TEST_DATABASE_DSN: postgres://test:test@localhost:5432/cerbixtest?sslmode=disable
-        run: go test -race -count=1 ./...
+        # The store package carries FR-024's ledger-maintenance suite (real lock waits, DETACH CONCURRENTLY,
+        # fencing) and exceeds go test's default 10 m per-package timeout under contention (iter-0163).
+        run: go test -race -count=1 -timeout 40m ./...
 
   frontend:
     name: Frontend (type-check, build, schema drift)

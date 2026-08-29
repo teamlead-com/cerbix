@@ -1,16 +1,16 @@
 # func-reliability-gate — a deploy asks whether the error budget allows it (FR-024 / NFR-019)
 
-> **Lifecycle: IN IMPLEMENTATION — resumed by the owner on 2026-08-29 (D-0204) as iter-0163.** Design
+> **Lifecycle: IMPLEMENTED — iter-0163, closed 2026-08-29 (D-0208); FR-024/NFR-019 are `DONE` in `docs/status.md`.** Resumed by the owner on 2026-08-29 (D-0204) as iter-0163 after the design phase. Design
 > approved at revision 13 (party [47], D-0201); UI mock static-contract approved (party [59]); deferred on
 > 2026-08-28 (D-0202) and resumed the next day. The resume path of D-0202 applies in order: the reviewer's
 > fresh focused review of this text against the current code (requested, party [6]); the owner's visual pass
 > on the mock before ANY SPA code — backend and CLI proceed under the approved design meanwhile; then the
 > discharge of the 21 invariants of §6 and the §7 matrix with named tests and mutations, the PostgreSQL 15.8
-> prepared-statement case RUN. FR-024/NFR-019 are `IN_PROGRESS` in `docs/status.md`. The
+> prepared-statement case RUN — all of which iter-0163 did (the FR-024 discharge table in `docs/traceability.md`). The
 > reviewer re-read the working tree independently: no findings remain. Conditions carried forward: the
 > owner-approved UI mock gate precedes any SPA code; implementation must discharge all 21 invariants of §6
 > and the full §7 matrix with named tests and mutations; the PostgreSQL 15.8 prepared-statement case is a
-> required implementation gate to RUN, not a claim; FR-024/NFR-019 stay TODO until then. Revisions 10–13
+> required implementation gate to RUN, not a claim — every one of these was met before the requirement moved to DONE. Revisions 10–13
 > were committed together as one accepted design phase, per the owner. Revision 1
 > (`46379fa`, `c65ea5d`) was rejected with 4 P0, 9 P1, 3 P2 (party [15]); revision 2 (`113308f`) with
 > 2 P0, 5 P1, 4 P2 (party [20]); revision 3 (`a16ea70`) with 4 P1, 4 P2 (party [25]); revision 4
@@ -24,9 +24,9 @@
 > ledger's capacity contract of round 5 (D-0193) and its partition period of round 6 (D-0194); rounds 3,
 > 4 and 7–12 raised no owner question (D-0191, D-0192, D-0195, D-0196, D-0197, D-0198, D-0199, D-0200). `make docs-check`
 > refuses the retired spellings of every earlier revision, inside the normative schema block too, and
-> its guard has fixture tests (§10). One gate remains before SPA code: the owner-approved UI mock of the policy editor and the decision
-> history. Backend implementation may begin under the approved design; FR-024/NFR-019 stay TODO until
-> implementation discharges every invariant of §6 and the §7 matrix. Change Intelligence is **FR-025** and is not
+> its guard has fixture tests (§10). The owner approved the UI mock visually on 2026-08-29 (D-0207) and the SPA
+> was built to it in the same iteration; implementation discharged every invariant of §6 and the §7 matrix
+> (`docs/traceability.md`, the FR-024 map). Change Intelligence is **FR-025** and is not
 > part of this requirement.
 
 ## 1. What this is, in one paragraph

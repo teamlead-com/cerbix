@@ -4214,7 +4214,7 @@ components:
 
     ServiceDetail:
       type: object
-      required: [service, declaration, epoch, materialization, reliability, supersedes]
+      required: [service, declaration, epoch, materialization, reliability, supersedes, sla_targets]
       additionalProperties: false
       properties:
         service: { $ref: '#/components/schemas/Service' }
@@ -4273,6 +4273,24 @@ components:
               type: { type: string }
               enabled: { type: boolean }
               retired_at: { type: string, format: date-time, nullable: true }
+        sla_targets:
+          type: array
+          description: >
+            The service's SLO target inventory (FR-024 AC-0163-8): the reliability-gate policy
+            editor offers ONLY these windows. Canonical window order (24h, 7d, 30d, 90d); an
+            empty array when none is declared — never null, never omitted. Written one window
+            at a time at `PUT …/services/{serviceID}/sla-target`.
+          items: { $ref: '#/components/schemas/ServiceSLATarget' }
+
+    ServiceSLATarget:
+      type: object
+      description: One declared service-scoped objective — the window it applies to and when it was last set.
+      required: [window, objective, updated_at]
+      additionalProperties: false
+      properties:
+        window: { type: string, enum: [24h, 7d, 30d, 90d] }
+        objective: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 100 }
+        updated_at: { type: string, format: date-time }
 
     PutDeclarationRequest:
       type: object

@@ -112,6 +112,12 @@ type serviceDetailView struct {
 	// A converted composite appears here at full strength: still probing, still alerting, and
 	// carrying its own retirement state so the operator sees which of the two is doing the work.
 	Supersedes []supersededMonitorView `json:"supersedes"`
+	// SLATargets is the service's SLO target inventory (FR-024 AC-0163-8) in canonical window
+	// order (24h, 7d, 30d, 90d). NEVER null and never omitted: the reliability-gate policy editor
+	// offers exactly these windows, and an empty array says "none declared" where a null would
+	// say "unknown". Unlike the best-effort blocks below it is not degraded on a read failure —
+	// an empty inventory over a target that exists would make the editor refuse a valid window.
+	SLATargets []domain.ServiceSLATarget `json:"sla_targets"`
 }
 
 // supersededMonitorView is a composite this service now expresses. `retired_at` is present so the
@@ -279,7 +285,18 @@ func (h *Handler) getService(w http.ResponseWriter, r *http.Request) {
 	if h.writeServiceError(w, err) {
 		return
 	}
+	// The SLO target inventory is part of the contract, not an annotation: a read that fails
+	// fails the detail, because "[]" over a declared target is a confident falsehood (the gate
+	// editor would refuse the very window the service has an objective for).
+	targets, err := h.store.ListServiceSLATargets(r.Context(), proj.ID, detail.Service.ID)
+	if h.writeServiceError(w, err) {
+		return
+	}
+	if targets == nil {
+		targets = []domain.ServiceSLATarget{}
+	}
 	out := serviceDetailView{
+		SLATargets: targets,
 		Service: serviceView{
 			ID: detail.Service.ID, Slug: detail.Service.Slug, Name: detail.Service.Name,
 			Description:        detail.Service.Description,

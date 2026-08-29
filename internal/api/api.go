@@ -203,6 +203,10 @@ type Store interface {
 	ServiceHealthNow(ctx context.Context, projectID, serviceID string) (domain.ServiceHealthNow, error)
 	ServiceReliabilitySeries(ctx context.Context, projectID, serviceID string, from, to time.Time, step time.Duration) ([]domain.ReliabilitySeriesPoint, error)
 	UpsertServiceSLATarget(ctx context.Context, projectID, serviceID, window string, objective float64) error
+	// ListServiceSLATargets is the SLO target inventory the detail payload carries (FR-024
+	// AC-0163-8): the gate policy editor offers only the windows this service has a target for.
+	// Canonical window order; empty (never nil) for a service with none.
+	ListServiceSLATargets(ctx context.Context, projectID, serviceID string) ([]domain.ServiceSLATarget, error)
 	// Alerting ownership (FR-021 phase 5, §16.6a). Both are transactional, audit inside the
 	// transaction and enqueue the §16.4a lifecycle closes their edit orphans. The READ half is
 	// asserted separately (see serviceAlertPolicyReader) because the store does not offer it yet.

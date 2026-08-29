@@ -2500,6 +2500,9 @@ type fakeService struct {
 	// burnTargets is keyed by window name. A window with no objective is absent, because the
 	// real store answers ErrNotFound for a burn write against a target nobody declared.
 	burnTargets map[string]*fakeBurnTarget
+	// slaTargets is the service's SLO target inventory keyed by window (FR-024 AC-0163-8), fed by
+	// the fake UpsertServiceSLATarget so a PUT then GET round-trips the way the real store does.
+	slaTargets map[string]domain.ServiceSLATarget
 	// alertWrites / burnWrites count writes that were actually ATTEMPTED against the store, so a
 	// test can assert that a refusal wrote nothing rather than only that it returned a status.
 	alertWrites int
@@ -2687,7 +2690,29 @@ func (f *fakeStore) UpsertServiceSLATarget(_ context.Context, projectID, service
 	}
 	r := f.reporting()
 	r.slaWindow, r.slaObj = window, objective
+	fs := f.serviceStore()[serviceID]
+	if fs.slaTargets == nil {
+		fs.slaTargets = map[string]domain.ServiceSLATarget{}
+	}
+	fs.slaTargets[window] = domain.ServiceSLATarget{Window: window, Objective: objective, UpdatedAt: time.Now().UTC()}
 	return nil
+}
+
+// ListServiceSLATargets mirrors the real store's ORDER (sla.StandardWindows) but deliberately NOT
+// its non-nil guarantee: a service with no targets yields a nil slice here, so the handler's own
+// "never null" normalization is what the detail tests prove, not the fake's courtesy.
+func (f *fakeStore) ListServiceSLATargets(_ context.Context, projectID, serviceID string) ([]domain.ServiceSLATarget, error) {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return nil, store.ErrNotFound
+	}
+	var out []domain.ServiceSLATarget
+	for _, w := range sla.StandardWindows {
+		if t, ok := fs.slaTargets[w.Name]; ok {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }
 
 // ── FR-021 phase 5 fakes: the alerting-ownership write surface (§16.6a) ─────

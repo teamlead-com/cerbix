@@ -451,3 +451,15 @@ func CeilToBucket(t time.Time) time.Time {
 // FloorToBucket rounds down. Only the one retroactive case — a first-adoption backfill —
 // uses it, and what it produces is a declared reconstruction rather than a measurement.
 func FloorToBucket(t time.Time) time.Time { return t.Truncate(CanonicalBucket) }
+
+// ServiceSLATarget is one entry of a service's SLO target INVENTORY: the objective declared
+// for one standard window (`sla_targets` service scope, FR-021 §11.3). The service detail
+// lists them so the reliability-gate policy editor (FR-024 AC-0163-8) can offer exactly the
+// windows this service has a target for — a question `…/reliability?window=W` cannot answer
+// for a brand-new service, because that report states its objective only once a seal
+// watermark exists.
+type ServiceSLATarget struct {
+	Window    string    `json:"window"`
+	Objective float64   `json:"objective"`
+	UpdatedAt time.Time `json:"updated_at"`
+}

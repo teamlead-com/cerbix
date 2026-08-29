@@ -809,6 +809,54 @@ func (s *Store) UpsertServiceSLATarget(ctx context.Context, projectID, serviceID
 	return nil
 }
 
+// ListServiceSLATargets is the service's SLO target INVENTORY (FR-024 AC-0163-8): every window
+// it has declared an objective for, in canonical window order (24h, 7d, 30d, 90d — the order of
+// sla.StandardWindows). It exists because no other read answers "which windows does this
+// service have a target for?": the reliability report states its objective only once a seal
+// watermark exists, so a brand-new service with a target looks target-less there, and the gate
+// policy editor must offer exactly the windows a target exists for.
+//
+// ONE query: the service row is the anchor (LEFT JOIN), so a service in the project with no
+// targets is an EMPTY, non-nil slice, while a service that is not in the project is ErrNotFound
+// — the two are different answers and a client must not have to guess which one it got.
+func (s *Store) ListServiceSLATargets(ctx context.Context, projectID, serviceID string) ([]domain.ServiceSLATarget, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT t.window_name, t.objective::float8, t.updated_at
+		  FROM services s
+		  LEFT JOIN sla_targets t ON t.service_id = s.id
+		 WHERE s.id = $1 AND s.project_id = $2
+		 ORDER BY CASE t.window_name
+		            WHEN '24h' THEN 1 WHEN '7d' THEN 2 WHEN '30d' THEN 3 WHEN '90d' THEN 4
+		            ELSE 5 END, t.window_name`,
+		serviceID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list service SLA targets: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.ServiceSLATarget{}
+	found := false
+	for rows.Next() {
+		found = true
+		var window *string
+		var objective *float64
+		var updatedAt *time.Time
+		if err := rows.Scan(&window, &objective, &updatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan service SLA target: %w", err)
+		}
+		if window == nil {
+			continue // the service row alone: no target declared
+		}
+		out = append(out, domain.ServiceSLATarget{Window: *window, Objective: *objective, UpdatedAt: updatedAt.UTC()})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list service SLA targets: %w", err)
+	}
+	if !found {
+		return nil, ErrNotFound
+	}
+	return out, nil
+}
+
 func addDurations(a, b domain.ReliabilityDurations) domain.ReliabilityDurations {
 	a.GoodUs += b.GoodUs
 	a.BadUs += b.BadUs

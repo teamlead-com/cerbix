@@ -322,3 +322,53 @@ func TestDeleteServicePinnedByFileIs409(t *testing.T) {
 		}
 	}
 }
+
+// The detail carries the service's SLO target INVENTORY (FR-024 AC-0163-8): the gate policy
+// editor offers only the windows a target exists for, so the list must be present and an ARRAY
+// even when empty — a null or an absent key would leave the editor unable to tell "no targets"
+// from "unknown". The fake returns a nil slice for the empty case on purpose: what the first
+// half proves is the handler's normalization, not the fake's courtesy.
+func TestServiceDetailCarriesItsSLOTargetInventory(t *testing.T) {
+	h := newHandler(seededStore())
+	id := createSvc(t, h, "checkout")
+
+	body := do(h, p1Viewer, http.MethodGet, "/api/v1/projects/p1/services/"+id, "").Body.String()
+	if !strings.Contains(body, `"sla_targets":[]`) {
+		t.Fatalf("detail without targets must serialize an empty array, got: %s", body)
+	}
+
+	// Two targets declared OUT of canonical order come back IN it, each with its objective.
+	for _, put := range []string{`{"window":"90d","objective":99.5}`, `{"window":"24h","objective":99}`} {
+		if rec := do(h, p1Editor, http.MethodPut, "/api/v1/projects/p1/services/"+id+"/sla-target", put); rec.Code != http.StatusOK {
+			t.Fatalf("PUT sla-target %s = %d: %s", put, rec.Code, rec.Body.String())
+		}
+	}
+	rec := do(h, p1Viewer, http.MethodGet, "/api/v1/projects/p1/services/"+id, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d: %s", rec.Code, rec.Body.String())
+	}
+	var v struct {
+		SLATargets []struct {
+			Window    string  `json:"window"`
+			Objective float64 `json:"objective"`
+			UpdatedAt string  `json:"updated_at"`
+		} `json:"sla_targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(v.SLATargets) != 2 {
+		t.Fatalf("sla_targets = %+v, want two entries", v.SLATargets)
+	}
+	if v.SLATargets[0].Window != "24h" || v.SLATargets[0].Objective != 99 {
+		t.Errorf("first entry = %+v, want 24h/99 (canonical order, not write order)", v.SLATargets[0])
+	}
+	if v.SLATargets[1].Window != "90d" || v.SLATargets[1].Objective != 99.5 {
+		t.Errorf("second entry = %+v, want 90d/99.5", v.SLATargets[1])
+	}
+	for _, e := range v.SLATargets {
+		if e.UpdatedAt == "" || strings.HasPrefix(e.UpdatedAt, "0001-") {
+			t.Errorf("entry %s carries no updated_at: %+v", e.Window, e)
+		}
+	}
+}

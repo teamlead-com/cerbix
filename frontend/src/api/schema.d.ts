@@ -7532,6 +7532,16 @@ export interface components {
                 /** Format: date-time */
                 retired_at?: string | null;
             }[];
+            /** @description The service's SLO target inventory (FR-024 AC-0163-8): the reliability-gate policy editor offers ONLY these windows. Canonical window order (24h, 7d, 30d, 90d); an empty array when none is declared — never null, never omitted. Written one window at a time at `PUT …/services/{serviceID}/sla-target`. */
+            sla_targets: components["schemas"]["ServiceSLATarget"][];
+        };
+        /** @description One declared service-scoped objective — the window it applies to and when it was last set. */
+        ServiceSLATarget: {
+            /** @enum {string} */
+            window: "24h" | "7d" | "30d" | "90d";
+            objective: number;
+            /** Format: date-time */
+            updated_at: string;
         };
         PutDeclarationRequest: {
             /**

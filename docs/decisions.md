@@ -5221,3 +5221,25 @@ the mapping down keeps "fidelity to the mock" reviewable against a named list ra
 **Consequences.** AC-0163-8 IN_PROGRESS (iter-0163 §0 task 8, sub-tasks 8a–8d); row 15's "shown on the
 service page" clause is discharged when `seal_lag` renders on the card and a test reaches it; the
 `make dev-test` count grows by the UI spec; `make spa-snapshot` after the frontend change (CLAUDE.md).
+
+## D-0208 — iter-0163 closed: FR-024 / NFR-019 (the reliability gate) are DONE (2026-08-29)
+
+**Decision.** The iteration that implemented the approved design (D-0201) closes with FR-024 and NFR-019
+`DONE`. Basis: every acceptance criterion AC-0163-1…8 is DONE with evidence (`docs/status.md`); the FR-024
+discharge table in `docs/traceability.md` reaches all 21 invariants of §6 with named tests and the
+mutations killed; the §7 matrix ran in both storage modes; the independent reviewer approved every range on
+record — [16], [26]/[30], [44]/[46], [60], [69], [74], [82]/[84], [94] — and no finding is open. The SPA was
+built only after the owner's visual approval of the mock (D-0207) and shipped with the three review
+findings of its design pass fixed and tested ([86], [88], [90]).
+
+**What the record keeps.** Three forward corrections to the design (D-0205), three maintenance deviations
+toward D10's intent (D-0206), the mock-to-product reading (D-0207); the service detail now carries its SLO
+target inventory (`3fc19e3`), a small API addition the SPA needed. Commits are one landed change each, per
+the owner; docs-only commits were made at phase completion at the reviewer's request ([71]) so the committed
+status never lagged landed work. The close-out needed two commits because the first, `98dd58d`, was
+committed with a message claiming content its aborted edit script had not written (iter-0163 §4). Nothing
+was pushed; pushing, tagging and any squash are the owner's.
+
+**Consequences.** `docs/specs/func-reliability-gate.md` header reads IMPLEMENTED; iter-0163 is immutable
+from its closing commit; the next requirement is the owner's call (FR-025 Change Intelligence is a
+candidate the spec names as out of scope here).

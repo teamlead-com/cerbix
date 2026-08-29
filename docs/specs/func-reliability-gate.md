@@ -1,10 +1,12 @@
 # func-reliability-gate — a deploy asks whether the error budget allows it (FR-024 / NFR-019)
 
-> **Lifecycle: DEFERRED by the owner on 2026-08-28 (D-0202) — design approved at revision 13 (party [47]),
-> UI mock static-contract approved (party [59]), no implementation scheduled.** The requirement was proposed
-> by the reviewer as a continuation of FR-021, not asked for by cerbix's users; the owner parked it until a
-> CI-side ask exists. Everything below stays the approved design and needs no re-approval to resume — only
-> a fresh focused review of the codebase it lands on. The
+> **Lifecycle: IN IMPLEMENTATION — resumed by the owner on 2026-08-29 (D-0204) as iter-0163.** Design
+> approved at revision 13 (party [47], D-0201); UI mock static-contract approved (party [59]); deferred on
+> 2026-08-28 (D-0202) and resumed the next day. The resume path of D-0202 applies in order: the reviewer's
+> fresh focused review of this text against the current code (requested, party [6]); the owner's visual pass
+> on the mock before ANY SPA code — backend and CLI proceed under the approved design meanwhile; then the
+> discharge of the 21 invariants of §6 and the §7 matrix with named tests and mutations, the PostgreSQL 15.8
+> prepared-statement case RUN. FR-024/NFR-019 are `IN_PROGRESS` in `docs/status.md`. The
 > reviewer re-read the working tree independently: no findings remain. Conditions carried forward: the
 > owner-approved UI mock gate precedes any SPA code; implementation must discharge all 21 invariants of §6
 > and the full §7 matrix with named tests and mutations; the PostgreSQL 15.8 prepared-statement case is a
@@ -605,8 +607,8 @@ The by-id route returns any override with the full actor triple, the revoker tri
 timestamps order deterministically. **Storage is unbounded and the product history is a window**
 (review round 11 P1-4): nothing in the regime bounds rows — a project admin can create and revoke in a
 loop — so the list is a bounded READ over an indexed order, the audit log is the record, and the
-expiry window is not a row bound. Invariant 17's "later read of the override" is this by-id route. Authorization: `gate:policy` for the policy
-`PUT`/`DELETE`, `gate:override` for the override `POST`/`DELETE`, the read action of D12 for every
+expiry window is not a row bound. Invariant 17's "later read of the override" is this by-id route. Authorization: `gate:policy:write` for the policy
+`PUT`/`DELETE` (D12's name — revision 13 wrote `gate:policy` here, corrected at implementation, D-0205), `gate:override` for the override `POST`/`DELETE`, the read action of D12 for every
 `GET`; every mutation is audited with the actor triple (D-0188). File-managed services expose the same
 routes — D13 makes gate policy UI/API-owned even there. The SPA's policy editor and override panel read
 exactly these shapes and nothing else.
@@ -642,6 +644,11 @@ auth, timeout, snapshot conflict or a 429 from the bounds of §5a — the CLI do
 `Retry-After` value (whole seconds, `ceil`ed, never below 1 — §5a) on stderr and exits 1. `UNKNOWN` therefore exits 0 or 2 by the operator's declared
 `unknown_behavior`, and the word `UNKNOWN` is in the output regardless — revision 1's exit 3 would have
 had a plain shell block against an operator who chose `warn`.
+Two details the implementation fixed where D16 was silent (iter-0163, D-0205): a USAGE error — an unknown
+flag such as `--token`, a missing `--project`/`--service`, an unparseable `--timeout` — exits **2** like
+every other `cerbix` verb (the exit code family of the CLI, not of the gate; a pipeline cannot confuse it
+with `BLOCK` because no stdout line is printed); and a 3xx response is NOT followed — it exits 1 naming the
+`Location` — because following it would carry the bearer to a host the operator never named.
 
 **D17 — Change Intelligence is FR-025 and is not started here. DECIDED.**
 Deployment/rollback/flag events, the service timeline, incident correlation and before/after SLI
@@ -655,8 +662,9 @@ identity, and closed enums with no free payload. None of it is needed for a deci
   reliability section.
 - `docs/runbook.md` — "the gate says UNKNOWN" (it is about the facts, not the pipeline); the override
   procedure and the metric; the decision-ledger retention knob and the capacity table of §5a; the CLI's
-  environment contract; and the alert thresholds for the new metrics — `writable_horizon_seconds < 2 d`
-  (the maintenance goroutine or the leader is gone; the gate stops recording when it reaches 0),
+  environment contract; and the alert thresholds for the new metrics — `writable_horizon_seconds < 2 d` paired with `absent()` — the four ledger gauges are exported only by
+  the process holding the gate session, so a vanished leader makes them ABSENT, not low (the maintenance
+  goroutine or the leader is gone; the gate stops recording when the horizon reaches 0),
   `partitions_pending_drop ≥ 2 for 6h` (removal refused by `lock_timeout` pass after pass),
   `evaluate_errors_total{kind="ledger_unwritable"} > 0` (page: the horizon was exhausted),
   `maintenance_errors_total{kind="partition_identity"} > 0` (page: a relation under our name lacks our

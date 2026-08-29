@@ -22,6 +22,7 @@ A single binary; behavior is selected by subcommand and flags.
 | `cerbix serve` | Start the operational server in the selected role. | `--config <path>` (required), `--role all\|api\|scheduler\|worker\|agent` (default `all`), `--region <name>` (worker/agent pool, default `core`) |
 | `cerbix migrate` | Apply DB migrations (goose, embedded) and exit. | `--config <path>` (required; needs `database.dsn`) |
 | `cerbix reencrypt` | Re-encrypt all at-rest secrets under the current primary key (after key rotation). | `--config <path>` (required; needs `security.encryption_key` and `database.dsn`) |
+| `cerbix gate check` | Ask the reliability gate (FR-024) whether the error budget allows a release; the exit code follows `action` — `0` ALLOW/WARN, `2` BLOCK, `4` NOT_CONFIGURED, `1` transport/auth/429. | `--project <id>`, `--service <id>` (required), `--json`, `--timeout 10s`; the server is `CERBIX_URL` and the credential `CERBIX_TOKEN` (environment only, never a flag), `CERBIX_CA_FILE` adds a CA |
 | `cerbix version` | Print build info (version, commit) as JSON and exit. | — |
 | `cerbix help` / `-h` / `--help` | Usage. | — |
 
@@ -39,7 +40,7 @@ A single binary; behavior is selected by subcommand and flags.
 |---|---|---|---|---|
 | `all` | Everything in one process: scheduler + worker + ingest + API/SPA + outbox. | `inproc` (channel) | yes | no |
 | `api` | HTTP: REST + SSE + SPA serving; the check-result consumer (→ heartbeats/statuses/incidents); outbox delivery. | AMQP | yes | yes |
-| `scheduler` | Leader scheduler (Postgres advisory lock): publishes due jobs; rollup/retention; renotify; burn-eval; SLA reports; region-worker-alert; escalation-advance. | AMQP | yes | yes |
+| `scheduler` | Leader scheduler (Postgres advisory lock): publishes due jobs; rollup/retention; renotify; burn-eval; SLA reports; region-worker-alert; escalation-advance; gate-ledger partition maintenance (FR-024, on its own fenced advisory session). | AMQP | yes | yes |
 | `worker` | Prober pool: pulls jobs, executes the probe with a timeout, publishes the result. Stateless. | AMQP | no | yes |
 | `agent` | HTTP pull prober for geos without a broker: pulls its region's jobs over HTTPS, probes, posts results. DB-less, broker-less. | HTTP-pull | no | no |
 
@@ -64,6 +65,7 @@ Top-level `Config` sections (`internal/config`):
 | `notification_egress` | `allow_private_ips`, `allow_metadata_ips` | SSRF guard for **alert delivery** (webhook/notify/SMTP), independent of `prober`; defaults **deny-private** (D-0141/iter-0084). |
 | `result` | `allowed_skew`, `revision_mode` | Result-ingest contract: future-clock skew bound + `execution_revision` gate policy (`enforce`\|`observe`; default `enforce`) — D-0142 (`specs/func-result-protocol.md`). |
 | `heartbeats` | `retention_days` | Retention period for raw heartbeats (partitions are dropped by the leader). |
+| `gate` | `evaluate_inflight_process`, `evaluate_inflight_principal`, `evaluate_rate_principal_per_minute`, `evaluate_rate_process_per_minute`, `evaluate_tx_budget_ms`, `decision_retention_days`, `decision_partition_lead_days`, `decision_partition_create_max`, `decision_purge_every`, `decision_purge_max_partitions` | Reliability-gate bounds (FR-024, spec `func-reliability-gate` §5a): process-local concurrency and rate caps on decisions, the decision transaction's budget, and the decision ledger's daily-partition retention and maintenance. All ten range-validated at load; the runbook has the table. |
 | `security` | `encryption_key`, `previous_keys`, `admin_email`, `admin_password` | AES-256-GCM keyring for at-rest secrets + rotation; global-admin bootstrap on an empty system. |
 | `mail` | `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). |
 | `pull` | `regions`, `token`, `agents`, `server_url` | HTTP-pull transport: broker-less regions (server side) and agent credentials (agent side). |
@@ -116,7 +118,7 @@ flowchart LR
 | `store` | pgx + goose migrations; repositories; encryption of secret fields. |
 | `domain` | Models and invariants (`Validate()`), rules without I/O. |
 | `dispatch` | `Dispatcher` interface + `inproc`/`amqp` implementations. |
-| `scheduler` | Leader (advisory lock), min-heap `next_run`, job publishing; rollup, retention, renotify, burn-eval, SLA reports. |
+| `scheduler` | Leader (advisory lock), min-heap `next_run`, job publishing; rollup, retention, renotify, burn-eval, SLA reports; the gate ledger's partition maintenance under its own session lock (FR-024). |
 | `worker` | Goroutine pool, probe execution with `context.WithTimeout`. |
 | `prober` | `Prober` registry by monitor type + conditions engine; SSRF guard. |
 | `ingest` | The CHECK-RESULT consumer — heartbeats, status flip (atomic), auto-incidents, transitions into the outbox. The package name is historical: cerbix ingests its OWN probe results and no external telemetry, which is why the product is not an observability backend. |
@@ -143,7 +145,7 @@ what the system was MEASURING — and a fact references the epoch alone. Facts a
 bucket by bucket, and the watermark `sealed_through` is defined by **contiguity**, so a gap
 holds it back instead of being jumped over. Phase 1 ships the declaration, the epoch, the seal
 and the file-provider format-2 surface; availability over a window, the error budget and the
-burn rate are phase 2 and are **absent** from the API rather than returned as zeros.
+burn rate shipped in phase 2 (iter-0144) and are returned on `…/services/{id}/reliability`; a window without an objective is **absent** rather than returned as zeros.
 
 **Alerting ownership (FR-021, phase 5).** A service can be the thing that pages, and its declared
 SLI members can stop delivering their own alerts for the same failure — but `owns_paging = true`
@@ -191,6 +193,52 @@ timeline intact. What does NOT change: a monitor incident's lifecycle, notes, es
 and postmortem (NFR-017); the `⚡` and `⏸` system notes keep their one home, the MONITOR's incident;
 and an open service incident moves no component STATUS on a status page — it is rendered as an
 incident, next to a status the §15.0 precedence table still derives from health alone.
+
+**Reliability gate (FR-024, iter-0163).** A deploy pipeline asks whether the error budget allows a
+release and gets a machine-readable answer: an observed `state` (`ALLOW`, `WARN`, `BLOCK`, `UNKNOWN`,
+or `NOT_CONFIGURED` when the service has no policy) and an effective `action` (`ALLOW`, `WARN`, `BLOCK`;
+none for `NOT_CONFIGURED`), with every matching or unavailable clause in `reasons[]` and the evidence
+it rests on. A per-service POLICY names ONE SLO window and assigns each clause of a closed, versioned
+vocabulary — `budget_exhausted`, `budget_consumed` (≥ N %), `page_burn_firing`, `ticket_burn_firing`,
+`service_incident_open` — to `block`, `warn` or `ignore`, plus a mandatory `unknown_behavior` and a
+`max_seal_lag_seconds` bound past which the budget is UNAVAILABLE rather than quoted stale. **The gate
+derives nothing** (NFR-019): it consumes the owners that already exist — the report path
+(`serviceReliabilityReportTx`: the budget for the policy's window and whether it may be quoted at all),
+the burn latches of that window's target, the coverage clauses (as evidence only, never a clause) and
+the open auto-incident predicate — and if a clause ever needs a fact none of them exposes, the owner is
+extended and the service page gains it too. **One snapshot** (D6a): the service row, the policy, the
+active override, the report, the latches, the incident, the coverage and the ledger INSERT all happen in
+ONE `REPEATABLE READ` transaction whose first snapshot-bearing statement, `SELECT statement_timestamp()`,
+is `evaluated_at` — so a gate response and the service page cannot disagree about the same instant.
+Every decision is one immutable row in a daily-partitioned, bounded ledger
+(`gate.decision_retention_days`), readable by id after the service is renamed or deleted; decisions are
+not audit rows, policy and override mutations are. An override (`gate:override`, at most 7 days, one
+active per service, bound to the policy revision) changes `action` only — `state` and `reasons[]` stay
+the observed facts, and the metric sees `cerbix_gate_decisions_total{state="BLOCK",action="ALLOW",overridden="true"}`.
+Decision requests are bounded in concurrency and in rate per process (`gate.*`, §5a); a 429 runs no
+report and writes no row. Change Intelligence (deploy events, timelines, before/after) is FR-025 and is
+not part of this.
+
+Routes (spec D13a and §5; `{p}` project id, `{s}` service id — 400 malformed, 404 foreign or unknown;
+every body decoded strictly, the server fills nothing in):
+
+| Route | Action | Purpose |
+|---|---|---|
+| `POST /api/v1/projects/{p}/services/{s}/gate` | `gate:evaluate` (`viewer`+) | The decision. 200 with the D7 response; 429 with `Retry-After` from the §5a bounds; 503 `snapshot_conflict` / `ledger_unwritable` — no decision, nothing recorded. |
+| `GET` / `PUT` / `DELETE /api/v1/projects/{p}/services/{s}/gate/policy` | read `gate:evaluate`; write `gate:policy:write` (`editor`+) | The policy. `PUT` carries the FULL document with `expected_revision` (`null` = "nothing configured"), 409 `revision_conflict` on mismatch; `DELETE ?expected_revision=N` tombstones it (later decisions are `NOT_CONFIGURED`, the ledger is untouched, the active override closes as `policy_deleted`). `revision` is a per-service generation a delete-and-recreate never reuses. Writable on a FILE-MANAGED service too (D13 — the documented exception to the 409 rule of `func-service-reliability.md` §16.6a). |
+| `GET /api/v1/projects/{p}/services/{s}/gate/override` | `gate:evaluate` | The ACTIVE override, or 404 `none_active`. |
+| `POST /api/v1/projects/{p}/services/{s}/gate/override` | `gate:override` (`project_admin`+) | Create: `{policy_revision, reason, expires_at}` → 201 `{id}`; 409 `override_active` / `revision_conflict`; no `action` field — D9 fixes what an override does. |
+| `GET /api/v1/projects/{p}/services/{s}/gate/overrides` | `gate:evaluate` | History: the newest 50 by `created_at DESC, id DESC`, each with its read-time `status: active \| expired \| revoked \| inert`. |
+| `GET` / `DELETE /api/v1/projects/{p}/services/{s}/gate/overrides/{override_id}` | `gate:evaluate` / `gate:override` | One override by immutable id, with both attribution triples; revoke → 204, or 409 `override_not_active` for an expired, revoked or superseded one — never a silent 204. |
+| `GET /api/v1/projects/{p}/gate/decisions/{id}` | `gate:evaluate` | One ledger row, PROJECT-scoped: no service on the path, so it still answers after the service is deleted — the moment the evidence is wanted. |
+| `GET /api/v1/projects/{p}/gate/decisions?from&to[&service_id][&cursor][&limit]` | `gate:evaluate` | The listing: `[from, to)` required and ≤ 31 days, `limit` ≤ 200 (default 50), live keyset cursor over `evaluated_at DESC, id DESC`; a foreign `service_id` is an empty page, not 404. |
+
+CLI: `cerbix gate check --project <id> --service <id> [--json] [--timeout 10s]` (`internal/cli/gate.go`)
+— `CERBIX_URL`, `CERBIX_TOKEN` (environment only, never a flag), `CERBIX_CA_FILE`; exit `0` `ALLOW`/`WARN`,
+`2` `BLOCK`, `4` `NOT_CONFIGURED`, `1` transport/auth/timeout/429 (no retry; `Retry-After` on stderr). The
+word `UNKNOWN` is in the output whatever the exit code, because the exit follows the operator's declared
+`unknown_behavior`. The operational side — the meaning of every `UNKNOWN` reason, the override
+procedure, ledger sizing, the metric surface and its alerts — is in `runbook.md`.
 
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
 `mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `push` (dead-man's-switch).

@@ -5096,3 +5096,52 @@ content.
 
 **Not done.** Revisions 1–5 (`46379fa` … `3771622`) were left as they are — they predate the owner's
 repeated instruction and the party's verified ranges start after them — and nothing was pushed.
+
+## D-0204 — FR-024/NFR-019 resumed: implementation of the approved design as iter-0163 (2026-08-29)
+
+**Context.** One day after deferring the reliability gate (D-0202), the owner asked to start work on
+`docs/specs/func-reliability-gate.md` under the full AGENTS.md workflow, with role separation through
+subagents, the party listener never stopped, and commits made only when code actually changes — never
+pushed by the implementer.
+
+**Decision (owner, 2026-08-29).** FR-024 and NFR-019 are `IN_PROGRESS` in iter-0163. The design stays
+revision 13, unchanged; nothing in D-0201's approval is reopened. D-0202's resume path is honoured in
+order: the reviewer's fresh focused review of the specification against the current code (requested
+in the new party, [6]) — trivially current since the code has not changed since the approval, but asked
+for rather than assumed; the owner's visual pass on the mock before any SPA code, while backend, CLI and
+API proceed under the approved design; and the discharge of the 21 invariants and the §7 matrix, with the
+PostgreSQL 15.8 prepared-statement case run, not asserted.
+
+**Shape of the work.** Eight tasks P0→P2 in `iter-0163.md`: schema + domain + config; store core
+(policies, overrides, the one-transaction decision, ledger reads); the fenced ledger maintenance; API +
+limiter + metrics + audit + OpenAPI; the CLI; the test matrix; the docs that must move; and the SPA,
+gated. Each lands as its own commit when its code is green; the reviewer sees each range in the party.
+
+**What this record does not change.** D-0202's reason stands as written — the requirement came from the
+reviewer's proposal, not a user ask — and its process lesson stands too; the owner's decision to build
+anyway is the owner's, recorded here without re-arguing it.
+
+## D-0205 — FR-024 at implementation: three forward corrections to revision 13 (2026-08-29)
+
+**Context.** Agent C, writing the runbook and overview against the approved specification and the
+landed code, found the specification disagreeing with itself in one place and silent in two others.
+Corrections are made forward, in the text, each marked with this record; nothing in D-0201's approval
+is reopened.
+
+1. **The policy write action is `gate:policy:write`.** D12 names the three `authz.Action`s
+   (`gate:evaluate`, `gate:policy:write`, `gate:override`); D13a's authorization sentence said
+   `gate:policy`. D12 is the section that defines the actions; D13a is corrected to match it.
+2. **CLI usage errors exit 2; redirects are not followed.** D16 defined the decision exit codes and left
+   usage errors and 3xx unstated. The CLI exits 2 on a usage error — the exit-code family every `cerbix`
+   verb already uses — with no stdout line, so no pipeline can read it as `BLOCK`; and it refuses to
+   follow a redirect (exit 1, naming the `Location`) because following one would send the bearer to a
+   host the operator did not name. D16 now says both.
+3. **The horizon alert pairs with `absent()`.** The four ledger gauges are exported only by the process
+   holding the gate session and are cleared at step-down (a deposed node does not speak), so a vanished
+   leader makes `cerbix_gate_decisions_writable_horizon_seconds` ABSENT rather than low; the §4 threshold
+   and the runbook say so.
+
+**Also corrected while there** (stale living docs Agent C noticed outside FR-024): the
+`docs/specs/README.md` row for `func-service-incidents.md` still called it "not commissioned" after
+FR-022 closed at iter-0156 (D-0171), and `docs/overview.md`'s FR-021 paragraph still said the budget and
+burn numbers were "phase 2 and absent from the API" long after phase 2 shipped.

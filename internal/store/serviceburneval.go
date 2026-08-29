@@ -93,6 +93,12 @@ type burnRuleLatch struct {
 	// (D-0187). Equal to `seq` means the announcement this rule is holding was never received by
 	// anybody, and the rule must announce again once there is somebody to tell.
 	undelivered int64
+	// lastVerdict, evaluatedAt and leaseUntil are the latch's verdict and freshness, read for the
+	// reliability gate (func-reliability-gate D1: "last_verdict, firing, lease_until, per rule").
+	// The evaluator itself decides on `firing` and the sequences alone.
+	lastVerdict string
+	evaluatedAt time.Time
+	leaseUntil  time.Time
 }
 
 // EvaluateServiceBurnAlerts evaluates ONE slice of service burn targets and emits the edges it finds.
@@ -424,7 +430,8 @@ func burnLatchTx(
 ) (map[burnLatchKey]burnRuleLatch, error) {
 	out := make(map[burnLatchKey]burnRuleLatch, len(targetIDs))
 	rows, err := tx.Query(ctx, `
-		SELECT sla_target_id, rule_key, firing, emitted_seq, COALESCE(undelivered_seq, 0)
+		SELECT sla_target_id, rule_key, firing, emitted_seq, COALESCE(undelivered_seq, 0),
+		       last_verdict, evaluated_at, lease_until
 		  FROM service_burn_alert_state
 		 WHERE sla_target_id = ANY($1::uuid[])`, targetIDs)
 	if err != nil {
@@ -434,7 +441,8 @@ func burnLatchTx(
 	for rows.Next() {
 		var k burnLatchKey
 		var l burnRuleLatch
-		if err := rows.Scan(&k.targetID, &k.ruleKey, &l.firing, &l.seq, &l.undelivered); err != nil {
+		if err := rows.Scan(&k.targetID, &k.ruleKey, &l.firing, &l.seq, &l.undelivered,
+			&l.lastVerdict, &l.evaluatedAt, &l.leaseUntil); err != nil {
 			return nil, fmt.Errorf("store: scan burn latch: %w", err)
 		}
 		out[k] = l

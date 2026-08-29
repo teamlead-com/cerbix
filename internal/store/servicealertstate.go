@@ -306,11 +306,21 @@ var serviceAlertingStateSQL = `
 func (s *Store) ServiceAlertingState(
 	ctx context.Context, projectID, serviceID string,
 ) (ServiceAlertingState, error) {
+	return serviceAlertingStateOn(ctx, s.pool, projectID, serviceID)
+}
+
+// serviceAlertingStateOn is ServiceAlertingState on a caller-supplied connection or transaction
+// — the transaction-taking variant the reliability gate consumes coverage through, so its
+// coverage evidence comes from the SAME snapshot as every other fact of the decision
+// (func-reliability-gate D6a) rather than from a separate pool read.
+func serviceAlertingStateOn(
+	ctx context.Context, q dbConn, projectID, serviceID string,
+) (ServiceAlertingState, error) {
 	var out ServiceAlertingState
 	var clauses serviceCoverageClauses
 	dest := append(clauses.scanInto(),
 		&out.Live.EvaluatedAt, &out.Live.LeaseUntil, &out.Burn.EvaluatedAt, &out.Burn.LeaseUntil)
-	err := s.pool.QueryRow(ctx, serviceAlertingStateSQL, serviceID, projectID).Scan(dest...)
+	err := q.QueryRow(ctx, serviceAlertingStateSQL, serviceID, projectID).Scan(dest...)
 	if noRows(err) || isInvalidTextRepresentation(err) {
 		return ServiceAlertingState{}, ErrNotFound
 	}

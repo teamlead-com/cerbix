@@ -137,6 +137,16 @@ type ServiceWindowReport struct {
 	RetractedTo *time.Time `json:"retracted_to,omitempty"`
 }
 
+// SealLag is the distance from the sealed watermark to the report's own instant — `as_of −
+// sealed_through` (func-reliability-gate D1, D8a) — stated by the report so the service page
+// and the gate act on the same staleness; ok is false when nothing is sealed.
+func (r ServiceWindowReport) SealLag() (lag time.Duration, ok bool) {
+	if r.SealedThrough == nil {
+		return 0, false
+	}
+	return r.AsOf.Sub(*r.SealedThrough), true
+}
+
 // ServiceHealthNow is the categorical LIVE signal (§11.3): derived from provisional data,
 // explicitly unstable, and deliberately not a percentage. The SLI layer answers for the
 // declared sli[] members only; Diagnostics answers for monitors[] — the two-layer card of

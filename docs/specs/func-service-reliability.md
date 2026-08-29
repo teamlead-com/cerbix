@@ -2969,6 +2969,18 @@ services:
 A file-managed service refuses UI paging edits with `409` and renders read-only, exactly as its
 declaration does (§15.1) — these fields are part of the desired state, so the file owns them.
 
+**Amendment — the one documented exception (FR-024 D13, `func-reliability-gate.md`; iter-0163).** A
+file-managed service's **gate policy** — `…/services/{s}/gate/policy` and the override routes beside it —
+is writable through the API even though the service's declaration and every paging field in the table
+above answer `409`. The policy is an operational control owned by the UI/API, because the team that
+deploys is not always the team that owns the service's declaration: it is not part of bundle format 2,
+it is excluded from the canonical hash, and it lives in its own tables (`service_gate_policies`,
+`service_gate_overrides`) rather than in the fields this section governs. It is the ONE paging-adjacent
+field a file-managed service accepts through the API; the rule above is otherwise unchanged. The
+alternative — policy as a declarative part of format 2, with file-managed services refusing API writes
+— was recommended in review and declined by the owner, and D13 records it so it can be revisited with
+evidence rather than rediscovered.
+
 **Every paging-config change is audited** with its actor and its before/after, not only the moment
 ownership is switched on: a `page_on` edit that stops covering the current state is as consequential
 as disabling ownership, and §16.4a gives it a close reason.

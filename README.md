@@ -57,6 +57,10 @@ its own alerts, incidents and pages.
 - **Service SLO, error budget & burn rate** — per window, quoted against the objective in
   force, with burn-rate alerting that says which watermark it was computed from. Monitor
   SLA and weekly SLA reports too; maintenance windows are excluded.
+- **Reliability gate** — a deploy pipeline asks `cerbix gate check` (or one `POST`) whether the
+  error budget allows the release and gets `ALLOW` / `WARN` / `BLOCK` / `UNKNOWN` with every reason
+  attached, from the same sealed facts the service page shows, in one database snapshot:
+  **cerbix decides, the pipeline acts.**
 - **Paging that does not double** — a Service can own paging for its members: suppression
   is per signal, per polarity, and only while coverage is demonstrably armed. Anything
   ambiguous **fails open** — a page that was not needed is noise, a page that was owed and
@@ -203,6 +207,9 @@ CLI:
 cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]
 cerbix migrate --config <path>     # apply DB migrations and exit
 cerbix reencrypt --config <path>   # rotate the secrets-at-rest key
+cerbix gate check --project <id> --service <id> [--json] [--timeout 10s]
+                                   # reliability gate; CERBIX_URL + CERBIX_TOKEN from the environment,
+                                   # exit 0 ALLOW/WARN, 2 BLOCK, 4 NOT_CONFIGURED, 1 error (no retry on 429)
 cerbix version
 ```
 

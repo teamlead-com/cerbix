@@ -762,3 +762,239 @@ UPDATE incidents SET status = 'resolved', resolved_at = now(), updated_at = now(
 - `cerbix_service_fact_maintenance_failing == 1 AND time() - cerbix_service_fact_maintenance_last_success_timestamp_seconds > 1800` —
   ticket: a stuck month (see the recovery split above). Before any success, last-success is
   floored at tracking start, so a first-cadence blip cannot trip the 30-minute age.
+
+## Reliability gate operations (FR-024)
+
+The gate (`docs/specs/func-reliability-gate.md`, revision 13; implementation iter-0163) answers one
+question for a pipeline: does the error budget of THIS service, for the SLO window its policy names,
+allow a release right now. It reads facts cerbix has already sealed and evaluated — the reliability
+report, the burn latches, the open auto-incident, the coverage clauses — in ONE `REPEATABLE READ`
+transaction, records the decision in a bounded ledger, and computes nothing of its own. The routes
+and the ledger store are landing in this iteration (FR-024, iter-0163); the metric surface
+(`internal/metrics/gate.go`), the CLI (`internal/cli/gate.go`), the `gate.*` keys
+(`internal/config/config.go`, `docker/config.example.yaml`), the domain vocabulary
+(`internal/domain/gate.go`) and the schema (`internal/store/migrations/00093_reliability_gate.sql`)
+are in the tree. Route shapes below are the spec's (D13a, §5).
+
+Two words carry the whole contract. `state` is what was OBSERVED: `ALLOW`, `WARN`, `BLOCK`, `UNKNOWN`,
+or `NOT_CONFIGURED` (the service has no policy). `action` is what the pipeline should DO: `ALLOW`,
+`WARN` or `BLOCK`; `NOT_CONFIGURED` has none. A known `BLOCK` is never softened by an unknown
+neighbour, and an override changes `action` and nothing else.
+
+### The gate says UNKNOWN
+
+`UNKNOWN` is about the FACTS, not about the pipeline or the gate: a clause the policy assigns `block`
+or `warn` could not be answered. The token, the network and cerbix itself are fine — cerbix is saying
+it does not currently KNOW whether the budget allows the release, and `reasons[]` names every clause
+that could not be answered, each with its reason code. A clause assigned `ignore` never produces
+`UNKNOWN`, whatever its facts look like.
+
+| Reason code | What it means | What to do |
+|---|---|---|
+| `seal_stale` | `evaluated_at − sealed_through` exceeds the policy's `max_seal_lag_seconds`: the materializer is behind, and the budget has not been measured since `sealed_through`. Every budget clause is unavailable (D8a). | Open the service page: it shows the same `sealed_through` and `seal_lag` the gate acted on — the report path states both and the gate derives nothing, so the two cannot disagree. Then read `cerbix_service_watermark_lag_seconds` and the FR-021 section above (a stalled leader, a wedged repair range, a stuck fact partition). Do not "fix" it by loosening the policy. The floor of `max_seal_lag_seconds` is **300 s** because a HEALTHY materializer sits at a lag of `[2m, 3m)` — `LateArrivalGrace` 120 s + `CanonicalBucket` 60 s, before queueing and commit — so the floor is that bound plus two buckets of headroom (`domain.MinSealLag`, D8a); the default is 900 s (15 min). A policy at the floor on a healthy stack is NOT `seal_stale`; a lag past the bound is a real fault in the seal pipeline. |
+| `facts_stale` | A burn clause's latch is stale: the rule's lease has expired, or no burn evaluation exists for that rule yet. | The burn arm of the alerting evaluator — `cerbix_service_alert_lag_seconds{signal="burn"}`, `cerbix_service_alert_backlog{signal="burn"}`, "Alerting evaluator: a stall" above. A NEW target's rules read `facts_stale` until their first evaluation. |
+| `never_sealed` | No fact has been sealed for this service at all: a fresh declaration, or one whose SLI members have never reported. | Wait for the first seal (a new service backfills first); check the service has SLI members and a governing definition revision. |
+| `window_target_missing` | The service has no SLA target for the policy's `window` (D2). A policy for a window without a target is refused at write time, so this means the target was deleted afterwards. | Recreate the target for that window, or rewrite the policy for a window that has one. |
+| `no_objective` | The window's target exists but carries no objective, so there is no budget to derive. | Set the objective on the target. |
+| `budget_withheld` | The report WITHHOLDS the number for this window — the same withholding the service page shows (for example a definition revision spanning the window). A withheld number is a withheld clause, never a zero. | The service page names the withholding reason; resolve that. The gate never quotes a number the page would withhold (invariant 1). |
+
+What happens next is the operator's declared choice, not a default: every policy carries
+`unknown_behavior: warn | block` and cannot be created without one (D5). `state` stays `UNKNOWN` — the
+word is in the response and on the CLI's stdout line regardless — and `action` becomes `WARN` (exit 0)
+or `BLOCK` (exit 2) accordingly. A fresh installation has no sealed facts for hours, which is why the
+choice is explicit: a silent `block` breaks onboarding and a silent `warn` is a fail-open nobody chose.
+
+Not `UNKNOWN`: `NOT_CONFIGURED` (no policy — `reason: not_configured` with a documentation link, no
+`action`, CLI exit 4) and a 503 (`snapshot_conflict` after the one retry, or `ledger_unwritable`),
+where NO decision was made and nothing was recorded — the CLI exits 1 and the pipeline asks again.
+
+### Overrides: lifting a BLOCK for a bounded time
+
+Who: a principal holding `gate:override` — `project_admin` and above in v1 (D12); an API token asks
+with the role it already has. A pipeline cannot approve itself: the override is never a field of the
+decision request, and any client-supplied actor field on either endpoint is refused as unknown.
+
+Create one against the policy revision you are looking at:
+
+```
+POST /api/v1/projects/{p}/services/{s}/gate/override
+{"policy_revision": <revision from GET …/gate/policy>, "reason": "<1..500 chars>", "expires_at": "<RFC3339>"}
+→ 201 {id}
+```
+
+`expires_at` must be after the database's `now()` and at most **7 days** ahead — a hard maximum, not a
+default; there is no default. The actor is server-derived and stored twice: the typed attribution the
+audit log uses AND an immutable `actor_label` (`token:<name>` for an API token, the user for a person),
+so the evidence names who did it for as long as the row exists, after the token is deleted too. The
+mutation goes to the tenant audit log.
+
+What it changes: **`action` only — never `state`, never `reasons[]`** (D9). A `BLOCK` under an active
+override answers `state: BLOCK`, `action: ALLOW`, `unoverridden_action: BLOCK` and
+`override: {id, actor_label, reason, expires_at}`; an `UNKNOWN` whose `unknown_behavior` is `block`
+likewise. `WARN` and `ALLOW` are left alone; `NOT_CONFIGURED` is never overridden. The CLI prints
+`override=<actor_label>` on its stdout line and exits 0.
+
+How to see it: `cerbix_gate_decisions_total{state="BLOCK",action="ALLOW",overridden="true"}`. The
+`state` label stays the truth, so this series is exactly "releases that went out over a blocking
+budget" — review it after any incident, and alongside the audit log, which has the override's reason.
+
+Lifecycle, and the 409s a stale screen will meet:
+
+- at most ONE unrevoked override per service: a second `POST` is 409 `override_active`. An expired one
+  releases its slot (closed as `expired` under the service lock before the insert);
+- a `policy_revision` that is not the current one is 409 `revision_conflict` — read the policy again;
+- a policy edit or a policy `DELETE` revokes the active override in the same transaction
+  (`revoked_reason: policy_changed` / `policy_deleted`), so an override never outlives a tightening of
+  the policy it was granted under;
+- revocation is by the override's immutable id, never "the current one":
+  `DELETE /api/v1/projects/{p}/services/{s}/gate/overrides/{override_id}` → 204. Revoking an expired,
+  already-revoked or superseded override is 409 `override_not_active`, never a silent 204, so a UI that
+  held override A while B was created cannot revoke B by accident;
+- reads: `GET …/gate/override` is the ACTIVE override (404 `none_active` otherwise); `GET …/gate/overrides`
+  is history, the newest 50; `GET …/gate/overrides/{override_id}` is any override with both attribution
+  triples and its read-time `status: active | expired | revoked | inert` (`inert` = the policy has moved
+  on since it was granted).
+
+### The decision ledger: retention, disk and the maintenance pass
+
+Every decision is one immutable row in `service_gate_decisions` — the gate's own bounded store and the
+only new thing FR-024 keeps. Decisions are NOT audit rows: a busy pipeline would bury the tenant audit
+log under its own heartbeat. Policy and override mutations ARE audited. A row stores the service slug
+and name, the policy snapshot and the full evidence, so it stays readable by id after the service is
+renamed or deleted (`service_id` becomes null; the row is cascaded with its project).
+
+The table is RANGE-partitioned by `evaluated_at`, one partition per UTC day, in BOTH storage modes (a
+plain partitioned table, no hypertable, and no DEFAULT partition), and **`gate.decision_retention_days`**
+(default 90, range 7..365) is enforced by removing WHOLE partitions — never a row `DELETE`. Two
+boundaries, both stated (D10), under a healthy pass:
+
+- a row stops being READABLE on the ledger routes when its partition is DETACHED:
+  `retention + <1 day + ≤ decision_purge_every` after `evaluated_at`;
+- its BYTES exist until the deferred `DROP` one pass later:
+  `retention + <1 day + ≤ 2 × decision_purge_every`.
+
+Beyond either boundary is BACKLOG — visible in `cerbix_gate_decisions_partitions_pending_drop`, alerted
+on below, and not a bound the product promises while a lock refusal or a lost session can delay a pass.
+
+The pass runs on the scheduler leader in its own goroutine, but its authority is its OWN session-level
+advisory lock (slot 3 of the `"cerbix" + slot` namespace; slot 1 is scheduler leadership, slot 2
+migrations), and every statement of a pass runs on the one pinned connection that holds it — so a
+deposed node cannot detach or drop anything after losing the lock, by construction. Each DDL statement
+runs under `lock_timeout = 2s` and `statement_timeout = 10s`; a refusal is logged, counted in
+`cerbix_gate_maintenance_errors_total{kind="lock_timeout"|"statement_timeout"}` and retried next pass,
+never escalated to a longer wait. Per pass: up to `decision_partition_create_max` days are created
+ahead (create standalone + attach, nearest horizon first, keeping `decision_partition_lead_days` of
+writable horizon), then up to `decision_purge_max_partitions` removal STAGE-OPS (finalize → drops whose
+snapshot gate is open → detaches, oldest first). Steady state consumes two stage-ops a day, so a
+retention shortened by many days converges only at the surplus above that: for a large cut, raise
+`gate.decision_purge_max_partitions` (or shorten `gate.decision_purge_every`) temporarily rather than
+wait, then put it back.
+
+**Disk.** A row is bounded by CHECKs — evidence ≤ 4 KiB, reasons ≤ 1 KiB, policy snapshot ≤ 4 KiB — so
+at most ≈ 10 KiB and typically ≈ 1.5 KiB of PAYLOAD. What the §5a bounds allow, per replica:
+
+| | rows / day | rows / 90 d | payload / 90 d typical → bound | rows / 365 d | payload / 365 d typical → bound |
+|---|---|---|---|---|---|
+| a real installation (≈ 200 decisions/day) | 200 | 18 000 | 27 MB → 180 MB | 73 000 | 110 MB → 730 MB |
+| defaults saturated (`60/min` process) | 86 400 | 7 776 000 | 11.7 GB → 78 GB | 31 536 000 | 47 GB → 315 GB |
+| hard maximum saturated (`600/min` process) | 864 000 | 77 760 000 | 117 GB → 778 GB | 315 360 000 | 473 GB → 3.2 TB |
+
+Payload is not disk: tuple headers, TOAST, the four indexes per partition (about 240 B of index entries
+per 1.5 KiB row) and fill factor sit outside the three JSON CHECKs, so physical size is roughly 2–3×
+payload. **Size disk from `cerbix_gate_decisions_bytes`** (the sum of `pg_total_relation_size` over
+partitions not yet dropped) **after the first week of real traffic, and from 3× the bound column before
+it.** One daily partition at saturated defaults holds 86 400 rows ≈ 130 MB typical and is removed in two
+catalog operations. The bounds are process-local by contract: multiply by the `api`/`all` replica count
+for a cluster. Raising **`gate.evaluate_rate_process_per_minute`** raises THIS table — read it first.
+
+### The CLI's environment contract
+
+`cerbix gate check --project <id> --service <id> [--json] [--timeout 10s]` performs exactly ONE
+`POST …/gate` and exits by the answer's `action`. It is a security and operations surface, not a
+convenience (D16, `internal/cli/gate.go`): it opens no database, reads no config file, follows no
+redirect.
+
+| Variable | Meaning |
+|---|---|
+| `CERBIX_URL` | The server base URL (`https://cerbix.example.com`; a reverse-proxy sub-path is tolerated). No credentials, query or fragment. A 3xx is NOT followed — exit 1 with "set `CERBIX_URL` to the final address" — because following it would carry the bearer token to a host the operator did not name, or turn the POST into a GET. |
+| `CERBIX_TOKEN` | The API token. **Environment only, never a flag**: flags land in shell history and process lists, and a `--token` flag does not exist. Missing → exit 1, naming the variable. |
+| `CERBIX_CA_FILE` | Optional PEM file appended to the system roots. TLS verifies by default (TLS ≥ 1.2); there is no skip-verify option. |
+
+| Exit | Meaning |
+|---|---|
+| `0` | `action` is `ALLOW` or `WARN` — including `state: UNKNOWN` under `unknown_behavior: warn`; the word `UNKNOWN` is on stdout regardless. |
+| `2` | `action` is `BLOCK` — including `UNKNOWN` under `unknown_behavior: block`. Usage errors (a bad flag, a missing `--project`/`--service`, a non-positive `--timeout`) also exit 2: a pipeline that cannot even ask the gate must not proceed either. |
+| `4` | `state: NOT_CONFIGURED` — the service has no policy. What to do with that is the integration's visible choice; it is never rendered as `ALLOW` or `WARN`. |
+| `1` | Transport, timeout (`--timeout`, default 10 s), TLS, auth, any other 4xx/5xx — including 503 `snapshot_conflict` / `ledger_unwritable`, where no decision was made — a malformed response, and **429**. The CLI does NOT retry a 429 (a pipeline that retries into a rate limit is the load the limit exists to shed): it prints the server's `Retry-After` (whole seconds, `ceil`ed, never below 1) on stderr and exits 1; back off in the pipeline. |
+
+stdout is ONE line — `state=<STATE> [action=<ACTION>] [override=<actor_label>] decision=<decision_id>`
+— or, with `--json`, the API response byte for byte (it carries `schema_version`). Every reason and
+every diagnostic goes to stderr. Store `decision_id` with the deploy: it resolves later, by id, through
+the project-scoped ledger route, after the service has been renamed or deleted, and a replayed id is
+visibly old because it carries its own `evaluated_at`.
+
+### Metrics and suggested alerts
+
+Nine families, every label set CLOSED (`internal/metrics/gate.go`): no principal, service or token ever
+becomes a label, because this surface is reachable from an authenticated pipeline on every decision,
+and a recorder handed a value outside its set records nothing. The four ledger gauges are exported
+ONLY by the process that currently holds the gate maintenance session and are cleared when it loses
+it — so exactly one process describes the ledger, and a threshold alert on a gauge must be paired with
+an `absent()` alert, or a vanished leader reads as "no problem".
+
+| Metric (type) | Labels | Meaning |
+|---|---|---|
+| `cerbix_gate_decisions_total` (counter) | `state`, `action`, `overridden` | Decisions by observed state and effective action; a `NOT_CONFIGURED` decision has no action and carries `action="none"`. |
+| `cerbix_gate_evaluate_rejected_total` (counter) | `reason`: `process_inflight` \| `principal_inflight` \| `process_rate` \| `principal_rate` | Evaluations refused by a process-local bound BEFORE any transaction (a 429: no report, no ledger row, no rate token burnt). |
+| `cerbix_gate_evaluate_errors_total` (counter) | `kind`: `snapshot_conflict` \| `timeout` \| `ledger_unwritable` \| `error` | Admitted evaluations that failed. Evaluation errors ONLY — a maintenance failure never moves this family. |
+| `cerbix_gate_maintenance_errors_total` (counter) | `kind`: `lock_timeout` \| `statement_timeout` \| `partition_identity` \| `error` | Ledger maintenance statements refused or failed; each retried next pass, never escalated to a longer wait. |
+| `cerbix_gate_decision_duration_seconds` (histogram) | — | Wall time of one admitted evaluation, request to decision, fixed buckets 0.05 … 30 s. |
+| `cerbix_gate_decisions_partitions_pending_drop` (gauge) | — | Partitions attached past the retention cutoff plus detached but not yet dropped — the backlog. |
+| `cerbix_gate_decisions_oldest_partition_age_seconds` (gauge) | — | Age of the oldest attached partition's upper bound; 0 when none is past the cutoff. |
+| `cerbix_gate_decisions_writable_horizon_seconds` (gauge) | — | Seconds until the upper bound of the newest attached partition, from the registry and the catalog; the ledger stops accepting decisions at 0. |
+| `cerbix_gate_decisions_bytes` (gauge) | — | `pg_total_relation_size` summed over partitions not yet dropped — the number to size disk from. |
+
+| Alert | Severity | Meaning / what to do |
+|---|---|---|
+| `cerbix_gate_decisions_writable_horizon_seconds < 172800` (2 days) | ticket | The maintenance goroutine or the scheduler leader is gone: the lead of `decision_partition_lead_days` is being consumed and nobody is creating partitions. The gate stops RECORDING when it reaches 0 — and a leader absent that long has already pushed every policy past `max_seal_lag_seconds`, so the gate is saying `UNKNOWN` before it stops recording. Check the scheduler leader and its logs; pair with `absent(cerbix_gate_decisions_writable_horizon_seconds)`. |
+| `cerbix_gate_decisions_partitions_pending_drop >= 2 for 6h` | ticket | Removal is being refused by `lock_timeout` pass after pass (see that row), or the pass is not running at all. Steady state is 0 or 1. |
+| `cerbix_gate_evaluate_errors_total{kind="ledger_unwritable"} > 0` | **page** | The writable horizon was EXHAUSTED: a decision found no partition for its `evaluated_at`, the API answered 503, the pipeline got no decision. Restore the leader and its maintenance pass; the next pass creates the missing days nearest-horizon-first. |
+| `cerbix_gate_maintenance_errors_total{kind="partition_identity"} > 0` | **page** | A relation under our partition name lacks our `cerbix:gate-ledger:<owner_token>` marker, or its shape is wrong, or the registry row is in a state no crash produces. That DAY is left alone until a human looks; the other days proceed, so one bad relation cannot exhaust the horizon by itself. Compare `service_gate_decision_partitions` with `pg_class` and `obj_description` for the named day; do not rename or drop by hand without reading D10. |
+| `rate(cerbix_gate_maintenance_errors_total{kind="lock_timeout"}[1h]) > 0` | ticket | Something holds `ACCESS EXCLUSIVE` on the ledger or one of its partitions during maintenance — a manual DDL, a long-running dump, a stuck backup. Find it in `pg_locks` joined to `pg_stat_activity`. |
+| `rate(cerbix_gate_evaluate_rejected_total[5m]) > 0` sustained for 15m | ticket | A pipeline is looping into the limit (the CLI never retries a 429 by itself, so this is a wrapper or a fleet). Read the `reason` label: `principal_*` names one token's loop, `process_*` means the replica's whole budget is spent — read the capacity table above before raising anything. |
+| `cerbix_gate_evaluate_errors_total{kind="snapshot_conflict"}` rising (`increase(…[15m]) > 0`) | ticket | Serialization failures the single retry is not absorbing — contention on the service's rows (policy writes, overrides, alert latches) while decisions run. A steady rate means a pipeline and an editor are fighting over one service. |
+
+### PostgreSQL ≥ 15.9 is recommended for the ledger (the floor stays 15.0)
+
+Ledger retention is `ALTER TABLE … DETACH PARTITION … CONCURRENTLY` followed, later, by a `DROP TABLE`
+of the standalone relation. PostgreSQL 15.9's release notes fix "possible crashes and 'could not open
+relation' errors in queries on a partitioned table occurring concurrently with a DETACH CONCURRENTLY
+and immediate drop of a partition". cerbix does not RELY on that fix: the drop is deferred to a later
+pass and gated on snapshots — it runs only when `detached_at <= now() − decision_purge_every` on the
+database clock AND no backend in the database has a transaction older than the detach
+(`pg_stat_activity.xact_start`) — a sequence that is safe on every supported 15.x, which is why the
+enforced floor (`minServerVersionNum`, 15.0, see "PostgreSQL 15 is a hard requirement" above) does not
+move. Running ≥ 15.9 is belt to those braces: it removes the server-side defect class instead of only
+sidestepping it. 16 is what every image and CI job here uses.
+
+### The `gate.*` keys
+
+All ten are validated at configuration load; a value outside its range refuses to start, naming the
+key and the range (`internal/config/config.go`; the example block in `docker/config.example.yaml`).
+Two cross-checks name both keys: `decision_partition_create_max × floor(86 400 / decision_purge_every)`
+must be at least 2 (one day's partition plus catch-up) and
+`decision_purge_max_partitions × floor(86 400 / decision_purge_every)` at least 4 (strictly more than
+the two stage-ops a day of steady state).
+
+| Key (`gate.*`) | Default | Range | Meaning |
+|---|---|---|---|
+| `evaluate_inflight_process` | 8 | 1..64 | decisions in flight per PROCESS; the (n+1)th is 429 `process_inflight` before any transaction |
+| `evaluate_inflight_principal` | 2 | 1..16 | decisions in flight per principal (token id or user id); 429 `principal_inflight` |
+| `evaluate_rate_principal_per_minute` | 10 | 1..600 | token bucket per principal: capacity = the value, refill value/60 per second; drained → 429 `principal_rate` |
+| `evaluate_rate_process_per_minute` | 60 | 1..600 | token bucket for the process, same algorithm; drained → 429 `process_rate`. Raising it raises the capacity table above |
+| `evaluate_tx_budget_ms` | 5000 | 500..30000 | begin-through-commit budget of the decision transaction, through the store's deadline wrapper |
+| `decision_retention_days` | 90 | 7..365 | ledger retention by whole-partition removal — readable until detach, on disk until the deferred drop (the two boundaries above) |
+| `decision_partition_lead_days` | 7 | 2..30 | days of partitions kept created ahead — the writable horizon the gauge measures against |
+| `decision_partition_create_max` | 3 | 1..8 | days created (create + attach) per maintenance pass, nearest horizon first |
+| `decision_purge_every` | 1h | 5m..24h | maintenance cadence on the gate's own fenced session; a pass's whole lifecycle fits 30 s (work ≤ 27 s + cleanup ≤ 3 s) |
+| `decision_purge_max_partitions` | 8 | 1..48 | removal stage-ops (finalize, drop, detach) per pass; steady state is two a day |

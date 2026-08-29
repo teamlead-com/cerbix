@@ -362,10 +362,10 @@ async function reload() {
   abortAll();
   const gen = ++generation;
   now.value = new Date();
-  conflict.value = "";
-  policyError.value = "";
-  deleteError.value = "";
-  ovError.value = "";
+  // The dialog closes, but the blocked state does NOT end here (P1 [86]): a refusal's message
+  // moves to the card's banner so the way out stays on screen, and `conflict` is cleared only
+  // below, once the server's policy has actually been re-read. A failed reload keeps it.
+  if (conflict.value === "delete" && deleteError.value) policyError.value = deleteError.value;
   deleteOpen.value = false;
   revokeConfirming.value = false;
   saving.value = false;
@@ -376,10 +376,16 @@ async function reload() {
   if (gen !== generation) return;
   await loadDependents(gen);
   if (gen !== generation) return;
-  if (editing.value) {
-    if (policyStatus.value === "unavailable") editing.value = false;
-    else prefill();
+  if (policyStatus.value === "unavailable") {
+    // Nothing was re-read that a mutation could rest on; the card shows one line and no controls.
+    editing.value = false;
+    return;
   }
+  conflict.value = "";
+  policyError.value = "";
+  deleteError.value = "";
+  ovError.value = "";
+  if (editing.value) prefill();
 }
 
 onMounted(load);
@@ -444,8 +450,11 @@ watch(windowsWithTarget, (ws) => {
 
 function discard() {
   editing.value = false;
-  policyError.value = "";
-  if (conflict.value === "policy" || conflict.value === "delete") conflict.value = "";
+  // P1 [86]: Discard drops the draft edits back to the last-known policy and closes the editor —
+  // it never ends the blocked state. `policy`/`baseRevision` are exactly what the 409 said is
+  // stale, so a Save from them would be the same stale write again; only `reload()` re-reads.
+  // While blocked, the banner and its Reload stay on screen (they render outside the editor).
+  if (!blocked.value) policyError.value = "";
   prefill();
 }
 
@@ -526,7 +535,10 @@ function openDelete() {
 function closeDelete() {
   if (deleting.value) return;
   deleteOpen.value = false;
-  deleteError.value = "";
+  // A 409 (or a not_configured) inside the dialog blocked every mutation; closing the dialog must
+  // not hide the way out (P1 [86]). The message moves to the card's banner, which carries Reload.
+  if (conflict.value === "delete") policyError.value = deleteError.value;
+  else deleteError.value = "";
 }
 
 async function confirmDelete() {
@@ -744,6 +756,24 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
     </p>
 
     <template v-else>
+      <!-- Refused by the server: verbatim, and a 409 with the way out. It sits ABOVE the policy
+           panel rather than inside the editor so that Discard, a closed delete dialog and the
+           empty state all keep the banner and its Reload on screen while every mutation is
+           blocked (P1 [86]); while the delete dialog is open the dialog carries the Reload. -->
+      <div v-if="policyError" :class="ERR_BOX" class="mx-4 mt-4" role="alert">
+        <span aria-hidden="true">⚠</span>
+        <span class="flex-1" data-testid="gate-policy-error">{{ policyError }}</span>
+        <button
+          v-if="conflict === 'policy' || (conflict === 'delete' && !deleteOpen)"
+          type="button"
+          class="flex-none rounded-[5px] border border-down bg-surface px-2 py-[2px] text-[11.5px]"
+          data-testid="gate-reload"
+          @click="reload"
+        >
+          Reload
+        </button>
+      </div>
+
       <!-- ── Screen 1: the empty state ─────────────────────────────────────────────────── -->
       <div v-if="policyStatus === 'none' && !editing" class="flex flex-col gap-[14px] p-4" data-testid="gate-empty">
         <p class="max-w-[62ch] text-[13px] text-ink-2">
@@ -944,13 +974,6 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
               A healthy service seals about 3 minutes behind now (bucket 60 s + late-arrival grace 120 s). The floor of 5 minutes is
               that plus two buckets of headroom — a bound below it would say <span class="font-mono">seal_stale</span> about a system doing exactly what it should.
             </div>
-          </div>
-
-          <!-- Refused by the server: verbatim, and a 409 with the way out. -->
-          <div v-if="policyError" :class="ERR_BOX" role="alert">
-            <span aria-hidden="true">⚠</span>
-            <span class="flex-1" data-testid="gate-policy-error">{{ policyError }}</span>
-            <button v-if="conflict === 'policy'" type="button" class="flex-none rounded-[5px] border border-down bg-surface px-2 py-[2px] text-[11.5px]" data-testid="gate-reload" @click="reload">Reload</button>
           </div>
 
           <div class="flex flex-wrap items-center gap-[10px] border-t border-border pt-[14px]">

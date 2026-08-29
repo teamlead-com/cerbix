@@ -256,24 +256,33 @@ function routeService(): string {
 
 /** Defaults for THIS project: the range, no state, and the service the route names (if any). */
 function start(fromRoute: boolean) {
+  booted = true;
   draft.value = { ...defaultRange(), service: fromRoute ? routeService() : "", state: "" };
   apply();
   void loadServices();
 }
 
+// P1 [88]: the FIRST project selection is STARTUP, not a switch. On a cold load of
+// `/gate/decisions?service=<id>` the workspace is not initialised yet; `ws.init()` picks the
+// project and the watcher below fires — and the route's pre-filter must survive that first
+// request. A LATER change of project is a real switch: the route's service belonged to the
+// previous project and would only ever yield an empty page, so the filters reset. The marker
+// is explicit; the two paths (watcher, onMounted) both consult it, so whichever runs first
+// starts once and the other stands down — never by ordering luck.
+let booted = false;
+
 onMounted(async () => {
-  const before = ws.projectId;
   await ws.init();
-  // If init() picked the project just now, the watcher below has already started the load.
-  if (ws.projectId && ws.projectId === before) start(true);
+  if (ws.projectId && !booted) start(true);
 });
-// A project switch resets the filters to their defaults: the `?service=` of the route belonged to
-// the previous project and would only ever yield an empty page here.
 watch(
   () => ws.projectId,
   (id) => {
-    if (id) start(false);
-    else cancelAll();
+    if (!id) {
+      cancelAll();
+      return;
+    }
+    start(!booted);
   },
 );
 // The card's "all decisions →" link moves the pre-filter while this view may be mounted.

@@ -60,7 +60,9 @@ its own alerts, incidents and pages.
 - **Reliability gate** — a deploy pipeline asks `cerbix gate check` (or one `POST`) whether the
   error budget allows the release and gets `ALLOW` / `WARN` / `BLOCK` / `UNKNOWN` with every reason
   attached, from the same sealed facts the service page shows, in one database snapshot:
-  **cerbix decides, the pipeline acts.**
+  **cerbix decides, the pipeline acts.** The policy, a bounded override and the decision ledger
+  live on the service page's `Release gate` card and the `Gate decisions` view; the UI never
+  writes a decision.
 - **Paging that does not double** — a Service can own paging for its members: suppression
   is per signal, per polarity, and only while coverage is demonstrably armed. Anything
   ambiguous **fails open** — a page that was not needed is noise, a page that was owed and

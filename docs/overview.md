@@ -240,6 +240,38 @@ word `UNKNOWN` is in the output whatever the exit code, because the exit follows
 `unknown_behavior`. The operational side — the meaning of every `UNKNOWN` reason, the override
 procedure, ledger sizing, the metric surface and its alerts — is in `runbook.md`.
 
+**The gate in the SPA (D-0207, `9793758`).** The service detail carries a `Release gate` card between
+Alerting and Dependencies (`frontend/src/components/ServiceGate.vue`: facts → who is woken → who may
+deploy). Its header pill is the state of the newest ledger row for the service over the last 30 days —
+`not configured` while the service has no policy — next to a `revision N` chip; without a policy the card
+is an empty state naming the windows that have a target and, for editors, `Configure`. The policy is
+edited inline — the window from the service's `sla_targets` inventory (`GET …/services/{s}` carries it in
+canonical order since `3fc19e3`; `ListServiceSLATargets` in `internal/store/servicereport.go`),
+`unknown_behavior`, the five clause assignments, the threshold, the seal lag in whole minutes — with
+client validation mirroring the server's rules; Save, Discard and Delete send `expected_revision`, and
+after a 409 the draft is kept and every mutation is blocked until an explicit Reload re-reads. The latest
+decision is rendered with its `reasons[]` (only a MATCHED clause is drawn in its assignment's colour;
+`seal_stale`/`facts_stale` are dashed), `sealed_through` with `seal_lag` beside it — marked stale once
+the lag exceeds the policy's bound — and `facts_fresh_until`; the error-budget figure is the value the
+decision itself quoted in a budget clause, never a fresher number fetched from the report path (NFR-019's
+"same snapshot", read strictly). An override panel shows the active override with Revoke-by-id and the
+add form (reason, `until` ≤ 7 days, one at a time); a compact CLI card prints `cerbix gate check` for this
+project and service with the four exit codes.
+
+Two ledger views complete the surface: `Gate decisions` (`/gate/decisions`,
+`frontend/src/views/GateDecisionsView.vue` — `?service=` pre-filter from the card, an explicit `[from, to)`
+range of at most 31 days frozen at Apply and refused client-side before the request, the server's
+`range_too_wide` rendered the same way, pages of 50 over the keyset cursor) and the by-id record
+(`/gate/decisions/:id`, `frontend/src/views/GateDecisionView.vue` — every present field of the immutable
+row plus the raw JSON, still readable after the service is deleted); the per-service override history is
+`/services/:id/gate/overrides` (`frontend/src/views/GateOverridesView.vue`, read-only, the closure per
+`revoked_reason`). RBAC follows the actions: `gate:evaluate` is viewer+, so the card and both histories
+render for everyone who sees the service; the policy controls render for `session.canProjectWrite`
+(editor+); the override controls only for `session.canProjectAdmin` (org/project admin or global admin,
+`frontend/src/stores/session.ts`). A file-managed service does NOT make the gate read-only (D13). And the
+SPA never asks the gate: opening a page reads the ledger (`limit=1` for the card) and creates no decision
+— a decision is written only by `POST …/gate`, that is by the CLI or the pipeline.
+
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
 `mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `push` (dead-man's-switch).
 HTTP-like types use the declarative conditions engine

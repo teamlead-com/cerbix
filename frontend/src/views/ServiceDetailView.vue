@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { api } from "@/api/client";
@@ -38,45 +38,75 @@ const canWrite = computed(() => session.canProjectWrite(ws.orgId, ws.projectId) 
 const canPolicyWrite = computed(() => session.canProjectWrite(ws.orgId, ws.projectId));
 const canOverride = computed(() => session.canProjectAdmin(ws.orgId, ws.projectId));
 
+// P1 [90] (iter-0163 §1.13 review): the parent's reads carry the same discipline as the cards
+// below them — one generation and one AbortController. Navigating A→B while A's GET is still in
+// flight must never let A's answer land on B's screen: `ServiceGate` takes `slaTargets`,
+// `serviceSlug` and `managedBy` from `detail`, so a stale `detail` would offer A's windows for B.
+// Every write to `detail`/`monitors`/`openIncident` checks the generation first; a response that
+// arrives after a route/workspace change or unmount is dropped silently (its abort included).
+let generation = 0;
+let inflight: AbortController | undefined;
+function begin(): { controller: AbortController; mine: number } {
+  inflight?.abort();
+  const controller = new AbortController();
+  inflight = controller;
+  return { controller, mine: ++generation };
+}
+const stale = (mine: number) => mine !== generation;
+const isAbort = (e: unknown) => (e as { name?: string } | null)?.name === "AbortError";
+onBeforeUnmount(() => {
+  generation++;
+  inflight?.abort();
+});
+
 async function load() {
+  const { controller, mine } = begin();
   loading.value = true;
   error.value = "";
   try {
     await ws.init();
+    if (stale(mine)) return;
     if (!ws.projectId || !serviceId.value) return;
+    // Captured once: the pair this load is FOR, whatever the route says by the time it answers.
+    const projectID = ws.projectId;
+    const serviceID = serviceId.value;
     const [svc, mons] = await Promise.all([
       api.GET("/api/v1/projects/{projectID}/services/{serviceID}", {
-        params: { path: { projectID: ws.projectId, serviceID: serviceId.value } },
+        params: { path: { projectID, serviceID } },
+        signal: controller.signal,
       }),
       api.GET("/api/v1/projects/{projectID}/monitors", {
-        params: { path: { projectID: ws.projectId } },
+        params: { path: { projectID } },
+        signal: controller.signal,
       }),
     ]);
+    if (stale(mine)) return;
     if (svc.error || !svc.data) {
       error.value = "This service does not exist, or you cannot see it.";
       return;
     }
     detail.value = svc.data;
     monitors.value = mons.data ?? [];
-    loadOpenIncident().catch(() => {});
-  } catch {
+    loadOpenIncident(mine, projectID, serviceID, controller.signal).catch(() => {});
+  } catch (e) {
+    if (stale(mine) || isAbort(e)) return;
     error.value = "Could not load the service.";
   } finally {
-    loading.value = false;
+    if (!stale(mine)) loading.value = false;
   }
 }
 
 // Best-effort, and it fails CLOSED into showing nothing: a link that cannot be resolved is worse
 // than no link, and the service page's own job — what this service IS and how it is doing — must
-// not depend on the incident query.
-async function loadOpenIncident() {
+// not depend on the incident query. Under the same generation as the load that started it.
+async function loadOpenIncident(mine: number, projectID: string, serviceID: string, signal: AbortSignal) {
   openIncident.value = null;
-  const projectID = ws.projectId;
-  if (!projectID || !serviceId.value) return;
   const res = await api.GET("/api/v1/projects/{projectID}/incidents", {
     params: { path: { projectID } },
+    signal,
   });
-  const open = (res.data ?? []).find((i) => i.service_id === serviceId.value && i.status !== "resolved");
+  if (stale(mine)) return;
+  const open = (res.data ?? []).find((i) => i.service_id === serviceID && i.status !== "resolved");
   openIncident.value = open ? { id: open.id, title: open.title } : null;
 }
 

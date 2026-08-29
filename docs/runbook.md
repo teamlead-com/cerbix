@@ -770,7 +770,8 @@ question for a pipeline: does the error budget of THIS service, for the SLO wind
 allow a release right now. It reads facts cerbix has already sealed and evaluated — the reliability
 report, the burn latches, the open auto-incident, the coverage clauses — in ONE `REPEATABLE READ`
 transaction, records the decision in a bounded ledger, and computes nothing of its own. The routes
-and the ledger store are landing in this iteration (FR-024, iter-0163); the metric surface
+(`internal/api/handlers_gate.go`) and the ledger store (`internal/store/gatedecision.go`, `gateledger.go`,
+`gatemaintenance.go`) landed in iter-0163 (FR-024); the metric surface
 (`internal/metrics/gate.go`), the CLI (`internal/cli/gate.go`), the `gate.*` keys
 (`internal/config/config.go`, `docker/config.example.yaml`), the domain vocabulary
 (`internal/domain/gate.go`) and the schema (`internal/store/migrations/00093_reliability_gate.sql`)
@@ -854,6 +855,18 @@ Lifecycle, and the 409s a stale screen will meet:
   is history, the newest 50; `GET …/gate/overrides/{override_id}` is any override with both attribution
   triples and its read-time `status: active | expired | revoked | inert` (`inert` = the policy has moved
   on since it was granted).
+
+From the SPA (iter-0163, D-0207). A project admin creates and revokes overrides from the `Release gate`
+card on the service page (`frontend/src/components/ServiceGate.vue`): revocation is by the override's id,
+the add form takes the reason and an `until` of at most 7 days, and a stale screen meets the same 409s as
+above (`override_active`, `revision_conflict`, `override_not_active`) as a banner with a Reload that
+re-reads before any further mutation is allowed. An editor edits the policy from the same card — Save and
+Delete send `expected_revision`, and 409 `revision_conflict` is surfaced the same way. The ledger is
+browsed at `/gate/decisions` (an explicit range of at most 31 days per page, `?service=` pre-filter,
+cursor paging), one record at `/gate/decisions/:id`, the per-service override history at
+`/services/:id/gate/overrides`. Nothing else changes: the SPA reads the same routes the CLI does, never
+`POST`s a decision, and the audit log holds the reason of every override and policy mutation whichever
+door it came through.
 
 ### The decision ledger: retention, disk and the maintenance pass
 

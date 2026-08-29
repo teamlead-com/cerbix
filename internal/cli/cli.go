@@ -840,7 +840,16 @@ func runServe(args []string) int {
 		authn.Routes(appMux)
 		apiHandler = api.New(st, logger, cfg.Local.MinPasswordLength).WithMetrics(registry).WithEvents(broker).WithOIDC(authn).WithSettings(settingsSvc).
 			WithSecretsEnabled(cfg.Secrets.Enabled).
-			WithHeartbeatRetention(cfg.Heartbeats.RetentionDays)
+			WithHeartbeatRetention(cfg.Heartbeats.RetentionDays).
+			// The reliability gate's §5a bounds and metric surface (FR-024): the validated
+			// gate.evaluate_* keys, process-local by contract.
+			WithGate(api.GateLimits{
+				InflightProcess:        cfg.Gate.EvaluateInflightProcess,
+				InflightPrincipal:      cfg.Gate.EvaluateInflightPrincipal,
+				RatePrincipalPerMinute: cfg.Gate.EvaluateRatePrincipalPerMinute,
+				RateProcessPerMinute:   cfg.Gate.EvaluateRateProcessPerMinute,
+				TxBudget:               time.Duration(cfg.Gate.EvaluateTxBudgetMs) * time.Millisecond,
+			}, registry)
 		if mail != nil {
 			apiHandler.WithMailer(mail)
 		}

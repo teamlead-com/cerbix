@@ -22,6 +22,7 @@ tags:
   - name: monitors
   - name: secrets
   - name: services
+  - name: gate
   - name: sla
   - name: incidents
   - name: status-pages
@@ -1159,6 +1160,384 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/gate:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+    post:
+      tags: [gate]
+      summary: Ask the reliability gate for a decision (viewer+, `gate:evaluate`)
+      description: >
+        FR-024. ONE point-in-time advisory reading of the service's sealed reliability facts under
+        its policy: `state` is what was OBSERVED (`ALLOW`, `WARN`, `BLOCK`, `UNKNOWN`, or
+        `NOT_CONFIGURED` when the service has no policy) and `action` is what the pipeline should
+        do (`ALLOW`, `WARN`, `BLOCK`) — absent for `NOT_CONFIGURED`, which is a 200 and never an
+        error. Every field follows the D7 presence table: absent means "does not apply", and the
+        one present-and-null field is `service_id` once the service has been deleted. An active
+        override changes ONLY `action` (to `ALLOW`, with `unoverridden_action` carrying what it
+        would have been); `state` and `reasons` are the facts and never move.
+
+
+        The decision is written to the ledger in the same transaction and is readable by
+        `decision_id` under `/gate/decisions/{decisionID}` after the service is renamed or deleted.
+        Nothing is reserved: ask immediately before the protected step.
+
+
+        The body is EMPTY or `{}`. Any field — `override`, `actor`, anything — is refused as an
+        unknown field naming it (400); an override is created only through `…/gate/override`.
+
+
+        Bounded per process (§5a): the in-flight permits are taken first (process, then principal)
+        and a refusal there consumes no rate token; then the principal and process token buckets
+        are checked and debited as a unit. A 429 runs no evaluation and writes no row; `Retry-After`
+        is `ceil(seconds until the next token)` for a rate refusal and `1` for an in-flight
+        refusal, never below 1. A pipeline must not retry into a 429.
+
+
+        Errors: 400 (malformed `serviceID`, or a body with any field); 404 (unknown or foreign
+        service — existence hidden); 429 `process_inflight` | `principal_inflight` |
+        `principal_rate` | `process_rate`; 503 `snapshot_conflict` (the one-snapshot transaction
+        lost twice to concurrent writes), `ledger_unwritable` (no ledger partition holds this
+        instant), `timeout` (the begin-through-commit budget ran out).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: Empty. Any field is refused as unknown.
+      responses:
+        '200':
+          description: The decision, ledger-recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GateDecision' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/GateTooManyRequests' }
+        '503':
+          description: >-
+            The evaluation could not complete: `snapshot_conflict`, `ledger_unwritable` or
+            `timeout`. No decision was made and nothing was recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/gate/policy:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+    get:
+      tags: [gate]
+      summary: The service's live gate policy (viewer+, `gate:evaluate`)
+      description: >
+        FR-024 D13a. 404 `not_configured` when the service has no policy (never written, or
+        deleted). `revision` is a DB-owned generation that is never reused — a delete bumps it, a
+        re-create bumps it again — so a stale screen can never CAS over a policy it has not seen.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatePolicy' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404':
+          description: Unknown or foreign service (`not found`), or no policy configured (`not_configured`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [gate]
+      summary: Create or replace the gate policy (editor+, `gate:policy:write`)
+      description: >
+        FR-024 D11, D13a, D14. The body is the WHOLE document — every clause of the schema
+        version, the threshold, the seal-lag bound and `unknown_behavior` — decoded strictly: an
+        unknown field, a missing field, a wrong type, a missing/unknown/duplicate clause, or a
+        value outside its range is 400 naming the field (`field: rule`). The server fills nothing
+        in. `expected_revision` is REQUIRED: `null` means "I believe nothing is configured" and
+        matches only an absent or deleted policy; any mismatch is 409 `revision_conflict` and
+        changes nothing — checked BEFORE the no-op comparison, so an identical body with a stale
+        revision is still 409. An identical body with the current revision is a no-op: same
+        revision back, no audit row, no override revocation. A real change bumps the revision and
+        revokes the active override (`revoked_reason: policy_changed`). The window must be an SLA
+        window the service has a target for. Writable for file-managed services too (D13).
+
+
+        Errors: 400 validation naming the field; 404 unknown or foreign service; 409 `revision_conflict`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GatePolicyWrite' }
+      responses:
+        '200':
+          description: The policy's revision after the write (unchanged for a no-op).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revision]
+                properties:
+                  revision: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`revision_conflict` — `expected_revision` is not the live revision; nothing changed.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [gate]
+      summary: Delete the gate policy (editor+, `gate:policy:write`)
+      description: >
+        FR-024 D13a. Tombstones the policy and bumps its revision in one statement; later decisions
+        are `NOT_CONFIGURED`; the active override is closed as `policy_deleted` and stays readable
+        through the history routes as `inert`; the ledger is untouched. `expected_revision` is
+        REQUIRED in the query.
+
+
+        Errors: 400 `expected_revision_required` (absent) | `expected_revision_invalid`
+        (non-integer or negative); 404 unknown or foreign service, or `not_configured`;
+        409 `revision_conflict`.
+      parameters:
+        - name: expected_revision
+          in: query
+          required: true
+          schema: { type: integer, format: int64, minimum: 0 }
+      responses:
+        '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Unknown or foreign service (`not found`), or no policy configured (`not_configured`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`revision_conflict`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/gate/override:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+    get:
+      tags: [gate]
+      summary: The ACTIVE override only, not history (viewer+, `gate:evaluate`)
+      description: >
+        FR-024 D13a. `status` is computed at read time; only a row whose status is `active` is
+        returned here. 404 `none_active` otherwise. History is under `…/gate/overrides`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GateOverride' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404':
+          description: Unknown or foreign service (`not found`), or no active override (`none_active`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      tags: [gate]
+      summary: Create an override (project_admin+, `gate:override`)
+      description: >
+        FR-024 D9, D13a. The ONE way an override comes to exist. Its actor is the request's
+        principal, server-derived and stored twice — the typed triple the audit log uses and an
+        immutable `actor_label` (`token:<name>` for an API token) — so a client-supplied actor
+        field is refused as unknown. There is NO `action` field: D9 fixes what an override does
+        (a `BLOCK` decision's `action` becomes `ALLOW`; `WARN` and `ALLOW` are left alone;
+        `state` and `reasons` never change). `reason` is 1..500 characters; `expires_at` must be
+        after the database's `now()` and at most 7 days ahead — a hard maximum, no default. The
+        override is bound to `policy_revision`, which must be the live revision; a policy edit or
+        delete revokes it. At most ONE unrevoked override per service: an expired one releases
+        its slot, a live one is 409 `override_active`.
+
+
+        Errors: 400 validation naming the field (missing field, unknown field, unparseable
+        `expires_at`, `reason` out of bounds, `expires_at` in the past or over 7 days); 404
+        unknown or foreign service; 409 `override_active` | `revision_conflict`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GateOverrideCreate' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: string, format: uuid }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`override_active` (a live override holds the slot) or `revision_conflict` (`policy_revision` is not the live revision).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/gate/overrides:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+    get:
+      tags: [gate]
+      summary: Override history — the newest 50 (viewer+, `gate:evaluate`)
+      description: >
+        FR-024 D13a. The newest 50 records by `created_at DESC, id DESC`, whatever their status.
+        Storage is unbounded and the product history is this window; the audit log is the record.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/GateOverrideRecord' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{projectID}/services/{serviceID}/gate/overrides/{overrideID}:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/ServiceID' }
+      - { $ref: '#/components/parameters/OverrideID' }
+    get:
+      tags: [gate]
+      summary: One override record, whatever its status (viewer+, `gate:evaluate`)
+      description: >
+        FR-024 D13a. Every field is ALWAYS present, never absent: an active row carries the five
+        closure fields as null; a system closure (`expired`, `policy_changed`, `policy_deleted`)
+        carries `revoked_at` and `revoked_reason` with the three attribution fields null; a
+        `manual` closure carries all five, with `revoked_by_user_id` null and `revoked_via_token`
+        true when the revoker was an API token. `status` is a FUNCTION computed at read time:
+        `revoked` (manual) > `inert` (policy changed/deleted, or bound to a revision that is not
+        the live one) > `expired` > `active`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GateOverrideRecord' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [gate]
+      summary: Revoke an override by its immutable id (project_admin+, `gate:override`)
+      description: >
+        FR-024 D13a. Revocation is by id, never "the current one": a stale screen revoking an
+        override that has expired or been superseded gets 409 `override_not_active` and the
+        current override is untouched. A revoke of an already-revoked or expired override is that
+        same 409, never a silent 204. Audited with the revoker's complete triple.
+
+
+        Errors: 400 malformed id; 404 unknown or foreign; 409 `override_not_active`.
+      responses:
+        '204': { description: Revoked. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`override_not_active`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/projects/{projectID}/gate/decisions:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [gate]
+      summary: The project's decision ledger, newest first (viewer+, `gate:evaluate`)
+      description: >
+        FR-024 §5. PROJECT-scoped, never service-nested: the ledger outlives services, so a
+        `service_id` foreign to the project yields an EMPTY page, not 404. The range is half-open
+        `[from, to)`, both REQUIRED, `from < to`, at most 31 days. Order is `evaluated_at DESC,
+        id DESC`; `cursor` is an opaque keyset of the LAST RETURNED item and the next page is
+        bound strictly below it; `next_cursor` is null on the last page. The traversal is LIVE:
+        a key returned once is never returned again, and rows committed or detached during the
+        traversal may or may not appear. Each item's presence follows the by-id response.
+
+
+        Ledger reads take the §5a in-flight permits (429 `process_inflight` / `principal_inflight`)
+        but no rate token.
+
+
+        Errors: 400 `range_required` | `range_invalid` | `range_too_wide` | `limit_invalid`
+        (0, negative, non-integer or above 200) | `cursor_invalid` | a non-UUID `service_id`;
+        404 project not visible; 429 in-flight permits exhausted.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: service_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque; the `next_cursor` of the previous page.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GateDecisionList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/GateTooManyRequests' }
+
+  /api/v1/projects/{projectID}/gate/decisions/{decisionID}:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/DecisionID' }
+    get:
+      tags: [gate]
+      summary: One decision by id (viewer+, `gate:evaluate`)
+      description: >
+        FR-024 D10, §5. Authorized by the row's persisted `project_id`, with NO service-existence
+        check on the path — the evidence is wanted exactly when the service is gone. The read
+        derives the row's UTC day from the id's own millisecond and prunes to that one partition;
+        a detached or never-created day and an unknown id both answer 404. Takes the §5a in-flight
+        permits, no rate token.
+
+
+        Errors: 400 malformed id; 404 unknown, foreign, or no longer retained; 429 permits exhausted.
+      responses:
+        '200':
+          description: The decision as it was, evidence included.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GateDecision' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/GateTooManyRequests' }
 
   /api/v1/projects/{projectID}/sla:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
@@ -3044,6 +3423,18 @@ components:
       name: serviceID
       required: true
       schema: { type: string, format: uuid }
+    OverrideID:
+      in: path
+      name: overrideID
+      required: true
+      schema: { type: string, format: uuid }
+      description: A gate override's immutable id (FR-024 D13a). Malformed is 400 before the store is asked.
+    DecisionID:
+      in: path
+      name: decisionID
+      required: true
+      schema: { type: string, format: uuid }
+      description: A gate decision's id — a UUIDv7 whose millisecond is its `evaluated_at` (FR-024 §5). Malformed is 400.
     SecretName:
       in: path
       name: name
@@ -3088,6 +3479,20 @@ components:
       description: >-
         The request lost a race or contradicts current state: a stale CAS token, an already-applied
         lifecycle act, a name already taken. First committer wins; re-read and decide again.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    GateTooManyRequests:
+      description: >-
+        Refused by a process-local bound of the reliability gate (FR-024 §5a) BEFORE any
+        transaction: `error` is `process_inflight`, `principal_inflight`, `principal_rate` or
+        `process_rate`. Nothing was evaluated and nothing was recorded. Do not retry into it.
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1 }
+          description: >-
+            Whole seconds: `ceil(seconds until the next token)` for a rate refusal, `1` for an
+            in-flight refusal, never below 1.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -4302,6 +4707,236 @@ components:
         up: { type: integer, format: int64 }
         total: { type: integer, format: int64 }
         uptime_percent: { type: number, format: double }
+    GateClauseAssignment:
+      type: string
+      enum: [block, warn, ignore]
+      description: What a policy declares about one clause (FR-024 D11). An ignored clause is evaluated for evidence and decides nothing.
+    GateClauses:
+      type: object
+      description: >
+        Every clause of the schema version, each exactly once (FR-024 D11, D14). Version 1's set is
+        the five below; a write missing one, naming an unknown one, or naming one twice is refused
+        by name.
+      required: [budget_exhausted, budget_consumed, page_burn_firing, ticket_burn_firing, service_incident_open]
+      additionalProperties: false
+      properties:
+        budget_exhausted: { $ref: '#/components/schemas/GateClauseAssignment' }
+        budget_consumed: { $ref: '#/components/schemas/GateClauseAssignment' }
+        page_burn_firing: { $ref: '#/components/schemas/GateClauseAssignment' }
+        ticket_burn_firing: { $ref: '#/components/schemas/GateClauseAssignment' }
+        service_incident_open: { $ref: '#/components/schemas/GateClauseAssignment' }
+    GatePolicy:
+      type: object
+      description: A service's live gate policy as stored (FR-024 D13a).
+      required: [schema_version, window, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior, revision, updated_at, updated_by]
+      additionalProperties: false
+      properties:
+        schema_version: { type: integer, description: The clause vocabulary version; 1 is the only known one. }
+        window: { type: string, enum: [24h, 7d, 30d, 90d], description: The SLO window every budget and burn clause is evaluated against (D2). }
+        clauses: { $ref: '#/components/schemas/GateClauses' }
+        budget_consumed_percent: { type: integer, minimum: 1, maximum: 100, description: The `budget_consumed` clause's threshold over `burned_percent` (D3). }
+        max_seal_lag_seconds: { type: integer, minimum: 300, maximum: 86400, description: Whole minutes; beyond it every budget clause is UNAVAILABLE with `seal_stale` (D8a). }
+        unknown_behavior: { type: string, enum: [warn, block], description: The action an UNKNOWN state resolves to (D5). Mandatory, no default. }
+        revision: { type: integer, format: int64, description: DB-owned generation, never reused. }
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: string, description: The writer's immutable audit label. }
+    GatePolicyWrite:
+      type: object
+      description: >
+        The PUT body — the whole document, nothing filled in server-side (FR-024 D11, D13a, D14).
+        `expected_revision` is required: `null` claims nothing is configured.
+      required: [expected_revision, schema_version, window, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior]
+      additionalProperties: false
+      properties:
+        expected_revision: { type: integer, format: int64, minimum: 0, nullable: true }
+        schema_version: { type: integer }
+        window: { type: string, enum: [24h, 7d, 30d, 90d] }
+        clauses: { $ref: '#/components/schemas/GateClauses' }
+        budget_consumed_percent: { type: integer, minimum: 1, maximum: 100 }
+        max_seal_lag_seconds: { type: integer, minimum: 300, maximum: 86400 }
+        unknown_behavior: { type: string, enum: [warn, block] }
+    GateOverride:
+      type: object
+      description: The ACTIVE override (FR-024 D13a `GET …/gate/override`).
+      required: [id, reason, expires_at, created_at, actor_label, policy_revision]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        reason: { type: string }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        actor_label: { type: string, description: The creator's immutable label — `token:<name>` for an API token. }
+        policy_revision: { type: integer, format: int64, description: The policy revision the override is bound to. }
+    GateOverrideRecord:
+      type: object
+      description: >
+        One override with its read-time status and both attribution triples (FR-024 D13a). EVERY
+        field is always present; the closure fields are null while active, the three revoker
+        attribution fields are null for a system closure.
+      required: [id, reason, expires_at, created_at, policy_revision, actor_label, actor_user_id, via_token, status, revoked_at, revoked_reason, revoked_by_label, revoked_by_user_id, revoked_via_token]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        reason: { type: string }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        policy_revision: { type: integer, format: int64 }
+        actor_label: { type: string }
+        actor_user_id: { type: string, format: uuid, nullable: true, description: Null for an API-token actor (`via_token` true). }
+        via_token: { type: boolean }
+        status: { type: string, enum: [active, expired, revoked, inert] }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        revoked_reason: { type: string, enum: [manual, expired, policy_changed, policy_deleted], nullable: true }
+        revoked_by_label: { type: string, nullable: true, description: Present only for a `manual` closure. }
+        revoked_by_user_id: { type: string, format: uuid, nullable: true, description: Null for a token revoker even when `revoked_by_label` is set. }
+        revoked_via_token: { type: boolean, nullable: true }
+    GateOverrideCreate:
+      type: object
+      description: The POST body (FR-024 D9). No `action`, no actor — both are refused as unknown fields.
+      required: [policy_revision, reason, expires_at]
+      additionalProperties: false
+      properties:
+        policy_revision: { type: integer, format: int64, description: Must be the live policy revision, else 409 `revision_conflict`. }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+        expires_at: { type: string, format: date-time, description: After the database's now() and at most 7 days ahead. }
+    GateReason:
+      type: object
+      description: >
+        One `reasons[]` entry (FR-024 D4, D7): a clause that matched (`code` names the match,
+        `value` what it saw) or that was UNAVAILABLE (`code` is the unavailability —
+        `budget_withheld`, `seal_stale`, `facts_stale`, `no_objective`, `window_target_missing`,
+        `never_sealed`, `never_evaluated`, `no_governing_revision`), or the whole-decision
+        `not_configured` with a `docs` link. Only `code` is always present.
+      required: [code]
+      properties:
+        code: { type: string }
+        clause: { type: string, enum: [budget_exhausted, budget_consumed, page_burn_firing, ticket_burn_firing, service_incident_open] }
+        assignment: { $ref: '#/components/schemas/GateClauseAssignment' }
+        value: { description: What the clause saw — a number, a rule key, an incident id. }
+        source: { type: string, description: The owner the fact came from. }
+        docs: { type: string, format: uri }
+    GateDecision:
+      type: object
+      description: >
+        The D7 response and, column for column, one ledger row (FR-024 D7, D10). The presence
+        contract: the five required fields always; `action` and `unoverridden_action` for every
+        state but `NOT_CONFIGURED`; `policy_revision`, `window`, `unknown_behavior`,
+        `max_seal_lag_seconds` when a policy exists; `target_id`, `objective`,
+        `objective_updated_at` when the window's target exists; `sealed_through`, `seal_lag`,
+        `fact_revisions` when any fact has been sealed; `governing_revision` when a declaration
+        governs; `burn_leases` one per rule of the target; `coverage_lease_until`,
+        `coverage_state` when the service has been evaluated; `override` and `override_id` when
+        one was applied; `facts_fresh_until` when a decision-constraining horizon exists. Absent
+        means "does not apply"; `service_id` is present and null once the service is deleted.
+        There is no `valid_until`.
+      required: [schema_version, decision_id, evaluated_at, service_id, service_slug, service_name, state, reasons]
+      properties:
+        schema_version: { type: integer }
+        decision_id: { type: string, format: uuid }
+        evaluated_at: { type: string, format: date-time, description: The one snapshot instant (D6a). }
+        service_id: { type: string, format: uuid, nullable: true }
+        service_slug: { type: string }
+        service_name: { type: string }
+        state: { type: string, enum: [ALLOW, WARN, BLOCK, UNKNOWN, NOT_CONFIGURED], description: What was OBSERVED. }
+        action: { type: string, enum: [ALLOW, WARN, BLOCK], description: What the pipeline should do. Absent for NOT_CONFIGURED. }
+        unoverridden_action: { type: string, enum: [ALLOW, WARN, BLOCK], description: The action without the override, when one was applied. }
+        reasons:
+          type: array
+          items: { $ref: '#/components/schemas/GateReason' }
+        policy_revision: { type: integer, format: int64 }
+        window: { type: string }
+        unknown_behavior: { type: string, enum: [warn, block] }
+        max_seal_lag_seconds: { type: integer }
+        override_id: { type: string, format: uuid }
+        override:
+          type: object
+          required: [id, actor_label, reason, expires_at]
+          properties:
+            id: { type: string, format: uuid }
+            actor_label: { type: string }
+            reason: { type: string }
+            expires_at: { type: string, format: date-time }
+        target_id: { type: string, format: uuid }
+        objective: { type: number, format: double }
+        objective_updated_at: { type: string, format: date-time }
+        sealed_through: { type: string, format: date-time, description: The end of the sealed data the budget rests on (D8). }
+        seal_lag: { type: number, format: double, description: Seconds from `sealed_through` to `evaluated_at` (D8a). }
+        fact_revisions:
+          type: object
+          description: The complete surviving evidence about the definition revisions the sealed facts were computed under (§5a).
+          required: [count, first_id, last_id, digest]
+          properties:
+            count: { type: integer }
+            first_id: { type: string, nullable: true }
+            last_id: { type: string, nullable: true }
+            digest: { type: string, description: SHA-256 over the sorted ids. }
+        governing_revision:
+          type: object
+          required: [id, revision]
+          properties:
+            id: { type: string, format: uuid }
+            revision: { type: integer, format: int64 }
+        burn_leases:
+          type: array
+          items:
+            type: object
+            required: [rule_key, severity, firing, last_verdict, evaluated_at, lease_until, fresh]
+            properties:
+              rule_key: { type: string }
+              severity: { type: string, enum: [page, ticket] }
+              firing: { type: boolean, nullable: true }
+              last_verdict: { type: string, nullable: true }
+              evaluated_at: { type: string, format: date-time, nullable: true }
+              lease_until: { type: string, format: date-time, nullable: true }
+              fresh: { type: boolean }
+        coverage_lease_until: { type: string, format: date-time }
+        coverage_state:
+          type: object
+          description: Both signals' coverage as EVIDENCE — never a clause (D11).
+          required: [live, burn]
+          properties:
+            live: { $ref: '#/components/schemas/GateCoverageSignal' }
+            burn: { $ref: '#/components/schemas/GateCoverageSignal' }
+        facts_fresh_until: { type: string, format: date-time, description: When the facts this decision RESTS ON go stale — not a lifetime of the decision (D7). }
+    GateCoverageSignal:
+      type: object
+      required: [armed]
+      properties:
+        armed: { type: boolean }
+        reason: { type: string }
+    GateDecisionSummary:
+      type: object
+      description: >
+        One ledger listing item (FR-024 §5): a strict projection of GateDecision with the same
+        presence rules — `action` and `policy_revision` exactly when `state ≠ NOT_CONFIGURED`,
+        `override_id` exactly when an override was applied, `service_id` present and null once the
+        service is deleted.
+      required: [schema_version, decision_id, evaluated_at, service_id, service_slug, service_name, state, reasons]
+      additionalProperties: false
+      properties:
+        schema_version: { type: integer }
+        decision_id: { type: string, format: uuid }
+        evaluated_at: { type: string, format: date-time }
+        service_id: { type: string, format: uuid, nullable: true }
+        service_slug: { type: string }
+        service_name: { type: string }
+        state: { type: string, enum: [ALLOW, WARN, BLOCK, UNKNOWN, NOT_CONFIGURED] }
+        action: { type: string, enum: [ALLOW, WARN, BLOCK] }
+        reasons:
+          type: array
+          items: { $ref: '#/components/schemas/GateReason' }
+        policy_revision: { type: integer, format: int64 }
+        override_id: { type: string, format: uuid }
+    GateDecisionList:
+      type: object
+      description: One page of the ledger (FR-024 §5); `next_cursor` is null on the last page.
+      required: [items, next_cursor]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/GateDecisionSummary' }
+        next_cursor: { type: string, nullable: true }
     ProjectSLA:
       type: object
       properties:

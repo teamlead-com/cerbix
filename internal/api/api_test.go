@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -138,6 +139,8 @@ type fakeStore struct {
 	// FR-023: policies belonging to ANOTHER project, and how many escalation-policy writes landed.
 	foreignPolicies        map[string]bool
 	escalationPolicyWrites int
+	// FR-024: the reliability gate's scripted half (see fakeGate); nil until a test touches it.
+	gate *fakeGate
 }
 
 // fakeSecret backs the project secret inventory in memory. The value is kept
@@ -2957,4 +2960,267 @@ func (f *fakeStore) ListIncidentImpacts(_ context.Context, projectID, incidentID
 		return nil, nil // tenant-scoped: a foreign scope reads nothing
 	}
 	return f.impacts[incidentID], nil
+}
+
+// ── FR-024: the reliability gate ─────────────────────────────────────────────────────────────
+
+// fakeGate is the gate half of fakeStore. It is SCRIPTED, not modelled: every method records that
+// it was called and what it was handed, enforces the one contract the HTTP layer relies on the
+// store for (a service outside the project is store.ErrNotFound — D15), runs the ONE pure domain
+// validator the real PutGatePolicy runs (so a duplicate or missing clause is refused by name
+// through the same function), and otherwise returns what the test programmed. DecideGate can be
+// made to BLOCK — signal `started`, wait on `release` — so the §5a in-flight bounds can be
+// exercised with real concurrency and no sleeps.
+type fakeGate struct {
+	mu    sync.Mutex
+	calls []string
+
+	policy      *domain.GatePolicy
+	policyErr   error
+	putRevision int64
+	putErr      error
+	deleteErr   error
+	createID    string
+	createErr   error
+	revokeErr   error
+	active      *store.GateOverrideRecord
+	activeErr   error
+	overrides   map[string]store.GateOverrideRecord
+	history     []store.GateOverrideRecord
+	decision    domain.GateDecision
+	decideErr   error
+	// hold is how many of the NEXT DecideGate calls block: each sends on started, then waits on
+	// release. Calls beyond hold proceed at once, so a test can hold n decisions and still send
+	// an (n+1)th that is admitted.
+	hold             int
+	started          chan struct{}
+	release          chan struct{}
+	decisions        map[string]domain.GateDecision
+	decisionProjects map[string]string
+	listItems        []domain.GateDecisionSummary
+	listNext         *store.GateCursor
+	listErr          error
+
+	actors             []store.GateActor
+	lastDoc            *domain.GatePolicyDocument
+	lastExpected       *int64
+	lastDeleteExpected int64
+	budgets            []time.Duration
+	lastCreate         struct {
+		policyRevision int64
+		reason         string
+		expiresAt      time.Time
+	}
+	lastRevokeID string
+	lastList     struct {
+		from, to  time.Time
+		serviceID *string
+		cursor    *store.GateCursor
+		limit     int
+	}
+}
+
+func (f *fakeStore) gateState() *fakeGate {
+	if f.gate == nil {
+		f.gate = &fakeGate{}
+	}
+	return f.gate
+}
+
+func (g *fakeGate) record(call string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.calls = append(g.calls, call)
+}
+
+// gateCalls is every gate store method the handlers reached, in order.
+func (f *fakeStore) gateCalls() []string {
+	g := f.gateState()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.calls...)
+}
+
+// gateService is the tenant check every service-scoped gate read and write shares.
+func (f *fakeStore) gateService(projectID, serviceID string) error {
+	fs, ok := f.serviceStore()[serviceID]
+	if !ok || fs.svc.ProjectID != projectID {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (f *fakeStore) GetGatePolicy(_ context.Context, projectID, serviceID string) (domain.GatePolicy, error) {
+	g := f.gateState()
+	g.record("GetGatePolicy")
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return domain.GatePolicy{}, err
+	}
+	if g.policyErr != nil {
+		return domain.GatePolicy{}, g.policyErr
+	}
+	if g.policy == nil {
+		return domain.GatePolicy{}, store.ErrGatePolicyNotConfigured
+	}
+	return *g.policy, nil
+}
+
+func (f *fakeStore) PutGatePolicy(_ context.Context, projectID, serviceID string, expected *int64, doc domain.GatePolicyDocument, actor store.GateActor) (int64, bool, error) {
+	g := f.gateState()
+	g.record("PutGatePolicy")
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return 0, false, err
+	}
+	// The real store validates the document first, through the domain (D11, D14).
+	if _, err := domain.ValidateGatePolicyV1(doc); err != nil {
+		return 0, false, err
+	}
+	g.mu.Lock()
+	g.lastDoc, g.lastExpected = &doc, expected
+	g.actors = append(g.actors, actor)
+	g.mu.Unlock()
+	if g.putErr != nil {
+		return 0, false, g.putErr
+	}
+	return g.putRevision, true, nil
+}
+
+func (f *fakeStore) DeleteGatePolicy(_ context.Context, projectID, serviceID string, expected int64, actor store.GateActor) error {
+	g := f.gateState()
+	g.record("DeleteGatePolicy")
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	g.lastDeleteExpected = expected
+	g.actors = append(g.actors, actor)
+	g.mu.Unlock()
+	return g.deleteErr
+}
+
+func (f *fakeStore) CreateGateOverride(_ context.Context, projectID, serviceID string, policyRevision int64, reason string, expiresAt time.Time, actor store.GateActor) (string, error) {
+	g := f.gateState()
+	g.record("CreateGateOverride")
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return "", err
+	}
+	g.mu.Lock()
+	g.lastCreate.policyRevision, g.lastCreate.reason, g.lastCreate.expiresAt = policyRevision, reason, expiresAt
+	g.actors = append(g.actors, actor)
+	g.mu.Unlock()
+	if g.createErr != nil {
+		return "", g.createErr
+	}
+	return g.createID, nil
+}
+
+func (f *fakeStore) RevokeGateOverride(_ context.Context, projectID, serviceID, overrideID string, actor store.GateActor) error {
+	g := f.gateState()
+	g.record("RevokeGateOverride")
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	g.lastRevokeID = overrideID
+	g.actors = append(g.actors, actor)
+	g.mu.Unlock()
+	if g.revokeErr != nil {
+		return g.revokeErr
+	}
+	if _, ok := g.overrides[overrideID]; !ok {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (f *fakeStore) ActiveGateOverride(_ context.Context, projectID, serviceID string) (store.GateOverrideRecord, error) {
+	g := f.gateState()
+	g.record("ActiveGateOverride")
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return store.GateOverrideRecord{}, err
+	}
+	if g.activeErr != nil {
+		return store.GateOverrideRecord{}, g.activeErr
+	}
+	if g.active == nil {
+		return store.GateOverrideRecord{}, store.ErrGateOverrideNone
+	}
+	return *g.active, nil
+}
+
+func (f *fakeStore) GetGateOverride(_ context.Context, projectID, serviceID, overrideID string) (store.GateOverrideRecord, error) {
+	g := f.gateState()
+	g.record("GetGateOverride")
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return store.GateOverrideRecord{}, err
+	}
+	rec, ok := g.overrides[overrideID]
+	if !ok {
+		return store.GateOverrideRecord{}, store.ErrNotFound
+	}
+	return rec, nil
+}
+
+func (f *fakeStore) ListGateOverrides(_ context.Context, projectID, serviceID string) ([]store.GateOverrideRecord, error) {
+	g := f.gateState()
+	g.record("ListGateOverrides")
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return nil, err
+	}
+	return append([]store.GateOverrideRecord{}, g.history...), nil
+}
+
+func (f *fakeStore) DecideGate(ctx context.Context, projectID, serviceID string, budget time.Duration) (domain.GateDecision, error) {
+	g := f.gateState()
+	g.record("DecideGate")
+	g.mu.Lock()
+	g.budgets = append(g.budgets, budget)
+	block := g.hold > 0
+	if block {
+		g.hold--
+	}
+	started, release := g.started, g.release
+	g.mu.Unlock()
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return domain.GateDecision{}, err
+	}
+	if block {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return domain.GateDecision{}, ctx.Err()
+		}
+	}
+	if g.decideErr != nil {
+		return domain.GateDecision{}, g.decideErr
+	}
+	return g.decision, nil
+}
+
+func (f *fakeStore) GetGateDecision(_ context.Context, projectID, decisionID string) (domain.GateDecision, error) {
+	g := f.gateState()
+	g.record("GetGateDecision")
+	dec, ok := g.decisions[decisionID]
+	if !ok {
+		return domain.GateDecision{}, store.ErrNotFound
+	}
+	// The real read is bound by the row's PERSISTED project_id and by nothing about the
+	// service (D10): a planted row belongs to decisionProjects[id], or to the caller when unset.
+	if owner, ok := g.decisionProjects[decisionID]; ok && owner != projectID {
+		return domain.GateDecision{}, store.ErrNotFound
+	}
+	return dec, nil
+}
+
+func (f *fakeStore) ListGateDecisions(_ context.Context, projectID string, from, to time.Time, serviceID *string, cursor *store.GateCursor, limit int) ([]domain.GateDecisionSummary, *store.GateCursor, error) {
+	g := f.gateState()
+	g.record("ListGateDecisions")
+	g.mu.Lock()
+	g.lastList.from, g.lastList.to, g.lastList.serviceID, g.lastList.cursor, g.lastList.limit = from, to, serviceID, cursor, limit
+	g.mu.Unlock()
+	if g.listErr != nil {
+		return nil, nil, g.listErr
+	}
+	return g.listItems, g.listNext, nil
 }

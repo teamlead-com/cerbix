@@ -29,31 +29,52 @@ const (
 	ActionProjectManage Action = "project:manage"
 	// ActionProjectWrite: create/edit monitors and settings within a project.
 	ActionProjectWrite Action = "project:write"
+
+	// The reliability gate (FR-024, D12): three actions checked where every other action is,
+	// mapped in v1 onto the existing project roles. No handler compares roles itself.
+
+	// ActionGateEvaluate: ask the gate for a decision, read a service's policy and overrides,
+	// and read the decision ledger. viewer+.
+	ActionGateEvaluate Action = "gate:evaluate"
+	// ActionGatePolicyWrite: create, replace or delete a service's gate policy. editor+.
+	ActionGatePolicyWrite Action = "gate:policy:write"
+	// ActionGateOverride: create or revoke a gate override — the one act that lets a BLOCK
+	// through. project_admin+.
+	ActionGateOverride Action = "gate:override"
 )
 
 // roleGrants maps each role to the actions it grants where it applies. Scope
 // applicability (org-wide vs a single project) is handled in Principal.Can.
 var roleGrants = map[domain.Role]map[Action]bool{
 	domain.RoleOrgAdmin: {
-		ActionOrgRead:       true,
-		ActionOrgManage:     true,
-		ActionProjectRead:   true,
-		ActionProjectManage: true,
-		ActionProjectWrite:  true,
+		ActionOrgRead:         true,
+		ActionOrgManage:       true,
+		ActionProjectRead:     true,
+		ActionProjectManage:   true,
+		ActionProjectWrite:    true,
+		ActionGateEvaluate:    true,
+		ActionGatePolicyWrite: true,
+		ActionGateOverride:    true,
 	},
 	domain.RoleProjectAdmin: {
-		ActionProjectRead:   true,
-		ActionProjectManage: true,
-		ActionProjectWrite:  true,
+		ActionProjectRead:     true,
+		ActionProjectManage:   true,
+		ActionProjectWrite:    true,
+		ActionGateEvaluate:    true,
+		ActionGatePolicyWrite: true,
+		ActionGateOverride:    true,
 	},
 	domain.RoleEditor: {
-		ActionOrgRead:      true,
-		ActionProjectRead:  true,
-		ActionProjectWrite: true,
+		ActionOrgRead:         true,
+		ActionProjectRead:     true,
+		ActionProjectWrite:    true,
+		ActionGateEvaluate:    true,
+		ActionGatePolicyWrite: true,
 	},
 	domain.RoleViewer: {
-		ActionOrgRead:     true,
-		ActionProjectRead: true,
+		ActionOrgRead:      true,
+		ActionProjectRead:  true,
+		ActionGateEvaluate: true,
 	},
 }
 

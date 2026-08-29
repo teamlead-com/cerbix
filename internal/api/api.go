@@ -227,6 +227,25 @@ type Store interface {
 	IncidentMemberSnapshot(ctx context.Context, incidentID string) ([]domain.IncidentMember, bool, error)
 
 	ListProjectSecrets(ctx context.Context, projectID string) ([]store.ProjectSecret, error)
+
+	// The reliability gate (FR-024). Every mutation takes the actor so its audit row is written
+	// INSIDE the mutation transaction (D9, D-0188); decisions are a ledger, not audit rows (D10).
+	// Sentinels the handlers map: store.ErrNotFound (foreign/unknown service, D15),
+	// ErrGatePolicyNotConfigured, ErrGateRevisionConflict, ErrGateOverrideActive,
+	// ErrGateOverrideNotActive, ErrGateOverrideNone, ErrGateSnapshotConflict,
+	// ErrGateLedgerUnwritable, ErrGateBudgetExceeded, ErrGateCursorInvalid, and the two
+	// field-naming validation errors (*domain.GatePolicyError, *store.GateValidationError).
+	GetGatePolicy(ctx context.Context, projectID, serviceID string) (domain.GatePolicy, error)
+	PutGatePolicy(ctx context.Context, projectID, serviceID string, expected *int64, doc domain.GatePolicyDocument, actor store.GateActor) (revision int64, changed bool, err error)
+	DeleteGatePolicy(ctx context.Context, projectID, serviceID string, expected int64, actor store.GateActor) error
+	CreateGateOverride(ctx context.Context, projectID, serviceID string, policyRevision int64, reason string, expiresAt time.Time, actor store.GateActor) (string, error)
+	RevokeGateOverride(ctx context.Context, projectID, serviceID, overrideID string, actor store.GateActor) error
+	ActiveGateOverride(ctx context.Context, projectID, serviceID string) (store.GateOverrideRecord, error)
+	GetGateOverride(ctx context.Context, projectID, serviceID, overrideID string) (store.GateOverrideRecord, error)
+	ListGateOverrides(ctx context.Context, projectID, serviceID string) ([]store.GateOverrideRecord, error)
+	DecideGate(ctx context.Context, projectID, serviceID string, budget time.Duration) (domain.GateDecision, error)
+	GetGateDecision(ctx context.Context, projectID, decisionID string) (domain.GateDecision, error)
+	ListGateDecisions(ctx context.Context, projectID string, from, to time.Time, serviceID *string, cursor *store.GateCursor, limit int) ([]domain.GateDecisionSummary, *store.GateCursor, error)
 }
 
 // Mailer sends status-page subscription emails. Optional; nil means email is not
@@ -244,6 +263,19 @@ type Metrics interface {
 	// not be read (§15.0, invariant 71a). It is a FAILED read, not absent measurement, and a log
 	// alone leaves it invisible to anything watching trends.
 	RecordStatusPageUnreadableComponent()
+}
+
+// GateMetrics is the reliability gate's metric surface (func-reliability-gate §5a, D9):
+// decisions by state/action/overridden, refusals by the four bounds, admitted evaluations that
+// failed by kind, and the decision duration histogram. Satisfied by *metrics.Registry; nil-safe
+// in the handlers so tests and embed-only modes can omit it. The recorders return an error for
+// a label outside their closed set — the handlers only ever pass the closed vocabulary, so the
+// error is a programming fault and is logged, never surfaced to the caller.
+type GateMetrics interface {
+	RecordGateDecision(state, action string, overridden bool) error
+	RecordGateEvaluateRejected(reason string) error
+	RecordGateEvaluateError(kind string) error
+	ObserveGateDecisionDuration(d time.Duration)
 }
 
 // ResultSink publishes a heartbeat into the ingestion pipeline. Used by the AGENT results
@@ -287,6 +319,10 @@ type Handler struct {
 	// repaired. It is a settings question, so the store does not answer it: the store takes
 	// the resolved floor as an argument and refuses anything older.
 	heartbeatRetentionDays int
+	// gate is the §5a limiter and the decision budget (FR-024); nil until WithGate wires the
+	// validated config, and the gate routes answer 501 until then rather than run unbounded.
+	gate        *gateLimiter
+	gateMetrics GateMetrics
 }
 
 // PullWaiter blocks until a pull job is enqueued for a region (or the max hold / request
@@ -427,6 +463,16 @@ func (h *Handler) rawRetention() time.Duration {
 	return time.Duration(days) * 24 * time.Hour
 }
 
+// WithGate wires the reliability gate's request-time bounds (the validated gate.evaluate_*
+// keys, §5a) and its metric surface. The limiter is process-local by contract and lives for
+// the handler's lifetime; without this call the gate routes answer 501, because a gate with
+// no bound is the load §5a exists to shed.
+func (h *Handler) WithGate(limits GateLimits, m GateMetrics) *Handler {
+	h.gate = newGateLimiter(limits, time.Now)
+	h.gateMetrics = m
+	return h
+}
+
 // WithSecretsEnabled sets the project-secret-inventory feature switch
 // (cfg.Secrets.Enabled). Off (the default), every secrets endpoint answers
 // 404 feature_disabled (spec func-secret-inventory §4.1).
@@ -537,6 +583,20 @@ func (h *Handler) Router() *http.ServeMux {
 	// FR-023: the ladder's policy. Until FR-023 this column was inert and reachable only at create
 	// time or through a file provider; it now decides who is woken for this service.
 	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/escalation-policy", h.setServiceEscalationPolicy)
+	// The reliability gate (FR-024, D13a): the decision, the policy, the override lifecycle
+	// under the service; the ledger PROJECT-scoped so a decision stays readable after its
+	// service is deleted (D10).
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/services/{serviceID}/gate", h.postGateDecision)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/gate/policy", h.getGatePolicy)
+	mux.HandleFunc("PUT /api/v1/projects/{projectID}/services/{serviceID}/gate/policy", h.putGatePolicy)
+	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/services/{serviceID}/gate/policy", h.deleteGatePolicy)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/gate/override", h.getGateOverride)
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/services/{serviceID}/gate/override", h.createGateOverride)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/gate/overrides", h.listGateOverrides)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/gate/overrides/{overrideID}", h.getGateOverrideByID)
+	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/services/{serviceID}/gate/overrides/{overrideID}", h.revokeGateOverride)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/gate/decisions", h.listGateDecisions)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/gate/decisions/{decisionID}", h.getGateDecision)
 
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/secrets", h.listSecrets)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/secrets", h.createSecret)

@@ -138,3 +138,58 @@ func TestAuditUserID(t *testing.T) {
 		})
 	}
 }
+
+// FR-024 D12: the three gate actions map onto the existing project roles — viewer+ evaluates
+// and reads, editor+ writes the policy, project_admin+ overrides — and a global admin holds
+// all of them as the existing rule implies. Every role × action cell is asserted, in both
+// directions, so a grant added or dropped by accident fails by name.
+func TestGateActionsByRole(t *testing.T) {
+	member := func(role domain.Role) Principal {
+		return Principal{UserID: "u", Memberships: []domain.Membership{{OrgID: "o1", ProjectID: "p1", Role: role}}}
+	}
+	cases := []struct {
+		name string
+		p    Principal
+		want map[Action]bool
+	}{
+		{"viewer", member(domain.RoleViewer), map[Action]bool{
+			ActionGateEvaluate: true, ActionGatePolicyWrite: false, ActionGateOverride: false}},
+		{"editor", member(domain.RoleEditor), map[Action]bool{
+			ActionGateEvaluate: true, ActionGatePolicyWrite: true, ActionGateOverride: false}},
+		{"project_admin", member(domain.RoleProjectAdmin), map[Action]bool{
+			ActionGateEvaluate: true, ActionGatePolicyWrite: true, ActionGateOverride: true}},
+		{"org_admin", Principal{UserID: "u", Memberships: []domain.Membership{{OrgID: "o1", Role: domain.RoleOrgAdmin}}}, map[Action]bool{
+			ActionGateEvaluate: true, ActionGatePolicyWrite: true, ActionGateOverride: true}},
+		{"global_admin", Principal{UserID: "u", IsGlobalAdmin: true}, map[Action]bool{
+			ActionGateEvaluate: true, ActionGatePolicyWrite: true, ActionGateOverride: true}},
+		{"no membership", Principal{UserID: "u"}, map[Action]bool{
+			ActionGateEvaluate: false, ActionGatePolicyWrite: false, ActionGateOverride: false}},
+	}
+	for _, tc := range cases {
+		for action, want := range tc.want {
+			if got := tc.p.Can(action, "o1", "p1"); got != want {
+				t.Errorf("%s Can(%s) = %v, want %v", tc.name, action, got, want)
+			}
+		}
+	}
+	// A project-scoped grant never reaches a sibling project, whatever the action.
+	admin := member(domain.RoleProjectAdmin)
+	for _, a := range []Action{ActionGateEvaluate, ActionGatePolicyWrite, ActionGateOverride} {
+		if admin.Can(a, "o1", "p2") {
+			t.Errorf("project admin of p1 must not hold %s on p2", a)
+		}
+	}
+}
+
+// The gate actions are distinct from the project actions they are mapped beside: holding
+// project:write does not by itself name gate:override, so a future re-mapping has to be made
+// here, in the grants table, and nowhere else.
+func TestGateActionsAreNotAliases(t *testing.T) {
+	editor := Principal{UserID: "e", Memberships: []domain.Membership{{OrgID: "o1", Role: domain.RoleEditor}}}
+	if !editor.Can(ActionProjectWrite, "o1", "p1") || editor.Can(ActionGateOverride, "o1", "p1") {
+		t.Fatal("an editor writes the project but does not override the gate")
+	}
+	if ActionGateEvaluate != "gate:evaluate" || ActionGatePolicyWrite != "gate:policy:write" || ActionGateOverride != "gate:override" {
+		t.Fatal("the gate action names are the spec's (D12)")
+	}
+}

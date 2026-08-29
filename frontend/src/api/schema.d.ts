@@ -2218,6 +2218,577 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/services/{serviceID}/gate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask the reliability gate for a decision (viewer+, `gate:evaluate`)
+         * @description FR-024. ONE point-in-time advisory reading of the service's sealed reliability facts under its policy: `state` is what was OBSERVED (`ALLOW`, `WARN`, `BLOCK`, `UNKNOWN`, or `NOT_CONFIGURED` when the service has no policy) and `action` is what the pipeline should do (`ALLOW`, `WARN`, `BLOCK`) — absent for `NOT_CONFIGURED`, which is a 200 and never an error. Every field follows the D7 presence table: absent means "does not apply", and the one present-and-null field is `service_id` once the service has been deleted. An active override changes ONLY `action` (to `ALLOW`, with `unoverridden_action` carrying what it would have been); `state` and `reasons` are the facts and never move.
+         *
+         *     The decision is written to the ledger in the same transaction and is readable by `decision_id` under `/gate/decisions/{decisionID}` after the service is renamed or deleted. Nothing is reserved: ask immediately before the protected step.
+         *
+         *     The body is EMPTY or `{}`. Any field — `override`, `actor`, anything — is refused as an unknown field naming it (400); an override is created only through `…/gate/override`.
+         *
+         *     Bounded per process (§5a): the in-flight permits are taken first (process, then principal) and a refusal there consumes no rate token; then the principal and process token buckets are checked and debited as a unit. A 429 runs no evaluation and writes no row; `Retry-After` is `ceil(seconds until the next token)` for a rate refusal and `1` for an in-flight refusal, never below 1. A pipeline must not retry into a 429.
+         *
+         *     Errors: 400 (malformed `serviceID`, or a body with any field); 404 (unknown or foreign service — existence hidden); 429 `process_inflight` | `principal_inflight` | `principal_rate` | `process_rate`; 503 `snapshot_conflict` (the one-snapshot transaction lost twice to concurrent writes), `ledger_unwritable` (no ledger partition holds this instant), `timeout` (the begin-through-commit budget ran out).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            responses: {
+                /** @description The decision, ledger-recorded. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["GateDecision"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                429: components["responses"]["GateTooManyRequests"];
+                /** @description The evaluation could not complete: `snapshot_conflict`, `ledger_unwritable` or `timeout`. No decision was made and nothing was recorded. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/gate/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The service's live gate policy (viewer+, `gate:evaluate`)
+         * @description FR-024 D13a. 404 `not_configured` when the service has no policy (never written, or deleted). `revision` is a DB-owned generation that is never reused — a delete bumps it, a re-create bumps it again — so a stale screen can never CAS over a policy it has not seen.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["GatePolicy"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                /** @description Unknown or foreign service (`not found`), or no policy configured (`not_configured`). */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        /**
+         * Create or replace the gate policy (editor+, `gate:policy:write`)
+         * @description FR-024 D11, D13a, D14. The body is the WHOLE document — every clause of the schema version, the threshold, the seal-lag bound and `unknown_behavior` — decoded strictly: an unknown field, a missing field, a wrong type, a missing/unknown/duplicate clause, or a value outside its range is 400 naming the field (`field: rule`). The server fills nothing in. `expected_revision` is REQUIRED: `null` means "I believe nothing is configured" and matches only an absent or deleted policy; any mismatch is 409 `revision_conflict` and changes nothing — checked BEFORE the no-op comparison, so an identical body with a stale revision is still 409. An identical body with the current revision is a no-op: same revision back, no audit row, no override revocation. A real change bumps the revision and revokes the active override (`revoked_reason: policy_changed`). The window must be an SLA window the service has a target for. Writable for file-managed services too (D13).
+         *
+         *     Errors: 400 validation naming the field; 404 unknown or foreign service; 409 `revision_conflict`.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["GatePolicyWrite"];
+                };
+            };
+            responses: {
+                /** @description The policy's revision after the write (unchanged for a no-op). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: int64 */
+                            revision: number;
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description `revision_conflict` — `expected_revision` is not the live revision; nothing changed. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        /**
+         * Delete the gate policy (editor+, `gate:policy:write`)
+         * @description FR-024 D13a. Tombstones the policy and bumps its revision in one statement; later decisions are `NOT_CONFIGURED`; the active override is closed as `policy_deleted` and stays readable through the history routes as `inert`; the ledger is untouched. `expected_revision` is REQUIRED in the query.
+         *
+         *     Errors: 400 `expected_revision_required` (absent) | `expected_revision_invalid` (non-integer or negative); 404 unknown or foreign service, or `not_configured`; 409 `revision_conflict`.
+         */
+        delete: {
+            parameters: {
+                query: {
+                    expected_revision: number;
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                /** @description Unknown or foreign service (`not found`), or no policy configured (`not_configured`). */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `revision_conflict`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/gate/override": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The ACTIVE override only, not history (viewer+, `gate:evaluate`)
+         * @description FR-024 D13a. `status` is computed at read time; only a row whose status is `active` is returned here. 404 `none_active` otherwise. History is under `…/gate/overrides`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["GateOverride"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                /** @description Unknown or foreign service (`not found`), or no active override (`none_active`). */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Create an override (project_admin+, `gate:override`)
+         * @description FR-024 D9, D13a. The ONE way an override comes to exist. Its actor is the request's principal, server-derived and stored twice — the typed triple the audit log uses and an immutable `actor_label` (`token:<name>` for an API token) — so a client-supplied actor field is refused as unknown. There is NO `action` field: D9 fixes what an override does (a `BLOCK` decision's `action` becomes `ALLOW`; `WARN` and `ALLOW` are left alone; `state` and `reasons` never change). `reason` is 1..500 characters; `expires_at` must be after the database's `now()` and at most 7 days ahead — a hard maximum, no default. The override is bound to `policy_revision`, which must be the live revision; a policy edit or delete revokes it. At most ONE unrevoked override per service: an expired one releases its slot, a live one is 409 `override_active`.
+         *
+         *     Errors: 400 validation naming the field (missing field, unknown field, unparseable `expires_at`, `reason` out of bounds, `expires_at` in the past or over 7 days); 404 unknown or foreign service; 409 `override_active` | `revision_conflict`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["GateOverrideCreate"];
+                };
+            };
+            responses: {
+                /** @description Created. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: uuid */
+                            id: string;
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description `override_active` (a live override holds the slot) or `revision_conflict` (`policy_revision` is not the live revision). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/gate/overrides": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Override history — the newest 50 (viewer+, `gate:evaluate`)
+         * @description FR-024 D13a. The newest 50 records by `created_at DESC, id DESC`, whatever their status. Storage is unbounded and the product history is this window; the audit log is the record.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["GateOverrideRecord"][];
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/gate/overrides/{overrideID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+                /** @description A gate override's immutable id (FR-024 D13a). Malformed is 400 before the store is asked. */
+                overrideID: components["parameters"]["OverrideID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * One override record, whatever its status (viewer+, `gate:evaluate`)
+         * @description FR-024 D13a. Every field is ALWAYS present, never absent: an active row carries the five closure fields as null; a system closure (`expired`, `policy_changed`, `policy_deleted`) carries `revoked_at` and `revoked_reason` with the three attribution fields null; a `manual` closure carries all five, with `revoked_by_user_id` null and `revoked_via_token` true when the revoker was an API token. `status` is a FUNCTION computed at read time: `revoked` (manual) > `inert` (policy changed/deleted, or bound to a revision that is not the live one) > `expired` > `active`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                    /** @description A gate override's immutable id (FR-024 D13a). Malformed is 400 before the store is asked. */
+                    overrideID: components["parameters"]["OverrideID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["GateOverrideRecord"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /**
+         * Revoke an override by its immutable id (project_admin+, `gate:override`)
+         * @description FR-024 D13a. Revocation is by id, never "the current one": a stale screen revoking an override that has expired or been superseded gets 409 `override_not_active` and the current override is untouched. A revoke of an already-revoked or expired override is that same 409, never a silent 204. Audited with the revoker's complete triple.
+         *
+         *     Errors: 400 malformed id; 404 unknown or foreign; 409 `override_not_active`.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                    /** @description A gate override's immutable id (FR-024 D13a). Malformed is 400 before the store is asked. */
+                    overrideID: components["parameters"]["OverrideID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Revoked. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description `override_not_active`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/gate/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The project's decision ledger, newest first (viewer+, `gate:evaluate`)
+         * @description FR-024 §5. PROJECT-scoped, never service-nested: the ledger outlives services, so a `service_id` foreign to the project yields an EMPTY page, not 404. The range is half-open `[from, to)`, both REQUIRED, `from < to`, at most 31 days. Order is `evaluated_at DESC, id DESC`; `cursor` is an opaque keyset of the LAST RETURNED item and the next page is bound strictly below it; `next_cursor` is null on the last page. The traversal is LIVE: a key returned once is never returned again, and rows committed or detached during the traversal may or may not appear. Each item's presence follows the by-id response.
+         *
+         *     Ledger reads take the §5a in-flight permits (429 `process_inflight` / `principal_inflight`) but no rate token.
+         *
+         *     Errors: 400 `range_required` | `range_invalid` | `range_too_wide` | `limit_invalid` (0, negative, non-integer or above 200) | `cursor_invalid` | a non-UUID `service_id`; 404 project not visible; 429 in-flight permits exhausted.
+         */
+        get: {
+            parameters: {
+                query: {
+                    from: string;
+                    to: string;
+                    service_id?: string;
+                    /** @description Opaque; the `next_cursor` of the previous page. */
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["GateDecisionList"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+                429: components["responses"]["GateTooManyRequests"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/gate/decisions/{decisionID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                /** @description A gate decision's id — a UUIDv7 whose millisecond is its `evaluated_at` (FR-024 §5). Malformed is 400. */
+                decisionID: components["parameters"]["DecisionID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * One decision by id (viewer+, `gate:evaluate`)
+         * @description FR-024 D10, §5. Authorized by the row's persisted `project_id`, with NO service-existence check on the path — the evidence is wanted exactly when the service is gone. The read derives the row's UTC day from the id's own millisecond and prunes to that one partition; a detached or never-created day and an unknown id both answer 404. Takes the §5a in-flight permits, no rate token.
+         *
+         *     Errors: 400 malformed id; 404 unknown, foreign, or no longer retained; 429 permits exhausted.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    /** @description A gate decision's id — a UUIDv7 whose millisecond is its `evaluated_at` (FR-024 §5). Malformed is 400. */
+                    decisionID: components["parameters"]["DecisionID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The decision as it was, evidence included. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["GateDecision"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+                429: components["responses"]["GateTooManyRequests"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/sla": {
         parameters: {
             query?: never;
@@ -7497,6 +8068,269 @@ export interface components {
             /** Format: double */
             uptime_percent?: number;
         };
+        /**
+         * @description What a policy declares about one clause (FR-024 D11). An ignored clause is evaluated for evidence and decides nothing.
+         * @enum {string}
+         */
+        GateClauseAssignment: "block" | "warn" | "ignore";
+        /** @description Every clause of the schema version, each exactly once (FR-024 D11, D14). Version 1's set is the five below; a write missing one, naming an unknown one, or naming one twice is refused by name. */
+        GateClauses: {
+            budget_exhausted: components["schemas"]["GateClauseAssignment"];
+            budget_consumed: components["schemas"]["GateClauseAssignment"];
+            page_burn_firing: components["schemas"]["GateClauseAssignment"];
+            ticket_burn_firing: components["schemas"]["GateClauseAssignment"];
+            service_incident_open: components["schemas"]["GateClauseAssignment"];
+        };
+        /** @description A service's live gate policy as stored (FR-024 D13a). */
+        GatePolicy: {
+            /** @description The clause vocabulary version; 1 is the only known one. */
+            schema_version: number;
+            /**
+             * @description The SLO window every budget and burn clause is evaluated against (D2).
+             * @enum {string}
+             */
+            window: "24h" | "7d" | "30d" | "90d";
+            clauses: components["schemas"]["GateClauses"];
+            /** @description The `budget_consumed` clause's threshold over `burned_percent` (D3). */
+            budget_consumed_percent: number;
+            /** @description Whole minutes; beyond it every budget clause is UNAVAILABLE with `seal_stale` (D8a). */
+            max_seal_lag_seconds: number;
+            /**
+             * @description The action an UNKNOWN state resolves to (D5). Mandatory
+             * @enum {string}
+             */
+            unknown_behavior: "warn" | "block";
+            /**
+             * Format: int64
+             * @description DB-owned generation
+             */
+            revision: number;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description The writer's immutable audit label. */
+            updated_by: string;
+        };
+        /** @description The PUT body — the whole document, nothing filled in server-side (FR-024 D11, D13a, D14). `expected_revision` is required: `null` claims nothing is configured. */
+        GatePolicyWrite: {
+            /** Format: int64 */
+            expected_revision: number | null;
+            schema_version: number;
+            /** @enum {string} */
+            window: "24h" | "7d" | "30d" | "90d";
+            clauses: components["schemas"]["GateClauses"];
+            budget_consumed_percent: number;
+            max_seal_lag_seconds: number;
+            /** @enum {string} */
+            unknown_behavior: "warn" | "block";
+        };
+        /** @description The ACTIVE override (FR-024 D13a `GET …/gate/override`). */
+        GateOverride: {
+            /** Format: uuid */
+            id: string;
+            reason: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            created_at: string;
+            /** @description The creator's immutable label — `token:<name>` for an API token. */
+            actor_label: string;
+            /**
+             * Format: int64
+             * @description The policy revision the override is bound to.
+             */
+            policy_revision: number;
+        };
+        /** @description One override with its read-time status and both attribution triples (FR-024 D13a). EVERY field is always present; the closure fields are null while active, the three revoker attribution fields are null for a system closure. */
+        GateOverrideRecord: {
+            /** Format: uuid */
+            id: string;
+            reason: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: int64 */
+            policy_revision: number;
+            actor_label: string;
+            /**
+             * Format: uuid
+             * @description Null for an API-token actor (`via_token` true).
+             */
+            actor_user_id: string | null;
+            via_token: boolean;
+            /** @enum {string} */
+            status: "active" | "expired" | "revoked" | "inert";
+            /** Format: date-time */
+            revoked_at: string | null;
+            /** @enum {string|null} */
+            revoked_reason: "manual" | "expired" | "policy_changed" | "policy_deleted" | null;
+            /** @description Present only for a `manual` closure. */
+            revoked_by_label: string | null;
+            /**
+             * Format: uuid
+             * @description Null for a token revoker even when `revoked_by_label` is set.
+             */
+            revoked_by_user_id: string | null;
+            revoked_via_token: boolean | null;
+        };
+        /** @description The POST body (FR-024 D9). No `action`, no actor — both are refused as unknown fields. */
+        GateOverrideCreate: {
+            /**
+             * Format: int64
+             * @description Must be the live policy revision
+             */
+            policy_revision: number;
+            reason: string;
+            /**
+             * Format: date-time
+             * @description After the database's now() and at most 7 days ahead.
+             */
+            expires_at: string;
+        };
+        /** @description One `reasons[]` entry (FR-024 D4, D7): a clause that matched (`code` names the match, `value` what it saw) or that was UNAVAILABLE (`code` is the unavailability — `budget_withheld`, `seal_stale`, `facts_stale`, `no_objective`, `window_target_missing`, `never_sealed`, `never_evaluated`, `no_governing_revision`), or the whole-decision `not_configured` with a `docs` link. Only `code` is always present. */
+        GateReason: {
+            code: string;
+            /** @enum {string} */
+            clause?: "budget_exhausted" | "budget_consumed" | "page_burn_firing" | "ticket_burn_firing" | "service_incident_open";
+            assignment?: components["schemas"]["GateClauseAssignment"];
+            /** @description What the clause saw — a number */
+            value?: unknown;
+            /** @description The owner the fact came from. */
+            source?: string;
+            /** Format: uri */
+            docs?: string;
+        };
+        /** @description The D7 response and, column for column, one ledger row (FR-024 D7, D10). The presence contract: the five required fields always; `action` and `unoverridden_action` for every state but `NOT_CONFIGURED`; `policy_revision`, `window`, `unknown_behavior`, `max_seal_lag_seconds` when a policy exists; `target_id`, `objective`, `objective_updated_at` when the window's target exists; `sealed_through`, `seal_lag`, `fact_revisions` when any fact has been sealed; `governing_revision` when a declaration governs; `burn_leases` one per rule of the target; `coverage_lease_until`, `coverage_state` when the service has been evaluated; `override` and `override_id` when one was applied; `facts_fresh_until` when a decision-constraining horizon exists. Absent means "does not apply"; `service_id` is present and null once the service is deleted. There is no `valid_until`. */
+        GateDecision: {
+            schema_version: number;
+            /** Format: uuid */
+            decision_id: string;
+            /**
+             * Format: date-time
+             * @description The one snapshot instant (D6a).
+             */
+            evaluated_at: string;
+            /** Format: uuid */
+            service_id: string | null;
+            service_slug: string;
+            service_name: string;
+            /**
+             * @description What was OBSERVED.
+             * @enum {string}
+             */
+            state: "ALLOW" | "WARN" | "BLOCK" | "UNKNOWN" | "NOT_CONFIGURED";
+            /**
+             * @description What the pipeline should do. Absent for NOT_CONFIGURED.
+             * @enum {string}
+             */
+            action?: "ALLOW" | "WARN" | "BLOCK";
+            /**
+             * @description The action without the override
+             * @enum {string}
+             */
+            unoverridden_action?: "ALLOW" | "WARN" | "BLOCK";
+            reasons: components["schemas"]["GateReason"][];
+            /** Format: int64 */
+            policy_revision?: number;
+            window?: string;
+            /** @enum {string} */
+            unknown_behavior?: "warn" | "block";
+            max_seal_lag_seconds?: number;
+            /** Format: uuid */
+            override_id?: string;
+            override?: {
+                /** Format: uuid */
+                id: string;
+                actor_label: string;
+                reason: string;
+                /** Format: date-time */
+                expires_at: string;
+            };
+            /** Format: uuid */
+            target_id?: string;
+            /** Format: double */
+            objective?: number;
+            /** Format: date-time */
+            objective_updated_at?: string;
+            /**
+             * Format: date-time
+             * @description The end of the sealed data the budget rests on (D8).
+             */
+            sealed_through?: string;
+            /**
+             * Format: double
+             * @description Seconds from `sealed_through` to `evaluated_at` (D8a).
+             */
+            seal_lag?: number;
+            /** @description The complete surviving evidence about the definition revisions the sealed facts were computed under (§5a). */
+            fact_revisions?: {
+                count: number;
+                first_id: string | null;
+                last_id: string | null;
+                /** @description SHA-256 over the sorted ids. */
+                digest: string;
+            };
+            governing_revision?: {
+                /** Format: uuid */
+                id: string;
+                /** Format: int64 */
+                revision: number;
+            };
+            burn_leases?: {
+                rule_key: string;
+                /** @enum {string} */
+                severity: "page" | "ticket";
+                firing: boolean | null;
+                last_verdict: string | null;
+                /** Format: date-time */
+                evaluated_at: string | null;
+                /** Format: date-time */
+                lease_until: string | null;
+                fresh: boolean;
+            }[];
+            /** Format: date-time */
+            coverage_lease_until?: string;
+            /** @description Both signals' coverage as EVIDENCE — never a clause (D11). */
+            coverage_state?: {
+                live: components["schemas"]["GateCoverageSignal"];
+                burn: components["schemas"]["GateCoverageSignal"];
+            };
+            /**
+             * Format: date-time
+             * @description When the facts this decision RESTS ON go stale — not a lifetime of the decision (D7).
+             */
+            facts_fresh_until?: string;
+        };
+        GateCoverageSignal: {
+            armed: boolean;
+            reason?: string;
+        };
+        /** @description One ledger listing item (FR-024 §5): a strict projection of GateDecision with the same presence rules — `action` and `policy_revision` exactly when `state ≠ NOT_CONFIGURED`, `override_id` exactly when an override was applied, `service_id` present and null once the service is deleted. */
+        GateDecisionSummary: {
+            schema_version: number;
+            /** Format: uuid */
+            decision_id: string;
+            /** Format: date-time */
+            evaluated_at: string;
+            /** Format: uuid */
+            service_id: string | null;
+            service_slug: string;
+            service_name: string;
+            /** @enum {string} */
+            state: "ALLOW" | "WARN" | "BLOCK" | "UNKNOWN" | "NOT_CONFIGURED";
+            /** @enum {string} */
+            action?: "ALLOW" | "WARN" | "BLOCK";
+            reasons: components["schemas"]["GateReason"][];
+            /** Format: int64 */
+            policy_revision?: number;
+            /** Format: uuid */
+            override_id?: string;
+        };
+        /** @description One page of the ledger (FR-024 §5); `next_cursor` is null on the last page. */
+        GateDecisionList: {
+            items: components["schemas"]["GateDecisionSummary"][];
+            next_cursor: string | null;
+        };
         ProjectSLA: {
             /** Format: uuid */
             project_id?: string;
@@ -8274,6 +9108,17 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
+        /** @description Refused by a process-local bound of the reliability gate (FR-024 §5a) BEFORE any transaction: `error` is `process_inflight`, `principal_inflight`, `principal_rate` or `process_rate`. Nothing was evaluated and nothing was recorded. Do not retry into it. */
+        GateTooManyRequests: {
+            headers: {
+                /** @description Whole seconds: `ceil(seconds until the next token)` for a rate refusal, `1` for an in-flight refusal, never below 1. */
+                "Retry-After"?: number;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
     };
     parameters: {
         OrgID: string;
@@ -8283,6 +9128,10 @@ export interface components {
         IncidentID: string;
         PageID: string;
         ServiceID: string;
+        /** @description A gate override's immutable id (FR-024 D13a). Malformed is 400 before the store is asked. */
+        OverrideID: string;
+        /** @description A gate decision's id — a UUIDv7 whose millisecond is its `evaluated_at` (FR-024 §5). Malformed is 400. */
+        DecisionID: string;
         /** @description Secret name (slug) within the project inventory. */
         SecretName: string;
         /** @description Feed serialization; defaults to RSS 2.0. */

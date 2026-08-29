@@ -103,7 +103,10 @@ type Registry struct {
 	// File-provider metrics (spec func-monitoring-as-code §16). Keyed by the bounded provider
 	// name only — never by file/project/monitor id.
 	fileProviders map[string]*fileProviderStat
-	now           func() time.Time
+	// FR-024 reliability-gate surface (gate.go): closed-label counters, one histogram, and the
+	// four decision-ledger gauges a maintenance pass sets and a deposed pass clears.
+	gate gateMetrics
+	now  func() time.Time
 }
 
 // fileProviderStat holds one file provider's exported gauges/counters.
@@ -900,6 +903,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		cp := fileProviderStat{leader: s.leader, reconciles: copyCounts(s.reconciles), lastDuration: s.lastDuration, lastSuccessUnix: s.lastSuccessUnix, managed: s.managed, orphaned: s.orphaned, bundleErrors: s.bundleErrors}
 		fileProviders[name] = cp
 	}
+	gate := r.gate.snapshot()
 	uptime := r.now().Sub(r.startTime).Seconds()
 	r.mu.RUnlock()
 	out := prometheusWriter{w: w}
@@ -1215,6 +1219,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 			out.printf("cerbix_service_slices_total{outcome=%q} %d\n", outcome, serviceSlices[outcome])
 		}
 	}
+
+	gate.write(&out)
 
 	if len(fileProviders) > 0 {
 		out.println("# HELP cerbix_file_provider_leader Whether this process holds a file provider's reconcile leadership.")

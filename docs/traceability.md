@@ -219,11 +219,15 @@ Mapping from requirements to code, tests, and metrics. Updated every iteration.
 Same instrument as the FR-023, FR-022 and FR-021 maps below: every number names a test that EXISTS in the
 tree (`make docs-check` resolves every `Test*` name cited here), and says which clause of the invariant
 that test reaches. Where an invariant is only partly reached today the row says `PARTIAL —` and names the
-gap instead of citing a test that does not reach it. The open gaps are of three kinds: the §7 cases that
-need a LIVE stack (an E2E spec for the API — `e2e/tests/` has no gate spec yet; the `pg_dump`/`pg_restore`
-round trip; the live materializer at the seal-lag floor), the SPA surface (AC-0163-8, gated on the owner's
-visual approval — no Vue file exists), and two §7 cases nobody has written (badge-parity of
-`coverage_state`, the file-managed policy write). Mutations named are those iter-0163 §1 records as killed.
+gap instead of citing a test that does not reach it. The open gaps, as of `16839a4`, are exactly these:
+the D15 FOREIGN case over HTTP (`e2e/tests/gate.spec.ts` proves a well-formed UNKNOWN id → 404 through a
+random UUID; a real service, decision and override in a SECOND project requested through the first
+project's path are not yet exercised — review [49]/[51]); the live materializer at the seal-lag floor
+(a 300 s policy on a healthy sealing stack is not `seal_stale` — row 15); the `pg_dump`/`pg_restore`
+round trip on the live stack followed by one maintenance pass (row 20); and the SPA surface (`seal_lag`
+on the service page, AC-0163-8, gated on the owner's visual approval — no Vue file exists). Everything else
+in the table cites a test that exists and reaches its clause. Mutations named are those iter-0163 §1
+records as killed.
 The table is checked for citation integrity; unlike the FR-021 table it is not yet compared as an exact
 set against the spec (the checker has no entry for it).
 

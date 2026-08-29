@@ -308,9 +308,22 @@ func probeDatabaseAt(
 	}
 	return db, notices, func() {
 		_ = db.Close()
-		if _, err := st.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Errorf("drop probe database: %v", err)
+		// The drop runs under its OWN deadline — the test's context may be nearly spent by the time
+		// cleanup runs (a declarative full-suite run under load saw "drop probe database: timeout:
+		// context deadline exceeded" after the test body had passed) — terminates any straggling
+		// session on the probe first, and retries once. A leaked probe database still fails the
+		// test: leaks must be visible, not silent.
+		dctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		var lastErr error
+		for attempt := 0; attempt < 2; attempt++ {
+			_, _ = st.pool.Exec(dctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, name)
+			if _, lastErr = st.pool.Exec(dctx, `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); lastErr == nil {
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
+		t.Errorf("drop probe database %s: %v", name, lastErr)
 	}
 }
 

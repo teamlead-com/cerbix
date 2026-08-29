@@ -15,8 +15,10 @@ import { apiGet, apiSend, ensureE2EWorkspace } from "./helpers";
 //      the listing with the same id (D10, §5);
 //   4. an override is created through its endpoint only, one active per service, revoked by its
 //      immutable id, and its record keeps the revoker's label after revocation (invariant 17);
-//   5. a malformed id is 400 and a foreign well-formed id is 404, on decide, policy and override
-//      alike (D15);
+//   5. a malformed id is 400; a well-formed id is 404 whether it is UNKNOWN (no such service
+//      anywhere) or FOREIGN (another project's real service, reached through this project's
+//      path) — on decide, policy, override and ledger alike, and a FOREIGN refusal changes
+//      nothing in the other project (D15);
 //   6. the ledger OUTLIVES the service: after DELETE the by-id read still answers 200 with
 //      `service_id: null` — invariant 12, "proven by an HTTP read after the service is deleted".
 //
@@ -286,58 +288,145 @@ test.describe("reliability gate", () => {
     expect(orphanFilter.items).toEqual([]);
   });
 
-  test("tenant: a malformed id is 400 and a foreign well-formed id is 404, on decide, policy and override alike", async ({ page }) => {
+  test("tenant (D15): malformed -> 400; UNKNOWN (random UUID) -> 404; FOREIGN (another project's real service) -> 404 and nothing there changes", async ({ page }) => {
     await page.goto("/services");
-    const { projectID } = await ensureE2EWorkspace(page);
+    const { orgID, projectID } = await ensureE2EWorkspace(page);
     const svcID = await createGovernedService(page, projectID, `${SLUG}-tenant`);
     const base = `/api/v1/projects/${projectID}/services`;
     const ledger = `/api/v1/projects/${projectID}/gate/decisions`;
-    const foreign = randomUUID();
+    const unknown = randomUUID();
+    const overrideBody = () => ({ policy_revision: 1, reason: "x", expires_at: new Date(Date.now() + 3600e3).toISOString() });
 
-    // Malformed service id: 400 BEFORE the store is asked (D15), on every service-scoped route.
-    for (const [method, path, data] of [
-      ["post", `${base}/not-a-uuid/gate`, undefined],
-      ["get", `${base}/not-a-uuid/gate/policy`, undefined],
-      ["put", `${base}/not-a-uuid/gate/policy`, { expected_revision: null, ...POLICY }],
-      ["get", `${base}/not-a-uuid/gate/override`, undefined],
-      ["post", `${base}/not-a-uuid/gate/override`, { policy_revision: 1, reason: "x", expires_at: new Date().toISOString() }],
-      ["get", `${base}/not-a-uuid/gate/overrides`, undefined],
-    ] as const) {
-      const r = await page.request[method](path, data === undefined ? undefined : { data });
-      expect(r.status(), `${method.toUpperCase()} ${path}`).toBe(400);
-      expect((await r.json()).error, `${method.toUpperCase()} ${path} names the rule`).toContain("UUID");
+    // Every service-scoped gate route, as (method, sub-path, body). The two override-by-id
+    // routes take the id to use, because the FOREIGN case must name a REAL foreign override.
+    const serviceRoutes = (overrideID: string) => [
+      ["post", "/gate", undefined],
+      ["get", "/gate/policy", undefined],
+      ["put", "/gate/policy", { expected_revision: 1, ...POLICY }],
+      ["delete", "/gate/policy?expected_revision=1", undefined], // the CAS rides the query string (D13a)
+      ["get", "/gate/override", undefined],
+      ["post", "/gate/override", overrideBody()],
+      ["get", "/gate/overrides", undefined],
+      ["get", `/gate/overrides/${overrideID}`, undefined],
+      ["delete", `/gate/overrides/${overrideID}`, undefined],
+    ] as const;
+    const hit = (method: "get" | "post" | "put" | "delete", path: string, data: unknown) =>
+      page.request[method](path, data === undefined ? undefined : { data });
+
+    // ── Malformed service id: 400 BEFORE the store is asked (D15), on every service-scoped route.
+    for (const [method, sub, data] of serviceRoutes(unknown)) {
+      const path = `${base}/not-a-uuid${sub}`;
+      const r = await hit(method, path, data);
+      expect(r.status(), `MALFORMED ${method.toUpperCase()} ${path}`).toBe(400);
+      expect((await r.json()).error, `MALFORMED ${method.toUpperCase()} ${path} names the rule`).toContain("UUID");
     }
 
-    // Foreign well-formed service id: the tenant 404 of D15, on every service-scoped route.
-    for (const [method, path, data] of [
-      ["post", `${base}/${foreign}/gate`, undefined],
-      ["get", `${base}/${foreign}/gate/policy`, undefined],
-      ["put", `${base}/${foreign}/gate/policy`, { expected_revision: null, ...POLICY }],
-      ["get", `${base}/${foreign}/gate/override`, undefined],
-      ["post", `${base}/${foreign}/gate/override`, { policy_revision: 1, reason: "x", expires_at: new Date(Date.now() + 3600e3).toISOString() }],
-      ["get", `${base}/${foreign}/gate/overrides`, undefined],
-    ] as const) {
-      const r = await page.request[method](path, data === undefined ? undefined : { data });
-      expect(r.status(), `${method.toUpperCase()} ${path}`).toBe(404);
+    // ── UNKNOWN: a well-formed id that no service anywhere has — the tenant 404 of D15 on every
+    // service-scoped route, with the spec's `not found` body (existence hidden).
+    for (const [method, sub, data] of serviceRoutes(unknown)) {
+      const path = `${base}/${unknown}${sub}`;
+      const r = await hit(method, path, data);
+      expect(r.status(), `UNKNOWN ${method.toUpperCase()} ${path}`).toBe(404);
+      expect((await r.json()).error, `UNKNOWN ${method.toUpperCase()} ${path} body`).toBe("not found");
     }
 
-    // A malformed or foreign OVERRIDE id under a real service, and the same for a decision id.
+    // A malformed or UNKNOWN OVERRIDE id under a real service, and the same for a decision id.
     const malformedOverride = await page.request.get(`${base}/${svcID}/gate/overrides/not-a-uuid`);
-    expect(malformedOverride.status()).toBe(400);
+    expect(malformedOverride.status(), "MALFORMED override id").toBe(400);
     const malformedRevoke = await apiSend(page, "delete", `${base}/${svcID}/gate/overrides/not-a-uuid`);
-    expect(malformedRevoke.status()).toBe(400);
-    const foreignOverride = await page.request.get(`${base}/${svcID}/gate/overrides/${foreign}`);
-    expect(foreignOverride.status()).toBe(404);
-    const foreignRevoke = await apiSend(page, "delete", `${base}/${svcID}/gate/overrides/${foreign}`);
-    expect(foreignRevoke.status()).toBe(404);
+    expect(malformedRevoke.status(), "MALFORMED override id on revoke").toBe(400);
+    const unknownOverride = await page.request.get(`${base}/${svcID}/gate/overrides/${unknown}`);
+    expect(unknownOverride.status(), "UNKNOWN override id").toBe(404);
+    const unknownRevoke = await apiSend(page, "delete", `${base}/${svcID}/gate/overrides/${unknown}`);
+    expect(unknownRevoke.status(), "UNKNOWN override id on revoke").toBe(404);
     const malformedDecision = await page.request.get(`${ledger}/not-a-uuid`);
-    expect(malformedDecision.status()).toBe(400);
-    const foreignDecision = await page.request.get(`${ledger}/${foreign}`);
-    expect(foreignDecision.status()).toBe(404);
+    expect(malformedDecision.status(), "MALFORMED decision id").toBe(400);
+    const unknownDecision = await page.request.get(`${ledger}/${unknown}`);
+    expect(unknownDecision.status(), "UNKNOWN decision id").toBe(404);
 
-    // None of the refusals above touched the database: the real service is still unconfigured.
+    // ── FOREIGN: a SECOND `e2e-` project the caller is authorized to, holding a REAL governed
+    // service with a policy, a decision and an active override. Reached through the FIRST
+    // project's path, every route is the same 404 as UNKNOWN — and nothing in the second
+    // project moves: its policy, its override and its decision are read BEFORE the block of
+    // foreign requests and AFTER it, through the CORRECT project, and compared field for field.
+    const otherSlug = `${SLUG}-other-${Date.now()}`;
+    const otherRes = await apiSend(page, "post", `/api/v1/organizations/${orgID}/projects`, { slug: otherSlug, name: "E2E Gate Other" });
+    expect(otherRes.status(), await otherRes.text()).toBe(201);
+    const otherID = (await otherRes.json()).id as string;
+    try {
+      const foreignSvc = await createGovernedService(page, otherID, `${SLUG}-foreign`);
+      const own = `/api/v1/projects/${otherID}/services/${foreignSvc}/gate`;
+      const ownLedger = `/api/v1/projects/${otherID}/gate/decisions`;
+      const putOwn = await apiSend(page, "put", `${own}/policy`, { expected_revision: null, ...POLICY });
+      expect(putOwn.status(), await putOwn.text()).toBe(200);
+      const decided = await apiSend(page, "post", own);
+      expect(decided.status(), await decided.text()).toBe(200);
+      const foreignDecision = await decided.json();
+      expect(foreignDecision.policy_revision).toBe(1);
+      const createdOverride = await apiSend(page, "post", `${own}/override`, {
+        policy_revision: 1, reason: "e2e-gate: foreign project's own override", expires_at: new Date(Date.now() + 3600e3).toISOString(),
+      });
+      expect(createdOverride.status(), await createdOverride.text()).toBe(201);
+      const foreignOverride = (await createdOverride.json()).id as string;
+
+      const from = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const to = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const snapshot = async () => ({
+        policy: await apiGet(page, `${own}/policy`),
+        active: await apiGet(page, `${own}/override`),
+        record: await apiGet(page, `${own}/overrides/${foreignOverride}`),
+        history: (await apiGet(page, `${own}/overrides`)).items,
+        decision: await apiGet(page, `${ownLedger}/${foreignDecision.decision_id}`),
+        listing: (await apiGet(page, `${ownLedger}?from=${from}&to=${to}&service_id=${foreignSvc}`)).items,
+      });
+      const before = await snapshot();
+      expect(before.policy.revision).toBe(1);
+      expect(before.active.id).toBe(foreignOverride);
+      expect(before.record.status).toBe("active");
+      expect(before.decision.decision_id).toBe(foreignDecision.decision_id);
+      expect(before.listing.map((i: any) => i.decision_id), "one decision so far in the foreign project").toEqual([foreignDecision.decision_id]);
+
+      // The foreign service's real id, the foreign override's real id — through the FIRST
+      // project's path. 404 `not found` everywhere: not 400, not 403, not 200.
+      for (const [method, sub, data] of serviceRoutes(foreignOverride)) {
+        const path = `${base}/${foreignSvc}${sub}`;
+        const r = await hit(method, path, data);
+        expect(r.status(), `FOREIGN ${method.toUpperCase()} ${path}`).toBe(404);
+        expect((await r.json()).error, `FOREIGN ${method.toUpperCase()} ${path} body`).toBe("not found");
+      }
+      // The project-scoped ledger: the foreign decision by id is 404, and a `service_id` filter
+      // naming the foreign service is an EMPTY page (§5: never a 404, because the ledger
+      // outlives services — but never another project's rows either).
+      const foreignByID = await page.request.get(`${ledger}/${foreignDecision.decision_id}`);
+      expect(foreignByID.status(), "FOREIGN decision id through the first project").toBe(404);
+      expect((await foreignByID.json()).error).toBe("not found");
+      const foreignFilter = await apiGet(page, `${ledger}?from=${from}&to=${to}&service_id=${foreignSvc}`);
+      expect(foreignFilter.items, "FOREIGN service_id filter is an empty page").toEqual([]);
+      expect(foreignFilter.next_cursor).toBeNull();
+
+      // AFTER: field for field, nothing in the second project changed — the policy (revision
+      // and document), the active override (id, status, every closure field), the override
+      // record and history, the decision by id, and the ledger still holds exactly one row.
+      const after = await snapshot();
+      expect(after.policy, "FOREIGN refusals left the policy document untouched").toEqual(before.policy);
+      expect(after.active, "FOREIGN refusals left the active override untouched").toEqual(before.active);
+      expect(after.record, "FOREIGN refusals left the override record untouched").toEqual(before.record);
+      expect(after.history, "FOREIGN refusals wrote no override history").toEqual(before.history);
+      expect(after.decision, "FOREIGN refusals left the decision untouched").toEqual(before.decision);
+      expect(after.listing, "FOREIGN POST …/gate ledgered nothing in the second project").toEqual(before.listing);
+      expect(after.policy.revision).toBe(1);
+      expect(after.active.status ?? after.record.status).toBe("active");
+    } finally {
+      // The second project and everything in it — the `e2e-` service, its policy, override and
+      // ledger rows — go with the project (the ledger keeps rows only while the project does).
+      const del = await apiSend(page, "delete", `/api/v1/projects/${otherID}`);
+      expect([200, 204], `delete second project -> ${del.status()}`).toContain(del.status());
+    }
+
+    // None of the refusals above touched the FIRST project's real service either: still unconfigured.
     const untouched = await apiSend(page, "post", `${base}/${svcID}/gate`);
     expect(untouched.status()).toBe(200);
     expect((await untouched.json()).state).toBe("NOT_CONFIGURED");
+    expect((await page.request.get(`${base}/${svcID}/gate/policy`)).status(), "no policy was written on the first project's service").toBe(404);
   });
 });

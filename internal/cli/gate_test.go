@@ -221,19 +221,22 @@ func TestGateCheckJSONIsByteIdenticalToResponse(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2 (BLOCK still governs the exit under --json)", code)
 	}
-	if stdout != gateBodyBlock+"\n" {
-		t.Fatalf("stdout = %q, want the body verbatim plus one newline", stdout)
+	if stdout != gateBodyBlock {
+		t.Fatalf("stdout = %q, want the body byte for byte (no newline appended)", stdout)
 	}
 
-	// A server that ends its body with a newline (json.Encoder does) is not doubled.
+	// A body that ends with a newline (json.Encoder does) is passed through with it — and only it.
 	srv2, _ := newGateServer(t, http.StatusOK, gateBodyAllow+"\n", nil)
 	code, stdout, _ = runGateCheckWith(t, srv2.URL, "--json")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
 	if stdout != gateBodyAllow+"\n" {
-		t.Fatalf("stdout = %q", stdout)
+		t.Fatalf("stdout = %q, want the body byte for byte", stdout)
 	}
+
+	// The mutation that appends a newline when the body lacks one fails the first assertion:
+	// stdout is compared to the body, never to body + "\n".
 }
 
 func TestGateCheck429PrintsRetryAfterAndNeverRetries(t *testing.T) {

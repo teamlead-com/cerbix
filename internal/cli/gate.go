@@ -306,12 +306,10 @@ func gateRenderDecision(body []byte, asJSON bool, stdout, stderr io.Writer) int 
 	}
 
 	if asJSON {
-		// Byte-identical to the API response; the newline is only added when the server did
-		// not end its body with one (json.Encoder does), so the bytes are never doubled.
+		// Byte-identical to the API response (D16, §7 CLI): exactly the body bytes, nothing
+		// appended — not even a newline. A consumer that diffs, hashes or signs the output must
+		// see what the server sent; a shell that wants a newline pipes through one.
 		_, _ = stdout.Write(body)
-		if len(body) == 0 || body[len(body)-1] != '\n' {
-			_, _ = io.WriteString(stdout, "\n")
-		}
 	} else {
 		_, _ = fmt.Fprintln(stdout, d.summaryLine())
 	}

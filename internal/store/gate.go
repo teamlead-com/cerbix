@@ -121,12 +121,15 @@ func lockServiceRowTx(ctx context.Context, tx pgx.Tx, projectID, serviceID strin
 	return nil
 }
 
-// dbNow reads the database's clock inside the transaction. Every gate comparison against
-// "now" — an override's expiry, the seven-day bound, a status — uses THIS clock, never the
-// application's (D9: "after the database's now()").
+// dbNow reads the database's clock inside the transaction — statement_timestamp(), the instant
+// THIS statement began, never now(): PostgreSQL's now() is frozen at BEGIN, so after a wait on the
+// service row lock it describes the moment the caller queued, not the moment the row is written
+// (review [19]: an override validated against BEGIN time after a two-minute wait committed already
+// expired). Every gate comparison against "now" — an override's expiry, the seven-day bound, a
+// status — uses THIS clock, read AFTER the lock, never the application's (D9).
 func dbNow(ctx context.Context, q dbConn) (time.Time, error) {
 	var now time.Time
-	if err := q.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
+	if err := q.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&now); err != nil {
 		return time.Time{}, fmt.Errorf("store: read clock: %w", err)
 	}
 	return now.UTC(), nil

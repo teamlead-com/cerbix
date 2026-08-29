@@ -193,7 +193,7 @@ func gatePolicyAuditText(doc *domain.GatePolicyDocument, clauses map[domain.Gate
 func closeGateOverridesTx(ctx context.Context, tx pgx.Tx, serviceID string, reason domain.GateRevokedReason) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE service_gate_overrides
-		   SET revoked_at = now(), revoked_reason = $2
+		   SET revoked_at = statement_timestamp(), revoked_reason = $2
 		 WHERE service_id = $1 AND revoked_at IS NULL`, serviceID, string(reason)); err != nil {
 		return fmt.Errorf("store: close gate overrides (%s): %w", reason, err)
 	}
@@ -262,7 +262,7 @@ func (s *Store) PutGatePolicy(
 			INSERT INTO service_gate_policies
 			    (service_id, project_id, window_name, schema_version, clauses, budget_consumed_percent,
 			     max_seal_lag_seconds, unknown_behavior, revision, deleted_at, updated_at, updated_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, NULL, now(), $9)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, NULL, statement_timestamp(), $9)
 			RETURNING revision`,
 			serviceID, projectID, doc.Window, doc.SchemaVersion, clausesJSON, doc.BudgetConsumedPercent,
 			doc.MaxSealLagSeconds, string(doc.UnknownBehavior), actor.Label).Scan(&revision); err != nil {
@@ -273,7 +273,7 @@ func (s *Store) PutGatePolicy(
 			UPDATE service_gate_policies
 			   SET window_name = $2, schema_version = $3, clauses = $4, budget_consumed_percent = $5,
 			       max_seal_lag_seconds = $6, unknown_behavior = $7,
-			       revision = revision + 1, deleted_at = NULL, updated_at = now(), updated_by = $8
+			       revision = revision + 1, deleted_at = NULL, updated_at = statement_timestamp(), updated_by = $8
 			 WHERE service_id = $1
 			RETURNING revision`,
 			serviceID, doc.Window, doc.SchemaVersion, clausesJSON, doc.BudgetConsumedPercent,
@@ -285,7 +285,8 @@ func (s *Store) PutGatePolicy(
 		return 0, false, err
 	}
 	target := "service=" + serviceID + " revision " + gateRevisionText(before, current) + "→" + strconv.FormatInt(revision, 10) +
-		" before=" + gatePolicyAuditText(before, beforeClauses) + " after=" + gatePolicyAuditText(&doc, clauses)
+		" before=" + gatePolicyAuditText(before, beforeClauses) + " after=" + gatePolicyAuditText(&doc, clauses) +
+		" actor=" + actor.Label // the immutable label: audit_logs' typed half reads "some token" for a machine (D9, invariant 11)
 	if err := insertGateAudit(ctx, tx, projectID, actor, "gate.policy.write", target); err != nil {
 		return 0, false, err
 	}
@@ -336,7 +337,7 @@ func (s *Store) DeleteGatePolicy(ctx context.Context, projectID, serviceID strin
 	var revision int64
 	if err := tx.QueryRow(ctx, `
 		UPDATE service_gate_policies
-		   SET deleted_at = now(), revision = revision + 1, updated_at = now(), updated_by = $2
+		   SET deleted_at = statement_timestamp(), revision = revision + 1, updated_at = statement_timestamp(), updated_by = $2
 		 WHERE service_id = $1
 		RETURNING revision`, serviceID, actor.Label).Scan(&revision); err != nil {
 		return fmt.Errorf("store: tombstone gate policy: %w", err)
@@ -346,7 +347,8 @@ func (s *Store) DeleteGatePolicy(ctx context.Context, projectID, serviceID strin
 	}
 	before := current.Document()
 	target := "service=" + serviceID + " revision " + strconv.FormatInt(current.Revision, 10) + "→" + strconv.FormatInt(revision, 10) +
-		" before=" + gatePolicyAuditText(&before, current.Clauses) + " after=none"
+		" before=" + gatePolicyAuditText(&before, current.Clauses) + " after=none" +
+		" actor=" + actor.Label
 	if err := insertGateAudit(ctx, tx, projectID, actor, "gate.policy.delete", target); err != nil {
 		return err
 	}

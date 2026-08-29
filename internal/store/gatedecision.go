@@ -98,7 +98,7 @@ func (s *Store) DecideGate(ctx context.Context, projectID, serviceID string, bud
 			continue
 		case isSerializationFailure(err):
 			return domain.GateDecision{}, fmt.Errorf("%w: %v", ErrGateSnapshotConflict, err)
-		case errors.Is(err, errSliceBudget) || isStatementTimeout(err):
+		case errors.Is(err, errSliceBudget) || isStatementTimeout(err) || errors.Is(err, context.DeadlineExceeded):
 			return domain.GateDecision{}, fmt.Errorf("%w: %v", ErrGateBudgetExceeded, err)
 		default:
 			return domain.GateDecision{}, err
@@ -107,6 +107,12 @@ func (s *Store) DecideGate(ctx context.Context, projectID, serviceID string, bud
 }
 
 func (s *Store) decideGateOnce(ctx context.Context, projectID, serviceID string, deadline time.Time, attempt int) (domain.GateDecision, error) {
+	// The budget is begin-through-commit (§5a): the SAME absolute deadline bounds the pool
+	// acquisition and BEGIN, not only the statements the deadline wrapper times after Begin
+	// succeeds — under pool exhaustion the request would otherwise wait past the contract before
+	// any per-statement bound existed (review [20]).
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	rawTx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return domain.GateDecision{}, fmt.Errorf("store: begin gate decision: %w", err)

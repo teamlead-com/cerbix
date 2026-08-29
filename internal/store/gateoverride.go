@@ -41,7 +41,7 @@ const gateOverrideColumns = `
 	o.reason, o.created_at, o.expires_at,
 	o.revoked_at, o.revoked_reason,
 	o.revoked_by_user_id, o.revoked_via_token, o.revoked_by_label,
-	now(),
+	statement_timestamp(),
 	(SELECT p.revision FROM service_gate_policies p WHERE p.service_id = o.service_id AND p.deleted_at IS NULL)`
 
 func scanGateOverride(row scannable) (GateOverrideRecord, error) {
@@ -139,8 +139,8 @@ func (s *Store) CreateGateOverride(
 	// Release the slot an expired row holds (D9), then check it.
 	if _, err := tx.Exec(ctx, `
 		UPDATE service_gate_overrides
-		   SET revoked_at = now(), revoked_reason = $2
-		 WHERE service_id = $1 AND revoked_at IS NULL AND expires_at <= now()`,
+		   SET revoked_at = statement_timestamp(), revoked_reason = $2
+		 WHERE service_id = $1 AND revoked_at IS NULL AND expires_at <= statement_timestamp()`,
 		serviceID, string(domain.GateRevokedExpired)); err != nil {
 		return "", fmt.Errorf("store: close expired gate override: %w", err)
 	}
@@ -157,8 +157,8 @@ func (s *Store) CreateGateOverride(
 	var id string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO service_gate_overrides
-		    (service_id, project_id, policy_revision, actor_user_id, via_token, actor_label, reason, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		    (service_id, project_id, policy_revision, actor_user_id, via_token, actor_label, reason, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, statement_timestamp())
 		RETURNING id`,
 		serviceID, projectID, policyRevision, actor.userID(), actor.ViaToken, actor.Label, reason, expiresAt.UTC()).Scan(&id); err != nil {
 		return "", fmt.Errorf("store: insert gate override: %w", err)
@@ -208,7 +208,7 @@ func (s *Store) RevokeGateOverride(ctx context.Context, projectID, serviceID, ov
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE service_gate_overrides
-		   SET revoked_at = now(), revoked_reason = $2,
+		   SET revoked_at = statement_timestamp(), revoked_reason = $2,
 		       revoked_by_user_id = $3, revoked_via_token = $4, revoked_by_label = $5
 		 WHERE id = $1`,
 		overrideID, string(domain.GateRevokedManual), actor.userID(), actor.ViaToken, actor.Label); err != nil {

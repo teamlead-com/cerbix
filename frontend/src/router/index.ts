@@ -44,6 +44,26 @@ const routes: RouteRecordRaw[] = [
     component: () => import("@/views/ServiceDeclarationView.vue"),
   },
   {
+    // FR-024 (D-0207): the override history is per SERVICE — an override is an operator's act on
+    // one service's gate — so it lives under the service, read-only; revocation is on the card.
+    path: "/services/:id/gate/overrides",
+    name: "service-gate-overrides",
+    component: () => import("@/views/GateOverridesView.vue"),
+  },
+  {
+    // FR-024 (D-0207, D10): the decision ledger is PROJECT-scoped, never service-nested — a
+    // decision outlives its service, and a route under the service would answer 404 at exactly
+    // the moment the evidence is wanted. `?service=<id>` pre-filters.
+    path: "/gate/decisions",
+    name: "gate-decisions",
+    component: () => import("@/views/GateDecisionsView.vue"),
+  },
+  {
+    path: "/gate/decisions/:id",
+    name: "gate-decision",
+    component: () => import("@/views/GateDecisionView.vue"),
+  },
+  {
     path: "/monitors",
     name: "monitors",
     component: () => import("@/views/MonitorsView.vue"),

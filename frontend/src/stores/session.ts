@@ -41,6 +41,22 @@ export const useSession = defineStore("session", {
             writeRoles.includes(m.role ?? ""),
         );
       },
+    // Whether the caller may ADMINISTER a project (FR-024 D12 `gate:override`; D-0207 item 3):
+    // a global admin, an org-level org_admin, or a project-level project_admin. The ONE
+    // predicate that separates editor from project_admin — components take its answer and
+    // never compare role strings themselves. Mirrors backend ActionProjectAdmin.
+    canProjectAdmin:
+      (s) =>
+      (orgID: string, projectID: string): boolean => {
+        if (s.user?.is_global_admin === true) return true;
+        const adminRoles = ["org_admin", "project_admin"];
+        return s.memberships.some(
+          (m) =>
+            m.org_id === orgID &&
+            (!m.project_id || m.project_id === projectID) &&
+            adminRoles.includes(m.role ?? ""),
+        );
+      },
     initials: (s) => {
       const name = s.user?.display_name || s.user?.email || "";
       return name

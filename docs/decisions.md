@@ -1351,7 +1351,7 @@ leaving the list. Verified by `vue-tsc` + `vite build`; served by the nginx `cer
 ## D-0075 — Incidents list: inline segmented status change
 
 **Context:** follow-up to D-0074 — moving an incident through Investigating → Identified → Monitoring still
-required opening "Manage". 
+required opening "Manage".
 **Decision:** add a **"Set status" segmented control** to `IncidentsView`'s detail panel (active incidents,
 `canProjectWrite`-gated) with the three working statuses; clicking one transitions in a single click
 (`setStatus` posts an update via `POST /incidents/{id}/updates`, refreshes the list, keeps the incident
@@ -5174,3 +5174,50 @@ acquire → work → release as a single lifecycle: authority is the gate sessio
 leadership. The gate advisory key is `0x6365726269780003` — slot 3 of the `"cerbix" + slot` namespace —
 with a pairwise-distinctness test. Wiring: `--role all` and `--role scheduler` construct the loop from
 the five `gate.decision_*` keys; the gate session pins one pool connection for at most 30 s per pass.
+
+## D-0207 — FR-024 SPA phase opened: the owner approved the mock; how the mock is read into product surfaces (2026-08-29)
+
+**Decision.** The owner approved `docs/design/mock-reliability-gate.html` visually on 2026-08-29 («апрув
+мока», chat), which is the gate D-0204 left in front of AC-0163-8. The SPA is built to the mock's six screens
+as follows, and every reading below is a decision, not a drift:
+
+1. **Product surfaces.** Screen 1 → the `Release gate` card on the service detail, after Alerting and before
+   Dependencies (D13: facts → who is woken → who may deploy), with its empty state, the "Latest decision ·
+   last 30 days" card and a compact "What a pipeline sees" card (the `cerbix gate check` command for THIS
+   project and service, the four exit codes). Screen 2 → the policy editor inline in that card (every field
+   explicit, client validation mirroring the server's rules, Save/Discard/Delete with `expected_revision`,
+   the delete confirmation listing what changes and what is kept, the 409 banner with Reload). Screen 3 → the
+   latest-decision detail with its reasons and evidence, the active-override card and the add-override form.
+   Screen 4 → a project-scoped `Gate decisions` view (`/gate/decisions`, `?service=` pre-filter from the
+   card's "all decisions →", ≤ 31-day range, cursor paging, "Show 50 more", the `range_too_wide` refusal
+   inline) and a by-id view (`/gate/decisions/:id`) rendering the full immutable record. Screen 5 → a
+   per-service `Override history` view (`/services/:id/gate/overrides`). Screen 6 → states of the
+   latest-decision card (UNKNOWN with `seal_stale`, `never_sealed`, budget withheld) and a compact
+   five-answers legend inside the card's help.
+2. **Explanatory cards are not built.** "Who sees which controls" and the CLI transport examples (429/503)
+   teach the reviewer the contract; the product expresses them by NOT rendering a control the role cannot
+   use and by the CLI's own stderr. Nothing in the mock's spec-notes becomes UI.
+3. **RBAC in the SPA.** `gate:evaluate` is viewer+, so the card and both histories render for everyone who
+   sees the service; `gate:policy:write` controls render for `session.canProjectWrite` (editor+); the
+   override controls render only for a NEW helper `session.canProjectAdmin` (org_admin/project_admin or
+   global admin) — the existing helper does not separate editor from project_admin and the mock requires
+   the separation. The service being file-managed does NOT make the gate read-only (D13), so the card does
+   not take the detail view's `canWrite` (which excludes managed services) but derives its own flags.
+4. **The SPA never asks the gate.** The latest decision is the newest ledger row for the service over the
+   last 30 days (`limit=1`), the same read as the history view; opening a page never creates a decision
+   (§9). The error-budget figure on the card is the value the decision itself quoted — `reasons[].value`
+   of a budget clause — and is omitted when no budget clause is in `reasons[]`; the card never fetches a
+   fresher number from the report path to stand beside a decision it did not belong to (NFR-019's "same
+   snapshot" read strictly). The mock's KPI is rendered when, and only when, the decision carries it.
+5. **Concurrency discipline as `ServiceAlerting.vue`.** Every load is guarded by a generation counter and
+   an `AbortController`; unmount and route/workspace changes abort in-flight reads and drop stale
+   responses; writes re-read after success; refusals are shown verbatim through one code→message map
+   (`revision_conflict`, `override_active`, `override_not_active`, `expected_revision_required`,
+   `not_configured`, `range_too_wide`, `none_active`).
+
+**Why.** The mock is the approved contract and the six screens map onto four product surfaces; writing
+the mapping down keeps "fidelity to the mock" reviewable against a named list rather than an impression.
+
+**Consequences.** AC-0163-8 IN_PROGRESS (iter-0163 §0 task 8, sub-tasks 8a–8d); row 15's "shown on the
+service page" clause is discharged when `seal_lag` renders on the card and a test reaches it; the
+`make dev-test` count grows by the UI spec; `make spa-snapshot` after the frontend change (CLAUDE.md).

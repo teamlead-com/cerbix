@@ -10,6 +10,7 @@ import { useWorkspace } from "@/stores/workspace";
 import ServiceReliability from "@/components/ServiceReliability.vue";
 import ServiceAlerting from "@/components/ServiceAlerting.vue";
 import ServiceDependencies from "@/components/ServiceDependencies.vue";
+import ServiceGate from "@/components/ServiceGate.vue";
 import { humanDuration, lagExact, sealedLabel } from "@/lib/services";
 
 type Detail = components["schemas"]["ServiceDetail"];
@@ -31,6 +32,11 @@ const openIncident = ref<{ id?: string; title?: string } | null>(null);
 const serviceId = computed(() => String(route.params.id || ""));
 const managed = computed(() => detail.value?.service.managed_by ?? "");
 const canWrite = computed(() => session.canProjectWrite(ws.orgId, ws.projectId) && !managed.value);
+// FR-024 D13 / D-0207 item 3: the release gate is UI/API-owned even for a file-managed service,
+// so it does NOT take `canWrite` (which excludes managed services). Two flags, from the two
+// central session predicates: `gate:policy:write` is editor+, `gate:override` is project_admin+.
+const canPolicyWrite = computed(() => session.canProjectWrite(ws.orgId, ws.projectId));
+const canOverride = computed(() => session.canProjectAdmin(ws.orgId, ws.projectId));
 
 async function load() {
   loading.value = true;
@@ -195,6 +201,18 @@ watch(() => [route.params.id, ws.projectId], load);
           :escalation-policy-id="detail.service.escalation_policy_id ?? ''"
           @saved="(value) => detail && (detail.alerting = value)"
           @policy-saved="(id) => detail && (detail.service.escalation_policy_id = id)"
+        />
+
+        <!-- FR-024 (iter-0163, D-0207): the release gate — facts → who is woken → who may deploy.
+             Owned by the UI/API even for a managed service (D13), so it derives its own flags. -->
+        <ServiceGate
+          :project-id="ws.projectId"
+          :service-id="serviceId"
+          :service-slug="detail.service.slug"
+          :sla-targets="detail.sla_targets"
+          :managed-by="managed"
+          :can-policy-write="canPolicyWrite"
+          :can-override="canOverride"
         />
 
         <!-- Phase 3 (iter-0148): the impact graph — both edge directions with the two-layer

@@ -17,7 +17,9 @@ vi.mock("vue-router", () => ({
 vi.mock("@/components/AppShell.vue", () => ({
   default: { name: "AppShell", template: "<div><slot name='actions' /><slot /></div>" },
 }));
-vi.mock("@/stores/session", () => ({ useSession: () => ({ canProjectWrite: () => true }) }));
+vi.mock("@/stores/session", () => ({
+  useSession: () => ({ canProjectWrite: () => true, canProjectAdmin: () => true }),
+}));
 vi.mock("@/stores/workspace", () => ({
   useWorkspace: () => ({ init: () => Promise.resolve(), orgId: "o1", projectId: "p1", orgName: "Acme", projectName: "API" }),
 }));
@@ -35,6 +37,7 @@ const SERVICE = {
   materialization: { repairing: [] },
   reliability: null,
   supersedes: [],
+  sla_targets: [],
 };
 
 function mountWith(incidents: Record<string, unknown>[]) {
@@ -51,6 +54,7 @@ function mountWith(incidents: Record<string, unknown>[]) {
         RouterLink,
         ServiceReliability: CHILD,
         ServiceAlerting: CHILD,
+        ServiceGate: CHILD,
         ServiceDependencies: CHILD,
       },
     },

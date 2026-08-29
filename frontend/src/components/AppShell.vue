@@ -85,6 +85,11 @@ const sections: { label: string; items: NavItem[] }[] = [
       ] },
       { key: "monitors", label: "Monitors", to: { name: "monitors" }, icon: [{ t: "path", d: "M3 12h4l2 6 4-14 2 8h6" }] },
       { key: "sla", label: "SLA & SLO", to: { name: "sla" }, icon: [{ t: "path", d: "M3 3v18h18" }, { t: "path", d: "M7 14l3-4 3 3 5-7" }] },
+      // FR-024 (D-0207): the project's decision LEDGER — project-scoped like SLA, because a
+      // decision outlives the service it was about (D10). Read-only for viewer+.
+      { key: "gate-decisions", label: "Gate decisions", to: { name: "gate-decisions" }, icon: [
+        { t: "path", d: "M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z" }, { t: "path", d: "M9 12l2 2 4-4" },
+      ] },
       { key: "escalation", label: "Escalation", to: { name: "escalation" }, icon: [{ t: "path", d: "M12 3v10" }, { t: "path", d: "M8 9l4 4 4-4" }, { t: "path", d: "M4 21h16" }] },
       { key: "incidents", label: "Incidents", to: { name: "incidents" }, icon: [
         { t: "path", d: "M12 9v4M12 17h.01" },

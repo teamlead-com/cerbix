@@ -15,7 +15,7 @@ vi.mock("@/api/client", () => ({ api: apiMock }));
 //     else changed between load and save, and the server merges under its own lock.
 //   * a refusal renders as ITSELF, from the payload's own message.
 
-type Alerting = { owns_paging: boolean; page_on: string[]; page_on_unknown: boolean; confirm_evaluations: number };
+type Alerting = { owns_paging: boolean; page_on: string[]; page_on_unknown: boolean; confirm_evaluations: number; renotify_seconds?: number };
 
 function mountWith(opts: {
   alerting?: Alerting | null;
@@ -73,7 +73,7 @@ function mountWith(opts: {
   });
 }
 
-const owning: Alerting = { owns_paging: true, page_on: ["down"], page_on_unknown: false, confirm_evaluations: 2 };
+const owning: Alerting = { owns_paging: true, page_on: ["down"], page_on_unknown: false, confirm_evaluations: 2, renotify_seconds: 0 };
 
 describe("ServiceAlerting", () => {
   it("reports coverage from the server, not from the switch", async () => {
@@ -433,5 +433,108 @@ describe("ServiceAlerting escalation policy", () => {
     await flushPromises();
     expect(w.get('[data-testid="alerting-escalation-select"]').attributes("disabled")).toBeDefined();
     expect(w.find('[data-testid="alerting-escalation-save"]').exists()).toBe(false);
+  });
+});
+
+// iter-0164: the `alerting` prop is the SERVER's declaration and the draft is the OPERATOR's, and the
+// two can move independently. Every re-fetch by the parent hands the panel a new `alerting` object —
+// which, until this iteration, rebuilt the draft from scratch and threw away whatever the operator
+// had typed but not yet saved. The E2E saw it as a cadence that "never reached the database": the
+// value was typed, the form went clean underneath the click, and Save had nothing to send.
+//
+// The rule these pin: a prop update re-initialises the draft ONLY where the operator has not been.
+// Touched fields keep the operator's value; untouched fields take the server's new one; and a draft
+// with nothing touched follows the prop exactly as before.
+describe("ServiceAlerting keeps unsaved edits across a prop update", () => {
+  const val = (w: ReturnType<typeof mountWith>, id: string) =>
+    (w.get(`[data-testid="${id}"]`).element as HTMLInputElement).value;
+
+  it("a late alerting prop does not discard an unsaved edit", async () => {
+    const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
+    await flushPromises();
+
+    await w.get('[data-testid="alerting-renotify"]').setValue("900");
+    expect(val(w, "alerting-renotify")).toBe("900");
+    expect(w.get('[data-testid="alerting-save"]').attributes("disabled")).toBeUndefined();
+
+    // The parent re-fetched: same values, NEW object — exactly what a second detail load delivers.
+    await w.setProps({ alerting: { ...owning, page_on: [...owning.page_on] } });
+    await flushPromises();
+
+    expect(val(w, "alerting-renotify"), "the typed value must survive the prop update").toBe("900");
+    expect(w.get('[data-testid="alerting-save"]').attributes("disabled"),
+      "the form is still dirty — the operator's edit is still unsaved").toBeUndefined();
+
+    await w.get('[data-testid="alerting-save"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.PATCH).toHaveBeenCalledTimes(1);
+    expect(apiMock.PATCH.mock.calls[0][1].body, "and it is what travels").toEqual({ renotify_seconds: 900 });
+  });
+
+  it("a prop change with no unsaved edit re-initialises the draft", async () => {
+    const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
+    await flushPromises();
+    expect(val(w, "alerting-confirm")).toBe("2");
+
+    // Somebody else (or a bundle) changed it; the operator has touched nothing: the form follows.
+    await w.setProps({ alerting: { ...owning, confirm_evaluations: 7, page_on: ["degraded", "down"] } });
+    await flushPromises();
+
+    expect(val(w, "alerting-confirm")).toBe("7");
+    expect(w.get('[data-testid="alerting-page-on-degraded"]').classes()).toContain("text-ok");
+    expect(w.get('[data-testid="alerting-save"]').attributes("disabled"), "nothing to save").toBeDefined();
+  });
+
+  it("an untouched field's server-side change flows into a dirty draft", async () => {
+    const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
+    await flushPromises();
+    await w.get('[data-testid="alerting-renotify"]').setValue("900");
+
+    // The server now says confirm=7 — a field the operator did not touch — while the cadence edit
+    // is still unsaved. Both truths must be on screen at once.
+    await w.setProps({ alerting: { ...owning, confirm_evaluations: 7 } });
+    await flushPromises();
+
+    expect(val(w, "alerting-confirm"), "the server's change to an untouched field lands").toBe("7");
+    expect(val(w, "alerting-renotify"), "the operator's unsaved edit stays").toBe("900");
+
+    await w.get('[data-testid="alerting-save"]').trigger("click");
+    await flushPromises();
+    // The diff is against the NEW server value: confirm=7 is not the operator's change, so §16.6a
+    // says it must not travel — a body restating it would overwrite the next concurrent edit.
+    expect(apiMock.PATCH.mock.calls[0][1].body).toEqual({ renotify_seconds: 900 });
+  });
+
+  it("the echo after a save leaves the form clean", async () => {
+    const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
+    await flushPromises();
+    await w.get('[data-testid="alerting-confirm"]').setValue("5");
+    await w.get('[data-testid="alerting-save"]').trigger("click");
+    await flushPromises();
+
+    // The parent does what ServiceDetailView does: it hands the echo straight back as the prop.
+    const echoed = w.emitted("saved")?.[0]?.[0] as Alerting;
+    expect(echoed.confirm_evaluations).toBe(5);
+    await w.setProps({ alerting: echoed });
+    await flushPromises();
+
+    expect(val(w, "alerting-confirm")).toBe("5");
+    expect(w.get('[data-testid="alerting-save"]').attributes("disabled"),
+      "what was just saved is no longer an unsaved edit").toBeDefined();
+  });
+
+  it("a different service's declaration replaces the draft, edits and all", async () => {
+    const w = mountWith({ alerting: owning, state: { live: { armed: true }, burn: { armed: true } } });
+    await flushPromises();
+    await w.get('[data-testid="alerting-renotify"]').setValue("900");
+
+    // Identity changed: the operator is now looking at another service. Carrying s1's unsaved
+    // cadence into s2's form would offer to write it to the wrong row.
+    await w.setProps({ serviceId: "s2", alerting: { ...owning, confirm_evaluations: 3, renotify_seconds: 60 } });
+    await flushPromises();
+
+    expect(val(w, "alerting-renotify")).toBe("60");
+    expect(val(w, "alerting-confirm")).toBe("3");
+    expect(w.get('[data-testid="alerting-save"]').attributes("disabled")).toBeDefined();
   });
 });

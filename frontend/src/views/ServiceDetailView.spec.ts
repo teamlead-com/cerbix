@@ -24,9 +24,13 @@ vi.mock("@/components/AppShell.vue", () => ({
 vi.mock("@/stores/session", () => ({
   useSession: () => ({ canProjectWrite: () => true, canProjectAdmin: () => true }),
 }));
-vi.mock("@/stores/workspace", () => ({
-  useWorkspace: () => ({ init: () => Promise.resolve(), orgId: "o1", projectId: "p1", orgName: "Acme", projectName: "API" }),
-}));
+// Swappable per test: the cold-load test below needs a REACTIVE store whose `projectId` is empty until
+// `init()` has answered, which is what the real one looks like on a fresh page.
+const wsMock = vi.hoisted(() => {
+  const STATIC = { init: () => Promise.resolve(), orgId: "o1", projectId: "p1", orgName: "Acme", projectName: "API" };
+  return { STATIC, current: STATIC as Record<string, unknown> };
+});
+vi.mock("@/stores/workspace", () => ({ useWorkspace: () => wsMock.current }));
 
 const RouterLink = { props: ["to"], template: '<a :data-to="to.params?.id"><slot /></a>' };
 const CHILD = { template: "<div />" };
@@ -205,6 +209,77 @@ describe("ServiceDetailView stale navigation (P1 [90])", () => {
       expect(errors).not.toHaveBeenCalled();
     } finally {
       errors.mockRestore();
+    }
+  });
+});
+
+// iter-0164: where the LATE `alerting` prop that clobbered the typed cadence came from. On a cold load
+// `ws.projectId` is "" until `ws.init()` — awaited INSIDE load() — sets it, and the view's own
+// `watch([route.params.id, ws.projectId])` then starts a SECOND load() (whose init runs in full again,
+// because the first has not marked the store loaded yet). Before P1 [90] both loads assigned `detail`,
+// so the panel was handed the declaration TWICE: the second one two round trips (orgs, projects)
+// after the first, a new object with the same values, which rebuilt the draft under whatever the
+// operator had typed in between. With the guard the first load is superseded before it reads, and the
+// panel is handed the declaration exactly once. Run against the pre-[90] view this test fails on both
+// of the last two assertions (2 reads, 2 deliveries) — that is the reproduction.
+describe("ServiceDetailView cold load (iter-0164)", () => {
+  it("hands the panel ONE declaration although ws.init() re-triggers load()", async () => {
+    const deliveries: unknown[] = [];
+    const AlertingProbe = {
+      props: ["alerting"],
+      template: '<div data-testid="alerting-probe" />',
+      watch: { alerting: { immediate: true, handler(v: unknown) { if (v) deliveries.push(v); } } },
+    };
+    const reads: string[] = [];
+    let inits = 0;
+    apiMock.GET.mockReset();
+    apiMock.GET.mockImplementation((path: string) => {
+      const p = String(path ?? "");
+      reads.push(p);
+      if (p.endsWith("/organizations")) return Promise.resolve({ data: [{ id: "o1", slug: "acme" }] });
+      if (p.endsWith("/projects")) return Promise.resolve({ data: [{ id: "p1", slug: "api" }] });
+      if (p.endsWith("/services/{serviceID}")) {
+        // A FRESH object per read, as JSON parsing gives: identity is what the panel's watcher sees.
+        return Promise.resolve({
+          data: { ...SERVICE, alerting: { owns_paging: false, page_on: ["down"], page_on_unknown: false, confirm_evaluations: 2, renotify_seconds: 0 } },
+        });
+      }
+      return Promise.resolve({ data: [] }); // monitors, incidents
+    });
+    // The real store's shape, reduced to what matters: `projectId` lands only after two awaited reads,
+    // it is set INSIDE an awaited `loadProjects()` — so the watcher it triggers runs before `loaded` is
+    // marked — and an init that starts before the first has finished therefore runs the whole thing
+    // again. (Set `loaded` in the same tick as `projectId` and the second init is a no-op: the tick
+    // boundary is what makes the double load real.)
+    wsMock.current = reactive({
+      orgId: "", projectId: "", loaded: false, orgName: "", projectName: "",
+      async init() {
+        if (this.loaded) return;
+        inits++;
+        const orgs = (await apiMock.GET("/api/v1/organizations")) as { data: { id: string }[] };
+        this.orgId = orgs.data[0].id;
+        await this.loadProjects();
+        this.loaded = true;
+      },
+      async loadProjects() {
+        const projects = (await apiMock.GET("/api/v1/organizations/{orgID}/projects")) as { data: { id: string }[] };
+        this.projectId = projects.data[0].id;
+      },
+    });
+    routeMock.route = reactive({ params: { id: "svc1" } });
+    try {
+      const w = mount(ServiceDetailView, {
+        global: { stubs: { RouterLink, ServiceReliability: CHILD, ServiceAlerting: AlertingProbe, ServiceGate: CHILD, ServiceDependencies: CHILD } },
+      });
+      for (let i = 0; i < 8; i++) await flushPromises();
+
+      expect(w.text(), "the page rendered").toContain("checkout");
+      expect(inits, "the projectId watcher fires from inside the first init, so load() runs twice").toBe(2);
+      expect(reads.filter((p) => p.endsWith("/services/{serviceID}")).length,
+        "…but only the surviving load reads the service").toBe(1);
+      expect(deliveries.length, "and the panel is handed the declaration exactly once").toBe(1);
+    } finally {
+      wsMock.current = wsMock.STATIC;
     }
   });
 });

@@ -134,6 +134,13 @@ watch(
     liveState.value = null;
     unavailable.value = false;
     void refreshState();
+    // And neither may their unsaved edits: the draft below survives a prop update on purpose, but
+    // only for the SAME service. Carrying one service's typed cadence into another's form would
+    // offer to write it to the wrong row, so an identity change starts over from whatever the
+    // parent currently holds (the new detail rebuilds it again when it lands — cleanly, as nothing
+    // is touched by then).
+    draft.value = props.alerting ? cloneAlerting(props.alerting) : null;
+    error.value = "";
   },
 );
 
@@ -196,11 +203,46 @@ async function savePolicy() {
   }
 }
 
+/** A copy the operator can edit without writing through to the parent's `detail`. */
+function cloneAlerting(value: Alerting): Alerting {
+  return { ...value, page_on: [...value.page_on] };
+}
+
+/**
+ * The declared fields that differ between two declarations, keyed as the wire names them. ONE
+ * definition of "changed": it is what a PATCH carries (§16.6a) and it is how the watcher below
+ * tells the operator's edits apart from the server's — two diffs would drift.
+ */
+function diffAlerting(before: Alerting, now: Alerting): Partial<Alerting> {
+  const out: Partial<Alerting> = {};
+  if (before.owns_paging !== now.owns_paging) out.owns_paging = now.owns_paging;
+  if (before.page_on_unknown !== now.page_on_unknown) out.page_on_unknown = now.page_on_unknown;
+  if (before.confirm_evaluations !== now.confirm_evaluations) out.confirm_evaluations = now.confirm_evaluations;
+  if (before.renotify_seconds !== now.renotify_seconds) out.renotify_seconds = now.renotify_seconds;
+  if (before.page_on.join(",") !== now.page_on.join(",")) out.page_on = now.page_on;
+  return out;
+}
+
+// The prop is the SERVER's declaration; the draft is the OPERATOR's. A new prop object arrives
+// whenever the parent re-reads the detail, and until iter-0164 it rebuilt the draft outright —
+// which threw away whatever had been typed but not yet saved, silently: the form went clean
+// underneath the operator, Save disabled itself, and the edit never travelled. So a prop update
+// re-initialises ONLY where the operator has not been. Fields they touched (measured against the
+// declaration the draft was built from, which is exactly the previous prop) keep their value;
+// every other field takes the server's new one, so a concurrent change elsewhere still shows.
+// A draft with nothing touched follows the prop as it always did.
 watch(
   () => props.alerting,
-  (value) => {
-    draft.value = value ? { ...value, page_on: [...value.page_on] } : null;
+  (value, previous) => {
     error.value = "";
+    if (!value || !previous || !draft.value) {
+      draft.value = value ? cloneAlerting(value) : null;
+      return;
+    }
+    const touched = diffAlerting(previous, draft.value);
+    const next = { ...cloneAlerting(value), ...touched };
+    if (touched.page_on) next.page_on = [...touched.page_on];
+    draft.value = next;
   },
   { immediate: true },
 );
@@ -262,13 +304,7 @@ function changedFields(): Record<string, unknown> {
   const before = props.alerting;
   const now = draft.value;
   if (!before || !now) return {};
-  const out: Record<string, unknown> = {};
-  if (before.owns_paging !== now.owns_paging) out.owns_paging = now.owns_paging;
-  if (before.page_on_unknown !== now.page_on_unknown) out.page_on_unknown = now.page_on_unknown;
-  if (before.confirm_evaluations !== now.confirm_evaluations) out.confirm_evaluations = now.confirm_evaluations;
-  if (before.renotify_seconds !== now.renotify_seconds) out.renotify_seconds = now.renotify_seconds;
-  if (before.page_on.join(",") !== now.page_on.join(",")) out.page_on = now.page_on;
-  return out;
+  return diffAlerting(before, now);
 }
 
 const dirty = computed(() => Object.keys(changedFields()).length > 0);
@@ -290,6 +326,9 @@ async function save() {
       error.value = res.error?.error ?? "could not save";
       return;
     }
+    // The ECHO is what the row holds now, so the draft adopts it before the parent hands it back as
+    // the prop: what was just saved is no longer an unsaved edit, whatever the server canonicalised.
+    draft.value = cloneAlerting(res.data);
     emit("saved", res.data);
     // A paging edit bumps the configuration generation, which dis-arms the service until the next
     // evaluation. Re-reading here is what stops the panel from showing the pre-save green badge

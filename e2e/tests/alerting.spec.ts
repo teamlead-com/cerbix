@@ -70,8 +70,17 @@ test.describe("alerting ownership", () => {
     // Turn ownership ON through the UI. The declaration changes; the COVERAGE does not follow it,
     // because nothing has evaluated the new configuration yet. A UI that rendered the switch as
     // coverage would go green here, which is exactly the confusion the badges exist to remove.
+    // Save disables the button the moment it is clicked (saving) and keeps it disabled once the echo
+    // has landed (clean), so `toBeDisabled` cannot tell the write apart from the intent to write —
+    // a read-back issued on it can reach the server before the PATCH has committed. The server's
+    // own answer to the PATCH can tell, so every read-back below waits for it (iter-0164).
+    const alertingPatch = () => page.waitForResponse(
+      (r) => r.request().method() === "PATCH" && r.url().includes(`/services/${svcID}/alerting`),
+    );
     await page.getByTestId("alerting-owns-paging").check();
+    let patched = alertingPatch();
     await page.getByTestId("alerting-save").click();
+    expect((await patched).status(), "the ownership PATCH").toBe(200);
     await expect(page.getByTestId("alerting-save")).toBeDisabled();
     await expect(page.getByTestId("alerting-badge-live")).not.toContainText("armed");
 
@@ -84,9 +93,9 @@ test.describe("alerting ownership", () => {
     expect(stored.owns_paging, "the declaration WAS stored").toBe(true);
 
     // A partial edit leaves the rest alone — the promise §16.6a makes about an omitted field.
-    const patched = await apiSend(page, "patch",
+    const confirmPatch = await apiSend(page, "patch",
       `/api/v1/projects/${projectID}/services/${svcID}/alerting`, { confirm_evaluations: 4 });
-    expect(patched.status()).toBe(200);
+    expect(confirmPatch.status()).toBe(200);
     const after = await apiGet(page, `/api/v1/projects/${projectID}/services/${svcID}/alerting`);
     expect(after.owns_paging, "a confirm-only edit must not disown the service").toBe(true);
     expect(after.confirm_evaluations).toBe(4);
@@ -98,15 +107,23 @@ test.describe("alerting ownership", () => {
     // that would have.
     await page.reload();
     await expect(panel).toBeVisible();
+    // The panel is visible the moment the detail lands, which is not the same as the form holding
+    // the stored declaration: the edit below must land on the draft the operator would see, so
+    // wait for the stored value to be on screen rather than racing the render for it (iter-0164).
+    const renotify = page.getByTestId("alerting-renotify");
+    await expect(renotify, "the stored cadence must be on screen before it is edited")
+      .toHaveValue(String(after.renotify_seconds ?? 0));
     // A value DIFFERENT from whatever is stored, computed rather than hard-coded. A literal made the
     // assertion depend on what earlier runs had left behind: when the service already held it the
     // form was not dirty, Save stayed disabled, and the test passed or failed by accident of order.
     // It failed in the full suite and passed on its own, which is the signature of exactly that.
     const wantCadence = Number(after.renotify_seconds ?? 0) + 900;
-    await page.getByTestId("alerting-renotify").fill(String(wantCadence));
+    await renotify.fill(String(wantCadence));
     await expect(page.getByTestId("alerting-save"), "a changed cadence must make the form dirty")
       .toBeEnabled();
+    patched = alertingPatch();
     await page.getByTestId("alerting-save").click();
+    expect((await patched).status(), "the cadence PATCH").toBe(200);
     await expect(page.getByTestId("alerting-save")).toBeDisabled();
     const cadence = await apiGet(page, `/api/v1/projects/${projectID}/services/${svcID}/alerting`);
     expect(cadence.renotify_seconds, "the cadence typed into the form must reach the database")

@@ -249,7 +249,7 @@ type Store interface {
 	ListGateOverrides(ctx context.Context, projectID, serviceID string) ([]store.GateOverrideRecord, error)
 	DecideGate(ctx context.Context, projectID, serviceID string, budget time.Duration) (domain.GateDecision, error)
 	GetGateDecision(ctx context.Context, projectID, decisionID string) (domain.GateDecision, error)
-	ListGateDecisions(ctx context.Context, projectID string, from, to time.Time, serviceID *string, cursor *store.GateCursor, limit int) ([]domain.GateDecisionSummary, *store.GateCursor, error)
+	ListGateDecisions(ctx context.Context, projectID string, from, to time.Time, serviceID *string, states []domain.GateState, cursor *store.GateCursor, limit int) ([]domain.GateDecisionSummary, *store.GateCursor, error)
 }
 
 // Mailer sends status-page subscription emails. Optional; nil means email is not

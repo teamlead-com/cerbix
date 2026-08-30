@@ -751,7 +751,9 @@ func (h *Handler) getGateDecision(w http.ResponseWriter, r *http.Request) {
 
 // listGateDecisions is the §5 listing: `from`/`to` required, half-open, at most 31 days;
 // `limit` 1..200 defaulting to 50; an opaque keyset `cursor`; an optional `service_id` that
-// yields an EMPTY page when foreign, never 404, because the ledger outlives services.
+// yields an EMPTY page when foreign, never 404, because the ledger outlives services; and a
+// repeatable `state` — every occurrence one of the five states, the set OR-ed, deduplicated
+// here so the store's array carries each state once, no occurrence at all = no filter.
 func (h *Handler) listGateDecisions(w http.ResponseWriter, r *http.Request) {
 	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionGateEvaluate)
 	if !ok {
@@ -791,6 +793,21 @@ func (h *Handler) listGateDecisions(w http.ResponseWriter, r *http.Request) {
 		}
 		serviceID = &v
 	}
+	var states []domain.GateState
+	if raw := q["state"]; len(raw) > 0 {
+		seen := make(map[domain.GateState]bool, len(raw))
+		for _, v := range raw {
+			st := domain.GateState(v)
+			if !domain.ValidGateState(st) {
+				writeError(w, http.StatusBadRequest, "state_invalid: "+strconv.Quote(v))
+				return
+			}
+			if !seen[st] {
+				seen[st] = true
+				states = append(states, st)
+			}
+		}
+	}
 	var cursor *store.GateCursor
 	if q.Has("cursor") {
 		c, err := store.DecodeGateCursor(q.Get("cursor"))
@@ -805,7 +822,7 @@ func (h *Handler) listGateDecisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	items, next, err := h.store.ListGateDecisions(r.Context(), proj.ID, from.UTC(), to.UTC(), serviceID, cursor, limit)
+	items, next, err := h.store.ListGateDecisions(r.Context(), proj.ID, from.UTC(), to.UTC(), serviceID, states, cursor, limit)
 	if h.writeGateError(w, "gate_decision_list", err) {
 		return
 	}

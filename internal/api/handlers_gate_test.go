@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -763,6 +764,12 @@ func TestGateDecisionListValidation(t *testing.T) {
 		"?from=" + from + "&to=" + to + "&cursor=!!!":                                  "cursor_invalid",
 		"?from=" + from + "&to=" + to + "&cursor=" + store.GateCursor{}.Encode() + "x": "cursor_invalid",
 		"?from=" + from + "&to=" + to + "&service_id=checkout":                         "service_id must be a UUID",
+		// `state`: every occurrence must be one of the five, case-sensitively, and the refusal
+		// names the offending value — the first bad one, however many good ones surround it.
+		"?from=" + from + "&to=" + to + "&state=bogus":                       `state_invalid: "bogus"`,
+		"?from=" + from + "&to=" + to + "&state=":                            `state_invalid: ""`,
+		"?from=" + from + "&to=" + to + "&state=block":                       `state_invalid: "block"`,
+		"?from=" + from + "&to=" + to + "&state=BLOCK&state=nope&state=WARN": `state_invalid: "nope"`,
 	} {
 		wantStatus(t, do(h, gateViewer, http.MethodGet, base+q, ""), http.StatusBadRequest, want)
 	}
@@ -770,13 +777,13 @@ func TestGateDecisionListValidation(t *testing.T) {
 		t.Fatal("a refused listing query reached the store")
 	}
 
-	// Defaults and pass-through: limit 50, no service, no cursor; an empty page is `[]`, not null,
-	// and the last page carries next_cursor null.
+	// Defaults and pass-through: limit 50, no service, no cursor, no states (nil, not an empty
+	// slice); an empty page is `[]`, not null, and the last page carries next_cursor null.
 	body := wantStatus(t, do(h, gateViewer, http.MethodGet, base+"?from="+from+"&to="+to, ""), http.StatusOK, "")
 	if string(body) != "{\"items\":[],\"next_cursor\":null}\n" {
 		t.Fatalf("empty page = %q", body)
 	}
-	if g.lastList.limit != 50 || g.lastList.serviceID != nil || g.lastList.cursor != nil ||
+	if g.lastList.limit != 50 || g.lastList.serviceID != nil || g.lastList.cursor != nil || g.lastList.states != nil ||
 		!g.lastList.from.Equal(time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)) || !g.lastList.to.Equal(time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("store saw %+v", g.lastList)
 	}
@@ -800,6 +807,43 @@ func TestGateDecisionListValidation(t *testing.T) {
 	}
 	g.listErr = store.ErrGateCursorInvalid
 	wantStatus(t, do(h, gateViewer, http.MethodGet, base+"?from="+from+"&to="+to, ""), http.StatusBadRequest, "cursor_invalid")
+}
+
+// The `state` filter reaches the store as a deduplicated SET of domain values in first-seen
+// order — one occurrence is a one-element set, several are OR-ed, a repeat is folded — and no
+// occurrence at all is nil, so the store's "every state" path is the same whether the SPA sends
+// nothing or a client never learned the parameter. It rides along with service_id, cursor and
+// limit in the same call; a bad value never reaches the store (TestGateDecisionListValidation).
+func TestGateDecisionListStateFilter(t *testing.T) {
+	fs := seededStore()
+	g := fs.gateState()
+	h := newGateHandler(fs, gateLimits(), &gateFakeMetrics{})
+	const base = "/api/v1/projects/p1/gate/decisions?from=2026-08-01T00:00:00Z&to=2026-08-15T00:00:00Z"
+	for _, tc := range []struct {
+		q    string
+		want []domain.GateState
+	}{
+		{"", nil},
+		{"&state=BLOCK", []domain.GateState{domain.GateStateBlock}},
+		{"&state=BLOCK&state=WARN", []domain.GateState{domain.GateStateBlock, domain.GateStateWarn}},
+		{"&state=WARN&state=BLOCK&state=WARN", []domain.GateState{domain.GateStateWarn, domain.GateStateBlock}},
+		{"&state=NOT_CONFIGURED&state=UNKNOWN&state=ALLOW", []domain.GateState{domain.GateStateNotConfigured, domain.GateStateUnknown, domain.GateStateAllow}},
+	} {
+		wantStatus(t, do(h, gateViewer, http.MethodGet, base+tc.q, ""), http.StatusOK, "")
+		if !reflect.DeepEqual(g.lastList.states, tc.want) {
+			t.Errorf("%q: store saw states %#v, want %#v", tc.q, g.lastList.states, tc.want)
+		}
+	}
+	if n := len(fs.gateCalls()); n != 5 {
+		t.Fatalf("%d store calls, want one per accepted query", n)
+	}
+	// Composition: service_id, cursor, limit and the state set travel in ONE call.
+	cursor := store.GateCursor{EvaluatedAt: gateT0, ID: gateDecID}
+	wantStatus(t, do(h, gateViewer, http.MethodGet, base+"&service_id="+gateSvcID+"&cursor="+cursor.Encode()+"&state=BLOCK&limit=7", ""), http.StatusOK, "")
+	if g.lastList.serviceID == nil || *g.lastList.serviceID != gateSvcID || g.lastList.cursor == nil || g.lastList.cursor.ID != gateDecID ||
+		g.lastList.limit != 7 || !reflect.DeepEqual(g.lastList.states, []domain.GateState{domain.GateStateBlock}) {
+		t.Fatalf("store saw %+v", g.lastList)
+	}
 }
 
 func mustMarshal(t *testing.T, v any) []byte {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -79,12 +80,12 @@ func gateInsertRow(t *testing.T, st *Store, ctx context.Context, f gateFixture, 
 	return id
 }
 
-func gateListAll(t *testing.T, st *Store, ctx context.Context, projectID string, from, to time.Time, serviceID *string, limit int) [][]domain.GateDecisionSummary {
+func gateListAll(t *testing.T, st *Store, ctx context.Context, projectID string, from, to time.Time, serviceID *string, states []domain.GateState, limit int) [][]domain.GateDecisionSummary {
 	t.Helper()
 	var pages [][]domain.GateDecisionSummary
 	var cursor *GateCursor
 	for {
-		items, next, err := st.ListGateDecisions(ctx, projectID, from, to, serviceID, cursor, limit)
+		items, next, err := st.ListGateDecisions(ctx, projectID, from, to, serviceID, states, cursor, limit)
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
@@ -195,7 +196,7 @@ func TestGateLedgerRowSurvivesRenameAndDeletion(t *testing.T) {
 	if !strings.Contains(string(raw), `"service_id":null`) {
 		t.Errorf("service_id must be present-and-null after deletion: %s", raw)
 	}
-	pages := gateListAll(t, st, ctx, f.projectID, dec.EvaluatedAt.Add(-time.Minute), dec.EvaluatedAt.Add(time.Minute), nil, 10)
+	pages := gateListAll(t, st, ctx, f.projectID, dec.EvaluatedAt.Add(-time.Minute), dec.EvaluatedAt.Add(time.Minute), nil, nil, 10)
 	if ids := gateIDsOf(pages); len(ids) != 1 || ids[0] != dec.DecisionID {
 		t.Errorf("listing after delete = %v", ids)
 	}
@@ -301,28 +302,28 @@ func TestGateLedgerListingContract(t *testing.T) {
 	}
 
 	// Refusals.
-	if _, _, err := st.ListGateDecisions(ctx, f.projectID, t0, t0, nil, nil, 10); validationField(t, err) != "range" {
+	if _, _, err := st.ListGateDecisions(ctx, f.projectID, t0, t0, nil, nil, nil, 10); validationField(t, err) != "range" {
 		t.Errorf("to == from named %v", err)
 	}
-	if _, _, err := st.ListGateDecisions(ctx, f.projectID, t0.Add(time.Minute), t0, nil, nil, 10); validationField(t, err) != "range" {
+	if _, _, err := st.ListGateDecisions(ctx, f.projectID, t0.Add(time.Minute), t0, nil, nil, nil, 10); validationField(t, err) != "range" {
 		t.Errorf("to < from named %v", err)
 	}
-	if _, _, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), nil, nil, 0); validationField(t, err) != "limit" {
+	if _, _, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), nil, nil, nil, 0); validationField(t, err) != "limit" {
 		t.Errorf("limit 0 named %v", err)
 	}
-	if _, _, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), nil, nil, GateListLimitMax+1); validationField(t, err) != "limit" {
+	if _, _, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), nil, nil, nil, GateListLimitMax+1); validationField(t, err) != "limit" {
 		t.Errorf("limit 201 named %v", err)
 	}
 
 	// [from, to): the row at exactly `to` excluded, the row at exactly `from` included; DESC order.
-	items, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(2*time.Minute), &f.serviceID, nil, 50)
+	items, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(2*time.Minute), &f.serviceID, nil, nil, 50)
 	if err != nil || next != nil || len(items) != 2 || items[0].DecisionID != ids[1] || items[1].DecisionID != ids[0] {
 		t.Errorf("[from,to) page = %v next=%v err=%v", gateIDsOf([][]domain.GateDecisionSummary{items}), next, err)
 	}
 
 	// limit = 2 over three rows: 2 + 1, no gap, the cursor from the LAST RETURNED row (the
 	// mutation that encodes the probe row would skip ids[0]).
-	page1, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), &f.serviceID, nil, 2)
+	page1, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), &f.serviceID, nil, nil, 2)
 	if err != nil || len(page1) != 2 || next == nil {
 		t.Fatalf("page 1 = %d items next=%v err=%v", len(page1), next, err)
 	}
@@ -339,7 +340,7 @@ func TestGateLedgerListingContract(t *testing.T) {
 			t.Errorf("cursor %q decoded: %v", bad, err)
 		}
 	}
-	page2, next2, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), &f.serviceID, &decoded, 2)
+	page2, next2, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), &f.serviceID, nil, &decoded, 2)
 	if err != nil || len(page2) != 1 || next2 != nil || page2[0].DecisionID != ids[0] {
 		t.Errorf("page 2 = %v next=%v err=%v", gateIDsOf([][]domain.GateDecisionSummary{page2}), next2, err)
 	}
@@ -348,19 +349,19 @@ func TestGateLedgerListingContract(t *testing.T) {
 		t.Errorf("traversal = %v, want newest first with no gap and no repeat", all)
 	}
 	// Exactly limit rows: no next page.
-	if items, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), &f.serviceID, nil, 3); err != nil || len(items) != 3 || next != nil {
+	if items, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), &f.serviceID, nil, nil, 3); err != nil || len(items) != 3 || next != nil {
 		t.Errorf("exact fit: %d items next=%v err=%v", len(items), next, err)
 	}
 
 	// No service filter: both services interleaved by time; a foreign service: an empty page.
-	if got := gateIDsOf(gateListAll(t, st, ctx, f.projectID, t0, t0.Add(time.Hour), nil, 2)); strings.Join(got, ",") != strings.Join([]string{ids[2], otherIDs[1], ids[1], otherIDs[0], ids[0]}, ",") {
+	if got := gateIDsOf(gateListAll(t, st, ctx, f.projectID, t0, t0.Add(time.Hour), nil, nil, 2)); strings.Join(got, ",") != strings.Join([]string{ids[2], otherIDs[1], ids[1], otherIDs[0], ids[0]}, ",") {
 		t.Errorf("project-wide traversal = %v", got)
 	}
 	foreign := "00000000-0000-0000-0000-000000000001"
-	if items, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), &foreign, nil, 10); err != nil || len(items) != 0 || next != nil || items == nil {
+	if items, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), &foreign, nil, nil, 10); err != nil || len(items) != 0 || next != nil || items == nil {
 		t.Errorf("foreign service = %v %v %v (want an empty, non-nil page)", items, next, err)
 	}
-	if items, _, err := st.ListGateDecisions(ctx, foreign, t0, t0.Add(time.Hour), nil, nil, 10); err != nil || len(items) != 0 {
+	if items, _, err := st.ListGateDecisions(ctx, foreign, t0, t0.Add(time.Hour), nil, nil, nil, 10); err != nil || len(items) != 0 {
 		t.Errorf("foreign project = %v %v", items, err)
 	}
 
@@ -373,6 +374,145 @@ func TestGateLedgerListingContract(t *testing.T) {
 			}
 		} else if !contains(keys, "action") || !contains(keys, "policy_revision") {
 			t.Errorf("configured item keys %v", keys)
+		}
+	}
+}
+
+// The `state` filter is a WHERE clause, not a post-filter (iter-0164): a page is full of
+// MATCHES with the non-matching rows interleaved between them on the timeline, the keyset runs
+// over the FILTERED set (a cursor continues it with no duplicate and no gap), several states are
+// OR-ed, the filter composes with service_id, and nil and empty both mean every state. The store
+// does not validate the values — the handler does — so a value no row carries, known or not, is
+// simply an empty, non-nil page.
+func TestGateLedgerListingStateFilter(t *testing.T) {
+	st, ctx := gateStore(t)
+	f := gateService(t, st, ctx, 2*time.Minute, minute, 0)
+	today := gateTodayDB(t, st, ctx)
+	t0 := today.Add(3 * time.Hour)
+	other := f
+	if err := st.pool.QueryRow(ctx, `INSERT INTO services (project_id, slug, name) VALUES ($1, 'other', 'Other') RETURNING id`, f.projectID).Scan(&other.serviceID); err != nil {
+		t.Fatal(err)
+	}
+	// The timeline, OLDEST first: twelve rows on `f` a second apart cycling BLOCK, ALLOW, WARN —
+	// so every BLOCK has two non-BLOCK neighbours — and three rows on `other` on the half-seconds
+	// between them (BLOCK, BLOCK, NOT_CONFIGURED).
+	type planted struct {
+		id    string
+		state domain.GateState
+		svc   string
+	}
+	var timeline []planted
+	plant := func(fx gateFixture, at time.Time, state domain.GateState) {
+		timeline = append(timeline, planted{gateInsertRow(t, st, ctx, fx, at, state, nil), state, fx.serviceID})
+	}
+	cycle := []domain.GateState{domain.GateStateBlock, domain.GateStateAllow, domain.GateStateWarn}
+	for i := 0; i < 12; i++ {
+		plant(f, t0.Add(time.Duration(i)*time.Second), cycle[i%3])
+		switch i {
+		case 0, 1:
+			plant(other, t0.Add(time.Duration(i)*time.Second+500*time.Millisecond), domain.GateStateBlock)
+		case 2:
+			plant(other, t0.Add(2*time.Second+500*time.Millisecond), domain.GateStateNotConfigured)
+		}
+	}
+	// want is the timeline NEWEST first, kept to the states (nil = all) and the service (nil = all).
+	want := func(states []domain.GateState, svc *string) []string {
+		var ids []string
+		for i := len(timeline) - 1; i >= 0; i-- {
+			p := timeline[i]
+			if svc != nil && p.svc != *svc {
+				continue
+			}
+			if len(states) > 0 && !slices.Contains(states, p.state) {
+				continue
+			}
+			ids = append(ids, p.id)
+		}
+		return ids
+	}
+	from, to := t0, t0.Add(time.Hour)
+	block := []domain.GateState{domain.GateStateBlock}
+
+	// One state: only its rows, newest first, both services (4 on f + 2 on other), one page.
+	items, next, err := st.ListGateDecisions(ctx, f.projectID, from, to, nil, block, nil, 50)
+	if err != nil || next != nil || len(items) != 6 {
+		t.Fatalf("BLOCK page: %d items next=%v err=%v", len(items), next, err)
+	}
+	for _, it := range items {
+		if it.State != domain.GateStateBlock {
+			t.Errorf("a %s row came back through the BLOCK filter", it.State)
+		}
+	}
+	if got := gateIDsOf([][]domain.GateDecisionSummary{items}); !slices.Equal(got, want(block, nil)) {
+		t.Errorf("BLOCK page = %v, want %v", got, want(block, nil))
+	}
+
+	// The page is FULL of matches: limit 3 over f's four BLOCK rows, each flanked by non-matching
+	// rows, returns three BLOCKs and a cursor from the last of them — not three rows of every
+	// state with one BLOCK among them.
+	page1, next, err := st.ListGateDecisions(ctx, f.projectID, from, to, &f.serviceID, block, nil, 3)
+	if err != nil || len(page1) != 3 || next == nil {
+		t.Fatalf("filtered page 1: %d items next=%v err=%v", len(page1), next, err)
+	}
+	for _, it := range page1 {
+		if it.State != domain.GateStateBlock {
+			t.Errorf("filtered page 1 holds a %s row", it.State)
+		}
+	}
+	if next.ID != page1[2].DecisionID || !next.EvaluatedAt.Equal(page1[2].EvaluatedAt) {
+		t.Errorf("cursor %+v is not the last returned MATCHING row %s", next, page1[2].DecisionID)
+	}
+	// The cursor continues within the filtered set: the fourth BLOCK, then the end — no row
+	// returned twice, none skipped.
+	page2, next2, err := st.ListGateDecisions(ctx, f.projectID, from, to, &f.serviceID, block, next, 3)
+	if err != nil || len(page2) != 1 || next2 != nil || page2[0].State != domain.GateStateBlock {
+		t.Fatalf("filtered page 2: %v next=%v err=%v", gateIDsOf([][]domain.GateDecisionSummary{page2}), next2, err)
+	}
+	if got := gateIDsOf([][]domain.GateDecisionSummary{page1, page2}); !slices.Equal(got, want(block, &f.serviceID)) {
+		t.Errorf("filtered traversal = %v, want %v (newest first, no gap, no repeat)", got, want(block, &f.serviceID))
+	}
+
+	// Two states = OR, paged through the cursor: BLOCK ∪ WARN on both services is 10 rows; pages of 4
+	// give 4 + 4 + 2 and the concatenation is exactly the timeline kept to those two states.
+	two := []domain.GateState{domain.GateStateWarn, domain.GateStateBlock}
+	pages := gateListAll(t, st, ctx, f.projectID, from, to, nil, two, 4)
+	if got := gateIDsOf(pages); len(pages) != 3 || len(got) != 10 || !slices.Equal(got, want(two, nil)) {
+		t.Errorf("BLOCK|WARN traversal: %d pages %v, want %v", len(pages), got, want(two, nil))
+	}
+	for _, p := range pages {
+		for _, it := range p {
+			if it.State != domain.GateStateBlock && it.State != domain.GateStateWarn {
+				t.Errorf("a %s row came back through the BLOCK|WARN filter", it.State)
+			}
+		}
+	}
+
+	// Composes with service_id: `other` + BLOCK is its two BLOCK rows; `other` + NOT_CONFIGURED is
+	// one; f + NOT_CONFIGURED is none (an empty, non-nil page).
+	if got := gateIDsOf(gateListAll(t, st, ctx, f.projectID, from, to, &other.serviceID, block, 50)); !slices.Equal(got, want(block, &other.serviceID)) || len(got) != 2 {
+		t.Errorf("other+BLOCK = %v, want %v", got, want(block, &other.serviceID))
+	}
+	nc := []domain.GateState{domain.GateStateNotConfigured}
+	if got := gateIDsOf(gateListAll(t, st, ctx, f.projectID, from, to, &other.serviceID, nc, 50)); len(got) != 1 || got[0] != want(nc, &other.serviceID)[0] {
+		t.Errorf("other+NOT_CONFIGURED = %v", got)
+	}
+	if items, next, err := st.ListGateDecisions(ctx, f.projectID, from, to, &f.serviceID, nc, nil, 50); err != nil || next != nil || items == nil || len(items) != 0 {
+		t.Errorf("f+NOT_CONFIGURED = %v %v %v, want an empty, non-nil page", items, next, err)
+	}
+
+	// A state no row carries — known (UNKNOWN) or not (the store does not validate; the handler
+	// does) — is an empty, non-nil page, never an error.
+	for _, s := range []domain.GateState{domain.GateStateUnknown, "RETIRED", ""} {
+		items, next, err := st.ListGateDecisions(ctx, f.projectID, from, to, nil, []domain.GateState{s}, nil, 50)
+		if err != nil || next != nil || items == nil || len(items) != 0 {
+			t.Errorf("state %q = %v %v %v, want an empty, non-nil page", s, items, next, err)
+		}
+	}
+
+	// nil and an empty slice both mean every state: all fifteen rows, interleaved by time.
+	for _, none := range [][]domain.GateState{nil, {}} {
+		if got := gateIDsOf(gateListAll(t, st, ctx, f.projectID, from, to, nil, none, 6)); !slices.Equal(got, want(nil, nil)) || len(got) != 15 {
+			t.Errorf("states=%v traversal = %v, want every row", none, got)
 		}
 	}
 }
@@ -410,7 +550,7 @@ func TestGateLedgerListingUnderAConcurrentWriter(t *testing.T) {
 	var seen []string
 	var cursor *GateCursor
 	for {
-		items, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), nil, cursor, 7)
+		items, next, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Hour), nil, nil, cursor, 7)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -467,7 +607,7 @@ func TestGateLedgerListingWithALongDecisionHeldOpen(t *testing.T) {
 	}()
 	<-held
 	from, to := gateTodayDB(t, st, ctx), gateTodayDB(t, st, ctx).Add(24*time.Hour)
-	page1, next, err := st.ListGateDecisions(ctx, f.projectID, from, to, nil, nil, 2)
+	page1, next, err := st.ListGateDecisions(ctx, f.projectID, from, to, nil, nil, nil, 2)
 	if err != nil || len(page1) != 2 || next == nil {
 		t.Fatalf("page 1: %d %v %v", len(page1), next, err)
 	}
@@ -482,7 +622,7 @@ func TestGateLedgerListingWithALongDecisionHeldOpen(t *testing.T) {
 	}
 	cursor := next
 	for cursor != nil {
-		items, n, err := st.ListGateDecisions(ctx, f.projectID, from, to, nil, cursor, 2)
+		items, n, err := st.ListGateDecisions(ctx, f.projectID, from, to, nil, nil, cursor, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -609,7 +749,7 @@ func TestGateLedgerListingPlan(t *testing.T) {
 	}
 	// Semantics on the populated fixture: the sparse service's ten rows, newest first, in 3 pages,
 	// each page one statement over the same plan.
-	pages := gateListAll(t, st, ctx, f.projectID, today.Add(-29*24*time.Hour), today.Add(2*24*time.Hour), &sparse.serviceID, 4)
+	pages := gateListAll(t, st, ctx, f.projectID, today.Add(-29*24*time.Hour), today.Add(2*24*time.Hour), &sparse.serviceID, nil, 4)
 	got := gateIDsOf(pages)
 	if len(pages) != 3 || len(got) != 10 {
 		t.Errorf("sparse traversal: %d pages, %d rows", len(pages), len(got))
@@ -642,7 +782,7 @@ func TestGateLedgerListingPresenceMatchesByID(t *testing.T) {
 		t.Fatal(err)
 	}
 	from, to := notConfigured.EvaluatedAt.Add(-time.Second), overridden.EvaluatedAt.Add(time.Second)
-	items, next, err := st.ListGateDecisions(ctx, f.projectID, from, to, nil, nil, 10)
+	items, next, err := st.ListGateDecisions(ctx, f.projectID, from, to, nil, nil, nil, 10)
 	if err != nil || next != nil || len(items) != 3 {
 		t.Fatalf("listing: %d %v %v", len(items), next, err)
 	}

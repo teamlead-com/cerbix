@@ -14,8 +14,9 @@ import { RANGE_TOO_WIDE_TEXT } from "@/lib/gateLedger";
 //     line, no table), 429 (Retry-After seconds), a network failure verbatim, an empty page.
 //   * `?service=` pre-selects — on a COLD load too, when `ws.init()` picks the project only after the
 //     view mounted (P1 [88]); a LATER project switch resets the filters.
-//   * the state filter is client-side and says so; a deleted service is a chip; a page that lands
-//     after the filters moved is dropped.
+//   * the state filter is the SERVER's (iter-0164): a picked state travels as a one-element `state`
+//     array on the first page AND on "Show 50 more", nothing is filtered here and no hint says
+//     otherwise; a deleted service is a chip; a page that lands after the filters moved is dropped.
 
 const apiMock = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn(), PUT: vi.fn(), DELETE: vi.fn() }));
 vi.mock("@/api/client", () => ({ api: apiMock }));
@@ -128,7 +129,12 @@ afterEach(() => {
     expect(Date.parse(q.to) - Date.parse(q.from)).toBeGreaterThan(0);
     expect(Date.parse(q.to) - Date.parse(q.from), "never wider than 31 days").toBeLessThanOrEqual(31 * DAY_MS);
     expect(q.limit).toBe(50);
-    expect("state" in q, "the API has no state filter; none is sent").toBe(false);
+    // `state` is the server's set filter: absent for "Any state", otherwise exactly the one picked.
+    if ("state" in q) {
+      expect(Array.isArray(q.state), "state travels as an array (repeatable query param)").toBe(true);
+      expect(q.state).toHaveLength(1);
+      expect(["ALLOW", "WARN", "BLOCK", "UNKNOWN", "NOT_CONFIGURED"]).toContain(q.state[0]);
+    }
     expect(c[1].signal).toBeInstanceOf(AbortSignal);
   }
 });
@@ -320,27 +326,58 @@ describe("GateDecisionsView — filters", () => {
     expect(opts[1].text()).toBe("6d1f0b1e…000a");
   });
 
-  it("the state filter is client-side: no `state` travels, the hint says so, and the empty text counts the loaded rows", async () => {
-    serve(page([row("d1", { state: "BLOCK", action: "BLOCK" }), row("d2"), row("d3", { state: "WARN", action: "WARN" })]));
+  it("the state filter is server-side: `state` travels as a one-element array on the first page AND on 'Show 50 more', nothing is filtered here, no hint", async () => {
+    // The server answers what it is asked: the rows it returns for `state=BLOCK` are all BLOCK, and
+    // the view renders EVERY row it gets — a client that still filtered would be invisible here, so
+    // the second page deliberately carries a row of another state to prove nothing is dropped.
+    serve((opts: { params: { query: { state?: string[]; cursor?: string } } }) => {
+      const { state, cursor } = opts.params.query;
+      if (!state) return page([row("d1", { state: "BLOCK", action: "BLOCK" }), row("d2"), row("d3", { state: "WARN", action: "WARN" })]);
+      return cursor ? page([row("d6", { state: "WARN", action: "WARN" })]) : page([row("d4", { state: "BLOCK", action: "BLOCK" }), row("d5", { state: "BLOCK", action: "BLOCK" })], "cur-b");
+    });
     const w = mountView();
     await settle();
     expect(rows(w)).toHaveLength(3);
-    expect(has(w, "gate-decisions-state-hint")).toBe(false);
+    expect("state" in lastQuery(), "Any state: no `state` key at all").toBe(false);
+    expect(has(w, "gate-decisions-state-hint"), "the client-side hint is gone").toBe(false);
+
     await t(w, "gate-decisions-state").setValue("BLOCK");
     await t(w, "gate-decisions-apply").trigger("click");
     await settle();
     expect(ledgerCalls()).toHaveLength(2);
-    expect("state" in lastQuery()).toBe(false);
-    expect(rows(w).map((r) => r.attributes("data-state"))).toEqual(["BLOCK"]);
-    expect(t(w, "gate-decisions-state-hint").text()).toContain("Showing only");
-    expect(t(w, "gate-decisions-state-hint").text()).toContain("no state filter");
+    expect(lastQuery().state, "the first filtered page carries the state").toEqual(["BLOCK"]);
+    expect(lastQuery().cursor).toBeUndefined();
+    expect(rows(w).map((r) => r.attributes("data-id")), "the server's rows, as returned").toEqual(["d4", "d5"]);
+    expect(has(w, "gate-decisions-state-hint")).toBe(false);
 
+    await t(w, "gate-decisions-more").trigger("click");
+    await settle();
+    expect(ledgerCalls()).toHaveLength(3);
+    expect(lastQuery(), "the next page reuses the SAME state with the cursor").toMatchObject({ state: ["BLOCK"], cursor: "cur-b", limit: 50 });
+    expect(rows(w).map((r) => r.attributes("data-id")), "appended verbatim — no client-side filtering").toEqual(["d4", "d5", "d6"]);
+    expect(has(w, "gate-decisions-more")).toBe(false);
+
+    // Back to "Any state": the key disappears again.
+    await t(w, "gate-decisions-state").setValue("");
+    await t(w, "gate-decisions-apply").trigger("click");
+    await settle();
+    expect(ledgerCalls()).toHaveLength(4);
+    expect("state" in lastQuery()).toBe(false);
+  });
+
+  it("an empty filtered page names the state it asked for", async () => {
+    serve((opts: { params: { query: { state?: string[] } } }) => (opts.params.query.state ? page([]) : page([row("d1")])));
+    const w = mountView();
+    await settle();
+    expect(rows(w)).toHaveLength(1);
     await t(w, "gate-decisions-state").setValue("NOT_CONFIGURED");
     await t(w, "gate-decisions-apply").trigger("click");
     await settle();
+    expect(lastQuery().state).toEqual(["NOT_CONFIGURED"]);
     expect(rows(w)).toHaveLength(0);
-    expect(t(w, "gate-decisions-empty").text()).toContain("None of the 3 loaded decisions is");
-    expect(t(w, "gate-decisions-empty").text()).toContain("not configured");
+    expect(t(w, "gate-decisions-empty").text()).toContain("No not configured decisions between");
+    expect(t(w, "gate-decisions-empty").text()).not.toContain("loaded decisions");
+    expect(has(w, "gate-decisions-state-hint")).toBe(false);
   });
 
   it("rows: the state pill, the reason chips with their attrs, a deleted service's chip, the link by id", async () => {

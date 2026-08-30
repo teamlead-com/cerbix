@@ -231,7 +231,7 @@ every body decoded strictly, the server fills nothing in):
 | `GET /api/v1/projects/{p}/services/{s}/gate/overrides` | `gate:evaluate` | History: the newest 50 by `created_at DESC, id DESC`, each with its read-time `status: active \| expired \| revoked \| inert`. |
 | `GET` / `DELETE /api/v1/projects/{p}/services/{s}/gate/overrides/{override_id}` | `gate:evaluate` / `gate:override` | One override by immutable id, with both attribution triples; revoke → 204, or 409 `override_not_active` for an expired, revoked or superseded one — never a silent 204. |
 | `GET /api/v1/projects/{p}/gate/decisions/{id}` | `gate:evaluate` | One ledger row, PROJECT-scoped: no service on the path, so it still answers after the service is deleted — the moment the evidence is wanted. |
-| `GET /api/v1/projects/{p}/gate/decisions?from&to[&service_id][&cursor][&limit]` | `gate:evaluate` | The listing: `[from, to)` required and ≤ 31 days, `limit` ≤ 200 (default 50), live keyset cursor over `evaluated_at DESC, id DESC`; a foreign `service_id` is an empty page, not 404. |
+| `GET /api/v1/projects/{p}/gate/decisions?from&to[&service_id][&state…][&cursor][&limit]` | `gate:evaluate` | The listing: `[from, to)` required and ≤ 31 days, `limit` ≤ 200 (default 50), live keyset cursor over `evaluated_at DESC, id DESC`; a foreign `service_id` is an empty page, not 404. `state` is repeatable — a SET of the five states, OR-ed, none = every state, any other value 400 `state_invalid` — applied in the WHERE clause, so a page is a page of matches and the cursor continues the filtered set (iter-0164). |
 
 CLI: `cerbix gate check --project <id> --service <id> [--json] [--timeout 10s]` (`internal/cli/gate.go`)
 — `CERBIX_URL`, `CERBIX_TOKEN` (environment only, never a flag), `CERBIX_CA_FILE`; exit `0` `ALLOW`/`WARN`,
@@ -261,7 +261,9 @@ project and service with the four exit codes.
 Two ledger views complete the surface: `Gate decisions` (`/gate/decisions`,
 `frontend/src/views/GateDecisionsView.vue` — `?service=` pre-filter from the card, an explicit `[from, to)`
 range of at most 31 days frozen at Apply and refused client-side before the request, the server's
-`range_too_wide` rendered the same way, pages of 50 over the keyset cursor) and the by-id record
+`range_too_wide` rendered the same way, a state picker that travels as the server's `state=` filter on
+the first page and on every `Show 50 more` — the view filters nothing itself since iter-0164 — and pages
+of 50 over the keyset cursor) and the by-id record
 (`/gate/decisions/:id`, `frontend/src/views/GateDecisionView.vue` — every present field of the immutable
 row plus the raw JSON, still readable after the service is deleted); the per-service override history is
 `/services/:id/gate/overrides` (`frontend/src/views/GateOverridesView.vue`, read-only, the closure per

@@ -11,7 +11,9 @@
 // of at most 31 days computed here (lib/gateLedger.ts), never a server default; paging reuses the
 // exact same `from`/`to` with the cursor. A range the server would refuse is refused BEFORE the
 // request, with the server's own sentence; the server's 400 `range_too_wide` renders the same way
-// if it ever comes back.
+// if it ever comes back. The state filter is the SERVER's (iter-0164): a picked state travels as
+// `state=<STATE>` on the first page and on every "Show 50 more", so a page of 50 is 50 matching
+// rows and the cursor continues the filtered set — nothing is filtered here.
 //
 // Concurrency discipline as ServiceAlerting.vue (D-0207 item 5): one generation counter and one
 // AbortController cover EVERY read, pagination included. A filter change, a project switch or an
@@ -131,13 +133,16 @@ function apply() {
   void loadFirst();
 }
 
+// The API's `state` is repeatable (a set, OR-ed; openapi-fetch serialises an array as
+// `state=A&state=B`); this picker selects one, so the set has one member — or is absent.
 function queryFor(cursor?: string) {
-  const q: { from: string; to: string; limit: number; service_id?: string; cursor?: string } = {
+  const q: { from: string; to: string; limit: number; service_id?: string; state?: GateState[]; cursor?: string } = {
     from: appliedBounds!.from,
     to: appliedBounds!.to,
     limit: PAGE_SIZE,
   };
   if (applied.value.service) q.service_id = applied.value.service;
+  if (applied.value.state) q.state = [applied.value.state];
   if (cursor) q.cursor = cursor;
   return q;
 }
@@ -241,13 +246,6 @@ const serviceOptions = computed(() => {
   if (picked && !opts.some((o) => o.id === picked)) opts.unshift({ id: picked, label: shortId(picked), title: picked });
   return opts;
 });
-
-// The API has no `state` filter (schema: from, to, service_id, cursor, limit), so the state select
-// filters the LOADED rows and the hint under the header says so; "Show 50 more" loads the next 50
-// of every state and filters them the same way.
-const visible = computed(() =>
-  applied.value.state ? rows.value.filter((r) => r.state === applied.value.state) : rows.value,
-);
 
 function routeService(): string {
   const v = route.query?.service;
@@ -377,14 +375,9 @@ const stateLabel = (s: GateState) => statePill(s).label;
           {{ error }}
         </p>
 
-        <p v-if="applied.state && !error" class="border-b border-border bg-surface-2 px-4 py-[8px] text-[12px] text-ink-3" data-testid="gate-decisions-state-hint">
-          Showing only <span class="font-mono">{{ stateLabel(applied.state) }}</span> among the loaded rows — the ledger has no state filter,
-          so each "Show {{ PAGE_SIZE }} more" loads the next {{ PAGE_SIZE }} of every state and keeps the matching ones.
-        </p>
-
         <p v-if="loading" class="px-4 py-10 text-center text-[13px] text-ink-3">Loading…</p>
 
-        <div v-else-if="visible.length" class="overflow-x-auto">
+        <div v-else-if="rows.length" class="overflow-x-auto">
           <table class="w-full text-[13px]" data-testid="gate-decisions-table">
             <thead>
               <tr class="text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
@@ -400,7 +393,7 @@ const stateLabel = (s: GateState) => statePill(s).label;
             </thead>
             <tbody>
               <tr
-                v-for="r in visible"
+                v-for="r in rows"
                 :key="r.decision_id"
                 class="hover:bg-surface-2"
                 data-testid="gate-decision-row"
@@ -462,14 +455,10 @@ const stateLabel = (s: GateState) => statePill(s).label;
         </div>
 
         <p v-else-if="!error" class="px-4 py-10 text-center text-[13px] text-ink-3" data-testid="gate-decisions-empty">
-          <template v-if="applied.state && rows.length">
-            None of the {{ rows.length }} loaded decisions is <span class="font-mono">{{ stateLabel(applied.state) }}</span>.
-            <template v-if="nextCursor">Show {{ PAGE_SIZE }} more to keep looking.</template>
-          </template>
-          <template v-else>
-            No decisions between <span class="font-mono">{{ applied.from }}</span> and <span class="font-mono">{{ applied.to }}</span><template v-if="applied.service"> for this service</template>.
-            The gate writes one row per <span class="font-mono">cerbix gate check</span>; opening this page writes nothing.
-          </template>
+          <template v-if="applied.state">No <span class="font-mono">{{ stateLabel(applied.state) }}</span> decisions</template>
+          <template v-else>No decisions</template>
+          between <span class="font-mono">{{ applied.from }}</span> and <span class="font-mono">{{ applied.to }}</span><template v-if="applied.service"> for this service</template>.
+          The gate writes one row per <span class="font-mono">cerbix gate check</span>; opening this page writes nothing.
         </p>
 
         <div class="flex flex-wrap items-center justify-center gap-[14px] border-t border-border px-4 py-[11px]">

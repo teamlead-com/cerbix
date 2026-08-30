@@ -138,13 +138,18 @@ const gateSummaryColumns = `
 	id, service_id, service_slug, service_name, state, action, reasons, policy_revision, override_id, evaluated_at`
 
 // ListGateDecisions is one page of the project's ledger over [from, to) (§5), newest first,
-// optionally for one service, bound strictly below the cursor. It issues ONE statement with
-// LIMIT limit + 1, returns the first `limit` items and a cursor from the last of THOSE — never
-// from the probe row — or a nil cursor on the last page. The handler owns the range and limit
-// contract; the store refuses `to <= from` and a limit outside 1..200 defensively. A foreign
-// service_id is an empty page, not ErrNotFound: the ledger outlives services.
+// optionally for one service and/or a SET of states, bound strictly below the cursor. It issues
+// ONE statement with LIMIT limit + 1, returns the first `limit` items and a cursor from the last
+// of THOSE — never from the probe row — or a nil cursor on the last page. Both filters sit in
+// the WHERE clause, so they apply BEFORE the limit (a full page is a full page of matches) and
+// the keyset runs over the filtered set: a cursor continues the same filters with no duplicate
+// and no gap. `states` nil or empty means every state; the handler validates the values, the
+// store passes them through and a value no row carries is simply an empty page. The handler
+// owns the range and limit contract; the store refuses `to <= from` and a limit outside 1..200
+// defensively. A foreign service_id is an empty page, not ErrNotFound: the ledger outlives
+// services.
 func (s *Store) ListGateDecisions(
-	ctx context.Context, projectID string, from, to time.Time, serviceID *string, cursor *GateCursor, limit int,
+	ctx context.Context, projectID string, from, to time.Time, serviceID *string, states []domain.GateState, cursor *GateCursor, limit int,
 ) ([]domain.GateDecisionSummary, *GateCursor, error) {
 	if !to.After(from) {
 		return nil, nil, gateInvalid("range", "to must be after from")
@@ -159,6 +164,14 @@ func (s *Store) ListGateDecisions(
 	if serviceID != nil {
 		args = append(args, *serviceID)
 		sql += fmt.Sprintf(" AND service_id = $%d", len(args))
+	}
+	if len(states) > 0 {
+		set := make([]string, 0, len(states))
+		for _, st := range states {
+			set = append(set, string(st))
+		}
+		args = append(args, set)
+		sql += fmt.Sprintf(" AND state = ANY($%d::text[])", len(args))
 	}
 	if cursor != nil {
 		args = append(args, cursor.EvaluatedAt, cursor.ID)

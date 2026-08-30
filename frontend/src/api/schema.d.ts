@@ -2693,9 +2693,11 @@ export interface paths {
          * The project's decision ledger, newest first (viewer+, `gate:evaluate`)
          * @description FR-024 §5. PROJECT-scoped, never service-nested: the ledger outlives services, so a `service_id` foreign to the project yields an EMPTY page, not 404. The range is half-open `[from, to)`, both REQUIRED, `from < to`, at most 31 days. Order is `evaluated_at DESC, id DESC`; `cursor` is an opaque keyset of the LAST RETURNED item and the next page is bound strictly below it; `next_cursor` is null on the last page. The traversal is LIVE: a key returned once is never returned again, and rows committed or detached during the traversal may or may not appear. Each item's presence follows the by-id response.
          *
+         *     `state` narrows the page to a SET of states: repeatable (`?state=BLOCK&state=WARN`), the occurrences OR-ed, none at all = no filter. The filter is applied BEFORE the limit — a page of 50 is 50 MATCHING rows, not 50 rows with the others struck out — and it composes with `service_id`. The cursor semantics are unchanged: the keyset runs over the FILTERED set, so a `next_cursor` continues the same state set and the same service, no duplicates, no gaps.
+         *
          *     Ledger reads take the §5a in-flight permits (429 `process_inflight` / `principal_inflight`) but no rate token.
          *
-         *     Errors: 400 `range_required` | `range_invalid` | `range_too_wide` | `limit_invalid` (0, negative, non-integer or above 200) | `cursor_invalid` | a non-UUID `service_id`; 404 project not visible; 429 in-flight permits exhausted.
+         *     Errors: 400 `range_required` | `range_invalid` | `range_too_wide` | `limit_invalid` (0, negative, non-integer or above 200) | `cursor_invalid` | `state_invalid` (any occurrence outside the five states, the offending value named) | a non-UUID `service_id`; 404 project not visible; 429 in-flight permits exhausted.
          */
         get: {
             parameters: {
@@ -2703,6 +2705,8 @@ export interface paths {
                     from: string;
                     to: string;
                     service_id?: string;
+                    /** @description Repeatable; the set of states to keep (OR). Omitted = every state. Any other value is 400 `state_invalid`. */
+                    state?: ("ALLOW" | "WARN" | "BLOCK" | "UNKNOWN" | "NOT_CONFIGURED")[];
                     /** @description Opaque; the `next_cursor` of the previous page. */
                     cursor?: string;
                     limit?: number;

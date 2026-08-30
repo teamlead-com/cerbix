@@ -3040,6 +3040,7 @@ type fakeGate struct {
 	lastList     struct {
 		from, to  time.Time
 		serviceID *string
+		states    []domain.GateState
 		cursor    *store.GateCursor
 		limit     int
 	}
@@ -3238,11 +3239,11 @@ func (f *fakeStore) GetGateDecision(_ context.Context, projectID, decisionID str
 	return dec, nil
 }
 
-func (f *fakeStore) ListGateDecisions(_ context.Context, projectID string, from, to time.Time, serviceID *string, cursor *store.GateCursor, limit int) ([]domain.GateDecisionSummary, *store.GateCursor, error) {
+func (f *fakeStore) ListGateDecisions(_ context.Context, projectID string, from, to time.Time, serviceID *string, states []domain.GateState, cursor *store.GateCursor, limit int) ([]domain.GateDecisionSummary, *store.GateCursor, error) {
 	g := f.gateState()
 	g.record("ListGateDecisions")
 	g.mu.Lock()
-	g.lastList.from, g.lastList.to, g.lastList.serviceID, g.lastList.cursor, g.lastList.limit = from, to, serviceID, cursor, limit
+	g.lastList.from, g.lastList.to, g.lastList.serviceID, g.lastList.states, g.lastList.cursor, g.lastList.limit = from, to, serviceID, states, cursor, limit
 	g.mu.Unlock()
 	if g.listErr != nil {
 		return nil, nil, g.listErr

@@ -263,7 +263,7 @@ func TestGateBListingCursorTiebreakOnSameInstantRows(t *testing.T) {
 	// A neighbour a second later, to prove the same-instant group is ordered below it as a block.
 	newer := gateInsertRow(t, st, ctx, f, t0.Add(time.Second), domain.GateStateAllow, nil)
 
-	pages := gateListAll(t, st, ctx, f.projectID, t0, t0.Add(time.Minute), &f.serviceID, 1)
+	pages := gateListAll(t, st, ctx, f.projectID, t0, t0.Add(time.Minute), &f.serviceID, nil, 1)
 	got := gateIDsOf(pages)
 	if len(pages) != 4 || len(got) != 4 {
 		t.Fatalf("limit=1 over four rows: %d pages, %d rows — %v", len(pages), len(got), got)
@@ -282,7 +282,7 @@ func TestGateBListingCursorTiebreakOnSameInstantRows(t *testing.T) {
 	}
 	// A cursor EQUAL to a row (its own key) never returns that row again.
 	cur := &GateCursor{EvaluatedAt: t0, ID: ids[0]}
-	items, _, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Minute), &f.serviceID, cur, 10)
+	items, _, err := st.ListGateDecisions(ctx, f.projectID, t0, t0.Add(time.Minute), &f.serviceID, nil, cur, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

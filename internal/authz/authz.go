@@ -41,7 +41,45 @@ const (
 	// ActionGateOverride: create or revoke a gate override — the one act that lets a BLOCK
 	// through. project_admin+.
 	ActionGateOverride Action = "gate:override"
+
+	// Change intelligence (FR-025, D12): one new action. The timeline, the comparison and the
+	// incident links are reads under ActionProjectRead — no `change:read` exists.
+
+	// ActionChangeRecord: record a change phase on a service. editor+.
+	ActionChangeRecord Action = "change:record"
 )
+
+// actionCatalogue is the CLOSED list of every Action — what a token's `actions` allow-list is
+// validated against on create (FR-025 D12, `action_unknown`).
+var actionCatalogue = []Action{
+	ActionGlobalManage,
+	ActionOrgRead,
+	ActionOrgManage,
+	ActionProjectRead,
+	ActionProjectManage,
+	ActionProjectWrite,
+	ActionGateEvaluate,
+	ActionGatePolicyWrite,
+	ActionGateOverride,
+	ActionChangeRecord,
+}
+
+// Actions returns a copy of the central action catalogue.
+func Actions() []Action {
+	out := make([]Action, len(actionCatalogue))
+	copy(out, actionCatalogue)
+	return out
+}
+
+// ValidAction reports whether a names an Action of the catalogue.
+func ValidAction(a Action) bool {
+	for _, known := range actionCatalogue {
+		if known == a {
+			return true
+		}
+	}
+	return false
+}
 
 // roleGrants maps each role to the actions it grants where it applies. Scope
 // applicability (org-wide vs a single project) is handled in Principal.Can.
@@ -55,6 +93,7 @@ var roleGrants = map[domain.Role]map[Action]bool{
 		ActionGateEvaluate:    true,
 		ActionGatePolicyWrite: true,
 		ActionGateOverride:    true,
+		ActionChangeRecord:    true,
 	},
 	domain.RoleProjectAdmin: {
 		ActionProjectRead:     true,
@@ -63,6 +102,7 @@ var roleGrants = map[domain.Role]map[Action]bool{
 		ActionGateEvaluate:    true,
 		ActionGatePolicyWrite: true,
 		ActionGateOverride:    true,
+		ActionChangeRecord:    true,
 	},
 	domain.RoleEditor: {
 		ActionOrgRead:         true,
@@ -70,6 +110,7 @@ var roleGrants = map[domain.Role]map[Action]bool{
 		ActionProjectWrite:    true,
 		ActionGateEvaluate:    true,
 		ActionGatePolicyWrite: true,
+		ActionChangeRecord:    true,
 	},
 	domain.RoleViewer: {
 		ActionOrgRead:      true,
@@ -94,6 +135,26 @@ type Principal struct {
 	// rows carry it beside the typed columns so a reader sees WHO acted without
 	// resolving a uuid ([288] P1-3). Never client-supplied.
 	AuditLabel string
+	// Actions is an API token's ALLOW-LIST (FR-025 D12): nil means the role decides — every
+	// principal that predates the list, and every session principal, is nil here. A non-nil
+	// list is INTERSECTED with the role grants: Can(action) = roleGrants[role] ∋ action AND
+	// action ∈ Actions. It is consulted in Can (and its scoping mirror VisibleScope) and
+	// nowhere else; handlers keep calling Can. Set by the auth layer from the token row.
+	Actions []Action
+}
+
+// allows is the allow-list half of the D12 intersection: true when the principal carries no
+// list, or when the list names the action.
+func (p Principal) allows(action Action) bool {
+	if p.Actions == nil {
+		return true
+	}
+	for _, a := range p.Actions {
+		if a == action {
+			return true
+		}
+	}
+	return false
 }
 
 // AuditActorLabel returns the label to record for this principal, falling back
@@ -125,12 +186,17 @@ func (p Principal) AuditUserID() string {
 // Can reports whether the principal may perform action on the target identified
 // by orgID and (optionally) projectID.
 //
+//   - A token's allow-list (Actions, when non-nil) must name the action — the ONE place the
+//     list is consulted (FR-025 D12); it bounds even a principal the role would let through.
 //   - Global admins may do anything.
 //   - ActionGlobalManage requires global admin.
 //   - Otherwise a membership must apply to the target and grant the action:
 //     org-scoped memberships apply to the org and all its projects; project-scoped
 //     memberships apply only to their own project.
 func (p Principal) Can(action Action, orgID, projectID string) bool {
+	if !p.allows(action) {
+		return false
+	}
 	if p.IsGlobalAdmin {
 		return true
 	}
@@ -187,8 +253,12 @@ func (p Principal) VisibleProject(orgID, projectID string) bool {
 // action, for pushing tenant scoping DOWN into a query (WHERE org_id = ANY(orgIDs)
 // OR project_id = ANY(projectIDs)) instead of filtering rows after a global LIMIT.
 // allOrgs=true means no restriction (global admin). orgIDs are org-level grants (all
-// projects in them); projectIDs are project-scoped grants. It mirrors Can exactly.
+// projects in them); projectIDs are project-scoped grants. It mirrors Can exactly — the
+// allow-list included: a token whose list omits the action sees nothing.
 func (p Principal) VisibleScope(action Action) (allOrgs bool, orgIDs, projectIDs []string) {
+	if !p.allows(action) {
+		return false, nil, nil
+	}
 	if p.IsGlobalAdmin {
 		return true, nil, nil
 	}

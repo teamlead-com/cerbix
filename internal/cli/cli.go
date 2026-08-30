@@ -799,7 +799,10 @@ func runServe(args []string) int {
 		deliverer := incidentFanout{hooks: webhook.New(st, egress.HTTPClient(10*time.Second)), subs: subs, logger: logger}
 		ob := outbox.New(st, deliverer, notify.New(st, egress.HTTPClient(10*time.Second)), registry, logger).
 			WithMailer(mail).
-			WithSilence(func() bool { return settingsSvc.Alerting().Silenced(time.Now()) })
+			WithSilence(func() bool { return settingsSvc.Alerting().Silenced(time.Now()) }).
+			// FR-025 D7: preceding changes are linked at a service auto-incident's opened delivery;
+			// the metrics sink is bound by the metrics changeset (nil is a no-op until then).
+			WithChangeCorrelation(time.Duration(cfg.Change.CorrelationWindow), cfg.Change.CorrelationNoteMax, nil)
 		spawn(func() { ob.Run(ctx) })
 	}
 
@@ -1021,6 +1024,7 @@ func runServe(args []string) int {
 		switch *role {
 		case "all":
 			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+				WithChangeRetention(cfg.Change.RetentionDays, cfg.Change.RetentionGroupsPerBatch). // FR-025 D9: change groups removed whole by age, daily
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
 				WithLocalCredentialRegions(domain.DefaultRegion).
@@ -1051,6 +1055,7 @@ func runServe(args []string) int {
 				return 1
 			}
 			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+				WithChangeRetention(cfg.Change.RetentionDays, cfg.Change.RetentionGroupsPerBatch). // FR-025 D9: change groups removed whole by age, daily
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
 				WithPullRegions(cfg.Pull.Regions). // pull-served regions get jobs via pull_jobs, not AMQP

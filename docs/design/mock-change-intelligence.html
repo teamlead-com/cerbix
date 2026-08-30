@@ -1,0 +1,732 @@
+<title>Cerbix Change Intelligence</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). FR-025 adds
+   NO new colour. A change is an operator's ACT, like an override: it is drawn in the accent
+   ("declared here" grammar) or in ink, never in a status hue — a deploy is not good or bad, what
+   FOLLOWED it is, and that is said by the facts strip beside it in the hues the facts already own.
+   Kind is said by SHAPE (deploy ▲, rollback ▼, flag ◆) plus text, never by colour alone. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+a{color:var(--accent); text-decoration:none} a:hover{text-decoration:underline}
+.top{position:sticky; top:0; z-index:20; height:56px; display:flex; align-items:center; gap:12px; padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface)}
+.brand{display:flex; align-items:center; gap:9px}
+.brand .wm{font-size:15px; font-weight:600; letter-spacing:-.01em}
+.top .spacer{flex:1}
+.tbtn{border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:12.5px; color:var(--ink-2); background:var(--surface)}
+.tbtn.on{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.screens{position:sticky; top:56px; z-index:19; display:flex; gap:2px; overflow-x:auto; padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface)}
+.screens button{padding:10px 12px 9px; font-size:13px; color:var(--ink-3); border-bottom:2px solid transparent; white-space:nowrap}
+.screens button.on{color:var(--ink); border-bottom-color:var(--accent); font-weight:550}
+.screens .n{font-size:10.5px; color:var(--ink-3); margin-right:5px}
+.wrap{padding:22px; max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+.head h1{font-size:21px; font-weight:650; letter-spacing:-.015em}
+.head .sub{margin-top:3px; font-size:13px; color:var(--ink-3)}
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.card > header{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card > header h2{font-size:14px; font-weight:600}
+.card .body{padding:16px}
+.card .spacer{flex:1}
+.stack{display:flex; flex-direction:column; gap:14px}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:760px){.grid2{grid-template-columns:1fr}}
+
+.pill{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px 0 7px; border-radius:999px; font-size:12px; font-weight:600; letter-spacing:.01em}
+.pill .dot{width:7px; height:7px; border-radius:50%; flex:none}
+.pill.allow{color:var(--up); background:var(--up-weak)} .pill.allow .dot{background:var(--up)}
+.pill.block{color:var(--down); background:var(--down-weak)} .pill.block .dot{background:var(--down)}
+.pill.warn{color:var(--degraded); background:var(--degraded-weak)} .pill.warn .dot{background:var(--degraded)}
+.pill.unk{color:var(--ink-2); background:var(--pending-weak); border:1px dashed var(--border-strong)} .pill.unk .dot{background:var(--pending)}
+
+.chip{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:11.5px; color:var(--ink-2); background:var(--surface)}
+.chip.mono{font-family:ui-monospace,Menlo,monospace; font-size:10.5px}
+.chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.chip.dorm{border-style:dashed; color:var(--ink-3)}
+.chip.downc{border-color:var(--down); color:var(--down); background:var(--down-weak)}
+.chip.warnc{border-color:var(--degraded); color:var(--degraded); background:var(--degraded-weak)}
+.chip.upc{border-color:var(--up); color:var(--up); background:var(--up-weak)}
+
+/* Kind marks: shape + text. Accent when in force on the strip, ink otherwise. Never a state hue. */
+.mark{display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:550; color:var(--ink)}
+.mark i{display:inline-block; width:10px; height:10px; flex:none}
+.mark.deploy i{clip-path:polygon(50% 0,100% 100%,0 100%); background:var(--accent)}
+.mark.rollback i{clip-path:polygon(0 0,100% 0,50% 100%); background:var(--accent)}
+.mark.flag i{clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%); background:var(--accent)}
+.mark.ghost i{background:var(--ink-3)}
+
+/* The facts strip with change marks on top: geometry = time. */
+.strip{position:relative; height:26px; display:flex; gap:1px; border-radius:4px; overflow:visible; margin-top:22px}
+.strip span{flex:1; border-radius:2px}
+.strip span.good{background:var(--up)} .strip span.bad{background:var(--down)} .strip span.unknown{background:var(--ink-3); opacity:.5} .strip span.excluded{background:var(--inset)} .strip span.provisional{opacity:.45}
+.strip .cm{position:absolute; top:-20px; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; gap:2px}
+.strip .cm i{display:block; width:11px; height:11px}
+.strip .cm.deploy i{clip-path:polygon(50% 0,100% 100%,0 100%); background:var(--accent)}
+.strip .cm.rollback i{clip-path:polygon(0 0,100% 0,50% 100%); background:var(--accent)}
+.strip .cm.flag i{clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%); background:var(--accent)}
+.strip .cm b{display:block; width:1px; height:8px; background:var(--accent)}
+.strip .cm.sel i{outline:2px solid var(--focus); outline-offset:1px; border-radius:1px}
+.axis{display:flex; justify-content:space-between; font-size:11px; color:var(--ink-3); margin-top:6px}
+
+.row{display:flex; flex-wrap:wrap; align-items:center; gap:9px; padding:11px 16px; border-bottom:1px solid var(--border)}
+.row:last-child{border-bottom:0}
+.row .nm{font-weight:550; font-size:13.5px}
+.row .spacer{flex:1}
+.row .sub{font-size:12.5px; color:var(--ink-3); width:100%}
+.row.sel{background:var(--accent-weak)}
+
+.phases{display:inline-flex; align-items:center; gap:0; font-size:11.5px}
+.phases span{padding:2px 8px; border:1px solid var(--border); background:var(--surface); color:var(--ink-2)}
+.phases span:first-child{border-radius:5px 0 0 5px} .phases span:last-child{border-radius:0 5px 5px 0}
+.phases span.on{background:var(--inset); color:var(--ink); font-weight:600}
+.phases span.fail{border-color:var(--down); color:var(--down)}
+.phases .arrow{border:0; padding:0 4px; color:var(--ink-3)}
+
+.kv{display:grid; grid-template-columns:max-content 1fr; gap:6px 18px; font-size:13px}
+.kv .k{color:var(--ink-3)}
+.kpi{font-size:26px; font-weight:500; letter-spacing:-.01em}
+.kpi small{font-size:12px; color:var(--ink-3); font-weight:400; margin-left:6px; letter-spacing:0}
+
+.compare{display:grid; grid-template-columns:1fr auto 1fr; gap:14px; align-items:stretch}
+.compare .side{border:1px solid var(--border); border-radius:7px; padding:12px 14px; display:flex; flex-direction:column; gap:6px}
+.compare .side.with{border-style:dashed}
+.compare .delta{display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; min-width:110px}
+.compare .delta .v{font-size:22px; font-weight:600; letter-spacing:-.01em}
+.bar{height:8px; border-radius:4px; background:var(--inset); overflow:hidden; display:flex}
+.bar span{height:100%}
+.bar .g{background:var(--up)} .bar .b{background:var(--down)} .bar .u{background:var(--ink-3); opacity:.5}
+
+.field{display:flex; flex-direction:column; gap:5px}
+.field label{font-size:12.5px; color:var(--ink-2); font-weight:500}
+.inp{display:inline-flex; align-items:center; gap:8px; height:30px; border:1px solid var(--border); border-radius:6px; padding:0 10px; font-size:13px; background:var(--surface); color:var(--ink)}
+.inp.err{border-color:var(--down)}
+.inp.sel::after{content:"⌄"; color:var(--ink-3); margin-left:auto}
+.inp .unit{color:var(--ink-3); font-size:12px}
+.hint{font-size:12px; color:var(--ink-3)}
+.hint.bad{color:var(--down)}
+.seg{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden}
+.seg span{padding:3px 10px; font-size:11.5px; color:var(--ink-3); border-right:1px solid var(--border)}
+.seg span:last-child{border-right:0}
+.seg span.on{background:var(--accent-weak); color:var(--accent); font-weight:600}
+
+.btn{display:inline-flex; align-items:center; gap:6px; height:30px; border:1px solid var(--border); border-radius:6px; padding:0 12px; font-size:13px; color:var(--ink); background:var(--surface)}
+.btn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:550}
+.btn.sm{height:26px; font-size:12.5px; padding:0 10px}
+.btn[disabled]{opacity:.5; cursor:not-allowed}
+
+.err{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--down); background:var(--down-weak); color:var(--down); border-radius:6px; padding:9px 12px; font-size:13px}
+.err b{font-weight:650}
+.warnb{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--degraded); background:var(--degraded-weak); color:var(--degraded); border-radius:6px; padding:9px 12px; font-size:13px}
+.info{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--border-strong); background:var(--surface-2); color:var(--ink-2); border-radius:6px; padding:9px 12px; font-size:13px}
+
+pre.code{margin:0; padding:12px 14px; border:1px solid var(--border); border-radius:6px; background:var(--inset); font:12.5px/1.55 ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; color:var(--ink); overflow-x:auto; font-variant-numeric:tabular-nums}
+pre.code .c{color:var(--ink-3)} pre.code .k{color:var(--accent)} pre.code .n{color:var(--ink-2)}
+
+table.tbl{width:100%; border-collapse:collapse; font-size:13px}
+table.tbl th{text-align:left; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3); padding:9px 12px; border-bottom:1px solid var(--border); white-space:nowrap}
+table.tbl td{padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:top}
+table.tbl tr:last-child td{border-bottom:0}
+table.tbl tr:hover td{background:var(--surface-2)}
+.tblwrap{overflow-x:auto}
+
+.tl{display:flex; flex-direction:column}
+.tl .ev{display:grid; grid-template-columns:150px 22px 1fr; gap:0 12px; padding:9px 16px; border-bottom:1px solid var(--border); align-items:start}
+.tl .ev:last-child{border-bottom:0}
+.tl .t{font-size:12.5px; color:var(--ink-3)}
+.tl .g{position:relative; display:flex; justify-content:center}
+.tl .g::before{content:""; position:absolute; top:-9px; bottom:-9px; left:50%; width:1px; background:var(--border)}
+.tl .g i{position:relative; z-index:1; display:block; width:10px; height:10px; margin-top:5px; border-radius:50%; background:var(--border-strong)}
+.tl .g i.inc{background:var(--down)} .tl .g i.chg{border-radius:0; clip-path:polygon(50% 0,100% 100%,0 100%); background:var(--accent)} .tl .g i.flag{border-radius:0; clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%); background:var(--accent)}
+.tl .body2{font-size:13px}
+
+.note{border:1px dashed var(--note-border); border-left:3px solid var(--note); background:var(--note-bg); border-radius:6px; padding:10px 12px; font-size:12.5px; color:var(--ink-2); display:flex; gap:10px; align-items:flex-start}
+.note .ref{flex:none; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--note); border:1px solid var(--note-border); border-radius:4px; padding:1px 6px; margin-top:1px; white-space:nowrap}
+.note b{color:var(--ink); font-weight:600}
+body.hide-notes .note{display:none}
+.foot{padding:18px 22px 36px; font-size:12px; color:var(--ink-3); max-width:1080px; margin:0 auto}
+.foot b{color:var(--ink-2)}
+@media (prefers-reduced-motion: no-preference){ .card{transition:border-color .12s} }
+</style>
+
+<header class="top">
+  <div class="brand">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/></svg>
+    <span class="wm mono">cerbix</span>
+  </div>
+  <span class="chip mono">FR-025 · change intelligence</span>
+  <div class="spacer"></div>
+  <button class="tbtn on" id="notesBtn" aria-pressed="true">Spec notes</button>
+  <button class="tbtn" id="themeBtn">Theme</button>
+</header>
+
+<nav class="screens" id="screens" aria-label="Mocked screens"></nav>
+<div class="wrap" id="view"></div>
+<footer class="foot">
+  FR-025 / NFR-020 <b>design track</b> · mock for the owner's approval BEFORE any frontend code · tokens verbatim from
+  <span class="mono">frontend/src/style.css</span> · behaviour follows
+  <span class="mono">docs/specs/func-change-intelligence.md</span> revision 3 (design approved at party [15], D-0209).
+</footer>
+
+<script>
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const note = (ref, html) => `<div class="note"><span class="ref">${esc(ref)}</span><div>${html}</div></div>`;
+const mark = (kind, text, ghost) => `<span class="mark ${kind}${ghost ? " ghost" : ""}"><i></i>${esc(text)}</span>`;
+const phases = (list) => `<span class="phases">${list.map((p, i) => `${i ? '<span class="arrow">→</span>' : ""}<span class="${p.on ? "on" : ""} ${p.fail ? "fail" : ""}">${esc(p.name)} <span class="mono" style="font-weight:400;color:var(--ink-3)">${esc(p.t)}</span></span>`).join("")}</span>`;
+const stateChip = (s) => `<span class="pill ${{ ALLOW: "allow", WARN: "warn", BLOCK: "block", UNKNOWN: "unk" }[s] || "unk"}"><span class="dot"></span>${esc(s)}</span>`;
+
+/* A day of facts around the 14:05 deploy. Geometry is time; marks sit where the phase happened. */
+function strip(marks, sel) {
+  const cells = [];
+  for (let i = 0; i < 96; i++) {
+    let c = "good";
+    if (i >= 57 && i <= 62) c = "bad";           // 14:15 – 15:30
+    if (i >= 63 && i <= 64) c = "unknown";
+    if (i >= 92) c = "good provisional";
+    cells.push(`<span class="${c}"></span>`);
+  }
+  return `<div class="strip">${cells.join("")}${marks.map((m) => `<span class="cm ${m.kind}${m.id === sel ? " sel" : ""}" style="left:${m.pct}%" title="${esc(m.title)}"><i></i><b></b></span>`).join("")}</div>
+  <div class="axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>now</span></div>`;
+}
+/* One mark per TERMINAL phase (D14, invariant 19): the in-progress deploy v4.2.2 (started 16:40) has none yet. */
+const MARKS = [
+  { id: "c1", kind: "flag", pct: 34, title: "flag · checkout-v2-rollout 10 % · 08:10" },
+  { id: "c2", kind: "deploy", pct: 58.7, title: "deploy · v4.2.1 · 14:05" },
+  { id: "c3", kind: "rollback", pct: 64.2, title: "rollback · v4.2.0 · 15:25" },
+];
+
+/* ── 1. The Changes card on the service ─────────────────────────────────────────── */
+function sCard() {
+  return `
+  <div class="head">
+    <h1>Checkout · changes</h1>
+    <p class="sub">Payments · service <span class="mono">checkout</span> · a new card on the service detail, between <b>Release gate</b> and <b>Dependencies</b></p>
+  </div>
+
+  ${note("D14 · D1", `The card is a <b>record</b>, not a control: nothing here creates, edits or deletes a change. A pipeline records
+    changes with <span class="mono">cerbix change record</span> (screen 2); the card reads them. The marks on the facts strip
+    are placed by <span class="mono">occurred_at</span> — geometry is time — one mark per TERMINAL phase (a group that has only
+    <span class="mono">started</span> is listed below but not yet marked), and say the KIND by shape (▲ deploy, ▼ rollback,
+    ◆ flag) and text, never by a status colour: a deploy is not good or bad; what followed it is, and the strip beneath says
+    that in the hues the facts already own.`)}
+
+  <div class="card">
+    <header><h2>Changes</h2><span class="chip mono">last 30 days · 14</span><span class="spacer"></span>
+      <span class="lbl" style="margin-right:2px">range</span><span class="seg"><span class="on">30 d</span><span>7 d</span><span>24 h</span></span>
+      <span class="lbl" style="margin:0 2px 0 8px">before/after at</span><span class="seg" title="applies to every row on this card"><span>15 m</span><span class="on">1 h</span><span>6 h</span><span>24 h</span></span>
+      <a class="mono" href="#" style="font-size:11.5px">full timeline →</a></header>
+    <div class="body stack">
+      <div>
+        <div class="lbl">Today · sealed facts, with the changes that happened on them</div>
+        ${strip(MARKS, "c2")}
+      </div>
+      <div style="border:1px solid var(--border); border-radius:7px">
+        <div class="row">
+          ${mark("deploy", "deploy")}<span class="nm mono">v4.2.2</span>
+          ${phases([{ name: "started", t: "16:40", on: true }])}
+          <span class="chip mono">github-actions · run 9201</span>
+          <span class="spacer"></span>
+          <span class="chip mono">token:deploy-bot</span>
+          <span class="sub">in progress — no terminal phase yet, so no mark on the strip and <span class="chip dorm">before/after unavailable until a terminal phase</span> · rested on decision <span class="mono">0191c3f0…77c1</span> ${stateChip("ALLOW")}</span>
+        </div>
+        <div class="row sel">
+          ${mark("rollback", "rollback")}<span class="nm mono">v4.2.0</span>
+          ${phases([{ name: "started", t: "15:23" }, { name: "succeeded", t: "15:25", on: true }])}
+          <span class="chip mono">github-actions · run 9182</span>
+          <span class="spacer"></span>
+          <span class="chip mono">token:deploy-bot</span>
+          <span class="sub">preceded <a href="#">INC-2041</a> by −0 s · no gate decision linked · before/after at 1 h: <span class="mono" style="color:var(--down)">98.31 %</span> → <span class="mono" style="color:var(--up)">99.97 %</span> <span class="chip upc mono">+1.66</span></span>
+        </div>
+        <div class="row">
+          ${mark("deploy", "deploy")}<span class="nm mono">v4.2.1</span>
+          ${phases([{ name: "started", t: "14:03" }, { name: "succeeded", t: "14:05", on: true }])}
+          <span class="chip mono">github-actions · run 9177</span>
+          <a class="chip mono" href="#" title="open the run">↗ run</a>
+          <span class="spacer"></span>
+          <span class="chip mono">token:deploy-bot</span>
+          <span class="sub">rested on decision <span class="mono">0191c2a4…5b04</span> ${stateChip("BLOCK")} <span class="chip acc mono">override → ALLOW</span> · <b>preceded <a href="#">INC-2041</a> by 26 m</b> · before/after at 1 h: <span class="mono" style="color:var(--up)">99.98 %</span> → <span class="mono" style="color:var(--down)">98.31 %</span> <span class="chip downc mono">−1.67</span></span>
+        </div>
+        <div class="row">
+          ${mark("flag", "flag")}<span class="nm mono">checkout-v2-rollout 10 %</span>
+          ${phases([{ name: "succeeded", t: "08:10", on: true }])}
+          <span class="chip mono">launchdarkly · flag-7f21</span>
+          <span class="spacer"></span>
+          <span class="chip mono">anna@payments</span>
+          <span class="sub">no <span class="mono">started</span> phase — the source reports the flip only · before/after at 1 h: <span class="mono">99.99 %</span> → <span class="mono">99.98 %</span> <span class="chip mono">−0.01</span></span>
+        </div>
+        <div class="row">
+          ${mark("deploy", "deploy")}<span class="nm mono">v4.2.0</span>
+          ${phases([{ name: "started", t: "Aug 27 16:40" }, { name: "failed", t: "16:44", on: true, fail: true }])}
+          <span class="chip mono">github-actions · run 9140</span>
+          <span class="spacer"></span>
+          <span class="chip mono">token:deploy-bot</span>
+          <span class="sub">rested on decision <span class="mono">0191bc3a…9a21</span> ${stateChip("ALLOW")} · a <b>failed</b> deploy is a change too — its before/after says whether the failure touched users: <span class="mono">99.98 %</span> → <span class="mono">99.98 %</span> <span class="chip mono">0.00</span></span>
+        </div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center">
+        <button class="btn sm">Show 10 more</button>
+        <span class="hint">before/after is the reliability page's own arithmetic over sealed minutes at the horizon chosen in the header (every row); a group without a terminal phase has none (<span class="mono">no_terminal_phase</span>)</span>
+      </div>
+    </div>
+  </div>
+
+  ${note("D6 · D3", `A row is a change GROUP — one external identity <span class="mono">(source, external_id)</span> with its phases nested
+    in the domain's order: <span class="mono">started</span> then exactly one of <span class="mono">succeeded · failed · cancelled</span>.
+    A terminal alone is a valid group (the flag flip): many sources can only report the end. Rows are newest first by the
+    group's LATEST phase; a <span class="mono">started</span> older than the range still travels with its group.`)}
+
+  <div class="card">
+    <header><h2>Nothing recorded yet</h2><span class="spacer"></span><span class="chip dorm">empty state</span></header>
+    <div class="body" style="display:flex; gap:14px; align-items:flex-start; flex-wrap:wrap">
+      <div style="flex:1; min-width:260px; color:var(--ink-2)">No pipeline has recorded a change on this service in the last 30 days. Changes are recorded by a pipeline with <span class="mono">cerbix change record</span> — deploys, rollbacks and flag flips, each with the instant it happened — and appear here beside the facts.</div>
+      <pre class="code" style="flex:1; min-width:300px">$ cerbix change record --project payments --service checkout \\
+    --kind deploy --phase succeeded --ref v4.2.1 \\
+    --source github-actions --external-id $GITHUB_RUN_ID</pre>
+    </div>
+  </div>`;
+}
+
+/* ── 2. What a pipeline sends ──────────────────────────────────────────────────── */
+function sRecord() {
+  return `
+  <div class="head">
+    <h1>Recording a change</h1>
+    <p class="sub">The CLI verb, its two phases, the replay, and the refusals a pipeline can earn</p>
+  </div>
+
+  ${note("D13 · D2", `Credentials from <span class="mono">CERBIX_URL</span> and <span class="mono">CERBIX_TOKEN</span> only, never flags.
+    stdout is ONE line; refusals go to stderr verbatim. Exit <b>0</b> recorded or replayed, <b>2</b> refused by the contract
+    (400/404/409 — the pipeline's own mistake, printed), <b>1</b> transport (auth, timeout, 429 with Retry-After, 5xx). No retry on
+    429, as the gate verb. Every field is a closed enum or a bounded scalar: no payload.`)}
+
+  <div class="card">
+    <header><h2>A deploy, start to finish</h2><span class="spacer"></span><span class="chip mono">exit 0 · exit 0</span></header>
+    <div class="body stack">
+<pre class="code"><span class="c"># before the protected step: the gate (FR-024)</span>
+$ cerbix gate check --project $P --service $S
+<span class="k">state=BLOCK action=ALLOW override=b7e2… decision=0191c2a4-6b3e-7a10-8f2e-3c9d1a7e5b04</span>
+
+<span class="c"># the release begins: the change names the decision it rests on</span>
+$ cerbix change record --project $P --service $S --kind deploy --phase started \\
+    --ref v4.2.1 --source github-actions --external-id $GITHUB_RUN_ID \\
+    --decision 0191c2a4-6b3e-7a10-8f2e-3c9d1a7e5b04 --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+<span class="k">recorded change=0191c2a6-…-01aa kind=deploy phase=started</span>
+
+<span class="c"># … the rollout …</span>
+
+$ cerbix change record --project $P --service $S --kind deploy --phase succeeded \\
+    --ref v4.2.1 --source github-actions --external-id $GITHUB_RUN_ID
+<span class="k">recorded change=0191c2a9-…-4c02 kind=deploy phase=succeeded</span>
+
+<span class="c"># the job restarted and sent the end again — identical fields → the same row, nothing written</span>
+$ cerbix change record … --phase succeeded --ref v4.2.1 --source github-actions --external-id $GITHUB_RUN_ID
+<span class="k">replayed change=0191c2a9-…-4c02 kind=deploy phase=succeeded</span>
+$ echo $?
+0</pre>
+      <p class="hint"><span class="mono">--at</span> defaults to the invocation instant and may lag the server by up to 24 h (a late report) or lead it by 5 min (clock skew) — <span class="mono">change.max_past</span> / <span class="mono">change.max_future</span>. A replay is IDENTICAL when kind, occurred_at, ref, url and decision match after normalization; who sent it does not matter — a retry under another token returns the ORIGINAL row and its original actor.</p>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>Refused by the contract</h2><span class="spacer"></span><span class="chip mono">exit 2</span></header>
+      <div class="body">
+<pre class="code">$ cerbix change record … --phase failed --external-id $GITHUB_RUN_ID
+<span class="n">cerbix: change: 409 phase_order — succeeded already recorded for github-actions/9177</span>
+$ echo $?
+2
+
+$ cerbix change record … --phase succeeded --ref v4.2.2 --external-id $GITHUB_RUN_ID
+<span class="n">cerbix: change: 409 phase_exists — ref differs: stored "v4.2.1", sent "v4.2.2"</span>
+
+$ cerbix change record … --url http://ci.internal/run/9177
+<span class="n">cerbix: change: 400 url_invalid — https:// only</span>
+
+$ cerbix change record … --decision 0191ba9d-…-c002
+<span class="n">cerbix: change: 400 decision_unknown — not a decision of this service</span></pre>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>Not a record</h2><span class="spacer"></span><span class="chip mono">exit 1</span></header>
+      <div class="body stack">
+<pre class="code">$ cerbix change record …
+<span class="n">cerbix: change: 429 Too Many Requests — retry after 3 s (principal_rate)</span>
+$ echo $?
+1</pre>
+        <p class="hint">30 records a minute per principal, 300 per process at defaults (<span class="mono">change.*</span>, §5a). A pipeline that loops a phase is the load the limit sheds; the phase-order rule caps a group at four rows regardless.</p>
+        <div class="info"><span>ℹ</span><div><b>No manual "record a change" form in the UI.</b> The record comes from the system that made the change, with its own identity. An operator who deployed by hand records it with the same verb from a shell — the row says <span class="mono">anna@payments</span> instead of <span class="mono">token:deploy-bot</span>.</div></div>
+      </div>
+    </div>
+  </div>
+
+  ${note("D3 · D4", `<b>Phases are append-only and idempotent under their key</b> <span class="mono">(service, source, external_id, phase)</span>.
+    Two pipelines reporting <span class="mono">succeeded</span> and <span class="mono">failed</span> for the same run at the same instant
+    are serialized per identity (an advisory lock for the length of the write), so exactly one terminal survives and the other
+    learns <span class="mono">phase_order</span>. A row is never edited and never deleted by a route; retention removes whole groups
+    by age (400 days at default).`)}`;
+}
+
+/* ── 3. Before and after ───────────────────────────────────────────────────────── */
+function sCompare() {
+  return `
+  <div class="head">
+    <h1>v4.2.1 · before and after</h1>
+    <p class="sub">The SLI on each side of the deploy's instant, from sealed minutes only — the reliability page's own number</p>
+  </div>
+
+  ${note("D8 · NFR-020", `<b>One store function</b>, the series owner extended with a bucket-aligned range sum: the same decidability,
+    exclusion and provisional rules, the same <span class="mono">sealed_through</span> clamp, the same definition segmentation.
+    Each side is a figure or is WITHHELD with one reason from the page's own vocabulary; <span class="mono">after</span> is
+    <span class="mono">pending</span> until the seal has passed <span class="mono">T + h</span> — never a partial number. The
+    comparison is addressed by the change's identity <span class="mono">(source, external_id)</span> and a horizon; T is the group's
+    terminal phase floored to the canonical minute, and a group that has only <span class="mono">started</span> has no comparison
+    (<span class="mono">404 no_terminal_phase</span>) — the card says "unavailable until a terminal phase".`)}
+
+  <div class="card">
+    <header>${mark("deploy", "deploy")}<h2 class="mono" style="font-weight:600">v4.2.1</h2><span class="chip mono">succeeded 14:05:12 Z</span><span class="chip mono">T = 14:05:00 Z</span>
+      <span class="spacer"></span>
+      <span class="lbl" style="margin-right:4px">horizon</span><span class="seg"><span>15 m</span><span class="on">1 h</span><span>6 h</span><span>24 h</span></span></header>
+    <div class="body stack">
+      <div class="compare">
+        <div class="side">
+          <div class="lbl">Before · 13:05 → 14:05</div>
+          <div class="kpi mono" style="color:var(--up)">99.98 %<small>60 min · 1 bad</small></div>
+          <div class="bar"><span class="g" style="width:99.98%"></span><span class="b" style="width:.02%"></span></div>
+          <div class="hint">good 59 m 59 s · bad 1 s · unknown 0 · excluded 0</div>
+        </div>
+        <div class="delta">
+          <div class="lbl">Δ availability</div>
+          <div class="v mono" style="color:var(--down)">−1.67</div>
+          <div class="hint">points</div>
+        </div>
+        <div class="side">
+          <div class="lbl">After · 14:05 → 15:05</div>
+          <div class="kpi mono" style="color:var(--down)">98.31 %<small>60 min · 61 bad</small></div>
+          <div class="bar"><span class="g" style="width:98.31%"></span><span class="b" style="width:1.69%"></span></div>
+          <div class="hint">good 58 m 59 s · bad 1 m 1 s · unknown 0 · excluded 0</div>
+        </div>
+      </div>
+      <div class="info"><span>ℹ</span><div><b>These are the minutes the reliability page shows for the same range.</b> Both sides are fully sealed (<span class="mono">sealed_through 16:57 Z</span>); the incident <a href="#">INC-2041</a> opened at 14:31, 26 minutes after this change — see screen 4. Correlation is not causation: the card says <b>preceded</b>, and only that.</div></div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>Not yet sealed</h2><span class="spacer"></span><span class="chip dorm mono">after: pending</span></header>
+      <div class="body stack">
+        <div class="compare" style="grid-template-columns:1fr auto 1fr">
+          <div class="side"><div class="lbl">Before · 15:25 → 16:25</div><div class="kpi mono" style="color:var(--down)">98.31 %</div></div>
+          <div class="delta"><div class="lbl">Δ</div><div class="v mono" style="color:var(--ink-3)">—</div></div>
+          <div class="side with"><div class="lbl">After · 16:25 → 17:25</div><div class="kpi mono" style="color:var(--ink-3)">pending<small>sealed through 16:57 Z</small></div><div class="hint">the seal must pass 17:25 before this side is quoted; nothing partial is shown</div></div>
+        </div>
+        <p class="hint">The rollback's 1 h window is not fully sealed. At the 15 m horizon both sides are: <span class="mono">98.31 % → 99.97 %</span>.</p>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>Withheld</h2><span class="spacer"></span><span class="chip dorm mono">definition_changed</span></header>
+      <div class="body stack">
+        <div class="compare" style="grid-template-columns:1fr auto 1fr">
+          <div class="side with"><div class="lbl">Before</div><div class="kpi mono" style="color:var(--ink-3)">—<small>withheld · definition changed</small></div><div class="hint">a declaration revision at 13:40 sits inside this side; the page would not quote one number across it, so neither does this</div></div>
+          <div class="delta"><div class="lbl">Δ</div><div class="v mono" style="color:var(--ink-3)">—</div></div>
+          <div class="side"><div class="lbl">After</div><div class="kpi mono">99.98 %</div></div>
+        </div>
+        <p class="hint">The other withholdings, each the page's own word: <span class="mono">undecidable</span> (coverage the page would not decide), <span class="mono">no_facts</span> (no sealed minute in the range). A <span class="mono">delta</span> exists only when both sides are figures.</p>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ── 4. The incident, preceded by ──────────────────────────────────────────────── */
+function sIncident() {
+  return `
+  <div class="head">
+    <h1>INC-2041 · preceded by</h1>
+    <p class="sub">Checkout · opened automatically 14:31 Z · a new section on the incident page, and one system note in its timeline</p>
+  </div>
+
+  ${note("D7", `At the incident's <span class="mono">opened</span> delivery — where the <span class="mono">⚡ Context:</span> note is written today — cerbix links
+    every change whose latest known phase happened within <span class="mono">change.correlation_window</span> (60 min at default)
+    before the open, on this service (<b>own service</b>) and on the services the impact graph marks as <b>probable root</b>. The
+    links and one <span class="mono">🚀 Changes:</span> note are written in ONE transaction through the marker guard. The link
+    anchors the phase KNOWN at that instant with its lag copied; a terminal recorded later rewrites nothing. Best-effort and
+    fail-open: a failed correlation is counted, the incident opens exactly as today.`)}
+
+  <div class="card">
+    <header><h2>Preceded by</h2><span class="chip mono">window 60 m</span><span class="spacer"></span><span class="chip">2 changes</span></header>
+    <div style="border-bottom:1px solid var(--border)">
+      <div class="row">
+        <span class="chip mono">own service</span>${mark("deploy", "deploy")}<span class="nm mono">v4.2.1</span>
+        <span class="chip mono">succeeded 14:05</span><span class="chip acc mono">−26 m</span>
+        <span class="spacer"></span><span class="chip mono">github-actions · 9177</span><a class="mono" href="#" style="font-size:11.5px">before/after →</a>
+        <span class="sub">anchored at the <span class="mono">succeeded</span> phase known at 14:31; the group's phases today: started 14:03 → succeeded 14:05</span>
+      </div>
+      <div class="row">
+        <span class="chip mono">upstream · probable root</span>${mark("flag", "flag")}<span class="nm mono">payments-gateway · pg-pool-v2 25 %</span>
+        <span class="chip mono">succeeded 13:52</span><span class="chip acc mono">−39 m</span>
+        <span class="spacer"></span><span class="chip mono">launchdarkly · flag-91aa</span><a class="mono" href="#" style="font-size:11.5px">before/after →</a>
+        <span class="sub">on <a href="#">payments-gateway</a>, which the impact graph marks as a probable root of this incident</span>
+      </div>
+    </div>
+    <div class="row"><span class="hint">Changes recorded after 14:31 are not linked back — the window is fixed at open, and a later <span class="mono">resolved</span> does not recompute. "Preceded" is the whole claim.</span></div>
+  </div>
+
+  <div class="card">
+    <header><h2>Timeline</h2><span class="spacer"></span><span class="chip mono">incident_updates</span></header>
+    <div class="tl">
+      <div class="ev"><span class="t mono">14:31:04 Z</span><span class="g"><i class="inc"></i></span><div class="body2"><b>Opened</b> automatically · checkout: 4 of 4 SLI monitors down for 3 evaluations</div></div>
+      <div class="ev"><span class="t mono">14:31:04 Z</span><span class="g"><i></i></span><div class="body2 mono" style="font-size:12.5px">⚡ Context: 4 co-failures (checkout-api, checkout-web, …) · dominant class timeout · region eu-west</div></div>
+      <div class="ev"><span class="t mono">14:31:05 Z</span><span class="g"><i class="chg"></i></span><div class="body2 mono" style="font-size:12.5px">🚀 Changes: 2 preceded this incident — deploy v4.2.1 by github-actions, −26 m; flag pg-pool-v2 25 % on payments-gateway by launchdarkly, −39 m</div></div>
+      <div class="ev"><span class="t mono">14:38:40 Z</span><span class="g"><i></i></span><div class="body2"><b>anna@payments</b> · rolling back v4.2.1</div></div>
+      <div class="ev"><span class="t mono">15:31:10 Z</span><span class="g"><i></i></span><div class="body2"><b>Resolved</b> automatically · all SLI monitors up for 5 evaluations</div></div>
+    </div>
+  </div>
+
+  ${note("§14.3 · D10", `The note keeps <b>exactly one home</b> — the incident — like <span class="mono">⚡ Context:</span>; it names at most
+    <span class="mono">change.correlation_note_max</span> changes and counts the rest. If the service is later deleted, its changes
+    and their links cascade away and this text remains as the historical trace.`)}`;
+}
+
+/* ── 5. The full timeline and its refusals ─────────────────────────────────────── */
+function sTimeline() {
+  const row = (kind, ref, ph, src, actor, dec, inc, ba) => `
+    <tr>
+      <td>${mark(kind, kind)}</td>
+      <td class="mono">${esc(ref)}</td>
+      <td>${ph}</td>
+      <td class="mono">${esc(src)}</td>
+      <td class="mono">${esc(actor)}</td>
+      <td>${dec}</td>
+      <td>${inc}</td>
+      <td class="mono" style="white-space:nowrap">${ba}</td>
+    </tr>`;
+  return `
+  <div class="head">
+    <h1>Checkout · timeline</h1>
+    <p class="sub">Every change recorded on this service · <span class="mono">GET …/services/{s}/changes?from&to&kind&source</span> · at most 92 days a page · the header's horizon applies to the before/after column</p>
+  </div>
+
+  ${note("D6", `Project-scoped ledgers outlive their subject (the gate's decisions); the timeline does not — a change is the
+    service's fact and goes with it (D10). The range is explicit and half-open, at most a quarter; groups newest first by
+    their latest phase; 50 a page over an opaque cursor. The traversal is live, as the gate ledger's: a group never
+    appears twice; a phase recorded mid-traversal can move its group ahead of the cursor, and a client that needs a fixed
+    set re-reads.`)}
+
+  <div class="card">
+    <header>
+      <h2>Changes</h2>
+      <span class="inp sel mono" style="height:26px; font-size:12px">2026-08-01 → 2026-08-30 <span class="unit">· 30 days</span></span>
+      <span class="inp sel" style="height:26px; font-size:12px">All kinds</span>
+      <span class="inp sel" style="height:26px; font-size:12px">All sources</span>
+      <span class="spacer"></span>
+      <span class="hint">newest first · 50 per page</span>
+    </header>
+    <div class="tblwrap">
+      <table class="tbl">
+        <thead><tr><th>Kind</th><th>Ref</th><th>Phases</th><th>Source · id</th><th>By</th><th>Rested on</th><th>Preceded</th><th>Before → after · 1 h</th></tr></thead>
+        <tbody>
+          ${row("deploy", "v4.2.2", phases([{ name: "started", t: "08-28 16:40", on: true }]), "github-actions · 9201", "token:deploy-bot", stateChip("ALLOW"), '<span style="color:var(--ink-3)">—</span>', '<span class="chip dorm" style="font-family:inherit">unavailable until a terminal phase</span>')}
+          ${row("rollback", "v4.2.0", phases([{ name: "started", t: "08-28 15:23" }, { name: "succeeded", t: "15:25", on: true }]), "github-actions · 9182", "token:deploy-bot", '<span style="color:var(--ink-3)">—</span>', '<a href="#">INC-2041</a> <span class="chip acc mono">−0 s</span>', '98.31 → <span style="color:var(--up)">99.97</span>')}
+          ${row("deploy", "v4.2.1", phases([{ name: "started", t: "08-28 14:03" }, { name: "succeeded", t: "14:05", on: true }]), "github-actions · 9177", "token:deploy-bot", `${stateChip("BLOCK")} <span class="chip acc mono">→ ALLOW</span>`, '<a href="#">INC-2041</a> <span class="chip acc mono">−26 m</span>', '99.98 → <span style="color:var(--down)">98.31</span>')}
+          ${row("flag", "checkout-v2-rollout 10 %", phases([{ name: "succeeded", t: "08-28 08:10", on: true }]), "launchdarkly · flag-7f21", "anna@payments", '<span style="color:var(--ink-3)">—</span>', '<span style="color:var(--ink-3)">—</span>', "99.99 → 99.98")}
+          ${row("deploy", "v4.2.0", phases([{ name: "started", t: "08-27 16:40" }, { name: "failed", t: "16:44", on: true, fail: true }]), "github-actions · 9140", "token:deploy-bot", stateChip("ALLOW"), '<span style="color:var(--ink-3)">—</span>', "99.98 → 99.98")}
+          ${row("deploy", "v4.1.9", phases([{ name: "started", t: "08-22 11:02" }, { name: "cancelled", t: "11:03", on: true }]), "github-actions · 9011", "token:deploy-bot", stateChip("ALLOW"), '<span style="color:var(--ink-3)">—</span>', "99.99 → 99.99")}
+          ${row("deploy", "v4.1.8", phases([{ name: "succeeded", t: "08-19 09:30", on: true }]), "github-actions · 8964", "token:deploy-bot", '<span class="chip dorm mono">0191a1…e0 · aged out</span>', '<span style="color:var(--ink-3)">—</span>', "99.99 → 99.99")}
+        </tbody>
+      </table>
+    </div>
+    <div class="row" style="justify-content:center; gap:14px">
+      <button class="btn sm">Show 50 more</button>
+      <span class="hint">a decision the ledger has already aged out is shown by id and said so — the change keeps the link, the ledger kept its retention</span>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>A range wider than a quarter</h2><span class="spacer"></span><span class="chip mono">400 range_too_wide</span></header>
+      <div class="body stack">
+        <span class="inp err sel mono" style="width:280px; font-size:12px">2026-05-01 → 2026-08-30 <span class="unit">· 121 days</span></span>
+        <p class="hint bad">Pick at most 92 days at a time.</p>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>The comparison, by identity</h2><span class="spacer"></span><span class="chip mono">GET …/changes/compare?source&external_id&horizon</span></header>
+      <div class="body">
+<pre class="code">{
+  <span class="k">"source"</span>: "github-actions", <span class="k">"external_id"</span>: "9177", <span class="k">"kind"</span>: "deploy", <span class="k">"ref"</span>: "v4.2.1",
+  <span class="k">"terminal_phase"</span>: "succeeded", <span class="k">"t"</span>: "2026-08-28T14:05:00Z", <span class="k">"horizon"</span>: "1h", <span class="k">"sealed_through"</span>: "2026-08-28T16:57:00Z",
+  <span class="k">"before"</span>: { <span class="k">"availability"</span>: 99.98, <span class="k">"good_seconds"</span>: 3599, <span class="k">"bad_seconds"</span>: 1, <span class="k">"unknown_seconds"</span>: 0, <span class="k">"excluded_seconds"</span>: 0, <span class="k">"buckets"</span>: 60 },
+  <span class="k">"after"</span>:  { <span class="k">"availability"</span>: 98.31, <span class="k">"good_seconds"</span>: 3539, <span class="k">"bad_seconds"</span>: 61,  <span class="k">"unknown_seconds"</span>: 0, <span class="k">"excluded_seconds"</span>: 0, <span class="k">"buckets"</span>: 60 },
+  <span class="k">"delta"</span>: -1.67
+}
+<span class="c">// a side that cannot be quoted is { "withheld": "definition_changed" | "undecidable" | "no_facts" }, or</span>
+<span class="c">// { "pending": true, "sealed_through": … } for `after`; delta is ABSENT unless both sides are figures.</span>
+<span class="c">// a group with only `started` → 404 no_terminal_phase. There is no by-identity group route: the timeline</span>
+<span class="c">// row already carries identity, phases, decision and preceded[]; the comparison is the only per-group read.</span></pre>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ── 6. The CI token, narrower than its role ───────────────────────────────────── */
+function sToken() {
+  return `
+  <div class="head">
+    <h1>Settings · API tokens · deploy-bot</h1>
+    <p class="sub">A token that may ask the gate and record changes, and may do nothing else — the capability FR-024 D12 deferred</p>
+  </div>
+
+  ${note("D12", `<span class="mono">api_tokens.actions</span> is an ALLOW-LIST intersected with the token's role inside the one central
+    predicate every route already calls (<span class="mono">authz.Can</span>): the token may do an action only if its ROLE grants it
+    AND the list names it. Empty list (<span class="mono">NULL</span>) means what every token means today — the role decides — so no
+    existing token changes. The list is fixed at creation: a different list is a new token; tokens are cheap, audit is not. The
+    handlers keep calling <span class="mono">projectAccess(w, r, projectID, action)</span> and never compare roles.`)}
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>New token</h2><span class="spacer"></span><span class="chip mono">POST /organizations/{org}/tokens</span></header>
+      <div class="body stack">
+        <div class="field"><label>Name</label><span class="inp mono">deploy-bot</span><span class="hint">appears as <span class="mono">token:deploy-bot</span> on every change and override it makes</span></div>
+        <div class="grid2">
+          <div class="field"><label>Project</label><span class="inp sel">Payments</span></div>
+          <div class="field"><label>Role</label><span class="inp sel mono">editor</span><span class="hint">the ceiling — the list below can only narrow it</span></div>
+        </div>
+        <div class="field">
+          <label>Limit to these actions <span class="hint">(optional — leave empty for the role's full set)</span></label>
+          <div style="display:flex; flex-wrap:wrap; gap:6px">
+            <span class="chip acc mono">✓ gate:evaluate</span><span class="chip acc mono">✓ change:record</span>
+            <span class="chip dorm mono">project:read</span><span class="chip dorm mono">project:write</span><span class="chip dorm mono">gate:policy:write</span>
+          </div>
+          <span class="hint">only actions the role grants are offered; <span class="mono">gate:override</span> is not — it needs <span class="mono">project_admin</span></span>
+        </div>
+        <div class="warnb"><span>⚠</span><div><b>This token will not be able to read the service page.</b> With <span class="mono">project:read</span> left out it can ask the gate and record changes and nothing else — which is the point of a CI token. It cannot be widened later; create another.</div></div>
+        <div style="display:flex; gap:10px"><button class="btn pri">Create token</button><button class="btn">Cancel</button></div>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>What the token can do</h2><span class="spacer"></span><span class="chip mono">audit: token.create</span></header>
+      <div class="body stack">
+        <div class="kv">
+          <span class="k">Name</span><span class="mono">deploy-bot</span>
+          <span class="k">Role</span><span class="mono">editor · Payments</span>
+          <span class="k">Actions</span><span><span class="chip acc mono">gate:evaluate</span> <span class="chip acc mono">change:record</span></span>
+          <span class="k">Created</span><span class="mono">2026-08-30 09:12 Z · by marek@payments</span>
+          <span class="k">Last used</span><span class="mono">2026-08-30 14:05 Z</span>
+        </div>
+<pre class="code">$ CERBIX_TOKEN=… cerbix gate check --project $P --service $S           <span class="c">→ 200, a decision</span>
+$ CERBIX_TOKEN=… cerbix change record … --kind deploy --phase started    <span class="c">→ 201, recorded</span>
+$ curl -H "Authorization: Bearer …" $CERBIX_URL/api/v1/projects/$P/services
+<span class="n">403 {"error":"forbidden"}</span>                                          <span class="c">→ project:read is not on the list</span>
+$ curl -X PUT … /gate/policy
+<span class="n">403 {"error":"forbidden"}</span>                                          <span class="c">→ gate:policy:write is not on the list</span></pre>
+        <p class="hint">Visibility is membership, not action: the token still sees its project (a foreign project is 404, its own is 403 on a missing action), exactly like every principal.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Who sees which controls</h2><span class="spacer"></span><span class="chip">the existing rule: never a button that can only 403</span></header>
+    <div class="tblwrap">
+      <table class="tbl">
+        <thead><tr><th>Role on Payments</th><th>Changes card · timeline · before/after</th><th>Incident "preceded by"</th><th>Record a change</th><th>Token allow-list</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mono">viewer</span></td><td>read</td><td>read</td><td>— (no UI form; the CLI needs <span class="mono">change:record</span>, editor+)</td><td>—</td></tr>
+          <tr><td><span class="mono">editor</span></td><td>read</td><td>read</td><td>by CLI</td><td>—</td></tr>
+          <tr><td><span class="mono">project_admin · org_admin</span></td><td>read</td><td>read</td><td>by CLI</td><td>create tokens with a list ≤ the role</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  ${note("§9 · non-goals", `Not on these screens and not built: a manual "record a change" form; a deployment catalog (repository, owner,
+    environment); vendor integrations (a GitHub Action is a wrapper around the verb someone writes outside); causal attribution;
+    flag STATE (only the flip); change approval or freeze windows (the gate is the control); DORA dashboards.`)}`;
+}
+
+const SCREENS = [
+  ["card", "Changes on the service", sCard],
+  ["record", "Recording a change", sRecord],
+  ["compare", "Before and after", sCompare],
+  ["incident", "Incident · preceded by", sIncident],
+  ["timeline", "Full timeline", sTimeline],
+  ["token", "CI token allow-list", sToken],
+];
+let active = "card";
+const nav = document.getElementById("screens");
+const view = document.getElementById("view");
+nav.innerHTML = SCREENS.map(([k, t], i) => `<button data-k="${k}" class="${k === active ? "on" : ""}"><span class="n">${i + 1}</span>${esc(t)}</button>`).join("");
+function render() {
+  const [, , fn] = SCREENS.find(([k]) => k === active);
+  view.innerHTML = fn();
+  nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.k === active));
+  window.scrollTo(0, 0);
+}
+nav.addEventListener("click", (e) => { const b = e.target.closest("button[data-k]"); if (!b) return; active = b.dataset.k; render(); });
+document.getElementById("themeBtn").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = getComputedStyle(root).getPropertyValue("--bg").trim() === "#0b0b0f";
+  root.setAttribute("data-theme", dark ? "light" : "dark");
+});
+const notesBtn = document.getElementById("notesBtn");
+notesBtn.addEventListener("click", () => {
+  const off = document.body.classList.toggle("hide-notes");
+  notesBtn.classList.toggle("on", !off);
+  notesBtn.setAttribute("aria-pressed", String(!off));
+});
+render();
+</script>

@@ -5269,3 +5269,44 @@ header reads DESIGN APPROVED; iter-0164 task 3 is DONE. Before any SPA code: an 
 the service timeline, the changes card and the before/after comparison. Backend work — schema, domain,
 store, API, CLI, the token allow-list — may proceed under the approved design in the next iteration, as
 FR-024's did while its mock waited. Numbers reserved: iter-0165 for the implementation.
+
+## D-0210 — FR-025 UI mock approved: how the six screens become product surfaces (2026-08-30)
+
+**Decision.** The owner approved `docs/design/mock-change-intelligence.html` visually on 2026-08-30 («мок ок»,
+chat); the independent reviewer approved its static contract the same day (party [29], after [23] and [27]:
+no by-identity group route, an explicit horizon control on the card with its scope stated, the started-only
+group shown without a strip mark and with "before/after unavailable until a terminal phase"). AC-0165-7 is
+open. The mock is read into the product as follows, each reading a decision:
+
+1. **Screen 1 → the `Changes` card** on the service detail between `Release gate` and `Dependencies`: change
+   marks on the existing `ReliabilityStrip` — one per TERMINAL phase, placed by `occurred_at`, kind-shaped
+   (▲ deploy ▼ rollback ◆ flag) in the accent, never a state hue; grouped rows newest by latest phase with
+   phases in the domain order, source/identity, actor, the gate decision the change rested on (live
+   state/action or `aged out`), `preceded INC-… by −lag`, and a before/after figure at the horizon chosen in
+   the card header (`range` and `before/after at` are two explicit controls; the horizon applies to every
+   row); a started-only group is listed with "no terminal phase yet — no mark, before/after unavailable";
+   an empty state with the CLI line. NO record form: the record is the pipeline's (D14).
+2. **Screen 2 → nothing in the SPA**: the CLI flow is documentation (runbook, overview).
+3. **Screen 3 → the comparison view** reached from a row: two sides + Δ, horizon selector, `pending` with
+   `sealed_through` and no partial figure, `withheld` with the page's reason word; addressed by
+   `(source, external_id, horizon)` — there is no by-identity group route.
+4. **Screen 4 → the incident page's `Preceded by` section** (own-service and probable-root rows with the
+   anchored phase and lag, a link to the comparison) and the `🚀 Changes:` note rendered like `⚡ Context:`
+   in the incident timeline.
+5. **Screen 5 → the per-service timeline view** (`/services/:id/changes`): range ≤ 92 days frozen at Apply,
+   kind (set) and source filters, groups with phases, decision, preceded, before/after column at the
+   header's horizon, `range_too_wide` refused client-side and rendered identically from the server, cursor
+   paging, live-traversal note.
+6. **Screen 6 → the token form and read model** in Settings: the optional `actions` allow-list offered from
+   the role's grants only, the warning that a narrowed token cannot read the service page, the list shown
+   read-only afterwards (immutable, D-0209).
+7. **RBAC in the SPA**: every change surface is `project:read` (viewer+); no control writes a change; the
+   token form is for org/project admins as today. Concurrency discipline as `ServiceGate.vue`: generation
+   counter + `AbortController` per load, abort on unmount and route/workspace change, drop stale responses.
+
+**Why.** The approved mock is the contract; naming the mapping keeps "fidelity to the mock" reviewable
+against a list, as D-0207 did for the gate.
+
+**Consequences.** SPA work (iter-0165 task 7) may begin once the API changeset (task 3) exposes the routes;
+`make spa-snapshot` after any frontend change; the mock file is committed with the first landed change of
+iter-0165; row 19 of the FR-025 discharge map is reached when the marks render from a test.

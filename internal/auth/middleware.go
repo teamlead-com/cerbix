@@ -92,7 +92,22 @@ func (a *Authenticator) principalFromToken(ctx context.Context, presented string
 		// The token's NAME is what an operator recognizes in an audit row; the id
 		// stays in UserID for the typed columns ([288] P1-3).
 		AuditLabel: "token:" + t.Name,
+		// The allow-list rides onto the principal untouched (FR-025 D12): nil stays nil (the
+		// role decides), a list stays a list; authz.Can is the only reader.
+		Actions: tokenActions(t.Actions),
 	}, nil
+}
+
+// tokenActions converts the stored list to the authz type, preserving nil.
+func tokenActions(actions []string) []authz.Action {
+	if actions == nil {
+		return nil
+	}
+	out := make([]authz.Action, len(actions))
+	for i, a := range actions {
+		out[i] = authz.Action(a)
+	}
+	return out
 }
 
 // principalFromJWT validates a OIDC client-credentials access token (issuer +

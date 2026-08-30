@@ -43,6 +43,10 @@ type Store interface {
 	// Returns the NEWLY inserted links plus the witness-overflow count of the
 	// [278] bound; a redelivery inserts none.
 	CorrelateIncident(ctx context.Context, incidentID string) ([]domain.ServiceImpactLink, int, error)
+	// Change correlation (FR-025 D7): at a SERVICE auto-incident's `opened` delivery, link the
+	// changes that preceded it and append the one `🚀 Changes:` note, in one transaction.
+	// Fail-open at the caller: an error is logged and counted, the delivery proceeds.
+	LinkPrecedingChanges(ctx context.Context, incidentID string, window time.Duration, noteMax int) (store.ChangeCorrelation, error)
 	// Alerting ownership (FR-021 §16.1): whether a service ACTIVELY covers this signal for this
 	// monitor — armed, quotable, routable, generation-matched and fresh. An error here must page.
 	ActiveDelegation(ctx context.Context, monitorID, projectID string, signal store.DelegationSignal) (store.DelegationVerdict, error)
@@ -103,6 +107,26 @@ type Metrics interface {
 	RecordImpactWitnessOverflow(n int)
 }
 
+// ChangeCorrelationMetrics counts FR-025 D7's correlation outcomes (D15:
+// cerbix_change_correlations_total{role}, cerbix_change_correlation_errors_total). Optional and
+// nil-safe; the metrics registry binds it. No per-service or per-identity label, ever.
+type ChangeCorrelationMetrics interface {
+	RecordChangeCorrelations(role string, n int)
+	RecordChangeCorrelationError()
+}
+
+type noopChangeMetrics struct{}
+
+func (noopChangeMetrics) RecordChangeCorrelations(string, int) {}
+func (noopChangeMetrics) RecordChangeCorrelationError()        {}
+
+// The §5a defaults the worker runs with until WithChangeCorrelation hands it the operator's
+// values — the same numbers config.Default carries, so an unwired worker is not a silent one.
+const (
+	defaultChangeCorrelationWindow  = 60 * time.Minute
+	defaultChangeCorrelationNoteMax = 5
+)
+
 // Worker polls the outbox and delivers due events.
 type Worker struct {
 	store    Store
@@ -112,6 +136,26 @@ type Worker struct {
 	metrics  Metrics
 	logger   *slog.Logger
 	silenced func() bool // optional: when true, alert notifications are suppressed
+	// FR-025 D7: the preceding-change window and the note's entry cap, and the counters.
+	changeWindow  time.Duration
+	changeNoteMax int
+	changeMetrics ChangeCorrelationMetrics
+}
+
+// WithChangeCorrelation sets FR-025 D7's bounds (`change.correlation_window`,
+// `change.correlation_note_max`) and the counter sink; a nil sink is a no-op. Non-positive
+// values keep the defaults.
+func (w *Worker) WithChangeCorrelation(window time.Duration, noteMax int, m ChangeCorrelationMetrics) *Worker {
+	if window > 0 {
+		w.changeWindow = window
+	}
+	if noteMax > 0 {
+		w.changeNoteMax = noteMax
+	}
+	if m != nil {
+		w.changeMetrics = m
+	}
+	return w
 }
 
 // WithMailer sets the sender used to deliver subscriber-confirmation emails.
@@ -142,7 +186,11 @@ func New(st Store, webhooks WebhookDeliverer, notifs NotifyDeliverer, metrics Me
 	if metrics == nil {
 		metrics = noopMetrics{}
 	}
-	return &Worker{store: st, webhooks: webhooks, notifs: notifs, metrics: metrics, logger: logger}
+	return &Worker{
+		store: st, webhooks: webhooks, notifs: notifs, metrics: metrics, logger: logger,
+		changeWindow: defaultChangeCorrelationWindow, changeNoteMax: defaultChangeCorrelationNoteMax,
+		changeMetrics: noopChangeMetrics{},
+	}
 }
 
 // noopMetrics absorbs every counter for a worker built without a registry.
@@ -433,6 +481,29 @@ func (w *Worker) attachIncidentContext(ctx context.Context, inc domain.Incident)
 	}
 }
 
+// linkPrecedingChanges runs FR-025 D7's correlation for an opened service auto-incident. Errors
+// are logged and counted, never propagated — the incident event itself was already delivered
+// (invariant 8: the incident opens and resolves exactly as it does today).
+func (w *Worker) linkPrecedingChanges(ctx context.Context, inc domain.Incident) {
+	res, err := w.store.LinkPrecedingChanges(ctx, inc.ID, w.changeWindow, w.changeNoteMax)
+	if err != nil {
+		w.logger.Warn("change_correlation_failed", "incident", inc.ID, "service_id", inc.ServiceID, "error", err.Error())
+		w.changeMetrics.RecordChangeCorrelationError()
+		return
+	}
+	if res.Skipped || len(res.Links) == 0 {
+		return
+	}
+	perRole := map[string]int{}
+	for _, l := range res.Links {
+		perRole[l.Role]++
+	}
+	for role, n := range perRole {
+		w.changeMetrics.RecordChangeCorrelations(role, n)
+	}
+	w.logger.Info("incident_changes_linked", "incident", inc.ID, "links", len(res.Links), "note", res.NoteAdded)
+}
+
 // deliver dispatches one event by topic. A nil error means the event is done.
 // `settleCtx` is the caller's UNBOUNDED context, separate from `ctx`, which carries the delivery
 // budget (D-0186). Every write that RECORDS what a delivery did — the coverage credit, the
@@ -513,6 +584,12 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 		// after a partial failure can't double-post.
 		if ev.Type == domain.EventIncidentOpened && ev.Incident.Source == domain.SourceAuto && ev.Incident.MonitorID != "" {
 			w.attachIncidentContext(ctx, ev.Incident)
+		}
+		// Change correlation (FR-025 D7): for a SERVICE auto-incident, the changes that preceded
+		// it are linked and named once — the same place, the same best-effort contract: a
+		// failure is logged and counted and never fails the (already delivered) event.
+		if ev.Type == domain.EventIncidentOpened && ev.Incident.Source == domain.SourceAuto && ev.Incident.ServiceID != "" {
+			w.linkPrecedingChanges(ctx, ev.Incident)
 		}
 		return nil
 

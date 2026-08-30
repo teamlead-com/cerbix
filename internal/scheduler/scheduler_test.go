@@ -59,6 +59,9 @@ type fakeStore struct {
 	// gatePasses counts RunGateLedgerMaintenancePass calls; gatePassFn, when set, is its body.
 	gatePasses int32
 	gatePassFn func(ctx context.Context, passStart time.Time, cfg store.GateMaintenanceConfig) (store.GateMaintenanceReport, bool, error)
+	// changePurges counts PurgeChangeGroups calls; changePurgeFn, when set, scripts each batch.
+	changePurges  int32
+	changePurgeFn func(ctx context.Context, cutoff time.Time, groupsPerBatch int) (int, int, error)
 }
 
 type staticCredentialRegions map[string]bool
@@ -220,6 +223,17 @@ func (f *fakeStore) ServiceAlertStats(context.Context) (metrics.ServiceAlertStat
 func (f *fakeStore) PurgeOldHeartbeats(_ context.Context, _ time.Time) (int, error) {
 	atomic.AddInt32(&f.purged, 1)
 	return 0, nil
+}
+
+// PurgeChangeGroups is the FR-025 D9 pass. changePurgeFn, when set, scripts each batch's
+// answer (a test proves the leader repeats until a batch selects fewer than the bound);
+// otherwise the fake reports an empty batch.
+func (f *fakeStore) PurgeChangeGroups(ctx context.Context, cutoff time.Time, groupsPerBatch int) (int, int, error) {
+	atomic.AddInt32(&f.changePurges, 1)
+	if f.changePurgeFn != nil {
+		return f.changePurgeFn(ctx, cutoff, groupsPerBatch)
+	}
+	return 0, 0, nil
 }
 
 func (f *fakeStore) EnqueueRenotifyReminders(context.Context) (int, error) { return 0, nil }

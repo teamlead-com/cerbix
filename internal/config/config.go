@@ -39,6 +39,7 @@ type Config struct {
 	Pull               PullConfig               `yaml:"pull"`
 	Providers          ProvidersConfig          `yaml:"providers"`
 	Gate               GateConfig               `yaml:"gate"`
+	Change             ChangeConfig             `yaml:"change"`
 }
 
 // PullConfig configures the HTTP-pull transport (an alternative to RabbitMQ for a geo
@@ -246,6 +247,43 @@ type GateConfig struct {
 	// pass performs; steady state is two a day. Default 8, range 1..48; load refuses
 	// max × floor(86400 / purge_every seconds) < 4.
 	DecisionPurgeMaxPartitions int `yaml:"decision_purge_max_partitions"`
+}
+
+// ChangeConfig bounds change intelligence (func-change-intelligence §5a): how fast changes may
+// be recorded and read, how far `occurred_at` may stray from the server clock, how the
+// incident correlation is bounded, and how long change groups are kept. Ten keys, each with a
+// default, a minimum and a maximum the spec owns; Validate REJECTS a value outside them at
+// startup naming the key and the range. The rate and in-flight bounds are PROCESS-LOCAL, as
+// the gate's are.
+type ChangeConfig struct {
+	// RecordRateProcessPerMinute is the process-wide token bucket for `POST …/changes`;
+	// drained → 429 `process_rate`. Default 300, range 10..3000.
+	RecordRateProcessPerMinute int `yaml:"record_rate_process_per_minute"`
+	// RecordRatePrincipalPerMinute is the bucket per principal (user id or token id);
+	// drained → 429 `principal_rate`. Default 30, range 1..600.
+	RecordRatePrincipalPerMinute int `yaml:"record_rate_principal_per_minute"`
+	// RecordInflightProcess caps record requests in flight per process; 429
+	// `process_inflight`. Default 32, range 1..256.
+	RecordInflightProcess int `yaml:"record_inflight_process"`
+	// ReadInflightProcess caps timeline/compare/incident-changes reads in flight per process.
+	// Default 64, range 1..512.
+	ReadInflightProcess int `yaml:"read_inflight_process"`
+	// MaxPast is how far `occurred_at` may lag the server clock. Default 24h, range 1h..168h.
+	MaxPast Duration `yaml:"max_past"`
+	// MaxFuture is how far `occurred_at` may lead the server clock. Default 5m, range 0s..1h.
+	MaxFuture Duration `yaml:"max_future"`
+	// CorrelationWindow is the preceding-change window at incident open (D7). Default 60m,
+	// range 5m..24h.
+	CorrelationWindow Duration `yaml:"correlation_window"`
+	// CorrelationNoteMax is how many entries the `🚀 Changes:` note names; the rest are
+	// counted. Default 5, range 1..20.
+	CorrelationNoteMax int `yaml:"correlation_note_max"`
+	// RetentionDays is the age bound on change GROUPS (D9): a group whose latest phase is
+	// older is removed whole. Default 400, range 30..1460.
+	RetentionDays int `yaml:"retention_days"`
+	// RetentionGroupsPerBatch is how many group keys one retention statement selects (at most
+	// four rows each). Default 250, range 10..2500.
+	RetentionGroupsPerBatch int `yaml:"retention_groups_per_batch"`
 }
 
 // SecurityConfig controls encryption of secrets stored at rest (webhook signing
@@ -494,6 +532,18 @@ func defaults() *Config {
 			DecisionPurgeEvery:             Duration(time.Hour),
 			DecisionPurgeMaxPartitions:     8,
 		},
+		Change: ChangeConfig{
+			RecordRateProcessPerMinute:   300,
+			RecordRatePrincipalPerMinute: 30,
+			RecordInflightProcess:        32,
+			ReadInflightProcess:          64,
+			MaxPast:                      Duration(24 * time.Hour),
+			MaxFuture:                    Duration(5 * time.Minute),
+			CorrelationWindow:            Duration(60 * time.Minute),
+			CorrelationNoteMax:           5,
+			RetentionDays:                400,
+			RetentionGroupsPerBatch:      250,
+		},
 	}
 }
 
@@ -548,6 +598,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.validateGate(); err != nil {
+		return err
+	}
+	if err := c.validateChange(); err != nil {
 		return err
 	}
 
@@ -659,6 +712,43 @@ func (c *Config) validateGate() error {
 		return fmt.Errorf("gate.decision_purge_max_partitions × floor(86400 / gate.decision_purge_every) must be at least %d "+
 			"(strictly more than the two stage-ops a day of steady state), got %d × %d = %d: raise gate.decision_purge_max_partitions or shorten gate.decision_purge_every",
 			gatePurgePerDayMin, g.DecisionPurgeMaxPartitions, passesPerDay, n)
+	}
+	return nil
+}
+
+// validateChange refuses any of the ten change.* keys outside its range (func-change-intelligence
+// §5a), naming the key and the range every time. Three are durations and are bounded as such.
+func (c *Config) validateChange() error {
+	ch := c.Change
+	for _, b := range []struct {
+		name     string
+		v        int
+		min, max int
+	}{
+		{"change.record_rate_process_per_minute", ch.RecordRateProcessPerMinute, 10, 3000},
+		{"change.record_rate_principal_per_minute", ch.RecordRatePrincipalPerMinute, 1, 600},
+		{"change.record_inflight_process", ch.RecordInflightProcess, 1, 256},
+		{"change.read_inflight_process", ch.ReadInflightProcess, 1, 512},
+		{"change.correlation_note_max", ch.CorrelationNoteMax, 1, 20},
+		{"change.retention_days", ch.RetentionDays, 30, 1460},
+		{"change.retention_groups_per_batch", ch.RetentionGroupsPerBatch, 10, 2500},
+	} {
+		if b.v < b.min || b.v > b.max {
+			return fmt.Errorf("%s must be between %d and %d, got %d", b.name, b.min, b.max, b.v)
+		}
+	}
+	for _, b := range []struct {
+		name     string
+		v        time.Duration
+		min, max time.Duration
+	}{
+		{"change.max_past", ch.MaxPast.Std(), time.Hour, 168 * time.Hour},
+		{"change.max_future", ch.MaxFuture.Std(), 0, time.Hour},
+		{"change.correlation_window", ch.CorrelationWindow.Std(), 5 * time.Minute, 24 * time.Hour},
+	} {
+		if b.v < b.min || b.v > b.max {
+			return fmt.Errorf("%s must be between %s and %s, got %s", b.name, b.min, b.max, b.v)
+		}
 	}
 	return nil
 }

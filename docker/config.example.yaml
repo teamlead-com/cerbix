@@ -126,6 +126,23 @@ gate:
   decision_purge_every: 1h                  # [5m, 24h] maintenance cadence on the gate's own fenced session
   decision_purge_max_partitions: 8          # [1, 48]   removal stage-ops per pass; max × passes/day must be >= 4
 
+# Change intelligence bounds (func-change-intelligence §5a, FR-025). A pipeline records a
+# handful of phases per deploy — a hundred busy services deploying ten times a day is ~2 000
+# rows a day — and these numbers are sized for that. Every key has a minimum and a maximum; a
+# value outside them is REJECTED at startup naming the key and the range. The rate and
+# in-flight limits are PROCESS-LOCAL like the gate's. The block is optional; absent → defaults.
+change:
+  record_rate_process_per_minute: 300       # [10, 3000] token bucket for POST …/changes, process-wide; drained → 429 process_rate
+  record_rate_principal_per_minute: 30      # [1, 600]   per user or token; drained → 429 principal_rate
+  record_inflight_process: 32               # [1, 256]   record requests in flight per process; more → 429 process_inflight
+  read_inflight_process: 64                 # [1, 512]   timeline / compare / incident-changes reads in flight per process
+  max_past: 24h                             # [1h, 168h] occurred_at may lag the server clock by at most this
+  max_future: 5m                            # [0s, 1h]   occurred_at may lead the server clock by at most this
+  correlation_window: 60m                   # [5m, 24h]  preceding-change window at incident open (the 🚀 Changes: note)
+  correlation_note_max: 5                   # [1, 20]    entries named in the note; the rest are counted
+  retention_days: 400                       # [30, 1460] change groups older than this (by their latest phase) are removed whole
+  retention_groups_per_batch: 250           # [10, 2500] group keys selected per retention statement (at most 4 rows each)
+
 # Encryption of secrets stored at rest (webhook signing secrets, notification
 # channel credentials). encryption_key is base64 of 32 bytes (AES-256); generate
 # with `head -c 32 /dev/urandom | base64`. Empty disables encryption (plaintext,

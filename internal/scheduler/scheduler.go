@@ -106,6 +106,10 @@ type Store interface {
 	// acquired=false: the lock is held elsewhere and the pass was skipped.
 	RunGateLedgerMaintenancePass(ctx context.Context, passStart time.Time, cfg store.GateMaintenanceConfig,
 		clock func() time.Time, metrics store.GateMaintenanceMetrics) (store.GateMaintenanceReport, bool, error)
+	// PurgeChangeGroups removes at most groupsPerBatch change GROUPS whose latest phase is older
+	// than cutoff, every phase row of a selected group in one statement (FR-025 D9). The leader
+	// repeats it until a batch selects fewer than the bound.
+	PurgeChangeGroups(ctx context.Context, cutoff time.Time, groupsPerBatch int) (groups, rows int, err error)
 }
 
 // PullStatsSink receives the leader's per-region pull-queue gauge snapshot.
@@ -175,6 +179,9 @@ const (
 	// maintainEvery is how often the leader maintains heartbeat partitions
 	// (pre-create upcoming, drop expired) — DDL, so far less often than the rollup.
 	maintainEvery = time.Hour
+	// changePurgeEvery is the cadence of FR-025 D9's change-group retention pass: daily, on the
+	// leader, whole groups by age.
+	changePurgeEvery = 24 * time.Hour
 	// partitionAheadDays is how many future daily partitions to keep pre-created.
 	partitionAheadDays = 2
 	// factPartitionAheadMonths is how many future MONTHLY service-fact partitions to keep
@@ -306,6 +313,19 @@ type Scheduler struct {
 	// a zero PurgeEvery means the loop is not started.
 	gateCfg     store.GateMaintenanceConfig
 	gateMetrics GateMaintenanceSink
+	// changeRetentionDays / changeGroupsPerBatch drive the daily change-group retention pass
+	// (FR-025 D9); a zero retention means the pass is not run.
+	changeRetentionDays  int
+	changeGroupsPerBatch int
+}
+
+// WithChangeRetention wires FR-025 D9's retention: once a day the leader removes change groups
+// whose latest phase is older than `days`, `groupsPerBatch` group keys per statement, repeating
+// until a batch selects fewer than the bound. Zero days disables the pass.
+func (s *Scheduler) WithChangeRetention(days, groupsPerBatch int) *Scheduler {
+	s.changeRetentionDays = days
+	s.changeGroupsPerBatch = groupsPerBatch
+	return s
 }
 
 // WithCredentialEnvelopes switches the scheduler to the decrypt-free snapshot plus
@@ -813,7 +833,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 	// signal — a recovery stops the signals, so acceleration decays on its own;
 	// the snapshot refresh prunes it authoritatively).
 	confirmFast := map[string]time.Time{}
-	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk, lastServiceSlice, lastServiceAlert, lastServiceBurn time.Time
+	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk, lastServiceSlice, lastServiceAlert, lastServiceBurn, lastChangePurge time.Time
 	ticker := time.NewTicker(s.tick)
 	defer ticker.Stop()
 	for {
@@ -898,6 +918,12 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			if lastMaintain.IsZero() || now.Sub(lastMaintain) >= maintainEvery {
 				lastMaintain = now
 				withTimeout(ctx, maintainTimeout, func(c context.Context) { s.maintainPartitions(c, now) })
+			}
+			// Change-group retention (FR-025 D9): the daily pass on the leader's existing
+			// retention cadence, bounded like the partition sweep.
+			if s.changeRetentionDays > 0 && (lastChangePurge.IsZero() || now.Sub(lastChangePurge) >= changePurgeEvery) {
+				lastChangePurge = now
+				withTimeout(ctx, maintainTimeout, func(c context.Context) { s.purgeChangeGroups(c, now) })
 			}
 			if lastRefresh.IsZero() || now.Sub(lastRefresh) >= refreshEvery {
 				lastRefresh = now
@@ -1434,6 +1460,31 @@ func (s *Scheduler) checkStalePush(ctx context.Context, now time.Time, nextRun m
 			s.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed)
 		}
 		nextRun[m.ID] = now.Add(m.Interval())
+	}
+}
+
+// purgeChangeGroups is FR-025 D9's daily pass: change GROUPS whose latest phase is older than
+// the retention bound are removed whole, `changeGroupsPerBatch` group keys per statement,
+// repeating until a batch selects fewer than the bound (or the pass's context ends). Best-effort:
+// an error is logged and the pass resumes at the next cadence.
+func (s *Scheduler) purgeChangeGroups(ctx context.Context, now time.Time) {
+	cutoff := now.UTC().Add(-time.Duration(s.changeRetentionDays) * 24 * time.Hour)
+	totalGroups, totalRows, batches := 0, 0, 0
+	for {
+		groups, rows, err := s.store.PurgeChangeGroups(ctx, cutoff, s.changeGroupsPerBatch)
+		if err != nil {
+			s.logger.Error("purge_change_groups_failed", "error", err.Error(), "cutoff", cutoff.Format(time.RFC3339), "batches", batches)
+			break
+		}
+		batches++
+		totalGroups += groups
+		totalRows += rows
+		if groups < s.changeGroupsPerBatch {
+			break
+		}
+	}
+	if totalGroups > 0 {
+		s.logger.Info("change_groups_purged", "groups", totalGroups, "rows", totalRows, "batches", batches, "cutoff", cutoff.Format(time.RFC3339))
 	}
 }
 

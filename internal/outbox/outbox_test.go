@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,24 @@ type fakeStore struct {
 	// monitorLookups records every GetMonitor the worker performs, so a test can assert a
 	// lookup did NOT happen — the absence of a call is the claim in FR-023 D7.
 	monitorLookups []string
+
+	// change-correlation fakes (FR-025 D7): the incidents passed to LinkPrecedingChanges with
+	// the window and note cap the worker handed over, the scripted answer, and a planted error.
+	changeLinked   []string // "incident|window|noteMax"
+	changeLinkRes  store.ChangeCorrelation
+	changeLinkErr  error
+	changeLinkHook func() // runs inside LinkPrecedingChanges, e.g. to observe ordering
+}
+
+func (f *fakeStore) LinkPrecedingChanges(_ context.Context, incidentID string, window time.Duration, noteMax int) (store.ChangeCorrelation, error) {
+	f.changeLinked = append(f.changeLinked, incidentID+"|"+window.String()+"|"+strconv.Itoa(noteMax))
+	if f.changeLinkHook != nil {
+		f.changeLinkHook()
+	}
+	if f.changeLinkErr != nil {
+		return store.ChangeCorrelation{}, f.changeLinkErr
+	}
+	return f.changeLinkRes, nil
 }
 
 func (f *fakeStore) CorrelateIncident(_ context.Context, incidentID string) ([]domain.ServiceImpactLink, int, error) {

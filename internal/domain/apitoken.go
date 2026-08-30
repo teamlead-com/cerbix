@@ -16,7 +16,12 @@ type ApiToken struct {
 	ProjectID string `json:"project_id,omitempty"`
 	Name      string `json:"name"`
 	Role      Role   `json:"role"`
-	CreatedBy string `json:"created_by,omitempty"`
+	// Actions is the token's ALLOW-LIST (FR-025 D12): nil means the role decides — exactly
+	// what every token meant before the list existed; a non-nil list is intersected with the
+	// role inside authz.Can. Validated against the central action catalogue on create,
+	// immutable after (a different list is a new token), visible in the read model.
+	Actions   []string `json:"actions,omitempty"`
+	CreatedBy string   `json:"created_by,omitempty"`
 	// CreatedByEmail resolves the issuer for display (list endpoint only).
 	CreatedByEmail string     `json:"created_by_email,omitempty"`
 	LastUsedAt     *time.Time `json:"last_used_at,omitempty"`

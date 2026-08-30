@@ -750,6 +750,15 @@ func serviceReliabilitySeriesTx(ctx context.Context, tx pgx.Tx, projectID, servi
 	if !owned {
 		return nil, ErrNotFound
 	}
+	return reliabilityStepRollupTx(ctx, tx, projectID, serviceID, from, to, trunc)
+}
+
+// reliabilityStepRollupTx is the ONE rollup statement behind the series AND the change
+// comparison (FR-025 D8, NFR-020): exact integer sums per (step × epoch × revision × state)
+// over `[from, to)`. The comparison sums these cells further; it never issues a second
+// aggregation of the facts, which is what makes its parity with the series true by
+// construction rather than by test.
+func reliabilityStepRollupTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to time.Time, trunc string) ([]domain.ReliabilitySeriesPoint, error) {
 	// date_trunc over the UTC PROJECTION: session-TimeZone-proof, the same lesson the
 	// adoption recovery learned (iter-0136).
 	rows, err := tx.Query(ctx, fmt.Sprintf(`
@@ -784,6 +793,151 @@ func serviceReliabilitySeriesTx(ctx context.Context, tx pgx.Tx, projectID, servi
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// ── The before/after comparison (FR-025 D8) — an EXTENSION of the series owner ───────────
+
+// ServiceReliabilityCompare is D8's read for one change identity: the group's terminal phase
+// fixes T (its occurred_at floored to the canonical bucket); `horizon` ∈ {15m, 1h, 6h, 24h}
+// (else `horizon_invalid`); a group with only `started` is `no_terminal_phase`; an identity
+// with no row, or a foreign/unknown service, is ErrNotFound. The two sides are computed by
+// serviceReliabilityCompareTx inside ONE report snapshot with the group read, so the change and
+// the facts come from one instant. Nothing is stored or cached.
+func (s *Store) ServiceReliabilityCompare(ctx context.Context, projectID, serviceID, source, externalID string, horizon time.Duration) (domain.ChangeComparison, error) {
+	if !domain.ValidChangeCompareHorizon(horizon) {
+		return domain.ChangeComparison{}, domain.NewChangeError(domain.ChangeErrHorizonInvalid, "horizon",
+			"must be one of 15m|1h|6h|24h, got %s", horizon)
+	}
+	if err := domain.ValidateChangeSource(source); err != nil {
+		return domain.ChangeComparison{}, err
+	}
+	if _, err := domain.ValidateChangeExternalID(externalID); err != nil {
+		return domain.ChangeComparison{}, err
+	}
+	tx, asOf, err := s.beginReportSnapshot(ctx)
+	if err != nil {
+		return domain.ChangeComparison{}, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only; no-op after commit
+	if err := serviceExistsOn(ctx, tx, projectID, serviceID); err != nil {
+		return domain.ChangeComparison{}, err
+	}
+	group, err := changeGroupTx(ctx, tx, projectID, serviceID, source, externalID)
+	if err != nil {
+		return domain.ChangeComparison{}, err
+	}
+	terminal := group.TerminalPhase()
+	if terminal == nil {
+		return domain.ChangeComparison{}, domain.NewChangeError(domain.ChangeErrNoTerminalPhase, "phase",
+			"the change has no terminal phase yet; only started is recorded")
+	}
+	cmp := domain.ChangeComparison{
+		Source: source, ExternalID: externalID, Change: *terminal,
+		T:       domain.FloorToBucket(terminal.OccurredAt),
+		Horizon: horizon.String(),
+		AsOf:    asOf,
+	}
+	cmp.Before, cmp.After, cmp.SealedThrough, err = serviceReliabilityCompareTx(ctx, tx, projectID, serviceID, cmp.T, horizon)
+	if err != nil {
+		return domain.ChangeComparison{}, err
+	}
+	if cmp.Before.Figure != nil && cmp.After.Figure != nil {
+		d := cmp.After.Figure.Availability - cmp.Before.Figure.Availability
+		cmp.Delta = &d
+	}
+	return cmp, tx.Commit(ctx)
+}
+
+// serviceReliabilityCompareTx is serviceReliabilitySeriesTx EXTENDED with a bucket-aligned range
+// sum (D8): for `[T − h, T)` and `[T, T + h)` it sums the SAME hourly rollup cells the series
+// returns (reliabilityStepRollupTx), keeps only sealed cells (provisional time never enters a
+// stated number, as on the page), and applies the page's own verdict — decideServiceWindow,
+// the ONE owner of the withholding rule — over the summed durations, continuity and era. Each
+// side is a figure or is withheld with one reason from the page's vocabulary:
+//
+//   - `pending` (after only): T + h is beyond sealed_through — stated, no partial figure;
+//   - `no_facts`: no sealed bucket in the range (also both sides when nothing is sealed);
+//   - `definition_changed`: more than one epoch or revision inside the side;
+//   - `undecidable`: the page would withhold the aggregate — the page's reason rides in Detail
+//     (`storage_gap`, `zero_decidable_time`, `window_precedes_materialization_era`, and for a
+//     `before` side that reaches past the watermark, `sealed_through_behind_window`).
+//
+// The watermark is read in the same snapshot; the third result is sealed_through (nil when the
+// service has sealed nothing).
+func serviceReliabilityCompareTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, t time.Time, h time.Duration) (before, after domain.ChangeCompareSide, sealedThrough *time.Time, err error) {
+	var era time.Time
+	var sealed *time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT era_start, sealed_through FROM service_materialization
+		 WHERE service_id = $1 AND project_id = $2`, serviceID, projectID).Scan(&era, &sealed)
+	if err != nil && !noRows(err) {
+		return before, after, nil, fmt.Errorf("store: compare watermark: %w", err)
+	}
+	if sealed != nil {
+		u := sealed.UTC()
+		sealed = &u
+	}
+	before, err = compareSideTx(ctx, tx, projectID, serviceID, t.Add(-h), t, era, sealed, false)
+	if err != nil {
+		return before, after, sealed, err
+	}
+	after, err = compareSideTx(ctx, tx, projectID, serviceID, t, t.Add(h), era, sealed, true)
+	return before, after, sealed, err
+}
+
+func compareSideTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to, era time.Time, sealed *time.Time, isAfter bool) (domain.ChangeCompareSide, error) {
+	side := domain.ChangeCompareSide{From: from, To: to}
+	withhold := func(reason, detail string) domain.ChangeCompareSide {
+		side.Withheld = &domain.ChangeCompareWithheld{Reason: reason, Detail: detail, SealedThrough: sealed}
+		return side
+	}
+	if sealed == nil {
+		return withhold(domain.ChangeCompareWithheldNoFacts, ""), nil
+	}
+	// The sealed_through clamp: a side that ends beyond the watermark is not yet a fact.
+	if to.After(*sealed) {
+		if isAfter {
+			return withhold(domain.ChangeCompareWithheldPending, ""), nil
+		}
+		return withhold(domain.ChangeCompareWithheldUndecidable, domain.ServiceReportReasonStaleWatermark), nil
+	}
+	points, err := reliabilityStepRollupTx(ctx, tx, projectID, serviceID, from, to, "hour")
+	if err != nil {
+		return side, err
+	}
+	var d domain.ReliabilityDurations
+	var buckets int64
+	epochs, revisions := map[string]bool{}, map[string]bool{}
+	for _, p := range points {
+		if p.Provisional {
+			continue
+		}
+		d = addDurations(d, p.Durations)
+		buckets += p.Buckets
+		epochs[p.EpochID] = true
+		revisions[p.RevisionID] = true
+	}
+	if buckets == 0 {
+		return withhold(domain.ChangeCompareWithheldNoFacts, ""), nil
+	}
+	if len(epochs) > 1 || len(revisions) > 1 {
+		return withhold(domain.ChangeCompareWithheldDefinitionChanged, ""), nil
+	}
+	expected := int64(to.Sub(from) / domain.CanonicalBucket)
+	verdict := decideServiceWindow(d, buckets, expected, 1, from, era)
+	if verdict.Availability == nil {
+		return withhold(domain.ChangeCompareWithheldUndecidable, verdict.Reason), nil
+	}
+	side.Figure = &domain.ChangeCompareFigure{
+		Availability:    *verdict.Availability,
+		GoodSeconds:     float64(d.GoodUs) / 1e6,
+		BadSeconds:      float64(d.BadUs) / 1e6,
+		UnknownSeconds:  float64(d.UnknownUs) / 1e6,
+		ExcludedSeconds: float64(d.ExcludedUs) / 1e6,
+		Buckets:         buckets,
+		Durations:       d,
+	}
+	return side, nil
 }
 
 // UpsertServiceSLATarget sets the service-scoped objective for one window. Burn alerting on

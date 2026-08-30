@@ -7,8 +7,9 @@ import (
 )
 
 // FR-025 D12 (invariants 16, 17): `change:record` is a central action granted editor and above;
-// a token's `actions` allow-list is INTERSECTED with the role inside Can and nowhere else; a nil
-// list leaves every existing principal's authority unchanged.
+// a token's `actions` allow-list is INTERSECTED with the role inside the ONE predicate — Can and
+// its query-scope mirror VisibleScope — and nowhere else; a nil list leaves every existing
+// principal's authority unchanged.
 
 func TestChangeRecordIsEditorAndAbove(t *testing.T) {
 	for _, tc := range []struct {

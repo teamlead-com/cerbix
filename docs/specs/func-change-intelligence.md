@@ -121,8 +121,13 @@ prior `started` is ACCEPTED — many pipelines can only report the end — and t
 Order checks and inserts for one `(service_id, source, external_id)` run under a transaction-scoped
 advisory lock keyed by a stable hash of that triple (`pg_advisory_xact_lock`), taken before the phase
 rows are read, so two pipelines reporting `succeeded` and `failed` for the same run at the same instant
-cannot both pass the order check. The lock is per identity — unrelated changes never queue behind each
-other — and lives only as long as the write transaction. **Invariant 4.**
+cannot both pass the order check. **The key (review [43], implementation):** the two-int form
+`pg_advisory_xact_lock(hashtext(service_id::uuid::text), hashtext(source || '/' || external_id))`, hashed
+over the CANONICAL uuid text so an upper-case or brace-wrapped spelling of the same service takes the same
+lock (the adversarial pass found two terminals landing when it did not); one SQL fragment owns the key and
+retention takes the same lock (D9). Two distinct identities may collide on the 64-bit key and serialize
+briefly — a bounded performance effect, never mixed data, because every query uses the exact identity;
+the lock lives only as long as the transaction. **Invariant 4.**
 
 **D5 — the actor is server-derived and stored twice. DECIDED (FR-024 D9 pattern).**
 `actor_label` (immutable text; `token:<name>` for a token) plus the typed pair `actor_user_id`
@@ -205,7 +210,13 @@ cadence. **Whole groups, never split (review P1-4):** each statement selects at 
 `latest_occurred_at < cutoff`, ordered by `(latest_occurred_at, service_id, source, external_id)`, and
 deletes EVERY phase row of those keys in the same transaction (at most four rows per group, so the row
 bound is `4 × groups`); it repeats until a batch selects fewer than the bound. A group whose `started` is
-old but whose terminal is young is not selected — the group's age is its latest phase. Change volume does not justify
+old but whose terminal is young is not selected — the group's age is its latest phase. **Under the
+identity lock (review [42]):** the purge takes the SAME per-identity lock as `RecordChangePhase` for each
+selected key inside its transaction, re-evaluates `latest_occurred_at < cutoff` under the lock, and deletes
+only the keys still old — a terminal committed between selection and delete keeps its whole group; the
+purge WAITS on a held lock, bounded by the caller's context (a cancelled batch rolls back and deletes
+nothing), and reports the groups and rows actually deleted. Up to `retention_groups_per_batch` locks are held
+per transaction, which is why the bound stays at 2 500. Change volume does not justify
 partitioning: the design capacity (§5a) is ~10⁵ rows a year for a hundred busy services. **Invariant 13.**
 
 **D10 — changes belong to their service; deleting the service deletes its timeline. DECIDED (owner, 2026-08-30 — cascade, not the ledger's outlive rule).**

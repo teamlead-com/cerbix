@@ -345,7 +345,7 @@ func TestChangeConcurrentTerminalsAreSerializedByTheIdentityLock(t *testing.T) {
 	}
 	// Released on every path: a leaked holder would make pool.Close wait forever at cleanup.
 	defer holder.Rollback(ctx) //nolint:errcheck // no-op after the explicit rollback below
-	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, f.serviceID+"/github-actions/held"); err != nil {
+	if _, err := holder.Exec(ctx, `SELECT `+changeIdentityLockSQL("$1", "$2", "$3"), f.serviceID, "github-actions", "held"); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
@@ -776,8 +776,8 @@ func TestChangeTimelineForeignServiceIsNotFoundAndDeletionCascades(t *testing.T)
 	st, ctx := declStore(t)
 	f := changeService(t, st, ctx)
 	now := gateDBNow(t, st, ctx)
-	change := mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseSucceeded, now.Add(-12*time.Minute)))
-	inc := openServiceIncidentAt(t, st, ctx, f, change.OccurredAt.Add(12*time.Minute))
+	mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseSucceeded, now.Add(-12*time.Minute)))
+	inc := openServiceIncidentAt(t, st, ctx, f, now.Add(time.Minute)) // ahead of the clock: the row is recorded by the open
 	if _, err := st.LinkPrecedingChanges(ctx, inc, time.Hour, 5); err != nil {
 		t.Fatal(err)
 	}
@@ -814,11 +814,13 @@ func TestChangeCorrelationLinksPrecedingChangesOnceWithTheNote(t *testing.T) {
 	f := changeService(t, st, ctx)
 	now := gateDBNow(t, st, ctx)
 
+	// The open is pinned a minute AHEAD of the clock so every row recorded here is recorded by
+	// the open (recorded_at <= opened_at, D7's candidate universe) and the lags stay exact.
+	opened := now.Add(time.Minute)
 	// The own change has BOTH phases before the open: the anchor must be the latest (succeeded,
 	// −12m), never the started (−20m).
-	ownStarted := mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseStarted, now.Add(-20*time.Minute)))
-	own := mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseSucceeded, now.Add(-12*time.Minute)))
-	opened := own.OccurredAt.Add(12 * time.Minute)
+	ownStarted := mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseStarted, opened.Add(-20*time.Minute)))
+	own := mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseSucceeded, opened.Add(-12*time.Minute)))
 	// Upstream probable_root: a deploy 40 min before on the upstream service.
 	up := changeInput(f, "up-7", domain.ChangePhaseSucceeded, opened.Add(-40*time.Minute))
 	up.ServiceID, up.Source, up.Ref = f.upstreamID, "argo", "db-9"
@@ -905,7 +907,7 @@ func TestChangeCorrelationNoteNamesAtMostMaxAndCountsTheRest(t *testing.T) {
 	st, ctx := declStore(t)
 	f2 := changeService(t, st, ctx)
 	now := gateDBNow(t, st, ctx)
-	opened2 := now.Add(-time.Minute)
+	opened2 := now.Add(time.Minute) // ahead of the clock: every row here is recorded by the open
 	for i := 0; i < 7; i++ {
 		mustRecord(t, st, ctx, changeInput(f2, fmt.Sprintf("many-%d", i), domain.ChangePhaseSucceeded, opened2.Add(-time.Duration(i+1)*time.Minute)))
 	}
@@ -926,8 +928,8 @@ func TestChangeCorrelationAnchorsTheLatestPhaseKnownAtOpen(t *testing.T) {
 	st, ctx := declStore(t)
 	f := changeService(t, st, ctx)
 	now := gateDBNow(t, st, ctx)
-	started := mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseStarted, now.Add(-10*time.Minute)))
-	opened := started.OccurredAt.Add(10 * time.Minute)
+	opened := now.Add(time.Minute) // ahead of the clock: the started row is recorded by the open
+	started := mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseStarted, opened.Add(-10*time.Minute)))
 	inc := openServiceIncidentAt(t, st, ctx, f, opened)
 	res, err := st.LinkPrecedingChanges(ctx, inc, time.Hour, 5)
 	if err != nil || len(res.Links) != 1 || res.Links[0].ChangeID != started.ID || res.Links[0].LagSeconds != 600 {
@@ -963,8 +965,9 @@ func TestChangeCorrelationIsAtomicAndTenantSafe(t *testing.T) {
 	st, ctx := declStore(t)
 	f := changeService(t, st, ctx)
 	now := gateDBNow(t, st, ctx)
-	own := mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseSucceeded, now.Add(-12*time.Minute)))
-	inc := openServiceIncidentAt(t, st, ctx, f, own.OccurredAt.Add(12*time.Minute))
+	opened := now.Add(time.Minute) // ahead of the clock: the own row is recorded by the open
+	own := mustRecord(t, st, ctx, changeInput(f, "run-1", domain.ChangePhaseSucceeded, opened.Add(-12*time.Minute)))
+	inc := openServiceIncidentAt(t, st, ctx, f, opened)
 
 	st.changeNoteFault = func() error { return errors.New("planted between links and note") }
 	if _, err := st.LinkPrecedingChanges(ctx, inc, time.Hour, 5); err == nil || !strings.Contains(err.Error(), "planted") {

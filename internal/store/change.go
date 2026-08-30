@@ -164,12 +164,26 @@ func validateRecordChangeInput(in *RecordChangeInput) error {
 	return nil
 }
 
+// changeIdentityLockSQL is the ONE spelling of the per-identity advisory lock (D4): the two-int
+// form `pg_advisory_xact_lock(hashtext(<service uuid as canonical text>), hashtext(<source>/<external_id>))`.
+// The service id is hashed in its CANONICAL text (`uuid::text`), never as the caller spelled it —
+// PostgreSQL accepts an upper-case or brace-wrapped uuid everywhere else in the transaction, so
+// two writers spelling one service differently must still take ONE key. RecordChangePhase and
+// PurgeChangeGroups both take the lock through this function, so the two writers cannot drift
+// apart. hashtext is 32 bits per argument: two DISTINCT identities may collide on the 64-bit key
+// and serialize briefly — a bounded performance effect, never mixed data, because every query
+// uses the exact identity (reviewer [43]). The arguments are SQL expressions — a placeholder or
+// a column reference.
+func changeIdentityLockSQL(serviceID, source, externalID string) string {
+	return fmt.Sprintf(`pg_advisory_xact_lock(hashtext(%s::uuid::text), hashtext(%s || '/' || %s))`, serviceID, source, externalID)
+}
+
 // RecordChangePhase records one phase of one change (D2–D5, D11), in ONE transaction:
 //
-//  1. the per-identity advisory lock — pg_advisory_xact_lock(hashtext(service/source/id)) —
-//     is taken FIRST, so two pipelines reporting `succeeded` and `failed` for the same run at
-//     the same instant cannot both pass the order check (D4); the lock lives as long as the
-//     transaction and unrelated identities never queue behind each other;
+//  1. the per-identity advisory lock (changeIdentityLockSQL) is taken FIRST, so two pipelines
+//     reporting `succeeded` and `failed` for the same run at the same instant cannot both pass
+//     the order check (D4); the lock lives as long as the transaction; identities queue behind
+//     each other only when their 64-bit hash keys collide (briefly, never mixing data);
 //  2. the service must exist in the project (else ErrNotFound); `occurred_at` must lie within
 //     [now − max_past, now + max_future] on the DATABASE clock read after the lock
 //     (`occurred_at_out_of_bounds`);
@@ -199,10 +213,14 @@ func (s *Store) RecordChangePhase(ctx context.Context, in RecordChangeInput) (do
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-	// D4: one external identity, one writer at a time. hashtext is stable across sessions and
-	// the key is the byte-exact identity (source is a slug; external_id is case-sensitive).
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`,
-		in.ServiceID+"/"+in.Source+"/"+in.ExternalID); err != nil {
+	// D4: one external identity, one writer at a time — the key is the byte-exact identity
+	// (source is a slug; external_id is case-sensitive; the service id in canonical text). A
+	// text that is not a uuid is ErrNotFound, as serviceExistsOn answers.
+	if _, err := tx.Exec(ctx, `SELECT `+changeIdentityLockSQL("$1", "$2", "$3"),
+		in.ServiceID, in.Source, in.ExternalID); err != nil {
+		if isInvalidTextRepresentation(err) {
+			return domain.ChangePhaseRow{}, false, ErrNotFound
+		}
 		return domain.ChangePhaseRow{}, false, fmt.Errorf("store: lock change identity: %w", err)
 	}
 	if err := serviceExistsOn(ctx, tx, in.ProjectID, in.ServiceID); err != nil {
@@ -770,8 +788,10 @@ type ChangeCorrelation struct {
 
 // LinkPrecedingChanges is D7's write at a service auto-incident's `opened` delivery, in ONE
 // transaction: the incident row is locked; if the `🚀 Changes:` note is already present the
-// attempt writes nothing (a retried delivery); otherwise every change GROUP whose latest phase
-// KNOWN NOW lies in `[opened_at − window, opened_at]` on the incident's own service
+// attempt writes nothing (a retried delivery); otherwise, among the phase rows RECORDED BY THE
+// OPEN (`recorded_at <= opened_at` — a phase recorded after the open is never back-linked,
+// however far back its `occurred_at` is dated within change.max_past; invariant 8, reviewer
+// [41]), every change GROUP whose latest such phase lies in `[opened_at − window, opened_at]` on the incident's own service
 // (`own_service`) and on every service its `incident_service_impacts` rows mark
 // `probable_root` (`upstream`) gets one `incident_changes` row anchoring that latest phase —
 // its occurred_at and the lag copied, never updated — and the note naming at most `noteMax` of
@@ -848,19 +868,24 @@ func (s *Store) LinkPrecedingChanges(ctx context.Context, incidentID string, win
 	}
 	sort.Strings(services)
 
-	// The anchors: per group in the window, the latest phase row known now (id DESC breaks a
-	// same-instant tie deterministically).
+	// The anchors: the candidate universe `u` is the rows recorded by the open (recorded_at <=
+	// opened_at); per group in that universe, the latest phase must lie in the window and IS the
+	// anchor (id DESC breaks a same-instant tie deterministically). A backdated phase recorded
+	// after the open is outside `u` and can neither become an anchor nor move a group's latest.
 	anchors, err := tx.Query(ctx, `
-		WITH g AS (
-		    SELECT service_id, source, external_id, max(occurred_at) AS latest
+		WITH u AS (
+		    SELECT id, service_id, source, external_id, kind, ref, occurred_at
 		      FROM service_changes
-		     WHERE project_id = $1 AND service_id = ANY($2::uuid[])
+		     WHERE project_id = $1 AND service_id = ANY($2::uuid[]) AND recorded_at <= $4),
+		g AS (
+		    SELECT service_id, source, external_id, max(occurred_at) AS latest
+		      FROM u
 		     GROUP BY service_id, source, external_id
 		    HAVING max(occurred_at) >= $3 AND max(occurred_at) <= $4)
 		SELECT DISTINCT ON (c.service_id, c.source, c.external_id)
 		       c.id, c.service_id, c.source, c.external_id, c.kind, c.ref, c.occurred_at
 		  FROM g
-		  JOIN service_changes c
+		  JOIN u c
 		    ON c.service_id = g.service_id AND c.source = g.source AND c.external_id = g.external_id
 		   AND c.occurred_at = g.latest
 		 ORDER BY c.service_id, c.source, c.external_id, c.id DESC`,
@@ -940,39 +965,94 @@ func (s *Store) LinkPrecedingChanges(ctx context.Context, incidentID string, win
 // ── Retention (D9) ───────────────────────────────────────────────────────────────────────
 
 // PurgeChangeGroups removes at most `groupsPerBatch` change GROUPS whose latest phase is older
-// than cutoff (D9): the group KEYS are selected in a deterministic order
-// (latest_occurred_at, service_id, source, external_id) and EVERY phase row of those keys is
-// deleted in the same statement, so a group is never split and a young terminal keeps an old
-// `started`. `incident_changes` rows follow by cascade. Returns the groups and rows removed;
-// the caller repeats until a batch selects fewer than the bound.
+// than cutoff (D9), in ONE transaction of three statements:
+//
+//  1. the group KEYS are selected in a deterministic order (latest_occurred_at, service_id,
+//     source, external_id), at most groupsPerBatch;
+//  2. each key's per-identity advisory lock — the SAME lock RecordChangePhase takes
+//     (changeIdentityLockSQL, D4) — is acquired in that order, so a writer mid-flight on one of
+//     the keys finishes first and a later one waits; the wait is bounded only by ctx (the
+//     scheduler's maintain timeout), and a cancelled purge rolls back having deleted nothing;
+//  3. `max(occurred_at) < cutoff` is RE-EVALUATED per key under the lock, in a snapshot taken
+//     after the locks, and EVERY phase row of the keys still old is deleted.
+//
+// So a group is never split (reviewer [42]): a terminal that landed between the selection and
+// the lock is seen by the re-evaluation and keeps its old `started`; a terminal that arrives
+// after the lock finds the whole group gone and stands alone, which D3 accepts. A young
+// terminal keeps an old `started` on the ordinary path too. `incident_changes` rows follow by
+// cascade. Returns the groups and rows actually removed; the caller repeats until a batch
+// returns fewer than the bound. Up to groupsPerBatch advisory locks are held at once — one slot
+// of the shared lock table each (max_locks_per_transaction × max_connections).
 func (s *Store) PurgeChangeGroups(ctx context.Context, cutoff time.Time, groupsPerBatch int) (groups, rows int, err error) {
 	if groupsPerBatch < 1 {
 		return 0, 0, domain.NewChangeError(domain.ChangeErrRetentionBatchInvalid, "retention_groups_per_batch", "must be at least 1, got %d", groupsPerBatch)
 	}
-	var g, r int64
-	err = s.pool.QueryRow(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: begin purge change groups: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	victims, err := tx.Query(ctx, `
 		WITH candidates AS (
 		    SELECT DISTINCT service_id, source, external_id
 		      FROM service_changes
-		     WHERE occurred_at < $1),
-		victims AS (
-		    SELECT c.service_id, c.source, c.external_id
-		      FROM service_changes c
-		      JOIN candidates k
-		        ON k.service_id = c.service_id AND k.source = c.source AND k.external_id = c.external_id
-		     GROUP BY c.service_id, c.source, c.external_id
-		    HAVING max(c.occurred_at) < $1
-		     ORDER BY max(c.occurred_at), c.service_id, c.source, c.external_id
-		     LIMIT $2),
+		     WHERE occurred_at < $1)
+		SELECT c.service_id, c.source, c.external_id
+		  FROM service_changes c
+		  JOIN candidates k
+		    ON k.service_id = c.service_id AND k.source = c.source AND k.external_id = c.external_id
+		 GROUP BY c.service_id, c.source, c.external_id
+		HAVING max(c.occurred_at) < $1
+		 ORDER BY max(c.occurred_at), c.service_id, c.source, c.external_id
+		 LIMIT $2`, cutoff.UTC(), groupsPerBatch)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: select change groups to purge: %w", err)
+	}
+	var services, sources, externalIDs []string
+	for victims.Next() {
+		var sid, src, ext string
+		if err := victims.Scan(&sid, &src, &ext); err != nil {
+			victims.Close()
+			return 0, 0, fmt.Errorf("store: scan change group to purge: %w", err)
+		}
+		services, sources, externalIDs = append(services, sid), append(sources, src), append(externalIDs, ext)
+	}
+	victims.Close()
+	if err := victims.Err(); err != nil {
+		return 0, 0, fmt.Errorf("store: iterate change groups to purge: %w", err)
+	}
+	if len(services) == 0 {
+		return 0, 0, tx.Commit(ctx)
+	}
+	// The identity locks, in the selection order — the arrays are unnested in order.
+	if _, err := tx.Exec(ctx, `
+		SELECT `+changeIdentityLockSQL("k.service_id", "k.source", "k.external_id")+`
+		  FROM unnest($1::uuid[], $2::text[], $3::text[]) AS k(service_id, source, external_id)`,
+		services, sources, externalIDs); err != nil {
+		return 0, 0, fmt.Errorf("store: lock change groups to purge: %w", err)
+	}
+	var g, r int64
+	err = tx.QueryRow(ctx, `
+		WITH still_old AS (
+		    SELECT k.service_id, k.source, k.external_id
+		      FROM unnest($2::uuid[], $3::text[], $4::text[]) AS k(service_id, source, external_id)
+		     WHERE NOT EXISTS (
+		           SELECT 1 FROM service_changes c
+		            WHERE c.service_id = k.service_id AND c.source = k.source AND c.external_id = k.external_id
+		              AND c.occurred_at >= $1)),
 		del AS (
 		    DELETE FROM service_changes c
-		     USING victims v
+		     USING still_old v
 		     WHERE c.service_id = v.service_id AND c.source = v.source AND c.external_id = v.external_id
-		    RETURNING 1)
-		SELECT (SELECT count(*) FROM victims), (SELECT count(*) FROM del)`,
-		cutoff.UTC(), groupsPerBatch).Scan(&g, &r)
+		    RETURNING c.service_id, c.source, c.external_id)
+		SELECT count(DISTINCT (service_id, source, external_id)), count(*) FROM del`,
+		cutoff.UTC(), services, sources, externalIDs).Scan(&g, &r)
 	if err != nil {
 		return 0, 0, fmt.Errorf("store: purge change groups: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("store: commit purge change groups: %w", err)
 	}
 	return int(g), int(r), nil
 }

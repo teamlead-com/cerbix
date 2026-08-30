@@ -2793,6 +2793,239 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/services/{serviceID}/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The service's change timeline over a bounded range (viewer+, `project:read`)
+         * @description FR-025 D6. Change GROUPS — one per external identity — with their phases nested, over an explicit half-open `[from, to)` of at most 92 days, both REQUIRED. A group is selected by `latest_occurred_at` (the max over its phases) and nests ALL its phases, including a `started` before `from`. Order is `latest_occurred_at DESC, source, external_id`; `cursor` is an opaque keyset of the LAST RETURNED group and the next page is bound strictly below it; `next_cursor` is null on the last page; `limit` counts GROUPS. The traversal is LIVE: a group returned once is never returned again, and a phase recorded mid-traversal may move its group out of this traversal — a client that needs a fixed set re-reads the range.
+         *
+         *     `kind` narrows to a SET of kinds (repeatable, OR, deduplicated); `source` to one slug. Both apply BEFORE the limit. Each group's `ref`/`url` are its latest phase's; `decision` is ABSENT when no phase carried a `decision_id`, the live ledger row's `{decision_id, state, action?, overridden}` while it exists, `{decision_id, aged_out: true}` once it is gone (D11); `incidents` is ALWAYS an array — the incidents this change PRECEDED (D7; never "caused").
+         *
+         *     Reads take the read permits of §5a (`change.read_inflight_process`), no rate token.
+         *
+         *     Errors: 400 `range_required` | `range_invalid` | `range_too_wide` | `limit_invalid` | `cursor_invalid` | `kind_invalid` | `source_invalid` | a non-UUID `serviceID`; 404 unknown or foreign service, or invisible project; 429 `process_inflight`.
+         */
+        get: {
+            parameters: {
+                query: {
+                    from: string;
+                    to: string;
+                    /** @description Repeatable; the set of kinds to keep (OR). Omitted = every kind. Any other value is 400 `kind_invalid`. */
+                    kind?: ("deploy" | "rollback" | "flag")[];
+                    source?: string;
+                    /** @description Opaque; the `next_cursor` of the previous page. */
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ChangeGroupList"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+                429: components["responses"]["ChangeTooManyRequests"];
+            };
+        };
+        put?: never;
+        /**
+         * Record a change phase (editor+, `change:record`)
+         * @description FR-025 D2, D3, D5. A pipeline says what it changed: `kind` (`deploy` | `rollback` | `flag`), `phase` (`started` | `succeeded` | `failed` | `cancelled`), the external identity `(source, external_id)` under which the phases of one change are grouped, an optional bounded `ref` and `https://` `url`, the gate `decision_id` the release rested on, and `occurred_at` (defaults to the server clock; at most `change.max_past` behind and `change.max_future` ahead of it). The body is decoded STRICTLY — an unknown field (an `actor` included: the actor is the principal, D5), a missing required field or a wrong type is 400 naming it. Every text field is NORMALIZED (Unicode NFC, trimmed) before anything validates it, so a client may send what it was given; the canonical rules (no control or format characters, no line separators, lengths in code points) are then the domain's.
+         *
+         *     Phases are append-only and idempotent under `(service, source, external_id, phase)`: a replay whose `kind`, `occurred_at`, `ref`, `url` and `decision_id` are equal after normalization is 200 with the ORIGINAL row (`replayed: true`, original actor and `recorded_at`) and writes nothing; a differing replay is 409 `phase_exists` naming the field. The order is the domain's: `started` then exactly one terminal; a terminal alone is accepted; a second terminal or a `started` after a terminal is 409 `phase_order`; a terminal that predates `started` is 400 `occurred_at_before_start`; a phase whose kind differs from the group's is 409 `kind_mismatch`. Writes for one identity are serialized. Recording is not audited — the row is the record.
+         *
+         *     Bounded per process (§5a): the in-flight permits first (`change.record_inflight_process`), then the principal and process token buckets checked and debited as a unit. A 429 reaches no store; `Retry-After` is `ceil(seconds until the next token)`, `1` for an in-flight refusal, never below 1. A malformed body is refused BEFORE the bounds and costs no token.
+         *
+         *     Errors: 400 — `<field>: unknown field` | `<field>: is required` | `<field>: must be …` (shape), `kind_invalid` | `phase_invalid` | `source_invalid` | `external_id_invalid` | `ref_invalid` | `url_invalid` | `decision_unknown` | `occurred_at_before_start` | `occurred_at_out_of_bounds` (the code first, then the field, then the rule); 403 the principal lacks `change:record`; 404 unknown or foreign service (existence hidden); 409 `phase_order` | `phase_exists` | `kind_mismatch`; 429 `process_inflight` | `principal_inflight` | `principal_rate` | `process_rate`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ChangeRecord"];
+                };
+            };
+            responses: {
+                /** @description An identical replay — the ORIGINAL row, nothing written. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ChangeRecordResult"];
+                    };
+                };
+                /** @description Recorded — a new phase row. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ChangeRecordResult"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description `phase_order` (the order rule), `phase_exists` (a differing replay, the field named) or `kind_mismatch`; nothing changed. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                429: components["responses"]["ChangeTooManyRequests"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/services/{serviceID}/changes/compare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                serviceID: components["parameters"]["ServiceID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The SLI before and after one change, from sealed buckets only (viewer+, `project:read`)
+         * @description FR-025 D8, D-0211. Addressed by `(source, external_id, horizon)` — there is no by-identity group route. For the group's TERMINAL phase at instant T (its `occurred_at` floored to the canonical bucket) and a horizon `h` in `{15m, 1h, 6h, 24h}` (default `1h`), the comparison sums the reliability page's OWN canonical buckets over `[T − h, T)` and `[T, T + h)` through the series owner — the same decidability, exclusion and provisional rules, the same `sealed_through` clamp — so its figures are the values the page would show for the same range and snapshot. Each side is EXACTLY ONE of: a FIGURE (`availability`, `good_seconds`, `bad_seconds`, `unknown_seconds`, `excluded_seconds`, `buckets`); WITHHELD (`withheld` one of `definition_changed` | `undecidable` | `no_facts`, `detail` carrying the page's own reason string for `undecidable`); or PENDING — a side whose end lies past `sealed_through` (`pending: true`, `sealed_through` stated, NO partial figure). `delta` (after − before, availability points) is present ONLY when both sides are figures. `sealed_through` at the top is null when the service has sealed nothing. `source` and `external_id` are normalized as a body field would be. Nothing is stored or cached; two reads in one snapshot are equal.
+         *
+         *     Errors: 400 `source_invalid` | `external_id_invalid` | `horizon_invalid`; 404 unknown or foreign service, unknown identity (`not found`), or `no_terminal_phase` (only `started` is recorded); 429 `process_inflight`.
+         */
+        get: {
+            parameters: {
+                query: {
+                    source: string;
+                    external_id: string;
+                    horizon?: "15m" | "1h" | "6h" | "24h";
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    serviceID: components["parameters"]["ServiceID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ChangeCompare"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                /** @description Unknown or foreign service, unknown identity (`not found`), or the change has no terminal phase yet (`no_terminal_phase`). */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                429: components["responses"]["ChangeTooManyRequests"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/incidents/{incidentID}/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                incidentID: components["parameters"]["IncidentID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The changes that PRECEDED an incident (viewer+, `project:read`)
+         * @description FR-025 D7. The `incident_changes` rows computed at the service auto-incident's `opened` delivery — the same rows each timeline group's `incidents[]` comes from, read from the incident side. Each item is the ANCHORED phase (the group's latest phase known at the open, with identity), its `role` (`own_service` | `upstream`, the latter a `probable_root` service of the incident), the copied `occurred_at` and `lag_seconds` (never updated), `computed_at`, and the group's CURRENT phases read live beside it. `items` is ALWAYS an array. The route says "preceded", never "caused". Scoped to the project at the link rows: an incident of another project is 404. Takes the read permits of §5a.
+         *
+         *     Errors: 400 non-UUID `incidentID`; 404 unknown or foreign incident, or invisible project; 429 `process_inflight`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    incidentID: components["parameters"]["IncidentID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["IncidentChanges"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+                429: components["responses"]["ChangeTooManyRequests"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/sla": {
         parameters: {
             query?: never;
@@ -5511,7 +5744,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Issue a service-account token (org admin). The secret is returned once. */
+        /**
+         * Issue a service-account token (org admin). The secret is returned once.
+         * @description Optionally with an `actions` allow-list (FR-025 D12): 400 `action_unknown` for an entry outside the action catalogue, 400 `action_not_granted` for one the role does not grant. The list is immutable after create — no route changes it (PATCH is 405).
+         */
         post: {
             parameters: {
                 query?: never;
@@ -8345,6 +8581,205 @@ export interface components {
             items: components["schemas"]["GateDecisionSummary"][];
             next_cursor: string | null;
         };
+        /**
+         * @description Closed (FR-025 D2). A configuration change is a `deploy` with a `ref` (D-0209).
+         * @enum {string}
+         */
+        ChangeKind: "deploy" | "rollback" | "flag";
+        /**
+         * @description Closed (FR-025 D2, D3) — `started` then exactly one of the three terminals.
+         * @enum {string}
+         */
+        ChangePhaseName: "started" | "succeeded" | "failed" | "cancelled";
+        /** @description The POST …/changes body (FR-025 D2). Strict: no actor field, nothing beyond these. Text fields are normalized (NFC, trimmed) by the server before validation. */
+        ChangeRecord: {
+            kind: components["schemas"]["ChangeKind"];
+            phase: components["schemas"]["ChangePhaseName"];
+            /** @description The reporting system */
+            source: string;
+            /** @description The run or flip id under which phases group; case-sensitive after NFC. */
+            external_id: string;
+            /** @description An opaque version or commit label; never interpreted. */
+            ref?: string;
+            /** @description `https://` with a host only; `http://` is refused (`url_invalid`). */
+            url?: string;
+            /**
+             * Format: date-time
+             * @description Defaults to the server clock; bounded by `change.max_past` / `change.max_future` against the database clock.
+             */
+            occurred_at?: string;
+            /**
+             * Format: uuid
+             * @description A gate decision of THIS service in THIS project
+             */
+            decision_id?: string;
+        };
+        /** @description One phase row of a change as every change response nests it (FR-025 §5, D5): the row id, the phase, its instant, `ref`/`url`, the decision link when one was given, and the actor triple — `actor_user_id` is ALWAYS present and null for an API token (`via_token` true). */
+        ChangePhase: {
+            /** Format: uuid */
+            id: string;
+            phase: components["schemas"]["ChangePhaseName"];
+            /** Format: date-time */
+            occurred_at: string;
+            ref: string;
+            url: string;
+            /**
+             * Format: uuid
+             * @description Present only when the phase carried one.
+             */
+            decision_id?: string;
+            /** @description The immutable label — `token:<name>` for an API token. */
+            actor_label: string;
+            /** Format: uuid */
+            actor_user_id: string | null;
+            via_token: boolean;
+            /** Format: date-time */
+            recorded_at: string;
+        };
+        /** @description A phase row WITH its identity — where the row stands alone (the record response, the incident route's anchored change). */
+        ChangeRow: components["schemas"]["ChangePhase"] & {
+            /** Format: uuid */
+            service_id: string;
+            source: string;
+            external_id: string;
+            kind: components["schemas"]["ChangeKind"];
+        };
+        /** @description POST …/changes' answer, the same shape for 201 and 200 (FR-025 D3). */
+        ChangeRecordResult: {
+            /** @description True for an identical replay — `change` is then the ORIGINAL row. */
+            replayed: boolean;
+            change: components["schemas"]["ChangeRow"];
+        };
+        /** @description A group's gate decision read back by id (FR-025 D11). A LIVE ledger row is `{decision_id, state, action?, overridden}` — `action` absent for a NOT_CONFIGURED decision, as the gate's own response; an aged-out row is `{decision_id, aged_out: true}`. */
+        ChangeDecisionLink: {
+            /** Format: uuid */
+            decision_id: string;
+            /** @enum {string} */
+            state?: "ALLOW" | "WARN" | "BLOCK" | "UNKNOWN" | "NOT_CONFIGURED";
+            /** @enum {string} */
+            action?: "ALLOW" | "WARN" | "BLOCK";
+            overridden?: boolean;
+            /** @description Present (true) only when the ledger row is gone. */
+            aged_out?: boolean;
+        };
+        /** @description One incident this change PRECEDED (FR-025 D7) — the change side of `incident_changes`. Never "caused". */
+        ChangeIncidentLink: {
+            /** Format: uuid */
+            incident_id: string;
+            /** Format: date-time */
+            opened_at: string;
+            /** @enum {string} */
+            role: "own_service" | "upstream";
+            /**
+             * Format: int64
+             * @description `opened_at − occurred_at` of the anchored phase, copied at the open, never updated.
+             */
+            lag_seconds: number;
+            /**
+             * Format: uuid
+             * @description The anchored phase row.
+             */
+            change_id: string;
+        };
+        /** @description One timeline item (FR-025 D6): the identity, the kind, `ref`/`url` of the LATEST phase, `latest_occurred_at` (the group key's instant), every phase nested in the domain's order, `decision` ABSENT when none was given, `incidents` ALWAYS an array. */
+        ChangeGroup: {
+            source: string;
+            external_id: string;
+            kind: components["schemas"]["ChangeKind"];
+            ref: string;
+            url: string;
+            /** Format: date-time */
+            latest_occurred_at: string;
+            phases: components["schemas"]["ChangePhase"][];
+            decision?: components["schemas"]["ChangeDecisionLink"];
+            incidents: components["schemas"]["ChangeIncidentLink"][];
+        };
+        /** @description One page of the timeline (FR-025 D6); `next_cursor` is null on the last page. */
+        ChangeGroupList: {
+            items: components["schemas"]["ChangeGroup"][];
+            next_cursor: string | null;
+        };
+        /** @description One side of the comparison over `[from, to)` (FR-025 D8, D-0211), EXACTLY ONE of three shapes: a FIGURE (the six numbers), WITHHELD (`withheld` + `detail` when the reason is `undecidable`), or PENDING (`pending: true` + `sealed_through`) — either side may be pending. */
+        ChangeCompareSide: {
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /**
+             * Format: double
+             * @description Percent
+             */
+            availability?: number;
+            /** Format: double */
+            good_seconds?: number;
+            /** Format: double */
+            bad_seconds?: number;
+            /** Format: double */
+            unknown_seconds?: number;
+            /** Format: double */
+            excluded_seconds?: number;
+            /**
+             * Format: int64
+             * @description Sealed canonical buckets summed.
+             */
+            buckets?: number;
+            /** @enum {string} */
+            withheld?: "definition_changed" | "undecidable" | "no_facts";
+            /** @description The reliability page's own reason string */
+            detail?: string;
+            /** @description The side's end lies past `sealed_through`; no partial figure. */
+            pending?: boolean;
+            /**
+             * Format: date-time
+             * @description Stated with `pending`.
+             */
+            sealed_through?: string;
+        };
+        /** @description GET …/changes/compare (FR-025 D8): the identity, the terminal phase the comparison rests on, T (floored to the canonical bucket), the horizon in the request's spelling, `sealed_through` (null when nothing is sealed), the snapshot instant, both sides, and `delta` (after − before, availability points) ONLY when both sides are figures. Nothing is stored or cached. */
+        ChangeCompare: {
+            source: string;
+            external_id: string;
+            kind: components["schemas"]["ChangeKind"];
+            ref: string;
+            /**
+             * Format: uuid
+             * @description The terminal phase row.
+             */
+            change_id: string;
+            /** @enum {string} */
+            terminal_phase: "succeeded" | "failed" | "cancelled";
+            /** Format: date-time */
+            t: string;
+            /** @enum {string} */
+            horizon: "15m" | "1h" | "6h" | "24h";
+            /** Format: date-time */
+            sealed_through: string | null;
+            /**
+             * Format: date-time
+             * @description The one snapshot instant both sides were read at.
+             */
+            as_of: string;
+            before: components["schemas"]["ChangeCompareSide"];
+            after: components["schemas"]["ChangeCompareSide"];
+            /** Format: double */
+            delta?: number;
+        };
+        /** @description One change that PRECEDED an incident, from the incident side (FR-025 D7): the anchored phase with identity, the role, the copied instant and lag, when the link was computed, and the group's CURRENT phases read live. */
+        IncidentChange: {
+            change: components["schemas"]["ChangeRow"];
+            /** @enum {string} */
+            role: "own_service" | "upstream";
+            /** Format: date-time */
+            occurred_at: string;
+            /** Format: int64 */
+            lag_seconds: number;
+            /** Format: date-time */
+            computed_at: string;
+            phases: components["schemas"]["ChangePhase"][];
+        };
+        IncidentChanges: {
+            items: components["schemas"]["IncidentChange"][];
+        };
         ProjectSLA: {
             /** Format: uuid */
             project_id?: string;
@@ -8963,6 +9398,8 @@ export interface components {
             project_id?: string;
             name?: string;
             role?: components["schemas"]["Role"];
+            /** @description The token's ALLOW-LIST (FR-025 D12), always present: null means the role decides — every token that predates the list; a list (even empty) is intersected with the role inside the one central predicate. Immutable after create. */
+            actions?: string[] | null;
             created_by?: string;
             /** @description Resolved issuer (list endpoint only). */
             created_by_email?: string;
@@ -8979,6 +9416,8 @@ export interface components {
              * @description Omit for an org-scoped token.
              */
             project_id?: string;
+            /** @description Optional allow-list (FR-025 D12). Omit or null: the role decides. Each entry must name an action of the central catalogue (else 400 `action_unknown`) that the token's role grants (else 400 `action_not_granted`) — the list only narrows. A CI token is `role: editor, actions: [gate:evaluate, change:record]`: it asks the gate and records changes and can do nothing else, not even read the service page. Written into the `token.create` audit row. Immutable: a different list is a new token. */
+            actions?: string[] | null;
         };
         /** @description Issue response — the plaintext secret is present only here. */
         CreatedApiToken: {
@@ -9124,6 +9563,17 @@ export interface components {
         };
         /** @description Refused by a process-local bound of the reliability gate (FR-024 §5a) BEFORE any transaction: `error` is `process_inflight`, `principal_inflight`, `principal_rate` or `process_rate`. Nothing was evaluated and nothing was recorded. Do not retry into it. */
         GateTooManyRequests: {
+            headers: {
+                /** @description Whole seconds: `ceil(seconds until the next token)` for a rate refusal, `1` for an in-flight refusal, never below 1. */
+                "Retry-After"?: number;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Refused by a process-local bound of change intelligence (FR-025 §5a) BEFORE any store call: `error` is `process_inflight`, `principal_inflight`, `principal_rate` or `process_rate` (the read routes take permits only, so only `process_inflight` occurs there). Nothing was recorded. Do not retry into it. */
+        ChangeTooManyRequests: {
             headers: {
                 /** @description Whole seconds: `ceil(seconds until the next token)` for a rate refusal, `1` for an in-flight refusal, never below 1. */
                 "Retry-After"?: number;

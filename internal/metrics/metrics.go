@@ -106,7 +106,10 @@ type Registry struct {
 	// FR-024 reliability-gate surface (gate.go): closed-label counters, one histogram, and the
 	// four decision-ledger gauges a maintenance pass sets and a deposed pass clears.
 	gate gateMetrics
-	now  func() time.Time
+	// FR-025 change-intelligence surface (change.go): closed-label counters and the retained gauge
+	// the retention pass sets and a deposed leader clears.
+	change changeMetrics
+	now    func() time.Time
 }
 
 // fileProviderStat holds one file provider's exported gauges/counters.
@@ -904,6 +907,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		fileProviders[name] = cp
 	}
 	gate := r.gate.snapshot()
+	change := r.change.snapshot()
 	uptime := r.now().Sub(r.startTime).Seconds()
 	r.mu.RUnlock()
 	out := prometheusWriter{w: w}
@@ -1221,6 +1225,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	}
 
 	gate.write(&out)
+	change.write(&out)
 
 	if len(fileProviders) > 0 {
 		out.println("# HELP cerbix_file_provider_leader Whether this process holds a file provider's reconcile leadership.")

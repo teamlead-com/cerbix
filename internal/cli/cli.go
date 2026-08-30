@@ -801,8 +801,8 @@ func runServe(args []string) int {
 			WithMailer(mail).
 			WithSilence(func() bool { return settingsSvc.Alerting().Silenced(time.Now()) }).
 			// FR-025 D7: preceding changes are linked at a service auto-incident's opened delivery;
-			// the metrics sink is bound by the metrics changeset (nil is a no-op until then).
-			WithChangeCorrelation(time.Duration(cfg.Change.CorrelationWindow), cfg.Change.CorrelationNoteMax, nil)
+			// the registry counts the links by role and the fail-open errors (D15).
+			WithChangeCorrelation(time.Duration(cfg.Change.CorrelationWindow), cfg.Change.CorrelationNoteMax, registry)
 		spawn(func() { ob.Run(ctx) })
 	}
 
@@ -852,6 +852,16 @@ func runServe(args []string) int {
 				RatePrincipalPerMinute: cfg.Gate.EvaluateRatePrincipalPerMinute,
 				RateProcessPerMinute:   cfg.Gate.EvaluateRateProcessPerMinute,
 				TxBudget:               time.Duration(cfg.Gate.EvaluateTxBudgetMs) * time.Millisecond,
+			}, registry).
+			// Change intelligence's §5a bounds, the occurred_at clock bounds and its metric surface
+			// (FR-025): the validated change.* keys, process-local by contract.
+			WithChange(api.ChangeLimits{
+				RecordInflightProcess:        cfg.Change.RecordInflightProcess,
+				RecordRatePrincipalPerMinute: cfg.Change.RecordRatePrincipalPerMinute,
+				RecordRateProcessPerMinute:   cfg.Change.RecordRateProcessPerMinute,
+				ReadInflightProcess:          cfg.Change.ReadInflightProcess,
+				MaxPast:                      time.Duration(cfg.Change.MaxPast),
+				MaxFuture:                    time.Duration(cfg.Change.MaxFuture),
 			}, registry)
 		if mail != nil {
 			apiHandler.WithMailer(mail)
@@ -1025,6 +1035,7 @@ func runServe(args []string) int {
 		case "all":
 			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithChangeRetention(cfg.Change.RetentionDays, cfg.Change.RetentionGroupsPerBatch). // FR-025 D9: change groups removed whole by age, daily
+				WithChangeRetentionMetrics(registry).                                              // FR-025 D15: cerbix_changes_retained, sampled by the pass
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
 				WithLocalCredentialRegions(domain.DefaultRegion).
@@ -1056,6 +1067,7 @@ func runServe(args []string) int {
 			}
 			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithChangeRetention(cfg.Change.RetentionDays, cfg.Change.RetentionGroupsPerBatch). // FR-025 D9: change groups removed whole by age, daily
+				WithChangeRetentionMetrics(registry).                                              // FR-025 D15: cerbix_changes_retained, sampled by the pass
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
 				WithPullRegions(cfg.Pull.Regions). // pull-served regions get jobs via pull_jobs, not AMQP

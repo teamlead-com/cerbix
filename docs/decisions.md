@@ -5332,3 +5332,32 @@ catches up, the other does not.
 (`{pending: true, sealed_through}`); the test `TestChangeCompareEitherSideIsPendingPastSealedThrough`
 asserts both sides pending with the watermark and no `delta`. Recorded before the code changed, as the
 reviewer required.
+
+## D-0212 — FR-025 API changeset: a token's list must be granted by its role; visibility stays membership; the metric sets (2026-08-30)
+
+**Decision.** Four readings made while the API of FR-025 was built, recorded before the range is claimed:
+1. **`action_not_granted`.** Revision 3 validated a token's `actions` against the action catalogue only
+   (`action_unknown`). The owner decided (2026-08-30) that an entry the token's ROLE does not grant is also
+   refused at creation — 400 `action_not_granted` naming it — because the intersection in `authz.Can` would
+   otherwise let an operator create a token whose listed action silently never works, and the mistake would
+   surface at the pipeline's first 403 instead of at the form. The handler asks the central predicate through
+   a shadow principal shaped as the middleware builds one; the store keeps validating the catalogue.
+2. **Visibility is membership.** `VisibleProject` — the 404-versus-403 predicate every project route
+   consults first — was `Can(project:read)`, which after changeset 2 consulted the allow-list, so the very
+   CI token D12 describes (`[gate:evaluate, change:record]`) got 404 on its own project, the record route
+   included. `VisibleProject` now reads membership alone (D12's own sentence: "its project is still visible
+   for 404-vs-403 purposes because visibility is membership, not action"); `Can` and its query-scope mirror
+   `VisibleScope` keep intersecting the list.
+3. **The rejected-reason set is closed and wider than "the 400/409 codes"**: `body_invalid` for a shape
+   refusal that has no code, and the four §5a limiter codes — an uncounted 429 would hide exactly the load
+   the limiter sheds.
+4. **`cerbix_changes_retained` counts rows**, sampled once per retention pass by the leader through
+   `CountServiceChanges`, cleared on leadership loss (a deposed node does not speak), the previous value kept
+   when a sample fails.
+
+**Why.** Each is a place where the letter of revision 3 was silent or wrong at the code face; each is
+recorded here and amended in D12, invariant 17 and D15 in the same commit, so the contract and the code say
+the same thing before the reviewer sees the range.
+
+**Consequences.** `openapi.yaml` lists `action_not_granted` on token creation; the SPA's token form offers
+only the role's grants (mock screen 6 already does); the runbook's metric rows use the closed reason set.

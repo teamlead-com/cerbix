@@ -65,3 +65,46 @@ func TestChangeRetentionIsOffWithoutTheOption(t *testing.T) {
 		t.Fatalf("option not applied: %d/%d", s.changeRetentionDays, s.changeGroupsPerBatch)
 	}
 }
+
+// fakeChangeSink records the retained-gauge calls (FR-025 D15).
+type fakeChangeSink struct {
+	set     []int64
+	cleared int
+}
+
+func (s *fakeChangeSink) SetChangesRetained(n int64) { s.set = append(s.set, n) }
+func (s *fakeChangeSink) ClearChangesRetained()      { s.cleared++ }
+
+// D15: the retention pass samples the rows it left behind into `cerbix_changes_retained` once per
+// pass — after the batches, from the store's count — a failed sample leaves the previous value
+// standing, and leadership loss clears the gauge. Without the sink nothing is counted.
+func TestChangeRetentionPassSetsTheRetainedGaugeAndLeadershipLossClearsIt(t *testing.T) {
+	fs := &fakeStore{changeCount: 4321}
+	sink := &fakeChangeSink{}
+	s := New(fs, nil, testLogger()).WithChangeRetention(400, 250).WithChangeRetentionMetrics(sink)
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	s.purgeChangeGroups(context.Background(), now)
+	if len(sink.set) != 1 || sink.set[0] != 4321 {
+		t.Fatalf("gauge samples = %v, want [4321] after one pass", sink.set)
+	}
+	fs.changeCountErr = errors.New("planted")
+	s.purgeChangeGroups(context.Background(), now)
+	if len(sink.set) != 1 {
+		t.Fatalf("a failed count must not move the gauge: %v", sink.set)
+	}
+	s.setLeaderState(true)
+	if sink.cleared != 0 {
+		t.Fatal("winning leadership must not clear the gauge")
+	}
+	s.setLeaderState(false)
+	if sink.cleared != 1 {
+		t.Fatalf("losing leadership must clear the gauge once, cleared %d", sink.cleared)
+	}
+
+	// No sink: the pass runs, counts nothing, asks the store for no count.
+	fs = &fakeStore{changeCount: 1, changeCountErr: errors.New("must not be asked")}
+	New(fs, nil, testLogger()).WithChangeRetention(400, 250).purgeChangeGroups(context.Background(), now)
+	if got := atomic.LoadInt32(&fs.changePurges); got != 1 {
+		t.Fatalf("purge calls = %d", got)
+	}
+}

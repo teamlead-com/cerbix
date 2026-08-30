@@ -141,6 +141,8 @@ type fakeStore struct {
 	escalationPolicyWrites int
 	// FR-024: the reliability gate's scripted half (see fakeGate); nil until a test touches it.
 	gate *fakeGate
+	// FR-025: change intelligence's scripted half (see fakeChange); nil until a test touches it.
+	change *fakeChange
 }
 
 // fakeSecret backs the project secret inventory in memory. The value is kept
@@ -3249,4 +3251,180 @@ func (f *fakeStore) ListGateDecisions(_ context.Context, projectID string, from,
 		return nil, nil, g.listErr
 	}
 	return g.listItems, g.listNext, nil
+}
+
+// ── FR-025: change intelligence ──────────────────────────────────────────────────────────────
+
+// fakeChange is the change half of fakeStore. SCRIPTED, as fakeGate is: every method records
+// that it was called and what it was handed, enforces the two tenant contracts the HTTP layer
+// relies on the store for (a service outside the project and an incident outside the project
+// are store.ErrNotFound), and otherwise returns what the test programmed. RecordChangePhase
+// and ListChangeGroups can be made to BLOCK — signal `started`, wait on `release` — so the §5a
+// in-flight bounds can be exercised with real concurrency and no sleeps. A record with no
+// programmed row answers a row BUILT FROM THE INPUT, so a test can read what reached the store
+// straight off the response.
+type fakeChange struct {
+	mu    sync.Mutex
+	calls []string
+
+	inputs    []store.RecordChangeInput
+	row       domain.ChangePhaseRow
+	replayed  bool
+	recordErr error
+	// hold is how many of the NEXT record/list calls block on release (each sends on started).
+	hold    int
+	started chan struct{}
+	release chan struct{}
+
+	groups   []domain.ChangeGroup
+	next     *store.ChangeCursor
+	listErr  error
+	lastList struct {
+		from, to time.Time
+		kinds    []domain.ChangeKind
+		source   *string
+		cursor   *store.ChangeCursor
+		limit    int
+	}
+
+	comparison  domain.ChangeComparison
+	compareErr  error
+	lastCompare struct {
+		source, externalID string
+		horizon            time.Duration
+	}
+
+	incidentLinks map[string][]domain.IncidentChangeLink // incident id → links
+	incidentErr   error
+}
+
+func (f *fakeStore) changeState() *fakeChange {
+	if f.change == nil {
+		f.change = &fakeChange{}
+	}
+	return f.change
+}
+
+func (c *fakeChange) record(call string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, call)
+}
+
+// changeCalls is every change store method the handlers reached, in order.
+func (f *fakeStore) changeCalls() []string {
+	c := f.changeState()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.calls...)
+}
+
+// changeInputs is every RecordChangeInput the handler handed the store, in order.
+func (f *fakeStore) changeInputs() []store.RecordChangeInput {
+	c := f.changeState()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]store.RecordChangeInput(nil), c.inputs...)
+}
+
+// blockIfHeld implements the scripted hold: the caller sends on started and waits on release.
+func (c *fakeChange) blockIfHeld(ctx context.Context) error {
+	c.mu.Lock()
+	block := c.hold > 0
+	if block {
+		c.hold--
+	}
+	started, release := c.started, c.release
+	c.mu.Unlock()
+	if !block {
+		return nil
+	}
+	started <- struct{}{}
+	select {
+	case <-release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (f *fakeStore) RecordChangePhase(ctx context.Context, in store.RecordChangeInput) (domain.ChangePhaseRow, bool, error) {
+	c := f.changeState()
+	c.record("RecordChangePhase")
+	c.mu.Lock()
+	c.inputs = append(c.inputs, in)
+	c.mu.Unlock()
+	if err := f.gateService(in.ProjectID, in.ServiceID); err != nil {
+		return domain.ChangePhaseRow{}, false, err
+	}
+	if err := c.blockIfHeld(ctx); err != nil {
+		return domain.ChangePhaseRow{}, false, err
+	}
+	if c.recordErr != nil {
+		return domain.ChangePhaseRow{}, false, c.recordErr
+	}
+	if c.row.ID != "" {
+		return c.row, c.replayed, nil
+	}
+	row := domain.ChangePhaseRow{
+		ID: "019906c0-aaaa-7abc-8def-0123456789ab", ProjectID: in.ProjectID, ServiceID: in.ServiceID,
+		Source: in.Source, ExternalID: in.ExternalID, Kind: in.Kind, Phase: in.Phase, Ref: in.Ref, URL: in.URL,
+		OccurredAt: in.OccurredAt.UTC().Truncate(time.Microsecond), DecisionID: in.DecisionID,
+		ActorLabel: in.Actor.Label, ViaToken: in.Actor.ViaToken, RecordedAt: gateT0,
+	}
+	if in.Actor.ActorUserID != "" {
+		id := in.Actor.ActorUserID
+		row.ActorUserID = &id
+	}
+	return row, c.replayed, nil
+}
+
+func (f *fakeStore) ListChangeGroups(ctx context.Context, projectID, serviceID string, from, to time.Time, kinds []domain.ChangeKind, source *string, cursor *store.ChangeCursor, limit int) ([]domain.ChangeGroup, *store.ChangeCursor, error) {
+	c := f.changeState()
+	c.record("ListChangeGroups")
+	c.mu.Lock()
+	c.lastList.from, c.lastList.to, c.lastList.kinds, c.lastList.source, c.lastList.cursor, c.lastList.limit = from, to, kinds, source, cursor, limit
+	c.mu.Unlock()
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return nil, nil, err
+	}
+	if err := c.blockIfHeld(ctx); err != nil {
+		return nil, nil, err
+	}
+	if c.listErr != nil {
+		return nil, nil, c.listErr
+	}
+	return c.groups, c.next, nil
+}
+
+func (f *fakeStore) ServiceReliabilityCompare(_ context.Context, projectID, serviceID, source, externalID string, horizon time.Duration) (domain.ChangeComparison, error) {
+	c := f.changeState()
+	c.record("ServiceReliabilityCompare")
+	c.mu.Lock()
+	c.lastCompare.source, c.lastCompare.externalID, c.lastCompare.horizon = source, externalID, horizon
+	c.mu.Unlock()
+	if err := f.gateService(projectID, serviceID); err != nil {
+		return domain.ChangeComparison{}, err
+	}
+	if c.compareErr != nil {
+		return domain.ChangeComparison{}, c.compareErr
+	}
+	return c.comparison, nil
+}
+
+func (f *fakeStore) ListIncidentChanges(_ context.Context, projectID, incidentID string) ([]domain.IncidentChangeLink, error) {
+	c := f.changeState()
+	c.record("ListIncidentChanges")
+	inc, ok := f.incidents[incidentID]
+	if !ok || inc.ProjectID != projectID {
+		return nil, store.ErrNotFound
+	}
+	if c.incidentErr != nil {
+		return nil, c.incidentErr
+	}
+	links := c.incidentLinks[incidentID]
+	if links == nil {
+		links = []domain.IncidentChangeLink{}
+	}
+	return links, nil
 }

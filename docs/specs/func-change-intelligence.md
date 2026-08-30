@@ -230,8 +230,11 @@ ALLOW-LIST intersected with the role: `Can(action)` for a token principal is `ro
 AND (actions IS NULL OR action ∈ actions)`. A CI token is therefore `role: editor, actions:
 [gate:evaluate, change:record]` — it can ask the gate and record changes and can do NOTHING else, not
 even `project:read` (its `GET …/services` is 403; its project is still visible for 404-vs-403 purposes
-because visibility is membership, not action). The list is validated against the central `Action`
-catalogue on create (400 `action_unknown`), is immutable after create (a different list is a new token —
+because visibility is membership, not action — `VisibleProject`, the 404-versus-403 predicate, therefore
+reads membership alone, while `Can` and its query-scope mirror `VisibleScope` intersect the list). The list
+is validated against the central `Action` catalogue on create (400 `action_unknown`) AND against the token's
+own role — an entry the role does not grant is 400 `action_not_granted` naming it, so an operator's mistake
+surfaces at creation and not at the pipeline's first 403 (owner decision D-0212) — is immutable after create (a different list is a new token —
 tokens are cheap, audit is not), and appears in the token's read model and in the audit row
 `token.create`. The list is consulted in ONE central authorization predicate — `authz.Can` and its
 query-scope mirror `VisibleScope`, which must intersect the same list or a narrowed token could still
@@ -257,9 +260,12 @@ is rendered before the owner approves a UI mock, exactly as FR-024. **Invariant 
 
 **D15 — observability. DECIDED.**
 `cerbix_changes_recorded_total{kind,phase,outcome="recorded|replayed"}`,
-`cerbix_change_record_rejected_total{reason}` (the 400/409 codes), `cerbix_change_correlations_total{role}`,
+`cerbix_change_record_rejected_total{reason}` (a closed set: the 400/409 codes, `body_invalid` for a shape
+refusal without a code, and the four §5a limiter codes — an uncounted 429 would hide the load; D-0212),
+`cerbix_change_correlations_total{role}`,
 `cerbix_change_correlation_errors_total`, `cerbix_change_compare_total{outcome="figure|withheld|pending"}`,
-`cerbix_changes_retained` (gauge, from the retention pass). No `service_id`, `source` or `external_id`
+`cerbix_changes_retained` (gauge: the ROWS of `service_changes`, sampled once per retention pass by the
+leader and cleared on leadership loss — D-0212). No `service_id`, `source` or `external_id`
 label anywhere (cardinality; the same rule that keeps `job_id` out of labels). Runbook rows for
 `correlation_errors_total > 0 for 15m` (warn) and `record_rejected_total{reason="phase_order"}` rising
 (inform: a pipeline reports out of order). **Invariant 20.**
@@ -412,7 +418,9 @@ Twenty-three, compared as a SET against the traceability map by `make docs-check
 16. `change:record` is a central action (editor+); reads are `project:read`; no role string appears in a
     handler;
 17. a token's `actions` allow-list intersects its role in the one central predicate — `authz.Can` and its
-    query-scope mirror `VisibleScope` — and nowhere else; `NULL` leaves
+    query-scope mirror `VisibleScope` — and nowhere else, while project visibility (`VisibleProject`, the
+    404-versus-403 predicate) is membership alone; an entry the role does not grant is refused at create
+    (`action_not_granted`, D-0212); `NULL` leaves
     every existing token's authority unchanged; the list is validated against the action catalogue on
     create, immutable after, visible in the read model and the `token.create` audit row; a CI token with
     `[gate:evaluate, change:record]` is 403 on `GET …/services`;

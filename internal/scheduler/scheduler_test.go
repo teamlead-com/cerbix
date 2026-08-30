@@ -62,6 +62,9 @@ type fakeStore struct {
 	// changePurges counts PurgeChangeGroups calls; changePurgeFn, when set, scripts each batch.
 	changePurges  int32
 	changePurgeFn func(ctx context.Context, cutoff time.Time, groupsPerBatch int) (int, int, error)
+	// changeCount answers CountServiceChanges; changeCountErr fails the sample.
+	changeCount    int64
+	changeCountErr error
 }
 
 type staticCredentialRegions map[string]bool
@@ -234,6 +237,10 @@ func (f *fakeStore) PurgeChangeGroups(ctx context.Context, cutoff time.Time, gro
 		return f.changePurgeFn(ctx, cutoff, groupsPerBatch)
 	}
 	return 0, 0, nil
+}
+
+func (f *fakeStore) CountServiceChanges(context.Context) (int64, error) {
+	return f.changeCount, f.changeCountErr
 }
 
 func (f *fakeStore) EnqueueRenotifyReminders(context.Context) (int, error) { return 0, nil }

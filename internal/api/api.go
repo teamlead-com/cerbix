@@ -250,6 +250,15 @@ type Store interface {
 	DecideGate(ctx context.Context, projectID, serviceID string, budget time.Duration) (domain.GateDecision, error)
 	GetGateDecision(ctx context.Context, projectID, decisionID string) (domain.GateDecision, error)
 	ListGateDecisions(ctx context.Context, projectID string, from, to time.Time, serviceID *string, states []domain.GateState, cursor *store.GateCursor, limit int) ([]domain.GateDecisionSummary, *store.GateCursor, error)
+
+	// Change intelligence (FR-025). The record is the ONE writer of `service_changes` (D2–D5,
+	// D11); the three reads answer from one report snapshot each. Sentinels the handlers map:
+	// store.ErrNotFound (foreign/unknown service or incident, unknown identity) and
+	// *domain.ChangeError carrying one of the closed codes (400/404/409 by code).
+	RecordChangePhase(ctx context.Context, in store.RecordChangeInput) (domain.ChangePhaseRow, bool, error)
+	ListChangeGroups(ctx context.Context, projectID, serviceID string, from, to time.Time, kinds []domain.ChangeKind, source *string, cursor *store.ChangeCursor, limit int) ([]domain.ChangeGroup, *store.ChangeCursor, error)
+	ServiceReliabilityCompare(ctx context.Context, projectID, serviceID, source, externalID string, horizon time.Duration) (domain.ChangeComparison, error)
+	ListIncidentChanges(ctx context.Context, projectID, incidentID string) ([]domain.IncidentChangeLink, error)
 }
 
 // Mailer sends status-page subscription emails. Optional; nil means email is not
@@ -280,6 +289,17 @@ type GateMetrics interface {
 	RecordGateEvaluateRejected(reason string) error
 	RecordGateEvaluateError(kind string) error
 	ObserveGateDecisionDuration(d time.Duration)
+}
+
+// ChangeMetrics is change intelligence's metric surface (func-change-intelligence.md D15):
+// accepted records by kind/phase/outcome, refusals by closed code, comparisons by outcome.
+// Satisfied by *metrics.Registry; nil-safe in the handlers. The recorders return an error for a
+// label outside their closed set — the handlers only ever pass the closed vocabulary, so the
+// error is a programming fault and is logged, never surfaced to the caller.
+type ChangeMetrics interface {
+	RecordChangeRecorded(kind, phase string, replayed bool) error
+	RecordChangeRecordRejected(reason string) error
+	RecordChangeCompare(outcome string) error
 }
 
 // ResultSink publishes a heartbeat into the ingestion pipeline. Used by the AGENT results
@@ -327,6 +347,11 @@ type Handler struct {
 	// validated config, and the gate routes answer 501 until then rather than run unbounded.
 	gate        *gateLimiter
 	gateMetrics GateMetrics
+	// change is the §5a limiter of change intelligence and the occurred_at clock bounds
+	// (FR-025); nil until WithChange wires the validated config, and the change routes answer
+	// 501 until then rather than run unbounded.
+	change        *changeLimiter
+	changeMetrics ChangeMetrics
 }
 
 // PullWaiter blocks until a pull job is enqueued for a region (or the max hold / request
@@ -477,6 +502,16 @@ func (h *Handler) WithGate(limits GateLimits, m GateMetrics) *Handler {
 	return h
 }
 
+// WithChange wires change intelligence's request-time bounds (the validated change.record_*,
+// change.read_inflight_process, change.max_past and change.max_future keys, §5a) and its metric
+// surface. Process-local by contract, as the gate's; without this call the change routes answer
+// 501.
+func (h *Handler) WithChange(limits ChangeLimits, m ChangeMetrics) *Handler {
+	h.change = newChangeLimiter(limits, time.Now)
+	h.changeMetrics = m
+	return h
+}
+
 // WithSecretsEnabled sets the project-secret-inventory feature switch
 // (cfg.Secrets.Enabled). Off (the default), every secrets endpoint answers
 // 404 feature_disabled (spec func-secret-inventory §4.1).
@@ -601,6 +636,14 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/services/{serviceID}/gate/overrides/{overrideID}", h.revokeGateOverride)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/gate/decisions", h.listGateDecisions)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/gate/decisions/{decisionID}", h.getGateDecision)
+	// Change intelligence (FR-025): the record under the service (`change:record`), the timeline
+	// and the comparison under the service and the incident's preceding changes under the
+	// project (all `project:read`). The comparison is addressed by (source, external_id, horizon)
+	// — there is no by-identity group route (D-0210).
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/services/{serviceID}/changes", h.recordChange)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/changes", h.listChanges)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/services/{serviceID}/changes/compare", h.compareChange)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/incidents/{incidentID}/changes", h.listIncidentChanges)
 
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/secrets", h.listSecrets)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/secrets", h.createSecret)

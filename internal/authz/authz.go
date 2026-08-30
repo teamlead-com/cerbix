@@ -244,9 +244,16 @@ func (p Principal) VisibleOrg(orgID string) bool {
 	return p.InOrg(orgID)
 }
 
-// VisibleProject reports whether the principal can see the project at all.
+// VisibleProject reports whether the principal can see the project at all: a membership that
+// applies to it (every role grants project:read), or global admin. Visibility is MEMBERSHIP, not
+// action (FR-025 D12): a token whose allow-list omits project:read still SEES its project — its
+// reads are 403, never 404 — so the allow-list plays no part here, and only here. Without this a
+// CI token `[gate:evaluate, change:record]` would be 404 on every project route, the record
+// included.
 func (p Principal) VisibleProject(orgID, projectID string) bool {
-	return p.Can(ActionProjectRead, orgID, projectID)
+	member := p
+	member.Actions = nil
+	return member.Can(ActionProjectRead, orgID, projectID)
 }
 
 // VisibleScope returns the set of orgs/projects on which the principal holds

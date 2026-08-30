@@ -110,6 +110,17 @@ type Store interface {
 	// than cutoff, every phase row of a selected group in one statement (FR-025 D9). The leader
 	// repeats it until a batch selects fewer than the bound.
 	PurgeChangeGroups(ctx context.Context, cutoff time.Time, groupsPerBatch int) (groups, rows int, err error)
+	// CountServiceChanges is the retention pass's sample for `cerbix_changes_retained` (D15):
+	// the rows of service_changes kept after the pass.
+	CountServiceChanges(ctx context.Context) (int64, error)
+}
+
+// ChangeRetentionSink receives the retention pass's sample of retained change rows and forgets
+// it on leadership loss (FR-025 D15, `cerbix_changes_retained`). Implemented by
+// *metrics.Registry. Optional.
+type ChangeRetentionSink interface {
+	SetChangesRetained(n int64)
+	ClearChangesRetained()
 }
 
 // PullStatsSink receives the leader's per-region pull-queue gauge snapshot.
@@ -317,6 +328,7 @@ type Scheduler struct {
 	// (FR-025 D9); a zero retention means the pass is not run.
 	changeRetentionDays  int
 	changeGroupsPerBatch int
+	changeMetrics        ChangeRetentionSink
 }
 
 // WithChangeRetention wires FR-025 D9's retention: once a day the leader removes change groups
@@ -325,6 +337,13 @@ type Scheduler struct {
 func (s *Scheduler) WithChangeRetention(days, groupsPerBatch int) *Scheduler {
 	s.changeRetentionDays = days
 	s.changeGroupsPerBatch = groupsPerBatch
+	return s
+}
+
+// WithChangeRetentionMetrics wires the `cerbix_changes_retained` gauge sink (FR-025 D15): the
+// retention pass samples the rows kept after it runs; a deposed leader clears the gauge.
+func (s *Scheduler) WithChangeRetentionMetrics(sink ChangeRetentionSink) *Scheduler {
+	s.changeMetrics = sink
 	return s
 }
 
@@ -708,6 +727,11 @@ func (s *Scheduler) setLeaderState(leader bool) {
 	// exists to prevent — and a stale wedged=true would hold /readyz down on a standby.
 	if !leader && s.serviceMetrics != nil {
 		s.serviceMetrics.ClearServiceReliabilityStats()
+	}
+	// The retained-changes gauge is the leader's sample of one table: a standby exporting the
+	// previous leader's count is the same two-answers lie (FR-025 D15).
+	if !leader && s.changeMetrics != nil {
+		s.changeMetrics.ClearChangesRetained()
 	}
 }
 
@@ -1485,6 +1509,17 @@ func (s *Scheduler) purgeChangeGroups(ctx context.Context, now time.Time) {
 	}
 	if totalGroups > 0 {
 		s.logger.Info("change_groups_purged", "groups", totalGroups, "rows", totalRows, "batches", batches, "cutoff", cutoff.Format(time.RFC3339))
+	}
+	// D15: `cerbix_changes_retained` is what the pass left behind, sampled once per pass. A
+	// failed sample leaves the previous value standing rather than exporting a zero that would
+	// read as "nothing retained".
+	if s.changeMetrics != nil && ctx.Err() == nil {
+		n, err := s.store.CountServiceChanges(ctx)
+		if err != nil {
+			s.logger.Warn("count_service_changes_failed", "error", err.Error())
+			return
+		}
+		s.changeMetrics.SetChangesRetained(n)
 	}
 }
 

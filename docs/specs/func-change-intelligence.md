@@ -2,7 +2,9 @@
 
 > **Lifecycle: DESIGN APPROVED — revision 3, 2026-08-30 (party [15]); the owner answered the seven questions of §11
 > the same day (D-0209). No SPA code before an owner-approved UI mock of the timeline and the comparison; backend
-> work may proceed under the approved design meanwhile, as FR-024's did.** Revisions 1–3 were reviewed as one design phase
+> work may proceed under the approved design meanwhile, as FR-024's did.** Forward correction at implementation,
+> owner decision D-0211 (2026-08-30): `pending` applies to EITHER comparison side whose end exceeds
+> `sealed_through`, not to `after` alone (D8, invariant 11, §7 amended in place). Revisions 1–3 were reviewed as one design phase
 > (iter-0164 task 3). Revision 1 was reviewed at party [9]: 2 P0 (tenant integrity of the link
 > table; a false persistence claim on the comparison), 4 P1 (identical replay undefined; the timeline's
 > group key and cursor; the link's anchor; retention by rows splitting a group), 3 P2 (text normalization;
@@ -46,8 +48,8 @@ changes and asks the gate gets, for the first time, an authority narrower than a
   readable) and named in one system note with the marker `🚀 Changes:`, best-effort and never blocking
   the incident. For a change with a terminal phase, the API and the service page state the SLI **before**
   and **after** its instant over a chosen horizon, from sealed canonical buckets only, with every
-  withholding the reliability page would apply; an `after` window that is not yet sealed is `pending`
-  with `sealed_through` stated, never partial. A CLI verb records a change the way `cerbix gate check`
+  withholding the reliability page would apply; a side whose window is not yet sealed is `pending`
+  with `sealed_through` stated, never partial (D-0211). A CLI verb records a change the way `cerbix gate check`
   asks the gate: credentials from the environment, one stdout line, stable exit codes, `--json` verbatim.
 - **NFR-020 — a change never rewrites a fact, and the comparison is the page's own number.** Recording a
   change mutates no reliability fact, no incident, no policy and no decision; correlation and comparison
@@ -179,8 +181,10 @@ same `sealed_through` clamp, the same epoch/revision segmentation. Each side is 
 (`availability`, `good_seconds`, `bad_seconds`, `unknown_seconds`, `excluded_seconds`, `buckets`) or
 withheld with ONE reason from the page's own vocabulary: `definition_changed` (a revision or epoch
 boundary inside the side), `undecidable` (the page would withhold availability for that range),
-`no_facts` (no sealed bucket in the range), or — for `after` only — `pending` when `T + h >
-sealed_through`, with `sealed_through` stated and NO partial figure. The response also states `delta`
+`no_facts` (no sealed bucket in the range), or `pending` when the side's end exceeds `sealed_through` —
+`after` when `T + h > sealed_through`, `before` when `T > sealed_through` (a change reported minutes ago has
+exactly this shape; owner decision D-0211, forward correction of revision 3's "after only") — with
+`sealed_through` stated and NO partial figure. The response also states `delta`
 (after − before, availability points) only when both sides are figures. T is the terminal phase's
 `occurred_at` floored to the canonical bucket; a change whose only phase is `started` has no comparison
 (`404 no_terminal_phase`). The comparison is a READ: nothing is stored, nothing is cached. **Its stability is the page's (review
@@ -389,8 +393,9 @@ Twenty-three, compared as a SET against the traceability map by `make docs-check
 10. the comparison's figures come from `serviceReliabilityCompareTx`, an extension of the series owner,
     never a second implementation; a range the page would withhold is withheld here with the same
     reason;
-11. `after` is `pending` with `sealed_through` stated whenever `T + h > sealed_through`, never a
-    partial figure; `delta` is present only when both sides are figures;
+11. a side whose end exceeds `sealed_through` is `pending` with `sealed_through` stated — `after` when
+    `T + h > sealed_through`, `before` when `T > sealed_through` (D-0211) — never a partial figure; `delta`
+    is present only when both sides are figures;
 12. the comparison stores and caches nothing; two reads in one snapshot are equal; across time it
     follows the reliability page's historical-correction semantics, and its contract is parity with the
     series for the same range and snapshot;
@@ -462,7 +467,8 @@ and the group's `incidents[]` agree row for row · the note and the API say "pre
 
 *Comparison:* a deploy at T with sealed facts around it → `before` and `after` figures equal the sums of
 `ServiceReliabilitySeries` over the same bucket ranges (parity, to the microsecond) · `T + h` past
-`sealed_through` → `after: pending` with `sealed_through`, no figure, no `delta` · a revision boundary
+`sealed_through` → `after: pending` with `sealed_through`, no figure, no `delta` · `T` itself past
+`sealed_through` → BOTH sides `pending` (D-0211) · a revision boundary
 inside `before` → `withheld: definition_changed` · a range the report path would withhold → `withheld:
 undecidable`, same reason string · no buckets → `no_facts` · `horizon=2h` → 400 `horizon_invalid` · a
 group with only `started` → 404 `no_terminal_phase` · two calls in one snapshot → identical bytes; a repaired bucket between two calls → the second equals

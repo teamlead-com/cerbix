@@ -855,12 +855,12 @@ func (s *Store) ServiceReliabilityCompare(ctx context.Context, projectID, servic
 // the ONE owner of the withholding rule — over the summed durations, continuity and era. Each
 // side is a figure or is withheld with one reason from the page's vocabulary:
 //
-//   - `pending` (after only): T + h is beyond sealed_through — stated, no partial figure;
+//   - `pending`: the side's end is beyond sealed_through (`after` past T + h; `before` too when T itself
+//     is past the seal — owner decision D-0211) — sealed_through stated, no partial figure;
 //   - `no_facts`: no sealed bucket in the range (also both sides when nothing is sealed);
 //   - `definition_changed`: more than one epoch or revision inside the side;
 //   - `undecidable`: the page would withhold the aggregate — the page's reason rides in Detail
-//     (`storage_gap`, `zero_decidable_time`, `window_precedes_materialization_era`, and for a
-//     `before` side that reaches past the watermark, `sealed_through_behind_window`).
+//     (`storage_gap`, `zero_decidable_time`, `window_precedes_materialization_era`).
 //
 // The watermark is read in the same snapshot; the third result is sealed_through (nil when the
 // service has sealed nothing).
@@ -877,15 +877,15 @@ func serviceReliabilityCompareTx(ctx context.Context, tx pgx.Tx, projectID, serv
 		u := sealed.UTC()
 		sealed = &u
 	}
-	before, err = compareSideTx(ctx, tx, projectID, serviceID, t.Add(-h), t, era, sealed, false)
+	before, err = compareSideTx(ctx, tx, projectID, serviceID, t.Add(-h), t, era, sealed)
 	if err != nil {
 		return before, after, sealed, err
 	}
-	after, err = compareSideTx(ctx, tx, projectID, serviceID, t, t.Add(h), era, sealed, true)
+	after, err = compareSideTx(ctx, tx, projectID, serviceID, t, t.Add(h), era, sealed)
 	return before, after, sealed, err
 }
 
-func compareSideTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to, era time.Time, sealed *time.Time, isAfter bool) (domain.ChangeCompareSide, error) {
+func compareSideTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, from, to, era time.Time, sealed *time.Time) (domain.ChangeCompareSide, error) {
 	side := domain.ChangeCompareSide{From: from, To: to}
 	withhold := func(reason, detail string) domain.ChangeCompareSide {
 		side.Withheld = &domain.ChangeCompareWithheld{Reason: reason, Detail: detail, SealedThrough: sealed}
@@ -894,12 +894,10 @@ func compareSideTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string, 
 	if sealed == nil {
 		return withhold(domain.ChangeCompareWithheldNoFacts, ""), nil
 	}
-	// The sealed_through clamp: a side that ends beyond the watermark is not yet a fact.
+	// The sealed_through clamp: a side that ends beyond the watermark is not yet a fact — either
+	// side (D-0211), stated as pending with the watermark, never a partial figure.
 	if to.After(*sealed) {
-		if isAfter {
-			return withhold(domain.ChangeCompareWithheldPending, ""), nil
-		}
-		return withhold(domain.ChangeCompareWithheldUndecidable, domain.ServiceReportReasonStaleWatermark), nil
+		return withhold(domain.ChangeCompareWithheldPending, ""), nil
 	}
 	points, err := reliabilityStepRollupTx(ctx, tx, projectID, serviceID, from, to, "hour")
 	if err != nil {

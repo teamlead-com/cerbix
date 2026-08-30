@@ -124,7 +124,7 @@ func TestChangeCompareHasParityWithTheSeriesToTheMicrosecond(t *testing.T) {
 // `after` is pending with sealed_through stated and NO figure whenever T + h > sealed_through;
 // delta is absent; `before` is unaffected. A `before` that reaches past the watermark is
 // undecidable with the page's own stale-watermark reason.
-func TestChangeCompareAfterIsPendingPastSealedThrough(t *testing.T) {
+func TestChangeCompareEitherSideIsPendingPastSealedThrough(t *testing.T) {
 	st, ctx := declStore(t)
 	f, a := compareFixture(t, st, ctx)
 	// 6h from the fixture: T + 6h = A + 6h > A + 3h.
@@ -149,12 +149,15 @@ func TestChangeCompareAfterIsPendingPastSealedThrough(t *testing.T) {
 	if c := compareOK(t, st, ctx, f, time.Hour); c.After.Figure == nil {
 		t.Fatalf("after exactly sealed to T + h = %+v", c.After)
 	}
-	// The watermark behind T: `before` reaches past it too.
+	// The watermark behind T: `before` reaches past it too, so BOTH sides are pending with the
+	// watermark stated (owner decision D-0211) — not `undecidable`: the facts are not yet sealed,
+	// they are not undecidable.
 	setWatermark(t, st, ctx, f.reportFixture, a.Add(-4*time.Hour), a.Add(-10*time.Minute))
 	c := compareOK(t, st, ctx, f, time.Hour)
-	if c.Before.Withheld == nil || c.Before.Withheld.Reason != domain.ChangeCompareWithheldUndecidable ||
-		c.Before.Withheld.Detail != domain.ServiceReportReasonStaleWatermark || c.After.Withheld == nil || c.After.Withheld.Reason != domain.ChangeCompareWithheldPending {
-		t.Fatalf("watermark behind T: before=%+v after=%+v", c.Before, c.After)
+	if c.Before.Withheld == nil || c.Before.Withheld.Reason != domain.ChangeCompareWithheldPending || c.Before.Withheld.Detail != "" ||
+		c.Before.Withheld.SealedThrough == nil || !c.Before.Withheld.SealedThrough.Equal(a.Add(-10*time.Minute)) ||
+		c.After.Withheld == nil || c.After.Withheld.Reason != domain.ChangeCompareWithheldPending || c.Delta != nil {
+		t.Fatalf("watermark behind T: before=%+v after=%+v delta=%v, want both pending with sealed_through and no delta", c.Before, c.After, c.Delta)
 	}
 	// Nothing sealed at all: both sides no_facts.
 	if _, err := st.pool.Exec(ctx, `UPDATE service_materialization SET sealed_through = NULL WHERE service_id = $1`, f.serviceID); err != nil {

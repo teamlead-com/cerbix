@@ -5310,3 +5310,25 @@ against a list, as D-0207 did for the gate.
 **Consequences.** SPA work (iter-0165 task 7) may begin once the API changeset (task 3) exposes the routes;
 `make spa-snapshot` after any frontend change; the mock file is committed with the first landed change of
 iter-0165; row 19 of the FR-025 discharge map is reached when the marks render from a test.
+
+## D-0211 — FR-025 comparison: `pending` applies to either side whose end exceeds the seal (2026-08-30)
+
+**Decision.** Revision 3 of `func-change-intelligence.md` made `pending` the sealing outcome of the `after`
+side only ("for `after` only — `pending` when `T + h > sealed_through`"). Implementation met the case the
+letter had not named: a change reported minutes ago has `T > sealed_through`, so its `before` window
+`[T − h, T)` is not sealed either; changeset 2 rendered that side `withheld: undecidable` with the page's
+stale-watermark reason, and the reviewer refused it as an unrecorded change of a sealed-data response
+contract (P1 [33]). The owner decided, the same day: **a side whose end exceeds `sealed_through` is
+`pending` with `sealed_through` stated — `after` when `T + h > sealed_through`, `before` when
+`T > sealed_through` — never a partial figure, never `undecidable`**, because the facts are not undecidable,
+they are not yet sealed. D8, invariant 11, §7 and the mock's screen 3 are amended in place; the spec header
+names the correction.
+
+**Why.** `undecidable` is the page's word for a range it cannot decide; a not-yet-sealed range is a
+different thing and the operator must be able to tell them apart — one resolves itself when the seal
+catches up, the other does not.
+
+**Consequences.** `compareSideTx` has one clamp for both sides; the API's side shape is unchanged
+(`{pending: true, sealed_through}`); the test `TestChangeCompareEitherSideIsPendingPastSealedThrough`
+asserts both sides pending with the watermark and no `delta`. Recorded before the code changed, as the
+reviewer required.

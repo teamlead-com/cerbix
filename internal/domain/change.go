@@ -347,8 +347,9 @@ const (
 	ChangeCompareWithheldUndecidable = "undecidable"
 	// ChangeCompareWithheldNoFacts: no sealed bucket in the range.
 	ChangeCompareWithheldNoFacts = "no_facts"
-	// ChangeCompareWithheldPending: `after` only — T + h is not yet sealed; sealed_through is
-	// stated and NO partial figure is given.
+	// ChangeCompareWithheldPending: the side's end exceeds sealed_through (`after` past T + h;
+	// `before` too when T itself is past the seal — D-0211); sealed_through is stated and NO partial
+	// figure is given.
 	ChangeCompareWithheldPending = "pending"
 )
 

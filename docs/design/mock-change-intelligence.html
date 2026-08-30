@@ -433,7 +433,8 @@ function sCompare() {
   ${note("D8 · NFR-020", `<b>One store function</b>, the series owner extended with a bucket-aligned range sum: the same decidability,
     exclusion and provisional rules, the same <span class="mono">sealed_through</span> clamp, the same definition segmentation.
     Each side is a figure or is WITHHELD with one reason from the page's own vocabulary; <span class="mono">after</span> is
-    <span class="mono">pending</span> until the seal has passed <span class="mono">T + h</span> — never a partial number. The
+    <span class="mono">pending</span> until the seal has passed its end — <span class="mono">after</span> until <span class="mono">T + h</span>, and
+    <span class="mono">before</span> too when the change was reported so recently that T itself is past the seal (D-0211) — never a partial number. The
     comparison is addressed by the change's identity <span class="mono">(source, external_id)</span> and a horizon; T is the group's
     terminal phase floored to the canonical minute, and a group that has only <span class="mono">started</span> has no comparison
     (<span class="mono">404 no_terminal_phase</span>) — the card says "unavailable until a terminal phase".`)}
@@ -475,7 +476,7 @@ function sCompare() {
           <div class="delta"><div class="lbl">Δ</div><div class="v mono" style="color:var(--ink-3)">—</div></div>
           <div class="side with"><div class="lbl">After · 16:25 → 17:25</div><div class="kpi mono" style="color:var(--ink-3)">pending<small>sealed through 16:57 Z</small></div><div class="hint">the seal must pass 17:25 before this side is quoted; nothing partial is shown</div></div>
         </div>
-        <p class="hint">The rollback's 1 h window is not fully sealed. At the 15 m horizon both sides are: <span class="mono">98.31 % → 99.97 %</span>.</p>
+        <p class="hint">The rollback's 1 h window is not fully sealed. At the 15 m horizon both sides are: <span class="mono">98.31 % → 99.97 %</span>. A change reported a minute ago has T past the seal, and then <b>both</b> sides read <span class="mono">pending</span> until the seal catches up (D-0211).</p>
       </div>
     </div>
     <div class="card">
@@ -615,7 +616,8 @@ function sTimeline() {
   <span class="k">"delta"</span>: -1.67
 }
 <span class="c">// a side that cannot be quoted is { "withheld": "definition_changed" | "undecidable" | "no_facts" }, or</span>
-<span class="c">// { "pending": true, "sealed_through": … } for `after`; delta is ABSENT unless both sides are figures.</span>
+<span class="c">// { "pending": true, "sealed_through": … } for a side not yet sealed (after past T + h; before too when T is past the seal, D-0211);</span>
+<span class="c">// delta is ABSENT unless both sides are figures.</span>
 <span class="c">// a group with only `started` → 404 no_terminal_phase. There is no by-identity group route: the timeline</span>
 <span class="c">// row already carries identity, phases, decision and preceded[]; the comparison is the only per-group read.</span></pre>
       </div>

@@ -11,6 +11,8 @@ import ServiceReliability from "@/components/ServiceReliability.vue";
 import ServiceAlerting from "@/components/ServiceAlerting.vue";
 import ServiceDependencies from "@/components/ServiceDependencies.vue";
 import ServiceGate from "@/components/ServiceGate.vue";
+import ServiceChanges from "@/components/ServiceChanges.vue";
+import type { StripMark } from "@/lib/changes";
 import { humanDuration, lagExact, sealedLabel } from "@/lib/services";
 
 type Detail = components["schemas"]["ServiceDetail"];
@@ -37,6 +39,12 @@ const canWrite = computed(() => session.canProjectWrite(ws.orgId, ws.projectId) 
 // central session predicates: `gate:policy:write` is editor+, `gate:override` is project_admin+.
 const canPolicyWrite = computed(() => session.canProjectWrite(ws.orgId, ws.projectId));
 const canOverride = computed(() => session.canProjectAdmin(ws.orgId, ws.projectId));
+
+// FR-025 D14 / D-0210 item 1: the change marks on the facts strip. The `Changes` card below
+// reads the timeline and EMITS one mark per terminal phase; the view hands them UP to the
+// reliability card, whose strip already owns the time geometry — one strip, one series fetch,
+// the marks placed by `occurred_at` over the facts they happened on.
+const changeMarks = ref<StripMark[]>([]);
 
 // P1 [90] (iter-0163 §1.13 review): the parent's reads carry the same discipline as the cards
 // below them — one generation and one AbortController. Navigating A→B while A's GET is still in
@@ -216,6 +224,7 @@ watch(() => [route.params.id, ws.projectId], load);
           :service-id="serviceId"
           :can-write="canWrite"
           :has-sli="sli.size > 0"
+          :marks="changeMarks"
         />
 
         <!-- Phase 5 (§16.6a): the paging declaration, and — separately — what it is actually
@@ -243,6 +252,16 @@ watch(() => [route.params.id, ws.projectId], load);
           :managed-by="managed"
           :can-policy-write="canPolicyWrite"
           :can-override="canOverride"
+        />
+
+        <!-- FR-025 (iter-0165, D-0210 item 1): what a pipeline said it changed, beside the facts.
+             A record, not a control — every read is project:read, so no flag is passed. Its marks
+             travel UP to the reliability strip above (see changeMarks). -->
+        <ServiceChanges
+          :project-id="ws.projectId"
+          :service-id="serviceId"
+          :service-slug="detail.service.slug"
+          @marks="(m) => (changeMarks = m)"
         />
 
         <!-- Phase 3 (iter-0148): the impact graph — both edge directions with the two-layer

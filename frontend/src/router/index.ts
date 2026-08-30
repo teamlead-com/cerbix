@@ -51,6 +51,22 @@ const routes: RouteRecordRaw[] = [
     component: () => import("@/views/GateOverridesView.vue"),
   },
   {
+    // FR-025 (D-0210 item 5, D6/D10): the change timeline is per SERVICE and goes with it — a
+    // change is the service's fact, not a ledger that outlives its subject. Read-only; the record
+    // is the pipeline's (`cerbix change record`). `?kind=`/`?source=` pre-filter.
+    path: "/services/:id/changes",
+    name: "service-changes",
+    component: () => import("@/views/ServiceChangesView.vue"),
+  },
+  {
+    // FR-025 (D-0210 item 3, D8): the before/after of ONE change, addressed by its identity
+    // `?source&external_id` and a `horizon` — there is no by-identity group route, so the
+    // comparison is the only per-group read and lives under the service, read-only.
+    path: "/services/:id/changes/compare",
+    name: "service-change-compare",
+    component: () => import("@/views/ChangeCompareView.vue"),
+  },
+  {
     // FR-024 (D-0207, D10): the decision ledger is PROJECT-scoped, never service-nested — a
     // decision outlives its service, and a route under the service would answer 404 at exactly
     // the moment the evidence is wanted. `?service=<id>` pre-filters.

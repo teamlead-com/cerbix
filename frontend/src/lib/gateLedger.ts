@@ -164,11 +164,16 @@ function rfc3339(ms: number): string {
   return new Date(ms).toISOString().replace(".000Z", "Z");
 }
 
-/** "" when the two days make a request the server will accept; otherwise the sentence to show instead of asking. */
-export function rangeRefusal(fromDay: string, toDay: string): string {
+/**
+ * "" when the two days make a request the server will accept; otherwise the sentence to show instead
+ * of asking. The bound and its sentence default to the LEDGER's (31 days); a caller whose server caps a
+ * page differently — the change timeline's 92 days (FR-025 D6, lib/changesTimeline.ts) — passes its own
+ * pair, and the ledger's behaviour does not move.
+ */
+export function rangeRefusal(fromDay: string, toDay: string, maxDays: number = MAX_RANGE_DAYS, tooWideText: string = RANGE_TOO_WIDE_TEXT): string {
   const b = rangeBounds(fromDay, toDay);
   if (!b) return "Pick both dates.";
   if (b.days <= 0) return "The end must not be before the start.";
-  if (b.days > MAX_RANGE_DAYS) return RANGE_TOO_WIDE_TEXT;
+  if (b.days > maxDays) return tooWideText;
   return "";
 }

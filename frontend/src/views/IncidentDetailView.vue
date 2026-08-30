@@ -7,8 +7,29 @@ import AppShell from "@/components/AppShell.vue";
 import IncidentSubjectChip from "@/components/IncidentSubjectChip.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
-import { forwardStatuses, impactBadge, relTime, statusBadge } from "@/lib/incident";
+import {
+  CHIP_ACC,
+  CHIP_BASE,
+  CHIP_DORM,
+  CHIP_PLAIN,
+  type ChangePhase,
+  type IncidentChange,
+  clockLabel,
+  describeChangeFailure,
+  failureOf,
+  kindClip,
+  kindLabel,
+  lagText,
+  phaseInstantLabel,
+  phaseLabel,
+  roleLabel,
+  shortId,
+  terminalOf,
+  transportFailure,
+} from "@/lib/changesTimeline";
+import { forwardStatuses, impactBadge, relTime, statusBadge, systemNoteKind } from "@/lib/incident";
 import { PM_SECTIONS, emptySections, parsePostmortem, renderSections, serializePostmortem } from "@/lib/postmortem";
+import { sealedLabel } from "@/lib/services";
 
 type Incident = components["schemas"]["AuthedIncident"];
 type IncidentUpdate = components["schemas"]["IncidentUpdate"];
@@ -50,6 +71,63 @@ const impactsUnavailable = computed(() => !!incident.value?.impacts_unavailable)
 const probableRoots = computed(() => impacts.value.filter((l) => l.role === "probable_root"));
 const affected = computed(() => impacts.value.filter((l) => l.role === "affected"));
 
+// FR-025 D7 (D-0210 item 4, mock screen 4): the changes that PRECEDED this incident — the
+// `incident_changes` rows computed at the `opened` delivery, read from the incident side. Only a
+// SERVICE incident has them (the correlation runs for service auto-incidents; a monitor or project
+// incident asks for nothing). Each row is the phase KNOWN at the open with its copied lag — a
+// terminal recorded later rewrites nothing, so the group's phases TODAY are read live beside the
+// anchor and shown as such. "Preceded" is the whole claim: never "caused".
+const hasService = computed(() => !!incident.value?.service_id);
+const preceded = ref<IncidentChange[]>([]);
+const precededLoading = ref(false);
+const precededError = ref("");
+const precededStatus = ref<number | null>(null);
+const openedAt = computed(() => incident.value?.started_at || "");
+
+async function loadPreceded(ticket: number) {
+  const inc = incident.value;
+  preceded.value = [];
+  precededError.value = "";
+  precededStatus.value = null;
+  if (!inc?.service_id || !inc.project_id) return;
+  precededLoading.value = true;
+  try {
+    const res = await api.GET("/api/v1/projects/{projectID}/incidents/{incidentID}/changes", {
+      params: { path: { projectID: inc.project_id, incidentID: id.value } },
+    });
+    if (ticket !== loadTicket) return;
+    if (res.error || !res.data) {
+      const f = failureOf(res);
+      precededError.value = describeChangeFailure(f, {
+        notFound: "The change links of this incident cannot be read — the incident is not in this project, or it is gone.",
+        denied: "You cannot see this incident's changes.",
+      });
+      precededStatus.value = f.status;
+      return;
+    }
+    preceded.value = res.data.items ?? [];
+  } catch (e) {
+    if (ticket !== loadTicket) return;
+    precededError.value = transportFailure(e);
+    precededStatus.value = 0;
+  } finally {
+    if (ticket === loadTicket) precededLoading.value = false;
+  }
+}
+
+/** The upstream service's slug from the impact links this page already holds; the id, shortened, when the graph no longer names it. */
+function upstreamSlug(c: IncidentChange): string {
+  return impacts.value.find((l) => l.service_id === c.change.service_id)?.slug || shortId(c.change.service_id);
+}
+/** `started 14:03 → succeeded 14:05` — the group's phases today, in the domain's order. */
+function phasesToday(phases: readonly ChangePhase[]): string {
+  return phases.map((p, i) => `${phaseLabel(p.phase)} ${phaseInstantLabel(p.occurred_at, i > 0 ? phases[i - 1].occurred_at : undefined)}`).join(" → ");
+}
+/** The comparison view's address (D-0210 item 3): by identity, under the change's OWN service. */
+function compareRoute(c: IncidentChange) {
+  return { path: `/services/${c.change.service_id}/changes/compare`, query: { source: c.change.source, external_id: c.change.external_id } };
+}
+
 async function acknowledge() {
   if (!incident.value) return;
   posting.value = true;
@@ -85,6 +163,7 @@ async function load() {
   postmortem.value = pm.error ? null : (pm.data ?? null);
   loading.value = false;
   loadSubjectName().catch(() => {});
+  loadPreceded(ticket).catch(() => {});
 }
 
 // Best-effort by design: without the name the chip still states the KIND, and an incident whose
@@ -278,19 +357,85 @@ watch(() => [id.value, ws.projectId], load);
         </span>
       </div>
 
+      <!-- Preceded by (FR-025 D7, mock screen 4): the changes linked at the open, own service and
+           probable-root upstreams; the anchored phase and its lag never move, the phases today are live. -->
+      <section v-if="hasService && incident" class="mb-5 rounded border border-border bg-surface shadow-card" data-testid="incident-preceded">
+        <header class="flex flex-wrap items-center gap-[10px] border-b border-border px-4 py-[13px]">
+          <h2 class="text-[13px] font-semibold">Preceded by</h2>
+          <span v-if="openedAt" :class="[CHIP_BASE, CHIP_PLAIN, 'font-mono text-[10.5px]']" :title="openedAt">opened {{ sealedLabel(openedAt) }}</span>
+          <span v-if="!precededLoading && !precededError" :class="[CHIP_BASE, CHIP_PLAIN, 'ml-auto']" data-testid="incident-preceded-count">{{ preceded.length }} change{{ preceded.length === 1 ? "" : "s" }}</span>
+        </header>
+
+        <p v-if="precededError" class="px-4 py-[10px] text-[13px] text-down" data-testid="incident-preceded-error" :data-status="precededStatus ?? undefined">{{ precededError }}</p>
+        <p v-else-if="precededLoading" class="px-4 py-6 text-center text-[13px] text-ink-3">Loading…</p>
+        <template v-else>
+          <div v-if="preceded.length" class="border-b border-border">
+            <div
+              v-for="c in preceded"
+              :key="c.change.id"
+              class="flex flex-wrap items-center gap-[9px] border-b border-border px-4 py-[11px] last:border-b-0"
+              data-testid="incident-preceded-row"
+              :data-role="c.role"
+              :data-source="c.change.source"
+              :data-external-id="c.change.external_id"
+              :data-kind="c.change.kind"
+            >
+              <span :class="[CHIP_BASE, CHIP_PLAIN, 'font-mono text-[10.5px]']" data-testid="incident-preceded-role">{{ roleLabel(c.role) }}</span>
+              <span class="inline-flex items-center gap-[6px] text-[12.5px] font-medium text-ink" data-testid="incident-preceded-kind">
+                <i class="inline-block h-[10px] w-[10px] flex-none bg-accent" :style="{ clipPath: kindClip(c.change.kind) }" aria-hidden="true"></i>{{ kindLabel(c.change.kind) }}
+              </span>
+              <span class="font-mono text-[13.5px] font-medium" :class="c.change.ref ? '' : 'text-ink-3'" data-testid="incident-preceded-ref">{{ c.change.ref || c.change.external_id }}</span>
+              <span :class="[CHIP_BASE, CHIP_PLAIN, 'font-mono text-[10.5px]']" :title="c.occurred_at" data-testid="incident-preceded-anchor">{{ phaseLabel(c.change.phase) }} {{ clockLabel(c.occurred_at) }}</span>
+              <span :class="[CHIP_BASE, CHIP_ACC, 'font-mono text-[10.5px]']" :title="`${c.lag_seconds} s before the open`" data-testid="incident-preceded-lag">{{ lagText(c.lag_seconds) }}</span>
+              <span class="flex-1"></span>
+              <span :class="[CHIP_BASE, CHIP_PLAIN, 'font-mono text-[10.5px]']" data-testid="incident-preceded-source">{{ c.change.source }} · {{ c.change.external_id }}</span>
+              <RouterLink
+                v-if="terminalOf(c)"
+                :to="compareRoute(c)"
+                class="font-mono text-[11.5px] text-accent hover:underline"
+                data-testid="incident-preceded-compare"
+              >before/after →</RouterLink>
+              <span v-else :class="[CHIP_BASE, CHIP_DORM]" data-testid="incident-preceded-no-terminal">before/after unavailable until a terminal phase</span>
+              <span class="w-full text-[12.5px] text-ink-3" data-testid="incident-preceded-sub">
+                <template v-if="c.role === 'upstream'">
+                  on <RouterLink :to="{ name: 'service', params: { id: c.change.service_id } }" class="text-accent hover:underline">{{ upstreamSlug(c) }}</RouterLink>, which the impact graph marks as a probable root of this incident ·
+                </template>
+                anchored at the <span class="font-mono">{{ phaseLabel(c.change.phase) }}</span> phase known at {{ openedAt ? clockLabel(openedAt) : "the open" }}; the group's phases today: <span class="font-mono">{{ phasesToday(c.phases) }}</span>
+              </span>
+            </div>
+          </div>
+          <p v-else class="px-4 py-6 text-[13px] text-ink-3" data-testid="incident-preceded-empty">
+            No change was recorded on this service or its probable-root upstreams before the open.
+          </p>
+          <p class="px-4 py-[10px] text-[12px] text-ink-3" data-testid="incident-preceded-hint">
+            Changes recorded after {{ openedAt ? sealedLabel(openedAt) : "the open" }} are not linked back — the window is fixed at open, and a later <span class="font-mono">resolved</span> does not recompute. "Preceded" is the whole claim.
+          </p>
+        </template>
+      </section>
+
       <!-- timeline -->
       <section class="mb-5 rounded border border-border bg-surface shadow-card">
         <div class="border-b border-border px-4 py-[13px] text-[13px] font-semibold">Timeline</div>
         <ol class="flex flex-col">
-          <li v-for="(u, i) in updates" :key="i" class="flex gap-3 border-b border-border px-4 py-[13px] last:border-b-0">
-            <span class="mt-[3px] h-[9px] w-[9px] shrink-0 rounded-full" :class="statusBadge(u.status).cls"></span>
+          <!-- A system-authored note (⚡ Context:, ⏸ Suppressed:, 🕸 Impact:, 🚀 Changes:) is detected by
+               its PREFIX — the marker that is also the server's idempotency guard — and every one renders
+               the same way: the body in mono; the changes note carries the change glyph in the gutter. -->
+          <li
+            v-for="(u, i) in updates"
+            :key="i"
+            class="flex gap-3 border-b border-border px-4 py-[13px] last:border-b-0"
+            :data-testid="systemNoteKind(u.body) ? 'incident-update-system-note' : undefined"
+            :data-note="systemNoteKind(u.body) ?? undefined"
+          >
+            <span v-if="systemNoteKind(u.body) === 'changes'" class="mt-[3px] h-[9px] w-[9px] shrink-0 bg-accent" :style="{ clipPath: kindClip('deploy') }" aria-hidden="true"></span>
+            <span v-else class="mt-[3px] h-[9px] w-[9px] shrink-0 rounded-full" :class="statusBadge(u.status).cls"></span>
             <div class="min-w-0">
               <div class="flex items-center gap-2">
                 <span class="text-[12.5px] font-medium">{{ statusBadge(u.status).label }}</span>
                 <span class="font-mono text-[11px] text-ink-3">{{ relTime(u.created_at) }}</span>
                 <span v-if="u.author" class="font-mono text-[11px] text-ink-3">· {{ u.author }}</span>
               </div>
-              <p v-if="u.body" class="mt-1 whitespace-pre-wrap text-[13px] text-ink-2">{{ u.body }}</p>
+              <p v-if="u.body" class="mt-1 whitespace-pre-wrap text-ink-2" :class="systemNoteKind(u.body) ? 'font-mono text-[12.5px]' : 'text-[13px]'">{{ u.body }}</p>
             </div>
           </li>
           <li v-if="!updates.length && !loading" class="px-4 py-6 text-center text-[13px] text-ink-3">No updates yet.</li>

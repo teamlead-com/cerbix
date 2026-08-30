@@ -64,7 +64,7 @@ function mountWith(incidents: Record<string, unknown>[]) {
         ServiceReliability: CHILD,
         ServiceAlerting: CHILD,
         ServiceGate: CHILD,
-        ServiceDependencies: CHILD,
+        ServiceDependencies: CHILD, ServiceChanges: CHILD,
       },
     },
   });
@@ -146,7 +146,7 @@ describe("ServiceDetailView stale navigation (P1 [90])", () => {
     });
     routeMock.route = reactive({ params: { id: "svcA" } });
     const w = mount(ServiceDetailView, {
-      global: { stubs: { RouterLink, ServiceReliability: CHILD, ServiceAlerting: CHILD, ServiceGate: GateProbe, ServiceDependencies: CHILD } },
+      global: { stubs: { RouterLink, ServiceReliability: CHILD, ServiceAlerting: CHILD, ServiceGate: GateProbe, ServiceDependencies: CHILD, ServiceChanges: CHILD } },
     });
     await flushPromises();
     await flushPromises();
@@ -198,7 +198,7 @@ describe("ServiceDetailView stale navigation (P1 [90])", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const w = mount(ServiceDetailView, {
-        global: { stubs: { RouterLink, ServiceReliability: CHILD, ServiceAlerting: CHILD, ServiceGate: CHILD, ServiceDependencies: CHILD } },
+        global: { stubs: { RouterLink, ServiceReliability: CHILD, ServiceAlerting: CHILD, ServiceGate: CHILD, ServiceDependencies: CHILD, ServiceChanges: CHILD } },
       });
       await flushPromises();
       w.unmount();
@@ -269,7 +269,7 @@ describe("ServiceDetailView cold load (iter-0164)", () => {
     routeMock.route = reactive({ params: { id: "svc1" } });
     try {
       const w = mount(ServiceDetailView, {
-        global: { stubs: { RouterLink, ServiceReliability: CHILD, ServiceAlerting: AlertingProbe, ServiceGate: CHILD, ServiceDependencies: CHILD } },
+        global: { stubs: { RouterLink, ServiceReliability: CHILD, ServiceAlerting: AlertingProbe, ServiceGate: CHILD, ServiceDependencies: CHILD, ServiceChanges: CHILD } },
       });
       for (let i = 0; i < 8; i++) await flushPromises();
 

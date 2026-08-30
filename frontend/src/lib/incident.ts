@@ -56,3 +56,28 @@ export function relTime(ts?: string): string {
   if (h < 24) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
 }
+
+// ── System-authored notes in an incident's timeline ──────────────────────────────────────────
+
+/**
+ * The prefixes of the notes cerbix itself writes into `incident_updates` (the `internal/domain`
+ * markers): `⚡ Context:` and `⏸ Suppressed:` (func-incident-context), `🕸 Impact:`
+ * (func-service-reliability §14.4) and, from FR-025 D7, `🚀 Changes:`. A note is detected by its
+ * PREFIX — the marker is also the server's idempotency guard on redelivery — and every one renders
+ * the same way in the timeline (the body in mono); the changes note also carries the change glyph.
+ */
+export const SYSTEM_NOTE_MARKERS = {
+  context: "⚡ Context:",
+  suppressed: "⏸ Suppressed:",
+  impact: "🕸 Impact:",
+  changes: "🚀 Changes:",
+} as const;
+export type SystemNoteKind = keyof typeof SYSTEM_NOTE_MARKERS;
+
+export function systemNoteKind(body: string | undefined | null): SystemNoteKind | null {
+  if (!body) return null;
+  for (const k of Object.keys(SYSTEM_NOTE_MARKERS) as SystemNoteKind[]) {
+    if (body.startsWith(SYSTEM_NOTE_MARKERS[k])) return k;
+  }
+  return null;
+}

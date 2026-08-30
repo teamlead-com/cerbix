@@ -11,6 +11,14 @@ import MembersPanel from "@/components/settings/MembersPanel.vue";
 import OrgDangerZonePanel from "@/components/settings/OrgDangerZonePanel.vue";
 import SecretsPanel from "@/components/settings/SecretsPanel.vue";
 import UsersPanel from "@/components/settings/UsersPanel.vue";
+import {
+  TOKEN_ACTIONS_WARNING_LEAD,
+  TOKEN_ACTIONS_WARNING_REST,
+  type TokenAction,
+  actionsFor,
+  omitsRead,
+  pruneActions,
+} from "@/lib/tokenActions";
 import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -462,9 +470,28 @@ async function deleteChannel(c: Channel) {
 const tokens = ref<ApiToken[]>([]);
 const tokensError = ref("");
 const showTokenAdd = ref(false);
-const tokenForm = reactive<{ name: string; role: Role; project_id: string }>({ name: "", role: "viewer", project_id: "" });
+// FR-025 D12 (D-0210 item 6): `actions` is the optional ALLOW-LIST — empty means the role decides,
+// as every token has always meant; a non-empty list is intersected with the role inside authz.Can and
+// is immutable after create (a different list is a new token). Only the picked role's grants are
+// offered (lib/tokenActions.ts mirrors internal/authz/authz.go); the server validates again
+// (`action_unknown`, `action_not_granted`) and its sentence is shown verbatim.
+const tokenForm = reactive<{ name: string; role: Role; project_id: string; actions: TokenAction[] }>({ name: "", role: "viewer", project_id: "", actions: [] });
 const tokenBusy = ref(false);
 const tokenFormError = ref("");
+const tokenActionsFor = computed(() => actionsFor(tokenForm.role));
+const tokenOmitsRead = computed(() => omitsRead(tokenForm.actions));
+function toggleTokenAction(a: TokenAction) {
+  tokenForm.actions = tokenForm.actions.includes(a)
+    ? tokenForm.actions.filter((x) => x !== a)
+    : pruneActions([...tokenForm.actions, a], tokenForm.role);
+}
+// The list can only NARROW the role: a role change drops every chip the new role does not grant.
+watch(
+  () => tokenForm.role,
+  (role) => {
+    tokenForm.actions = pruneActions(tokenForm.actions, role);
+  },
+);
 const revealedSecret = ref<{ kind: string; value: string } | null>(null);
 
 async function loadTokens() {
@@ -487,6 +514,9 @@ async function addToken() {
   tokenFormError.value = "";
   const body: components["schemas"]["CreateApiToken"] = { name: tokenForm.name.trim(), role: tokenForm.role };
   if (tokenForm.project_id) body.project_id = tokenForm.project_id;
+  // `actions` travels ONLY when at least one chip is on; omitted otherwise, so the token means what
+  // every token meant before D12 — the role decides (never an empty list, which would allow nothing).
+  if (tokenForm.actions.length) body.actions = [...tokenForm.actions];
   try {
     const res = await api.POST("/api/v1/organizations/{orgID}/tokens", {
       params: { path: { orgID: ws.orgId } },
@@ -501,6 +531,7 @@ async function addToken() {
     tokenForm.name = "";
     tokenForm.project_id = "";
     tokenForm.role = "viewer";
+    tokenForm.actions = [];
     showTokenAdd.value = false;
   } finally {
     tokenBusy.value = false;
@@ -1213,11 +1244,53 @@ watch(tab, loadActive);
               <select v-model="tokenForm.role" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent">
                 <option v-for="r in roles" :key="r.key" :value="r.key">{{ r.label }}</option>
               </select>
+              <span class="text-[12px] text-ink-3">the ceiling — the list below can only narrow it</span>
             </label>
           </div>
-          <div v-if="tokenFormError" class="text-[12.5px] text-down">{{ tokenFormError }}</div>
+          <!-- FR-025 D12 (mock screen 6): the optional allow-list. Only the role's grants are offered; an
+               action the role lacks is shown dormant with the role it needs — never a chip that can only 400. -->
+          <div class="flex flex-col gap-[6px]">
+            <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">
+              Limit to these actions <span class="font-normal normal-case tracking-normal">(optional — leave empty for the role's full set)</span>
+            </span>
+            <div class="flex flex-wrap gap-[6px]" role="group" aria-label="Allowed actions" data-testid="token-actions">
+              <button
+                v-for="a in tokenActionsFor.offered"
+                :key="a"
+                type="button"
+                class="inline-flex items-center gap-[5px] rounded-[5px] border px-[7px] py-[2px] font-mono text-[11px] leading-[1.4]"
+                :class="tokenForm.actions.includes(a) ? 'border-accent bg-accent-weak text-accent' : 'border-border bg-surface text-ink-2 hover:border-border-strong'"
+                :aria-pressed="tokenForm.actions.includes(a)"
+                :data-testid="`token-action-${a}`"
+                :data-on="tokenForm.actions.includes(a) ? 'true' : undefined"
+                @click="toggleTokenAction(a)"
+              >{{ tokenForm.actions.includes(a) ? "✓ " : "" }}{{ a }}</button>
+              <span
+                v-for="l in tokenActionsFor.lacking"
+                :key="l.action"
+                class="inline-flex cursor-not-allowed items-center gap-[5px] rounded-[5px] border border-dashed border-border bg-surface px-[7px] py-[2px] font-mono text-[11px] leading-[1.4] text-ink-3"
+                :title="l.needs ? `needs ${l.needs}` : 'no role grants this'"
+                :data-testid="`token-action-${l.action}`"
+                data-lacking="true"
+                aria-disabled="true"
+              >{{ l.action }}</span>
+            </div>
+            <span class="text-[12px] text-ink-3" data-testid="token-actions-hint">
+              only actions the role grants are offered<template v-if="tokenActionsFor.lacking.length">;
+                <template v-for="(l, i) in tokenActionsFor.lacking" :key="l.action"><template v-if="i"> · </template><span class="font-mono">{{ l.action }}</span> needs <span class="font-mono">{{ l.needs || "—" }}</span></template></template>
+            </span>
+          </div>
+          <div
+            v-if="tokenOmitsRead"
+            class="flex items-start gap-[9px] rounded-sm border border-degraded bg-degraded-weak px-3 py-[9px] text-[13px] text-degraded"
+            data-testid="token-actions-warning"
+          >
+            <span aria-hidden="true">⚠</span>
+            <div><b class="font-semibold">{{ TOKEN_ACTIONS_WARNING_LEAD }}</b> {{ TOKEN_ACTIONS_WARNING_REST }}</div>
+          </div>
+          <div v-if="tokenFormError" class="text-[12.5px] text-down" data-testid="token-error">{{ tokenFormError }}</div>
           <div class="flex items-center gap-2">
-            <button type="button" :disabled="!tokenForm.name.trim() || tokenBusy" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="addToken">{{ tokenBusy ? "Issuing…" : "Issue" }}</button>
+            <button type="button" :disabled="!tokenForm.name.trim() || tokenBusy" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" data-testid="token-create" @click="addToken">{{ tokenBusy ? "Issuing…" : "Issue" }}</button>
             <button type="button" class="h-[34px] rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong" @click="showTokenAdd = false">Cancel</button>
           </div>
         </div>
@@ -1228,21 +1301,30 @@ watch(tab, loadActive);
                 <th class="border-b border-border px-4 py-[10px] text-left">Name</th>
                 <th class="border-b border-border px-4 py-[10px] text-left">Scope</th>
                 <th class="border-b border-border px-4 py-[10px] text-left">Role</th>
+                <th class="border-b border-border px-4 py-[10px] text-left">Actions</th>
                 <th class="border-b border-border px-4 py-[10px] text-left">Created by</th>
                 <th class="border-b border-border px-4 py-[10px] text-left">Last used</th>
                 <th class="border-b border-border px-4 py-[10px]"></th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="t in tokens" :key="t.id" class="hover:bg-surface-2">
+              <tr v-for="t in tokens" :key="t.id" class="hover:bg-surface-2" data-testid="token-row" :data-name="t.name">
                 <td class="border-b border-border px-4 py-[11px] font-medium">{{ t.name }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-ink-2">{{ projectName(t.project_id) }}</td>
                 <td class="border-b border-border px-4 py-[11px]"><span class="rounded-full border border-border px-[9px] py-[2px] text-[11.5px] font-medium text-ink-2">{{ roleLabel(t.role) }}</span></td>
+                <!-- The allow-list, READ-ONLY (D12: immutable after create; a different list is a new token). null = the role decides. -->
+                <td class="border-b border-border px-4 py-[11px]" data-testid="token-actions-readonly" :data-mode="t.actions == null ? 'role' : 'list'">
+                  <span v-if="t.actions == null" class="text-[12.5px] text-ink-3">role decides</span>
+                  <span v-else-if="!t.actions.length" class="text-[12.5px] text-ink-3" title="an empty list allows nothing">none</span>
+                  <span v-else class="flex flex-wrap gap-1">
+                    <span v-for="a in t.actions" :key="a" class="inline-flex items-center rounded-[5px] border border-accent bg-accent-weak px-[7px] py-[2px] font-mono text-[10.5px] leading-[1.4] text-accent" data-testid="token-action-chip">{{ a }}</span>
+                  </span>
+                </td>
                 <td class="border-b border-border px-4 py-[11px] font-mono text-[12px] text-ink-3">{{ t.created_by_email || "—" }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-ink-3">{{ t.last_used_at ? new Date(t.last_used_at).toLocaleString() : "never" }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-right"><button v-if="canManageOrg" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteToken(t)">Revoke</button></td>
               </tr>
-              <tr v-if="!tokens.length && !loading"><td colspan="6" class="px-4 py-10 text-center text-[13px] text-ink-3">No tokens yet.</td></tr>
+              <tr v-if="!tokens.length && !loading"><td colspan="7" class="px-4 py-10 text-center text-[13px] text-ink-3">No tokens yet.</td></tr>
             </tbody>
           </table>
         </section>

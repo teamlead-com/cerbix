@@ -21,7 +21,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
-import ReliabilityStrip, { type ReliabilityTick } from "@/components/ReliabilityStrip.vue";
+import ReliabilityStrip, { type ReliabilityTick, type StripMark } from "@/components/ReliabilityStrip.vue";
 import { canonicalObjective } from "@/lib/objective";
 
 type Report = components["schemas"]["ServiceWindowReport"];
@@ -32,7 +32,18 @@ type Segment = Report["segments"][number];
 // same { error } form an HTTP error arrives in.
 type Res<T> = { data?: T; error?: unknown };
 
-const props = defineProps<{ projectId: string; serviceId: string; canWrite: boolean; hasSli: boolean }>();
+const props = defineProps<{
+  projectId: string;
+  serviceId: string;
+  canWrite: boolean;
+  hasSli: boolean;
+  /**
+   * FR-025 (D14, D-0210 item 1): change marks for the MAIN timeline strip — one per terminal
+   * phase, produced by ServiceChanges.vue and handed down by the view. This card fetches nothing
+   * for them; the strip places them over its own time geometry. Segment strips carry none.
+   */
+  marks?: StripMark[];
+}>();
 
 const windows = ["24h", "7d", "30d", "90d"] as const;
 const win = ref<(typeof windows)[number]>("30d");
@@ -288,6 +299,9 @@ function tickOf(
     provisional: p.provisional,
     revisionBoundary: prevRevision !== "" && p.revision_id !== prevRevision,
     epochBoundary: prevEpoch !== "" && p.epoch_id !== prevEpoch && p.revision_id === prevRevision,
+    // The tick's real extent, so the strip can place a change mark by its instant (FR-025).
+    startMs,
+    endMs,
   };
 }
 const ticks = computed<ReliabilityTick[]>(() => {
@@ -558,7 +572,7 @@ const pillClass: Record<string, string> = {
             The timeline request failed — a transport problem, not an empty timeline.
           </p>
           <div v-else-if="ticks.length" class="mt-4" data-testid="svc-timeline">
-            <ReliabilityStrip :ticks="ticks" :height="30" />
+            <ReliabilityStrip :ticks="ticks" :height="30" :marks="marks ?? []" />
             <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-ink-3">
               <span><span class="mr-[6px] inline-block h-[12px] w-[2px] bg-accent align-[-2px]"></span>definition revision boundary</span>
               <span><span class="mr-[6px] inline-block h-[12px] w-px bg-ink-3 align-[-2px] opacity-70"></span>evaluation epoch marker</span>

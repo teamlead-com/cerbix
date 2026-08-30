@@ -701,3 +701,47 @@ func TestMainDispatchesChange(t *testing.T) {
 		t.Fatalf("usage lacks the change verb: %q", u.String())
 	}
 }
+
+// Review [52]: a flag EXPLICITLY given travels as given, even empty — `--at ""` is not the
+// invocation instant, and `--decision ""` is not an omission.
+func TestChangeRecordExplicitEmptyAtAndDecisionTravelVerbatim(t *testing.T) {
+	t.Run("at empty travels empty", func(t *testing.T) {
+		srv, fake := newChangeServer(t, http.StatusBadRequest, `{"error":"occurred_at: must be an RFC3339 timestamp"}`+"\n", nil)
+		code, _, stderr := runChangeRecordWith(t, srv.URL, "--at", "")
+		if code != changeExitRefused {
+			t.Fatalf("exit = %d, want %d; stderr %q", code, changeExitRefused, stderr)
+		}
+		if got, ok := fake.last()["occurred_at"]; !ok || got != "" {
+			t.Fatalf("occurred_at = %v (present %v), want the explicit empty string", got, ok)
+		}
+	})
+	t.Run("decision empty travels empty", func(t *testing.T) {
+		srv, fake := newChangeServer(t, http.StatusBadRequest, `{"error":"decision_unknown (decision_id): not a decision of this service"}`+"\n", nil)
+		code, _, _ := runChangeRecordWith(t, srv.URL, "--decision", "")
+		if code != changeExitRefused {
+			t.Fatalf("exit = %d, want %d", code, changeExitRefused)
+		}
+		if got, ok := fake.last()["decision_id"]; !ok || got != "" {
+			t.Fatalf("decision_id = %v (present %v), want the explicit empty string", got, ok)
+		}
+	})
+	t.Run("decision omitted stays absent", func(t *testing.T) {
+		srv, fake := newChangeServer(t, http.StatusCreated, changeBodyRecorded, nil)
+		code, _, _ := runChangeRecordWith(t, srv.URL)
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+		if _, ok := fake.last()["decision_id"]; ok {
+			t.Fatal("decision_id present in the body although --decision was never given")
+		}
+	})
+	t.Run("at given travels verbatim", func(t *testing.T) {
+		srv, fake := newChangeServer(t, http.StatusCreated, changeBodyRecorded, nil)
+		if code, _, _ := runChangeRecordWith(t, srv.URL, "--at", "2026-08-30T10:00:00Z"); code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+		if got := fake.last()["occurred_at"]; got != "2026-08-30T10:00:00Z" {
+			t.Fatalf("occurred_at = %v, want the given instant", got)
+		}
+	})
+}

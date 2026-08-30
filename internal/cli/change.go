@@ -52,14 +52,14 @@ const (
 // `decision_id` are OMITTED when their flag was not given — the server defaults them, and for
 // `decision_id` an empty string is not the same statement as absence.
 type changeRecordBody struct {
-	Kind       string `json:"kind"`
-	Phase      string `json:"phase"`
-	OccurredAt string `json:"occurred_at"`
-	Source     string `json:"source"`
-	ExternalID string `json:"external_id"`
-	Ref        string `json:"ref,omitempty"`
-	URL        string `json:"url,omitempty"`
-	DecisionID string `json:"decision_id,omitempty"`
+	Kind       string  `json:"kind"`
+	Phase      string  `json:"phase"`
+	OccurredAt string  `json:"occurred_at"`
+	Source     string  `json:"source"`
+	ExternalID string  `json:"external_id"`
+	Ref        string  `json:"ref,omitempty"`
+	URL        string  `json:"url,omitempty"`
+	DecisionID *string `json:"decision_id,omitempty"`
 }
 
 // changeRecorded is the subset of the 2xx response the CLI needs for its stdout line. Unknown
@@ -132,6 +132,11 @@ func runChangeRecord(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "change record: --timeout must be positive")
 		return changeExitRefused
 	}
+	// A flag EXPLICITLY given travels as given, even empty (review [52]): `--at ""` must not
+	// silently become the invocation instant, and `--decision ""` must not silently vanish
+	// through omitempty — the server is the authority on both refusals.
+	seen := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
 
 	target, err := serviceRouteTarget(os.Getenv("CERBIX_URL"), *project, *service, "changes")
 	if err != nil {
@@ -154,9 +159,12 @@ func runChangeRecord(args []string, stdout, stderr io.Writer) int {
 	// the CLI's own: the invocation instant (D13), RFC3339 in UTC.
 	body := changeRecordBody{
 		Kind: *kind, Phase: *phase, Source: *source, ExternalID: *externalID,
-		Ref: *ref, URL: *link, DecisionID: *decision, OccurredAt: *at,
+		Ref: *ref, URL: *link, OccurredAt: *at,
 	}
-	if body.OccurredAt == "" {
+	if *decision != "" || seen["decision"] {
+		body.DecisionID = decision
+	}
+	if !seen["at"] {
 		body.OccurredAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	payload, err := json.Marshal(body)

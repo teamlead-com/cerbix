@@ -1011,3 +1011,135 @@ the two stage-ops a day of steady state).
 | `decision_partition_create_max` | 3 | 1..8 | days created (create + attach) per maintenance pass, nearest horizon first |
 | `decision_purge_every` | 1h | 5m..24h | maintenance cadence on the gate's own fenced session; a pass's whole lifecycle fits 30 s (work ≤ 27 s + cleanup ≤ 3 s) |
 | `decision_purge_max_partitions` | 8 | 1..48 | removal stage-ops (finalize, drop, detach) per pass; steady state is two a day |
+
+## Change intelligence operations (FR-025)
+
+Change intelligence (`docs/specs/func-change-intelligence.md`, revision 3 with the forward corrections
+D-0211 and D-0212; implementation iter-0165) lets a pipeline RECORD that a release, rollback or flag flip
+happened to a service, and lets the service's existing sealed facts answer what changed and when (the
+timeline), which changes preceded an incident (the correlation) and how the SLI read before and after (the
+comparison). It computes no new reliability fact, keeps no deployment catalog, takes no action on any
+external system and never says "caused". The routes are `internal/api/handlers_change.go` (limiter
+`internal/api/changelimiter.go`), the store `internal/store/change.go` (the comparison lives with the
+series owner in `internal/store/servicereport.go`), the CLI `internal/cli/change.go`, the metrics
+`internal/metrics/change.go`, the keys `internal/config/config.go` (example block in
+`docker/config.example.yaml`), the schema `internal/store/migrations/00094_change_intelligence.sql`.
+
+### The CI token: `role: editor, actions: [gate:evaluate, change:record]`
+
+Create the pipeline's token with the editor role and the two-entry allow-list. What it CAN do: ask the
+gate (`POST …/gate`, `cerbix gate check`) and record changes (`POST …/changes`, `cerbix change record`).
+What it CANNOT do: anything else — `GET …/services`, the policy routes, the change timeline, the
+comparison, the incident routes and every other action are 403 (never 404: the project stays visible,
+because visibility is membership and the list narrows actions only). Rules of the list:
+
+- `actions` omitted or `null` — the token's role decides, exactly as every token created before FR-025;
+- an entry outside the action catalogue is 400 `action_unknown`; an entry the token's ROLE does not grant
+  is 400 `action_not_granted` naming it (D-0212) — a viewer token cannot list `change:record`, and the
+  mistake surfaces at the form, not at the pipeline's first 403;
+- the list is immutable: `PATCH`/`PUT` of a token are 405. A pipeline that needs one more action gets a
+  NEW token — tokens are cheap, audit is not;
+- the list is in the token's read model and in the `token.create` audit row; recording a change is NOT an
+  audit event (the row itself names `token:<name>` for as long as it exists).
+
+A stolen CI token can record fake changes and ask the gate — nothing else. A fake change blocks nothing
+and pages nobody: the timeline is a record, not a control; every row names the token; rate limits cap it.
+
+### A pipeline reports out of order
+
+`409 phase_order` ("succeeded already recorded", or `started` after a terminal) is the PIPELINE's bug, not
+cerbix's: the domain owns the order — `started`, then exactly one of `succeeded`, `failed`, `cancelled`; a
+terminal alone is accepted (many pipelines can only report the end). Typical causes: two jobs of one run
+both reporting a terminal (the second is the 409 — and under a race the per-identity advisory lock
+guarantees exactly one lands); a re-run reusing the previous run's `external-id` (use the new run id —
+the external id is the change's identity at the source, case-sensitive by design); a retry with a CHANGED
+body (`ref` edited between attempts → 409 `phase_exists` naming the field; an identical retry is a 200
+replay and never an error). `400 occurred_at_before_start` means the terminal's `--at` precedes the
+recorded `started`; `400 occurred_at_out_of_bounds` means `--at` is more than `change.max_past` behind or
+`change.max_future` ahead of the server clock (defaults 24 h and 5 min) — check the runner's clock, or
+drop `--at` and let it default to the invocation instant. The CLI prints every refusal verbatim on stderr
+and exits 2; the pipeline should fail the step and fix itself, not retry.
+`cerbix_change_record_rejected_total{reason="phase_order"}` rising is the fleet-level view of the same
+thing.
+
+### Reading a comparison: `pending` is not `withheld`
+
+`GET …/changes/compare?source&external_id&horizon` states each side as exactly one of three shapes, and
+the difference between the last two matters to an operator:
+
+| Side shape | Meaning | What to do |
+|---|---|---|
+| a figure (`availability`, `good_seconds`, `bad_seconds`, `unknown_seconds`, `excluded_seconds`, `buckets`) | the sum of the SEALED canonical buckets of that side — the reliability page's own arithmetic for the same range and snapshot; `delta` (after − before, availability points) is present only when BOTH sides are figures | read it. Across time it follows the page's own corrections (repair, reconciliation, definition history) — the contract is parity with the series, not byte stability |
+| `{pending: true, sealed_through}` | the side's end exceeds `sealed_through`: the facts are not yet SEALED — not undecidable. `after` is pending while `T + h > sealed_through`; `before` too while `T` itself is past the seal — a change reported minutes ago has exactly this shape (D-0211). Never a partial figure | wait for the seal (a healthy materializer sits 2–3 minutes behind) and ask again once `sealed_through` passes the side's end. If `sealed_through` is not moving, the FR-021 section above owns the fault (a stalled leader, a wedged range) — not this route |
+| `{withheld: <reason>, detail?}` | the reliability page would NOT show a number for that range and neither does this: `definition_changed` (a revision or epoch boundary inside the side), `undecidable` (the page's own withholding, the same reason string in `detail`), `no_facts` (no sealed bucket in the range) | this resolves only if the underlying condition does — a different horizon may avoid a boundary; `no_facts` on a young service usually means the range predates its facts. Never read a withheld side as zero |
+
+404 `no_terminal_phase` is a group with only `started` — no before/after until the pipeline reports the
+end. `horizon` is one of `15m`, `1h`, `6h`, `24h` (400 `horizon_invalid` otherwise; default `1h`).
+
+### The correlation note and the incident
+
+At a service auto-incident's `opened` delivery the outbox worker links the changes whose latest phase
+known at that instant lies within `change.correlation_window` (default 60 min) before the open — on the
+incident's own service and on the services the impact graph marks `probable_root` — and appends ONE
+system note beside `⚡ Context:`: `🚀 Changes: <n> preceded this incident — <kind ref by source, −<lag>>;
+…`, naming at most `change.correlation_note_max` (default 5) and counting the rest. "Preceded" is the
+whole claim: cerbix does not know that the deploy caused anything. A change recorded AFTER the open is not
+back-linked and a later `resolved` does not recompute; a terminal phase reported after the open rewrites
+neither the link nor the note (the group's live phases are shown beside the anchored one). If the
+correlation fails or is slow, the incident opens and resolves exactly as before — the error is logged and
+counted, and nothing else changes.
+
+### Retention and the identity lock
+
+`change.retention_days` (default 400 — a year and a month, so a quarterly review still has its history)
+removes WHOLE change groups whose latest phase is older than the bound, on the scheduler leader's daily
+cadence: each statement selects at most `change.retention_groups_per_batch` group keys (default 250) in
+`(latest_occurred_at, service_id, source, external_id)` order, takes for each the SAME per-identity
+advisory lock `RecordChangePhase` takes, re-evaluates the age under the lock and deletes every phase row
+of the keys still old in one transaction — `incident_changes` rows cascade; a group whose `started` is old
+but whose terminal is young is not selected. Two consequences worth knowing: the purge WAITS on a held
+identity lock, bounded by the maintain pass's context (a cancelled batch rolls back and deletes nothing);
+and it holds up to `retention_groups_per_batch` advisory locks per transaction — one lock-table slot each,
+out of the shared table sized `max_locks_per_transaction × (max_connections + max_prepared_transactions)`
+— which is why the key's ceiling stays at 2 500: size the lock table before raising it anywhere near
+that. Capacity: a hundred services each deploying ten times a day with two phases is ~2 000 rows a day,
+~7·10⁵ a year — a plain table with two indexes; `cerbix_changes_retained` is the row count. Deleting a
+service cascades its changes and links; the incident's `🚀 Changes:` note remains as text.
+
+### Metrics and suggested alerts
+
+Six families (`internal/metrics/change.go`), every label set CLOSED — no service, source or external
+identity is ever a label; a recorder handed a value outside its set records nothing.
+
+| Metric (type) | Labels | Meaning |
+|---|---|---|
+| `cerbix_changes_recorded_total` (counter) | `kind`, `phase`, `outcome`: `recorded` \| `replayed` | Accepted records; an identical replay is counted apart. |
+| `cerbix_change_record_rejected_total` (counter) | `reason`: the 400/409 codes \| `body_invalid` \| `process_inflight` \| `principal_inflight` \| `process_rate` \| `principal_rate` | Records refused, by the closed code they were refused with (D-0212: the 429s are counted, or the shed load would be invisible). |
+| `cerbix_change_correlations_total` (counter) | `role`: `own_service` \| `upstream` | Links inserted at incident open. |
+| `cerbix_change_correlation_errors_total` (counter) | — | Correlations that failed; the incident's delivery proceeded (fail-open). |
+| `cerbix_change_compare_total` (counter) | `outcome`: `figure` \| `withheld` \| `pending` | Comparisons served, by the result's shape (`figure` = both sides figures; `pending` = a side not yet sealed; `withheld` = a side withheld for any other reason). |
+| `cerbix_changes_retained` (gauge) | — | Rows of `service_changes`, sampled by the leader once per retention pass; cleared on leadership loss — pair any threshold with `absent()`. |
+
+| Alert | Severity | Meaning / what to do |
+|---|---|---|
+| `cerbix_change_correlation_errors_total > 0 for 15m` (`increase(…[15m]) > 0`) | warn | Correlation is failing at incident open — incidents still open and resolve (fail-open), but their `🚀 Changes:` notes and links are missing. Read the outbox worker's log for the store error; the `⚡ Context:` note on the same incidents tells you whether the delivery itself is healthy. |
+| `cerbix_change_record_rejected_total{reason="phase_order"}` rising (`increase(…[1h]) > 0`) | inform | A pipeline reports out of order (the section above). Not cerbix's fault and not an outage: find the pipeline from its own logs — the metric carries no source label by design. |
+| `rate(cerbix_change_record_rejected_total{reason=~"process_.*\|principal_.*"}[5m]) > 0` sustained for 15m | ticket | A pipeline is looping into the limiter (the CLI never retries a 429 by itself, so this is a wrapper or a fleet). `principal_*` names one token's loop; `process_*` means the replica's whole budget is spent — read `change.record_rate_process_per_minute` and §5a's capacity note before raising anything. |
+
+### The `change.*` keys
+
+All ten are validated at configuration load; a value outside its range refuses to start, naming the key
+and the range (`internal/config/config.go`; the example block in `docker/config.example.yaml`).
+
+| Key (`change.*`) | Default | Range | Meaning |
+|---|---|---|---|
+| `record_rate_process_per_minute` | 300 | 10..3000 | token bucket, process-wide, for `POST …/changes`; drained → 429 `process_rate` |
+| `record_rate_principal_per_minute` | 30 | 1..600 | token bucket per principal (user id or token id); drained → 429 `principal_rate` |
+| `record_inflight_process` | 32 | 1..256 | in-flight permits for record; the (n+1)th is 429 `process_inflight` before any bucket is debited |
+| `read_inflight_process` | 64 | 1..512 | in-flight permits for the timeline, comparison and incident-changes reads (reads take no rate token) |
+| `max_past` | 24h | 1h..168h | `occurred_at` may lag the server clock by at most this (400 `occurred_at_out_of_bounds`) |
+| `max_future` | 5m | 0s..1h | `occurred_at` may lead the server clock by at most this |
+| `correlation_window` | 60m | 5m..24h | preceding-change window at incident open |
+| `correlation_note_max` | 5 | 1..20 | entries named in the `🚀 Changes:` note; the rest are counted |
+| `retention_days` | 400 | 30..1460 | age bound on change groups, judged by the group's LATEST phase |
+| `retention_groups_per_batch` | 250 | 10..2500 | group keys selected per retention statement (≤ 4 rows each; one advisory lock each) |

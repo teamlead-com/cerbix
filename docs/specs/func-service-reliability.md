@@ -1874,6 +1874,22 @@ Recommending monitor `depends_on` from service edges ("may recommend", deliberat
 any visual graph rendering; status-page projection of impact (phase 4 DECLINED it — §15.0 keeps impact links non-public; a later phase would need its own owner decision); alerting on impact
 (phase 5); any retrospective annotation of resolved incidents; cross-project edges.
 
+### 14.9 Change correlation (FR-025) — a cross-reference
+
+The links between an incident and the CHANGES that preceded it are not this section's relation and not a
+second impact graph: they live in `incident_changes` (`func-change-intelligence.md` §5, D7), computed by the
+outbox worker at the service auto-incident's `opened` delivery — the same place `attachIncidentContext`
+runs — from the incident's own service (`role = own_service`) and from the services THIS section's
+`incident_service_impacts` rows mark `probable_root` (`role = upstream`), never `affected`. Each link
+anchors the group's latest phase known at that instant, with its `occurred_at` and lag copied and never
+updated; a terminal phase recorded after the open rewrites neither the link nor the note. The `🚀 Changes:`
+note is that marker's single home — one system note per incident, appended in the SAME transaction as the
+links through the same `NOT EXISTS … LIKE marker` guard `⚡ Context:` uses (`func-incident-context.md`),
+saying "preceded", never "caused". Tenancy is the schema's on both ends — the §16 composite rule, as for
+`incident_service_impacts`. Correlation is fail-open and changes nothing of this section's: the impact rows,
+the incident's open and resolve and §14.3's own note are untouched whatever it does. Invariants 108–109 in
+§16.8; the acceptance map is FR-025's in `docs/traceability.md`.
+
 ## 15. Coexistence and migration
 
 **Status pages.** Service projection becomes the default *managed* component type; **manual
@@ -3235,7 +3251,23 @@ owner, and this file is where ownership is decided.
     `evaluated_at`, so the budget, burn, incident and coverage facts in one response are the values
     the service page and the alerting badge would show for that SAME instant; a serialization
     failure is retried once and then reported as a transport error, never as a decision (FR-024
-    invariant 7).
+    invariant 7);
+108. the before/after COMPARISON of FR-025 is the series owner's arithmetic, never a second
+    implementation: `serviceReliabilityCompareTx` sums the same rollup cells `serviceReliabilitySeriesTx`
+    reads, through the ONE shared query `reliabilityStepRollupTx`, with the same decidability
+    (`decideServiceWindow`), the same exclusion of provisional cells, the same `sealed_through` clamp and
+    the same epoch/revision segmentation; a range the page would withhold is withheld there with the
+    page's reason word, a side not yet sealed is `pending` and never a partial figure, and its stability
+    is the page's — parity with the series for the same range and snapshot, never byte stability across
+    later maintenance (FR-025 invariants 10–12, D-0211). A comparison that summed heartbeats or
+    re-decided a window locally would be the second owner §16.4b and §16.6b forbid;
+109. change correlation at a service auto-incident's `opened` delivery reads THIS file's impact graph —
+    the `probable_root` rows of `incident_service_impacts` and the incident's own service, never
+    `affected` downstream and never another project — and links through `incident_changes`, a link
+    table under the §16 composite rule on both ends; its `🚀 Changes:` note is a second system note
+    beside `⚡ Context:`, appended once through the same marker guard in the same transaction as the
+    links; and the incident's delivery, open and resolve are unchanged whatever the correlation does
+    (FR-025 invariants 7–9 and 22; §14.9).
 
 ### 16.9 What phase 5 does NOT do
 

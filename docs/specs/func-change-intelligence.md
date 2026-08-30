@@ -16,8 +16,8 @@
 > keyed `UNIQUE(service_id, source, external_id, phase)`, a domain-owned phase order, serialization per
 > external identity, and closed enums with no free payload") and carrying the token-scoped CI capability
 > that D12 of the same spec named as a follow-up requirement. The owner's answers to the seven questions of §11
-> are recorded there and in D-0209; FR-025 and NFR-020 are `TODO` rows in `docs/status.md` citing this design;
-> implementation is iter-0165.
+> are recorded there and in D-0209; FR-025 and NFR-020 are `IN_PROGRESS` in `docs/status.md`;
+> the implementation is iter-0165 and its evidence map is the FR-025 acceptance discharge in `docs/traceability.md`.
 
 ## 1. What this is, in one paragraph
 
@@ -257,8 +257,9 @@ enumerate what it may not read (review [36]) — and nowhere else; handlers keep
 Credentials from `CERBIX_URL` and `CERBIX_TOKEN` only, never flags. stdout ONE line:
 `recorded change=<id> kind=<k> phase=<p>` (or `replayed …` for an identical replay); stderr carries
 refusals verbatim. Exit codes: **0** recorded or replayed; **2** refused by the contract (400/404/409 —
-the pipeline's own mistake, printed); **1** transport (auth, timeout, 429 with `Retry-After` printed,
-5xx). No retry on 429, as the gate verb. `--json` prints the API response verbatim. `--at` defaults to
+the pipeline's own mistake, printed) and usage errors (a missing or invalid flag); **1** transport (auth,
+timeout, 429 with `Retry-After` printed, 5xx) and a missing environment variable, named, with no request
+made — the gate verb's precedent (iter-0165 §1.5). No retry on 429, as the gate verb. `--json` prints the API response verbatim. `--at` defaults to
 the invocation instant. **Invariant 18.**
 
 **D14 — the SPA surfaces, and what waits for the mock. DECIDED.**
@@ -540,8 +541,8 @@ only); a change on a project or an organization (services only).
 
 `make docs-check` refuses, in this file and the living documents: `deployment_events`, `change_events`
 (the table is `service_changes`), `caused_by`, `root_cause_change` (the field is `preceded_by`, the note
-says "preceded"), `change:read` (reads are `project:read`), `token_scopes`/`scopes` for the token list
-(it is `actions`).
+says "preceded"), `change:read` (reads are `project:read`), and `token_scopes` for the token list (it is
+`actions`; the bare word `scopes` stays legal — it is the OIDC vocabulary elsewhere in the tree).
 
 ## 11. The owner's questions, and the answers (D-0209, 2026-08-30)
 

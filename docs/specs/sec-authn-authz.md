@@ -25,8 +25,9 @@ local login, API tokens and machine access. The provider is **not hardcoded** (D
 
 ## Authorization (implemented)
 
-- `internal/authz`: `Principal{UserID, IsGlobalAdmin, Memberships}`, the `Action` set,
-  a declarative matrix `role→actions`, `Can(action, orgID, projectID)` + `InOrg` +
+- `internal/authz`: `Principal{UserID, IsGlobalAdmin, Memberships}` (+ `Actions`, a token's
+  allow-list — FR-025 D12), the `Action` set, a declarative matrix `role→actions`,
+  `Can(action, orgID, projectID)` + `VisibleScope` (its query-scope mirror) + `InOrg` +
   `VisibleOrg`/`VisibleProject`.
 - A single source of access rules; global admin — bypass. For the matrix see `func-tenancy-rbac.md`.
 - Middleware `RequireAuth`: cookie → session → user+memberships → `Principal` in the context;
@@ -93,6 +94,23 @@ DONE (rate limit — D-0031).
 - **OIDC client-credentials** (iter-0027, D-0034; provider-agnostic, D-0043): a machine
   OAuth2 client, the JWT is verified by issuer+signature (`ccVerifier`, audience relaxed),
   JIT by `sub`, access — via membership. Both schemes converge on the same `authz.Can`.
+- **Per-token `actions` allow-list (FR-025 D12, iter-0165; D-0209/D-0212).** `api_tokens.actions
+  text[] NULL`. `NULL` means what it always meant — the token's role decides. A non-null list is an
+  ALLOW-LIST intersected with the role inside the ONE central predicate and nowhere else: `Can(action)`
+  for a token principal is `roleGrants[role] ∋ action AND (actions IS NULL OR action ∈ actions)`, and the
+  query-scope mirror `VisibleScope` intersects the same list (or a narrowed token could still enumerate
+  what it may not read). Project VISIBILITY is membership, not action: `VisibleProject` — the
+  404-versus-403 predicate — reads membership alone, so a narrowed token is 403, never 404, on its own
+  project (D-0212 item 2). The list is validated at creation against the central `Action` catalogue
+  (400 `action_unknown`) and against the token's own role (400 `action_not_granted` naming the entry —
+  the operator's mistake surfaces at the form, not at the pipeline's first 403), is immutable after
+  creation (`PATCH`/`PUT` → 405; a different list is a new token), and appears in the token's read model
+  (`null` or an array) and in the `token.create` audit row. The middleware copies the list onto the
+  principal (`internal/auth/middleware.go`); handlers keep calling `Can` with an action and compare no
+  role string. The canonical CI token is `role: editor, actions: [gate:evaluate, change:record]` — it asks
+  the gate and records changes and can do nothing else. Code: `internal/authz/authz.go`,
+  `internal/store/apitokens.go`, `internal/api/handlers_apitokens.go`; spec `func-change-intelligence.md`
+  D12, invariants 16–17.
 
 ## Requirements
 

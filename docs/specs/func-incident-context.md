@@ -26,6 +26,16 @@ When a service goes down the incident is empty: the on-call engineer assembles t
   against a marker prefix of existing updates before insertion).
 - A context assembly failure must not break delivery of the original event (best-effort:
   WARN log, event delivered).
+- **A second system note (FR-025, iter-0165):** at the same `opened` delivery of a SERVICE auto-incident
+  the outbox worker also appends `🚀 Changes: <n> preceded this incident — …` from `LinkPrecedingChanges`
+  (`internal/store/change.go`), naming the changes recorded on the service and on its `probable_root`
+  upstreams within `change.correlation_window` — "preceded", never "caused"; best-effort exactly as this
+  note is (`func-change-intelligence.md` D7).
+- **The shared marker guard:** both notes are `author = system` rows of `incident_updates` written through
+  the same idempotency guard — `NOT EXISTS (… WHERE incident_id = $1 AND author = 'system' AND body LIKE
+  '<marker>%')` — under distinct unique prefixes (`domain.IncidentContextMarker` `⚡ Context:`,
+  `domain.ChangesMarker` `🚀 Changes:`, and `⏸ Suppressed:` for suppression), so a retried delivery writes
+  neither twice and any new system note must bring its own unique prefix.
 
 ## Layers
 - **store:** `IncidentContext(ctx, incident) (domain.IncidentContext, error)` — a single

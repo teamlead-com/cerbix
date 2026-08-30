@@ -23,6 +23,7 @@ A single binary; behavior is selected by subcommand and flags.
 | `cerbix migrate` | Apply DB migrations (goose, embedded) and exit. | `--config <path>` (required; needs `database.dsn`) |
 | `cerbix reencrypt` | Re-encrypt all at-rest secrets under the current primary key (after key rotation). | `--config <path>` (required; needs `security.encryption_key` and `database.dsn`) |
 | `cerbix gate check` | Ask the reliability gate (FR-024) whether the error budget allows a release; the exit code follows `action` — `0` ALLOW/WARN, `2` BLOCK, `4` NOT_CONFIGURED, `1` transport/auth/429. | `--project <id>`, `--service <id>` (required), `--json`, `--timeout 10s`; the server is `CERBIX_URL` and the credential `CERBIX_TOKEN` (environment only, never a flag), `CERBIX_CA_FILE` adds a CA |
+| `cerbix change record` | Record a change event for a service (FR-025) — a deploy, rollback or flag flip in one of its phases — so the service's facts can say what followed; exit `0` recorded or replayed, `2` refused by the contract (400/404/409, printed verbatim), `1` transport/auth/429. | `--project <id>`, `--service <id>`, `--kind deploy\|rollback\|flag`, `--phase started\|succeeded\|failed\|cancelled`, `--source <slug>`, `--external-id <id>` (required), `[--ref <label>] [--url <https url>] [--decision <id>] [--at <RFC3339>] [--json] [--timeout 10s]`; the same `CERBIX_URL` / `CERBIX_TOKEN` / `CERBIX_CA_FILE` environment contract as the gate verb, never a flag. |
 | `cerbix version` | Print build info (version, commit) as JSON and exit. | — |
 | `cerbix help` / `-h` / `--help` | Usage. | — |
 
@@ -40,7 +41,7 @@ A single binary; behavior is selected by subcommand and flags.
 |---|---|---|---|---|
 | `all` | Everything in one process: scheduler + worker + ingest + API/SPA + outbox. | `inproc` (channel) | yes | no |
 | `api` | HTTP: REST + SSE + SPA serving; the check-result consumer (→ heartbeats/statuses/incidents); outbox delivery. | AMQP | yes | yes |
-| `scheduler` | Leader scheduler (Postgres advisory lock): publishes due jobs; rollup/retention; renotify; burn-eval; SLA reports; region-worker-alert; escalation-advance; gate-ledger partition maintenance (FR-024, on its own fenced advisory session). | AMQP | yes | yes |
+| `scheduler` | Leader scheduler (Postgres advisory lock): publishes due jobs; rollup/retention; renotify; burn-eval; SLA reports; region-worker-alert; escalation-advance; gate-ledger partition maintenance (FR-024, on its own fenced advisory session); change-group retention (FR-025, daily, whole groups under the identity lock). | AMQP | yes | yes |
 | `worker` | Prober pool: pulls jobs, executes the probe with a timeout, publishes the result. Stateless. | AMQP | no | yes |
 | `agent` | HTTP pull prober for geos without a broker: pulls its region's jobs over HTTPS, probes, posts results. DB-less, broker-less. | HTTP-pull | no | no |
 
@@ -66,6 +67,7 @@ Top-level `Config` sections (`internal/config`):
 | `result` | `allowed_skew`, `revision_mode` | Result-ingest contract: future-clock skew bound + `execution_revision` gate policy (`enforce`\|`observe`; default `enforce`) — D-0142 (`specs/func-result-protocol.md`). |
 | `heartbeats` | `retention_days` | Retention period for raw heartbeats (partitions are dropped by the leader). |
 | `gate` | `evaluate_inflight_process`, `evaluate_inflight_principal`, `evaluate_rate_principal_per_minute`, `evaluate_rate_process_per_minute`, `evaluate_tx_budget_ms`, `decision_retention_days`, `decision_partition_lead_days`, `decision_partition_create_max`, `decision_purge_every`, `decision_purge_max_partitions` | Reliability-gate bounds (FR-024, spec `func-reliability-gate` §5a): process-local concurrency and rate caps on decisions, the decision transaction's budget, and the decision ledger's daily-partition retention and maintenance. All ten range-validated at load; the runbook has the table. |
+| `change` | `record_rate_process_per_minute`, `record_rate_principal_per_minute`, `record_inflight_process`, `read_inflight_process`, `max_past`, `max_future`, `correlation_window`, `correlation_note_max`, `retention_days`, `retention_groups_per_batch` | Change-intelligence bounds (FR-025, spec `func-change-intelligence` §5a): process-local concurrency and rate caps on the record route and permits on its reads, the `occurred_at` clock window, the incident-correlation window and note size, and retention of change groups by age. Every key refused outside its range at boot, naming the key. |
 | `security` | `encryption_key`, `previous_keys`, `admin_email`, `admin_password` | AES-256-GCM keyring for at-rest secrets + rotation; global-admin bootstrap on an empty system. |
 | `mail` | `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). |
 | `pull` | `regions`, `token`, `agents`, `server_url` | HTTP-pull transport: broker-less regions (server side) and agent credentials (agent side). |
@@ -118,7 +120,7 @@ flowchart LR
 | `store` | pgx + goose migrations; repositories; encryption of secret fields. |
 | `domain` | Models and invariants (`Validate()`), rules without I/O. |
 | `dispatch` | `Dispatcher` interface + `inproc`/`amqp` implementations. |
-| `scheduler` | Leader (advisory lock), min-heap `next_run`, job publishing; rollup, retention, renotify, burn-eval, SLA reports; the gate ledger's partition maintenance under its own session lock (FR-024). |
+| `scheduler` | Leader (advisory lock), min-heap `next_run`, job publishing; rollup, retention, renotify, burn-eval, SLA reports; the gate ledger's partition maintenance under its own session lock (FR-024); the daily purge of change groups by whole identity (FR-025). |
 | `worker` | Goroutine pool, probe execution with `context.WithTimeout`. |
 | `prober` | `Prober` registry by monitor type + conditions engine; SSRF guard. |
 | `ingest` | The CHECK-RESULT consumer — heartbeats, status flip (atomic), auto-incidents, transitions into the outbox. The package name is historical: cerbix ingests its OWN probe results and no external telemetry, which is why the product is not an observability backend. |
@@ -216,8 +218,8 @@ not audit rows, policy and override mutations are. An override (`gate:override`,
 active per service, bound to the policy revision) changes `action` only — `state` and `reasons[]` stay
 the observed facts, and the metric sees `cerbix_gate_decisions_total{state="BLOCK",action="ALLOW",overridden="true"}`.
 Decision requests are bounded in concurrency and in rate per process (`gate.*`, §5a); a 429 runs no
-report and writes no row. Change Intelligence (deploy events, timelines, before/after) is FR-025 and is
-not part of this.
+report and writes no row. Change intelligence — the record of what a pipeline changed and what followed — is FR-025,
+described below.
 
 Routes (spec D13a and §5; `{p}` project id, `{s}` service id — 400 malformed, 404 foreign or unknown;
 every body decoded strictly, the server fills nothing in):
@@ -273,6 +275,102 @@ render for everyone who sees the service; the policy controls render for `sessio
 `frontend/src/stores/session.ts`). A file-managed service does NOT make the gate read-only (D13). And the
 SPA never asks the gate: opening a page reads the ledger (`limit=1` for the card) and creates no decision
 — a decision is written only by `POST …/gate`, that is by the CLI or the pipeline.
+
+**Change intelligence (FR-025, iter-0165 — the backend has landed; the SPA per the approved mock lands in
+the same iteration).** The gate says whether a release may go; change intelligence records that it WENT
+and lets the service's existing facts say what followed. A pipeline records a **change event** for a
+service: `kind ∈ {deploy, rollback, flag}`, `phase ∈ {started, succeeded, failed, cancelled}`, the instant
+it `occurred_at`, an external identity `(source, external_id)` under which the phases of one change are
+grouped, an optional bounded `ref` (a version or commit label), an optional `https://` `url`, and
+optionally the gate `decision_id` the release rested on. Phases are append-only rows keyed
+`UNIQUE (service_id, source, external_id, phase)`; the order is the domain's — `started`, then exactly one
+terminal; a terminal alone is accepted because many pipelines can only report the end — and a violation is
+refused by name (409 `phase_order`, `kind_mismatch`; 400 `occurred_at_before_start`). Replaying a phase
+with an identical body is 200 with the ORIGINAL row (a retry is not an error; the original actor and
+`recorded_at` stand); a differing replay is 409 `phase_exists` naming the field. Writes for one identity
+are serialized by a transaction-scoped advisory lock hashed over the canonical uuid text, so two pipelines
+reporting `succeeded` and `failed` for one run cannot both pass the order check. The actor is
+server-derived and stored twice (`actor_label` — `token:<name>` for a token — plus the typed pair); a body
+with an actor field is a 400 unknown field. **It is a fact about time, not a catalog** (D1): no
+repository, owner, environment or artefact is stored, `ref` and `url` are opaque bounded labels nothing
+joins or searches, and cerbix takes no action on any external system. Text has one canonical form — NFC,
+trimmed, no control or format characters, lengths in code points — normalized by the handler, validated
+by the domain (the single Unicode authority), written only through `RecordChangePhase`; the DB CHECK
+enforces exactly length and the ASCII control class and claims no more. `external_id` is case-sensitive
+after normalization.
+
+Three reads need no new measurement. **The timeline** is a `[from, to)` read of at most 92 days over
+change GROUPS (one per identity, phases nested, selected and ordered by `latest_occurred_at DESC, source,
+external_id`), with an opaque keyset cursor that never returns a group twice, `limit` counted in groups,
+`kind` as a repeatable OR-set and `source` as one slug; a group's gate decision is read back live
+(`state`/`action`, or `aged_out` once the ledger partition is gone) and `incidents[]` names the incidents
+the change PRECEDED. **The correlation** runs where `⚡ Context:` does — at a service auto-incident's
+`opened` delivery in the outbox worker: every change whose latest phase known at that instant lies within
+`change.correlation_window` before the open, on the incident's own service and on the services the impact
+graph marks `probable_root`, becomes one `incident_changes` row anchoring that phase with its lag copied
+and never updated, and ONE system note `🚀 Changes: <n> preceded this incident — <kind ref by source,
+−<lag>>; …` is appended in the same transaction through the same marker guard. The word is "preceded",
+never "caused" — cerbix does not know that the deploy caused anything. It is fail-open: an error is
+counted (`cerbix_change_correlation_errors_total`) and the incident opens and resolves exactly as before;
+a change recorded after the open is not back-linked. **The comparison** states the SLI before and after a
+change's terminal phase over a horizon of `15m`, `1h`, `6h` or `24h` from SEALED canonical buckets only,
+through the series owner's own query (`reliabilityStepRollupTx`, shared with the reliability page —
+NFR-020: never a second implementation): each side is a figure, or `withheld` with the page's own word
+(`definition_changed`, `undecidable`, `no_facts`), or `pending` with `sealed_through` stated when the
+side's end exceeds the seal — `after` when `T + h` does, `before` when `T` itself does (D-0211) — never a
+partial figure; `delta` only when both sides are figures; a started-only group has no comparison (404
+`no_terminal_phase`). Nothing is stored or cached: two reads in one snapshot are equal, and across time
+the figures follow the page's own corrections.
+
+Routes (spec D6–D8 and D12; `{p}` project, `{s}` service, `{i}` incident — 404 for an invisible project,
+403 for a missing action, every body decoded strictly):
+
+| Route | Action | Purpose |
+|---|---|---|
+| `POST /api/v1/projects/{p}/services/{s}/changes` | `change:record` (`editor`+) | Record a phase. 201 recorded; 200 identical replay `{replayed, change}`; 400 `kind_invalid`, `phase_invalid`, `source_invalid`, `external_id_invalid`, `ref_invalid`, `url_invalid`, `occurred_at_out_of_bounds`, `occurred_at_before_start`, `decision_unknown`, or an unknown field by name; 409 `phase_order`, `phase_exists`, `kind_mismatch`; 429 `process_inflight` / `principal_inflight` / `process_rate` / `principal_rate` with `Retry-After ≥ 1` (the `change.record_*` bounds, §5a). |
+| `GET /api/v1/projects/{p}/services/{s}/changes?from&to[&kind…][&source][&cursor][&limit]` | `project:read` (`viewer`+) | The timeline: `[from, to)` required and ≤ 92 days, `limit` 1..200 (default 50), `{items, next_cursor}`; 400 `range_required`, `range_invalid`, `range_too_wide`, `limit_invalid`, `cursor_invalid`, `kind_invalid`, `source_invalid`. |
+| `GET /api/v1/projects/{p}/services/{s}/changes/compare?source&external_id[&horizon]` | `project:read` | Before/after at `horizon` (default `1h`; otherwise 400 `horizon_invalid`); 404 `not found` for an unknown identity, `no_terminal_phase` for a started-only group. |
+| `GET /api/v1/projects/{p}/incidents/{i}/changes` | `project:read` | The incident's preceding changes — the anchored link rows with each group's live phases, `own_service` and `upstream`. |
+
+The three reads take in-flight permits (`change.read_inflight_process`) and no rate token.
+
+CLI: `cerbix change record --project <id> --service <id> --kind deploy|rollback|flag --phase started|succeeded|failed|cancelled --source <slug> --external-id <id> [--ref <label>] [--url <https url>] [--decision <id>] [--at <RFC3339>] [--json] [--timeout 10s]`
+(`internal/cli/change.go`) — `CERBIX_URL`, `CERBIX_TOKEN` (environment only, never a flag),
+`CERBIX_CA_FILE`; ONE stdout line `recorded change=<id> kind=<k> phase=<p>` (or `replayed …`); exit `0`
+recorded or replayed, `2` refused by the contract (400/404/409 — the pipeline's own mistake, printed
+verbatim on stderr; usage errors too), `1` transport, auth, timeout, 429 (no retry; `Retry-After` printed)
+and every other status. `--at` defaults to the invocation instant; `--json` prints the response byte for
+byte. The CLI holds no copy of the rules: what it is given travels verbatim and the server's refusal is
+what it prints.
+
+**Tokens with an `actions` allow-list (D12, D-0212).** `api_tokens.actions` is `NULL` for every token
+that exists today — the role decides, nothing changes — or a list intersected with the role inside the ONE
+central predicate, `authz.Can` and its query-scope mirror `VisibleScope`: `Can(action)` for a token is
+`roleGrants[role] ∋ action AND (actions IS NULL OR action ∈ actions)`. A CI token is `role: editor,
+actions: [gate:evaluate, change:record]`: it can ask the gate and record changes and can do NOTHING else —
+its `GET …/services` is 403, not 404, because project VISIBILITY (`VisibleProject`, the 404-versus-403
+predicate) is membership alone. The list is validated at creation against the action catalogue (400
+`action_unknown`) and against the token's own role (400 `action_not_granted` naming the entry — an
+operator's mistake surfaces at the form, not at the pipeline's first 403), is immutable after (a different
+list is a new token; `PATCH`/`PUT` are 405), and appears in the token's read model (`null` or an array)
+and in the `token.create` audit row. Recording a change is not an audit event — the row is the record.
+
+Bounds and retention: the ten `change.*` keys (§5a) are refused outside their ranges at boot, naming the
+key. Retention (`change.retention_days`, default 400) removes WHOLE change groups by the age of their
+latest phase — at most `change.retention_groups_per_batch` group keys per statement in key order, under
+the same per-identity lock the writer takes, `incident_changes` cascading — on the scheduler leader's
+daily cadence; deleting a service cascades its changes and links while the incident note remains as text.
+Metrics (`internal/metrics/change.go`; every label set closed; no service, source or identity label):
+`cerbix_changes_recorded_total{kind,phase,outcome}`, `cerbix_change_record_rejected_total{reason}`,
+`cerbix_change_correlations_total{role}`, `cerbix_change_correlation_errors_total`,
+`cerbix_change_compare_total{outcome}`, `cerbix_changes_retained` (rows, sampled by the leader after each
+retention pass, cleared on leadership loss). In the SPA, per the approved mock (D-0210) and landing in
+iter-0165: change marks on the service's reliability strip (one per terminal phase, placed by
+`occurred_at`, kind-shaped, never a state colour), a `Changes` card between `Release gate` and
+`Dependencies`, a per-service timeline view, the comparison view, a `Preceded by` section on the incident
+page and the `actions` list on the token form — no control writes a change; the record is the pipeline's.
+The operational side — the CI-token recipe, "a pipeline reports out of order", the alert rows, the
+retention knobs and what `pending` versus `withheld` means to a reader — is in `runbook.md`.
 
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
 `mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `push` (dead-man's-switch).

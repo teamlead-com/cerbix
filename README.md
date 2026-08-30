@@ -63,6 +63,12 @@ its own alerts, incidents and pages.
   **cerbix decides, the pipeline acts.** The policy, a bounded override and the decision ledger
   live on the service page's `Release gate` card and the `Gate decisions` view; the UI never
   writes a decision.
+- **Change intelligence** — the pipeline records what it changed (`cerbix change record`: a deploy,
+  rollback or flag flip, with its phases and the gate decision it rested on), and the service's own
+  sealed facts say what followed: a timeline of changes beside the facts, the changes that **preceded**
+  an auto-incident (never "caused"), and the SLI before and after a change from the same numbers the
+  service page shows — `pending` until sealed, withheld wherever the page would withhold. A CI token
+  can be narrowed to exactly `gate:evaluate` and `change:record`.
 - **Paging that does not double** — a Service can own paging for its members: suppression
   is per signal, per polarity, and only while coverage is demonstrably armed. Anything
   ambiguous **fails open** — a page that was not needed is noise, a page that was owed and
@@ -212,6 +218,11 @@ cerbix reencrypt --config <path>   # rotate the secrets-at-rest key
 cerbix gate check --project <id> --service <id> [--json] [--timeout 10s]
                                    # reliability gate; CERBIX_URL + CERBIX_TOKEN from the environment,
                                    # exit 0 ALLOW/WARN, 2 BLOCK, 4 NOT_CONFIGURED, 1 error (no retry on 429)
+cerbix change record --project <id> --service <id> --kind deploy|rollback|flag \
+                     --phase started|succeeded|failed|cancelled --source <slug> --external-id <id> \
+                     [--ref <label>] [--url <https url>] [--decision <id>] [--at <RFC3339>] [--json]
+                                   # change intelligence; same environment contract; exit 0 recorded or
+                                   # replayed, 2 refused by the contract (400/404/409), 1 transport/auth/429
 cerbix version
 ```
 

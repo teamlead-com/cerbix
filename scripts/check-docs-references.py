@@ -92,6 +92,12 @@ FR022_HEADING = '### FR-022 invariants (§6 of func-service-incidents.md)'
 FR022_MATRIX_HEADING = '### FR-022 required test matrix (§7, written before the code)'
 FR023_HEADING = '### FR-023 invariants (§6 of func-service-escalation.md)'
 FR023_MATRIX_HEADING = '### FR-023 required test matrix (§7, written before the code)'
+# FR-025 (func-change-intelligence.md): §6 is compared as a SET like FR-021's sections, because the spec
+# says so ("Twenty-three, compared as a SET against the traceability map by `make docs-check`"); §7 has
+# nine scenario GROUPS, one row each.
+FR025_SPEC = 'docs/specs/func-change-intelligence.md'
+FR025_HEADING = '### FR-025 invariants (§6 of func-change-intelligence.md)'
+FR025_MATRIX_HEADING = '### FR-025 required test matrix (§7, written before the code)'
 
 
 def discharge_rows(text, heading):
@@ -286,6 +292,36 @@ def check_gate_stale_spellings():
     return bad
 
 
+# Spellings FR-025's design retired (func-change-intelligence.md §10). Refused in the spec itself —
+# outside §10, which is where the list is stated — and in every living document; a blockquote or a
+# sentence that says "retired spelling" is quoting, not prescribing. `scopes` alone is not on the list:
+# it is the OIDC word everywhere else in the tree.
+CHANGE_STALE = [
+    (re.compile(r'deployment_events|change_events'), 'the table is service_changes'),
+    (re.compile(r'caused_by|root_cause_change'), 'the field is preceded_by and the note says "preceded"'),
+    (re.compile(r'change:read'), 'reads are project:read'),
+    (re.compile(r'token_scopes'), 'the token list is actions'),
+]
+CHANGE_GUARD_SECTION = re.compile(r'^## 10\.')
+
+
+def check_change_stale_spellings():
+    bad = []
+    for path in [FR025_SPEC] + [d for d in LIVING if d != FR025_SPEC]:
+        if not os.path.exists(path):
+            continue
+        in_guard = False
+        for n, line in enumerate(open(path, encoding='utf-8').read().split('\n'), 1):
+            if path == FR025_SPEC and line.startswith('## '):
+                in_guard = bool(CHANGE_GUARD_SECTION.match(line))
+            if in_guard or line.startswith('>') or 'retired spelling' in line:
+                continue
+            for rx, label in CHANGE_STALE:
+                if rx.search(line):
+                    bad.append((path, n, 'stale', f'retired FR-025 spelling: {label}'))
+    return bad
+
+
 def check_spec_banners():
     """No spec says it is unbuilt while status.md marks one of its requirements DONE."""
     status_path = 'docs/status.md'
@@ -363,29 +399,51 @@ def fr021_invariant_numbers():
     return set(seen)
 
 
-def check_invariant_set(src, text, expected):
+def fr025_invariant_numbers():
+    """The SET of invariant numbers §6 of the FR-025 spec states — FR-021's discipline: a set, not a
+    maximum, a renamed section a loud failure, a duplicate number a loud failure."""
+    text = open(FR025_SPEC, encoding='utf-8').read()
+    i = text.find('\n## 6.')
+    if i < 0:
+        raise SystemExit(f'check-docs-references: {FR025_SPEC} has no "## 6." section; the FR-025 '
+                         'invariant gate has nothing to compare the discharge map against')
+    section = text[i + 1:]
+    end = re.search(r'\n## ', section)
+    if end:
+        section = section[:end.start()]
+    seen = [int(m) for m in re.findall(r'^\s{0,4}(\d{1,3})\.\s', section, re.M)]
+    if not seen:
+        raise SystemExit('check-docs-references: the FR-025 spec states no invariants at all')
+    dupes = sorted({n for n in seen if seen.count(n) > 1})
+    if dupes:
+        raise SystemExit('check-docs-references: the FR-025 spec states invariant number(s) '
+                         f'{dupes} more than once')
+    return set(seen)
+
+
+def check_invariant_set(src, text, expected, heading=INV_HEADING, label='FR-021'):
     """The FR-021 invariant table's keys must EQUAL the spec's numbers — both directions.
 
     Contiguity is checked too, because these are written as a numbered list and a hole in it is a
     typo rather than a decision. Say which numbers, not merely that the counts differ: the point of
     the map is that a reader can follow it."""
     bad = []
-    rows = discharge_rows(text, INV_HEADING)
+    rows = discharge_rows(text, heading)
     if rows is None:
-        return [(DISCHARGE_DOC, 0, 'discharge', 'the invariant table is missing entirely')]
+        return [(DISCHARGE_DOC, 0, 'discharge', f'the {label} invariant table is missing entirely')]
     holes = sorted(set(range(1, max(expected) + 1)) - expected)
     if holes:
         bad.append((DISCHARGE_DOC, 0, 'discharge',
-                    f'the FR-021 spec skips invariant number(s) {holes} — a numbered list with a '
+                    f'the {label} spec skips invariant number(s) {holes} — a numbered list with a '
                     f'hole is a typo, and the gate cannot tell it from a deletion'))
     for n in sorted(expected - set(rows)):
         bad.append((DISCHARGE_DOC, 0, 'discharge',
-                    f'invariant {n} is stated in the spec and has no discharge row'))
+                    f'{label} invariant {n} is stated in the spec and has no discharge row'))
     for n in sorted(set(rows) - expected):
         bad.append((DISCHARGE_DOC, 0, 'discharge',
-                    f'discharge row {n} names an invariant the FR-021 spec does not state'))
+                    f'discharge row {n} names an invariant the {label} spec does not state'))
     for n in sorted(expected & set(rows)):
-        bad += discharge_row_evidence(src, rows[n], n, 'invariant')
+        bad += discharge_row_evidence(src, rows[n], n, f'{label} invariant')
     return bad
 
 
@@ -417,11 +475,13 @@ def check_discharge(src):
     fr021 = fr021_invariant_numbers()
     # The FR-021 invariants are compared as a SET; the other tables are still contiguous 1..N.
     bad += check_invariant_set(src, text, fr021)
+    bad += check_invariant_set(src, text, fr025_invariant_numbers(), FR025_HEADING, 'FR-025')
     for heading, count, label in ((MATRIX_HEADING, 24, 'scenario'),
                                   (FR022_HEADING, 16, 'FR-022 invariant'),
                                   (FR022_MATRIX_HEADING, 16, 'FR-022 scenario'),
                                   (FR023_HEADING, 16, 'FR-023 invariant'),
-                                  (FR023_MATRIX_HEADING, 19, 'FR-023 scenario')):
+                                  (FR023_MATRIX_HEADING, 19, 'FR-023 scenario'),
+                                  (FR025_MATRIX_HEADING, 9, 'FR-025 scenario')):
         rows = discharge_rows(text, heading)
         if rows is None:
             bad.append((DISCHARGE_DOC, 0, 'discharge', f'the {label} table is missing entirely'))
@@ -462,10 +522,12 @@ def main():
     bad += check_row_statuses()
     bad += check_spec_banners()
     bad += check_gate_stale_spellings()
+    bad += check_change_stale_spellings()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
               'and every acceptance map is complete (FR-021 invariants compared as a SET against '
-              'the spec, plus 24 scenarios; FR-022: 16+16, FR-023: 16+19); '
+              'the spec, plus 24 scenarios; FR-022: 16+16, FR-023: 16+19; FR-025: §6 as a SET + 9 '
+              'scenario groups, its retired spellings refused); '
               'every requirement row states one of the three statuses, and no spec calls itself '
               'unbuilt while its requirement is DONE')
         return 0

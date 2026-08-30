@@ -1,8 +1,8 @@
 # func-change-intelligence — a pipeline says what it changed, and the service's facts say what followed (FR-025 / NFR-020)
 
 > **Lifecycle: DESIGN APPROVED — revision 3, 2026-08-30 (party [15]); the owner answered the seven questions of §11
-> the same day (D-0209). No code before an approved UI mock of the timeline and the comparison; backend work may
-> proceed under the approved design meanwhile, as FR-024's did.** Revisions 1–3 were reviewed as one design phase
+> the same day (D-0209). No SPA code before an owner-approved UI mock of the timeline and the comparison; backend
+> work may proceed under the approved design meanwhile, as FR-024's did.** Revisions 1–3 were reviewed as one design phase
 > (iter-0164 task 3). Revision 1 was reviewed at party [9]: 2 P0 (tenant integrity of the link
 > table; a false persistence claim on the comparison), 4 P1 (identical replay undefined; the timeline's
 > group key and cursor; the link's anchor; retention by rows splitting a group), 3 P2 (text normalization;
@@ -13,8 +13,9 @@
 > events, the service timeline, incident correlation and before/after SLI comparison … append-only phases
 > keyed `UNIQUE(service_id, source, external_id, phase)`, a domain-owned phase order, serialization per
 > external identity, and closed enums with no free payload") and carrying the token-scoped CI capability
-> that D12 of the same spec named as a follow-up requirement. Open owner questions are §11. FR-025 and
-> NFR-020 have no row in `docs/status.md` until the design is approved; nothing here is built.
+> that D12 of the same spec named as a follow-up requirement. The owner's answers to the seven questions of §11
+> are recorded there and in D-0209; FR-025 and NFR-020 are `TODO` rows in `docs/status.md` citing this design;
+> implementation is iter-0165.
 
 ## 1. What this is, in one paragraph
 

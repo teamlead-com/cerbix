@@ -76,8 +76,10 @@ integration may link to it by `url`. **Invariant 1.**
 **D2 — closed enums, bounded scalars, no free payload. DECIDED (owner, 2026-08-30 — three kinds, case-sensitive identity; D17).**
 `kind ∈ {deploy, rollback, flag}`, `phase ∈ {started, succeeded, failed, cancelled}`, `source` a slug
 `^[a-z0-9][a-z0-9-]{0,63}$`, `external_id` 1..128 characters (any printable, trimmed), `ref` 0..128
-printable, `url` 0..512 and `https://` only (a plain `http://` is refused; the UI renders it as a link
-and must not become a phishing surface), `occurred_at` RFC3339 with at most `change.max_past` behind and
+printable, `url` 0..512 and `https://` only — the exact grammar (review [36]): empty, or an absolute URL that
+parses with scheme `https` and a non-empty host; `https://` alone, `http://` and scheme-relative forms are
+refused as `url_invalid` (the UI renders it as a link and must not become a phishing surface) —
+`occurred_at` RFC3339 with at most `change.max_past` behind and
 `change.max_future` ahead of the server clock (§5a), stored in UTC to the microsecond. **Text is normative
 (review P2-1; layers per round 2 P1-1/P1-2):** the canonical form of `external_id`, `ref` and `url` is
 Unicode NFC, trimmed of leading and trailing whitespace, containing no code point of category Cc or Cf
@@ -231,7 +233,9 @@ even `project:read` (its `GET …/services` is 403; its project is still visible
 because visibility is membership, not action). The list is validated against the central `Action`
 catalogue on create (400 `action_unknown`), is immutable after create (a different list is a new token —
 tokens are cheap, audit is not), and appears in the token's read model and in the audit row
-`token.create`. `authz.Can` is the ONLY place the list is consulted; handlers keep calling
+`token.create`. The list is consulted in ONE central authorization predicate — `authz.Can` and its
+query-scope mirror `VisibleScope`, which must intersect the same list or a narrowed token could still
+enumerate what it may not read (review [36]) — and nowhere else; handlers keep calling
 `projectAccess(w, r, projectID, action)`. **Invariants 16, 17.**
 
 **D13 — the CLI verb `cerbix change record`. DECIDED (FR-024 D16 contract).**
@@ -407,7 +411,8 @@ Twenty-three, compared as a SET against the traceability map by `make docs-check
     the timeline reads it back by id and says `aged out` when the row is gone;
 16. `change:record` is a central action (editor+); reads are `project:read`; no role string appears in a
     handler;
-17. a token's `actions` allow-list intersects its role in `authz.Can` and nowhere else; `NULL` leaves
+17. a token's `actions` allow-list intersects its role in the one central predicate — `authz.Can` and its
+    query-scope mirror `VisibleScope` — and nowhere else; `NULL` leaves
     every existing token's authority unchanged; the list is validated against the action catalogue on
     create, immutable after, visible in the read model and the `token.create` audit row; a CI token with
     `[gate:evaluate, change:record]` is 403 on `GET …/services`;

@@ -5243,3 +5243,29 @@ was pushed; pushing, tagging and any squash are the owner's.
 **Consequences.** `docs/specs/func-reliability-gate.md` header reads IMPLEMENTED; iter-0163 is immutable
 from its closing commit; the next requirement is the owner's call (FR-025 Change Intelligence is a
 candidate the spec names as out of scope here).
+
+## D-0209 — FR-025 Change Intelligence: design approved at revision 3; the owner's seven answers (2026-08-30)
+
+**Decision.** `docs/specs/func-change-intelligence.md` is the approved design of FR-025 / NFR-020. The
+independent reviewer approved revision 3 at party [15] after two rounds (revision 1 at [9]: 2 P0 — tenant
+integrity of the link table, a false persistence claim on the comparison; 4 P1; 3 P2. Revision 2 at [13]:
+2 P1 — the DB CHECK claiming Unicode rules a CHECK cannot enforce, the normalization owner per layer
+unstated; 1 P2). The owner answered the seven questions of §11 the same day, accepting every
+recommendation: (1) three kinds — `deploy | rollback | flag` — as D17 named them; a configuration change is
+a `deploy` with a `ref`; (2) a service's changes CASCADE on delete — a change is the service's fact, the
+incident note remains as text — the ledger's outlive rule is deliberately not copied; (3) correlation
+reaches the own service and its `probable_root` upstream services only, never downstream; (4) comparison
+horizons are `15m | 1h | 6h | 24h`, no `7d` — a slow burn is the burn rules' job; (5) a token's `actions`
+list is immutable after create — a different list is a new token; (6) the CI capability is the per-token
+ALLOW-LIST intersected with the role inside `authz.Can`, not a dedicated `ci` role — one mechanism that
+generalizes to every future action; (7) `external_id` identity is case-sensitive after NFC — CI run ids are
+opaque and folding would merge identities a system distinguishes.
+
+**Why.** The design phase closes the way FR-024's did (D-0201, D-0203): the reviewer owns consistency and
+testability, the owner owns the product choices, and the accepted phase is committed once.
+
+**Consequences.** FR-025 and NFR-020 enter `docs/status.md` as `TODO` with the design cited; the spec's
+header reads DESIGN APPROVED; iter-0164 task 3 is DONE. Before any SPA code: an owner-approved UI mock of
+the service timeline, the changes card and the before/after comparison. Backend work — schema, domain,
+store, API, CLI, the token allow-list — may proceed under the approved design in the next iteration, as
+FR-024's did while its mock waited. Numbers reserved: iter-0165 for the implementation.

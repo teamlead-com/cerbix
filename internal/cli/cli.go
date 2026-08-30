@@ -139,6 +139,8 @@ func Main(args []string) int {
 		return runEnqueueServiceRepair(args[1:])
 	case "gate":
 		return runGate(args[1:], os.Stdout, os.Stderr)
+	case "change":
+		return runChange(args[1:], os.Stdout, os.Stderr)
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return 0
@@ -159,6 +161,7 @@ func usage(w io.Writer) {
 		"  cerbix adopt-fact-month --config <path> --month YYYY-MM [--timeout 10m]",
 		"  cerbix enqueue-service-repair --config <path> --project <id> --service <id> --from RFC3339 --to RFC3339",
 		"  cerbix gate check --project <id> --service <id> [--json] [--timeout 10s]   (env: CERBIX_URL, CERBIX_TOKEN, [CERBIX_CA_FILE])",
+		"  cerbix change record --project <id> --service <id> --kind deploy|rollback|flag --phase started|succeeded|failed|cancelled --source <slug> --external-id <id> [--ref <label>] [--url <https url>] [--decision <id>] [--at <RFC3339>] [--json] [--timeout 10s]   (env: CERBIX_URL, CERBIX_TOKEN, [CERBIX_CA_FILE])",
 		"  cerbix version",
 	} {
 		if _, err := fmt.Fprintln(w, line); err != nil {

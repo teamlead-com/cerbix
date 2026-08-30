@@ -152,10 +152,18 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 	return gateOutcome(res, *asJSON, stdout, stderr)
 }
 
-// gateTarget resolves CERBIX_URL into the decision endpoint. A trailing slash and a path prefix
-// (a reverse proxy mounting cerbix under a sub-path) are tolerated; anything that is not a plain
-// http(s) base URL is refused by name so the operator knows which variable to fix.
+// gateTarget resolves CERBIX_URL into the decision endpoint.
 func gateTarget(base, project, service string) (string, error) {
+	return serviceRouteTarget(base, project, service, "gate")
+}
+
+// serviceRouteTarget resolves CERBIX_URL into one service-scoped route — `leaf` is the last path
+// element (`gate`, `changes`) — and is the ONE place the remote verbs validate the base URL, so
+// `cerbix gate check` and `cerbix change record` refuse exactly the same values. A trailing slash
+// and a path prefix (a reverse proxy mounting cerbix under a sub-path) are tolerated; anything
+// that is not a plain http(s) base URL is refused by name so the operator knows which variable to
+// fix.
+func serviceRouteTarget(base, project, service, leaf string) (string, error) {
 	base = strings.TrimSpace(base)
 	if base == "" {
 		return "", errors.New("CERBIX_URL is not set (the server base URL, e.g. https://cerbix.example.com)")
@@ -172,7 +180,7 @@ func gateTarget(base, project, service string) (string, error) {
 	}
 	// JoinPath takes already-escaped elements and cleans doubled slashes, so an id holding a
 	// '/' or '..' cannot change the route.
-	target := u.JoinPath("api", "v1", "projects", url.PathEscape(project), "services", url.PathEscape(service), "gate")
+	target := u.JoinPath("api", "v1", "projects", url.PathEscape(project), "services", url.PathEscape(service), leaf)
 	return target.String(), nil
 }
 

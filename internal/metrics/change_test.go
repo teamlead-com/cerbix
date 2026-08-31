@@ -258,3 +258,31 @@ func TestChangeExpositionNamesOnlyTheD15FamiliesAndLabels(t *testing.T) {
 		t.Fatalf("exposition is not deterministic\n--- first ---\n%s\n--- second ---\n%s", got, again)
 	}
 }
+
+// The HELP text of `cerbix_change_compare_total` is read by operators on /metrics, and it is the
+// one place a stale sentence is not merely a comment. It said `pending` meant "after not yet
+// sealed", which stopped being true at D-0211: EITHER side may reach past `sealed_through`, and
+// the handler has counted it that way since. Nothing asserted the wording, so the drift was
+// invisible until review [11] of the close-out party read the file. This pins it.
+func TestChangeCompareHelpDescribesPendingOnEitherSide(t *testing.T) {
+	reg := New(buildinfo.Info{}, "api")
+	if err := reg.RecordChangeCompare("pending"); err != nil {
+		t.Fatal(err)
+	}
+	got := changeLines(t, reg)
+	var help string
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "# HELP cerbix_change_compare_total") {
+			help = line
+		}
+	}
+	if help == "" {
+		t.Fatalf("no HELP line for cerbix_change_compare_total in:\n%s", got)
+	}
+	if !strings.Contains(help, "pending (either side not yet sealed)") {
+		t.Fatalf("HELP does not describe pending side-neutrally (D-0211):\n%s", help)
+	}
+	if strings.Contains(help, "after not yet sealed") {
+		t.Fatalf("HELP still says pending is about the AFTER side only:\n%s", help)
+	}
+}

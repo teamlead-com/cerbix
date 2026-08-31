@@ -36,9 +36,10 @@ var (
 	}
 	// D7: the two roles a link can carry.
 	changeLinkRoles = map[string]bool{"own_service": true, "upstream": true}
-	// D8/D15: what one comparison response amounted to — `pending` when `after` is not yet
-	// sealed, `withheld` when either side is withheld for any other reason, `figure` when both
-	// sides are figures (the only case with a `delta`).
+	// D8/D15: what one comparison response amounted to — `pending` when EITHER side reaches past
+	// `sealed_through` (D-0211: the before side can be unsealed too, on a comparison asked for a
+	// change that has only just happened), `withheld` when a side is withheld for any other
+	// reason, `figure` when both sides are figures (the only case with a `delta`).
 	changeCompareOutcomes = map[string]bool{"figure": true, "withheld": true, "pending": true}
 )
 
@@ -121,8 +122,8 @@ func (r *Registry) RecordChangeCorrelationError() {
 }
 
 // RecordChangeCompare counts one served comparison by outcome (D8, D15): `figure` (both sides
-// stated), `withheld` (a side withheld with a reason other than pending), `pending` (`after` not
-// yet sealed).
+// stated), `withheld` (a side withheld with a reason other than pending), `pending` (EITHER side
+// past `sealed_through`, D-0211).
 func (r *Registry) RecordChangeCompare(outcome string) error {
 	if !changeCompareOutcomes[outcome] {
 		return fmt.Errorf("%w: compare outcome %q", ErrChangeMetricLabel, outcome)
@@ -202,7 +203,7 @@ func (c changeMetrics) write(w *prometheusWriter) {
 		w.printf("cerbix_change_correlation_errors_total %d\n", c.correlationErrors)
 	}
 	writeLabelCounter(w, "cerbix_change_compare_total", "outcome",
-		"Before/after comparisons served, by outcome — figure (both sides stated), withheld (a side withheld), pending (after not yet sealed) (FR-025 D8).", c.compare)
+		"Before/after comparisons served, by outcome — figure (both sides stated), withheld (a side withheld), pending (either side not yet sealed) (FR-025 D8).", c.compare)
 	if c.retained != nil {
 		w.println("# HELP cerbix_changes_retained Rows of service_changes kept after the last retention pass, sampled by the scheduler leader (FR-025 D9).")
 		w.println("# TYPE cerbix_changes_retained gauge")

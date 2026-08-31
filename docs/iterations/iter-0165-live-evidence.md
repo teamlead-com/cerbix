@@ -136,3 +136,33 @@ exit=0
 
 The counts above the UI test (57/1) and these (58/1) differ by exactly that one test; the single skip is
 the same documented one, `file-providers.spec.ts:19`. No `429` in either run.
+
+## Corrections (reviews [59], [60], [61])
+
+The transcript above is what those commands printed, and it stays as it is — a record of a run is not
+something to rewrite. Its LABELS were wrong in three ways, and a reader must not have to discover that
+themselves.
+
+**Row 20 is mislabelled.** It says `decision unknown`; its own stderr says `occurred_at_out_of_bounds` for
+`2026-08-31T09:11:00Z`, which is the FUTURE side of the window, the counterpart of row 19's past side. The
+run did not exercise `decision_unknown` at that row. (It is exercised in
+[`iter-0165-cli-evidence.md`](iter-0165-cli-evidence.md) row 07, and the API tests have covered it
+throughout.)
+
+**The number 26 is used twice** — once for `url http` (exit 2) and once for `revoked token` (exit 1) — and
+the numbering has gaps: 06 and 07 exist, 08 to 16 do not. The numbers are labels from the harness that
+produced them, not a contiguous index, and reading them as one is what made the next error possible.
+
+**The summary sentence is wrong about its own ranges.** It says "04–05, 07 and 16–23 are exit 2"; there is
+no row 16, and the `url http` row it means is labelled 26. The exit CLASSES it states are right; the row
+numbers naming them are not.
+
+**Scope.** This file records a run at `f8f8cb4` with image `sha256:0c560a1026a4`. It has not been
+reproduced at that commit. `iter-0165-cli-evidence.md` is a CURRENT-HEAD confirmation with its own image
+and a complete raw transcript of every exit class, including the exit 1 credentials cases and the
+explicitly empty `--at`; it says plainly that it does not reproduce this one.
+
+One more correction, of a claim made in the party rather than in this file: the current-head run was
+reported with image `sha256:27bc11c370b6`. That is the manifest exported by the first `make dev-build`;
+`make dev-up` runs `dev-build` again, so the image the tested container actually ran is the second one.
+The id in `iter-0165-cli-evidence.md` is that one.

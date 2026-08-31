@@ -37,7 +37,8 @@ func changeOpened(t *testing.T, inc domain.Incident) []byte {
 // FR-025 D7/D8 at the worker (invariants 7, 8): the correlation runs at a SERVICE auto-incident's
 // `opened` delivery with the configured window and note cap, counts its links per role, and is
 // FAIL-OPEN — a planted store error is counted and the delivery still completes. It does not run
-// for a monitor incident, a manual incident, a resolved event, or an event whose webhook failed.
+// for a monitor incident, a manual incident, or a resolved event. It DOES run when the webhook
+// delivery fails (review [64]): eligibility is the event's, not the notification's.
 func TestChangeCorrelationRunsAtServiceIncidentOpenAndFailsOpen(t *testing.T) {
 	service := domain.Incident{ID: "inc3", ProjectID: "p1", ServiceID: "svc1", Source: domain.SourceAuto}
 
@@ -78,7 +79,8 @@ func TestChangeCorrelationRunsAtServiceIncidentOpenAndFailsOpen(t *testing.T) {
 	}
 
 	// Not for a MONITOR auto-incident (that path keeps its ⚡ context), a manual incident, or a
-	// resolved event — and never before the webhook succeeded.
+	// resolved event. These three are the whole of the ineligible set; a failed or absent
+	// notification is NOT part of it (see the last case here and the two tests below).
 	monitor := domain.Incident{ID: "inc1", ProjectID: "p1", MonitorID: "m1", Source: domain.SourceAuto}
 	manual := domain.Incident{ID: "inc2", ProjectID: "p1", ServiceID: "svc1", Source: domain.SourceManual}
 	resolved, _ := json.Marshal(domain.IncidentEvent{Type: domain.EventIncidentResolved, Incident: service})
@@ -176,5 +178,76 @@ func TestChangeCorrelationRunsThoughTheWebhookDeliveryFails(t *testing.T) {
 	}
 	if len(fs.delivered) != 0 {
 		t.Fatalf("delivered = %v, want the webhook failure to decide the event", fs.delivered)
+	}
+}
+
+// Review [70]: a MISSING deliverer is one more way for the notification to fail, and D7 says a
+// notification's fate never decides the correlation's. Review [68]: the correlation's second
+// guarantee is its own live, bounded context — `ctx` carries the delivery budget, which a slow
+// webhook can have spent entirely, and a correlation must not be counted as failed for that.
+func TestChangeCorrelationSurvivesANilDelivererAndGetsItsOwnLiveBudget(t *testing.T) {
+	service := domain.Incident{ID: "inc10", ProjectID: "p1", ServiceID: "svc10", Source: domain.SourceAuto}
+	linked := store.ChangeCorrelation{Links: []store.ChangeCorrelationLink{
+		{ChangeID: "c1", Role: domain.ChangeLinkRoleOwnService}}, NoteAdded: true}
+
+	// No deliverer at all: the event fails, and the correlation still ran.
+	fs := &fakeStore{
+		pending:       []domain.OutboxEvent{{ID: "e1", Topic: domain.TopicIncidentEvent, Payload: changeOpened(t, service), Attempts: 1}},
+		changeLinkRes: linked,
+	}
+	m := &fakeChangeMetrics{}
+	newWorker(fs, nil, &fakeNotify{}, &fakeMetrics{}).WithChangeCorrelation(0, 0, m).drain(context.Background())
+	if len(fs.changeLinked) != 1 {
+		t.Fatalf("correlation calls = %v, want one although no deliverer is configured", fs.changeLinked)
+	}
+	if len(fs.delivered) != 0 || len(fs.failed) != 1 {
+		t.Fatalf("delivered=%v failed=%v, want the event failed for want of a deliverer", fs.delivered, fs.failed)
+	}
+	if m.correlations[domain.ChangeLinkRoleOwnService] != 1 || m.errors != 0 {
+		t.Fatalf("metrics = %+v, want the link counted once and no error", m)
+	}
+
+	// A monitor incident with no deliverer still correlates nothing: the eligibility rule is the
+	// incident's, not the notification's.
+	monitor := domain.Incident{ID: "inc11", ProjectID: "p1", MonitorID: "mon1", Source: domain.SourceAuto}
+	fs = &fakeStore{pending: []domain.OutboxEvent{{ID: "e2", Topic: domain.TopicIncidentEvent, Payload: changeOpened(t, monitor), Attempts: 1}}}
+	newWorker(fs, nil, &fakeNotify{}, &fakeMetrics{}).WithChangeCorrelation(0, 0, nil).drain(context.Background())
+	if len(fs.changeLinked) != 0 {
+		t.Fatalf("correlation ran for a monitor incident: %v", fs.changeLinked)
+	}
+
+	// The context: a webhook that spends the whole delivery budget must not poison the
+	// correlation. The fake deliverer cancels the context it was handed; the correlation must
+	// still receive a LIVE context, and a BOUNDED one (its own budget, not settleCtx bare).
+	//
+	// The lease is what MAKES the delivery bounded (`leaseHeadroom` + a little): without one the
+	// delivery context is the caller's, and a deliverer that waits for Done never returns.
+	now := time.Now()
+	fs = &fakeStore{
+		pending: []domain.OutboxEvent{{ID: "e3", Topic: domain.TopicIncidentEvent, Payload: changeOpened(t, service),
+			Attempts: 1, ClaimedAt: now, LeaseUntil: now.Add(leaseHeadroom + 500*time.Millisecond)}},
+		changeLinkRes: linked,
+	}
+	spender := &fakeWebhook{err: context.DeadlineExceeded, spendBudget: true}
+	m2 := &fakeChangeMetrics{}
+	newWorker(fs, spender, &fakeNotify{}, &fakeMetrics{}).WithChangeCorrelation(0, 0, m2).drain(context.Background())
+	if len(fs.changeLinked) != 1 {
+		t.Fatalf("correlation calls = %v, want one after the delivery burned its budget", fs.changeLinked)
+	}
+	if fs.changeLinkCtxErr != nil {
+		t.Fatalf("the correlation was handed a dead context (%v) — it must get its own, live", fs.changeLinkCtxErr)
+	}
+	if !fs.changeLinkBounded {
+		t.Fatal("the correlation's context has no deadline — it must be bounded, not settleCtx bare")
+	}
+	if d := time.Until(fs.changeLinkDeadline); d <= 0 || d > changeCorrelationBudget+time.Second {
+		t.Fatalf("the correlation's remaining budget is %s, want (0, %s]", d, changeCorrelationBudget)
+	}
+	if m2.errors != 0 {
+		t.Fatalf("correlation errors = %d, want the delivery's exhaustion not counted against it", m2.errors)
+	}
+	// And the budget is released when the attempt returns: no context is left dangling.
+	if fs.changeLinkCtx.Err() == nil {
+		t.Fatal("the correlation's context outlived the call — cancel() must run when it returns")
 	}
 }

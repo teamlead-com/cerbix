@@ -84,10 +84,19 @@ type fakeStore struct {
 	changeLinkRes  store.ChangeCorrelation
 	changeLinkErr  error
 	changeLinkHook func() // runs inside LinkPrecedingChanges, e.g. to observe ordering
+	// The context the correlation was handed, captured so a test can prove it is LIVE and
+	// BOUNDED even when the delivery's own context is spent (review [68]).
+	changeLinkCtx      context.Context
+	changeLinkCtxErr   error
+	changeLinkDeadline time.Time
+	changeLinkBounded  bool
 }
 
-func (f *fakeStore) LinkPrecedingChanges(_ context.Context, incidentID string, window time.Duration, noteMax int) (store.ChangeCorrelation, error) {
+func (f *fakeStore) LinkPrecedingChanges(ctx context.Context, incidentID string, window time.Duration, noteMax int) (store.ChangeCorrelation, error) {
 	f.changeLinked = append(f.changeLinked, incidentID+"|"+window.String()+"|"+strconv.Itoa(noteMax))
+	f.changeLinkCtx = ctx
+	f.changeLinkCtxErr = ctx.Err()
+	f.changeLinkDeadline, f.changeLinkBounded = ctx.Deadline()
 	if f.changeLinkHook != nil {
 		f.changeLinkHook()
 	}
@@ -215,10 +224,17 @@ func (f *fakeMail) SendContext(ctx context.Context, to, subject, body string) er
 type fakeWebhook struct {
 	got []domain.IncidentEvent
 	err error
+	// spendBudget makes the deliverer behave like a webhook that used the whole delivery
+	// budget: it waits for the delivery context to be done before answering, so a test can
+	// prove the correlation is not handed that spent context (review [68]).
+	spendBudget bool
 }
 
-func (f *fakeWebhook) Deliver(_ context.Context, ev domain.IncidentEvent) error {
+func (f *fakeWebhook) Deliver(ctx context.Context, ev domain.IncidentEvent) error {
 	f.got = append(f.got, ev)
+	if f.spendBudget {
+		<-ctx.Done()
+	}
 	return f.err
 }
 
@@ -375,8 +391,16 @@ func transitionSeq(t *testing.T, monitorID string, prev, cur domain.MonitorStatu
 	return b
 }
 
+// newWorker treats a nil *fakeWebhook as NO deliverer at all. Handing the pointer straight to
+// New would instead produce a non-nil interface holding a nil pointer, so `w.webhooks != nil`
+// stays true and the fake's Deliver panics on its own receiver — which is a bug in the test, not
+// a configuration a worker can ever be in. Every "no deliverer configured" case goes through here.
 func newWorker(fs *fakeStore, wh *fakeWebhook, nf *fakeNotify, m *fakeMetrics) *Worker {
-	return New(fs, wh, nf, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var d WebhookDeliverer
+	if wh != nil {
+		d = wh
+	}
+	return New(fs, d, nf, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 // TestStaleTransitionSuppressed covers the #2 delivery-time staleness gate: a
@@ -872,11 +896,7 @@ func TestUnknownTopicAndNilDeliverersFail(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			fs := &fakeStore{pending: []domain.OutboxEvent{c.event}}
-			var wh WebhookDeliverer
-			if c.webhook != nil {
-				wh = c.webhook
-			}
-			New(fs, wh, c.notify, &fakeMetrics{}, slog.New(slog.NewTextHandler(io.Discard, nil))).drain(context.Background())
+			newWorker(fs, c.webhook, c.notify, &fakeMetrics{}).drain(context.Background())
 			if len(fs.failed) != 1 || len(fs.delivered) != 0 {
 				t.Fatalf("expected failure: failed=%v delivered=%v", fs.failed, fs.delivered)
 			}

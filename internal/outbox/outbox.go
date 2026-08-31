@@ -560,9 +560,11 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 		return nil
 
 	case domain.TopicIncidentEvent:
-		if w.webhooks == nil {
-			return errors.New("no webhook deliverer configured")
-		}
+		// The event is decoded BEFORE any notification-failure exit (review [70]). A payload that
+		// cannot be decoded is the only thing that stops the correlation here: without the event
+		// there is no incident to correlate. A missing deliverer is not that — it is one more way
+		// for the notification to fail, and D7 says a notification's fate never decides the
+		// correlation's.
 		var ev domain.IncidentEvent
 		if err := json.Unmarshal(e.Payload, &ev); err != nil {
 			return err
@@ -580,18 +582,26 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 		// Ordering is enforced where it can be durable: `ClaimDueOutbox` will not release an event
 		// while an earlier event of the same incident is undelivered, and a CLAIMED row is not a
 		// delivered one. Nothing here needs to guess.
-		derr := w.webhooks.Deliver(ctx, ev)
-		// Change correlation (FR-025 D7) is attempted for the OPENED event whatever the delivery
-		// did (review [64]). It used to sit after the early return above, which made it
-		// conditional on a webhook that has nothing to do with it: a subscriber's endpoint
-		// failing persistently left the service incident with no `incident_changes` links, no
-		// `🚀 Changes:` note, and no counted error — the correlation had never been attempted.
-		// D7/NFR-020 separate the two directions of fail-open: correlation must not block the
-		// notification, and the notification's failure must not skip the correlation. The attempt
-		// is idempotent (the store takes the incident row, returns `Skipped` when the note is
-		// already there), so a retried delivery cannot double-write or double-count, and it runs
-		// on its OWN bounded context off `settleCtx` — an exhausted delivery budget must not turn
-		// into a counted correlation error.
+		// Every way the notification can fail lives in `derr`, and none of them reaches the
+		// correlation below: a missing deliverer (review [70]) and a deliverer that errors
+		// (review [64]) are the same kind of event here — the subscriber's problem, not the
+		// incident's history.
+		derr := errors.New("no webhook deliverer configured")
+		if w.webhooks != nil {
+			derr = w.webhooks.Deliver(ctx, ev)
+		}
+		// Change correlation (FR-025 D7) is attempted for the OPENED event whatever the
+		// notification did. It used to sit after an early return, which made it conditional on a
+		// webhook that has nothing to do with it: a subscriber's endpoint failing persistently —
+		// or no deliverer being configured at all — left the service incident with no
+		// `incident_changes` links, no `🚀 Changes:` note, and no counted error, because the
+		// correlation had never been attempted. D7/NFR-020 separate the two directions of
+		// fail-open: correlation must not block the notification, and the notification's failure
+		// must not skip the correlation. The attempt is idempotent (the store takes the incident
+		// row, returns `Skipped` when the note is already there), so a retried delivery cannot
+		// double-write or double-count, and it runs on its OWN bounded context off `settleCtx` —
+		// `ctx` carries the delivery budget, which a slow webhook can have spent entirely, and a
+		// correlation must not be counted as failed because the notification took the clock.
 		if ev.Type == domain.EventIncidentOpened && ev.Incident.Source == domain.SourceAuto && ev.Incident.ServiceID != "" {
 			cctx, cancel := context.WithTimeout(settleCtx, changeCorrelationBudget)
 			w.linkPrecedingChanges(cctx, ev.Incident)

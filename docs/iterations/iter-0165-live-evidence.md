@@ -107,3 +107,32 @@ CERBIX_TOPOLOGY=single CERBIX_URL=http://localhost:8080 ./e2e/run.sh            
 
 Leave ~60 s between a targeted and a full run: both spend the admin principal's 30 records/minute bucket
 (§5a), and back-to-back runs earn a `429 principal_rate` that is the limiter working, not a failure.
+
+## The UI test, added after the run above
+
+`e2e/tests/changes-ui.spec.ts` drives the `Changes` card in a browser against the same stack: both groups
+listed with the right `data-terminal`, the started-only row's compare cell `no-terminal`, the terminal
+row's cell settling to a figure/pending/withheld word (never a partial number), the 6 h horizon control
+changing the cell's `data-horizon`, the hop to the comparison view with both sides typed, and the hop to
+the per-service timeline listing both groups.
+
+```
+Running 2 tests using 1 worker
+
+  ✓  1 [setup] › auth.setup.ts:5:6 › authenticate as the bootstrap admin (609ms)
+  ✓  2 [chromium] › changes-ui.spec.ts:43:7 › change intelligence UI › the card lists both groups, compares only the terminal one, and links on to the comparison and the timeline (762ms)
+
+  2 passed (2.0s)
+```
+
+The full suite with it (started 95 s after the targeted run, so the admin's record bucket had refilled):
+
+```
+✓  12 [chromium] › changes-ui.spec.ts:43:7 › change intelligence UI › the card lists both groups, compares only the terminal one, and links on to the comparison and the timeline (731ms)
+1 skipped
+58 passed (6.2m)
+exit=0
+```
+
+The counts above the UI test (57/1) and these (58/1) differ by exactly that one test; the single skip is
+the same documented one, `file-providers.spec.ts:19`. No `429` in either run.

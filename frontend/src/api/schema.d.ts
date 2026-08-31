@@ -9388,25 +9388,25 @@ export interface components {
         /** @description Service-account token metadata (never includes the secret). */
         ApiToken: {
             /** Format: uuid */
-            id?: string;
+            id: string;
             /** Format: uuid */
-            org_id?: string;
+            org_id: string;
             /**
              * Format: uuid
              * @description Set for a project-scoped token.
              */
             project_id?: string;
-            name?: string;
-            role?: components["schemas"]["Role"];
+            name: string;
+            role: components["schemas"]["Role"];
             /** @description The token's ALLOW-LIST (FR-025 D12), always present: null means the role decides — every token that predates the list; a list (even empty) is intersected with the role inside the one central predicate. Immutable after create. */
-            actions?: string[] | null;
+            actions: string[] | null;
             created_by?: string;
             /** @description Resolved issuer (list endpoint only). */
             created_by_email?: string;
             /** Format: date-time */
             last_used_at?: string | null;
             /** Format: date-time */
-            created_at?: string;
+            created_at: string;
         };
         CreateApiToken: {
             name: string;

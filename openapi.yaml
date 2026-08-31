@@ -5941,6 +5941,11 @@ components:
     ApiToken:
       type: object
       description: Service-account token metadata (never includes the secret).
+      # Exactly the keys the Go type always serializes, proven by
+      # `TestApiTokenAlwaysSerializesTheseKeys` rather than read off its struct tags. Without this
+      # list the generated client typed `actions?`, so a client could satisfy the published schema
+      # while omitting a key D12 guarantees is present (review [14]).
+      required: [id, org_id, name, role, actions, created_at]
       properties:
         id: { type: string, format: uuid }
         org_id: { type: string, format: uuid }

@@ -403,4 +403,45 @@ describe("ChangeCompareView — concurrency (D-0210 item 7)", () => {
     await settle();
     expect(w.text(), "the previous identity's answer is dropped").not.toContain("STALE");
   });
+
+
+  // Review [31]: the comparison is ANCILLARY and must never suppress an answer about the SUBJECT.
+  // The view used to `await Promise.all([service, compare])`, so a comparison that never settles —
+  // a blackholed transport, not merely a slow one — held the page on "Loading…" forever while the
+  // service's own 404 was already in hand. `deferred()` here is never resolved on purpose: that is
+  // the whole condition, and a test that resolves it late would prove something weaker.
+  it("renders the service's own refusal even when the comparison never settles", async () => {
+    const stuck = deferred<Res>();
+    serve({ service: refused(404, "not found"), compare: stuck.promise });
+    const w = mountView();
+    await settle();
+
+    expect(has(w, "compare-loading")).toBe(false);
+    expect(t(w, "compare-error").text()).toContain("This service does not exist");
+    expect(t(w, "compare-error").attributes("data-status")).toBe("404");
+
+    // And a late arrival cannot overwrite the decided page: nothing rendered from `cmp` appears.
+    // (`compare-ref` is NOT the check — it falls back to the link's own external_id, so it reads
+    // "1234" whether or not a comparison ever arrived. The `v-if="cmp"` chips are the honest ones.)
+    stuck.resolve(ok(compareBody()));
+    await settle();
+    expect(t(w, "compare-error").text()).toContain("This service does not exist");
+    expect(has(w, "compare-kind")).toBe(false);
+    expect(has(w, "compare-terminal")).toBe(false);
+    expect(has(w, "compare-t")).toBe(false);
+  });
+
+  it("does the same for a denied service, and abandons the comparison rather than waiting on it", async () => {
+    const stuck = deferred<Res>();
+    serve({ service: refused(403, "forbidden"), compare: stuck.promise });
+    const w = mountView();
+    await settle();
+
+    expect(has(w, "compare-loading")).toBe(false);
+    expect(t(w, "compare-error").text()).toContain("You cannot see this service.");
+    expect(t(w, "compare-error").attributes("data-status")).toBe("403");
+    // The comparison was issued — the two go out together — and then abandoned.
+    expect(compareCalls().length).toBe(1);
+    expect(compareCalls()[0][1].signal.aborted).toBe(true);
+  });
 });

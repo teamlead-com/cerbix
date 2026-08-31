@@ -109,23 +109,31 @@ async function load() {
       if (svc.data) service.value = svc.data;
       return;
     }
-    const [svc, res] = await Promise.all([
-      svcReq,
-      api.GET("/api/v1/projects/{projectID}/services/{serviceID}/changes/compare", {
-        // The cast sends the query's value as given (see `horizon` above).
-        params: { path, query: { source: source.value, external_id: externalId.value, horizon: horizon.value as ChangeHorizon } },
-        signal: controller.signal,
-      }),
-    ]);
+    const cmpReq = api.GET("/api/v1/projects/{projectID}/services/{serviceID}/changes/compare", {
+      // The cast sends the query's value as given (see `horizon` above).
+      params: { path, query: { source: source.value, external_id: externalId.value, horizon: horizon.value as ChangeHorizon } },
+      signal: controller.signal,
+    });
+    // Both requests are already in flight; what follows decides only the ORDER OF DECISION, and it
+    // is the subject that decides. `await Promise.all([svcReq, cmpReq])` made the page wait for an
+    // ANCILLARY answer before acting on the authoritative one, so a comparison that never settles —
+    // a blackholed transport, not merely a slow one — held `loading` true forever while a 404 or a
+    // 403 for the service was already in hand and would never be rendered (review [31]).
+    cmpReq.catch(() => {}); // the abort below must not surface as an unhandled rejection
+    const svc = await svcReq;
     if (stale(mine)) return;
     if (svc.error || !svc.data) {
-      // The service is the subject; without it the comparison has no header to sit under.
+      // The service is the subject; without it the comparison has no header to sit under, so stop
+      // waiting for one. Aborting is what keeps a late arrival from writing into a dead page.
+      controller.abort();
       const f = failureOf(svc);
       error.value = describeFailure(f, { notFound: SERVICE_GONE, denied: "You cannot see this service." });
       errorStatus.value = f.status;
       return;
     }
     service.value = svc.data;
+    const res = await cmpReq;
+    if (stale(mine)) return;
     if (res.error || !res.data) {
       const f = failureOf(res);
       error.value = describeChangeFailure(f, { notFound: CHANGE_GONE, denied: "You cannot read this service's changes." });

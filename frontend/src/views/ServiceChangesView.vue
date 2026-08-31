@@ -17,9 +17,12 @@
 // The before/after column is the reliability page's own arithmetic (D8) at the horizon chosen in the
 // header — ONE comparison per terminal group on the page, re-issued when the horizon moves; a group
 // without a terminal phase has none and says so. Concurrency discipline as GateDecisionsView.vue
-// (D-0210 item 7): one generation counter covers every read — the page, its pagination and every
-// per-row comparison; a filter change, a project switch, a route change or an unmount aborts what is
-// in flight, and a response that lands after its generation has passed is dropped.
+// (D-0210 item 7), in TWO scopes since the comparisons became bounded: the PAGE's own generation and
+// controller cover the list and its pagination, while every per-row comparison runs on the shared
+// `requestScope` of lib/changes.ts — at most `COMPARE_POOL` in flight, each with a 10 s deadline, and
+// its own generation which a HORIZON change retires without disturbing the page's. A filter change, a
+// project switch, a route change or an unmount aborts what is in flight in both, and a response that
+// lands after either generation has passed is dropped (reviews [32], [37], [41]).
 //
 // Read-only for viewer+ (`project:read`): no control here records, edits or deletes a change — the
 // record is the pipeline's (`cerbix change record`, D14).

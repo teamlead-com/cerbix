@@ -14,9 +14,12 @@
 // silently corrected into a comparison the link did not ask for.
 //
 // Read-only for viewer+ (`project:read`): no role is consulted, nothing is written. Concurrency
-// discipline as GateOverridesView.vue / ServiceGate.vue: one generation and one AbortController
-// per load; a route or workspace change and unmount abort what is in flight; a late answer is
-// dropped, never applied.
+// discipline comes from the shared `requestScope` of lib/changes.ts, which the card and the
+// per-service timeline use too: ONE generation per load, and a controller per REQUEST owned by
+// the scope rather than one shared by the pair, plus a 10 s deadline on each. A route or
+// workspace change and unmount abort what is still in flight, a late answer is dropped and never
+// applied, and the SUBJECT decides — a refused service abandons the comparison at once through
+// `scope.abort()` instead of waiting for it (reviews [31], [42], [45]).
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 

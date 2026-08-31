@@ -47,6 +47,7 @@ export {
   lagText,
   phaseLabel,
   phaseTone,
+  requestScope,
   terminalOf,
   type ChangeCompare,
   type ChangeCompareSide,

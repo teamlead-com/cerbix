@@ -557,4 +557,40 @@ describe("ServiceChangesView — the empty state and the notes", () => {
     expect(peak).toBe(4);
   });
 
+
+
+  // Review [37]: the bound of [32] introduced a way to stall. `inPool` holds a slot until its work
+  // resolves, so four comparisons that never settle would occupy the whole pool and leave every
+  // queued row loading forever — where the UNBOUNDED fan-out at least asked every row. The 10 s
+  // deadline in `requestScope` is what makes the bound safe: it aborts, frees the slot, and leaves
+  // an error cell a reader can see.
+  //
+  // Fake timers, so this is deterministic rather than a race against a real clock.
+  it("releases a pool slot when a comparison outlives its deadline, and the queue moves on", async () => {
+    vi.useFakeTimers();
+    try {
+      const rows = Array.from({ length: 6 }, (_, i) => done(`run-${i}`));
+      serve({ list: page(rows), compare: () => new Promise<Res>(() => {}) }); // never settles, ever
+      const w = mountView();
+      await settle();
+
+      // Four in flight, two queued behind them, nothing resolved.
+      expect(compareCalls().length).toBe(4);
+      expect(w.findAll('[data-testid="changes-compare"][data-state="error"]').length).toBe(0);
+
+      // Cross the deadline: the four abort, their cells become errors, and the two queued start.
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+      expect(compareCalls().length).toBe(6);
+      expect(w.findAll('[data-testid="changes-compare"][data-state="error"]').length).toBe(4);
+
+      // And the last two are not stuck either — they hold their own slots for one deadline more.
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+      expect(w.findAll('[data-testid="changes-compare"][data-state="error"]').length).toBe(6);
+      expect(w.findAll('[data-testid="changes-compare"][data-state="loading"]').length).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -47,6 +47,7 @@ import {
   COMPARE_POOL,
   groupKey,
   inPool,
+  requestScope,
   groupLatest,
   horizonLabel,
   instantLabel,
@@ -68,7 +69,7 @@ import {
   type DeltaChip,
   type StripMark,
 } from "@/lib/changes";
-import { CHIP_ACC, CHIP_BASE, CHIP_DORM, CHIP_PLAIN, PILL_BASE, PILL_DOT, failureOf, statePill, transportFailureOf, type GateFailure } from "@/lib/gate";
+import { CHIP_ACC, CHIP_BASE, CHIP_DORM, CHIP_PLAIN, PILL_BASE, PILL_DOT, statePill } from "@/lib/gate";
 import { sealedLabel } from "@/lib/services";
 
 const props = defineProps<{
@@ -83,78 +84,10 @@ const emit = defineEmits<{
   marks: [marks: StripMark[]];
 }>();
 
-// ── Transport ─────────────────────────────────────────────────────────────────────────────────
-// A lax response shape shared by every boundary: openapi-fetch's `{ data, error, response }`,
-// with every member optional so a rejected transport and a test fixture fit the same reader.
-type Res<T> = {
-  data?: T;
-  error?: unknown;
-  response?: { status?: number; headers?: { get?: (name: string) => string | null } };
-};
-type Outcome<T> = { kind: "ok"; data: T | undefined } | { kind: "stale" } | { kind: "failed"; failure: GateFailure };
-
-const TIMEOUT_MS = 10_000;
-
-/**
- * One generation counter and one set of controllers. The card holds two — the list's and the
- * comparisons' — so the horizon can re-issue every compare without touching the page.
- */
-function scope() {
-  let gen = 0;
-  const inflight = new Set<AbortController>();
-  const abortAll = () => {
-    for (const c of inflight) c.abort();
-    inflight.clear();
-  };
-  return {
-    get gen() {
-      return gen;
-    },
-    stale: (g: number) => g !== gen,
-    /** Abort everything in flight and open the next generation. */
-    begin: () => {
-      abortAll();
-      return ++gen;
-    },
-    /** Invalidate without opening a new generation (unmount). */
-    close: () => {
-      gen++;
-      abortAll();
-    },
-    /**
-     * ONE request under the generation captured by the caller: aborted with the scope, raced
-     * against a deadline, and reported as `stale` — never applied — when the scope moved on.
-     */
-    async request<T>(g: number, run: (signal: AbortSignal) => Promise<Res<T>>): Promise<Outcome<T>> {
-      const controller = new AbortController();
-      inflight.add(controller);
-      let deadline: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const timeout = new Promise<never>((_, reject) => {
-          deadline = setTimeout(() => {
-            controller.abort();
-            reject(new Error("the request timed out"));
-          }, TIMEOUT_MS);
-        });
-        const res = (await Promise.race([run(controller.signal), timeout])) as Res<T>;
-        if (g !== gen) return { kind: "stale" };
-        const status = res.response?.status;
-        if (res.error !== undefined || (typeof status === "number" && status >= 400)) {
-          return { kind: "failed", failure: failureOf(res) };
-        }
-        return { kind: "ok", data: res.data };
-      } catch (e) {
-        if (g !== gen) return { kind: "stale" };
-        return { kind: "failed", failure: transportFailureOf(e) };
-      } finally {
-        if (deadline) clearTimeout(deadline);
-        inflight.delete(controller);
-      }
-    },
-  };
-}
-const list = scope();
-const cmp = scope();
+// Transport, the generation guard and the 10 s deadline live in `lib/changes.ts` (`requestScope`)
+// so this card and the full timeline cannot drift apart on them (review [37]).
+const list = requestScope();
+const cmp = requestScope();
 
 // ── The header's two controls ─────────────────────────────────────────────────────────────────
 const rangeDays = ref(DEFAULT_RANGE_DAYS);

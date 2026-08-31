@@ -47,6 +47,7 @@ import {
   DEFAULT_HORIZON,
   HORIZONS,
   inPool,
+  requestScope,
   NO_TERMINAL_TEXT,
   PAGE_SIZE,
   PILL_BASE,
@@ -124,7 +125,8 @@ const compares = ref<Record<string, CompareState>>({});
 let generation = 0;
 let inflight: AbortController | undefined;
 let serviceInflight: AbortController | undefined;
-const compareInflight = new Set<AbortController>();
+/** The comparisons' own scope: generation, aborts and the 10 s deadline (review [37]). */
+const cmpScope = requestScope();
 
 function begin(): { controller: AbortController; mine: number } {
   inflight?.abort();
@@ -136,8 +138,7 @@ function stale(mine: number): boolean {
   return mine !== generation;
 }
 function cancelCompares() {
-  for (const c of compareInflight) c.abort();
-  compareInflight.clear();
+  cmpScope.begin();
 }
 function cancelAll() {
   generation++;
@@ -295,32 +296,37 @@ function compareRows(groups: readonly ChangeGroup[], mine: number) {
   void inPool(queue, COMPARE_POOL, (g: ChangeGroup) => compareOne(g, mine), () => stale(mine));
 }
 
+/**
+ * ONE comparison, on the shared bounded request scope: the generation guard, the abort set and a
+ * 10 s DEADLINE (`lib/changes.ts`, `requestScope`).
+ *
+ * The deadline is what makes the pool safe. `inPool` holds a slot until this resolves, so without
+ * one, four comparisons that never settle would occupy the whole pool and leave every queued row
+ * loading forever — a failure the BOUND introduced, since the unbounded fan-out at least asked
+ * every row (review [37]). A request that outlives its deadline aborts, frees its slot and leaves
+ * an error cell, which is something the reader can see.
+ */
 async function compareOne(g: ChangeGroup, mine: number) {
   const key = groupKey(g);
   const h = horizon.value;
-  const controller = new AbortController();
-  compareInflight.add(controller);
-  compares.value = { ...compares.value, [key]: { status: "loading" } };
-  try {
-    const res = await api.GET("/api/v1/projects/{projectID}/services/{serviceID}/changes/compare", {
+  const out = await cmpScope.request<ChangeCompare>(cmpScope.gen, (signal: AbortSignal) =>
+    api.GET("/api/v1/projects/{projectID}/services/{serviceID}/changes/compare", {
       params: { path: pathFor(), query: { source: g.source, external_id: g.external_id, horizon: h } },
-      signal: controller.signal,
-    });
-    // Dropped when the page moved on OR the horizon moved: the answer is for a column that no
-    // longer exists.
-    if (stale(mine) || h !== horizon.value) return;
-    if (res.error || !res.data) {
-      const f = failureOf(res);
-      compares.value = { ...compares.value, [key]: { status: "error", text: describeChangeFailure(f), code: f.status } };
-      return;
-    }
-    compares.value = { ...compares.value, [key]: { status: "ok", data: res.data } };
-  } catch (e) {
-    if (stale(mine) || isAbort(e) || h !== horizon.value) return;
-    compares.value = { ...compares.value, [key]: { status: "error", text: transportFailure(e), code: 0 } };
-  } finally {
-    compareInflight.delete(controller);
+      signal,
+    }),
+  );
+  // Dropped when the page moved on OR the horizon moved: the answer is for a column that no longer
+  // exists.
+  if (out.kind === "stale" || stale(mine) || h !== horizon.value) return;
+  if (out.kind === "failed") {
+    compares.value = { ...compares.value, [key]: { status: "error", text: describeChangeFailure(out.failure), code: out.failure.status } };
+    return;
   }
+  if (!out.data) {
+    compares.value = { ...compares.value, [key]: { status: "error", text: "The comparison returned nothing.", code: 0 } };
+    return;
+  }
+  compares.value = { ...compares.value, [key]: { status: "ok", data: out.data } };
 }
 
 function setHorizon(h: ChangeHorizon) {

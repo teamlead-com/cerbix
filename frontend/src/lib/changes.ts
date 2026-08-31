@@ -19,7 +19,7 @@
 //     own words for a network failure, an unknown code verbatim — never swallowed.
 //   * the strip marks (stripMarksOf): one per TERMINAL phase, placed by `occurred_at` (D14).
 import type { components } from "@/api/schema";
-import { CHIP_DOWN, CHIP_PLAIN, describeFailure, fmtPercent, shortId, type GateFailure } from "@/lib/gate";
+import { CHIP_DOWN, CHIP_PLAIN, describeFailure, failureOf, fmtPercent, shortId, transportFailureOf, type GateFailure } from "@/lib/gate";
 import { humanDuration, sealedLabel } from "@/lib/services";
 
 type Schemas = components["schemas"];
@@ -471,4 +471,78 @@ export async function inPool<T>(
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+}
+
+// ── Bounded requests ──────────────────────────────────────────────────────────────────────────
+// A lax response shape shared by every boundary: openapi-fetch's `{ data, error, response }`, with
+// every member optional so a rejected transport and a test fixture fit the same reader.
+export type ScopeRes<T> = {
+  data?: T;
+  error?: unknown;
+  response?: { status?: number; headers?: { get?: (name: string) => string | null } };
+};
+export type ScopeOutcome<T> = { kind: "ok"; data: T | undefined } | { kind: "stale" } | { kind: "failed"; failure: GateFailure };
+
+/** No single change read may occupy its slot longer than this. */
+export const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * One generation counter, one set of controllers, and a DEADLINE on every request.
+ *
+ * The deadline is not decoration once reads are pooled: `inPool` holds a slot until its work
+ * resolves, so four comparisons that never settle would occupy the whole pool and leave every
+ * queued row loading forever, with no fifth request able to start (review [37] — a failure the
+ * bound itself introduced, since an unbounded fan-out at least asked every row). A request that
+ * outlives the deadline aborts, releases its slot and reports `failed`, which is a cell the reader
+ * can see rather than a spinner that never ends.
+ */
+export function requestScope() {
+  let gen = 0;
+  const inflight = new Set<AbortController>();
+  const abortAll = () => {
+    for (const c of inflight) c.abort();
+    inflight.clear();
+  };
+  return {
+    get gen() {
+      return gen;
+    },
+    stale: (g: number) => g !== gen,
+    /** Abort everything in flight and open the next generation. */
+    begin: () => {
+      abortAll();
+      return ++gen;
+    },
+    /** Invalidate without opening a new generation (unmount). */
+    close: () => {
+      gen++;
+      abortAll();
+    },
+    async request<T>(g: number, run: (signal: AbortSignal) => Promise<ScopeRes<T>>): Promise<ScopeOutcome<T>> {
+      const controller = new AbortController();
+      inflight.add(controller);
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const timeout = new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => {
+            controller.abort();
+            reject(new Error("the request timed out"));
+          }, REQUEST_TIMEOUT_MS);
+        });
+        const res = (await Promise.race([run(controller.signal), timeout])) as ScopeRes<T>;
+        if (g !== gen) return { kind: "stale" };
+        const status = res.response?.status;
+        if (res.error !== undefined || (typeof status === "number" && status >= 400)) {
+          return { kind: "failed", failure: failureOf(res) };
+        }
+        return { kind: "ok", data: res.data };
+      } catch (e) {
+        if (g !== gen) return { kind: "stale" };
+        return { kind: "failed", failure: transportFailureOf(e) };
+      } finally {
+        if (deadline) clearTimeout(deadline);
+        inflight.delete(controller);
+      }
+    },
+  };
 }

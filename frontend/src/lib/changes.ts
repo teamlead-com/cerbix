@@ -441,3 +441,35 @@ export function stripMarksOf(groups: readonly ChangeGroup[], selectedKey = "", n
   }
   return out;
 }
+
+/** At most this many comparison reads in flight from one screen at a time (FR-025 §5a). */
+export const COMPARE_POOL = 4;
+
+/**
+ * Run `work` over `items` with at most `limit` of them in flight, in order, stopping as soon as
+ * `stop()` says the caller has moved on. Resolves when every started worker has drained.
+ *
+ * The bound is the point. `change.read_inflight_process` is configurable down to 1, and a timeline
+ * page holds up to 50 groups, so a screen that fired one request per row could saturate the
+ * instance's own read permits, manufacture its own 429s and crowd out other reads — review [32].
+ * The card already worked this way; this is that loop, owned once, so the two screens cannot drift
+ * apart on it.
+ */
+export async function inPool<T>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T) => Promise<void>,
+  stop?: () => boolean,
+): Promise<void> {
+  let i = 0;
+  const worker = async () => {
+    for (;;) {
+      if (stop?.()) return;
+      const item = items[i++];
+      if (item === undefined) return;
+      await work(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+}
+

@@ -44,7 +44,9 @@ import {
   describeChangeFailure,
   formatCompareSide,
   groupActors,
+  COMPARE_POOL,
   groupKey,
+  inPool,
   groupLatest,
   horizonLabel,
   instantLabel,
@@ -254,7 +256,6 @@ function setRange(days: number) {
 // ── The comparisons: one per terminal group, at the header's horizon ──────────────────────────
 type CompareCell = { state: "loading" } | { state: "ok"; data: ChangeCompare } | { state: "failed"; text: string; status: number };
 const compares = ref<Record<string, CompareCell>>({});
-const COMPARE_POOL = 4;
 
 const COMPARE_TEXT = {
   notFound: "This change is no longer on the timeline.",
@@ -274,12 +275,10 @@ function scheduleCompares(items: readonly ChangeGroup[], gen: number, path: Path
   const next: Record<string, CompareCell> = { ...compares.value };
   for (const g of queue) next[groupKey(g)] = { state: "loading" };
   compares.value = next;
-  let i = 0;
-  const worker = async () => {
-    for (;;) {
-      if (cmp.stale(gen)) return;
-      const g = queue[i++];
-      if (!g) return;
+  void inPool(
+    queue,
+    COMPARE_POOL,
+    async (g: ChangeGroup) => {
       const out = await cmp.request<ChangeCompare>(gen, (signal) =>
         api.GET("/api/v1/projects/{projectID}/services/{serviceID}/changes/compare", {
           params: { path, query: { source: g.source, external_id: g.external_id, horizon: h } },
@@ -292,9 +291,9 @@ function scheduleCompares(items: readonly ChangeGroup[], gen: number, path: Path
       else if (out.data) cell = { state: "ok", data: out.data };
       else cell = { state: "failed", text: "The comparison returned nothing.", status: 0 };
       compares.value = { ...compares.value, [groupKey(g)]: cell };
-    }
-  };
-  for (let w = 0; w < Math.min(COMPARE_POOL, queue.length); w++) void worker();
+    },
+    () => cmp.stale(gen),
+  );
 }
 
 /** The horizon applies to EVERY row: abort what is in flight, forget every figure, ask again. */

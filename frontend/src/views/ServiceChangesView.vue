@@ -34,6 +34,7 @@ import {
   CHANGE_KINDS,
   CHANGE_RANGE_MAX_DAYS,
   CHIP_ACC,
+  COMPARE_POOL,
   CHIP_BASE,
   CHIP_DORM,
   CHIP_PLAIN,
@@ -45,6 +46,7 @@ import {
   type DecisionView,
   DEFAULT_HORIZON,
   HORIZONS,
+  inPool,
   NO_TERMINAL_TEXT,
   PAGE_SIZE,
   PILL_BASE,
@@ -280,10 +282,17 @@ async function loadMore() {
 }
 
 // ── The before/after column (D8) ────────────────────────────────────────────────────────────
+/**
+ * Ask the comparison for every TERMINAL group, through the SAME bounded pool the card uses — one
+ * request per row with nothing holding them back could open fifty at once on a full page, saturate
+ * `change.read_inflight_process` (configurable down to 1), manufacture this screen's own 429s and
+ * crowd out every other read (review [32]). A queued row needs no marking: `compareState` already
+ * reads a cell it has not been given yet as `loading`, which is exactly what a queued row is.
+ */
 function compareRows(groups: readonly ChangeGroup[], mine: number) {
-  for (const g of groups) {
-    if (terminalOf(g)) void compareOne(g, mine);
-  }
+  const queue = groups.filter((g) => terminalOf(g));
+  if (!queue.length) return;
+  void inPool(queue, COMPARE_POOL, (g: ChangeGroup) => compareOne(g, mine), () => stale(mine));
 }
 
 async function compareOne(g: ChangeGroup, mine: number) {

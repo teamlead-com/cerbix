@@ -507,4 +507,54 @@ describe("ServiceChangesView — the empty state and the notes", () => {
     expect(t(w, "changes-view-error").text()).toBe("Could not reach the server: Failed to fetch");
     expect(t(w, "changes-view-error").attributes("data-status")).toBe("0");
   });
+
+
+  // Review [32]: the timeline asked one comparison per terminal row with nothing holding them back.
+  // A page is up to 50 groups and `change.read_inflight_process` is configurable down to 1, so a
+  // normal page could saturate the instance's read permits, manufacture its own 429s and crowd out
+  // every other read. The card already used a pool of four; the loop is now owned once in
+  // `lib/changes.ts` and both screens go through it.
+  //
+  // The assertion is on MAX CONCURRENCY, measured, not on the pool constant: the comparison answers
+  // are deferred and released in waves, so a run that opened everything at once cannot pass by
+  // finishing quickly.
+  it("never opens more than four comparisons at once, however many rows the page has", async () => {
+    const rows = Array.from({ length: 12 }, (_, i) => done(`run-${i}`));
+    let open = 0;
+    let peak = 0;
+    const gates: Array<(v: Res) => void> = [];
+    serve({
+      list: page(rows),
+      compare: () => {
+        open++;
+        peak = Math.max(peak, open);
+        const d = deferred<Res>();
+        gates.push((v) => {
+          open--;
+          d.resolve(v);
+        });
+        return d.promise;
+      },
+    });
+    mountView();
+    await settle();
+
+    expect(compareCalls().length).toBe(4);
+    expect(peak).toBe(4);
+
+    // Release one: exactly one more starts, so the pool refills rather than bursting.
+    gates.shift()!(ok(compareBody()));
+    await settle();
+    expect(compareCalls().length).toBe(5);
+    expect(peak).toBe(4);
+
+    // Drain the rest; every row is asked exactly once and the ceiling never moved.
+    while (gates.length) {
+      gates.shift()!(ok(compareBody()));
+      await settle();
+    }
+    expect(compareCalls().length).toBe(12);
+    expect(peak).toBe(4);
+  });
+
 });

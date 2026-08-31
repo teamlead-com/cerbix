@@ -593,4 +593,64 @@ describe("ServiceChangesView — the empty state and the notes", () => {
       vi.useRealTimers();
     }
   });
+
+
+  // Review [41]: the pool must be fenced by the COMPARISONS' generation, not only the page's.
+  // A horizon switch opens a new cmp generation and schedules a fresh pool for every row. The old
+  // pool's stop check looked at the page's generation, which a horizon switch does not move, so it
+  // kept dequeuing — and each job read the CURRENT scope generation, so it was not stale either.
+  // Two pools of four ran at once and retired work wrote into the fresh page.
+  it("abandons the old pool when the horizon changes, instead of running two of them", async () => {
+    const rows = Array.from({ length: 10 }, (_, i) => done(`run-${i}`));
+    let open = 0;
+    let peak = 0;
+    const byHorizon: Record<string, number> = {};
+    const gates: Array<() => void> = [];
+    serve({
+      list: page(rows),
+      compare: (opts: any) => {
+        const h = String(opts?.params?.query?.horizon ?? "?");
+        byHorizon[h] = (byHorizon[h] ?? 0) + 1;
+        open++;
+        peak = Math.max(peak, open);
+        const d = deferred<Res>();
+        let counted = true;
+        const release = () => {
+          if (counted) open--;
+          counted = false;
+        };
+        // An aborted request stops occupying anything the moment the signal fires — the browser
+        // cancels it on the wire. Counting it as in-flight until its (never-arriving) response
+        // would measure the fake, not the code.
+        opts?.signal?.addEventListener?.("abort", release);
+        gates.push(() => {
+          release();
+          d.resolve(ok(compareBody()));
+        });
+        return d.promise;
+      },
+    });
+    const w = mountView();
+    await settle();
+    expect(byHorizon["1h"]).toBe(4); // four of ten started, six queued behind them
+    expect(peak).toBe(4);
+
+    // Switch the horizon while six jobs are still QUEUED under the old one.
+    await t(w, "changes-horizon-24h").trigger("click");
+    await settle();
+
+    // The four in flight were aborted and the new pool opened four of its own. If the old pool were
+    // still alive it would keep dequeuing its six and peak would exceed four.
+    expect(byHorizon["24h"]).toBe(4);
+    expect(peak).toBe(4);
+
+    // Draining everything must never start another `1h` job: the old queue is abandoned, not paused.
+    while (gates.length) {
+      gates.shift()!();
+      await settle();
+    }
+    expect(byHorizon["1h"]).toBe(4);
+    expect(byHorizon["24h"]).toBe(10);
+    expect(peak).toBe(4);
+  });
 });

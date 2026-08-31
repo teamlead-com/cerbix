@@ -289,11 +289,25 @@ async function loadMore() {
  * `change.read_inflight_process` (configurable down to 1), manufacture this screen's own 429s and
  * crowd out every other read (review [32]). A queued row needs no marking: `compareState` already
  * reads a cell it has not been given yet as `loading`, which is exactly what a queued row is.
+ *
+ * TWO generations fence this pool, and both are captured HERE, at scheduling time. `mine` is the
+ * page's: a filter change or a project switch retires the rows themselves. `cmpGen` is the
+ * comparisons' own, and it is the one a horizon switch moves — `cancelCompares()` opens a new cmp
+ * generation and a new pool is scheduled for every row. Without the second check the OLD pool kept
+ * dequeuing (the page's generation had not moved), each job read the CURRENT scope generation and
+ * so was not stale, and two pools of four ran at once writing the same cells — review [41], a
+ * regression the pooling introduced.
  */
 function compareRows(groups: readonly ChangeGroup[], mine: number) {
   const queue = groups.filter((g) => terminalOf(g));
   if (!queue.length) return;
-  void inPool(queue, COMPARE_POOL, (g: ChangeGroup) => compareOne(g, mine), () => stale(mine));
+  const cmpGen = cmpScope.gen;
+  void inPool(
+    queue,
+    COMPARE_POOL,
+    (g: ChangeGroup) => compareOne(g, mine, cmpGen),
+    () => stale(mine) || cmpScope.stale(cmpGen),
+  );
 }
 
 /**
@@ -306,10 +320,13 @@ function compareRows(groups: readonly ChangeGroup[], mine: number) {
  * every row (review [37]). A request that outlives its deadline aborts, frees its slot and leaves
  * an error cell, which is something the reader can see.
  */
-async function compareOne(g: ChangeGroup, mine: number) {
+async function compareOne(g: ChangeGroup, mine: number, cmpGen: number) {
   const key = groupKey(g);
   const h = horizon.value;
-  const out = await cmpScope.request<ChangeCompare>(cmpScope.gen, (signal: AbortSignal) =>
+  // `cmpGen` is the generation this job was SCHEDULED under, never the current one: reading
+  // `cmpScope.gen` here would make every job belong to whichever generation is live when it
+  // happens to run, which is exactly how retired work wrote into a fresh page (review [41]).
+  const out = await cmpScope.request<ChangeCompare>(cmpGen, (signal: AbortSignal) =>
     api.GET("/api/v1/projects/{projectID}/services/{serviceID}/changes/compare", {
       params: { path: pathFor(), query: { source: g.source, external_id: g.external_id, horizon: h } },
       signal,

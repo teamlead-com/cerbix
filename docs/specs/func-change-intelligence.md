@@ -174,8 +174,12 @@ incident — <kind ref by source, −<lag>>; …` (at most `change.correlation_n
 counted) is appended ONCE through the existing `NOT EXISTS … LIKE marker` guard. Reads are symmetric
 because both come from the link table: `GET /incidents/{id}/changes` and each change group carries
 `incidents[]` (id, opened_at, lag). Nothing here is causal: the field is `preceded_by`, the note says
-"preceded", and the UI says "preceded" — cerbix does not know that the deploy caused anything. Fail-open:
-an error is counted (`cerbix_change_correlation_errors_total`) and the incident's delivery proceeds; a
+"preceded", and the UI says "preceded" — cerbix does not know that the deploy caused anything. Fail-open runs in BOTH directions (review [64]): the correlation never fails the incident's delivery, and
+the delivery's own outcome never skips the correlation — the attempt is made for the `opened` event whether
+the notification succeeded, failed or is heading for the dead letter, on its own bounded context, and its
+idempotence (the incident row is taken and the marker checked inside the transaction) is what makes a
+retried delivery write nothing the second time. An error is counted
+(`cerbix_change_correlation_errors_total`) and the incident's delivery is decided elsewhere; a
 change recorded AFTER the incident opened is not back-linked (the window is fixed at open; a later
 `resolved` does not recompute). **Invariants 7, 8, 9.**
 
@@ -408,8 +412,10 @@ Twenty-three, compared as a SET against the traceability map by `make docs-check
    the latest phase known at that instant with its `occurred_at` and lag copied and never updated — and
    the `🚀 Changes:` note is appended in the SAME transaction, exactly once through the marker guard; a
    later terminal phase rewrites neither;
-8. correlation is fail-open: a failing correlation is counted and the incident's delivery, open and
-   resolve are unchanged; a change recorded after open is not back-linked;
+8. correlation is fail-open in both directions: a failing correlation is counted and the incident's
+   delivery, open and resolve are unchanged, AND a failing notification does not skip the correlation —
+   the attempt is made for the `opened` event whatever the delivery did, idempotently, so a retry neither
+   duplicates nor double-counts; a change recorded after open is not back-linked;
 9. the links read symmetrically — `GET /incidents/{id}/changes` and the group's `incidents[]` come from
    the same rows — and no field, note or screen says "caused";
 10. the comparison's figures come from `serviceReliabilityCompareTx`, an extension of the series owner,

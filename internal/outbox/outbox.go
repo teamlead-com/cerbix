@@ -481,9 +481,15 @@ func (w *Worker) attachIncidentContext(ctx context.Context, inc domain.Incident)
 	}
 }
 
+// changeCorrelationBudget bounds one correlation attempt. It is deliberately its own budget
+// rather than the delivery's: the attempt runs whatever the delivery did (review [64]), and a
+// delivery that spent its whole budget must not make the correlation report a context error.
+const changeCorrelationBudget = 15 * time.Second
+
 // linkPrecedingChanges runs FR-025 D7's correlation for an opened service auto-incident. Errors
-// are logged and counted, never propagated — the incident event itself was already delivered
-// (invariant 8: the incident opens and resolves exactly as it does today).
+// are logged and counted, never propagated — the incident's delivery outcome is decided
+// elsewhere and is not this function's to change (invariant 8: the incident opens and resolves
+// exactly as it does today).
 func (w *Worker) linkPrecedingChanges(ctx context.Context, inc domain.Incident) {
 	res, err := w.store.LinkPrecedingChanges(ctx, inc.ID, w.changeWindow, w.changeNoteMax)
 	if err != nil {
@@ -574,8 +580,25 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 		// Ordering is enforced where it can be durable: `ClaimDueOutbox` will not release an event
 		// while an earlier event of the same incident is undelivered, and a CLAIMED row is not a
 		// delivered one. Nothing here needs to guess.
-		if err := w.webhooks.Deliver(ctx, ev); err != nil {
-			return err
+		derr := w.webhooks.Deliver(ctx, ev)
+		// Change correlation (FR-025 D7) is attempted for the OPENED event whatever the delivery
+		// did (review [64]). It used to sit after the early return above, which made it
+		// conditional on a webhook that has nothing to do with it: a subscriber's endpoint
+		// failing persistently left the service incident with no `incident_changes` links, no
+		// `🚀 Changes:` note, and no counted error — the correlation had never been attempted.
+		// D7/NFR-020 separate the two directions of fail-open: correlation must not block the
+		// notification, and the notification's failure must not skip the correlation. The attempt
+		// is idempotent (the store takes the incident row, returns `Skipped` when the note is
+		// already there), so a retried delivery cannot double-write or double-count, and it runs
+		// on its OWN bounded context off `settleCtx` — an exhausted delivery budget must not turn
+		// into a counted correlation error.
+		if ev.Type == domain.EventIncidentOpened && ev.Incident.Source == domain.SourceAuto && ev.Incident.ServiceID != "" {
+			cctx, cancel := context.WithTimeout(settleCtx, changeCorrelationBudget)
+			w.linkPrecedingChanges(cctx, ev.Incident)
+			cancel()
+		}
+		if derr != nil {
+			return derr
 		}
 		// Heuristic RCA context for freshly-opened auto-incidents: correlated
 		// co-failures, dominant error class, single-region hint — posted once as
@@ -584,12 +607,6 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 		// after a partial failure can't double-post.
 		if ev.Type == domain.EventIncidentOpened && ev.Incident.Source == domain.SourceAuto && ev.Incident.MonitorID != "" {
 			w.attachIncidentContext(ctx, ev.Incident)
-		}
-		// Change correlation (FR-025 D7): for a SERVICE auto-incident, the changes that preceded
-		// it are linked and named once — the same place, the same best-effort contract: a
-		// failure is logged and counted and never fails the (already delivered) event.
-		if ev.Type == domain.EventIncidentOpened && ev.Incident.Source == domain.SourceAuto && ev.Incident.ServiceID != "" {
-			w.linkPrecedingChanges(ctx, ev.Incident)
 		}
 		return nil
 

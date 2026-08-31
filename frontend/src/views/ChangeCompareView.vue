@@ -44,6 +44,7 @@ import {
   type ChangeCompareSide,
   type ChangeHorizon,
   type CompareSideView,
+  requestScope,
 } from "@/lib/changes";
 import { CHIP_BASE, CHIP_PLAIN, describeFailure, failureOf, isAbort, transportFailure } from "@/lib/gate";
 import { sealedLabel } from "@/lib/services";
@@ -70,26 +71,21 @@ const error = ref("");
 // link this view refused before any request. Exposed as data-status so a test can tell them apart.
 const errorStatus = ref<number | "client" | null>(null);
 
-let generation = 0;
-let inflight: AbortController | undefined;
-function begin(): { controller: AbortController; mine: number } {
-  inflight?.abort();
-  const controller = new AbortController();
-  inflight = controller;
-  return { controller, mine: ++generation };
-}
-const stale = (mine: number) => mine !== generation;
-onBeforeUnmount(() => {
-  generation++;
-  inflight?.abort();
-});
+// The generation guard, the abort set and the 10 s DEADLINE all come from the shared scope. This
+// view is the third caller (the card and the timeline are the others), and it was left out when
+// the scope moved into `lib/changes.ts` — so a service that answered and a comparison that never
+// settled held this page on "Loading…" for good, while the commit that moved the scope claimed
+// every comparison was bounded in time. Review [42].
+const scope = requestScope();
+const stale = (mine: number) => scope.stale(mine);
+onBeforeUnmount(() => scope.close());
 
 const SERVICE_GONE = "This service does not exist, or you cannot see it.";
 const CHANGE_GONE = "This change does not exist on this service, or you cannot see it.";
 const LINK_INCOMPLETE = "This link names no change — it needs a source and an external_id.";
 
 async function load() {
-  const { controller, mine } = begin();
+  const mine = scope.begin();
   loading.value = true;
   error.value = "";
   errorStatus.value = null;
@@ -99,43 +95,47 @@ async function load() {
     if (stale(mine)) return;
     if (!ws.projectId || !serviceId.value) return;
     const path = { projectID: ws.projectId, serviceID: serviceId.value };
-    const svcReq = api.GET("/api/v1/projects/{projectID}/services/{serviceID}", { params: { path }, signal: controller.signal });
+    const svcReq = scope.request<Detail>(mine, (signal: AbortSignal) =>
+      api.GET("/api/v1/projects/{projectID}/services/{serviceID}", { params: { path }, signal }),
+    );
     if (!source.value || !externalId.value) {
       // Refused here, before any comparison is asked; the service is still read for the header.
       error.value = LINK_INCOMPLETE;
       errorStatus.value = "client";
       const svc = await svcReq;
-      if (stale(mine)) return;
-      if (svc.data) service.value = svc.data;
+      if (svc.kind === "stale") return;
+      if (svc.kind === "ok" && svc.data) service.value = svc.data;
       return;
     }
-    const cmpReq = api.GET("/api/v1/projects/{projectID}/services/{serviceID}/changes/compare", {
-      // The cast sends the query's value as given (see `horizon` above).
-      params: { path, query: { source: source.value, external_id: externalId.value, horizon: horizon.value as ChangeHorizon } },
-      signal: controller.signal,
-    });
+    const cmpReq = scope.request<ChangeCompare>(mine, (signal: AbortSignal) =>
+      api.GET("/api/v1/projects/{projectID}/services/{serviceID}/changes/compare", {
+        // The cast sends the query's value as given (see `horizon` above).
+        params: { path, query: { source: source.value, external_id: externalId.value, horizon: horizon.value as ChangeHorizon } },
+        signal,
+      }),
+    );
     // Both requests are already in flight; what follows decides only the ORDER OF DECISION, and it
     // is the subject that decides. `await Promise.all([svcReq, cmpReq])` made the page wait for an
     // ANCILLARY answer before acting on the authoritative one, so a comparison that never settles —
     // a blackholed transport, not merely a slow one — held `loading` true forever while a 404 or a
     // 403 for the service was already in hand and would never be rendered (review [31]).
-    cmpReq.catch(() => {}); // the abort below must not surface as an unhandled rejection
     const svc = await svcReq;
-    if (stale(mine)) return;
-    if (svc.error || !svc.data) {
+    if (svc.kind === "stale") return;
+    if (svc.kind === "failed" || !svc.data) {
       // The service is the subject; without it the comparison has no header to sit under, so stop
-      // waiting for one. Aborting is what keeps a late arrival from writing into a dead page.
-      controller.abort();
-      const f = failureOf(svc);
+      // waiting for one. `scope.abort()` abandons it AT ONCE — not at its deadline — while leaving
+      // this generation live, so the 404 below is still rendered and `loading` still clears.
+      scope.abort();
+      const f = svc.kind === "failed" ? svc.failure : failureOf({});
       error.value = describeFailure(f, { notFound: SERVICE_GONE, denied: "You cannot see this service." });
       errorStatus.value = f.status;
       return;
     }
     service.value = svc.data;
     const res = await cmpReq;
-    if (stale(mine)) return;
-    if (res.error || !res.data) {
-      const f = failureOf(res);
+    if (res.kind === "stale") return;
+    if (res.kind === "failed" || !res.data) {
+      const f = res.kind === "failed" ? res.failure : failureOf({});
       error.value = describeChangeFailure(f, { notFound: CHANGE_GONE, denied: "You cannot read this service's changes." });
       errorStatus.value = f.status;
       return;

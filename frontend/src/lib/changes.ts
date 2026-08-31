@@ -518,6 +518,14 @@ export function requestScope() {
       gen++;
       abortAll();
     },
+    /**
+     * Abort what is in flight WITHOUT retiring the generation — for a caller that has decided the
+     * rest of its own work is pointless but is still the current one and must go on to render the
+     * decision it just made. The comparison view uses it when the SUBJECT refuses: the ancillary
+     * read is abandoned at once rather than left to its deadline, while the view stays live enough
+     * to clear `loading` and show the service's 404 (reviews [31] and [42]).
+     */
+    abort: abortAll,
     async request<T>(g: number, run: (signal: AbortSignal) => Promise<ScopeRes<T>>): Promise<ScopeOutcome<T>> {
       const controller = new AbortController();
       inflight.add(controller);

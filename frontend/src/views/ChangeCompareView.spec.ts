@@ -372,7 +372,12 @@ describe("ChangeCompareView — concurrency (D-0210 item 7)", () => {
     expect(signals.some((s) => s.aborted)).toBe(false);
 
     w.unmount();
-    expect(signals.every((s) => s.aborted), "one controller covers both reads of a load").toBe(true);
+    // The service read had already RESOLVED, so its controller left the scope's in-flight set and
+    // there is nothing there to abort; the comparison is what is still open. Until the shared
+    // `requestScope` this view used ONE controller for both reads, which made `every` the right
+    // check; now each request owns its own, and asserting on the settled one would be bookkeeping
+    // rather than behaviour.
+    expect(signals[1].aborted, "the read still in flight is aborted").toBe(true);
     gate.resolve(ok(compareBody()));
     await settle();
     expect(compareCalls(), "nothing new is asked after unmount").toHaveLength(1);
@@ -443,5 +448,36 @@ describe("ChangeCompareView — concurrency (D-0210 item 7)", () => {
     // The comparison was issued — the two go out together — and then abandoned.
     expect(compareCalls().length).toBe(1);
     expect(compareCalls()[0][1].signal.aborted).toBe(true);
+  });
+
+
+  // Review [42]: [31] made the SUBJECT decisive, which fixed the case where the service refuses. It
+  // left the other half — service 200 and a comparison that never settles — and the commit that
+  // moved `requestScope` into `lib/changes.ts` claimed every comparison was bounded in time while
+  // this view, its third caller, was still outside. It is on the scope now, so the 10 s deadline
+  // applies here too: fake timers, and the page ends in a visible transport error, not a spinner.
+  it("a blackholed comparison under a healthy service ends at the deadline, not never", async () => {
+    vi.useFakeTimers();
+    try {
+      serve({ service: ok(DETAIL), compare: () => new Promise<Res>(() => {}) });
+      const w = mountView();
+      await settle();
+
+      // The subject arrived; the comparison has not, and the page is honestly still loading.
+      expect(has(w, "compare-loading")).toBe(true);
+      expect(has(w, "compare-error")).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+
+      expect(has(w, "compare-loading")).toBe(false);
+      expect(has(w, "compare-error")).toBe(true);
+      expect(t(w, "compare-error").attributes("data-status")).toBe("0");
+      // The header still shows the subject that DID arrive — the deadline ends the comparison, not
+      // the page.
+      expect(t(w, "compare-identity").text()).toContain("github-actions");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

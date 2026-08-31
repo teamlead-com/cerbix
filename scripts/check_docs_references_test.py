@@ -3,13 +3,16 @@
 A guard that is not itself tested is a sentence about a guard. Each case below is a shape one review
 round actually found, or the hole the guard's own first draft had.
 """
+import ast
 import importlib.util
 import os
+import pathlib
 import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location("cdr", os.path.join(HERE, "check-docs-references.py"))
+CHECKER = os.path.join(HERE, "check-docs-references.py")
+spec = importlib.util.spec_from_file_location("cdr", CHECKER)
 cdr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cdr)
 
@@ -223,6 +226,32 @@ class DischargeParsing(unittest.TestCase):
         # `check_discharge` compares this key set with range(1, count+1) EXACTLY; before review [50]
         # it only looked up the required keys, so this row rode along unnoticed.
         self.assertEqual(sorted(set(rows) - set(range(1, 3))), [10])
+
+
+class TheCheckerClosesWhatItOpens(unittest.TestCase):
+    """Review [54]: every call site read documents with a bare `open(...).read()`, leaking the
+    descriptor until the collector noticed — 46 ResourceWarning lines from one verbose run, over the
+    temporary fixtures and every scanned living document alike. They are all routed through `read()`
+    now, and this asserts it structurally: an AST walk, not a grep, so the sentence describing the
+    old habit in that function's own docstring cannot satisfy or trip the check."""
+
+    def test_no_open_call_escapes_a_with_statement(self):
+        tree = ast.parse(pathlib.Path(CHECKER).read_text(encoding="utf-8"))
+        managed = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.With):
+                for item in node.items:
+                    for sub in ast.walk(item.context_expr):
+                        managed.add(id(sub))
+        stray = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "open"
+            and id(node) not in managed
+        ]
+        self.assertEqual(stray, [], f"open() outside a `with` at line(s) {stray} — use read()")
 
 
 class DecisionsAreVocabularyGuarded(unittest.TestCase):

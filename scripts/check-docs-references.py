@@ -31,6 +31,18 @@ Anything intentionally unresolvable lives in ALLOWED below, each with a reason.
 """
 import glob
 import os, re, sys, glob, itertools
+from pathlib import Path
+
+
+def read(path, **kw):
+    """Read a document, closing the handle.
+
+    Every call site used a bare `open(...).read()`, which leaks the descriptor until the garbage
+    collector notices and makes the suite print a ResourceWarning per scanned document (review
+    [54]). One reader, so no call site can forget again.
+    """
+    return Path(path).read_text(encoding='utf-8', **kw)
+
 
 # CHANGELOG.md is a LIVING document for this gate's purpose even though it is a historical
 # record: its RELEASE NOTES cite code paths a reader is expected to open, and it carried a
@@ -89,7 +101,7 @@ def source_text():
     for pat in ('internal/**/*.go', 'cmd/**/*.go', 'frontend/src/**/*.ts', 'frontend/src/**/*.vue',
                 'e2e/**/*.ts', 'internal/store/migrations/*.sql'):
         for f in glob.glob(pat, recursive=True):
-            parts.append(open(f, encoding='utf-8', errors='ignore').read())
+            parts.append(read(f, errors='ignore'))
     return '\n'.join(parts)
 
 DISCHARGE_DOC = 'docs/traceability.md'
@@ -161,7 +173,7 @@ def check_row_statuses():
     for doc in ROW_STATUS_DOCS:
         if not os.path.exists(doc):
             continue
-        for n, line in enumerate(open(doc, encoding='utf-8'), 1):
+        for n, line in enumerate(read(doc).splitlines(), 1):
             if not re.match(r'\| (AC|DoD|FR|NFR)-', line):
                 continue
             cells = split_row(line.rstrip('\n'))
@@ -297,12 +309,12 @@ def check_gate_stale_spellings():
     bad = []
     for path in (GATE_SPEC, 'docs/status.md', 'docs/decisions.md'):
         try:
-            lines = open(path, encoding='utf-8').read().split('\n')
+            lines = read(path).split('\n')
         except FileNotFoundError:
             continue
         bad += gate_stale_findings(path, lines)
     try:
-        text = open(GATE_SPEC, encoding='utf-8').read()
+        text = read(GATE_SPEC)
     except FileNotFoundError:
         return bad
     for h in gate_duplicate_headers(text):
@@ -338,7 +350,7 @@ def check_change_stale_spellings(paths=None):
         if not os.path.exists(path):
             continue
         in_guard = False
-        for n, line in enumerate(open(path, encoding='utf-8').read().split('\n'), 1):
+        for n, line in enumerate(read(path).split('\n'), 1):
             if path == FR025_SPEC and line.startswith('## '):
                 in_guard = bool(CHANGE_GUARD_SECTION.match(line))
             if in_guard or line.startswith('>') or 'retired spelling' in line:
@@ -358,7 +370,7 @@ def check_spec_banners():
     # names its requirement only when its prose happens to, so reading those would make the gate's
     # coverage depend on wording.
     done = set()
-    for line in open(status_path, encoding='utf-8'):
+    for line in read(status_path).splitlines():
         cells = split_row(line.rstrip('\n'))
         if len(cells) < 5:
             continue
@@ -368,7 +380,7 @@ def check_spec_banners():
 
     bad = []
     for spec in sorted(glob.glob('docs/specs/*.md')):
-        lines = open(spec, encoding='utf-8').read().splitlines()[:BANNER_LINES]
+        lines = read(spec).splitlines()[:BANNER_LINES]
         head = '\n'.join(lines)
         # The requirements a spec is ABOUT are named in its title line.
         owned = set(REQ_RE.findall(lines[0])) if lines else set()
@@ -401,7 +413,7 @@ def fr021_invariant_numbers():
     hole below it: adding traceability row 104 with no spec invariant, and deleting spec invariant
     102 while keeping 103, both passed. The discharge map has to match this set EXACTLY — a missing
     key is an unchecked requirement and an extra one is a requirement nobody made."""
-    text = open('docs/specs/func-service-reliability.md', encoding='utf-8').read()
+    text = read('docs/specs/func-service-reliability.md')
     # Collected as a LIST first. Folding straight into a set hid a duplicate: two `103.` entries with
     # different text passed, and the discharge map could only ever match one of them, so half a
     # requirement was silently unchecked.
@@ -429,7 +441,7 @@ def fr021_invariant_numbers():
 def fr025_invariant_numbers():
     """The SET of invariant numbers §6 of the FR-025 spec states — FR-021's discipline: a set, not a
     maximum, a renamed section a loud failure, a duplicate number a loud failure."""
-    text = open(FR025_SPEC, encoding='utf-8').read()
+    text = read(FR025_SPEC)
     i = text.find('\n## 6.')
     if i < 0:
         raise SystemExit(f'check-docs-references: {FR025_SPEC} has no "## 6." section; the FR-025 '
@@ -499,7 +511,7 @@ def check_discharge(src):
     and every row must name a test that exists or an INSPECTION: reason — that is what makes "done"
     a checkable claim instead of a memory of thirty iteration reports."""
     bad = []
-    text = open(DISCHARGE_DOC, encoding='utf-8').read()
+    text = read(DISCHARGE_DOC)
     # The FR-021 invariant count is READ from the spec, not written here. Hard-coding 91 meant a
     # discharge row above that number was neither required nor checked, so twelve invariants existed
     # only in the map — a claim nobody had made in the requirement it was being checked against.
@@ -541,7 +553,7 @@ def main():
     for doc in LIVING:
         if not os.path.exists(doc):
             continue
-        for n, line in enumerate(open(doc, encoding='utf-8'), 1):
+        for n, line in enumerate(read(doc).splitlines(), 1):
             for raw in PATH_RE.findall(line) + LINK_RE.findall(line):
                 for tok in expand(raw):
                     if tok in ALLOWED or raw in ALLOWED or resolves(tok):

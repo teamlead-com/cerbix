@@ -520,6 +520,19 @@ func validateChangeRecord(in store.RecordChangeInput) *domain.ChangeError {
 			return domain.NewChangeError(changeErrBodyInvalid, "", "%s", err.Error())
 		}
 	}
+	// `decision_id` last, as it is last in the body — and HERE rather than only in the store.
+	// The store still owns whether the id is a decision OF THIS SERVICE, which needs a read; what
+	// it cannot own is the SHAPE, because by the time the store is reached the request has already
+	// been admitted against §5a and has spent a token of the principal's record bucket. Ten
+	// malformed bodies therefore drained the bucket and the eleventh honest one was answered 429
+	// (review [8]). Both layers now ask `domain.DecisionIDMillis`, so there is one rule and the
+	// wire answer is unchanged: 400 with `decision_unknown`, only sooner.
+	if in.DecisionID != nil {
+		if _, ok := domain.DecisionIDMillis(*in.DecisionID); !ok {
+			return domain.NewChangeError(domain.ChangeErrDecisionUnknown, "decision_id",
+				"%q is not a decision of this service", *in.DecisionID)
+		}
+	}
 	return nil
 }
 

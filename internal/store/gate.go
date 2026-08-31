@@ -13,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // FR-024 — the reliability gate's store (func-reliability-gate.md, iter-0163 changeset 2).
@@ -175,22 +177,11 @@ func newGateDecisionID(evaluatedAt time.Time) (string, error) {
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32], nil
 }
 
-// gateDecisionIDMillis reads the 48-bit millisecond out of a decision id — the inverse of
-// newGateDecisionID — strictly: a text that is not a canonical 36-character lowercase-or-
-// uppercase hex UUID is refused. It is what lets the by-id read derive the row's UTC day from
-// the id alone, with no application clock anywhere (§5).
+// gateDecisionIDMillis is the inverse of newGateDecisionID. The rule itself lives in
+// `domain.DecisionIDMillis` because the API needs the identical answer one layer up; this stays
+// as the store's name for it so the ledger's call sites read as they always did.
 func gateDecisionIDMillis(id string) (int64, bool) {
-	if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
-		return 0, false
-	}
-	hexOnly := strings.ReplaceAll(id, "-", "")
-	raw, err := hex.DecodeString(hexOnly)
-	if err != nil || len(raw) != 16 {
-		return 0, false
-	}
-	var ts [8]byte
-	copy(ts[2:8], raw[0:6])
-	return int64(binary.BigEndian.Uint64(ts[:])), true
+	return domain.DecisionIDMillis(id)
 }
 
 // pgErrCode returns the SQLSTATE of err, "" when it is not a server error.

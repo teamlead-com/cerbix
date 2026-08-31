@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -719,4 +721,24 @@ func DecideGateAlgebra(verdicts []GateClauseVerdict, unknown GateUnknownBehavior
 	default:
 		return GateStateAllow, GateActionAllow, reasons
 	}
+}
+
+// DecisionIDMillis reads the 48-bit millisecond out of a gate decision id, strictly: a text that
+// is not a canonical 36-character hex UUID is refused. It lives in the domain because TWO layers
+// need the same answer and must not disagree about it — the store, to derive a row's UTC day from
+// the id with no application clock (FR-024 §5), and the API, to refuse a malformed `decision_id`
+// on a change record BEFORE the request is admitted against the §5a rate bounds (FR-025, review
+// [8] of the close-out party: while only the store knew the shape, ten malformed bodies drained a
+// principal's record bucket and the eleventh honest one was answered 429).
+func DecisionIDMillis(id string) (int64, bool) {
+	if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
+		return 0, false
+	}
+	raw, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
+	if err != nil || len(raw) != 16 {
+		return 0, false
+	}
+	var ts [8]byte
+	copy(ts[2:8], raw[0:6])
+	return int64(binary.BigEndian.Uint64(ts[:])), true
 }

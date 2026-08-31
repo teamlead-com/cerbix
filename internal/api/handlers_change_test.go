@@ -323,6 +323,8 @@ func TestChangeRecordDomainValidationBeforeTheBounds(t *testing.T) {
 		{map[string]any{"ref": "v1​"}, "ref_invalid"},
 		{map[string]any{"ref": "v1\nv2"}, "ref_invalid"},
 		{map[string]any{"url": "http://ci.example/run/42"}, "url_invalid"},
+		{map[string]any{"decision_id": "not-a-uuid"}, "decision_unknown"},
+		{map[string]any{"decision_id": "0199a0f0-1111-7222-8333-44445555666"}, "decision_unknown"},
 	}
 	for _, tc := range cases {
 		rec := do(h, gateEditor, http.MethodPost, changeP(gateSvcID), changeWith(t, changeBody, tc.set))
@@ -343,6 +345,46 @@ func TestChangeRecordDomainValidationBeforeTheBounds(t *testing.T) {
 	}
 	if strings.Join(rejected, ",") != strings.Join(want, ",") {
 		t.Fatalf("rejected = %v, want %v", rejected, want)
+	}
+}
+
+// Review [8]: a body the handler refuses must not cost the principal anything. The record bucket
+// is 10/min, and a malformed `decision_id` used to be caught only by the store — one layer BELOW
+// admission — so ten such bodies spent the whole bucket and the eleventh honest record was
+// answered 429 instead of 201. The refusals here are deliberately more numerous than the bucket:
+// if any one of them took a token the final valid record could not be created.
+func TestChangeRecordMalformedDecisionIDCostsNoRateBudget(t *testing.T) {
+	fs := seededStore()
+	seedGateService(fs, "p1", gateSvcID)
+	m := &changeFakeMetrics{}
+	h := newChangeHandler(fs, changeLimits(), m)
+
+	for i := 0; i < 25; i++ {
+		body := changeWith(t, changeBody, map[string]any{"decision_id": "not-a-uuid"})
+		rec := do(h, gateEditor, http.MethodPost, changeP(gateSvcID), body)
+		wantStatus(t, rec, http.StatusBadRequest, "decision_unknown")
+		if ra := rec.Header().Get("Retry-After"); ra != "" {
+			t.Fatalf("request %d carried Retry-After %q — it was rate-refused, not body-refused", i, ra)
+		}
+	}
+	if calls := fs.changeCalls(); len(calls) != 0 {
+		t.Fatalf("a malformed decision_id reached the store: %v", calls)
+	}
+	wantStatus(t, do(h, gateEditor, http.MethodPost, changeP(gateSvcID), changeBody), http.StatusCreated, "")
+}
+
+// The new gate must not OVER-refuse. Whether a well-formed id is a decision of this service needs
+// a read, so it stays the store's question; the handler's job ends at the shape. This pins the
+// half that a shape check could silently swallow — the mutation "refuse every decision_id the
+// handler cannot resolve" fails here, not in the budget test above.
+func TestChangeRecordWellFormedDecisionIDIsLeftToTheStore(t *testing.T) {
+	fs := seededStore()
+	seedGateService(fs, "p1", gateSvcID)
+	h := newChangeHandler(fs, changeLimits(), &changeFakeMetrics{})
+	body := changeWith(t, changeBody, map[string]any{"decision_id": "0199a0f0-1111-7222-8333-444455556666"})
+	wantStatus(t, do(h, gateEditor, http.MethodPost, changeP(gateSvcID), body), http.StatusCreated, "")
+	if calls := fs.changeCalls(); len(calls) != 1 {
+		t.Fatalf("store calls = %v, want the well-formed id passed through to the store", calls)
 	}
 }
 

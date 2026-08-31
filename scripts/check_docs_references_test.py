@@ -5,6 +5,7 @@ round actually found, or the hole the guard's own first draft had.
 """
 import importlib.util
 import os
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -183,6 +184,80 @@ class StaleSpellingGuard(unittest.TestCase):
     def test_duplicate_schema_headers_are_caught(self):
         text = "service_gate_decisions  (a)\nservice_gate_overrides  (b)\nservice_gate_decisions  (c)\n"
         self.assertEqual(cdr.gate_duplicate_headers(text), ["service_gate_decisions"])
+
+
+TABLE = """## H
+
+| # | invariant | discharge |
+| - | --------- | --------- |
+| 1 | one | `TestOne` |
+| 2 | two | `TestTwo` |
+"""
+
+
+class DischargeParsing(unittest.TestCase):
+    """Review [49]/[50]: the parser wrote straight into a dict, so a SECOND row for the same number
+    replaced the first and disappeared — a table could carry two rows for invariant 1, be one
+    invariant short, and still satisfy both a count and a required-key check. The same loop only
+    asked whether every required number was present, so an EXTRA row above the count was invisible
+    too. Both are now returned, and these probes fail if either regresses."""
+
+    def test_a_second_row_for_the_same_number_is_reported_not_overwritten(self):
+        rows, dups = cdr.discharge_rows(TABLE + "| 1 | one again | `TestThree` |\n", "## H")
+        self.assertEqual(dups, [1])
+        self.assertEqual(rows[1], "`TestOne`")    # the FIRST row is kept, the duplicate is named
+        self.assertEqual(sorted(rows), [1, 2])
+
+    def test_a_clean_table_reports_no_duplicates(self):
+        rows, dups = cdr.discharge_rows(TABLE, "## H")
+        self.assertEqual(dups, [])
+        self.assertEqual(sorted(rows), [1, 2])
+
+    def test_a_missing_table_is_distinguishable_from_an_empty_one(self):
+        rows, dups = cdr.discharge_rows(TABLE, "## NOT THERE")
+        self.assertIsNone(rows)
+        self.assertEqual(dups, [])
+
+    def test_a_row_numbered_above_the_matrix_size_is_visible_to_the_caller(self):
+        rows, _ = cdr.discharge_rows(TABLE + "| 10 | extra | `TestTen` |\n", "## H")
+        # `check_discharge` compares this key set with range(1, count+1) EXACTLY; before review [50]
+        # it only looked up the required keys, so this row rode along unnoticed.
+        self.assertEqual(sorted(set(rows) - set(range(1, 3))), [10])
+
+
+class DecisionsAreVocabularyGuarded(unittest.TestCase):
+    """Review [49]: FR-025 §10 promises the retired spellings are refused in every LIVING document,
+    and AGENTS lists docs/decisions.md among those edited in place — but it was in neither the
+    scanned list nor, therefore, the guard. Reference checking stays off for it; the vocabulary
+    guard does not."""
+
+    def test_decisions_is_in_the_scanned_set_and_not_in_the_reference_checked_one(self):
+        self.assertIn(cdr.DECISIONS_DOC, cdr.change_guard_docs())
+        self.assertNotIn(cdr.DECISIONS_DOC, cdr.LIVING)  # not reference-checked, deliberately
+
+    def test_a_retired_spelling_in_a_decisions_style_document_is_refused(self):
+        """The functional probe, not a list membership: give the guard a file that says
+        `change_events` and it must object. The first version of this test asserted on the
+        function's docstring, which is a sentence that cannot fail."""
+        with tempfile.TemporaryDirectory() as d:
+            bad_doc = os.path.join(d, "decisions.md")
+            with open(bad_doc, "w", encoding="utf-8") as fh:
+                fh.write("## D-9999\n\nThe pipeline writes a row into `change_events` and sets `caused_by`.\n")
+            found = cdr.check_change_stale_spellings([bad_doc])
+            # BOTH retired spellings on that line are named, not just the first: a reader fixing one
+            # and re-running should not discover the other on the next pass.
+            self.assertEqual(len(found), 2, found)
+            self.assertIn("service_changes", found[0][3])
+            self.assertIn("preceded", found[1][3])
+
+            good_doc = os.path.join(d, "clean.md")
+            with open(good_doc, "w", encoding="utf-8") as fh:
+                fh.write("## D-9999\n\nThe pipeline writes a row into `service_changes` and the note says preceded.\n")
+            self.assertEqual(cdr.check_change_stale_spellings([good_doc]), [])
+
+    def test_the_real_decisions_document_carries_no_retired_spelling(self):
+        bad = [b for b in cdr.check_change_stale_spellings() if b[0] == cdr.DECISIONS_DOC]
+        self.assertEqual(bad, [])
 
 
 if __name__ == "__main__":

@@ -11,9 +11,16 @@ resolving.
 WHAT IS CHECKED — only documents that are edited in place (AGENTS "Documentation Layout"):
   docs/status.md, docs/traceability.md, docs/specs/*.md, docs/overview.md, docs/runbook.md,
   docs/project-description.md, README.md, CLAUDE.md
-Iteration reports (`docs/iterations/*.md`), review snapshots (`docs/checks/*`) and
-`docs/decisions.md` are IMMUTABLE or historical by contract: they record what was true when they
-were written, and a rename afterwards does not make them wrong. They are deliberately not checked.
+Iteration reports (`docs/iterations/*.md`) and review snapshots (`docs/checks/*`) are IMMUTABLE by
+contract: they record what was true when they were written, and a rename afterwards does not make
+them wrong. They are deliberately not checked for references.
+
+`docs/decisions.md` is a MIXED case and used to be described here as simply historical, which was
+wrong twice over: AGENTS lists it among the documents edited in place, and FR-025 §10 promises that
+a retired spelling is refused in every LIVING document. Its reference checking stays off — a D-record
+naming a path that has since moved is still an accurate record of that decision — but the FR-025
+stale-spelling guard DOES scan it, because a decision introducing `change_events` or `caused_by`
+would be a live claim about the product's vocabulary, not a historical one (review [49]).
 
 WHAT IS CHECKED IN THEM:
   * backticked repo paths (`internal/...go`, `frontend/src/...vue`, `migrations/000NN_*.sql`, ...)
@@ -96,24 +103,35 @@ FR023_MATRIX_HEADING = '### FR-023 required test matrix (§7, written before the
 # says so ("Twenty-three, compared as a SET against the traceability map by `make docs-check`"); §7 has
 # nine scenario GROUPS, one row each.
 FR025_SPEC = 'docs/specs/func-change-intelligence.md'
+# Reference-checked: no. Vocabulary-guarded: yes. See the module docstring (review [49]).
+DECISIONS_DOC = 'docs/decisions.md'
 FR025_HEADING = '### FR-025 invariants (§6 of func-change-intelligence.md)'
 FR025_MATRIX_HEADING = '### FR-025 required test matrix (§7, written before the code)'
 
 
 def discharge_rows(text, heading):
-    """Rows of the numbered table that follows `heading`, as {number: discharge cell}."""
+    """Rows of the numbered table that follows `heading`, as ({number: cell}, [duplicate numbers]).
+
+    The duplicates are returned rather than dropped. Writing straight into a dict made a second row
+    for the same number OVERWRITE the first and vanish — so a table could carry two rows for
+    invariant 1, be short one invariant, and still satisfy a count and a required-key check (review
+    [49] of the close-out party, reproduced in memory: 23 rows expected, 23 found, no error)."""
     i = text.find(heading)
     if i < 0:
-        return None
-    out = {}
+        return None, []
+    out, dups = {}, []
     for line in text[i:].split('\n')[1:]:
         if line.startswith('### ') or line.startswith('## '):
             break
         cells = [c.strip() for c in line.split('|')]
         if len(cells) < 5 or not cells[1].isdigit():
             continue
-        out[int(cells[1])] = cells[3]
-    return out
+        n = int(cells[1])
+        if n in out:
+            dups.append(n)
+            continue
+        out[n] = cells[3]
+    return out, dups
 
 
 ROW_STATUS_DOCS = ['docs/status.md']
@@ -305,9 +323,18 @@ CHANGE_STALE = [
 CHANGE_GUARD_SECTION = re.compile(r'^## 10\.')
 
 
-def check_change_stale_spellings():
+# Every document the FR-025 vocabulary guard reads. `docs/decisions.md` is here and NOT in LIVING:
+# it is exempt from reference checking (a D-record may name a path that has since moved) but not
+# from the vocabulary guard, which §10 promises for every living document and which AGENTS' own
+# classification of decisions.md as edited-in-place demands (review [49]). A module-level list so a
+# test can assert what is scanned instead of trusting a comment.
+def change_guard_docs():
+    return [FR025_SPEC] + [d for d in LIVING if d != FR025_SPEC] + [DECISIONS_DOC]
+
+
+def check_change_stale_spellings(paths=None):
     bad = []
-    for path in [FR025_SPEC] + [d for d in LIVING if d != FR025_SPEC]:
+    for path in paths if paths is not None else change_guard_docs():
         if not os.path.exists(path):
             continue
         in_guard = False
@@ -428,9 +455,13 @@ def check_invariant_set(src, text, expected, heading=INV_HEADING, label='FR-021'
     typo rather than a decision. Say which numbers, not merely that the counts differ: the point of
     the map is that a reader can follow it."""
     bad = []
-    rows = discharge_rows(text, heading)
+    rows, dups = discharge_rows(text, heading)
     if rows is None:
         return [(DISCHARGE_DOC, 0, 'discharge', f'the {label} invariant table is missing entirely')]
+    for n in sorted(set(dups)):
+        bad.append((DISCHARGE_DOC, 0, 'discharge',
+                    f'{label} invariant {n} has MORE THAN ONE discharge row — the second used to '
+                    f'overwrite the first, so the table could be one invariant short and still count right'))
     holes = sorted(set(range(1, max(expected) + 1)) - expected)
     if holes:
         bad.append((DISCHARGE_DOC, 0, 'discharge',
@@ -482,10 +513,19 @@ def check_discharge(src):
                                   (FR023_HEADING, 16, 'FR-023 invariant'),
                                   (FR023_MATRIX_HEADING, 19, 'FR-023 scenario'),
                                   (FR025_MATRIX_HEADING, 9, 'FR-025 scenario')):
-        rows = discharge_rows(text, heading)
+        rows, dups = discharge_rows(text, heading)
         if rows is None:
             bad.append((DISCHARGE_DOC, 0, 'discharge', f'the {label} table is missing entirely'))
             continue
+        for n in sorted(set(dups)):
+            bad.append((DISCHARGE_DOC, 0, 'discharge',
+                        f'{label} {n} has MORE THAN ONE row — the second silently replaced the first'))
+        # EXACT key equality, not merely "every required number is present". A required-key loop let
+        # a tenth row sit in a nine-scenario matrix unnoticed, which is a scenario nobody agreed to
+        # measured as if they had (review [50]).
+        for n in sorted(set(rows) - set(range(1, count + 1))):
+            bad.append((DISCHARGE_DOC, 0, 'discharge',
+                        f'{label} table has a row numbered {n}, but the matrix has {count} entries'))
         for n in range(1, count + 1):
             cell = rows.get(n)
             if cell is None:

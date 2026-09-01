@@ -135,9 +135,17 @@ test:
 	@mkdir -p $(GOCACHE) $(GOMODCACHE)
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test ./...
 
+## race: the full suite under the race detector, with the timeout CI uses
+##
+## -timeout 40m is not padding: internal/store runs the fencing and contention tests
+## serially against a live database and needs ~11 minutes under -race on a developer
+## machine, which is PAST go test's 10 m default. Without the flag the package dies
+## with "panic: test timed out" naming whichever test happened to be running, and the
+## reader debugs the wrong thing (iter-0163 hit this in CI; .github/workflows/tests.yml
+## has carried the flag since).
 race:
 	@mkdir -p $(GOCACHE) $(GOMODCACHE)
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -race ./...
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -race -count=1 -timeout 40m ./...
 
 lint:
 	golangci-lint run ./...

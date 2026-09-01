@@ -106,7 +106,8 @@ authorized `org_id`/`project_id` set. A missing filter is a security defect.
 From the repo root:
 
 - `make test` / `go test ./...` — unit and fake-backed integration tests.
-- `make race` / `go test -race ./...` — concurrency checks (scheduler, worker, SSE).
+- `make race` — the full suite under the race detector (`-timeout 40m`, which
+  `internal/store` needs; a bare `go test -race ./...` dies on the 10 m default).
 - `make build` — builds `bin/cerbix` with version/commit ldflags.
 - `make dev-init && make dev-up` — initialize a fresh base broker pin and start the full single-process dev stack.
 - `make dev-down && make dev-up-distributed` — stop single and start the distributed-role dev stack after the explicit migration barrier.

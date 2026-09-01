@@ -6,6 +6,108 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [v0.1.7] - 2026-09-02
+
+PromQL grew up: it is expressible in a Monitoring-as-Code bundle and can authenticate to a Prometheus
+behind basic auth. One security fix rides with it, and it BREAKS a configuration that works today —
+read the upgrade note first. No migration.
+
+### ⚠️ Upgrade Notes
+
+- **A monitor target may no longer carry credentials in its URL userinfo.**
+  `https://user:pass@prom.internal:9090` is refused on every surface now, not only in bundles. It used
+  to work — Go's `net/http` turns such a URL into an `Authorization: Basic` header on its own — and the
+  password was stored as plaintext in `monitors.target`, which the API's redaction does not blank, so
+  every VIEWER of the project could read it in the monitor list. **Stored monitors keep probing**:
+  nothing re-validates on read, so the refusal appears the next time such a monitor is EDITED. Move the
+  credential to the type's own settings (`promql` now has them) or to a target without userinfo before
+  editing ([f827d96](https://github.com/teamlead-com/cerbix/commit/f827d96))
+- **No migration, no configuration change.** A `promql` monitor with no `auth_mode` behaves exactly as
+  before, at validation and at the dispatch gate — the default is resolved, never written, so no
+  canonical hash moves and no monitor is rescheduled ([754e5dc](https://github.com/teamlead-com/cerbix/commit/754e5dc))
+- **Worth knowing if you deploy the release BINARIES:** the `v0.1.6` assets were compiled with Go
+  1.25.12, which carries seven known standard-library vulnerabilities this release closes by moving the
+  pin. The container image was never affected — it is built on `golang:1.26.6` — so an installation
+  running the image was not exposed by this ([be75d51](https://github.com/teamlead-com/cerbix/commit/be75d51))
+
+### New Features
+
+**PromQL: bundles and basic auth**
+
+- **A `promql` monitor can live in a Monitoring-as-Code bundle.** It carries `query` — required,
+  bounded at 1024 characters, never blank. The type was excluded because a 2026-08 classification
+  grouped it with the credentialed types; the prober had in fact never had a credential slot, so what
+  stood between it and a bundle was one typed field ([39245fe](https://github.com/teamlead-com/cerbix/commit/39245fe))
+- **Optional HTTP basic auth against Prometheus**, through `auth_mode: none | basic`. `basic` requires
+  a `username` and a credential — a project-secret reference in a bundle, value or reference in the
+  UI/API — and the prober sends the header only when a username is configured, so an unauthenticated
+  Prometheus is never handed an empty one. Bearer tokens and mTLS are deliberately NOT supported: basic
+  is what Prometheus implements natively, and for anything else the answer remains a regional agent
+  plus an unauthenticated path for the prober ([754e5dc](https://github.com/teamlead-com/cerbix/commit/754e5dc))
+- **In the SPA:** the PromQL section gained an Authentication selector, a username field and the same
+  credential control the database types use — value or project secret, with the dangling-secret warning
+  ([05db534](https://github.com/teamlead-com/cerbix/commit/05db534))
+
+### Security
+
+- **The Go pin carries the standard-library fixes `govulncheck` asks for.** Under the version the
+  workflows install from `go.mod` (1.25.12) it reported SEVEN called vulnerabilities — `crypto/tls` ×2,
+  `net/http` ×2, `encoding/xml`, `encoding/asn1`, `html/template` — reached through ordinary product
+  paths: the HTTP prober's `Client.Do`, the mailer's TLS handshake, the operational server's
+  `ListenAndServe`. All seven are fixed in 1.25.13, and one line moves the scan AND the release
+  binaries, because all three workflows read the version from `go.mod` ({c('be75d51')})
+- **The full-history secret scan is clean, without weakening it.** Its seven findings were read one by
+  one and are fabricated test fixtures — two sequential-hex AES keys, the same two base64-encoded, and
+  an `actor_label` in a committed CLI transcript, which is the server's derived name for a bearer and
+  never the token. Nothing needed rotating. The allowlist entries are anchored to those exact literals,
+  so any other high-entropy string in the same files still fails the scan ({c('7a9350d')})
+
+### Improvements
+
+**Correctness**
+
+- **The file provider no longer conflates "has settings" with "is credentialed".** One entry point
+  routes a type to the credential registry, to its own schema, or to an error naming the key — which is
+  what the specification has said in words since the beginning ([39245fe](https://github.com/teamlead-com/cerbix/commit/39245fe))
+- **A blank-after-trim `query` is refused.** A presence check accepts `"   "`, and a whitespace-only
+  expression makes the prober report "no query configured" on every run: a monitor that is configured,
+  scheduled and permanently meaningless ([754e5dc](https://github.com/teamlead-com/cerbix/commit/754e5dc))
+- **A rejection reason is decided by a typed error, not by matching message text**, so a reworded
+  validator can no longer silently change which reason a bundle is refused with ([754e5dc](https://github.com/teamlead-com/cerbix/commit/754e5dc))
+
+**Repository hygiene**
+
+- **The documented test command is the one that finishes.** CI has passed `-timeout 40m` since
+  iter-0163 because `internal/store` needs about eleven minutes under `-race`; `make race`, `CLAUDE.md`
+  and `AGENTS.md` did not, so a developer running the documented command met
+  `panic: test timed out` naming whichever test was running — a name that sends the reader after the
+  wrong bug ([9608fbf](https://github.com/teamlead-com/cerbix/commit/9608fbf))
+- **Dependabot got quieter without hiding anything**: monthly instead of weekly, all MAJOR bumps in one
+  PR per ecosystem instead of one each, lower open-PR limits, and a cooldown so a version released
+  yesterday is not proposed today ([18e3564](https://github.com/teamlead-com/cerbix/commit/18e3564))
+- **A roadmap exists** (`docs/roadmap.md`) and the PRD points at it; the red Security workflow is its
+  first item ([6e89c84](https://github.com/teamlead-com/cerbix/commit/6e89c84), [1efd5dc](https://github.com/teamlead-com/cerbix/commit/1efd5dc))
+- **A flake left the suite by being understood rather than retried.** A scheduler test waited on the
+  gate pass's sink events and then asserted on the leader gauge, which the leadership loop publishes on
+  an unordered path — so under load it read the state before the step-down landed. The assertion now
+  waits for the signal it asserts on, with the same requirement and its own deadline ([aa3cbfb](https://github.com/teamlead-com/cerbix/commit/aa3cbfb))
+
+### API · Metrics · Schema
+
+- **API:** the monitor `config` description now names promql's settings (`query`, and with
+  `auth_mode: "basic"` a username plus `password` | `password_ref`); a monitor target with URL userinfo
+  is refused with 400 on create and update.
+- **Metrics:** unchanged.
+- **Schema:** no migration. `promql` joins the credential registry, so `monitor_secret_refs` covers its
+  `password_ref` through the same normalization every credentialed type uses.
+
+<sub>14 commits · decisions D-0145 (addendum) and D-0215 · no requirement row: the type boundary is
+FR-017's, and extending it is an addendum to its decision rather than a new requirement · full `-race`
+suite green under the new pin, browser suite 59 passed / 1 skipped, `govulncheck` and `gitleaks` both
+clean</sub>
+
+---
+
 ## [v0.1.6] - 2026-09-01
 
 Two requirements that turn reliability facts into something a pipeline can act on: a **release gate**

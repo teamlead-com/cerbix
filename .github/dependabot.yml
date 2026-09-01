@@ -1,20 +1,34 @@
 version: 2
-# Grouped updates: instead of one PR per dependency (which produced ~20 PRs on the
-# first run), each ecosystem opens a SINGLE PR bundling all minor+patch bumps.
-# Major bumps still open their own PRs (they can break and deserve individual review).
+# Update policy, tuned for a repository where dependencies are swept deliberately
+# rather than merged as they arrive (iter-0159: patch and minor together, each MAJOR
+# alone with its own verification).
+#
+# Three knobs keep the volume honest without hiding anything:
+#   * monthly, not weekly — a sweep is a deliberate act, and a weekly reminder of the
+#     same four majors is not new information;
+#   * TWO groups per ecosystem — one PR for minor+patch, one PR for ALL majors. A
+#     major still gets reviewed on its own before it lands; the grouped PR is the
+#     notification, not the merge;
+#   * a cooldown, so a version released yesterday is not proposed today and the same
+#     PR is not rewritten every time upstream ships a patch.
 updates:
   # Go backend
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
       time: "04:00"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
     groups:
       go-modules:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      go-modules-major:
+        patterns: ["*"]
+        update-types: ["major"]
     labels:
       - "dependencies"
       - "backend"
@@ -25,26 +39,33 @@ updates:
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "monthly"
       time: "04:00"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
     groups:
       frontend:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      frontend-major:
+        patterns: ["*"]
+        update-types: ["major"]
     labels:
       - "dependencies"
       - "frontend"
     commit-message:
       prefix: "build(deps-frontend)"
 
-  # Dockerfile base images — group everything (few, low-risk)
+  # Dockerfile base images — few, low-risk, everything in one PR
   - package-ecosystem: "docker"
     directory: "/docker"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    cooldown:
+      default-days: 7
     groups:
       docker:
         patterns: ["*"]
@@ -52,12 +73,14 @@ updates:
       - "dependencies"
       - "docker"
 
-  # GitHub Actions — group everything (version/SHA bumps, low-risk)
+  # GitHub Actions — SHA bumps, low-risk, everything in one PR
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]

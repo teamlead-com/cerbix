@@ -1,8 +1,9 @@
 # iter-0165 — the change CLI against a running server, confirmed at the current head
 
 > This file is EVIDENCE, not narrative. Every line below is raw stdout/stderr and an exit code from the
-> commands quoted with them, against the image named here. `CERBIX_TOKEN` never reached this log: the
-> capture substituted it in every argv, and `grep` for the literal returns zero.
+> commands quoted with them, against the image named here, and every `argv` is the COMPLETE command with only
+> the token value substituted — no elisions. `CERBIX_TOKEN` never reached this log: `grep` for the literal
+> returns zero.
 
 Written because review [59] of the close-out party was right about two things at once: the earlier
 attestation summarised where it should have transcribed, and a reproduction built from a later tree is not
@@ -90,14 +91,22 @@ usage: cerbix change record --project <id> --service <id> --kind deploy|rollback
   argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service d8b1223d-346f-42e9-90a0-bbc9daaa54e3 --source github-actions --external-id b-cli3-1788220136 --kind deploy --phase started
   stdout: —
   stderr: cerbix: change: 401 unauthorized
-17 no CERBIX_TOKEN             exit=1
-  argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service d8b1223d-346f-42e9-90a0-bbc9daaa54e3 --source github-actions --external-id x-cli3-1788220136 --kind deploy --phase started
+17a same token, works          exit=0
+  argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service 910eb61e-2c50-4907-990c-df858fbe984f --source github-actions --external-id rev-1788220782 --kind deploy --phase started
+  stdout: recorded change=01a05a43-b8ff-70ed-9420-94b6e76d71f2 kind=deploy phase=started
+  stderr: —
+17b revoke that same token
+  request:  DELETE /api/v1/tokens/f2b68a19-c7d9-4812-b121-1fe49295bbaf   (session-auth, org admin)
+  status:   204
+  body:
+17c same token, revoked        exit=1
+  argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service 910eb61e-2c50-4907-990c-df858fbe984f --source github-actions --external-id rev-1788220782-after --kind deploy --phase started
   stdout: —
-  stderr: cerbix: change: CERBIX_TOKEN is not set (the API token that authenticates to the server; environment only, never a flag)
-18 revoked token               exit=1
-  argv:   cerbix change record … (token revoked a moment earlier)
-  stdout:
   stderr: cerbix: change: 401 unauthorized
+17d no CERBIX_TOKEN            exit=1
+  argv:   env -u CERBIX_TOKEN /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service 910eb61e-2c50-4907-990c-df858fbe984f --source github-actions --external-id noenv-rev-1788220782 --kind deploy --phase started
+  stdout:
+  stderr: cerbix: change: CERBIX_TOKEN is not set (the API token that authenticates to the server; environment only, never a flag)
 ```
 
 ## What the rows establish
@@ -108,8 +117,12 @@ usage: cerbix change record --project <id> --service <id> --kind deploy|rollback
   `phase_exists`), a phase after a terminal one (409 `phase_order`), and the 400s for `decision_id`,
   `url`, `source`, `kind`, both ends of the `occurred_at` window, an explicitly empty `--at`, an unknown
   service (404) and a missing required flag with its usage line.
-* **exit 1** — credentials and transport, never a decision: a bogus token, no `CERBIX_TOKEN` at all, and a
-  token revoked while the CLI still holds it.
+* **exit 1** — credentials and transport, never a decision: a bogus token (16), no `CERBIX_TOKEN` at all
+  (17d), and a token revoked while the CLI still holds it. That last one is rows 17a–17c together, and it is
+  three rows rather than one because a 401 on its own proves nothing about revocation: 17a is the SAME token
+  recording a change successfully, 17b is the revocation itself with its request, its token id and its 204,
+  and 17c is that same token, one command later, refused. Review [64] asked for exactly that chain, and it was
+  right to — the earlier version asserted the revocation in prose and showed only the 401.
 
 Row 13 is review [52]'s fix seen end to end: `--at ""` travels verbatim and the SERVER refuses it, rather
 than the CLI silently substituting the invocation instant.
@@ -125,5 +138,7 @@ what this transcript demonstrates against a running server rather than a fake.
 make dev-build && make dev-up          # dev-up runs dev-build again; the second image id is the live one
 make dev-test                          # 58 passed, 1 skipped
 go build -o /tmp/cerbix-cli ./cmd/cerbix
-CERBIX_URL=http://localhost:8080 CERBIX_TOKEN=<a CI token> /tmp/cerbix-cli change record …
+CERBIX_URL=http://localhost:8080 CERBIX_TOKEN=<a CI token> /tmp/cerbix-cli change record \
+  --project <project id> --service <service id> --source github-actions \
+  --external-id <run id> --kind deploy --phase started
 ```

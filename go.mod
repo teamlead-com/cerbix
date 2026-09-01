@@ -1,6 +1,6 @@
 module github.com/teamlead-com/cerbix
 
-go 1.25.12
+go 1.25.13
 
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0

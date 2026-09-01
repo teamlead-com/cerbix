@@ -13,5 +13,18 @@ regexes = [
   # Fabricated password literal in the password-reset test body (not a credential);
   # generic-api-key flags it on entropy. internal/auth/handlers_reset_test.go.
   '''pw1234567890''',
+  # The two fabricated AES keys the encryption tests are built on — sequential hex,
+  # never a credential, and the SAME two strings appear base64-encoded in the config
+  # tests. Anchored, so any OTHER high-entropy literal in those files still fails.
+  # internal/secret/aad_test.go, internal/config/secrets_test.go.
+  '''^0123456789abcdef0123456789abcdef$''',
+  '''^fedcba9876543210fedcba9876543210$''',
+  '''^MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=$''',
+  '''^ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=$''',
+  # A committed CLI-evidence transcript prints `actor_label`, which is the server's
+  # DERIVED name for the bearer (`token:<name>`) and never the token itself — the
+  # transcript redacts the secret and shows `"token": "<redacted>"` two lines above.
+  # The e2e tokens are named `<purpose>-<unix ts>`. docs/iterations/*-evidence.md.
+  '''^[a-z][a-z0-9-]*-17[0-9]{8}$''',
 ]
 paths = []

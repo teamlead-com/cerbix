@@ -193,17 +193,34 @@ func TestGateMaintenanceGaugesFollowTheReportAndClearOnStepDown(t *testing.T) {
 	// The deposed leader re-contends and (the fake still says leader) starts a fresh loop, so
 	// the tail may hold further gauges/clear pairs; the leader gauge went true then false at
 	// least once, and every leadership's gate loop ends with its clear.
-	states := leaderSpy.snapshot()
-	var sawTrue, sawFalseAfterTrue bool
-	for _, v := range states {
-		if v {
-			sawTrue = true
-		} else if sawTrue {
-			sawFalseAfterTrue = true
+	//
+	// This WAITS for the gauge instead of reading it once. The loop above waits on the SINK —
+	// the gate pass's gauges/clear — while the leader gauge is published by the leadership
+	// loop itself (`setLeaderState(false)` when the lock is lost). Nothing orders the two, so
+	// under load the clear can land first and a single read sees `[false true]`: the standby
+	// false and the acquisition true, with the step-down false still in flight. That is the
+	// flake this loop removes, and it removes it without weakening the assertion — the same
+	// true-then-false is still required, just given a deadline to arrive in.
+	deadline = time.After(5 * time.Second)
+	var states []bool
+	for {
+		states = leaderSpy.snapshot()
+		var sawTrue, sawFalseAfterTrue bool
+		for _, v := range states {
+			if v {
+				sawTrue = true
+			} else if sawTrue {
+				sawFalseAfterTrue = true
+			}
 		}
-	}
-	if !sawTrue || !sawFalseAfterTrue {
-		t.Fatalf("leader gauge must go true then false on step-down, got %v", states)
+		if sawTrue && sawFalseAfterTrue {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("leader gauge must go true then false on step-down, got %v", states)
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 	cancel()
 	time.Sleep(50 * time.Millisecond)

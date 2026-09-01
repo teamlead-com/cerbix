@@ -74,6 +74,30 @@ func (c NotificationChannel) Redacted() NotificationChannel {
 	return c
 }
 
+// MergeChannelConfig applies a client's config patch to the config a channel
+// already has, and returns the result; stored is not mutated.
+//
+// The rule exists because Redacted() means a secret never reaches the client: an
+// edit form has nothing to round-trip. So a SECRET key the client left blank —
+// absent, or present and empty — keeps the value already stored, and only a
+// non-empty one replaces it. Every other key is exactly what the client sent, so an
+// optional field can still be cleared by sending it empty. A key the patch does not
+// mention keeps its stored value; the type-specific required set is enforced by
+// Validate on the merged result, so no edit can leave a channel undeliverable.
+func MergeChannelConfig(stored, patch map[string]string) map[string]string {
+	out := make(map[string]string, len(stored)+len(patch))
+	for k, v := range stored {
+		out[k] = v
+	}
+	for k, v := range patch {
+		if SecretChannelConfigKeys[k] && strings.TrimSpace(v) == "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // Validate enforces channel invariants, including type-specific required config.
 func (c NotificationChannel) Validate() error {
 	if c.ProjectID == "" {

@@ -1497,6 +1497,18 @@ func (f *fakeStore) SetWebhookEnabled(_ context.Context, id string, enabled bool
 	f.webhooks[id] = h
 	return nil
 }
+func (f *fakeStore) UpdateNotificationChannel(_ context.Context, ch domain.NotificationChannel) (domain.NotificationChannel, error) {
+	stored, ok := f.channels[ch.ID]
+	if !ok {
+		return domain.NotificationChannel{}, store.ErrNotFound
+	}
+	// The real store rewrites name and config only: identity, type and enabled are
+	// the stored row's, so a test that edits cannot silently change them.
+	stored.Name = ch.Name
+	stored.Config = ch.Config
+	f.channels[ch.ID] = stored
+	return stored, nil
+}
 func (f *fakeStore) SetNotificationChannelEnabled(_ context.Context, id string, enabled bool) error {
 	c, ok := f.channels[id]
 	if !ok {

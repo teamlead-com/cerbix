@@ -163,6 +163,7 @@ type Store interface {
 	DeleteWebhook(ctx context.Context, id string) error
 	CreateNotificationChannel(ctx context.Context, ch domain.NotificationChannel) (domain.NotificationChannel, error)
 	GetNotificationChannel(ctx context.Context, id string) (domain.NotificationChannel, error)
+	UpdateNotificationChannel(ctx context.Context, ch domain.NotificationChannel) (domain.NotificationChannel, error)
 	SetNotificationChannelEnabled(ctx context.Context, id string, enabled bool) error
 	ListChannelsByProject(ctx context.Context, projectID string) ([]domain.NotificationChannel, error)
 	DeleteNotificationChannel(ctx context.Context, id string) error

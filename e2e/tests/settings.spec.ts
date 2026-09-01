@@ -144,3 +144,63 @@ test.describe("settings", () => {
     // The tab lives in the Administration group, where "instance, not tenant" already means something.
     await expect(page.locator("text=Administration").first()).toBeVisible();
   });
+
+  // Editing a notification channel through the UI. The property worth a live run is the
+  // one no unit test can reach: the server never sends a secret out, so the form leaves
+  // it blank, and the channel must still hold the bot token it was created with. The
+  // proof is the PATCH at the end — the server merges a config patch onto the STORED
+  // config and validates the result, so a telegram channel whose bot_token had been
+  // blanked by the edit would answer 400 there instead of 200.
+  test("a notification channel is edited in place, and its secret survives", async ({ page }) => {
+    const { projectID } = await firstProject(page);
+    const name = "e2e-channel-edit";
+    const created = await apiSend(page, "post", `/api/v1/projects/${projectID}/notification-channels`, {
+      type: "telegram",
+      name,
+      config: { bot_token: "e2e-secret-token", chat_id: "1000" },
+    });
+    expect(created.ok(), `create channel -> ${created.status()}`).toBeTruthy();
+    const channelID = (await created.json()).id as string;
+
+    try {
+      await page.goto("/settings?tab=channels");
+      const row = page.locator("tr", { hasText: name });
+      await expect(row).toBeVisible();
+      await row.getByRole("button", { name: "Edit" }).click();
+
+      const form = page.getByTestId("channel-form");
+      await expect(form).toBeVisible();
+      // The type is frozen and the secret is blank: the page cannot show what it was never given.
+      await expect(page.getByTestId("channel-type")).toBeDisabled();
+      await expect(page.getByTestId("channel-field-bot_token")).toHaveValue("");
+      await expect(page.getByTestId("channel-field-chat_id")).toHaveValue("1000");
+
+      await page.getByTestId("channel-name").fill(`${name}-renamed`);
+      await page.getByTestId("channel-field-chat_id").fill("2000");
+      await form.getByRole("button", { name: "Save" }).click();
+
+      // The list shows the edit without a reload, and it survives one.
+      await expect(page.locator("tr", { hasText: `${name}-renamed` })).toBeVisible();
+      await page.reload();
+      await expect(page.locator("tr", { hasText: `${name}-renamed` })).toBeVisible();
+
+      const listed = (await apiGet(page, `/api/v1/projects/${projectID}/notification-channels`)) as {
+        id: string;
+        name: string;
+        config: Record<string, string>;
+      }[];
+      const got = listed.find((c) => c.id === channelID)!;
+      expect(got.name).toBe(`${name}-renamed`);
+      expect(got.config.chat_id).toBe("2000");
+      expect(got.config.bot_token, "a listed channel never carries its secret").toBe("");
+
+      // The blank the form sent did NOT blank the stored token: this patch validates the
+      // merged config, and telegram without a bot_token is a 400.
+      const merged = await apiSend(page, "patch", `/api/v1/notification-channels/${channelID}`, {
+        config: { chat_id: "3000" },
+      });
+      expect(merged.status(), "the stored bot_token still satisfies telegram's contract").toBe(200);
+    } finally {
+      await apiSend(page, "delete", `/api/v1/notification-channels/${channelID}`);
+    }
+  });

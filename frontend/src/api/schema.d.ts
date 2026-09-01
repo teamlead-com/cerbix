@@ -6183,7 +6183,7 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        /** Pause or resume a notification channel (editor+) */
+        /** Edit a notification channel — name, config, enabled (editor+) */
         patch: {
             parameters: {
                 query?: never;
@@ -6195,7 +6195,7 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["ToggleEnabled"];
+                    "application/json": components["schemas"]["UpdateNotificationChannel"];
                 };
             };
             responses: {
@@ -9483,6 +9483,14 @@ export interface components {
             };
             /** @default true */
             enabled: boolean;
+        };
+        /** @description A partial edit. Every field is optional, but a body naming none of them is a 400. `type` is NOT editable — another type requires another config, which is a new channel; a body carrying one is refused as an unknown field. Secret config values (`url`, `bot_token`, `smtp_password`) are never returned by the API, so an omitted or empty secret KEEPS the stored value and only a non-empty one replaces it; every other key is stored exactly as sent, so an optional field is cleared by sending it empty. The merged config must still satisfy the channel type's required keys. */
+        UpdateNotificationChannel: {
+            name?: string;
+            config?: {
+                [key: string]: string;
+            };
+            enabled?: boolean;
         };
         /** @description A durably-queued outbound event (dead-letter view). */
         OutboxEvent: {

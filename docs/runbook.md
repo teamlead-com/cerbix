@@ -399,6 +399,36 @@ never restarting: create → scheduler executes the file-managed monitor → in-
 update (generation bump, same DB id) → last-known-good on invalid input → orphan-disable (no
 hard delete) → restore (same DB id and push token).
 
+## Notification channels: editing and credential rotation
+
+A channel is edited in place — Settings → Notification channels → **Edit** on the row, or
+`PATCH /api/v1/notification-channels/{id}` (editor+) with any of `name`, `config`, `enabled`.
+A body naming none of the three is a 400 rather than a silent no-op.
+
+Rotating a credential does NOT mean deleting and recreating the channel any more, so the
+monitors, escalation steps and service alert routes that point at it keep pointing at it:
+
+```bash
+curl -sS -X PATCH "$CERBIX_URL/api/v1/notification-channels/$ID" \
+  -H 'Content-Type: application/json' -b "$COOKIE" \
+  -d '{"config":{"bot_token":"NEW-TOKEN","chat_id":"1000"}}'
+```
+
+Two rules explain every surprise here:
+
+- **A blank secret keeps the stored one.** `url`, `bot_token` and `smtp_password` are never
+  returned by the API (`internal/domain/notification.go`, `SecretChannelConfigKeys`), so an
+  edit form is not given them; sending one empty — or omitting it — leaves the stored value
+  alone, and only a non-empty value replaces it. Every other key is stored exactly as sent,
+  which is how an optional field such as `smtp_username` is cleared.
+- **The merged config still has to satisfy the type.** Clearing `chat_id` on a Telegram
+  channel is a 400 naming the required keys, and the stored row is untouched — an edit
+  cannot leave a channel undeliverable.
+
+The channel TYPE is not editable: another type requires another config, which is a new
+channel. A body carrying `type` is refused as an unknown field. Pausing is unchanged —
+`{"enabled":false}` keeps the config and delivery skips the channel.
+
 ## Project secret inventory and credential dispatch (FR-020)
 
 Secret values are write-only project data. Core materializing roles (`all`, `api`,

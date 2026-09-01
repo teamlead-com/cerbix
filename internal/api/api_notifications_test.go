@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func TestNotificationChannelAuthz(t *testing.T) {
@@ -148,4 +150,119 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestNotificationChannelEdit pins the edit contract of PATCH: name and config are
+// editable, the enabled-only body every earlier client sends still works, a secret
+// the client left blank keeps the value the API never showed it, the type cannot be
+// edited, and an edit that would break the type's required config is refused.
+func TestNotificationChannelEdit(t *testing.T) {
+	h := newHandler(seededStore())
+
+	// Rename only: the config is untouched.
+	rec := do(h, o1Admin, http.MethodPatch, "/api/v1/notification-channels/nc1", `{"name":"ops-renamed"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Name    string            `json:"name"`
+		Type    string            `json:"type"`
+		Enabled bool              `json:"enabled"`
+		Config  map[string]string `json:"config"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Name != "ops-renamed" {
+		t.Fatalf("name = %q, want ops-renamed", got.Name)
+	}
+	if got.Config["url"] != "" {
+		t.Fatalf("edit response leaked the secret url: %q", got.Config["url"])
+	}
+	if !got.Enabled {
+		t.Fatal("rename must not disable the channel")
+	}
+
+	// A blank secret keeps the stored URL: the form was never given it to send back.
+	if rec := do(h, o1Admin, http.MethodPatch, "/api/v1/notification-channels/nc1",
+		`{"config":{"url":""}}`); rec.Code != http.StatusOK {
+		t.Fatalf("blank secret = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, o1Admin, http.MethodGet, "/api/v1/projects/p1/notification-channels", ""); rec.Code != http.StatusOK {
+		t.Fatalf("list = %d", rec.Code)
+	}
+
+	// A new secret replaces it; the stored value is what delivery would use, so the
+	// assertion is on the store rather than the (redacted) response.
+	fs := seededStore()
+	h2 := newHandler(fs)
+	if rec := do(h2, o1Admin, http.MethodPatch, "/api/v1/notification-channels/nc1",
+		`{"config":{"url":"https://hook.example/new"}}`); rec.Code != http.StatusOK {
+		t.Fatalf("new secret = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if fs.channels["nc1"].Config["url"] != "https://hook.example/new" {
+		t.Fatalf("stored url = %q, want the new one", fs.channels["nc1"].Config["url"])
+	}
+	// And a blank one, on the same handler, leaves that new value alone.
+	if rec := do(h2, o1Admin, http.MethodPatch, "/api/v1/notification-channels/nc1",
+		`{"config":{"url":"   "}}`); rec.Code != http.StatusOK {
+		t.Fatalf("blank after set = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if fs.channels["nc1"].Config["url"] != "https://hook.example/new" {
+		t.Fatalf("blank secret overwrote the stored url: %q", fs.channels["nc1"].Config["url"])
+	}
+
+	// Name and enabled in ONE request: both land.
+	if rec := do(h2, o1Admin, http.MethodPatch, "/api/v1/notification-channels/nc1",
+		`{"name":"paused-ops","enabled":false}`); rec.Code != http.StatusOK {
+		t.Fatalf("name+enabled = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if c := fs.channels["nc1"]; c.Name != "paused-ops" || c.Enabled {
+		t.Fatalf("name+enabled left %+v", c)
+	}
+
+	// Refusals.
+	for name, tc := range map[string]struct {
+		body string
+		want int
+	}{
+		"empty body":           {`{}`, http.StatusBadRequest},
+		"blank name":           {`{"name":"   "}`, http.StatusBadRequest},
+		"type is not editable": {`{"type":"telegram"}`, http.StatusBadRequest},
+		"url must be http":     {`{"config":{"url":"ftp://x"}}`, http.StatusBadRequest},
+		"unknown channel":      {`{"name":"x"}`, http.StatusNotFound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := "/api/v1/notification-channels/nc1"
+			if name == "unknown channel" {
+				path = "/api/v1/notification-channels/nope"
+			}
+			if rec := do(h2, o1Admin, http.MethodPatch, path, tc.body); rec.Code != tc.want {
+				t.Fatalf("%s = %d, want %d (%s)", name, rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+
+	// Clearing a required non-secret field is a 400, and the stored row survives it.
+	fs2 := seededStore()
+	h3 := newHandler(fs2)
+	fs2.channels["nc-tg"] = domain.NotificationChannel{ID: "nc-tg", ProjectID: "p1", Type: domain.ChannelTelegram,
+		Name: "tg", Config: map[string]string{"bot_token": "STORED", "chat_id": "42"}, Enabled: true}
+	if rec := do(h3, o1Admin, http.MethodPatch, "/api/v1/notification-channels/nc-tg",
+		`{"config":{"chat_id":""}}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("clearing chat_id = %d, want 400", rec.Code)
+	}
+	if c := fs2.channels["nc-tg"]; c.Config["chat_id"] != "42" || c.Config["bot_token"] != "STORED" {
+		t.Fatalf("refused edit mutated the channel: %+v", c)
+	}
+
+	// Authz: a viewer may not edit, and another org's channel is invisible.
+	if rec := do(h3, p1Viewer, http.MethodPatch, "/api/v1/notification-channels/nc1",
+		`{"name":"x"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer edit = %d, want 403", rec.Code)
+	}
+	if rec := do(h3, o1Admin, http.MethodPatch, "/api/v1/notification-channels/nc3",
+		`{"name":"x"}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign channel edit = %d, want 404", rec.Code)
+	}
 }

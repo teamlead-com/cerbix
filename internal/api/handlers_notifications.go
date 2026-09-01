@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -61,9 +62,16 @@ func (h *Handler) createChannel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created.Redacted())
 }
 
-// deleteChannel removes a notification channel (editor+ on its project).
-// updateChannel toggles a notification channel (editor+). Disabled is not
+// updateChannel edits a notification channel (editor+): its name, its config, its
+// enabled flag, or any combination of the three — every field is optional, and a
+// body naming none of them is a 400 rather than a silent no-op. Disabled is not
 // deleted — the config survives a pause; delivery skips disabled channels.
+//
+// `type` is not editable: another type requires another config, which is a new
+// channel and not an edit; the strict decoder answers a body carrying one with a
+// 400 naming the field. Secrets are merged rather than overwritten
+// (domain.MergeChannelConfig) because the API never sends them out, so a form that
+// posts back what it was given would blank them.
 func (h *Handler) updateChannel(w http.ResponseWriter, r *http.Request) {
 	ch, err := h.store.GetNotificationChannel(r.Context(), r.PathValue("channelID"))
 	if errors.Is(err, store.ErrNotFound) {
@@ -78,23 +86,51 @@ func (h *Handler) updateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Enabled *bool `json:"enabled"`
+		Enabled *bool             `json:"enabled"`
+		Name    *string           `json:"name"`
+		Config  map[string]string `json:"config"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.Enabled == nil {
-		writeError(w, http.StatusBadRequest, "enabled is required")
+	if body.Enabled == nil && body.Name == nil && body.Config == nil {
+		writeError(w, http.StatusBadRequest, "enabled, name or config is required")
 		return
 	}
-	if err := h.store.SetNotificationChannelEnabled(r.Context(), ch.ID, *body.Enabled); err != nil {
-		h.serverError(w, "set_channel_enabled", err)
-		return
+	if body.Name != nil || body.Config != nil {
+		edited := ch
+		if body.Name != nil {
+			edited.Name = strings.TrimSpace(*body.Name)
+		}
+		if body.Config != nil {
+			edited.Config = domain.MergeChannelConfig(ch.Config, body.Config)
+		}
+		if err := edited.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		updated, err := h.store.UpdateNotificationChannel(r.Context(), edited)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		if err != nil {
+			h.serverError(w, "update_channel", err)
+			return
+		}
+		ch = updated
 	}
-	ch.Enabled = *body.Enabled
+	if body.Enabled != nil {
+		if err := h.store.SetNotificationChannelEnabled(r.Context(), ch.ID, *body.Enabled); err != nil {
+			h.serverError(w, "set_channel_enabled", err)
+			return
+		}
+		ch.Enabled = *body.Enabled
+	}
 	writeJSON(w, http.StatusOK, ch.Redacted())
 }
 
+// deleteChannel removes a notification channel (editor+ on its project).
 func (h *Handler) deleteChannel(w http.ResponseWriter, r *http.Request) {
 	ch, err := h.store.GetNotificationChannel(r.Context(), r.PathValue("channelID"))
 	if errors.Is(err, store.ErrNotFound) {

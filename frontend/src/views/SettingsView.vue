@@ -398,7 +398,14 @@ const channelFields: Record<ChannelType, { key: string; label: string; placehold
     { key: "smtp_password", label: "SMTP password", optional: true },
   ],
 };
+// Secret config values are blanked by the API (internal/domain/notification.go
+// SecretChannelConfigKeys), so the edit form is never given them and must not send
+// them back: a blank secret means "keep the stored one" on the server.
+const SECRET_CHANNEL_KEYS = new Set(["url", "bot_token", "smtp_password"]);
 const showChannelAdd = ref(false);
+// null while creating; the channel's id while editing one. The same form serves both.
+const channelEditId = ref<string | null>(null);
+const isChannelEdit = computed(() => channelEditId.value !== null);
 const channelForm = reactive<{ type: ChannelType; name: string; config: Record<string, string> }>({
   type: "webhook",
   name: "",
@@ -406,6 +413,46 @@ const channelForm = reactive<{ type: ChannelType; name: string; config: Record<s
 });
 const channelBusy = ref(false);
 const channelFormError = ref("");
+
+// Leaves `type` alone: the create form has always kept the last type picked, and an
+// edit sets it explicitly. Only the per-channel state is cleared.
+function resetChannelForm() {
+  channelEditId.value = null;
+  channelForm.name = "";
+  channelForm.config = {};
+  channelFormError.value = "";
+}
+
+function toggleChannelAdd() {
+  if (showChannelAdd.value) {
+    showChannelAdd.value = false;
+    resetChannelForm();
+    return;
+  }
+  resetChannelForm();
+  showChannelAdd.value = true;
+}
+
+/** Opens the form on an existing channel: name and non-secret config prefilled,
+ * secrets left blank because the server never sent them. */
+function startEditChannel(c: Channel) {
+  if (!c.id || !c.type) return;
+  channelEditId.value = c.id;
+  channelForm.type = c.type;
+  channelForm.name = c.name ?? "";
+  const cfg: Record<string, string> = {};
+  for (const f of channelFields[c.type]) {
+    cfg[f.key] = SECRET_CHANNEL_KEYS.has(f.key) ? "" : ((c.config?.[f.key] as string) ?? "");
+  }
+  channelForm.config = cfg;
+  channelFormError.value = "";
+  showChannelAdd.value = true;
+}
+
+function cancelChannelForm() {
+  showChannelAdd.value = false;
+  resetChannelForm();
+}
 
 async function loadChannels() {
   channelsError.value = "";
@@ -450,12 +497,47 @@ async function addChannel() {
       return;
     }
     channels.value.push(res.data);
-    channelForm.name = "";
-    channelForm.config = {};
     showChannelAdd.value = false;
+    resetChannelForm();
   } finally {
     channelBusy.value = false;
   }
+}
+
+/** Saves an edit. A secret left blank is OMITTED from the body — the server keeps the
+ * stored value — while every non-secret field travels as typed, so an optional one can
+ * be cleared. The type is not sent: it is not editable. */
+async function editChannel() {
+  const id = channelEditId.value;
+  if (!id || channelBusy.value) return;
+  channelBusy.value = true;
+  channelFormError.value = "";
+  const config: Record<string, string> = {};
+  for (const f of channelFields[channelForm.type]) {
+    const v = (channelForm.config[f.key] ?? "").trim();
+    if (SECRET_CHANNEL_KEYS.has(f.key) && !v) continue;
+    config[f.key] = v;
+  }
+  try {
+    const res = await api.PATCH("/api/v1/notification-channels/{channelID}", {
+      params: { path: { channelID: id } },
+      body: { name: channelForm.name.trim(), config },
+    });
+    if (res.error || !res.data) {
+      channelFormError.value = (res.error as { error?: string })?.error || "Could not save the channel.";
+      return;
+    }
+    const updated = res.data;
+    channels.value = channels.value.map((c) => (c.id === id ? updated : c));
+    showChannelAdd.value = false;
+    resetChannelForm();
+  } finally {
+    channelBusy.value = false;
+  }
+}
+
+function submitChannelForm() {
+  return isChannelEdit.value ? editChannel() : addChannel();
 }
 
 async function deleteChannel(c: Channel) {
@@ -836,31 +918,32 @@ watch(tab, loadActive);
       <template v-if="tab === 'channels' && !activeError">
         <div class="mb-3 flex items-center justify-between">
           <div class="text-[13px] text-ink-3">{{ ws.projectName }} · {{ channels.length }} channel(s)</div>
-          <button v-if="canWriteChannels" type="button" class="h-[32px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2" @click="showChannelAdd = !showChannelAdd">Add channel</button>
+          <button v-if="canWriteChannels" type="button" class="h-[32px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2" @click="toggleChannelAdd">Add channel</button>
         </div>
-        <div v-if="showChannelAdd && canWriteChannels" class="mb-5 flex flex-col gap-3 rounded border border-border bg-surface p-4 shadow-card">
+        <div v-if="showChannelAdd && canWriteChannels" data-testid="channel-form" class="mb-5 flex flex-col gap-3 rounded border border-border bg-surface p-4 shadow-card">
+          <div v-if="isChannelEdit" class="text-[12.5px] text-ink-3">Editing <span class="font-medium text-ink">{{ channelForm.name || "channel" }}</span> — the type cannot be changed; a channel of another type is a new channel.</div>
           <div class="grid grid-cols-[200px_1fr] gap-3 max-[720px]:grid-cols-1">
             <label class="flex flex-col gap-[6px]">
               <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Type</span>
-              <select v-model="channelForm.type" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent">
+              <select v-model="channelForm.type" :disabled="isChannelEdit" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60" data-testid="channel-type">
                 <option v-for="ct in channelTypes" :key="ct.key" :value="ct.key">{{ ct.label }}</option>
               </select>
             </label>
             <label class="flex flex-col gap-[6px]">
               <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Name</span>
-              <input v-model="channelForm.name" type="text" placeholder="e.g. oncall-slack" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
+              <input v-model="channelForm.name" type="text" data-testid="channel-name" placeholder="e.g. oncall-slack" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
             </label>
           </div>
           <div class="grid grid-cols-2 gap-3 max-[720px]:grid-cols-1">
             <label v-for="f in channelFields[channelForm.type]" :key="f.key" class="flex flex-col gap-[6px]">
               <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">{{ f.label }}<span v-if="f.optional" class="ml-1 normal-case text-ink-3/70">(optional)</span></span>
-              <input v-model="channelForm.config[f.key]" type="text" :placeholder="f.placeholder" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
+              <input v-model="channelForm.config[f.key]" type="text" :data-testid="`channel-field-${f.key}`" :placeholder="isChannelEdit && SECRET_CHANNEL_KEYS.has(f.key) ? 'unchanged — type a new value to replace it' : f.placeholder" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
             </label>
           </div>
           <div v-if="channelFormError" class="text-[12.5px] text-down">{{ channelFormError }}</div>
           <div class="flex items-center gap-2">
-            <button type="button" :disabled="!channelForm.name.trim() || channelBusy" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="addChannel">{{ channelBusy ? "Creating…" : "Create" }}</button>
-            <button type="button" class="h-[34px] rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong" @click="showChannelAdd = false">Cancel</button>
+            <button type="button" :disabled="!channelForm.name.trim() || channelBusy" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="submitChannelForm">{{ channelBusy ? (isChannelEdit ? "Saving…" : "Creating…") : isChannelEdit ? "Save" : "Create" }}</button>
+            <button type="button" class="h-[34px] rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong" @click="cancelChannelForm">Cancel</button>
           </div>
         </div>
         <section class="overflow-hidden rounded border border-border bg-surface shadow-card">
@@ -889,7 +972,10 @@ watch(tab, loadActive);
                   ><span class="block h-[15px] w-[15px] rounded-full bg-white transition-transform" :class="c.enabled ? 'translate-x-[17px]' : 'translate-x-[2px]'"></span></button>
                   <span v-else class="text-ink-2">{{ c.enabled ? "enabled" : "disabled" }}</span>
                 </td>
-                <td class="border-b border-border px-4 py-[11px] text-right"><button v-if="canWriteChannels" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteChannel(c)">Delete</button></td>
+                <td class="border-b border-border px-4 py-[11px] text-right">
+                  <button v-if="canWriteChannels" type="button" class="mr-3 text-[12.5px] text-ink-2 hover:underline" @click="startEditChannel(c)">Edit</button>
+                  <button v-if="canWriteChannels" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteChannel(c)">Delete</button>
+                </td>
               </tr>
               <tr v-if="!channels.length && !loading"><td colspan="4" class="px-4 py-10 text-center text-[13px] text-ink-3">No channels yet. Link one to a monitor from its detail page.</td></tr>
             </tbody>

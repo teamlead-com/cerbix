@@ -68,6 +68,43 @@ func (s *Store) CreateNotificationChannel(ctx context.Context, ch domain.Notific
 	return created, nil
 }
 
+// UpdateNotificationChannel rewrites a channel's name and config (validated in
+// domain, config re-encrypted exactly as Create writes it) and returns the stored
+// row. Type and project are NOT updated: a channel of another type needs another
+// required config, which is a new channel rather than an edit. Enabled has its own
+// writer, SetNotificationChannelEnabled, so a pause never rewrites credentials.
+func (s *Store) UpdateNotificationChannel(ctx context.Context, ch domain.NotificationChannel) (domain.NotificationChannel, error) {
+	if ch.ID == "" {
+		return domain.NotificationChannel{}, fmt.Errorf("store: update channel: id is required")
+	}
+	if err := ch.Validate(); err != nil {
+		return domain.NotificationChannel{}, fmt.Errorf("store: invalid channel: %w", err)
+	}
+	enc := make(map[string]string, len(ch.Config))
+	for k, v := range ch.Config {
+		ev, err := s.cipher.Encrypt(v)
+		if err != nil {
+			return domain.NotificationChannel{}, fmt.Errorf("store: encrypt channel config %q: %w", k, err)
+		}
+		enc[k] = ev
+	}
+	cfg, err := json.Marshal(enc)
+	if err != nil {
+		return domain.NotificationChannel{}, fmt.Errorf("store: encode channel config: %w", err)
+	}
+	row := s.pool.QueryRow(ctx,
+		`UPDATE notification_channels SET name = $2, config = $3 WHERE id = $1 RETURNING `+channelColumns,
+		ch.ID, ch.Name, string(cfg))
+	updated, err := s.scanChannel(row)
+	if noRows(err) {
+		return domain.NotificationChannel{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.NotificationChannel{}, fmt.Errorf("store: update channel: %w", err)
+	}
+	return updated, nil
+}
+
 // GetNotificationChannel returns a channel by id, or ErrNotFound.
 func (s *Store) GetNotificationChannel(ctx context.Context, id string) (domain.NotificationChannel, error) {
 	row := s.pool.QueryRow(ctx, `SELECT `+channelColumns+` FROM notification_channels WHERE id = $1`, id)

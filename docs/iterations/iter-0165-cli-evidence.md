@@ -27,7 +27,8 @@ a reproduction of a historical claim. So this file claims only what it is.
 ## Every exit class of D13, transcribed
 
 `CERBIX_URL=http://localhost:8080`; a CI token `role: editor, actions: [gate:evaluate, change:record]`,
-created for this run and revoked during it (row 18 is that revocation taking effect). The service was
+created for this run and revoked during it — rows 17-0 to 17c are that token's whole life, creation to
+refusal. The service was
 created for this run and deleted after it; zero `cli-repro` services or tokens remain.
 
 ```
@@ -115,7 +116,8 @@ usage: cerbix change record --project <id> --service <id> --kind deploy|rollback
                 "role": "editor"
               },
               "token": "<redacted>"
-            }17a the SAME token records, --json so the SERVER names the bearer   exit=0
+            }
+17a the SAME token records, --json so the SERVER names the bearer   exit=0
   argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service fd1cb270-04f1-41e2-989a-2284b7900549 --source github-actions --external-id chain-1788221368 --kind deploy --phase started --json
   stdout: {"replayed":false,"change":{"service_id":"fd1cb270-04f1-41e2-989a-2284b7900549","source":"github-actions","external_id":"chain-1788221368","kind":"deploy","id":"01a05a4c-a73f-75d5-8ba5-42ebe4ee0c42","phase":"started","occurred_at":"2026-09-01T00:09:28Z","ref":"","url":"","actor_label":"token:chain-proof-1788221354","actor_user_id":null,"via_token":true,"recorded_at":"2026-09-01T00:09:28.127824Z"}}
   stderr:

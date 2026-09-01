@@ -6,6 +6,147 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [v0.1.6] - 2026-09-01
+
+Two requirements that turn reliability facts into something a pipeline can act on: a **release gate**
+that answers whether the error budget allows a deploy, and **change intelligence** that records the
+deploy went and lets the service's own facts say what followed. Eighty-five commits since `v0.1.5`.
+
+### ⚠️ Upgrade Notes
+
+- **Two additive migrations, no data repair, nothing to stop.** `00093` creates the gate's policy,
+  override and decision tables plus the partition registry; `00094` creates the change tables and adds
+  `api_tokens.actions`. Run `cerbix migrate` with the new binary and start as usual — every role applies
+  migrations on startup anyway. On a database where no service has a gate policy, nothing evaluates and
+  nothing is written ([16eecaf](https://github.com/teamlead-com/cerbix/commit/16eecaf), [c6c74dd](https://github.com/teamlead-com/cerbix/commit/c6c74dd))
+- **`00094` builds a UNIQUE index on `incidents`.** The constraint `(id, project_id)` is what lets an
+  incident↔change link be tenant-safe by the schema rather than by a query. It is built
+  non-concurrently and takes a brief exclusive lock on `incidents`; the guard skips the build entirely
+  if an equivalent constraint already exists ([c6c74dd](https://github.com/teamlead-com/cerbix/commit/c6c74dd))
+- **The scheduler leader gains one background pass.** Gate-ledger partition maintenance runs on its own
+  fenced advisory session — daily partitions created a week ahead, dropped past
+  `gate.decision_retention_days` (default 90). Watch `cerbix_gate_decisions_writable_horizon_seconds`
+  and `cerbix_gate_decisions_partitions_pending_drop`; a healthy pass keeps the first well above zero
+  ([a6a9915](https://github.com/teamlead-com/cerbix/commit/a6a9915))
+- **Existing API tokens are unchanged.** The new `actions` allow-list is optional: omitted or `null`
+  means the token's role decides, exactly as before. A token is only ever NARROWED by it — the list is
+  intersected with the role, never added to it ([7260e68](https://github.com/teamlead-com/cerbix/commit/7260e68))
+- **`gate.*` and `change.*` ship with defaults**, so no YAML edit is required. The ones worth knowing:
+  gate decisions retained 90 days and purged hourly; change groups retained by whole identity; the
+  record endpoint bounded at 300 requests/minute per process and 30 per principal ([16eecaf](https://github.com/teamlead-com/cerbix/commit/16eecaf),
+  [c6c74dd](https://github.com/teamlead-com/cerbix/commit/c6c74dd))
+
+### New Features
+
+**Reliability Gate — a deploy asks whether the error budget allows it (FR-024)**
+
+- **One call, one machine-readable answer.** `cerbix gate check --project <id> --service <id>` (or
+  `POST /api/v1/projects/{p}/services/{s}/gate`) returns an observed `state` — `ALLOW`, `WARN`,
+  `BLOCK`, `UNKNOWN`, `NOT_CONFIGURED` — an effective `action`, every matching reason and the evidence
+  under it. The CLI's exit code follows the action (`0` allow/warn, `2` block, `4` not configured,
+  `1` transport/auth), so a CI step is one command; credentials come from the environment only
+  ([d926568](https://github.com/teamlead-com/cerbix/commit/d926568), [229b33e](https://github.com/teamlead-com/cerbix/commit/229b33e))
+- **What blocks is declared, not guessed.** A per-service policy names ONE SLO window and assigns each
+  clause of a closed vocabulary — budget exhausted, budget consumed over a threshold, page-burn firing,
+  ticket-burn firing, an open service incident — to `block`, `warn` or `ignore`, with a mandatory
+  `unknown_behavior` and a seal-lag bound past which the budget is UNAVAILABLE rather than quoted stale
+  ([8cb12d6](https://github.com/teamlead-com/cerbix/commit/8cb12d6))
+- **The gate derives nothing.** The service row, the policy, the active override, the report, the burn
+  latches, the incident and the ledger write all happen in ONE `REPEATABLE READ` transaction whose
+  first snapshot-bearing statement is the decision's `evaluated_at` — so a gate answer and the service
+  page cannot disagree about the same instant ([8cb12d6](https://github.com/teamlead-com/cerbix/commit/8cb12d6), [b7518b9](https://github.com/teamlead-com/cerbix/commit/b7518b9))
+- **An override changes the action and never the facts.** At most seven days, one active per service,
+  bound to the policy revision, project-admin only; the decision still records the state that was
+  observed and that somebody overrode it ([229b33e](https://github.com/teamlead-com/cerbix/commit/229b33e))
+- **Every decision is an immutable ledger row**, in a daily-partitioned bounded table, readable by id
+  after the service is renamed or deleted — the moment the evidence is actually wanted. Partition
+  maintenance runs as a fenced pass with a 30-second lifecycle and ownership proved by marker rather
+  than by OID ([a6a9915](https://github.com/teamlead-com/cerbix/commit/a6a9915), [24e901f](https://github.com/teamlead-com/cerbix/commit/24e901f))
+- **In the SPA:** a `Release gate` card on the service page with the policy editor, the latest decision
+  and the override panel; a `Gate decisions` browser with a server-side state filter and keyset paging;
+  the by-id record; and the per-service override history. Opening a page never creates a decision — only
+  a pipeline does ([9793758](https://github.com/teamlead-com/cerbix/commit/9793758), [84adac1](https://github.com/teamlead-com/cerbix/commit/84adac1), [3fc19e3](https://github.com/teamlead-com/cerbix/commit/3fc19e3))
+
+**Change Intelligence — the pipeline says what it changed (FR-025)**
+
+- **A change is a fact about time, not a catalog.** `cerbix change record` (or one `POST`) reports a
+  `deploy`, `rollback` or `flag` in one of its phases — `started`, `succeeded`, `failed`, `cancelled` —
+  under an external identity `(source, external_id)`, optionally naming the gate decision the release
+  rested on. Phases are append-only and idempotent: an identical retry returns the original row, a
+  contradictory one is refused by name, and two runners reporting different endings for one run cannot
+  both pass ([c6c74dd](https://github.com/teamlead-com/cerbix/commit/c6c74dd), [74ce187](https://github.com/teamlead-com/cerbix/commit/74ce187))
+- **The service timeline** is a bounded `[from, to)` read of change groups with an opaque cursor that
+  never returns a group twice, each group carrying its live gate decision and the incidents it preceded
+  ([7260e68](https://github.com/teamlead-com/cerbix/commit/7260e68))
+- **Incident correlation says "preceded", never "caused".** When a service auto-incident opens, the
+  changes within the correlation window on that service and on its `probable_root` upstreams are linked
+  and named in one `🚀 Changes:` note. It is fail-open in both directions: the incident opens and
+  resolves exactly as before whatever the correlation does ([7260e68](https://github.com/teamlead-com/cerbix/commit/7260e68), [3b43b70](https://github.com/teamlead-com/cerbix/commit/3b43b70),
+  [f5654d7](https://github.com/teamlead-com/cerbix/commit/f5654d7))
+- **Before/after SLI around a change**, computed from SEALED buckets through the same query the
+  reliability page uses — never a second implementation. Each side is a figure, or withheld with the
+  page's own word, or `pending` until the seal reaches it; a delta only when both sides are figures
+  ([c6c74dd](https://github.com/teamlead-com/cerbix/commit/c6c74dd), [5cace76](https://github.com/teamlead-com/cerbix/commit/5cace76))
+- **A CI token can be narrower than a role.** An optional `actions` allow-list on an API token is
+  intersected with the role in `authz.Can`, so a pipeline token can be exactly "ask the gate, record a
+  change" and nothing else ([7260e68](https://github.com/teamlead-com/cerbix/commit/7260e68), [a1cfe00](https://github.com/teamlead-com/cerbix/commit/a1cfe00))
+- **In the SPA:** a `Changes` card beside the release gate with terminal-only marks on the facts strip,
+  the timeline view, the comparison view, and `Preceded by` on the incident page ([d2e0f3c](https://github.com/teamlead-com/cerbix/commit/d2e0f3c),
+  [42ae4ab](https://github.com/teamlead-com/cerbix/commit/42ae4ab))
+
+**Notification channels are edited in place**
+
+- **A channel's name and config are editable**, so rotating a bot token or a hook URL no longer means
+  delete-and-recreate — which silently dropped every monitor link, escalation step and alert route
+  pointing at the channel. A secret left blank keeps the stored value, because the API never sends one
+  out; the merged config is validated, so an edit cannot leave a channel undeliverable ([3e76791](https://github.com/teamlead-com/cerbix/commit/3e76791))
+
+### Improvements
+
+**UI**
+
+- **The alerting panel keeps an operator's unsaved edits** when a late prop arrives instead of
+  discarding them ([dd83bfa](https://github.com/teamlead-com/cerbix/commit/dd83bfa))
+- **The gate ledger's state filter is the server's**, so a page of results is a page of matches and the
+  cursor continues the filtered set ([84adac1](https://github.com/teamlead-com/cerbix/commit/84adac1))
+
+**Documentation & Gates**
+
+- **Every surface now says what the product is.** D-0174's positioning — a service reliability platform,
+  not "uptime & SLA monitoring" — reached the README at iter-0160 and stopped there; the CLI's help, the
+  OpenAPI description, the overview, the onboarding doc, the systemd unit and the OIDC client all still
+  carried the pre-FR-021 framing. Claims that the repository is private are gone with them; they told a
+  reader to authenticate for things that need no authentication ([92edc5b](https://github.com/teamlead-com/cerbix/commit/92edc5b))
+- **The PRD describes the product as it is now** — services, their incidents, their escalation ladder
+  and change intelligence — and points at a roadmap that exists ([4066527](https://github.com/teamlead-com/cerbix/commit/4066527), [59d05c4](https://github.com/teamlead-com/cerbix/commit/59d05c4))
+- **`make docs-check` compares the FR-025 acceptance map as a SET** and refuses the spellings the design
+  retired, in the specification and in every living document ([056eff5](https://github.com/teamlead-com/cerbix/commit/056eff5), [b320290](https://github.com/teamlead-com/cerbix/commit/b320290))
+- **The incident-audit gap has a requirement.** FR-026 / NFR-021 are specified and approved at revision
+  four after three review rounds; no product code changes until the iteration opens ([9208171](https://github.com/teamlead-com/cerbix/commit/9208171))
+
+### API · Metrics · Schema
+
+- **API:** eleven gate routes (the decision, the policy CRUD with `expected_revision`, the override
+  lifecycle and history, the project-scoped ledger read and listing); four change routes (record,
+  timeline, compare, an incident's preceding changes); `ApiToken.actions`; `PATCH
+  /api/v1/notification-channels/{id}` now accepts `name` and `config` as well as `enabled`; the
+  service detail carries its `sla_targets` inventory.
+- **Metrics:** the gate family — `cerbix_gate_decisions_total{state,action,overridden}`,
+  `cerbix_gate_decision_duration_seconds` (this project's first histogram),
+  `cerbix_gate_evaluate_rejected_total`, `cerbix_gate_evaluate_errors_total`,
+  `cerbix_gate_maintenance_errors_total` and four ledger gauges; and the change family —
+  `cerbix_change_correlations_total`, `cerbix_change_correlation_errors_total`,
+  `cerbix_change_compare_total`, `cerbix_change_record_rejected_total` ([db16dfa](https://github.com/teamlead-com/cerbix/commit/db16dfa)).
+- **Schema:** migrations `00093`–`00094` — gate policies, overrides, the daily-partitioned decision
+  ledger and its ownership registry; `service_changes`, `incident_changes`, `api_tokens.actions`, and
+  `UNIQUE (id, project_id)` on `incidents`.
+
+<sub>85 commits · decisions D-0188…D-0214 · independent review: every FR-024 range approved, FR-025
+approved as four effective slices plus the live-evidence correction · full account in
+`docs/iterations/iter-0163.md`, `docs/iterations/iter-0164.md`, `docs/iterations/iter-0165.md`</sub>
+
+---
+
 ## [v0.1.5] - 2026-08-28
 
 ### ⚠️ Upgrade Notes

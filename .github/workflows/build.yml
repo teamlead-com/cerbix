@@ -72,11 +72,36 @@ jobs:
           retention-days: 30
 
       # --- On a v* tag: publish everything as a GitHub Release ---------------
+      # The release body is the tag's own CHANGELOG section, because that text is
+      # written for an operator (upgrade notes first) while a generated commit list
+      # is not. Generated notes stay as the FALLBACK for a tag that has no section
+      # yet, so a release is never published with an empty body.
+      - name: Release notes from CHANGELOG
+        id: notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          awk -v tag="$GITHUB_REF_NAME" '
+            $0 == "## [" tag "]" || index($0, "## [" tag "] ") == 1 { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+          ' CHANGELOG.md | sed -e '/^---$/d' > release-notes.md
+          # Trim leading/trailing blank lines; report whether anything survived.
+          sed -i -e '/./,$!d' release-notes.md
+          if [ -s release-notes.md ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+            echo "release notes: $(wc -l < release-notes.md) lines from CHANGELOG.md"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "no CHANGELOG section for $GITHUB_REF_NAME — falling back to generated notes" >&2
+          fi
+
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: out/*
-          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.have == 'true' && 'release-notes.md' || '' }}
+          generate_release_notes: ${{ steps.notes.outputs.have != 'true' }}
           # -alpha / -beta / -rc tags publish as pre-releases automatically
           prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}

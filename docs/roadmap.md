@@ -7,21 +7,37 @@ being done, or by being declined with its reason moved to §5.
 
 **Where the tree stands (2026-09-01).** Every requirement in `status.md` is `DONE` except FR-026 and
 NFR-021, which entered as `TODO` when their design was approved (D-0214). iter-0165 is closed; no
-iteration is open. `v0.1.5` was cut on 2026-08-28 and **85 commits have landed since**, including two
-whole requirements (FR-024 reliability gate, FR-025 change intelligence), two migrations (`00093`,
-`00094`), two CLI verbs (`cerbix gate check`, `cerbix change record`) and the notification-channel
-edit. The product is further ahead of its last release than it has been at any point in this project.
+iteration is open. **`v0.1.6` shipped on 2026-09-01** — 85 commits over `v0.1.5`, carrying two whole
+requirements (FR-024 reliability gate, FR-025 change intelligence), two migrations (`00093`, `00094`),
+two CLI verbs (`cerbix gate check`, `cerbix change record`) and the notification-channel edit; the
+release body is the CHANGELOG section and the image tags `0.1.6`, `0.1` and `latest` point at it. The
+release backlog that dominated this list is therefore empty, and what remains is one red pipeline, one
+designed requirement and a dependency sweep.
 
 ---
 
-## 1. Now — the release, then the requirement that is already designed
+## 1. Now — the red pipeline, then the requirement that is already designed
 
-**R1 — cut `v0.1.6`.** The largest gap in the tree is not a missing feature, it is that nothing since
-2026-08-28 has been released. Two migrations land with it, so the upgrade notes are not optional:
-`00093` creates the gate's daily-partitioned decision ledger and its registry, `00094` the change
-schema. `CHANGELOG.md` is written at release time by this project's convention, and its release-notes
-style is set by the `v0.1.5` entry. Blocking nothing, blocked by nothing — and every day it waits, the
-notes get harder to write honestly.
+**R1 — make the Security workflow green, and keep it that way, BEFORE the next tag.** Both of its jobs
+fail on every push to `main`, and have since before the FR-024/FR-025 arc — `v0.1.6` shipped with the
+signal already red, which is the reason this is R1 rather than a footnote. A check that is always red
+is a check nobody reads, and the next release would inherit that.
+
+- **`govulncheck ./...`** reports vulnerabilities in the Go standard library against the version the
+  workflow pins through `go-version-file: go.mod` (`go 1.25.12` today). The fix is to move the pin to a
+  patch release that carries the fixes and re-run, not to silence the job. Reproduced locally against a
+  different toolchain (1.26.4), where it reports eight standard-library findings fixed in 1.26.5/1.26.6
+  plus two in imported packages and one in a required module that the code does not call — the exact
+  list under CI's pin will differ, the class will not.
+- **`gitleaks`** scans the full history (581 commits) and reports seven findings. The two that were
+  inspected are base64 32-byte keys in `internal/config/secrets_test.go` — test fixtures caught by the
+  `generic-api-key` rule. **The other five have not been reviewed**, and until they are, "false
+  positives" is a guess. The order matters: review all seven first, ROTATE anything genuine before
+  touching the config (the scan reads history, so a secret deleted by a later commit still leaks), and
+  only then allowlist the fixtures in `.gitleaks.toml` — by path or fingerprint, never by disabling the
+  rule.
+
+Cheap either way, and it is the one item that gates a release rather than being one.
 
 **R2 — implement FR-026 / NFR-021 (incident audit).** The design is approved at revision 4 and the
 spec is the contract: `func-incident-audit.md`. It is the only requirement in the tree that is
@@ -34,15 +50,18 @@ iteration.
 the last sweep (iter-0159, 2026-08-19): the go-modules group, the golang base image, a GitHub action,
 the frontend group (6 updates), `vue-tsc`, and four MAJORS — TypeScript 5.9 → 7.0, Vite 6.4 → 8.2,
 vue-router 4.6 → 5.2, jsdom 26 → 30. iter-0159's rule applies unchanged: patch and minor together,
-each major alone with its own verification, and `make spa-snapshot` read back afterwards. Cheap per
-branch, and it gets more expensive the longer four majors sit.
+each major alone with its own verification, and `make spa-snapshot` read back afterwards. Related to
+R1 but not the same work — R1's Go finding is a toolchain pin, which no dependabot branch touches.
 
-**Order.** R1 first because it is the only item whose cost grows with delay and whose risk is entirely
-in the past (the code is already green). R2 second because it is designed, bounded, and closes a named
-gap. R3 third because it is interruptible: each branch is its own commit and the sweep can be paused
-between majors without leaving anything half-done.
+**Order.** R1 first because it gates the next release and because every day it stays red is a day the
+habit of ignoring it hardens. R2 second because it is designed, bounded, and closes a named gap. R3
+third because it is interruptible: each branch is its own commit and the sweep can be paused between
+majors without leaving anything half-done.
 
----
+**Retired from this section.** *Cut `v0.1.6`* — done on 2026-09-01: the release carries the CHANGELOG
+section as its body (a workflow step now extracts it for any tag), the upgrade notes name the
+`incidents` index build and the leader's new maintenance pass, and `latest` moved in both GitHub and
+ghcr.
 
 ## 2. Next — the debts this arc created
 

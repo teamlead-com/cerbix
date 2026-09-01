@@ -2,8 +2,13 @@
 
 > This file is EVIDENCE, not narrative. Every line below is raw stdout/stderr and an exit code from the
 > commands quoted with them, against the image named here, and every `argv` is the COMPLETE command with only
-> the token value substituted — no elisions. `CERBIX_TOKEN` never reached this log: `grep` for the literal
-> returns zero.
+> the token VALUE substituted — no elisions. The secret itself never reached this file: `grep` for the token
+> value returns zero, and no token-shaped string — the `cbx_` prefix followed by a secret body — occurs
+> anywhere in it. Two things that DO occur and are not secrets: the variable NAME `CERBIX_TOKEN`, quoted in
+> row 17d and in the reproduction, and the prefix named in this very sentence. Review [66] found the earlier
+> wording claiming `grep` for "the literal `CERBIX_TOKEN`" returns zero, which is false of a document that
+> quotes the variable; the first correction then claimed the same of `cbx_`, in a sentence that contains it.
+> A claim about a document has to be true of the document making it.
 
 Written because review [59] of the close-out party was right about two things at once: the earlier
 attestation summarised where it should have transcribed, and a reproduction built from a later tree is not
@@ -91,20 +96,39 @@ usage: cerbix change record --project <id> --service <id> --kind deploy|rollback
   argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service d8b1223d-346f-42e9-90a0-bbc9daaa54e3 --source github-actions --external-id b-cli3-1788220136 --kind deploy --phase started
   stdout: —
   stderr: cerbix: change: 401 unauthorized
-17a same token, works          exit=0
-  argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service 910eb61e-2c50-4907-990c-df858fbe984f --source github-actions --external-id rev-1788220782 --kind deploy --phase started
-  stdout: recorded change=01a05a43-b8ff-70ed-9420-94b6e76d71f2 kind=deploy phase=started
-  stderr: —
-17b revoke that same token
-  request:  DELETE /api/v1/tokens/f2b68a19-c7d9-4812-b121-1fe49295bbaf   (session-auth, org admin)
+17-0 the token this chain is about, as created
+  request:  POST /api/v1/organizations/<org>/tokens   (session-auth, org admin)
+  status:   201
+  response: (secret redacted, id and name kept — they are not secrets)
+            {
+              "api_token": {
+                "actions": [
+                  "gate:evaluate",
+                  "change:record"
+                ],
+                "created_at": "2026-09-01T00:09:14.660661Z",
+                "created_by": "dee66cb5-e73b-4793-be1f-0afb1b75cb19",
+                "id": "2f3e6913-5b9b-4e40-a4bd-0c9b2702623c",
+                "name": "chain-proof-1788221354",
+                "org_id": "bff7d6dc-26ce-4e02-b616-20ca50a7f45b",
+                "project_id": "e15f2fa2-dc30-4321-b531-dc8ebe356e99",
+                "role": "editor"
+              },
+              "token": "<redacted>"
+            }17a the SAME token records, --json so the SERVER names the bearer   exit=0
+  argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service fd1cb270-04f1-41e2-989a-2284b7900549 --source github-actions --external-id chain-1788221368 --kind deploy --phase started --json
+  stdout: {"replayed":false,"change":{"service_id":"fd1cb270-04f1-41e2-989a-2284b7900549","source":"github-actions","external_id":"chain-1788221368","kind":"deploy","id":"01a05a4c-a73f-75d5-8ba5-42ebe4ee0c42","phase":"started","occurred_at":"2026-09-01T00:09:28Z","ref":"","url":"","actor_label":"token:chain-proof-1788221354","actor_user_id":null,"via_token":true,"recorded_at":"2026-09-01T00:09:28.127824Z"}}
+  stderr:
+17b the revocation of THAT id
+  request:  DELETE /api/v1/tokens/2f3e6913-5b9b-4e40-a4bd-0c9b2702623c
   status:   204
   body:
-17c same token, revoked        exit=1
-  argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service 910eb61e-2c50-4907-990c-df858fbe984f --source github-actions --external-id rev-1788220782-after --kind deploy --phase started
+17c the SAME token, one command after the revocation                exit=1
+  argv:   /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service fd1cb270-04f1-41e2-989a-2284b7900549 --source github-actions --external-id chain-1788221384-after --kind deploy --phase started --json
   stdout: —
   stderr: cerbix: change: 401 unauthorized
-17d no CERBIX_TOKEN            exit=1
-  argv:   env -u CERBIX_TOKEN /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service 910eb61e-2c50-4907-990c-df858fbe984f --source github-actions --external-id noenv-rev-1788220782 --kind deploy --phase started
+17d no CERBIX_TOKEN in the environment at all                       exit=1
+  argv:   env -u CERBIX_TOKEN /tmp/cerbix-cli change record --project e15f2fa2-dc30-4321-b531-dc8ebe356e99 --service fd1cb270-04f1-41e2-989a-2284b7900549 --source github-actions --external-id noenv-chain-1788221384 --kind deploy --phase started
   stdout:
   stderr: cerbix: change: CERBIX_TOKEN is not set (the API token that authenticates to the server; environment only, never a flag)
 ```
@@ -118,11 +142,20 @@ usage: cerbix change record --project <id> --service <id> --kind deploy|rollback
   `url`, `source`, `kind`, both ends of the `occurred_at` window, an explicitly empty `--at`, an unknown
   service (404) and a missing required flag with its usage line.
 * **exit 1** — credentials and transport, never a decision: a bogus token (16), no `CERBIX_TOKEN` at all
-  (17d), and a token revoked while the CLI still holds it. That last one is rows 17a–17c together, and it is
-  three rows rather than one because a 401 on its own proves nothing about revocation: 17a is the SAME token
-  recording a change successfully, 17b is the revocation itself with its request, its token id and its 204,
-  and 17c is that same token, one command later, refused. Review [64] asked for exactly that chain, and it was
-  right to — the earlier version asserted the revocation in prose and showed only the 401.
+  (17d), and a token revoked while the CLI still holds it. That last one is rows 17-0 to 17c together, and it
+  is four rows rather than one because each earlier version proved less than it claimed:
+
+  * **17-0** the creation response, secret redacted, `id` and `name` kept — neither is a secret.
+  * **17a** the same token recording a change with `--json`, so the SERVER states the bearer:
+    `"actor_label":"token:chain-proof-…","via_token":true,"actor_user_id":null`. The name there is the name in
+    17-0, which is the row that carries the id.
+  * **17b** `DELETE /api/v1/tokens/<that id>` → 204.
+  * **17c** that same token, one command later → 401.
+
+  Review [64] asked for the revocation to be shown rather than asserted; review [66] then observed that a
+  shown revocation of an ID still proves nothing about the bearer of rows 17a and 17c, since the CLI prints
+  only change ids. `--json` closes it: creation names id and name, the server names the name as the actor, the
+  DELETE names the id, and the refusal follows. No step is my word for it.
 
 Row 13 is review [52]'s fix seen end to end: `--at ""` travels verbatim and the SERVER refuses it, rather
 than the CLI silently substituting the invocation instant.

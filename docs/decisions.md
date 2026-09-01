@@ -5410,3 +5410,54 @@ fixes, and that a claim about an artefact — including a count — is a claim l
 **Consequence.** FR-025 and NFR-020 are `DONE`; `func-change-intelligence.md` is `IMPLEMENTED`; iter-0165 is
 CLOSED and immutable from the commit that carries this record. Nothing in the chain has been pushed; that
 remains the owner's.
+
+## D-0214 — FR-026 / NFR-021: incident writes are audited, and the design is approved at revision 4 (2026-09-01)
+
+**Context.** D-0171 left "the audit trail for INCIDENT writes" as an open gap, and iter-0156 §2.8 had already
+proved the shape of it: FR-022's invariant 14 as written ("every write audited with actor and tenant, in the
+mutating transaction") was false of the PRODUCT, not merely unimplemented — an incident write leaves no
+`audit_logs` row for either anchor. What FR-022 keeps is the absence of asymmetry between the two anchors. An
+operator can resolve someone else's incident, acknowledge a page or publish a postmortem, and the
+organization's audit trail says nothing. The gap was the only named item left in the backlog after iter-0165
+closed.
+
+**The owner's three sizing answers (2026-09-01).** Only PRINCIPAL writes are audited — a machine's work is
+recorded in the incident's own timeline, and a flapping service would bury the log, which is the same reason
+D10 of `func-reliability-gate.md` keeps gate DECISIONS out of `audit_logs`. The row is written INSIDE the
+mutating transaction, the `insertGateAudit` pattern of FR-020/FR-024, not the best-effort `h.audit` helper —
+that is what makes "audited" a property of the recorded fact and what makes invariant 14's wording true. And
+NO read is added: the rows appear in the organization's existing audit listing; an incident-scoped panel and a
+project-scoped read were both considered and declined, and stay named as follow-ups.
+
+**The review, and what it changed.** Three rounds against the working tree, each verified against the code
+rather than accepted. Revision 1 was rejected with 1 P0, 5 P1 and 2 P2. The P0 was mine and it mattered: `nil`
+as "the machine actor" meant a handler that forgot the argument produced exactly what the requirement
+forbids — an unaudited principal write — and revision 1's own test matrix asserted that behaviour. The actor
+now travels in the DOOR (`…ByPrincipal` requires it, `…BySystem` has no actor parameter), so a forgotten actor
+is a compile error. Round 1 also found that the postmortem writer owns no transaction (`UpsertPostmortem` is
+one pooled statement that cannot tell a create from a replace), that a repeated acknowledgement is not a no-op
+today because `updated_at` is written unconditionally, that the machine list omitted the `🕸 Impact:` note,
+and that a concurrent Alertmanager firing answers 500 where the sequential retry answers "ignored". Round 2
+found that the regression for the acknowledgement no-op was pinned to a surface that does not read
+`updated_at` at all, that the machine list still was not enumerated by writer (`⏸ Suppressed:` alone has two
+independent writers, in `dependencies.go` and `alertdelegation.go`, and neither is in `incidentcontext.go`),
+that "the loser is silent" is not an observable contract for a parallel resolve, and that a system door for a
+writer with no machine caller would widen the unaudited surface for nothing. Round 3 found that the
+`internal/api` AST guard proves only what is REACHED: a `…BySystem` method declared for a writer nobody calls
+passes it untouched, so a second guard now pins what EXISTS over the declarations of `internal/store`.
+
+**Decision.** The design of `func-incident-audit.md` is APPROVED at revision 4 (owner, 2026-09-01). FR-026 and
+NFR-021 enter `docs/status.md` as `TODO`, per the rule iter-0164 followed for FR-025: a requirement gets its
+row when its design is approved, and revisions 1–4 are committed ONCE as the accepted design phase (D-0203).
+The scope question the owner settled explicitly: **D8b stays inside FR-026** — the concurrent receiver retry
+is a normal part of the real Alertmanager path, and without it "one mutation → one audit row" is a false
+claim rather than an invariant. The same reasoning carries D8a. Both are user-visible behaviour changes and
+are named as the only two exceptions to NFR-021's "nothing else moves".
+
+**Consequence.** The spec is the contract for an implementation iteration that is NOT yet opened; nothing in
+the product changes until it is. Two guards, each fixture-tested, hold the door surface — one over
+`internal/api` for what is reached, one over `internal/store` declarations for what exists — and a door built
+ahead of its caller fails the second even while the first passes. The nine machine writers are enumerated by
+name in D1, and a writer that grows a sibling without a §7 case is a gap that table exists to make visible.
+The two follow-ups D9 declined — an incident-scoped audit panel and a project-scoped audit read — remain open
+and unclaimed.

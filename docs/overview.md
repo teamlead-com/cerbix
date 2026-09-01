@@ -276,8 +276,8 @@ render for everyone who sees the service; the policy controls render for `sessio
 SPA never asks the gate: opening a page reads the ledger (`limit=1` for the card) and creates no decision
 — a decision is written only by `POST …/gate`, that is by the CLI or the pipeline.
 
-**Change intelligence (FR-025, iter-0165 — the backend has landed; the SPA per the approved mock lands in
-the same iteration).** The gate says whether a release may go; change intelligence records that it WENT
+**Change intelligence (FR-025, iter-0165 — closed 2026-09-01, D-0213: schema, store, API, `cerbix change
+record` and the SPA per the owner-approved mock all landed in that iteration).** The gate says whether a release may go; change intelligence records that it WENT
 and lets the service's existing facts say what followed. A pipeline records a **change event** for a
 service: `kind ∈ {deploy, rollback, flag}`, `phase ∈ {started, succeeded, failed, cancelled}`, the instant
 it `occurred_at`, an external identity `(source, external_id)` under which the phases of one change are

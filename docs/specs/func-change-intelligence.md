@@ -17,8 +17,9 @@
 > keyed `UNIQUE(service_id, source, external_id, phase)`, a domain-owned phase order, serialization per
 > external identity, and closed enums with no free payload") and carrying the token-scoped CI capability
 > that D12 of the same spec named as a follow-up requirement. The owner's answers to the seven questions of §11
-> are recorded there and in D-0209; FR-025 and NFR-020 are `IN_PROGRESS` in `docs/status.md`;
-> the implementation is iter-0165 and its evidence map is the FR-025 acceptance discharge in `docs/traceability.md`.
+> are recorded there and in D-0209; FR-025 and NFR-020 are `DONE` in `docs/status.md`;
+> the implementation is iter-0165, closed 2026-09-01 (D-0213), and its evidence map is the FR-025 acceptance
+> discharge in `docs/traceability.md`.
 
 ## 1. What this is, in one paragraph
 

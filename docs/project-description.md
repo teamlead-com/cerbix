@@ -136,6 +136,31 @@ rotation runbook, metrics and alerts ship in the single binary. Full contract:
 [`docs/specs/func-secret-inventory.md`](specs/func-secret-inventory.md) (FR-020, NFR-015,
 D-0155) — **DONE**.
 
+## Reliability gate
+
+A deploy pipeline asks cerbix whether a release may go out and gets an answer it can branch on
+instead of a dashboard someone has to read. One call — `cerbix gate check --project <id> --service
+<id>` or `POST /api/v1/projects/{p}/services/{s}/gate` with an API token — returns the observed
+`state` (`ALLOW`, `WARN`, `BLOCK`, `UNKNOWN`, or `NOT_CONFIGURED` when the service has no policy), the
+effective `action`, every matching reason and the evidence each reason rests on; the CLI's exit code
+follows the action (`0` allow/warn, `2` block, `4` not configured, `1` transport/auth), so a CI step
+is one command. What blocks is declared per service in a POLICY naming ONE SLO window and assigning
+each clause of a closed vocabulary — budget exhausted, budget consumed at or above N %, page-burn firing,
+ticket-burn firing, an open service incident — to `block`, `warn` or `ignore`, plus what to do when a
+fact is unavailable and how stale the facts may be before they are refused rather than quoted. The
+gate computes **no new reliability number**: it reads the same sealed facts through the same code
+paths as the service page, inside one database snapshot, so a gate answer and the screen cannot
+disagree about the same instant. A release that must ship anyway gets a time-bounded, audited
+override (at most 7 days, one active per service, project admin only) that changes the ACTION and
+never the observed state — the decision still records that the budget was exhausted and that someone
+overrode it. Every decision is an immutable row in a bounded, daily-partitioned ledger, readable by
+id after the service is renamed or deleted; the service page carries a `Release gate` card
+([`frontend/src/components/ServiceGate.vue`](../frontend/src/components/ServiceGate.vue)) with the
+policy editor, the latest decision and the override panel, and opening a page never creates a
+decision — only a pipeline does. Full contract:
+[`docs/specs/func-reliability-gate.md`](specs/func-reliability-gate.md) (FR-024, NFR-019,
+D-0201/D-0207/D-0208) — **DONE**.
+
 ## Delivery Method
 
 Iteration-based per `AGENTS.md`. The full phased roadmap and rationale live in the

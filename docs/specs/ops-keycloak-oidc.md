@@ -49,8 +49,8 @@ cerbix follows a **Provider-Agnostic OIDC Authentication (AuthN)** model (Decisi
 2. **General Configuration**:
    - **Client type**: `OpenID Connect`
    - **Client ID**: `cerbix`
-   - **Name**: `cerbix Monitoring`
-   - **Description**: `OIDC Client for cerbix Uptime & SLA Monitoring`
+   - **Name**: `cerbix`
+   - **Description**: `OIDC Client for the cerbix service reliability platform`
 3. Click **Next**.
 
 4. **Capability Config**:
@@ -248,8 +248,8 @@ Instead of manual UI configuration, you can import this complete realm configura
   "clients": [
     {
       "clientId": "cerbix",
-      "name": "cerbix Monitoring",
-      "description": "OIDC Client for cerbix Uptime & SLA Monitoring",
+      "name": "cerbix",
+      "description": "OIDC Client for the cerbix service reliability platform",
       "enabled": true,
       "clientAuthenticatorType": "client-secret",
       "secret": "secret",

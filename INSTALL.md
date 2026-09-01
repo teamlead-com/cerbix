@@ -46,8 +46,7 @@ version via `CERBIX_IMAGE` in `docker/.env`) and starts `postgres`, `rabbitmq`, 
 `cerbix` (`--role all`). Migrations apply automatically; the admin account is created on
 the first start against an empty database.
 
-> While the repository is private, pulling needs `docker login ghcr.io` with a PAT
-> (`read:packages`). Alternatively build the image from source:
+> To build the image from source instead of pulling it:
 > `docker build -t ghcr.io/teamlead-com/cerbix:latest .` at the repo root.
 
 Verify:
@@ -97,8 +96,8 @@ sudo install -m 0755 cerbix /usr/local/bin/cerbix
 cerbix version
 ```
 
-> While the repository is private, release assets need authentication — use
-> `gh release download vX.Y.Z -R teamlead-com/cerbix` instead of curl.
+> `gh release download vX.Y.Z -R teamlead-com/cerbix` fetches the same assets if you
+> prefer the GitHub CLI to curl.
 > Or build from source at the repo root: `make build` (binary lands in `bin/cerbix`;
 > requires Go 1.25+ and an already-built SPA in `internal/web/dist`).
 
@@ -164,7 +163,7 @@ sudo chmod 0640 /etc/cerbix/cerbix.env /etc/cerbix/config.yaml
 
 ```ini
 [Unit]
-Description=cerbix — uptime & SLA monitoring
+Description=cerbix — service reliability platform
 Wants=network-online.target
 After=network-online.target postgresql.service
 

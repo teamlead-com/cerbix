@@ -10,8 +10,8 @@
   "clients": [
     {
       "clientId": "cerbix",
-      "name": "cerbix Monitoring",
-      "description": "OIDC Client for cerbix Uptime & SLA Monitoring",
+      "name": "cerbix",
+      "description": "OIDC Client for the cerbix service reliability platform",
       "enabled": true,
       "clientAuthenticatorType": "client-secret",
       "secret": "secret",

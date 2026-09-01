@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-cerbix — self-hosted uptime & SLA monitoring. One static Go binary embeds the Vue 3 SPA, REST API, and goose migrations. Monorepo: the Go module at the repo root (`cmd/`, `internal/`, Go 1.25), `frontend/` (Vue 3 + Vite + TS), `docs/`, `docker/`, `openapi.yaml` (source of truth for the API). Module path `github.com/teamlead-com/cerbix` matches the GitHub repo, so `go install .../cmd/cerbix@latest` works once the repo is public.
+cerbix — self-hosted, multi-tenant **service reliability platform** (D-0174, the positioning that supersedes "uptime & SLA monitoring"): a Service declares what its reliability MEANS in versioned definitions, cerbix measures that from its own checks, withholds any number it cannot defend, and drives the response — incidents, dependency impact, status pages, on-call escalation, a release gate and change intelligence. Not an observability platform: it ingests no external telemetry. One static Go binary embeds the Vue 3 SPA, REST API, and goose migrations. Monorepo: the Go module at the repo root (`cmd/`, `internal/`, Go 1.25), `frontend/` (Vue 3 + Vite + TS), `docs/`, `docker/`, `openapi.yaml` (source of truth for the API). Module path `github.com/teamlead-com/cerbix` matches the GitHub repo, so `go install github.com/teamlead-com/cerbix/cmd/cerbix@latest` works.
 
 ## Commands
 

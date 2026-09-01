@@ -153,7 +153,7 @@ func Main(args []string) int {
 
 func usage(w io.Writer) {
 	for _, line := range []string{
-		"cerbix — internal uptime & SLA monitoring",
+		"cerbix — self-hosted service reliability platform",
 		"usage:",
 		"  cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]",
 		"  cerbix migrate --config <path>",

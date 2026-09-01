@@ -71,8 +71,7 @@ services:
 
   cerbix:
     # Published by .github/workflows/image.yml on v* tags. Pin a version via
-    # CERBIX_IMAGE in .env (e.g. ghcr.io/teamlead-com/cerbix:v0.1.0); while the
-    # repository is private, `docker login ghcr.io` with a PAT is required to pull.
+    # CERBIX_IMAGE in .env (e.g. ghcr.io/teamlead-com/cerbix:v0.1.0).
     image: ${CERBIX_IMAGE:-ghcr.io/teamlead-com/cerbix:latest}
     restart: unless-stopped
     <<: [*netCaps, *logging]

@@ -1,7 +1,9 @@
 # Onboarding — cerbix
 
-Internal uptime & SLA monitoring: monitors → heartbeats → SLA/incidents/status
-pages, with OpenID Connect (any issuer) + local login, org→project multi-tenancy and role-based access control (Global/Org/Project roles). Go backend,
+Self-hosted, multi-tenant service reliability platform: a Service declares what reliable
+means for it in versioned definitions, cerbix measures that from its own checks — monitors →
+heartbeats → SLO / error budget / burn rate — and drives the response: incidents, dependency
+impact, status pages, on-call escalation, a release gate for pipelines. With OpenID Connect (any issuer) + local login, org→project multi-tenancy and role-based access control (Global/Org/Project roles). Go backend,
 Postgres, RabbitMQ, Vue 3 SPA. Monorepo: the Go module at the root (`cmd/`, `internal/`), `frontend/`, `docs/`, `docker/`.
 
 ## 1. Read this first

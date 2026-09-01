@@ -3,7 +3,8 @@ info:
   title: cerbix API
   version: 0.23.0
   description: >
-    Internal uptime & SLA monitoring API. Authentication is via a server-side
+    Service reliability platform API — declared reliability definitions, the facts
+    measured against them, and the operational response. Authentication is via a server-side
     session cookie established by an OIDC provider (`/auth/login` → `/auth/callback`)
     or local login (`/auth/local/login`). All `/api/v1/*` endpoints require a
     valid session and enforce tenant isolation: callers only see and mutate the

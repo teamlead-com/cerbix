@@ -1,7 +1,9 @@
 # cerbix — overview: binary, architecture, stack, deployment
 
-Internal availability and SLA monitoring service for a multi-tenant
-environment: organization → project → monitor. A single Go binary runs in different roles,
+Self-hosted, multi-tenant service reliability platform (D-0174): organization → project →
+service, with monitors beside services as the checks that feed them. A Service declares what
+its reliability MEANS in versioned definitions; cerbix measures that from its own checks and
+drives the response. A single Go binary runs in different roles,
 scales horizontally via RabbitMQ, stores data in Postgres (+TimescaleDB),
 authenticates via OIDC (Keycloak) and/or local passwords, and serves an SPA (Vue 3).
 

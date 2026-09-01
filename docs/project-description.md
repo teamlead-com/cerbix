@@ -239,5 +239,6 @@ D-0209/D-0211/D-0213) — **DONE**.
 
 ## Delivery Method
 
-Iteration-based per `AGENTS.md`. The full phased roadmap and rationale live in the
-planning document; scoped specs are in `docs/specs/`; live status is `docs/status.md`.
+Iteration-based per `AGENTS.md`. What is next and in what order is
+[`docs/roadmap.md`](roadmap.md); scoped specs are in `docs/specs/`; live status is
+`docs/status.md`; the decisions behind both are in `docs/decisions.md`.

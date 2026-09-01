@@ -1062,10 +1062,19 @@ const selectCls =
                   <option value="basic">Basic auth</option>
                 </select>
               </label>
-              <label v-if="promqlAuth === 'basic'" class="flex flex-col gap-[6px]">
-                <span class="text-[12px] font-semibold text-ink-2">Username</span>
-                <input v-model="pg.username" data-testid="promql-username" type="text" placeholder="scanner" :class="[inputCls, 'font-mono text-[13px]']" />
-              </label>
+              <div v-if="promqlAuth === 'basic'" class="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1">
+                <label class="flex flex-col gap-[6px]">
+                  <span class="text-[12px] font-semibold text-ink-2">Username</span>
+                  <input v-model="pg.username" data-testid="promql-username" type="text" placeholder="scanner" :class="[inputCls, 'font-mono text-[13px]']" />
+                </label>
+              <div class="flex flex-col gap-[6px]">
+                <span class="text-[12px] font-semibold text-ink-2">Credential</span>
+                <div class="flex gap-3 text-[12px]"><label><input v-model="credentialMode" type="radio" value="value" /> Value</label><label :class="secretFeatureDisabled && 'opacity-50'"><input v-model="credentialMode" type="radio" value="ref" :disabled="secretFeatureDisabled" /> Secret reference</label></div>
+                <select v-if="credentialMode === 'ref'" v-model="secretRef" data-testid="monitor-secret-ref" :class="[selectCls, 'h-[38px]']"><option value="" disabled>Select a project secret</option><option v-for="s in projectSecrets" :key="s.id" :value="s.name">{{ s.name }}</option></select>
+                <p v-if="danglingSecretRef" data-testid="monitor-secret-ref-missing" class="mt-1 text-[12px] text-down">Secret <span class="font-mono">{{ secretRef }}</span> no longer exists in this project. This monitor cannot dispatch until you pick an existing secret.</p>
+                <input v-else v-model="pg.password" type="password" :placeholder="isEdit && initialCredentialMode === 'value' ? '•••••• (unchanged)' : ''" autocomplete="new-password" :class="[inputCls, 'font-mono text-[13px]']" />
+              </div>
+              </div>
             </div>
           </section>
 

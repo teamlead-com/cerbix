@@ -53,7 +53,8 @@ vue-router 4.6 → 5.2, jsdom 26 → 30. iter-0159's rule applies unchanged: pat
 each major alone with its own verification, and `make spa-snapshot` read back afterwards. Related to
 R1 but not the same work — R1's Go finding is a toolchain pin, which no dependabot branch touches.
 
-**Order.** R1 first because it gates the next release and because every day it stays red is a day the
+**Order.** R4 is sequenced last of the four but is independent of the other three: it touches the
+logger and the deployment documents, nothing R1–R3 own. R1 first because it gates the next release and because every day it stays red is a day the
 habit of ignoring it hardens. R2 second because it is designed, bounded, and closes a named gap. R3
 third because it is interruptible: each branch is its own commit and the sweep can be paused between
 majors without leaving anything half-done.
@@ -62,6 +63,22 @@ majors without leaving anything half-done.
 section as its body (a workflow step now extracts it for any tag), the upgrade notes name the
 `incidents` index build and the leader's new maintenance pass, and `latest` moved in both GitHub and
 ghcr.
+
+**R4 — a log file an operator can grep (FR-027 / NFR-022).** Searching the history through
+`journalctl` is too slow on a systemd install: the journal is compressed and every record is
+decompressed and formatted on the way past a `grep`. The owner picked the middle option — the operator names an
+absolute path in `log.file`, cerbix uses it VERBATIM and REOPENS it on `SIGHUP`, so ordinary logrotate keeps owning rotation and
+no line is lost to `copytruncate`; stdout keeps receiving the same records so `systemctl status` stays
+useful. Design is written and awaiting review (`docs/specs/ops-logging.md`, revision 1); no
+requirement row until it is approved. Estimated at half an iteration — the cost is not the write, it
+is the signal handler across five roles, the test that proves the reopen honestly (rename, HUP, assert
+the new inode grows and the old one does not), and the operational sequencing: Go's default action for
+`SIGHUP` is to TERMINATE, so a logrotate file installed before the new binary kills the service.
+Giving each role on a host its own path stays the operator's job — deriving a name from the role was
+considered and rejected, because a file appearing somewhere other than where the config says is
+implicit behaviour, and the product's half of that bargain is to say so wherever the key appears
+rather than to rewrite the path quietly. Docker is unaffected — the `json-file` driver already writes
+rotated files there.
 
 ## 2. Next — the debts this arc created
 

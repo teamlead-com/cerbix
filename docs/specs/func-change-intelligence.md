@@ -1,6 +1,7 @@
 # func-change-intelligence — a pipeline says what it changed, and the service's facts say what followed (FR-025 / NFR-020)
 
-> **Lifecycle: DESIGN APPROVED — revision 3, 2026-08-30 (party [15]); the owner answered the seven questions of §11
+> **Lifecycle: IMPLEMENTED — iter-0165, closed 2026-09-01 (D-0213); FR-025/NFR-020 are `DONE` in `docs/status.md`.**
+> Design approved at revision 3, 2026-08-30 (party [15]); the owner answered the seven questions of §11
 > the same day (D-0209). No SPA code before an owner-approved UI mock of the timeline and the comparison; backend
 > work may proceed under the approved design meanwhile, as FR-024's did.** Forward correction at implementation,
 > owner decision D-0211 (2026-08-30): `pending` applies to EITHER comparison side whose end exceeds

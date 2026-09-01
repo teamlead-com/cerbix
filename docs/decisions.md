@@ -5361,3 +5361,52 @@ the same thing before the reviewer sees the range.
 
 **Consequences.** `openapi.yaml` lists `action_not_granted` on token creation; the SPA's token form offers
 only the role's grants (mock screen 6 already does); the runbook's metric rows use the closed reason set.
+
+## D-0213 — iter-0165 closed: FR-025 / NFR-020 (change intelligence) are DONE (2026-09-01)
+
+**Decision.** The iteration that implemented the approved design (D-0209) closes with FR-025 and NFR-020
+`DONE`. Basis: AC-0165-1…7 are DONE with evidence (`docs/status.md`); the FR-025 discharge table in
+`docs/traceability.md` reaches all 23 invariants of §6 and the nine groups of the §7 matrix with named tests
+and the mutations killed, with no `PARTIAL` row; the store matrix ran in BOTH storage modes under `-race`,
+independently, one attended run per DSN (hypertable ok 616.764 s, declarative partitions ok 591.406 s); the
+full `-race` suite is green (33 packages); the browser suite is 58 passed / 1 skipped / exit 0 on a live
+stack; and the independent reviewer issued a disposition for every commit in the chain.
+
+**The dispositions are recorded as the reviewer worded them, not collapsed.** Four ranges are approved as an
+EFFECTIVE SLICE while the original commit is NOT APPROVED AS SUBMITTED, because each shipped with defects
+that later commits fixed:
+
+| slice | original, not approved as submitted | approved as | verdict |
+| --- | --- | --- | --- |
+| API | `7260e68` — findings [8], [11], [14] | + `2c662a4`, `424edcd`, `a1cfe00`, `4f3a046` | [20] |
+| CLI | `74ce187` — finding [52] of the previous party | + `25e181a` | [24] |
+| SPA | `d2e0f3c` — findings [31], [32] | + `0c8a489`, `41b688c`, `3ad656f`, `caf8e6e`, `7bca415`, `673f707`, `381bfd4` | [47] |
+| docs / checker | `35ded9a` — findings [49], [50], [54] | + `056eff5`, `b320290` | [56] |
+| live evidence | `f27133d` — incomplete and internally inconsistent | correction slice `7c45db0..201f542` | [72], [77] |
+
+`cee8790` is **SUPERSEDED** by `28bf8cd` and is NOT SUBJECT TO STANDALONE APPROVAL: it is neither approved
+nor an open defect ([77]). Approved outright: `c6c74dd` [99 prev], `5cace76` (narrow) [39 prev], `927c8e6`
+[52], `fb625ca` [29], `8e41b24` [62 prev], `3b43b70` + `f5654d7` [62], `28bf8cd` [97 prev], `3ad656f` [39],
+`f8f8cb4` + `42ae4ab` [74], `9402801` + `1297577` [75].
+
+**The live-run boundary is part of this decision, not a footnote.** `iter-0165-live-evidence.md` records a
+run at `f8f8cb4` with image `sha256:0c560a1026a4`. That run has NOT been reproduced. What exists is a
+current-head confirmation — `iter-0165-cli-evidence.md`, its own image, twenty-one labelled entries of which
+nineteen are CLI invocations carrying exit codes and two are the HTTP records that make the revocation chain
+checkable — and both files say so in their own words. Approving the corrected state is not approving the
+historical claim, and the close-out does not pretend otherwise ([72]).
+
+**Why it is worth recording how this iteration went.** Of the reviewer's findings after the code was
+complete, the large majority were defects in my own FIXES and in the EVIDENCE I produced, not in the product:
+a bounded pool that could stall the queue it bounded, that pool fenced by the wrong generation, a commit title
+claiming coverage the change did not have, a `@ts-expect-error` in a file the type-check excludes, an
+assertion of inclusion under a documentation claim of equality, a checker that could bless a duplicated or
+over-long acceptance table, a live-run report typed from scrollback instead of a retained log, a 401 offered
+as proof of a revocation, and a document header whose claim about itself was false — twice, the second time
+inside the sentence correcting the first. The product moved once in that whole sequence. The lesson entered
+in the iteration report is that a fix is a change and earns the same adversarial reading as the code it
+fixes, and that a claim about an artefact — including a count — is a claim like any other.
+
+**Consequence.** FR-025 and NFR-020 are `DONE`; `func-change-intelligence.md` is `IMPLEMENTED`; iter-0165 is
+CLOSED and immutable from the commit that carries this record. Nothing in the chain has been pushed; that
+remains the owner's.

@@ -53,10 +53,14 @@ Transport between scheduler and workers is the `Dispatcher` interface: `rabbitmq
 
 ## Domain Model & Naming
 
-`Organization` → `Project` → `Monitor` → `Heartbeat`, plus `Incident`/`IncidentUpdate`/
+`Organization` → `Project` → `Monitor` → `Heartbeat`, plus `Service` (with its definition
+revisions, evaluation epochs and sealed facts), `Incident`/`IncidentUpdate`/
 `Postmortem`, `StatusPage`/`Component`, `MaintenanceWindow`, `NotificationChannel`,
 `Subscriber`, `ApiToken`. Organization is the isolation boundary; Project is the primary
-unit of permissions; Monitor is the "service" being checked.
+unit of permissions; a Monitor is one check with its own history, and a Service is the
+declared reliability domain that monitor may contribute to — the two sit beside each other
+(see "Service as a reliability domain" below), which is why this line no longer calls a
+monitor "the service being checked".
 
 ## RBAC
 
@@ -136,6 +140,53 @@ rotation runbook, metrics and alerts ship in the single binary. Full contract:
 [`docs/specs/func-secret-inventory.md`](specs/func-secret-inventory.md) (FR-020, NFR-015,
 D-0155) — **DONE**.
 
+## Service as a reliability domain
+
+A `Service` is the unit whose reliability is **explicitly declared**, and it sits BESIDE monitors
+rather than above them: one monitor may contribute to several services, or to none. A team declares
+what availability MEANS for a service — which checks are its SLI, how regions aggregate, what counts
+as pageable — in a versioned definition revision, while what the system actually MEASURED is a
+separate evaluation epoch; every fact references the epoch, so any reported number resolves back to
+exactly one declaration. Facts are duration-weighted and sealed bucket by bucket, and the seal
+watermark advances only over CONTIGUOUS data — a gap holds it back instead of being jumped over —
+which is what makes a number reproducible and not merely current. Availability per window, the error
+budget and the burn rate are served from those sealed facts (`GET …/services/{id}/reliability`,
+[`internal/reliability/reduce.go`](../internal/reliability/reduce.go)); a window with no objective is
+ABSENT rather than reported as zeros, and missing inputs are never rendered as perfect reliability. A
+service can also be the thing that PAGES: with declared alerting ownership its SLI members stop
+delivering their own alert for the same failure — but only per signal, only for onset-like events, and
+only while a replacement is demonstrably armed; anything ambiguous fails OPEN and the member pages,
+because a page that was not needed is noise while a page that was owed and never sent is the failure
+the design exists to prevent. All of that governs DELIVERY only — facts, status flips and history keep
+recording either way. Services are declarable as code through the same file provider as monitors. Full
+contract: [`docs/specs/func-service-reliability.md`](specs/func-service-reliability.md) (FR-021,
+NFR-016, D-0159/0166/0167/0168) — **DONE** (iter-0153, D-0169; the §16.9 follow-ups were explicit
+non-goals there and shipped as the two requirements below).
+
+## Service incidents and escalation
+
+A Service can be the SUBJECT of an incident, not merely a thing that pages. An incident has AT MOST
+ONE anchor — a monitor or a service — so every read path branches on an unambiguous discriminator,
+while a manual project-level incident with neither keeps working. A live service alert opens one
+automatically, in the same transaction as the announcement and under the same gates that decide
+whether it pages at all; the end of the announcement resolves it. A burn-rate breach opens none, ever
+— a budget signal trails the seal and says nothing about now. At most one open auto-incident per
+service, so a flapping service cannot accumulate them, and only automatic incidents are auto-resolved,
+so a machine never overwrites a conclusion a person drew. The incident carries its impact links and a
+snapshot of the members the service had AT OPEN time, so it keeps naming a member deleted since;
+deleting the service clears the anchor and keeps the record, timeline intact. A service that has an
+escalation policy escalates its OWN incident: steps fire on the policy's schedule from the incident's
+start, progress latches so a step fires once, acknowledgement or resolution ends the ladder, and every
+step names the SERVICE. The ladder fails CLOSED where alert delegation fails open — ambiguity at
+delivery time means one page exists, ambiguity in a ladder would mean pages MULTIPLY on a state nobody
+can confirm — and the service graph annotates and links but never pauses it. Nothing about a monitor's
+incident changes: lifecycle, notes, escalation, status-page rendering and postmortem are the same
+before and after (NFR-017, NFR-018), and an open service incident moves no component STATUS on a
+status page — it is rendered as an incident next to a status still derived from health alone. Full
+contract: [`docs/specs/func-service-incidents.md`](specs/func-service-incidents.md) (FR-022, NFR-017,
+D-0171) and [`docs/specs/func-service-escalation.md`](specs/func-service-escalation.md) (FR-023,
+NFR-018, D-0173) — **DONE**.
+
 ## Reliability gate
 
 A deploy pipeline asks cerbix whether a release may go out and gets an answer it can branch on
@@ -160,6 +211,31 @@ policy editor, the latest decision and the override panel, and opening a page ne
 decision — only a pipeline does. Full contract:
 [`docs/specs/func-reliability-gate.md`](specs/func-reliability-gate.md) (FR-024, NFR-019,
 D-0201/D-0207/D-0208) — **DONE**.
+
+## Change intelligence
+
+The gate says whether a release may go; change intelligence records that it WENT, and lets the facts
+the service already has say what followed. A pipeline reports a **change event** — `deploy`, `rollback`
+or `flag`, in one of its phases (`started`, `succeeded`, `failed`, `cancelled`) under its own external
+identity `(source, external_id)` — with `cerbix change record` or one `POST`, optionally naming the
+gate decision the release rested on. Phases are append-only and idempotent: an identical retry returns
+the ORIGINAL row, a contradictory one is refused by name, and two runners reporting different endings
+for the same run cannot both pass. It is a fact about TIME, not a catalog — no repository, environment
+or artefact is stored, the version label and link are opaque, and cerbix takes no action on any
+external system. Three reads follow, none of which measures anything new: a service TIMELINE of change
+groups over a bounded window; the CORRELATION written when a service incident opens automatically,
+linking the changes that preceded it on that service and on the upstreams the impact graph marks as
+probable root, with one `🚀 Changes:` note whose word is "preceded", never "caused" — cerbix does not
+claim to know what caused an outage — and which fails open, so an incident never depends on it; and a
+before/after COMPARISON of the SLI around the change, computed from SEALED buckets through the same
+query the reliability page uses, so it is withheld exactly where the page would withhold and reads
+`pending` until the facts are sealed rather than quoting a partial figure. A CI token can be narrowed
+to exactly what a pipeline needs — record a change, ask the gate — instead of carrying a whole role.
+In the UI the service page carries a `Changes` card
+([`frontend/src/components/ServiceChanges.vue`](../frontend/src/components/ServiceChanges.vue)) beside
+the release gate, with the timeline and the before/after view behind it. Full contract:
+[`docs/specs/func-change-intelligence.md`](specs/func-change-intelligence.md) (FR-025, NFR-020,
+D-0209/D-0211/D-0213) — **DONE**.
 
 ## Delivery Method
 

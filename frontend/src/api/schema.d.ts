@@ -8063,7 +8063,7 @@ export interface components {
             tags?: string[];
             /** @description Worker-pool region that probes this monitor; default core. Composite monitors must be core. */
             region?: string;
-            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}. */
+            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}. */
             config?: {
                 [key: string]: string;
             };
@@ -8214,7 +8214,7 @@ export interface components {
             tags?: string[];
             /** @description Worker-pool region that probes this monitor; default core. Composite monitors must be core. */
             region?: string;
-            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}. */
+            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}. */
             config?: {
                 [key: string]: string;
             };
@@ -8247,7 +8247,7 @@ export interface components {
             tags?: string[];
             /** @description Worker-pool region that probes this monitor; default core. Composite monitors must be core. */
             region?: string;
-            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}. */
+            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}. */
             config?: {
                 [key: string]: string;
             };

@@ -167,8 +167,13 @@ const tlsSettings = reactive({ enabled: true, skipVerify: false });
 // management mode uses basic auth (username + write-only password, reusing `pg`)
 // and an optional path.
 const rabbitMode = ref<"amqp" | "management">("amqp");
+// PromQL basic auth is OPTIONAL (D-0215): `none` is the default and the shape every existing
+// monitor has, so the credential block only appears once the operator asks for it.
+const promqlAuth = ref<"none" | "basic">("none");
 const rabbitPath = ref("");
-const credentialRequired = computed(() => isDB.value || isRedis.value || (isRabbitMQ.value && rabbitMode.value === "management"));
+const credentialRequired = computed(
+  () => isDB.value || isRedis.value || (isRabbitMQ.value && rabbitMode.value === "management") || (isPromQL.value && promqlAuth.value === "basic"),
+);
 function rabbitConfig(): Record<string, string> {
   if (rabbitMode.value !== "management") return { mode: "amqp" };
   const base: Record<string, string> = {
@@ -203,7 +208,12 @@ function redisConfig(): Record<string, string> {
   return withSecret({ username: pg.username.trim(), tls: String(tlsSettings.enabled), tls_skip_verify: String(tlsSettings.skipVerify) });
 }
 function promqlConfig(): Record<string, string> {
-  return { query: pg.query.trim() };
+  const base: Record<string, string> = { query: pg.query.trim() };
+  if (promqlAuth.value !== "basic") return base;
+  // The discriminator is `auth_mode`, not `auth`: a settings key literally named `auth` is
+  // refused by the file provider's inline-secret guard, and the schema uses one spelling
+  // across every surface.
+  return withSecret({ ...base, auth_mode: "basic", username: pg.username.trim() });
 }
 // Which per-type config to send, if any.
 function typeConfig(): Record<string, string> | undefined {
@@ -679,6 +689,7 @@ async function loadForEdit() {
   // RabbitMQ: prefill mode + management basic-auth username/path (password redacted).
   if (m.type === "rabbitmq") {
     rabbitMode.value = m.config?.mode === "management" ? "management" : "amqp";
+    promqlAuth.value = m.config?.auth_mode === "basic" ? "basic" : "none";
     rabbitPath.value = m.config?.path ?? "";
     pg.username = m.config?.username ?? "";
     pg.password = "";
@@ -1042,8 +1053,19 @@ const selectCls =
               <h2 class="text-[13px] font-semibold">PromQL query</h2>
               <p class="mt-[2px] text-[12px] text-ink-3">Runs against the Prometheus instance. Assert a threshold with a <span class="font-mono">[RESULT]</span> condition; with none, up = the query returns a value.</p>
             </div>
-            <div class="px-4 pb-4 pt-[14px]">
+            <div class="flex flex-col gap-3 px-4 pb-4 pt-[14px]">
               <input v-model="pg.query" type="text" placeholder="up{job=&quot;api&quot;}" :class="[inputCls, 'font-mono text-[13px]']" />
+              <label class="flex flex-col gap-[6px]">
+                <span class="text-[12px] font-semibold text-ink-2">Authentication</span>
+                <select v-model="promqlAuth" data-testid="promql-auth-mode" :class="[selectCls, 'h-[38px] w-[260px]']">
+                  <option value="none">None (Prometheus is reachable without it)</option>
+                  <option value="basic">Basic auth</option>
+                </select>
+              </label>
+              <label v-if="promqlAuth === 'basic'" class="flex flex-col gap-[6px]">
+                <span class="text-[12px] font-semibold text-ink-2">Username</span>
+                <input v-model="pg.username" data-testid="promql-username" type="text" placeholder="scanner" :class="[inputCls, 'font-mono text-[13px]']" />
+              </label>
             </div>
           </section>
 

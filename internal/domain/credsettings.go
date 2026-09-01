@@ -143,9 +143,16 @@ type credVariant struct {
 // discriminator key (rabbitmq `mode`).
 type credSchema struct {
 	discriminator string // "" = single variant, keyed ""
-	missingErr    string
-	invalidErr    string
-	variants      map[string]credVariant
+	// discriminatorDefault is the variant chosen when the discriminator key is ABSENT.
+	// Empty means the key is mandatory (rabbitmq: a monitor must say which mode it is).
+	// It exists for a type whose credential is OPTIONAL — promql, where the common case is
+	// an unauthenticated Prometheus and demanding `auth: none` from every existing monitor
+	// would both break them at the executor gate and rewrite their canonical hash. The
+	// default is RESOLVED and never materialized, exactly as tls_skip_verify is.
+	discriminatorDefault string
+	missingErr           string
+	invalidErr           string
+	variants             map[string]credVariant
 }
 
 // tlsFields are the shared TLS booleans; skip-verify is an explicit, visible opt-in and
@@ -159,6 +166,18 @@ func tlsFields() []credField {
 		// makes absent and an explicit "false" digest identically.
 		{key: "tls_skip_verify", binding: bindingExecution, boolean: true, def: "false"},
 	}
+}
+
+// promqlQueryNotBlank closes the gap `required` leaves: presence checks reject "" but accept
+// "   ", and a whitespace-only expression makes the prober report "no query configured" on
+// every run — a monitor that is configured, scheduled, and permanently meaningless. The
+// registry does not trim values (a stored setting is what the operator wrote, and trimming
+// would change the canonical hash of existing monitors), so the rule is stated instead.
+func promqlQueryNotBlank(settings map[string]string) error {
+	if q, ok := settings["query"]; ok && strings.TrimSpace(q) == "" {
+		return fmt.Errorf("settings: promql `query` must not be blank")
+	}
+	return nil
 }
 
 // tlsPairCheck rejects a skip-verify without TLS rather than silently ignoring it.
@@ -208,6 +227,49 @@ var credentialSchemas = map[MonitorType]credSchema{
 	// credential fields are forbidden, not silently ignored; mode=management is an
 	// authenticated HTTP check and requires them. `mode` is execution-binding because it
 	// alone decides credentialed HTTP versus unauthenticated AMQP.
+	// PromQL: the query is the check, and basic auth is OPTIONAL — an unauthenticated
+	// Prometheus on a private network is the common case and must keep working untouched
+	// (D-0215, 2026-09-01). The `auth` discriminator defaults to `none`, so a monitor that
+	// predates this schema resolves to the forbidden variant and keeps probing.
+	//
+	// Bearer tokens are deliberately absent: one authentication scheme, chosen because it
+	// is what Prometheus itself implements natively. A proxy that wants a bearer token is
+	// the unsupported case, and the spec says so rather than half-supporting it.
+	//
+	// No TLS fields: the target is a full URL, so the scheme decides, and the prober has no
+	// skip-verify to offer. Declaring the keys would claim a capability that does not exist.
+	//
+	// The discriminator is `auth_mode` and not `auth` because the file provider's inline-secret
+	// guard treats a settings key literally named `auth` as credential-bearing — `auth: Bearer …`
+	// is exactly the shape it exists to catch. Renaming the key was the correct side to give
+	// way: a discriminator can be called anything, and weakening that guard for every type to
+	// fit one schema's spelling would be a poor trade.
+	MonitorPromQL: {
+		discriminator:        "auth_mode",
+		discriminatorDefault: "none",
+		invalidErr:           "settings: promql `auth_mode` must be `none` or `basic`",
+		variants: map[string]credVariant{
+			"none": {
+				requirement: CredentialForbidden,
+				crossChecks: []func(map[string]string) error{promqlQueryNotBlank},
+				fields: []credField{
+					{key: "auth_mode", binding: bindingExecution, def: "none"},
+					{key: "query", binding: bindingExecution, required: true, maxLen: maxQueryLen},
+				},
+			},
+			"basic": {
+				requirement: CredentialRequired,
+				crossChecks: []func(map[string]string) error{promqlQueryNotBlank},
+				fields: []credField{
+					{key: "auth_mode", binding: bindingExecution, def: "none"},
+					{key: "query", binding: bindingExecution, required: true, maxLen: maxQueryLen},
+					{key: "username", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
+					{key: "password", binding: bindingSecretValue},
+					{key: "password_ref", binding: bindingSecretRef},
+				},
+			},
+		},
+	},
 	MonitorRabbitMQ: {
 		discriminator: "mode",
 		missingErr:    "settings: rabbitmq requires `mode` (amqp|management)",
@@ -252,7 +314,10 @@ func resolveVariant(typ MonitorType, settings map[string]string) (credVariant, e
 	}
 	value, ok := settings[schema.discriminator]
 	if !ok {
-		return credVariant{}, fmt.Errorf("%s", schema.missingErr)
+		if schema.discriminatorDefault == "" {
+			return credVariant{}, fmt.Errorf("%s", schema.missingErr)
+		}
+		value = schema.discriminatorDefault
 	}
 	variant, ok := schema.variants[value]
 	if !ok {
@@ -402,7 +467,7 @@ func validateCredentialSettings(typ MonitorType, settings map[string]string, sur
 	}
 	for k := range settings {
 		if !allowed[k] {
-			return fmt.Errorf("settings: unknown key %q for this monitor type", k)
+			return fmt.Errorf("settings: unknown key %q for this monitor type: %w", k, ErrUnknownSetting)
 		}
 	}
 	for _, f := range variant.fields {

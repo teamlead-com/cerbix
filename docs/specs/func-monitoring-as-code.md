@@ -65,14 +65,14 @@ The common-field types are `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `websock
 and `push`. FR-020 adds strict typed `settings` for `postgres`, `mysql`, `redis` and
 `rabbitmq`: their credential slots accept inventory references such as `password_ref`, never
 inline values. The schema, TLS defaults and reference lifecycle are normative in
-[`func-secret-inventory.md`](func-secret-inventory.md) §§4.2–4.8. **`promql`** carries one
-non-secret setting, `query` — required, trimmed, bounded at 1024 characters, and no other key
-accepted (D-0145 addendum, 2026-09-01): a type is available when its type-specific fields have
-a strict non-secret schema, and a credential is one way to have such a schema rather than the
-definition of having one. An authenticated Prometheus is NOT supported on any surface; the
-operator gives the prober an unauthenticated path — a regional agent where Prometheus lives,
-plus an allowlist or a localhost listener — because an agent speaks the same HTTP and collects
-the same 401. `composite` and `synthetic` remain unavailable: children-by-UID and a multi-step
+[`func-secret-inventory.md`](func-secret-inventory.md) §§4.2–4.8. **`promql`** carries `query`
+(required, bounded at 1024 characters, never blank) and OPTIONAL basic auth through the
+`auth_mode` discriminator: `none` — the default, and the shape of every monitor written before
+D-0215 — or `basic`, which requires a `username` and a credential slot obeying the same file
+rule as every other credentialed type (`password_ref`, never a literal). Bearer tokens and
+mTLS are not supported, and for those the answer of the D-0145 addendum stands: a regional
+agent where Prometheus lives PLUS an unauthenticated path for the prober, since an agent
+speaks the same HTTP and collects the same 401. `composite` and `synthetic` remain unavailable: children-by-UID and a multi-step
 definition are schema problems, not missing fields. Unsupported types or fields reject the
 bundle; there is no generic `config: map[string]string` escape hatch.
 

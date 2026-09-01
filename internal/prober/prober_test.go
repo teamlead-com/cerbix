@@ -519,3 +519,48 @@ func TestMySQLProberClosedPort(t *testing.T) {
 		t.Fatalf("closed MySQL port should be down: %+v", hb)
 	}
 }
+
+// TestPromQLProberBasicAuth pins D-0215's two shapes at the wire. The credential arrives
+// materialized in Config (the dispatch gate put it there), and an absent username must send
+// NO Authorization header at all — an empty one would turn an unauthenticated Prometheus
+// into a 401 for every monitor that predates the schema.
+func TestPromQLProberBasicAuth(t *testing.T) {
+	seen := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"scalar","result":[1700000000,"1"]}}`))
+	}))
+	defer srv.Close()
+
+	r := NewRunner()
+	base := domain.Monitor{ID: "pq", ProjectID: "p", Name: "promql", Type: domain.MonitorPromQL,
+		Target: srv.URL, IntervalSeconds: 60, TimeoutSeconds: 5}
+
+	base.Config = map[string]string{"query": "up"}
+	if hb := r.Run(context.Background(), base); !hb.Up {
+		t.Fatalf("unauthenticated probe should be up: %+v", hb)
+	}
+	if got := <-seen; got != "" {
+		t.Fatalf("no username configured must send no Authorization header, got %q", got)
+	}
+
+	base.Config = map[string]string{"auth": "basic", "query": "up", "username": "scanner", "password": "s3cr3t-v4lue"}
+	if hb := r.Run(context.Background(), base); !hb.Up {
+		t.Fatalf("authenticated probe should be up: %+v", hb)
+	}
+	got := <-seen
+	if got == "" {
+		t.Fatal("a configured username must produce an Authorization header")
+	}
+	user, pass, ok := parseBasic(got)
+	if !ok || user != "scanner" || pass != "s3cr3t-v4lue" {
+		t.Fatalf("Authorization carried (%q, %q, ok=%v), want the configured pair", user, pass, ok)
+	}
+}
+
+// parseBasic decodes what the server received, so the assertion is on the credential that
+// actually crossed the wire rather than on the header's shape.
+func parseBasic(header string) (string, string, bool) {
+	req := &http.Request{Header: http.Header{"Authorization": []string{header}}}
+	return req.BasicAuth()
+}

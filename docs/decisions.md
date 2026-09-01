@@ -5500,3 +5500,48 @@ ahead of its caller fails the second even while the first passes. The nine machi
 name in D1, and a writer that grows a sibling without a §7 case is a gap that table exists to make visible.
 The two follow-ups D9 declined — an incident-scoped audit panel and a project-scoped audit read — remain open
 and unclaimed.
+
+## D-0215 — PromQL takes optional basic auth, and the tri-state gains a default (2026-09-01)
+
+**Context.** The D-0145 addendum of the same day admitted `promql` to the file provider and stated
+that an authenticated Prometheus stays unsupported: the operator was to place a regional agent where
+Prometheus lives and give the prober an unauthenticated path. The owner reversed that within the day.
+The reversal is recorded rather than edited into the earlier text, because the rejected position had a
+real argument — YAGNI, and one fewer credential surface — and a future reader deserves to see both.
+
+**Decision.** `promql` carries OPTIONAL basic auth. Basic only: bearer tokens are out, deliberately,
+because basic is what Prometheus implements natively (`--web.config.file`) and half-supporting a
+second scheme is worse than naming it unsupported. No TLS fields either: the target is a full URL, so
+the scheme decides, and the prober has no skip-verify to offer — declaring the keys would claim a
+capability that does not exist.
+
+**Why the schema needed a new mechanism.** The credential requirement of `func-secret-inventory.md`
+§4.7 is a TRI-STATE resolved from the effective schema — required, forbidden, invalid — and the
+executor's gate acts on it. "Optional" is not one of the three, and it must not become one: the whole
+point is that the gate never guesses. So the shape is rabbitmq's, a discriminator with variants —
+`auth_mode: none` (forbidden) and `auth_mode: basic` (required) — with ONE addition: the
+discriminator may declare a DEFAULT for the case where the key is absent. Without that default every
+promql monitor written before today would resolve to "invalid" at the executor gate and stop probing,
+and materializing `auth_mode: none` into their config would rewrite the canonical hash of each one.
+The default is resolved and never written, exactly as `tls_skip_verify` is.
+
+**The key is `auth_mode`, not `auth`.** The file provider refuses a settings key literally named
+`auth` as credential-bearing — `auth: Bearer …` is the shape that guard exists to catch. Renaming the
+discriminator was the correct side to give way: a discriminator can be called anything, while
+weakening the guard for every type to fit one schema's spelling would trade a security property for a
+spelling preference.
+
+**What came for free, and what did not.** The dispatch gate, the envelope's expected-field set and the
+`monitor_secret_refs` normalization are all schema-driven, so they needed no per-type change — adding
+the schema wired the path from bundle to executor. What needed writing: the prober's `SetBasicAuth`
+(mirroring the RabbitMQ management probe, and NOT sent at all when no username is configured, so an
+unauthenticated Prometheus is never handed an empty header), the SPA's optional credential block, and
+a cross-check refusing a blank-after-trim `query` — `required` rejects `""` but accepts `"   "`, and a
+whitespace-only expression is a monitor that is configured, scheduled and permanently meaningless.
+
+**Consequence.** `func-monitoring-as-code.md` §3.1's "an authenticated Prometheus is NOT supported on
+any surface" is SUPERSEDED and rewritten. A monitor with no `auth_mode` behaves exactly as before, at
+validation and at dispatch. The unsupported case is now narrower and still named: a Prometheus behind
+a scheme other than basic — a bearer-token proxy, mTLS — for which the agent-plus-unauthenticated-path
+answer of the D-0145 addendum still stands, with its own precise sentence about the agent not
+authenticating.

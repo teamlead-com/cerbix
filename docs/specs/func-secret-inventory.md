@@ -125,7 +125,9 @@ Non-goals: org/shared secrets; external secret managers; user-facing value histo
 hard recall of already-enqueued jobs (post-read in-flight exposure is bounded by ACK/TTL/
 DLQ purge and fenced at ingest — §4.4.3);
 job-scoped one-time secret fetch for pull agents (v2 refinement); asymmetric per-executor
-keys; `promql`/`synthetic`/`composite` file support; retroactive normalization of existing
+keys; `synthetic`/`composite` file support (`promql` was in this list and left it: admitted to
+MaC by the D-0145 addendum and given optional basic auth by D-0215, both 2026-09-01);
+retroactive normalization of existing
 UI-monitor configs (their **snapshot handling** does change — §4.4.2 — but stored rows are
 untouched).
 
@@ -170,6 +172,7 @@ envelope (no ref row).
 | `postgres` | `username`, `database`, `password_ref`\* | `sslmode` (**`require`** for ref-based; allowlist `disable\|require\|verify-ca\|verify-full`), `query` (`SELECT 1`, ≤ 1 KiB) | `require` = **encrypted, server identity NOT verified** — stated plainly; `verify-ca`/`verify-full` available for verified TLS. Runtime's historical default `prefer` is intentionally not carried over for ref-based monitors; existing UI monitors unmigrated. `disable` = explicit opt-in (§4.8). |
 | `mysql` | `username`, `database`, `password_ref`\* | `tls` (**`true`** for ref-based; verified against system roots + hostname per Go TLS defaults), `tls_skip_verify` (explicit opt-in, never silent), `query` (`SELECT 1`, ≤ 1 KiB) | `tls: false` = explicit opt-in. |
 | `redis` | `password_ref`\* | `username` (ACL), `tls` (**`true`**, verified), `tls_skip_verify` (explicit) | today's prober AUTHs over plain TCP; v1 adds TLS. |
+| `promql` | `query` (≤ 1024 B, never blank); with `auth_mode: basic` also `username`, `password_ref`\* | `auth_mode` (**`none`** — resolved when the key is absent, never materialized) | D-0215. Basic auth only: no bearer, no mTLS, and no TLS keys — the target is a full URL, so its scheme decides and the prober offers no skip-verify. The discriminator is `auth_mode` and not `auth`, because a settings key named `auth` is refused as credential-bearing by the MaC guard. |
 | `rabbitmq` | `mode` | management: `username`, `password_ref`\*, `path` (≤ 512 B), `tls` (**`true`**, verified), `tls_skip_verify` (explicit) | **Conditional:** `mode: amqp` = protocol-header handshake only (today's prober), credential fields **forbidden**; `mode: management` requires them, defaults https. |
 
 \* in MaC; in API/UI the slot is exactly-one-of value/ref. Bounds: `username`/`database`

@@ -1,10 +1,17 @@
 package domain
 
 import (
+	"errors"
 	"fmt"
 	"sort"
-	"strings"
 )
+
+// ErrUnknownSetting marks "this key does not belong to this type's schema", so a caller can
+// map it onto its own vocabulary without matching on message text. The file provider needs
+// exactly that: an unknown key is `unsupported_field`, while a key that IS in the schema and
+// fails its rule is `domain_invalid` — two different reasons for the operator reading the
+// bundle's rejection.
+var ErrUnknownSetting = errors.New("settings: unknown key for this monitor type")
 
 // PrepareTypedSettings normalizes and validates a monitor's typed `settings` object for a
 // write surface, and is the ONE entry point a caller needs: it routes a credentialed type to
@@ -14,8 +21,10 @@ import (
 // it is credentialed", which was never what the rule said. `func-monitoring-as-code.md` §3.1
 // says a type is available when every type-specific field has a strict non-secret schema —
 // credentials are one way to have such a schema, not the definition of having one. `promql`
-// is the type that made the difference visible: it carries one field, `query`, and no
-// credential at all (D-0145 addendum, 2026-09-01).
+// is the type that made the difference visible: when it was admitted it carried one field,
+// `query`, and no credential at all (D-0145 addendum, 2026-09-01). It has since gained
+// OPTIONAL basic auth (D-0215) and resolves through the credential registry like every other
+// credentialed type — routing here is what let that be a schema change and nothing else.
 //
 // A type with no schema at all keeps the old answer: any settings key is an error naming the
 // key, because there is no generic config escape hatch.
@@ -23,35 +32,10 @@ func PrepareTypedSettings(typ MonitorType, input map[string]string, surface Cred
 	if CredentialedType(typ) {
 		return PrepareCredentialSettings(typ, input, surface)
 	}
-	if typ == MonitorPromQL {
-		return preparePromQLSettings(input)
-	}
 	for _, k := range sortedKeys(input) {
-		return nil, fmt.Errorf("settings: monitor type %q has no setting %q", typ, k)
+		return nil, fmt.Errorf("settings: monitor type %q has no setting %q: %w", typ, k, ErrUnknownSetting)
 	}
 	return nil, nil
-}
-
-// preparePromQLSettings validates the one field a PromQL monitor carries. The expression is
-// NOT a secret and is never redacted: it is the check's definition, and an operator reading
-// the monitor must see what is being asked. Length is bounded by the same limit the postgres
-// query field uses, so one type cannot store a payload another type would refuse.
-func preparePromQLSettings(input map[string]string) (map[string]string, error) {
-	out := make(map[string]string, 1)
-	for _, k := range sortedKeys(input) {
-		if k != "query" {
-			return nil, fmt.Errorf("settings: monitor type %q has no setting %q", MonitorPromQL, k)
-		}
-		out[k] = strings.TrimSpace(input[k])
-	}
-	query := out["query"]
-	if query == "" {
-		return nil, fmt.Errorf("settings: %s requires a non-empty `query`", MonitorPromQL)
-	}
-	if len(query) > maxQueryLen {
-		return nil, fmt.Errorf("settings: %s `query` must be at most %d characters", MonitorPromQL, maxQueryLen)
-	}
-	return out, nil
 }
 
 // sortedKeys makes an error message deterministic: with two unknown keys, the same one is

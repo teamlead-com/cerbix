@@ -16,7 +16,8 @@ import (
 // promqlProber evaluates a PromQL query against a Prometheus server (through the
 // guarded HTTP client). Success (no conditions) = the query returns a value; the
 // scalar value is exposed as [RESULT] so `[RESULT] < 0.9` can assert a threshold.
-// Config keys: query (the PromQL expression). Target is the Prometheus base URL.
+// Config keys: query (the PromQL expression) and, for `auth: basic`, username + the
+// materialized password. Target is the Prometheus base URL.
 type promqlProber struct{ client *http.Client }
 
 func (p promqlProber) Probe(ctx context.Context, m domain.Monitor) Result {
@@ -30,6 +31,13 @@ func (p promqlProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad request: " + err.Error()}
+	}
+	// Optional basic auth (D-0215): the credential arrives materialized in Config by the
+	// dispatch gate, exactly as it does for the RabbitMQ management probe. An absent
+	// username means the `none` variant — the unauthenticated Prometheus that was the only
+	// supported shape before — so the header is not sent at all rather than sent empty.
+	if user := m.Config["username"]; user != "" {
+		req.SetBasicAuth(user, m.Config["password"])
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {

@@ -2,39 +2,80 @@ package domain
 
 import "testing"
 
-// D-0145 addendum: `promql` is a type with a schema and NO credential. The rule the file
-// provider used to apply — "settings iff credentialed" — would have rejected it, so these
-// cases pin the one it applies now: a type has settings iff it has a schema.
-func TestPrepareTypedSettingsPromQL(t *testing.T) {
-	got, err := PrepareTypedSettings(MonitorPromQL, map[string]string{"query": "  up{job=\"api\"}  "}, SurfaceFile)
+// D-0215: promql's credential is OPTIONAL, which the tri-state requirement cannot express in
+// one variant — so the schema is a discriminator with a DEFAULT, and these cases pin what that
+// buys: a monitor written before the schema existed keeps working untouched, and the
+// authenticated shape obeys the same credential rules as every other credentialed type.
+func TestPromQLCredentialSchema(t *testing.T) {
+	// The default variant: a monitor that predates D-0215 carries only `query`, resolves to
+	// `none`, and must keep working — at validation AND at the executor's gate.
+	got, err := PrepareTypedSettings(MonitorPromQL, map[string]string{"query": `up{job="api"}`}, SurfaceAPI)
 	if err != nil {
-		t.Fatalf("valid promql settings rejected: %v", err)
+		t.Fatalf("an unauthenticated promql monitor must stay valid: %v", err)
 	}
-	if got["query"] != `up{job="api"}` {
-		t.Fatalf("query = %q, want it trimmed", got["query"])
+	if _, ok := got["auth_mode"]; ok {
+		t.Fatalf("the discriminator default must NOT be materialized (it would rewrite every canonical hash): %v", got)
+	}
+	req, err := ResolveCredentialRequirement(MonitorPromQL, got)
+	if err != nil || req != CredentialForbidden {
+		t.Fatalf("requirement = (%v, %v), want CredentialForbidden with no error", req, err)
+	}
+	if fields, _ := ExpectedCredentialFields(MonitorPromQL, got); len(fields) != 0 {
+		t.Fatalf("the forbidden variant expects no envelope field, got %v", fields)
 	}
 
+	// `basic` demands a username and a credential slot; the file surface demands the ref form.
+	if _, err := PrepareTypedSettings(MonitorPromQL,
+		map[string]string{"auth_mode": "basic", "query": "up"}, SurfaceAPI); err == nil {
+		t.Fatal("auth_mode: basic without a username must be refused")
+	}
+	if _, err := PrepareTypedSettings(MonitorPromQL,
+		map[string]string{"auth_mode": "basic", "query": "up", "username": "scanner"}, SurfaceAPI); err == nil {
+		t.Fatal("auth_mode: basic without a credential must be refused")
+	}
+	if _, err := PrepareTypedSettings(MonitorPromQL,
+		map[string]string{"auth_mode": "basic", "query": "up", "username": "scanner", "password": "literal"}, SurfaceFile); err == nil {
+		t.Fatal("a literal credential must be refused on the file surface")
+	}
+	basic, err := PrepareTypedSettings(MonitorPromQL,
+		map[string]string{"auth_mode": "basic", "query": "up", "username": "scanner", "password_ref": "prom-scanner"}, SurfaceFile)
+	if err != nil {
+		t.Fatalf("auth_mode: basic with a ref must be accepted on the file surface: %v", err)
+	}
+	if req, err := ResolveCredentialRequirement(MonitorPromQL, basic); err != nil || req != CredentialRequired {
+		t.Fatalf("requirement for auth_mode: basic = (%v, %v), want CredentialRequired", req, err)
+	}
+	if fields, _ := ExpectedCredentialFields(MonitorPromQL, basic); len(fields) != 1 || fields[0] != "password" {
+		t.Fatalf("expected envelope fields = %v, want [password]", fields)
+	}
+
+	// A credential on the unauthenticated variant is a contradiction, not a spare key.
+	if _, err := PrepareTypedSettings(MonitorPromQL,
+		map[string]string{"query": "up", "username": "scanner", "password_ref": "x"}, SurfaceAPI); err == nil {
+		t.Fatal("credentials without auth_mode: basic must be refused")
+	}
+	if _, err := PrepareTypedSettings(MonitorPromQL, map[string]string{"auth_mode": "bearer", "query": "up"}, SurfaceAPI); err == nil {
+		t.Fatal("bearer is not a supported scheme and must be refused by name")
+	}
+
+	// The query is still the check: missing, blank, over-long and unknown keys all refuse.
 	for name, in := range map[string]map[string]string{
-		"no settings at all": nil,
-		"empty query":        {"query": ""},
-		"whitespace query":   {"query": "   "},
+		"no query":    {},
+		"empty query": {"query": ""},
+		"blank query": {"query": "   "},
+		"unknown key": {"query": "up", "step": "30s"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := PrepareTypedSettings(MonitorPromQL, in, SurfaceFile); err == nil {
-				t.Fatal("expected a rejection: a promql monitor without a query probes nothing")
+			if _, err := PrepareTypedSettings(MonitorPromQL, in, SurfaceAPI); err == nil {
+				t.Fatal("expected a rejection")
 			}
 		})
 	}
-
-	if _, err := PrepareTypedSettings(MonitorPromQL, map[string]string{"query": "up", "step": "30s"}, SurfaceFile); err == nil {
-		t.Fatal("an unknown promql setting must be refused by name, not ignored")
-	}
-
 	long := make([]byte, maxQueryLen+1)
 	for i := range long {
 		long[i] = 'a'
 	}
-	if _, err := PrepareTypedSettings(MonitorPromQL, map[string]string{"query": string(long)}, SurfaceFile); err == nil {
+	if _, err := PrepareTypedSettings(MonitorPromQL, map[string]string{"query": string(long)}, SurfaceAPI); err == nil {
 		t.Fatal("an over-long query must be refused")
 	}
 }

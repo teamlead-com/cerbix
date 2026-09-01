@@ -105,6 +105,12 @@ func TestDecodeStrictRejections(t *testing.T) {
 		{"promql without a query", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n", ReasonDomainInvalid},
 		{"promql with an empty query", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n    settings:\n      query: \"   \"\n", ReasonDomainInvalid},
 		{"promql with an unknown setting", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n    settings:\n      query: up\n      step: 30s\n", ReasonUnsupportedField},
+		// D-0215: basic auth is optional, and its credential obeys the same file rule as every
+		// other credentialed type — the ref form, never a literal.
+		{"promql basic without a username", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n    settings:\n      auth_mode: basic\n      query: up\n      password_ref: prom\n", ReasonDomainInvalid},
+		{"promql basic with an inline password", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n    settings:\n      auth_mode: basic\n      query: up\n      username: scanner\n      password: hunter2\n", ReasonInlineSecret},
+		{"promql with an unknown auth scheme", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n    settings:\n      auth_mode: bearer\n      query: up\n", ReasonDomainInvalid},
+		{"promql credentials without auth basic", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n    settings:\n      query: up\n      username: scanner\n      password_ref: prom\n", ReasonUnsupportedField},
 		// The two types that stay out keep their reason: a schema problem, not a missing field.
 		{"composite still unsupported", "format: 1\norganization: acme\nproject: p\nmonitors:\n  c:\n    name: C\n    type: composite\n    target: x\n", ReasonUnsupportedType},
 		{"synthetic still unsupported", "format: 1\norganization: acme\nproject: p\nmonitors:\n  s:\n    name: S\n    type: synthetic\n    target: x\n", ReasonUnsupportedType},
@@ -134,6 +140,19 @@ func TestDecodePromQLBundle(t *testing.T) {
 	}
 	if dp.Monitors["budget"].Hash == "" {
 		t.Fatal("canonical hash not computed for a promql monitor")
+	}
+
+	// The authenticated shape decodes too, with the credential as a REFERENCE.
+	auth := []byte("format: 1\norganization: acme\nproject: payments\nmonitors:\n  budget:\n    name: Error budget\n    type: promql\n    target: https://prom.internal:9090\n    settings:\n      auth_mode: basic\n      query: up\n      username: scanner\n      password_ref: prom-scanner\n")
+	ap, err := Decode(auth, instanceScope())
+	if err != nil {
+		t.Fatalf("an authenticated promql bundle must decode: %v", err)
+	}
+	if cfg := ap.Monitors["budget"].Monitor.Config; cfg["username"] != "scanner" || cfg["password_ref"] != "prom-scanner" || cfg["auth_mode"] != "basic" {
+		t.Fatalf("credential settings did not survive decoding: %v", cfg)
+	}
+	if cfg := ap.Monitors["budget"].Monitor.Config; cfg["password"] != "" {
+		t.Fatal("a bundle never carries a literal credential")
 	}
 
 	other, err := Decode(y("'up{job=\"web\"}'"), instanceScope())

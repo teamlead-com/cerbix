@@ -441,7 +441,7 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 	settings, serr := domain.PrepareTypedSettings(typ, rm.Settings, domain.SurfaceFile)
 	if serr != nil {
 		reason := ReasonDomainInvalid
-		if strings.Contains(serr.Error(), "has no setting") {
+		if errors.Is(serr, domain.ErrUnknownSetting) {
 			reason = ReasonUnsupportedField
 		}
 		return DesiredMonitor{}, rejectf(reason, uid, "%s", serr.Error())

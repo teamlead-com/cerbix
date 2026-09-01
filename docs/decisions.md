@@ -2658,6 +2658,45 @@ strict non-secret `settings` schema (composite/synthetic) or the `secret_ref` co
 simplification: there is no generic `config` escape hatch, and any secret-bearing key is
 rejected `inline_secret_forbidden` before type resolution.
 
+**Addendum (2026-09-01, owner: `promql` is admitted, and a target may not carry credentials).** Two
+decisions, taken together because the second is what makes the first safe to leave alone.
+
+**`promql` joins the file-supported types.** The iter-0087 addendum above listed it among the types
+"needing credentials", beside `postgres, mysql, redis, rabbitmq`. That classification was wrong and
+stayed wrong through FR-020: `promqlProber` reads exactly ONE config key — `query` — and sends a plain
+unauthenticated GET to `<target>/api/v1/query`; it has never had a credential slot, and
+`domain.CredentialedType` has never returned true for it. So the thing standing between it and a
+bundle is not a `secret_ref` contract, it is one typed non-secret field. Consequence for the parser:
+the branch that reads "a type has `settings` IF AND ONLY IF it is credentialed" becomes "IF AND ONLY
+IF it has a schema", which is what §3.1's rule has said in words since the beginning. `composite` and
+`synthetic` stay out: children-by-UID and a multi-step definition are real schema problems, not a
+missing field.
+
+**An authenticated Prometheus stays unsupported, and the sentence saying so must be precise.** The
+owner's answer is a regional agent placed where Prometheus lives — which is this product's own design
+for unreachable targets, not a workaround. But an agent does not authenticate: it speaks the same
+HTTP and collects the same 401. What the operator must provide is an UNAUTHENTICATED PATH for the
+prober — an IP allowlist in the fronting proxy, a localhost listener, a network policy — and the
+documentation says exactly that, because "put an agent next to it and it will handle auth" is a
+sentence a reader can act on for a day before discovering it is false.
+
+**A monitor target may not carry userinfo, on any surface.** Go's `net/http` turns
+`https://user:pass@host` into an `Authorization: Basic` header on its own (verified against
+`httptest`), so that URL works today — and the password is then stored as plaintext in
+`monitors.target`, which `Monitor.Redacted()` does not touch, so every VIEWER of the project reads it
+in the monitor list. The file provider has always refused such a target
+(`inline_secret_forbidden`); the UI and API accept it. The decision is to refuse it everywhere, at the
+domain boundary, and to say so in the changelog: this breaks an installation that is relying on it
+today, and a rejected upgrade an operator can see beats a credential leak they cannot. Nothing about
+this admits a credential slot to `promql` — a monitor that needs one is the unsupported case above.
+
+**Status.** Both landed with this record, 2026-09-01. `promql` is in `fileSupportedTypes` and its
+settings go through `domain.PrepareTypedSettings`, the one entry point that replaced the
+"settings iff credentialed" branch; the userinfo rule sits in `Monitor.Validate`, so every write
+surface passes through it. What did NOT change: stored monitors are never re-validated on read, so an
+installation living on a userinfo target keeps probing and is refused at its next EDIT — the next
+release owes that upgrade note, and the roadmap carries the obligation.
+
 ## D-0146 — File-provider canonical hash excludes dependency edges (iter-0089)
 Spec §7 lists "dependency UIDs" among the set-like values folded into the canonical semantic
 hash, while §9.2 / D-0142 require a dependency-only change to be a `dependency_update` that

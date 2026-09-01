@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -237,6 +238,23 @@ func (m Monitor) Validate() error {
 		if len(sc.Steps) > maxSyntheticSteps {
 			return fmt.Errorf("monitor: a synthetic scenario may have at most %d steps", maxSyntheticSteps)
 		}
+	}
+	// A URL-style target may not carry credentials in its userinfo, on ANY surface
+	// (D-0145 addendum, 2026-09-01). Go's net/http turns https://user:pass@host into an
+	// `Authorization: Basic` header by itself, so such a target WORKS — and the password is
+	// then stored as plaintext in `monitors.target`, which Redacted() does not touch, so
+	// every viewer of the project reads it in the monitor list. The file provider has always
+	// refused this (D-0152); this is the same rule at the domain boundary, which is the only
+	// place every write surface passes through.
+	//
+	// Narrower than the file provider on purpose: the parser also refuses secret-bearing
+	// QUERY keys and URL-shaped targets that fail to parse, because a bundle must be PROVEN
+	// free of secrets before it is applied. Here the rule is the one that can be decided
+	// exactly — url.Parse populates User only for a real URL authority, so bare host:port,
+	// ICMP hostnames and other non-URL targets never trip it. The message never echoes the
+	// target.
+	if u, err := url.Parse(strings.TrimSpace(m.Target)); err == nil && u.User != nil {
+		return fmt.Errorf("monitor: target must not carry credentials in its URL userinfo; use a target without user:password")
 	}
 	if m.Type == MonitorHTTP && m.Method != "" && !httpMethods[m.Method] {
 		return fmt.Errorf("monitor: unsupported HTTP method %q", m.Method)

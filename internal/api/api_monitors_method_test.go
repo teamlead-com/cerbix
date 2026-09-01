@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/api"
@@ -352,5 +353,29 @@ func TestTestMonitor(t *testing.T) {
 	if rec := do(hNoWorker, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors/test",
 		`{"type":"http","target":"https://x","region":"geo1"}`); rec.Code != http.StatusBadGateway {
 		t.Fatalf("test no-worker = %d, want 502 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMonitorTargetWithUserinfoIsRefused is the API half of the D-0145 addendum. Go's
+// net/http turns https://user:pass@host into an Authorization header on its own, so such a
+// target WORKS — and the password then sits in `monitors.target`, which Redacted() does not
+// blank, so every viewer of the project reads it in the monitor list. The file provider has
+// always refused it; this proves the UI/API surface refuses it too, and that the refusal does
+// not echo the credential back to the caller.
+func TestMonitorTargetWithUserinfoIsRefused(t *testing.T) {
+	h := newHandler(seededStore())
+	rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors",
+		`{"name":"prom","type":"promql","target":"https://scanner:s3cr3t-v4lue@prom.internal:9090","interval_seconds":60,"timeout_seconds":5,"config":{"query":"up"}}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create with userinfo = %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "s3cr3t-v4lue") {
+		t.Fatalf("the refusal echoed the credential: %s", rec.Body.String())
+	}
+	// The same monitor without credentials in the target is accepted, so the guard is about
+	// the userinfo and not about the type or the URL.
+	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors",
+		`{"name":"prom","type":"promql","target":"https://prom.internal:9090","interval_seconds":60,"timeout_seconds":5,"config":{"query":"up"}}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create without userinfo = %d, want 201 (%s)", rec.Code, rec.Body.String())
 	}
 }

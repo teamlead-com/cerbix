@@ -377,7 +377,12 @@ retention knobs and what `pending` versus `withheld` means to a reader — is in
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
 `mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `push` (dead-man's-switch).
 HTTP-like types use the declarative conditions engine
-(`[STATUS] == 200`, `[RESPONSE_TIME] < 500`, `[BODY].status == "UP"`).
+(`[STATUS] == 200`, `[RESPONSE_TIME] < 500`, `[BODY].status == "UP"`). All of them except
+`composite` and `synthetic` are expressible in a Monitoring-as-Code bundle — `promql` since the
+D-0145 addendum, with its one non-secret setting `query`. A monitor target may not carry
+credentials in its URL userinfo on ANY surface: `https://user:pass@host` is refused by the
+domain validator, because Go turns it into an `Authorization` header and the password would
+then be readable by every viewer in the monitor list.
 
 **HTTP surface:** `/healthz`, `/readyz`, `/metrics` (operational); `/api/v1/*` (behind auth middleware);
 `/api/v1/public/*` (status pages, feeds, subscriptions, push, branding — no login); `/auth/*`

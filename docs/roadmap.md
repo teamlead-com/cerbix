@@ -119,8 +119,11 @@ These are named in specs as follow-up REQUIREMENTS rather than non-goals. None i
 ## 4. Standing work with no end state
 
 - **Dependencies** — a sweep roughly monthly, under iter-0159's rules.
-- **Releases** — a tag when a requirement closes or a migration lands, so the gap R1 is fixing does
-  not rebuild.
+- **Releases** — a tag when a requirement closes or a migration lands, so the gap the v0.1.6 item
+  fixed does not rebuild. **The next tag owes an upgrade note**: a monitor target carrying credentials
+  in its URL userinfo (`https://user:pass@host`) is now refused on every surface, not only in bundles
+  (D-0145 addendum). An installation relying on it will see its next monitor EDIT rejected — stored
+  monitors keep running, because nothing re-validates on read.
 - **The living documents** — `make docs-check` is the only mechanical guard; the failure it cannot
   catch is prose that is true of nothing, which is what the FR-025 closing arc kept finding.
 

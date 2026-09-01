@@ -101,9 +101,47 @@ func TestDecodeStrictRejections(t *testing.T) {
 		{"target query duplicate secret key", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://h/?token=a&token=b\n", ReasonInlineSecret},
 		{"target query malformed encoding", "format: 1\norganization: acme\nproject: payments\nmonitors:\n  api:\n    name: A\n    type: http\n    target: https://h/?token=%zz\n", ReasonInlineSecret},
 		{"empty name", "format: 1\norganization: acme\nproject: p\nmonitors:\n  x:\n    type: http\n    target: https://x\n", ReasonDomainInvalid},
+		// D-0145 addendum: promql is admitted, and its ONE field is required and closed.
+		{"promql without a query", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n", ReasonDomainInvalid},
+		{"promql with an empty query", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n    settings:\n      query: \"   \"\n", ReasonDomainInvalid},
+		{"promql with an unknown setting", "format: 1\norganization: acme\nproject: p\nmonitors:\n  q:\n    name: Q\n    type: promql\n    target: http://prom:9090\n    settings:\n      query: up\n      step: 30s\n", ReasonUnsupportedField},
+		// The two types that stay out keep their reason: a schema problem, not a missing field.
+		{"composite still unsupported", "format: 1\norganization: acme\nproject: p\nmonitors:\n  c:\n    name: C\n    type: composite\n    target: x\n", ReasonUnsupportedType},
+		{"synthetic still unsupported", "format: 1\norganization: acme\nproject: p\nmonitors:\n  s:\n    name: S\n    type: synthetic\n    target: x\n", ReasonUnsupportedType},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { wantReason(t, c.y, instanceScope(), c.r) })
+	}
+}
+
+// TestDecodePromQLBundle is the positive half of the D-0145 addendum: a promql monitor is
+// expressible in a bundle, its query survives decoding trimmed, and the canonical hash covers
+// it — a settings change must be a semantic change, or a query edit would never be applied.
+func TestDecodePromQLBundle(t *testing.T) {
+	y := func(query string) []byte {
+		return []byte("format: 1\norganization: acme\nproject: payments\nmonitors:\n  budget:\n    name: Error budget\n    type: promql\n    target: http://prom.internal:9090\n    settings:\n      query: " + query + "\n")
+	}
+	dp, err := Decode(y("'up{job=\"api\"}'"), instanceScope())
+	if err != nil {
+		t.Fatalf("a promql bundle must decode: %v", err)
+	}
+	m := dp.Monitors["budget"].Monitor
+	if m.Type != "promql" {
+		t.Fatalf("type = %q", m.Type)
+	}
+	if m.Config["query"] != `up{job="api"}` {
+		t.Fatalf("query = %q, want the expression", m.Config["query"])
+	}
+	if dp.Monitors["budget"].Hash == "" {
+		t.Fatal("canonical hash not computed for a promql monitor")
+	}
+
+	other, err := Decode(y("'up{job=\"web\"}'"), instanceScope())
+	if err != nil {
+		t.Fatalf("second bundle: %v", err)
+	}
+	if other.Monitors["budget"].Hash == dp.Monitors["budget"].Hash {
+		t.Fatal("two different queries produced one hash: a query edit would never be applied")
 	}
 }
 

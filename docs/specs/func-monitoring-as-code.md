@@ -65,10 +65,16 @@ The common-field types are `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `websock
 and `push`. FR-020 adds strict typed `settings` for `postgres`, `mysql`, `redis` and
 `rabbitmq`: their credential slots accept inventory references such as `password_ref`, never
 inline values. The schema, TLS defaults and reference lifecycle are normative in
-[`func-secret-inventory.md`](func-secret-inventory.md) §§4.2–4.8. `composite`, `synthetic`,
-`promql` and any future type without a strict file schema remain unavailable. Unsupported
-types or fields reject the bundle; there is no generic `config: map[string]string` escape
-hatch.
+[`func-secret-inventory.md`](func-secret-inventory.md) §§4.2–4.8. **`promql`** carries one
+non-secret setting, `query` — required, trimmed, bounded at 1024 characters, and no other key
+accepted (D-0145 addendum, 2026-09-01): a type is available when its type-specific fields have
+a strict non-secret schema, and a credential is one way to have such a schema rather than the
+definition of having one. An authenticated Prometheus is NOT supported on any surface; the
+operator gives the prober an unauthenticated path — a regional agent where Prometheus lives,
+plus an allowlist or a localhost listener — because an agent speaks the same HTTP and collects
+the same 401. `composite` and `synthetic` remain unavailable: children-by-UID and a multi-step
+definition are schema problems, not missing fields. Unsupported types or fields reject the
+bundle; there is no generic `config: map[string]string` escape hatch.
 
 ### 3.2 Explicitly outside version 1
 
@@ -536,7 +542,12 @@ No reconcile may rotate/replace a token on update, no-op, file rename, orphan, o
   records, plan diffs, and metrics never expose the submitted value.
   - A monitor `target` that carries credentials in its URL **userinfo**
     (`https://user:pass@host`, `postgres://user:pass@host/db`, password-only
-    `https://:pass@host`) rejects.
+    `https://:pass@host`) rejects. Since the D-0145 addendum (2026-09-01) this half of the
+    rule is enforced at the DOMAIN boundary, so the UI and API refuse it too: Go's `net/http`
+    turns such a URL into an `Authorization: Basic` header by itself, and the password would
+    otherwise sit in plaintext in `monitors.target`, which `Monitor.Redacted()` does not
+    blank. The two rules below stay file-only — a bundle must be PROVEN free of secrets
+    before it is applied, which is a stronger obligation than a single write can carry.
   - A monitor `target` whose **query string** carries a known secret-bearing key
     (`?token=…`, `?api_key=…`, `?password=…`, …) rejects — the same finite secret-key set
     that classifies inline settings secrets applies to the target query, so a cleartext

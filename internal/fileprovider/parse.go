@@ -433,19 +433,18 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 	if !fileSupportedTypes[typ] {
 		return DesiredMonitor{}, rejectf(ReasonUnsupportedType, uid, "monitor type %q is not yet available via the file provider (needs a strict non-secret settings/secret_ref contract)", rm.Type)
 	}
-	settings := map[string]string(nil)
-	if domain.CredentialedType(typ) {
-		var err error
-		settings, err = domain.PrepareCredentialSettings(typ, rm.Settings, domain.SurfaceFile)
-		if err != nil {
-			return DesiredMonitor{}, rejectf(ReasonDomainInvalid, uid, "%s", err.Error())
+	// ONE entry point for every typed `settings` object: the credential registry for a
+	// credentialed type, the plain schema for a type that has one (`promql`), and an error
+	// naming the key for a type with neither. The branch this replaced read "settings IF AND
+	// ONLY IF credentialed", which was never the rule — §3.1 asks for a strict non-secret
+	// schema, and a credential is one way to have one (D-0145 addendum, 2026-09-01).
+	settings, serr := domain.PrepareTypedSettings(typ, rm.Settings, domain.SurfaceFile)
+	if serr != nil {
+		reason := ReasonDomainInvalid
+		if strings.Contains(serr.Error(), "has no setting") {
+			reason = ReasonUnsupportedField
 		}
-	} else {
-		// Common-field types have no typed `settings` object. Credentialed types above
-		// are the only format-1 extension; there is still no generic config escape hatch.
-		for k := range rm.Settings {
-			return DesiredMonitor{}, rejectf(ReasonUnsupportedField, uid, "type %q has no file-provider setting %q", rm.Type, k)
-		}
+		return DesiredMonitor{}, rejectf(reason, uid, "%s", serr.Error())
 	}
 
 	m := domain.Monitor{

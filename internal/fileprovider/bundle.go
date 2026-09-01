@@ -100,8 +100,10 @@ type DesiredProject struct {
 
 // fileSupportedTypes are the monitor types the v1 file provider can express through either
 // common fields or a strict typed settings schema. The credentialed subset uses inventory
-// references only; composite, synthetic, promql and any future untyped shape remain rejected.
-// This is an explicit scope boundary, not a generic config escape hatch.
+// references only; `promql` carries one non-secret field, `query` (D-0145 addendum,
+// 2026-09-01). `composite` and `synthetic` remain rejected — children-by-UID and a
+// multi-step definition are schema problems, not a missing field — as does any future
+// untyped shape. This is an explicit scope boundary, not a generic config escape hatch.
 var fileSupportedTypes = map[domain.MonitorType]bool{
 	domain.MonitorHTTP:      true,
 	domain.MonitorTCP:       true,
@@ -116,6 +118,7 @@ var fileSupportedTypes = map[domain.MonitorType]bool{
 	domain.MonitorMySQL:     true,
 	domain.MonitorRedis:     true,
 	domain.MonitorRabbitMQ:  true,
+	domain.MonitorPromQL:    true,
 }
 
 // secretSettingKeys are field/settings keys that carry credentials. Their presence anywhere

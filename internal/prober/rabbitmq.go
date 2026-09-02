@@ -95,7 +95,9 @@ func (p rabbitmqProber) probeManagement(ctx context.Context, m domain.Monitor) R
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
+		// The management URL is built from the operator's target and may carry a query; the
+		// invariant is that no probe result contains a request URL, whatever the type.
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: probeFailure(err, u)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	lat := elapsedMS(start)

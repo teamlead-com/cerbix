@@ -170,7 +170,9 @@ func (p httpProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
+		// probeFailure, not err.Error(): net/http embeds the request URL, and the target's
+		// query string may carry a credential.
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: probeFailure(err, m.Target)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))

@@ -41,7 +41,9 @@ func (p promqlProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
+		// The composed URL carries the operator's target, which may hold a credential in its
+		// query — and the query cerbix appends besides. Neither goes into the message.
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: probeFailure(err, base)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	lat := elapsedMS(start)

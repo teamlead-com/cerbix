@@ -71,7 +71,10 @@ func (p syntheticProber) Probe(ctx context.Context, m domain.Monitor) Result {
 		stepStart := time.Now()
 		resp, err := p.client.Do(req)
 		if err != nil {
-			return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: stepLabel(i, st) + ": " + err.Error()}
+			// D-0090 promised heartbeat.msg "never echoes bodies/headers"; it was true of the
+			// assert path and false here, because net/http puts the step's URL in the error.
+			return Result{Connected: false, LatencyMS: elapsedMS(start),
+				Msg: stepLabel(i, st) + ": " + probeFailure(err, subst(st.URL, vars))}
 		}
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		_ = resp.Body.Close()

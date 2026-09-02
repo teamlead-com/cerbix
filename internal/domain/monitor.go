@@ -350,9 +350,55 @@ var httpMethods = map[string]bool{
 	"GET": true, "POST": true, "HEAD": true, "PUT": true, "DELETE": true,
 }
 
-// SecretMonitorConfigKeys are config keys treated as secrets: encrypted at rest
-// and never returned in API responses (single source of truth for store + api).
-var SecretMonitorConfigKeys = map[string]bool{"password": true}
+// The protection a monitor config key gets is THREE classifications, not one set. They were
+// one set until FR-028, and that is how a scenario's bearer token ended up cleartext at rest
+// and in every viewer's monitor list: the single name `SecretMonitorConfigKeys` meant both
+// "encrypt this" and "never return this", so a key that needs the first and not the second
+// had nowhere to live (D-0216).
+//
+// The classifications are declarative and closed. They are NOT an authorization mechanism:
+// the decision is `ActionProjectWrite`, taken by the handler, which then SELECTS a reader.
+// A mode inferred from request contents would be an authorization decision made by the
+// caller of the API.
+var (
+	// EncryptedMonitorConfigKeys are ciphertext in the column, covered by rotation and by
+	// the startup backfill.
+	EncryptedMonitorConfigKeys = map[string]bool{"password": true, SyntheticScenarioKey: true}
+
+	// WriteOnlyMonitorConfigKeys never leave the server, in any mode: a client that wants to
+	// change one sends a new value, and an empty submission keeps what is stored.
+	WriteOnlyMonitorConfigKeys = map[string]bool{"password": true}
+
+	// WriterOnlyMonitorConfigKeys are returned to a principal who may WRITE the monitor and
+	// withheld from everyone else. A scenario is the check's own definition — an operator who
+	// may edit the monitor must be able to read and change it — while it may carry a
+	// credential until FR-028 stage 2 lands, so a read-only viewer does not get it.
+	WriterOnlyMonitorConfigKeys = map[string]bool{SyntheticScenarioKey: true}
+
+	// SecretMonitorConfigKeys is the write-only set under its historical name, kept only for
+	// callers that mean exactly "never return this". New code names the classification it
+	// means; this alias exists so the split did not become a rename of forty call sites.
+	SecretMonitorConfigKeys = WriteOnlyMonitorConfigKeys
+)
+
+// WithoutWriterOnlyConfig removes the keys a read-only principal may not see — today the
+// synthetic scenario. It is a separate step from Redacted() for the same reason
+// WithoutPushToken is: what a VIEWER may not see is a different question from what NOBODY
+// may see, and collapsing them is the mistake FR-028 exists to correct.
+func (m Monitor) WithoutWriterOnlyConfig() Monitor {
+	if len(m.Config) == 0 {
+		return m
+	}
+	cfg := make(map[string]string, len(m.Config))
+	for k, v := range m.Config {
+		if WriterOnlyMonitorConfigKeys[k] {
+			continue
+		}
+		cfg[k] = v
+	}
+	m.Config = cfg
+	return m
+}
 
 // Redacted returns a copy of the monitor with secret config values blanked, safe
 // to return to clients.

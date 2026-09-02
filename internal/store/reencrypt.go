@@ -216,9 +216,11 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		return webhooks, channels, fmt.Errorf("store: scan mail settings for reencrypt: %w", merr)
 	}
 
-	// Monitors: only the SecretMonitorConfigKeys values in config are encrypted
-	// (non-secret keys are plaintext), so re-encrypt ONLY those. Skipping this left
-	// monitor credentials unreadable once the old key was dropped.
+	// Monitors: only the values in the encrypted-at-rest classification are ciphertext
+	// (everything else in config is plaintext), so re-encrypt ONLY those. Skipping this left
+	// monitor credentials unreadable once the old key was dropped. Since FR-028 the set also
+	// carries the synthetic scenario — `func-oncall-synthetic-pull.md` §217 promised exactly
+	// that from the start and the code did not do it.
 	monRows, err := s.pool.Query(ctx, `SELECT id, config FROM monitors`)
 	if err != nil {
 		return webhooks, channels, fmt.Errorf("store: scan monitors for reencrypt: %w", err)
@@ -250,7 +252,7 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		}
 		changed := false
 		for k, v := range cfg {
-			if !domain.SecretMonitorConfigKeys[k] || v == "" {
+			if !domain.EncryptedMonitorConfigKeys[k] || v == "" {
 				continue
 			}
 			plain, derr := s.cipher.Decrypt(v)
@@ -457,4 +459,79 @@ func (s *Store) reencryptProjectSecretCAS(ctx context.Context, id, projectID, ol
 		return false, err
 	}
 	return ct.RowsAffected() == 1, nil
+}
+
+// BackfillMonitorConfigEnc encrypts any monitor config value in the encrypted-at-rest
+// classification that is still stored as plaintext — today the synthetic scenario, which
+// FR-SYN-1 promised would be encrypted "like the other types" and which never was (FR-028,
+// D-0216). It runs at startup beside BackfillPushTokenEnc and shares its properties:
+// idempotent (an already-encrypted value is skipped by the cipher's own prefix check),
+// concurrency-safe (the UPDATE carries the old config as a CAS so only one replica converts
+// a row), and a no-op without a cipher.
+//
+// Unlike the push-token backfill it is NOT readiness-gated and its failure NEVER fails
+// startup. That is the owner's ruling of §10: a service must not go down because of an unset
+// variable or one unconvertible row. A row that is already ciphertext is protected; a row
+// that is not keeps working exactly as it does today and is retried on the next start. The
+// count and the failure are reported to the caller, which logs them.
+func (s *Store) BackfillMonitorConfigEnc(ctx context.Context) (int, error) {
+	if s.cipher == nil {
+		return 0, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, config::text FROM monitors WHERE config IS NOT NULL AND config::text <> '{}'`)
+	if err != nil {
+		return 0, fmt.Errorf("store: scan monitor configs for backfill: %w", err)
+	}
+	type row struct{ id, raw string }
+	var pending []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.raw); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("store: scan monitor config: %w", err)
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: iterate monitor configs: %w", err)
+	}
+
+	converted := 0
+	for _, r := range pending {
+		cfg := map[string]string{}
+		if err := json.Unmarshal([]byte(r.raw), &cfg); err != nil {
+			return converted, fmt.Errorf("store: decode monitor config %s: %w", r.id, err)
+		}
+		changed := false
+		for k, v := range cfg {
+			if !domain.EncryptedMonitorConfigKeys[k] || v == "" || secret.IsEncrypted(v) {
+				continue
+			}
+			enc, err := s.cipher.Encrypt(v)
+			if err != nil {
+				return converted, fmt.Errorf("store: encrypt monitor config %q of %s: %w", k, r.id, err)
+			}
+			cfg[k] = enc
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		next, err := json.Marshal(cfg)
+		if err != nil {
+			return converted, fmt.Errorf("store: encode monitor config %s: %w", r.id, err)
+		}
+		// CAS on the old document: a concurrent writer that already converted this row, or
+		// changed it, leaves the UPDATE matching nothing and this pass simply moves on.
+		ct, err := s.pool.Exec(ctx,
+			`UPDATE monitors SET config = $1 WHERE id = $2 AND config::text = $3`, next, r.id, r.raw)
+		if err != nil {
+			return converted, fmt.Errorf("store: backfill monitor config %s: %w", r.id, err)
+		}
+		if ct.RowsAffected() == 1 {
+			converted++
+		}
+	}
+	return converted, nil
 }

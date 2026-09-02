@@ -118,6 +118,9 @@ const scenarioSteps = ref<SynStep[]>([
 function addStep() { scenarioSteps.value.push(blankStep()); }
 function removeStep(i: number) { scenarioSteps.value.splice(i, 1); if (!scenarioSteps.value.length) scenarioSteps.value.push(blankStep()); }
 
+// True when an existing synthetic monitor came back without its scenario: the caller cannot
+// write it, so the server did not send it (FR-028 stage 1).
+const scenarioWithheld = ref(false);
 const scenarioError = computed(() => {
   if (!isSynthetic.value) return "";
   if (!scenarioSteps.value.length) return "Add at least one step.";
@@ -658,6 +661,10 @@ async function loadForEdit() {
   mode.value = (m.config?.mode as "all" | "any" | "quorum") || "all";
   quorum.value = Number(m.config?.quorum ?? 2) || 2;
   }
+  // The server withholds a synthetic scenario from a caller who may not write the monitor
+  // (FR-028 stage 1). Say so, rather than rendering an empty step builder that looks like a
+  // monitor with no scenario — an empty scaffold is a lie a reader would act on.
+  scenarioWithheld.value = m.type === "synthetic" && !m.config?.scenario;
   // Synthetic: parse the stored scenario JSON back into the visual step builder.
   if (m.type === "synthetic" && m.config?.scenario) {
     try {
@@ -1117,7 +1124,11 @@ const selectCls =
           </section>
 
           <!-- synthetic scenario builder -->
-          <section v-if="isSynthetic" class="rounded border border-border bg-surface shadow-card">
+          <section v-if="isSynthetic && scenarioWithheld" data-testid="scenario-withheld" class="rounded border border-border bg-surface p-4 text-[13px] text-ink-2 shadow-card">
+            The scenario is not shown: it can carry credentials, so it is returned only to someone who may edit this
+            monitor. Ask for editor rights on this project to view or change it.
+          </section>
+          <section v-if="isSynthetic && !scenarioWithheld" class="rounded border border-border bg-surface shadow-card">
             <div class="px-4 pt-[13px]"><h2 class="text-[13px] font-semibold">Scenario</h2></div>
             <div class="flex flex-col gap-3 p-4">
               <p class="text-[12px] text-ink-3">

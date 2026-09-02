@@ -739,6 +739,17 @@ func runServe(args []string) int {
 			} else if n > 0 {
 				logger.Info("push_token_backfill_complete", "converted", n)
 			}
+			// The monitor-config backfill (FR-028: the synthetic scenario) is deliberately
+			// NOT fail-fast and NOT readiness-gated. A service must not refuse to run because
+			// one row could not be converted or a variable was unset — the owner's ruling in
+			// `sec-synthetic-secrets.md` §10. A row already in ciphertext is protected; the
+			// rest keep working and are retried on the next start, and the failure is loud in
+			// the log rather than fatal.
+			if n, err := st.BackfillMonitorConfigEnc(ctx); err != nil {
+				logger.Error("monitor_config_backfill_failed", "error", err.Error())
+			} else if n > 0 {
+				logger.Info("monitor_config_backfill_complete", "converted", n)
+			}
 		}
 		st.WithSecretsEnabled(cfg.Secrets.Enabled)
 		st.WithServiceLimits(store.ServiceLimits{

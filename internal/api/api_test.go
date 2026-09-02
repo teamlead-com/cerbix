@@ -430,6 +430,30 @@ func (f *fakeStore) CreateMonitor(_ context.Context, m domain.Monitor) (domain.M
 	f.monitors[m.ID] = m
 	return m, nil
 }
+
+// The writer-mode readers of FR-028: the fake keeps ONE map, so what distinguishes them here
+// is what they hand back — the safe readers strip the writer-only keys the way the store's
+// safe scanner omits them, which is what an API test asserting a viewer's response needs.
+func (f *fakeStore) GetMonitorForWriter(ctx context.Context, id string) (domain.Monitor, error) {
+	return f.getMonitorRaw(id)
+}
+func (f *fakeStore) ListMonitorsByProjectForWriter(ctx context.Context, projectID string) ([]domain.Monitor, error) {
+	var out []domain.Monitor
+	for _, m := range f.monitors {
+		if m.ProjectID == projectID {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+func (f *fakeStore) getMonitorRaw(id string) (domain.Monitor, error) {
+	m, ok := f.monitors[id]
+	if !ok {
+		return domain.Monitor{}, store.ErrNotFound
+	}
+	return m, nil
+}
+
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {
 	m, ok := f.monitors[id]
 	if !ok {

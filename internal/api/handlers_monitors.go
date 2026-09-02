@@ -68,12 +68,18 @@ func (h *Handler) listMonitors(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	monitors, err := h.store.ListMonitorsByProject(r.Context(), proj.ID)
+	// The reader is chosen AFTER the authorization decision and never inferred from the
+	// request (FR-028 D4): a writer's list decrypts the scenario, a viewer's never touches it.
+	canWrite := h.principalCan(r, authz.ActionProjectWrite, proj.OrgID, proj.ID)
+	list := h.store.ListMonitorsByProject
+	if canWrite {
+		list = h.store.ListMonitorsByProjectForWriter
+	}
+	monitors, err := list(r.Context(), proj.ID)
 	if err != nil {
 		h.serverError(w, "list_monitors", err)
 		return
 	}
-	canWrite := h.principalCan(r, authz.ActionProjectWrite, proj.OrgID, proj.ID)
 	ids := make([]string, len(monitors))
 	for i := range monitors {
 		ids[i] = monitors[i].ID
@@ -87,7 +93,8 @@ func (h *Handler) listMonitors(w http.ResponseWriter, r *http.Request) {
 	for i := range monitors {
 		m := monitors[i].Redacted() // never return secret config to the client
 		if !canWrite {
-			m = m.WithoutPushToken() // viewers must not get the push bearer token
+			m = m.WithoutPushToken()        // viewers must not get the push bearer token
+			m = m.WithoutWriterOnlyConfig() // ...nor the scenario, which may carry one (FR-028)
 		}
 		fm, ok := prov[monitors[i].ID]
 		out[i] = monitorWithMgmt{Monitor: m, Management: mgmtFor(fm, ok)}
@@ -481,9 +488,20 @@ func (h *Handler) getMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	out := mon.Redacted()
 	// The push token is a bearer capability — reveal it only to a caller who can
-	// write the monitor; a read-only viewer must not be able to forge heartbeats.
+	// write the monitor; a read-only viewer must not be able to forge heartbeats. The
+	// synthetic scenario is the same shape of question and gets the same answer: it may hold
+	// a credential until FR-028 stage 2, so a viewer does not receive it, and a writer reads
+	// it through the writer-mode store call rather than through a decryption this handler
+	// performs itself (D4 — the mode follows the authorization decision).
 	if !h.principalCan(r, authz.ActionProjectWrite, proj.OrgID, proj.ID) {
 		out = out.WithoutPushToken()
+		out = out.WithoutWriterOnlyConfig()
+	} else if writable, werr := h.store.GetMonitorForWriter(r.Context(), mon.ID); werr == nil {
+		writable.PushToken = out.PushToken
+		out = writable.Redacted()
+	} else if !errors.Is(werr, store.ErrNotFound) {
+		h.serverError(w, "get_monitor_for_writer", werr)
+		return
 	}
 	fm, ok, perr := h.store.MonitorProvenance(r.Context(), mon.ID)
 	if perr != nil {

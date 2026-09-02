@@ -1,6 +1,8 @@
 # sec-synthetic-secrets — a credential inside a scenario is a secret everywhere (FR-028 / NFR-023)
 
-> **Lifecycle: DESIGN — revision 3, APPROVED by the reviewer subject to the owner resolving §10.** Opened 2026-09-02 after an operator asked whether a
+> **Lifecycle: STAGES 0 AND 1 IMPLEMENTED (2026-09-02); stage 2 designed and unbuilt.** Design approved
+> by the reviewer at revision 3 and amended by the owner's §10 ruling; the implementation notes below
+> record what the code actually does, so a reader never has to infer it from the design. Opened 2026-09-02 after an operator asked whether a
 > synthetic monitor could carry a bearer token, and the answer turned out to be "yes, in cleartext, to
 > everyone". Reviewed adversarially on the party before this text existed; every finding of that round
 > is folded in and named where it changed the design. This is a **spec-versus-code defect**, not an
@@ -34,6 +36,32 @@
 > invariant 4 changes accordingly. The pattern is not new — `internal/worker/worker.go` already answers
 > an unopenable credential with a per-job typed diagnostic and flips readiness only on a persistent
 > systemic failure.
+
+## 0. What is built, as of 2026-09-02
+
+**Stage 0 — done.** No probe result carries a request URL, for any type:
+`internal/prober/failure.go` composes a bounded failure class plus a host taken from the URL by that
+code. Applied to `http`, `promql`, `synthetic` and the RabbitMQ management probe; the websocket probe
+dials `host:port` and is asserted as a case rather than assumed clean.
+
+**Stage 1 — done.** The one secret set became three classifications in `internal/domain/monitor.go`
+(encrypted-at-rest, write-only-on-read, writer-only-display) and the reader became an explicit mode
+named by WHAT it decrypts (`readSafe`, `readWriterOnly`, `readAll`). The scenario is ciphertext at
+rest, covered by rotation, and backfilled at startup by `BackfillMonitorConfigEnc` — idempotent,
+compare-and-set, and NON-fatal, per §10. A viewer receives no scenario from the detail or the list; a
+writer does, through a store call chosen after the authorization decision. A partial update carries the
+stored ciphertext forward. On a keyless instance a scenario write is refused with `ErrNoAtRestKey` and
+nothing else changes.
+
+**The trap the review predicted, caught by a test rather than by production:** the materializer reads
+through the same boundary as a display list, so adding `scenario` to the encrypted set stripped it from
+every job and every synthetic probe would have run with no scenario. The materializer now uses the
+writer-only mode — the scenario is execution input, the credential is not, and the credential still
+travels as an envelope.
+
+**Stage 2 — not built.** D6 will store the ref NAME in a flat config key rather than inside the
+scenario JSON, which keeps `repointSecretRefs`, `monitor_secret_refs` and rotation working untouched
+and makes D6a unnecessary.
 
 ## 1. What this is, in one paragraph
 

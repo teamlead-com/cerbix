@@ -102,7 +102,12 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 		var rawConfig, rawRefs []byte
 		var jobID string
 		var issuedAt time.Time
-		m, err := s.scanMonitorNoSecrets(rows, &rawConfig, &jobID, &issuedAt, &rawRefs)
+		// FR-028: the job needs the SCENARIO decrypted (it is execution input), and must
+		// still never receive the credential in config — that arrives as an envelope. The
+		// safe reader used here before stage 1 omitted nothing, because nothing in config was
+		// encrypted except the credential; once the scenario joined the encrypted set, this
+		// line silently stripped it and every synthetic probe would have run with no scenario.
+		m, err := s.scanMonitorForExecution(rows, &rawConfig, &jobID, &issuedAt, &rawRefs)
 		if err != nil {
 			return nil, fmt.Errorf("store: scan materialized execution: %w", err)
 		}

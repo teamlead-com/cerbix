@@ -45,6 +45,11 @@ type Store interface {
 	DeleteUser(ctx context.Context, id string) error
 	CountGlobalAdmins(ctx context.Context) (int, error)
 	ListMonitorsByProject(ctx context.Context, projectID string) ([]domain.Monitor, error)
+	// ListMonitorsByProjectForWriter is the same list for a principal already authorized to
+	// write: it decrypts the writer-only config (the synthetic scenario) and still never
+	// returns a credential (FR-028).
+	ListMonitorsByProjectForWriter(ctx context.Context, projectID string) ([]domain.Monitor, error)
+	GetMonitorForWriter(ctx context.Context, id string) (domain.Monitor, error)
 	ListRegions(ctx context.Context) ([]string, error)
 	CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error)
 	UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error)

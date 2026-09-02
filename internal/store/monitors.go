@@ -6,12 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
+
+// ErrNoAtRestKey is returned when a write carries a value the encrypted-at-rest
+// classification covers and no `security.encryption_key` is configured. It is a WRITE
+// refusal on purpose (FR-028 §10 rule 2): the alternative shapes were storing the value in
+// cleartext behind a warning, or taking instance readiness down — and a monitoring service
+// must not go down because of an unset variable.
+var ErrNoAtRestKey = errors.New("store: no at-rest encryption key configured")
 
 // SecretRefNotFoundError means a prepared monitor setting references no secret with
 // that name in the monitor's project. The name is inventory metadata (never a value),
@@ -251,11 +259,44 @@ func nullableID(id string) *string {
 	return &id
 }
 
-// scanMonitor scans monitorColumns into a Monitor. extra dests are appended to the Scan,
-// letting a caller pull additional trailing columns (e.g. statement_timestamp()) selected
-// alongside monitorColumns in the same query.
+// readMode is what a caller has been AUTHORIZED to receive, named at the call site instead
+// of passed as a boolean (FR-028 D4). The boolean it replaced had two values for three
+// needs, which is how the scenario had no place to live.
+type readMode int
+
+const (
+	// readSafe decrypts nothing: display lists, scheduler snapshots, everything that must
+	// never hold credential plaintext even transiently.
+	readSafe readMode = iota
+	// readWriterOnly decrypts the writer-only keys (the scenario) and never the write-only
+	// ones (the password). Two callers, and they are the same question: a principal already
+	// authorized to WRITE the monitor, and the MATERIALIZER that builds a job — because a
+	// scenario is execution input while a credential is not, the credential travelling as an
+	// envelope under a per-region key instead.
+	readWriterOnly
+	// readAll decrypts everything, including the write-only credential. Reached only by
+	// internal write paths that must round-trip what is stored; never by a client response
+	// and never by a job payload.
+	readAll
+)
+
+// scanMonitor scans monitorColumns into a Monitor with FULL decryption. It is the execution
+// and internal-write reader; a handler serving a client picks a narrower mode.
 func (s *Store) scanMonitor(row pgx.Row, extra ...any) (domain.Monitor, error) {
-	return s.scanMonitorMode(row, true, extra...)
+	return s.scanMonitorAs(row, readAll, extra...)
+}
+
+// scanMonitorForWriter decrypts the scenario for a principal who may write the monitor, and
+// never the password (FR-028 invariant 6/7).
+func (s *Store) scanMonitorForWriter(row pgx.Row, extra ...any) (domain.Monitor, error) {
+	return s.scanMonitorAs(row, readWriterOnly, extra...)
+}
+
+// scanMonitorForExecution is the materializer's reader: the scenario a job needs to run,
+// never the credential a job receives as an envelope. It is deliberately the SAME mode as the
+// writer's — the distinction that matters is what is decrypted, not who asked.
+func (s *Store) scanMonitorForExecution(row pgx.Row, extra ...any) (domain.Monitor, error) {
+	return s.scanMonitorAs(row, readWriterOnly, extra...)
 }
 
 // scanMonitorNoSecrets is the display/snapshot read boundary (§4.4.2). Secret config
@@ -263,10 +304,10 @@ func (s *Store) scanMonitor(row pgx.Row, extra ...any) (domain.Monitor, error) {
 // remain visible metadata. This is intentionally a separate scanner, not post-decrypt
 // redaction, so APIs and scheduler snapshots cannot transiently hold credential plaintext.
 func (s *Store) scanMonitorNoSecrets(row pgx.Row, extra ...any) (domain.Monitor, error) {
-	return s.scanMonitorMode(row, false, extra...)
+	return s.scanMonitorAs(row, readSafe, extra...)
 }
 
-func (s *Store) scanMonitorMode(row pgx.Row, decryptConfigSecrets bool, extra ...any) (domain.Monitor, error) {
+func (s *Store) scanMonitorAs(row pgx.Row, mode readMode, extra ...any) (domain.Monitor, error) {
 	var (
 		m                       domain.Monitor
 		typ                     string
@@ -309,18 +350,32 @@ func (s *Store) scanMonitorMode(row pgx.Row, decryptConfigSecrets bool, extra ..
 		if err := json.Unmarshal(config, &m.Config); err != nil {
 			return domain.Monitor{}, fmt.Errorf("store: decode monitor config: %w", err)
 		}
-		for k := range domain.SecretMonitorConfigKeys {
-			if v, ok := m.Config[k]; ok {
-				if !decryptConfigSecrets {
-					delete(m.Config, k)
-					continue
-				}
-				plain, err := s.cipher.Decrypt(v)
-				if err != nil {
-					return domain.Monitor{}, fmt.Errorf("store: decrypt monitor config %q: %w", k, err)
-				}
-				m.Config[k] = plain
+		// One rule per classification, resolved against the mode the caller was authorized
+		// for. Omission happens WITHOUT calling Decrypt, so a reader that must not hand a
+		// value out never holds its plaintext even transiently (FR-028 NFR-023).
+		for k, v := range m.Config {
+			encrypted := domain.EncryptedMonitorConfigKeys[k]
+			if !encrypted {
+				continue
 			}
+			var allowed bool
+			switch {
+			case domain.WriteOnlyMonitorConfigKeys[k]:
+				allowed = mode == readAll
+			case domain.WriterOnlyMonitorConfigKeys[k]:
+				allowed = mode == readWriterOnly || mode == readAll
+			default:
+				allowed = mode == readAll
+			}
+			if !allowed {
+				delete(m.Config, k)
+				continue
+			}
+			plain, err := s.cipher.Decrypt(v)
+			if err != nil {
+				return domain.Monitor{}, fmt.Errorf("store: decrypt monitor config %q: %w", k, err)
+			}
+			m.Config[k] = plain
 		}
 	}
 	return m, nil
@@ -366,6 +421,14 @@ func (s *Store) storedCredentialTx(ctx context.Context, tx pgx.Tx, m domain.Moni
 // or password_ref replaces the old credential normally.
 func (s *Store) marshalConfigForUpdateTx(ctx context.Context, tx pgx.Tx, m domain.Monitor, preserveInline bool) ([]byte, error) {
 	config, err := s.marshalConfig(m)
+	if err != nil {
+		return nil, err
+	}
+	// A writer-only value the submission did not carry keeps what is stored (FR-028
+	// invariant 6). The scenario is the case: a writer DOES receive it, so a full edit can
+	// resend it, but a partial update that touches another field must not wipe the check's
+	// own definition. Carried as CIPHERTEXT — this path never decrypts.
+	config, err = s.carryWriterOnlyConfigTx(ctx, tx, m, config)
 	if err != nil || !preserveInline {
 		return config, err
 	}
@@ -389,15 +452,70 @@ func (s *Store) marshalConfigForUpdateTx(ctx context.Context, tx pgx.Tx, m domai
 	return json.Marshal(encoded)
 }
 
-// marshalConfig encrypts secret config values (when a cipher is set) and encodes
-// the config map to JSON for storage ('{}' when empty).
+// carryWriterOnlyConfigTx copies a stored writer-only value forward when the submitted
+// config does not carry it. It reads the old row without a lock, exactly as the credential
+// preservation above does, and never decrypts: the ciphertext moves as bytes.
+func (s *Store) carryWriterOnlyConfigTx(ctx context.Context, tx pgx.Tx, m domain.Monitor, config []byte) ([]byte, error) {
+	submitted := map[string]string{}
+	if err := json.Unmarshal(config, &submitted); err != nil {
+		return nil, fmt.Errorf("store: decode prepared monitor config: %w", err)
+	}
+	missing := false
+	for k := range domain.WriterOnlyMonitorConfigKeys {
+		if strings.TrimSpace(submitted[k]) == "" {
+			missing = true
+		}
+	}
+	if !missing {
+		return config, nil
+	}
+	var oldRaw []byte
+	if err := tx.QueryRow(ctx, `SELECT config FROM monitors WHERE id=$1 AND project_id=$2`, m.ID, m.ProjectID).Scan(&oldRaw); err != nil {
+		return nil, fmt.Errorf("store: read writer-only monitor config: %w", err)
+	}
+	oldConfig := map[string]string{}
+	if len(oldRaw) > 0 {
+		if err := json.Unmarshal(oldRaw, &oldConfig); err != nil {
+			return nil, fmt.Errorf("store: decode writer-only monitor config: %w", err)
+		}
+	}
+	changed := false
+	for k := range domain.WriterOnlyMonitorConfigKeys {
+		if strings.TrimSpace(submitted[k]) != "" {
+			continue
+		}
+		if stored := oldConfig[k]; stored != "" {
+			submitted[k] = stored
+			changed = true
+		}
+	}
+	if !changed {
+		return config, nil
+	}
+	return json.Marshal(submitted)
+}
+
+// marshalConfig encrypts every value in the encrypted-at-rest classification (when a cipher
+// is set) and encodes the config map to JSON for storage ('{}' when empty). The set is wider
+// than the write-only one since FR-028: a scenario is encrypted and still readable by a
+// writer.
 func (s *Store) marshalConfig(m domain.Monitor) ([]byte, error) {
 	if len(m.Config) == 0 {
 		return []byte("{}"), nil
 	}
+	// §10 rule 2: a secret-bearing value cerbix cannot protect is refused at WRITE time, with
+	// a typed reason. One monitor's write fails; nothing that already runs is touched, and
+	// readiness is never involved — a service must not go down for an unset variable.
+	if s.cipher == nil {
+		for k := range domain.WriterOnlyMonitorConfigKeys {
+			if strings.TrimSpace(m.Config[k]) != "" {
+				return nil, fmt.Errorf("%w: %q needs security.encryption_key to be stored", ErrNoAtRestKey, k)
+			}
+		}
+	}
 	enc := make(map[string]string, len(m.Config))
 	for k, v := range m.Config {
-		if domain.SecretMonitorConfigKeys[k] {
+		if domain.EncryptedMonitorConfigKeys[k] {
 			ev, err := s.cipher.Encrypt(v)
 			if err != nil {
 				return nil, fmt.Errorf("store: encrypt monitor config %q: %w", k, err)
@@ -787,6 +905,45 @@ func (s *Store) ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, erro
 		return nil, fmt.Errorf("store: list enabled monitors: %w", err)
 	}
 	return s.collectMonitors(rows)
+}
+
+// GetMonitorForWriter reads a monitor for a principal that has ALREADY been authorized to
+// write it: the scenario is decrypted, the credential is not. The mode is a parameter of the
+// call rather than something the store infers, because inferring it from the request would
+// be an authorization decision taken in the wrong place (FR-028 D4).
+func (s *Store) GetMonitorForWriter(ctx context.Context, id string) (domain.Monitor, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+monitorColumns+` FROM monitors WHERE id = $1`, id)
+	m, err := s.scanMonitorForWriter(row)
+	if noRows(err) {
+		return domain.Monitor{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Monitor{}, fmt.Errorf("store: get monitor for writer: %w", err)
+	}
+	return m, nil
+}
+
+// ListMonitorsByProjectForWriter is the writer's list: same query and order as the safe one,
+// the scenario decrypted, the credential still never returned.
+func (s *Store) ListMonitorsByProjectForWriter(ctx context.Context, projectID string) ([]domain.Monitor, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+monitorColumns+` FROM monitors WHERE project_id = $1 ORDER BY name`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list monitors for writer: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Monitor
+	for rows.Next() {
+		m, err := s.scanMonitorForWriter(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan monitor for writer: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate monitors for writer: %w", err)
+	}
+	return out, nil
 }
 
 // ListEnabledMonitorSnapshots is the ciphertext/plaintext-free scheduler surface used

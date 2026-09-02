@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
@@ -377,5 +378,49 @@ func TestMonitorTargetWithUserinfoIsRefused(t *testing.T) {
 	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors",
 		`{"name":"prom","type":"promql","target":"https://prom.internal:9090","interval_seconds":60,"timeout_seconds":5,"config":{"query":"up"}}`); rec.Code != http.StatusCreated {
 		t.Fatalf("create without userinfo = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSyntheticScenarioIsWriterOnly is the API half of FR-028 stage 1: a viewer's detail and
+// list carry no scenario, a writer's do. The point is not the response shape but the
+// authorization boundary — a viewer who can read a monitor must not read the credential the
+// scenario may still hold until stage 2.
+func TestSyntheticScenarioIsWriterOnly(t *testing.T) {
+	fs := seededStore()
+	fs.monitors["m-syn"] = domain.Monitor{
+		ID: "m-syn", ProjectID: "p1", Name: "journey", Type: domain.MonitorSynthetic,
+		IntervalSeconds: 60, TimeoutSeconds: 30, Enabled: true,
+		Config: map[string]string{"scenario": `{"steps":[{"url":"https://x","headers":{"authorization":"Bearer s3cr3t-bearer"}}]}`},
+	}
+	h := newHandler(fs)
+
+	for _, tc := range []struct {
+		name  string
+		who   authz.Principal
+		wants bool
+	}{
+		{"viewer", p1Viewer, false},
+		{"admin", o1Admin, true},
+	} {
+		t.Run(tc.name+" detail", func(t *testing.T) {
+			rec := do(h, tc.who, http.MethodGet, "/api/v1/monitors/m-syn", "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("detail = %d (%s)", rec.Code, rec.Body.String())
+			}
+			carries := strings.Contains(rec.Body.String(), "s3cr3t-bearer")
+			if carries != tc.wants {
+				t.Fatalf("%s detail carries the scenario = %v, want %v: %s", tc.name, carries, tc.wants, rec.Body.String())
+			}
+		})
+		t.Run(tc.name+" list", func(t *testing.T) {
+			rec := do(h, tc.who, http.MethodGet, "/api/v1/projects/p1/monitors", "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("list = %d (%s)", rec.Code, rec.Body.String())
+			}
+			carries := strings.Contains(rec.Body.String(), "s3cr3t-bearer")
+			if carries != tc.wants {
+				t.Fatalf("%s list carries the scenario = %v, want %v", tc.name, carries, tc.wants)
+			}
+		})
 	}
 }

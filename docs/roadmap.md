@@ -145,6 +145,11 @@ These are named in specs as follow-up REQUIREMENTS rather than non-goals. None i
   monitors keep running, because nothing re-validates on read. **And a second one from FR-028 stage 2:**
   a synthetic monitor whose `authorization`-class header holds a LITERAL now fails validation on its
   next write — it keeps probing, and the refusal names the step and the header.
+- **AC-SYN-2: a synthetic monitor on a GEO worker.** iter-0167 gave the type its first browser
+  coverage, on `core` only, so the criterion is narrowed and still undischarged. It needs a case on
+  the geo stack (`make geo-up-all` / `make geo-test`), where region affinity is what is actually being
+  claimed — `synthetic` carries no region rule of its own, so this is about proving the general rule
+  holds for it rather than about synthetic-specific code.
 - **A load-dependent flake in FR-024's gate maintenance** —
   `TestGateMaintCrashAfterEveryRemovalStatementConverges/after_drop.commit` fails as `crashed=false
   err=<nil>`: the crash injected after the drop's commit does not fire. Reproduced 2 of 5 runs with the

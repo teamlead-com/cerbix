@@ -49,6 +49,15 @@ async function mountSyntheticForm() {
   return w;
 }
 
+async function addHeaderRow(w: Awaited<ReturnType<typeof mountSyntheticForm>>, key: string) {
+  const adders = w.findAll("button").filter((b) => b.text() === "+ header");
+  expect(adders.length, "a step can take a header").toBeGreaterThan(0);
+  await adders[0].trigger("click");
+  await flushPromises();
+  await w.findAll('input[placeholder="Header"]')[0].setValue(key);
+  await flushPromises();
+}
+
 async function declareBinding(w: Awaited<ReturnType<typeof mountSyntheticForm>>, name = "login") {
   await w.find('[data-testid="new-binding"]').trigger("click");
   await w.find('[data-testid="new-binding-name"]').setValue(name);
@@ -86,28 +95,60 @@ describe("the binding → inventory mapping is on screen", () => {
 });
 
 describe("D7 arrives at the header field", () => {
-  it("refuses a literal in a credential-bearing header, and offers the binding instead", async () => {
+  // The party's P1: choosing Synthetic used to open an INVALID form, because the default
+  // scaffold put `Authorization: Bearer {{token}}` in a credential-bearing header — and two of
+  // these tests asserted that refusal as the normal initial state, which documented the bug as
+  // behaviour. The scaffold now demonstrates extract → interpolate with an id, and this case
+  // guards the property that was missing rather than the symptom.
+  it("opens VALID: no refusal on arrival, and no free-text control for a credential header", async () => {
     const w = await mountSyntheticForm();
-    // The default scaffold's second step carries `Authorization: Bearer {{token}}` — a literal
-    // in a credential-bearing header, which is exactly what D7 refuses.
-    expect(w.text()).toContain("must be exactly");
+    expect(w.text()).not.toContain("must be exactly");
+    expect(w.text()).not.toContain("Authorization");
+    // Nothing in the scaffold is a credential-bearing header, so no picker is needed yet.
+    expect(w.find('[data-testid="header-binding"]').exists()).toBe(false);
+    // And the form can actually be submitted, which it could not before: canSubmit demanded a
+    // target this type does not have.
+    expect(w.find("form").exists()).toBe(true);
+  });
+
+  it("turns the value into a binding selector as soon as the header NAME is credential-bearing", async () => {
+    const w = await mountSyntheticForm();
+    await addHeaderRow(w, "authorization");
+
+    // With zero bindings the control is a DISABLED selector saying what to do — never a
+    // free-text box, which is what invited the literal in the first place.
+    const picker = w.find('[data-testid="header-binding"]');
+    expect(picker.exists(), "the control is a selector before any binding exists").toBe(true);
+    expect(picker.attributes("disabled")).toBeDefined();
+    expect(picker.text()).toContain("Add a binding first");
 
     await declareBinding(w);
-    const picker = w.find('[data-testid="header-binding"]');
-    expect(picker.exists(), "the value control becomes a binding picker").toBe(true);
-    await picker.setValue("login");
+    const live = w.find('[data-testid="header-binding"]');
+    expect(live.attributes("disabled")).toBeUndefined();
+    await live.setValue("login");
     await flushPromises();
     expect(w.text()).not.toContain("must be exactly");
     expect(w.find('[data-testid="scenario-binding"]').text()).not.toContain("never used");
   });
 
+  it("still refuses a literal that arrives from elsewhere, in the server's words", async () => {
+    const w = await mountSyntheticForm();
+    // A monitor written through the API or a bundle can carry one, and an operator can paste a
+    // header name after typing a value. The refusal is the same either way.
+    const headerAdders = w.findAll("button").filter((b) => b.text() === "+ header");
+    await headerAdders[0].trigger("click");
+    await flushPromises();
+    await w.findAll('input[placeholder="value (supports {{var}})"]')[0].setValue("Bearer literal-token");
+    await w.findAll('input[placeholder="Header"]')[0].setValue("authorization");
+    await flushPromises();
+    expect(w.text()).toContain("must be exactly");
+    expect(w.text()).not.toContain("literal-token");
+  });
+
   it("says what is NOT protected instead of implying a guarantee", async () => {
     const w = await mountSyntheticForm();
-    const headerKeys = w.findAll('input[placeholder="Header"]');
-    const headerValues = w.findAll('input[placeholder="value (supports {{var}})"]');
-    expect(headerKeys.length, "the scaffold has a header row to type into").toBeGreaterThan(0);
-    await headerKeys[0].setValue("x-tenant-secret");
-    await headerValues[0].setValue("EXAMPLE-thirty-two-characters-long");
+    await addHeaderRow(w, "x-tenant-secret");
+    await w.findAll('input[placeholder="value (supports {{var}})"]')[0].setValue("EXAMPLE-thirty-two-characters-long");
     await flushPromises();
     // A hint, not a refusal: cerbix cannot tell a credential from data here.
     expect(w.text()).toContain("nothing refuses it");
@@ -127,9 +168,9 @@ describe("save before test, and the body that leaves the page", () => {
 
   it("sends the flat reference key and a document carrying only the placeholder", async () => {
     const w = await mountSyntheticForm();
+    await addHeaderRow(w, "authorization");
     await declareBinding(w);
-    const picker = w.find('[data-testid="header-binding"]');
-    await picker.setValue("login");
+    await w.find('[data-testid="header-binding"]').setValue("login");
     await flushPromises();
 
     const name = w.findAll("input").find((i) => (i.element as HTMLInputElement).placeholder?.includes("checkout"))

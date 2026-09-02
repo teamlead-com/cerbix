@@ -121,10 +121,15 @@ const synOps = ["eq", "ne", "lt", "gt", "contains"];
 function blankStep(): SynStep {
   return { name: "", method: "GET", url: "", headers: [], body: "", extract: [], assert: [{ that: "status", op: "eq", value: "200", path: "" }] };
 }
+// The default scaffold demonstrates extract → interpolate WITHOUT teaching a credential
+// pattern. It used to be `login` → `Authorization: Bearer {{token}}`, which the server refuses
+// under D7 — so merely choosing Synthetic opened a form whose own example could not be saved,
+// and two of my tests asserted that refusal as the normal initial state (party finding, P1).
+// An extracted id used in a later path is what `extract` is actually for, and it is valid.
 const scenarioSteps = ref<SynStep[]>([
-  { name: "login", method: "POST", url: "https://api.internal/login", headers: [], body: "",
-    extract: [{ var: "token", from: "json", path: "data.token" }], assert: [{ that: "status", op: "eq", value: "200", path: "" }] },
-  { name: "profile", method: "GET", url: "https://api.internal/me", headers: [{ k: "Authorization", v: "Bearer {{token}}" }], body: "",
+  { name: "list orders", method: "GET", url: "https://api.internal/orders", headers: [], body: "",
+    extract: [{ var: "order_id", from: "json", path: "data.0.id" }], assert: [{ that: "status", op: "eq", value: "200", path: "" }] },
+  { name: "read one", method: "GET", url: "https://api.internal/orders/{{order_id}}", headers: [], body: "",
     extract: [], assert: [{ that: "status", op: "eq", value: "200", path: "" }] },
 ]);
 function addStep() { scenarioSteps.value.push(blankStep()); }
@@ -1296,14 +1301,21 @@ const selectCls =
                       <input v-model="hd.k" placeholder="Header" class="h-[30px] w-[38%] rounded-sm border border-border bg-surface px-2 text-[12.5px]" />
                       <!-- A credential-bearing header stops being free text: D7 is taught by the
                            control, not by a refusal after saving. -->
+                      <!-- Once the header NAME is credential-bearing the value is a binding and
+                           nothing else, so the control is a selector even before the first binding
+                           exists: it is then empty and disabled, and says what to do. Rendering a
+                           free-text box until a binding existed invited exactly the literal D7
+                           refuses (party finding, P1). -->
                       <select
-                        v-if="isSecretCapableHeader(hd.k) && scenarioBindings.length"
+                        v-if="isSecretCapableHeader(hd.k)"
                         :value="headerBindingName(hd.v)"
                         data-testid="header-binding"
-                        :class="[selectCls, 'h-[30px] flex-1']"
+                        :disabled="!scenarioBindings.length"
+                        :class="[selectCls, 'h-[30px] flex-1', !scenarioBindings.length && 'opacity-60']"
                         @change="useBindingInHeader(si, hi, ($event.target as HTMLSelectElement).value)"
                       >
-                        <option value="" disabled>Select a binding</option>
+                        <option v-if="!scenarioBindings.length" value="">Add a binding first</option>
+                        <option v-else value="" disabled>Select a binding</option>
                         <option v-for="b in scenarioBindings" :key="b.name" :value="b.name">{{ b.name }} → {{ b.secret || "no secret" }}</option>
                       </select>
                       <input v-else v-model="hd.v" placeholder="value (supports {{var}})" class="h-[30px] flex-1 rounded-sm border border-border bg-surface px-2 font-mono text-[12.5px]" :class="bindingIssues.headerErrors[si + ':' + hi] && 'border-down bg-down-weak'" />
@@ -1311,7 +1323,7 @@ const selectCls =
                     </div>
                     <p v-if="bindingIssues.headerErrors[si + ':' + hi]" class="mt-[3px] text-[12px] text-down">{{ bindingIssues.headerErrors[si + ':' + hi] }}</p>
                     <p v-else-if="isSecretCapableHeader(hd.k) && !scenarioBindings.length" class="mt-[3px] text-[12px] text-ink-3">
-                      <code>{{ hd.k.trim().toLowerCase() }}</code> is a credential-bearing header: its value must be a binding, not a token. Add one above.
+                      <code>{{ hd.k.trim().toLowerCase() }}</code> is a credential-bearing header: its value must be a binding, not a token. Declare one in <b>Scenario secrets</b> above.
                     </p>
                     <!-- The residual, said rather than implied: cerbix cannot tell a credential
                          from data here, so nothing refuses it (D7). -->

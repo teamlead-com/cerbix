@@ -36,6 +36,10 @@ test.describe("synthetic secret bindings", () => {
     await page.goto(`/monitors/new?project=${projectID}`);
     await page.locator("button", { hasText: "Synthetic" }).click();
     await expect(page.getByTestId("scenario-secrets")).toBeVisible();
+    // The form opens VALID: the default scaffold demonstrates extract → interpolate and puts no
+    // credential anywhere, so there is no D7 refusal to start with (party finding, P1 — it used
+    // to open with `Authorization: Bearer {{token}}`, which the server refuses).
+    await expect(page.locator("text=must be exactly")).toHaveCount(0);
 
     // ── The mapping, declared where the operator is ─────────────────────────────────────
     await page.getByTestId("new-binding").click();
@@ -54,11 +58,11 @@ test.describe("synthetic secret bindings", () => {
     await page.getByPlaceholder("payments-callback").fill("e2e-synthetic-binding");
 
     // ── D7 at the header field ──────────────────────────────────────────────────────────
-    // Step 2 of the default scaffold already carries an `Authorization` header with a literal
-    // `Bearer {{token}}` — the extract-driven flow. That is exactly the shape D7 refuses when
-    // the header is credential-bearing, so the form must be showing the refusal right now.
-    await expect(page.locator("text=must be exactly").first()).toBeVisible();
-    // And the control is a binding picker, not a free-text box, for that header.
+    // Add a credential-bearing header the way an operator does. Its value control is a binding
+    // selector from the first keystroke — never a free-text box, which is what invited a pasted
+    // token in the first place.
+    await page.locator("button", { hasText: "+ header" }).first().click();
+    await page.getByPlaceholder("Header").first().fill("authorization");
     const picker = page.getByTestId("header-binding").first();
     await expect(picker).toBeVisible();
     await picker.selectOption("login");

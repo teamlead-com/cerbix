@@ -42,6 +42,11 @@ const (
 	MonitorSSH MonitorType = "ssh"
 	// MonitorSynthetic runs a scripted multi-step HTTP scenario (login→act→assert).
 	MonitorSynthetic MonitorType = "synthetic"
+	// MonitorAsyncCanary runs ONE typed asynchronous transaction end to end — submit, correlate,
+	// await a terminal result, assert — declared in a closed schema rather than a document
+	// (FR-029, D-0218). It is deliberately not `synthetic` widened: an untyped document forces
+	// every rule about it to guess, which is what D7 had to do and what cost FR-028 a round.
+	MonitorAsyncCanary MonitorType = "async_canary"
 	// MonitorPush is a passive dead-man's-switch: the target reports in.
 	MonitorPush MonitorType = "push"
 )
@@ -51,19 +56,23 @@ const (
 func (t MonitorType) Active() bool {
 	return t == MonitorHTTP || t == MonitorTCP || t == MonitorICMP || t == MonitorDNS ||
 		t == MonitorTLS || t == MonitorGRPC || t == MonitorComposite || t == MonitorPostgres || t == MonitorMySQL || t == MonitorRedis || t == MonitorPromQL ||
-		t == MonitorRabbitMQ || t == MonitorWebSocket || t == MonitorSSH || t == MonitorSynthetic
+		t == MonitorRabbitMQ || t == MonitorWebSocket || t == MonitorSSH || t == MonitorSynthetic ||
+		t == MonitorAsyncCanary
 }
 
 // NeedsTarget reports whether the type probes a single network target (composites
 // derive from children; synthetic carries its own per-step URLs in the scenario).
 func (t MonitorType) NeedsTarget() bool {
-	return t.Active() && t != MonitorComposite && t != MonitorSynthetic
+	// A canary's target is its workflow, exactly as a synthetic monitor's is its scenario: there is
+	// no single address to probe, and `canSubmit` in the SPA demanding one is the defect FR-028's
+	// editor arc found for `synthetic`.
+	return t.Active() && t != MonitorComposite && t != MonitorSynthetic && t != MonitorAsyncCanary
 }
 
 // Valid reports whether t is a known monitor type.
 func (t MonitorType) Valid() bool {
 	switch t {
-	case MonitorHTTP, MonitorTCP, MonitorICMP, MonitorDNS, MonitorTLS, MonitorGRPC, MonitorComposite, MonitorPostgres, MonitorMySQL, MonitorRedis, MonitorPromQL, MonitorRabbitMQ, MonitorWebSocket, MonitorSSH, MonitorSynthetic, MonitorPush:
+	case MonitorHTTP, MonitorTCP, MonitorICMP, MonitorDNS, MonitorTLS, MonitorGRPC, MonitorComposite, MonitorPostgres, MonitorMySQL, MonitorRedis, MonitorPromQL, MonitorRabbitMQ, MonitorWebSocket, MonitorSSH, MonitorSynthetic, MonitorAsyncCanary, MonitorPush:
 		return true
 	default:
 		return false
@@ -254,6 +263,33 @@ func (m Monitor) Validate() error {
 	if m.Type != MonitorSynthetic {
 		if refs := ScenarioSecretRefKeys(m.Config); len(refs) > 0 {
 			return fmt.Errorf("monitor: %s is not a synthetic monitor and must not declare %s", m.Type, refs[0])
+		}
+	}
+	if m.Type == MonitorAsyncCanary {
+		if m.IntervalSeconds <= 0 || m.TimeoutSeconds <= 0 {
+			return fmt.Errorf("monitor: interval_seconds and timeout_seconds must be positive for async_canary monitors")
+		}
+		// TYPE-SCOPED on purpose (FR-029 D9, and the D6b lesson from FR-028): an ordinary http
+		// monitor with a 30 s interval and a 60 s timeout is legal today and common, so writing this
+		// as a general rule would refuse configurations nobody meant it to.
+		if m.IntervalSeconds < m.TimeoutSeconds {
+			return fmt.Errorf("monitor: interval_seconds must be at least timeout_seconds for async_canary monitors (one probe may not overlap the next)")
+		}
+		w, err := ParseCanaryConfig(m.Config)
+		if err != nil {
+			return err
+		}
+		if err := ValidateCanaryWorkflow(w, m.TimeoutSeconds); err != nil {
+			return err
+		}
+	}
+	// A `canary_secret_*` reference belongs to an async_canary monitor and to nothing else — the
+	// same rule, and the same reason, as FR-028's D6b: the key writes a `monitor_secret_refs` row,
+	// adds an expected envelope field and joins the execution digest, so on any other type it
+	// produces a monitor this surface ACCEPTED and dispatch then refuses.
+	if m.Type != MonitorAsyncCanary {
+		if refs := CanarySecretRefKeys(m.Config); len(refs) > 0 {
+			return fmt.Errorf("monitor: %s is not an async_canary monitor and must not declare %s", m.Type, refs[0])
 		}
 	}
 	// A URL-style target may not carry credentials in its userinfo, on ANY surface

@@ -80,6 +80,14 @@ func NewRunnerWithGuard(g Guard) *Runner {
 		domain.MonitorWebSocket: websocketProber{dial: g.dialContext(&net.Dialer{})},
 		domain.MonitorSSH:       sshProber{dial: g.dialContext(&net.Dialer{})},
 		domain.MonitorSynthetic: syntheticProber{client: &http.Client{Transport: transport}},
+		// The canary gets its OWN guard, strict and not configurable: no loopback, no link-local,
+		// no private range, no cloud metadata — validated after resolution and re-validated on every
+		// redirect hop by the dialer. There is deliberately no setting that relaxes it, because a
+		// flag reachable in production is the policy's own bypass (FR-029 §6.12). Tests reach a
+		// local fixture by constructing the prober with their own dialer, at the seam.
+		domain.MonitorAsyncCanary: canaryProber{
+			dial: NewGuard(false, false).dialContext(&net.Dialer{Timeout: canaryDialTimeout}),
+		},
 	}
 	// MySQL's driver dialer registry is global; point it at this runner's guard.
 	dial := g.dialContext(&net.Dialer{})

@@ -124,8 +124,17 @@ build:
 ##
 ## `assets/placeholder.txt` is a FIXTURE, not build output: internal/web/web_test.go asserts
 ## the embedded asset route through it, so it is restored after every refresh.
+## `--user` matters: without it the container writes `node_modules/` and its caches as
+## root, and every later tool that runs as the developer — vitest creating
+## `node_modules/.vite-temp`, eslint, a plain `npm run build` — then fails with EACCES on
+## a tree it owns nothing in. That is not theoretical: it stopped an independent reviewer
+## from running the frontend tests at all in iter-0167, and the fix belongs here rather
+## than in a chown someone has to remember. A tree that was ALREADY built as root needs one
+## cleanup before this works — `docker run --rm -v "$(CURDIR)/frontend":/app alpine sh -c
+## 'chown -R $(shell id -u):$(shell id -g) /app/node_modules /app/dist'` — because `npm ci`
+## has to delete what root wrote.
 spa-snapshot:
-	docker run --rm --network=host -v "$(CURDIR)/frontend":/app -w /app node:22-alpine sh -c "npm ci && npm run build"
+	docker run --rm --network=host --user "$(shell id -u):$(shell id -g)" -e npm_config_cache=/tmp/.npm -v "$(CURDIR)/frontend":/app -w /app node:22-alpine sh -c "npm ci && npm run build"
 	rm -rf internal/web/dist
 	cp -r frontend/dist internal/web/dist
 	printf 'cerbix SPA asset placeholder\n' > internal/web/dist/assets/placeholder.txt

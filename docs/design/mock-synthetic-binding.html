@@ -1,0 +1,629 @@
+<title>Cerbix Synthetic Secret Bindings</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). FR-028 adds
+   NO new colour. A binding is not a status, so it never borrows --up/--down: it is the accent
+   ("declared here" grammar), the same voice the secret inventory already speaks in. Refusals are
+   --down because they are refusals, and the withheld/unknown surfaces borrow --pending with the
+   dashed ring the earlier mocks gave to "deficient evidence". */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+a{color:var(--accent); text-decoration:none} a:hover{text-decoration:underline}
+
+.top{
+  position:sticky; top:0; z-index:20; height:56px; display:flex; align-items:center; gap:12px;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.brand{display:flex; align-items:center; gap:9px}
+.brand .wm{font-size:15px; font-weight:600; letter-spacing:-.01em}
+.top .spacer{flex:1}
+.tbtn{border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:12.5px; color:var(--ink-2); background:var(--surface)}
+.tbtn.on{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.screens{
+  position:sticky; top:56px; z-index:19; display:flex; gap:2px; overflow-x:auto;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.screens button{padding:10px 12px 9px; font-size:13px; color:var(--ink-3); border-bottom:2px solid transparent; white-space:nowrap}
+.screens button.on{color:var(--ink); border-bottom-color:var(--accent); font-weight:550}
+.screens .n{font-size:10.5px; color:var(--ink-3); margin-right:5px}
+
+.wrap{padding:22px; max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+.head h1{font-size:21px; font-weight:650; letter-spacing:-.015em}
+.head .sub{margin-top:3px; font-size:13px; color:var(--ink-3)}
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.card > header{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card > header h2{font-size:14px; font-weight:600}
+.card .body{padding:16px}
+.card .spacer{flex:1}
+.stack{display:flex; flex-direction:column; gap:14px}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:760px){.grid2{grid-template-columns:1fr}}
+
+.chip{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:11.5px; color:var(--ink-2); background:var(--surface)}
+.chip.mono{font-family:ui-monospace,Menlo,monospace; font-size:10.5px}
+.chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.chip.dorm{border-style:dashed; color:var(--ink-3)}
+.chip.downc{border-color:var(--down); color:var(--down); background:var(--down-weak)}
+.chip.warnc{border-color:var(--degraded); color:var(--degraded); background:var(--degraded-weak)}
+.chip.file{background:var(--inset)}
+
+/* A binding chip is the ONE new object this feature puts on screen: a name that stands for a
+   credential nobody in the browser ever holds. Accent, monospace, and always paired with the
+   inventory secret it resolves to — never shown alone, which is the mapping requirement. */
+.bind{display:inline-flex; align-items:center; gap:6px; border:1px solid var(--accent); border-radius:5px;
+  padding:2px 8px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--accent); background:var(--accent-weak)}
+.bind .k{opacity:.7}
+.arrow{color:var(--ink-3); font-size:12px}
+.sec{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border-strong); border-radius:5px;
+  padding:2px 8px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-2); background:var(--inset)}
+.sec svg{opacity:.65}
+
+.step{border:1px solid var(--border); border-radius:7px; background:var(--surface-2); padding:12px}
+.step + .step{margin-top:10px}
+.step .sh{display:flex; align-items:center; gap:9px}
+.step .num{display:grid; place-items:center; width:20px; height:20px; border-radius:50%; background:var(--accent-weak); color:var(--accent); font-size:11px; font-weight:650; flex:none}
+.frow{display:flex; align-items:center; gap:8px; margin-top:8px; flex-wrap:wrap}
+.inp{display:inline-flex; align-items:center; gap:8px; min-height:30px; border:1px solid var(--border); border-radius:6px;
+  padding:4px 10px; font-size:13px; background:var(--surface); color:var(--ink)}
+.inp.mono{font-family:ui-monospace,Menlo,monospace; font-size:12.5px}
+.inp.grow{flex:1; min-width:170px}
+.inp.err{border-color:var(--down); background:var(--down-weak)}
+.inp.ok{border-color:var(--accent)}
+.inp .ph{color:var(--ink-3)}
+.inp.sel::after{content:"⌄"; color:var(--ink-3); margin-left:auto}
+.inp.w38{width:38%; min-width:150px}
+.hint{font-size:12px; color:var(--ink-3)}
+.hint.bad{color:var(--down)}
+.hint.acc{color:var(--accent)}
+
+.btn{display:inline-flex; align-items:center; gap:6px; height:30px; border:1px solid var(--border); border-radius:6px; padding:0 12px; font-size:13px; color:var(--ink); background:var(--surface)}
+.btn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:550}
+.btn.sm{height:26px; font-size:12.5px; padding:0 10px}
+.btn.link{border:0; padding:0; height:auto; color:var(--accent); font-size:12.5px}
+.btn[disabled]{opacity:.5; cursor:not-allowed}
+
+.err{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--down); background:var(--down-weak); color:var(--down); border-radius:6px; padding:9px 12px; font-size:13px}
+.err b{font-weight:650}
+.warnb{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--degraded); background:var(--degraded-weak); color:var(--degraded); border-radius:6px; padding:9px 12px; font-size:13px}
+.info{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--border-strong); background:var(--surface-2); color:var(--ink-2); border-radius:6px; padding:9px 12px; font-size:13px}
+.info.dash{border-style:dashed}
+
+table.tbl{width:100%; border-collapse:collapse; font-size:13px}
+table.tbl th{text-align:left; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3); padding:9px 12px; border-bottom:1px solid var(--border); white-space:nowrap}
+table.tbl td{padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:middle}
+table.tbl tr:last-child td{border-bottom:0}
+.tblwrap{overflow-x:auto}
+
+pre.code{
+  margin:0; padding:12px 14px; border:1px solid var(--border); border-radius:6px; background:var(--inset);
+  font:12.5px/1.55 ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; color:var(--ink); overflow-x:auto;
+}
+pre.code .c{color:var(--ink-3)}
+pre.code .k{color:var(--accent)}
+
+.note{
+  border:1px dashed var(--note-border); border-left:3px solid var(--note);
+  background:var(--note-bg); border-radius:6px; padding:10px 12px; font-size:12.5px; color:var(--ink-2);
+  display:flex; gap:10px; align-items:flex-start;
+}
+.note .ref{flex:none; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--note); border:1px solid var(--note-border); border-radius:4px; padding:1px 6px; margin-top:1px; white-space:nowrap}
+.note b{color:var(--ink); font-weight:600}
+body.hide-notes .note{display:none}
+
+.foot{padding:18px 22px 36px; font-size:12px; color:var(--ink-3); max-width:1080px; margin:0 auto}
+.foot b{color:var(--ink-2)}
+</style>
+
+<header class="top">
+  <div class="brand">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/></svg>
+    <span class="wm mono">cerbix</span>
+  </div>
+  <span class="chip mono">FR-028 · synthetic secret bindings</span>
+  <div class="spacer"></div>
+  <button class="tbtn on" id="notesBtn" aria-pressed="true">Spec notes</button>
+  <button class="tbtn" id="themeBtn">Theme</button>
+</header>
+
+<nav class="screens" id="screens" aria-label="Mocked screens"></nav>
+<div class="wrap" id="view"></div>
+<footer class="foot">
+  FR-028 / NFR-023 <b>design track</b> · mock for the owner's approval BEFORE any frontend code · tokens verbatim from
+  <span class="mono">frontend/src/style.css</span> · behaviour follows
+  <span class="mono">docs/specs/sec-synthetic-secrets.md</span> (stage 2 approved, D-0217) and the reviewer's three
+  requirements recorded as roadmap <b>N4</b>.
+</footer>
+
+<script>
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const note = (ref, html) => `<div class="note"><span class="ref">${esc(ref)}</span><div>${html}</div></div>`;
+const KEY = (b) => `scenario_secret_${b}_ref`;
+const PH = (b) => `{{secret:${b}}}`;
+const lock = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>`;
+/* The mapping unit, used everywhere a binding appears. It is ALWAYS binding → secret: the
+   reviewer's first requirement is that no screen shows a binding name without saying which
+   inventory secret fills it. */
+const map = (b, secret) =>
+  `<span class="bind"><span class="k">binding</span>${esc(b)}</span><span class="arrow">→</span><span class="sec">${lock}${esc(secret)}</span>`;
+
+/* ── 1. The scenario as it reads once bindings exist ───────────────────────────────── */
+function sScenario() {
+  return `
+  <div class="head">
+    <h1>Checkout journey · scenario</h1>
+    <p class="sub">Payments · synthetic monitor · the existing step builder in
+      <span class="mono">NewMonitorView.vue</span>, with one new panel above it</p>
+  </div>
+
+  ${note("N4 · requirement 1", `<b>The mapping is the panel, not a tooltip.</b> A binding name is meaningless on its
+    own — it is a placeholder for a credential the browser never holds — so the editor opens with the table that says
+    which project secret fills which binding, and every placeholder in the steps below is the same accent chip. The
+    reviewer's words: show the binding → inventory mapping <b>explicitly</b>.`)}
+
+  <div class="card">
+    <header><h2>Scenario secrets</h2>
+      <span class="chip acc mono">2 of 16 bindings</span>
+      <span class="spacer"></span>
+      <button class="btn sm">Manage project secrets</button>
+    </header>
+    <div class="tblwrap">
+      <table class="tbl">
+        <thead><tr><th>Binding</th><th>Project secret</th><th>Used in</th><th>Stored as</th><th></th></tr></thead>
+        <tbody>
+          <tr>
+            <td>${map("login", "checkout-api-token")}</td>
+            <td><span class="hint">rotated 4 days ago · used by 3 monitors</span></td>
+            <td><span class="chip mono">step 1 · authorization</span></td>
+            <td><span class="chip mono">${esc(KEY("login"))}</span></td>
+            <td style="text-align:right"><button class="btn link">edit</button></td>
+          </tr>
+          <tr>
+            <td>${map("upload_key", "files-upload-key")}</td>
+            <td><span class="hint">rotated 2 months ago · used by 1 monitor</span></td>
+            <td><span class="chip mono">step 2 · x-api-key</span> <span class="chip mono">step 2 · body</span></td>
+            <td><span class="chip mono">${esc(KEY("upload_key"))}</span></td>
+            <td style="text-align:right"><button class="btn link">edit</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="body stack" style="padding-top:12px">
+      <button class="btn sm" style="align-self:flex-start">+ binding</button>
+      <div class="info">
+        <div>The value is resolved from the project inventory <b>at dispatch</b> and travels to the prober inside the
+          credential envelope. It is never part of the scenario, never returned to this page, and never written beside
+          it. Rotating the secret needs no edit here; renaming it re-points this row by itself.</div>
+      </div>
+    </div>
+  </div>
+
+  ${note("D6 · as built", `The reference is an ordinary flat config key, <span class="mono">${esc(KEY("<binding>"))}</span>
+    — the same shape as <span class="mono">password_ref</span>. That is why rename, delete-counting and rotation need no
+    scenario-aware code, and it is what the “Used in” column can be built from without parsing anything the server does
+    not already validate.`)}
+
+  <div class="card">
+    <header><h2>Scenario</h2><span class="chip">2 steps</span><span class="spacer"></span>
+      <span class="chip dorm mono">timeout 30s covers the whole chain</span></header>
+    <div class="body">
+      <p class="hint" style="margin-bottom:10px">Ordered HTTP steps sharing a variable context: <span class="mono">extract</span>
+        pulls a value into a var, later steps interpolate it as <span class="mono">{{var}}</span>; each step's asserts must pass.</p>
+
+      <div class="step">
+        <div class="sh"><span class="num">1</span>
+          <span class="inp grow">sign in</span>
+          <button class="btn link">remove</button></div>
+        <div class="frow">
+          <span class="inp sel" style="width:92px">POST</span>
+          <span class="inp mono grow">https://api.internal/login</span>
+        </div>
+        <div class="frow">
+          <span class="inp mono w38">authorization</span>
+          <span class="inp ok mono grow" style="gap:6px">${map("login", "checkout-api-token")}</span>
+          <button class="btn link">×</button>
+        </div>
+        <div class="hint acc" style="margin-top:5px">A credential-bearing header holds the binding and nothing else.
+          The stored value is <span class="mono">${esc(PH("login"))}</span>.</div>
+      </div>
+
+      <div class="step">
+        <div class="sh"><span class="num">2</span>
+          <span class="inp grow">upload</span>
+          <button class="btn link">remove</button></div>
+        <div class="frow">
+          <span class="inp sel" style="width:92px">POST</span>
+          <span class="inp mono grow">https://files.internal/upload?session={{sid}}</span>
+        </div>
+        <div class="frow">
+          <span class="inp mono w38">x-api-key</span>
+          <span class="inp ok mono grow">${map("upload_key", "files-upload-key")}</span>
+          <button class="btn link">×</button>
+        </div>
+        <div class="frow">
+          <span class="inp mono w38">content-type</span>
+          <span class="inp mono grow">application/json</span>
+          <button class="btn link">×</button>
+        </div>
+        <div class="frow" style="align-items:flex-start">
+          <span class="inp mono grow" style="min-height:52px; align-items:flex-start">{"token":"${esc(PH("upload_key"))}","only_audio":false}</span>
+        </div>
+        <div class="hint" style="margin-top:5px">A binding may also be used in a body. There it is a convenience —
+          cerbix cannot tell a credential in a body from ordinary data, so nothing here is <i>enforced</i> (see screen 3).</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ── 2. Declaring one, from the header field ───────────────────────────────────────── */
+function sDeclare() {
+  return `
+  <div class="head">
+    <h1>Declaring a binding</h1>
+    <p class="sub">The flow starts where the operator already is — typing a header — and not in a separate panel they
+      must know about first</p>
+  </div>
+
+  ${note("N4 · requirement 2", `<b>D7 arrives before the value does.</b> The moment a header NAME is one of the
+    credential-bearing set, the value field stops being a free-text box and offers the inventory. The rule is taught by
+    the control, not by a refusal after saving — which is the reviewer's second requirement and the reason this screen
+    exists at all.`)}
+
+  <div class="card">
+    <header><h2>Step 1 · headers</h2></header>
+    <div class="body stack">
+      <div class="frow" style="margin-top:0">
+        <span class="inp mono w38">authorization</span>
+        <span class="inp grow" style="justify-content:space-between"><span class="ph">value</span>
+          <span class="chip acc">use a project secret</span></span>
+      </div>
+      <div class="info">
+        <div><b>authorization</b> is a credential-bearing header, so its value must be a binding — one
+          <span class="mono">{{secret:…}}</span> and nothing else. Typing a token here is refused on save, and the
+          refusal names this step and this header.</div>
+      </div>
+
+      <div style="border:1px solid var(--border-strong); border-radius:8px; padding:14px; background:var(--surface-2)">
+        <div class="lbl" style="margin-bottom:9px">New binding</div>
+        <div class="grid2">
+          <div>
+            <div class="lbl" style="margin-bottom:5px">Project secret</div>
+            <span class="inp sel mono" style="width:100%">checkout-api-token</span>
+            <div class="hint" style="margin-top:5px">from this project's inventory · a viewer of another project cannot see it</div>
+          </div>
+          <div>
+            <div class="lbl" style="margin-bottom:5px">Binding name</div>
+            <span class="inp ok mono" style="width:100%">login</span>
+            <div class="hint" style="margin-top:5px"><span class="mono">a–z 0–9 _ -</span>, starts with a letter, ≤ 40 characters</div>
+          </div>
+        </div>
+        <div class="frow" style="margin-top:12px; align-items:center">
+          <span class="hint">Stored as</span>
+          <span class="chip mono">${esc(KEY("login"))} = checkout-api-token</span>
+          <span class="hint">and the header becomes</span>
+          <span class="chip acc mono">${esc(PH("login"))}</span>
+        </div>
+        <div class="frow" style="margin-top:12px">
+          <button class="btn pri">Add binding</button>
+          <button class="btn">Cancel</button>
+          <span class="spacer"></span>
+          <span class="hint">14 of 16 bindings left</span>
+        </div>
+      </div>
+
+      ${note("D6b", `The two rows this panel writes are the WHOLE feature on the wire: a flat config key holding the
+        secret's NAME, and a placeholder in the document. Both are refused on any monitor that is not synthetic, so this
+        panel exists on the synthetic form only — permanently, not until some later release.`)}
+
+      <div class="info dash">
+        <div><b>Nothing here can reveal a value.</b> The picker lists secret NAMES; the browser never receives one, on
+          this page or any other. If the operator needs a new secret, the link goes to the inventory — this form does
+          not create one, because a credential typed into a monitor editor is the habit FR-028 exists to end.</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ── 3. What is refused, inline, and what honestly is not ──────────────────────────── */
+function sRefusals() {
+  return `
+  <div class="head">
+    <h1>Refusals, at the field</h1>
+    <p class="sub">Every one of these is a server rule (<span class="mono">Monitor.Validate</span>) — the editor shows
+      it early, and shows the same words the API would return</p>
+  </div>
+
+  <div class="card">
+    <header><h2>A literal in a credential-bearing header</h2><span class="chip downc">refused</span></header>
+    <div class="body stack">
+      <div class="frow" style="margin-top:0">
+        <span class="inp mono w38">authorization</span>
+        <span class="inp err mono grow">Bearer sk-live-EXAMPLE-do-not-paste-me-here</span>
+        <button class="btn link">×</button>
+      </div>
+      <div class="err"><div><b>step 1 header "authorization" must be exactly {{secret:&lt;binding&gt;}}</b> — a
+        credential is never a literal here. <button class="btn link" style="color:inherit; text-decoration:underline">Move it to the inventory</button></div></div>
+      <div class="hint">The refusal never echoes what was typed — not in the message, not in the log, not in a
+        heartbeat. That is stage 0's rule and it holds for validation text too.</div>
+      ${note("D7 · the enforceable half", `The set is finite and it is the one the file provider already refuses:
+        <span class="mono">authorization, proxy-authorization, cookie, x-api-key, api-key, x-auth-token, auth-token,
+        x-access-token, access-token, private-token</span>.`)}
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>A binding in a URL</h2><span class="chip downc">refused</span></header>
+    <div class="body stack">
+      <div class="frow" style="margin-top:0">
+        <span class="inp sel" style="width:92px">GET</span>
+        <span class="inp err mono grow">https://api.internal/act?token=${esc(PH("login"))}</span>
+      </div>
+      <div class="err"><div><b>step 1 must not reference a secret in its URL</b></div></div>
+      <div class="hint">A URL reaches proxy logs, access logs and error text. Stage 0 exists because that text used to
+        carry it; the rule keeps it out of the place the leak came from.</div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <header><h2>Declared, never used</h2><span class="chip downc">refused</span></header>
+      <div class="body stack">
+        <div>${map("legacy_key", "old-upload-key")}</div>
+        <div class="err"><div><b>binding "legacy_key" is declared and never used</b></div></div>
+        <div class="hint">A reference nobody sends is a permission the monitor holds for nothing — and it blocks the
+          deletion of a secret it never uses. Remove the binding, or use it.</div>
+      </div>
+    </div>
+    <div class="card">
+      <header><h2>The same header twice</h2><span class="chip downc">refused</span></header>
+      <div class="body stack">
+        <div class="frow" style="margin-top:0"><span class="inp mono w38">Authorization</span><span class="inp mono grow">${esc(PH("login"))}</span></div>
+        <div class="frow"><span class="inp err mono w38">authorization</span><span class="inp mono grow">Bearer …</span></div>
+        <div class="err"><div><b>step 1 declares header "authorization" twice</b> (as "Authorization" and
+          "authorization"); one header is one location</div></div>
+        <div class="hint">Case-insensitively, because two keys differing only in case are one place on the wire and the
+          execution digest could not tell them apart.</div>
+      </div>
+    </div>
+  </div>
+
+  ${note("D7 · the residual, said out loud", `<b>This screen must also say what cerbix does NOT catch,</b> or the panel
+    above becomes a promise the product cannot keep. A credential pasted into an ordinary header — or into a body — is
+    indistinguishable from data, so it is <b>not</b> refused. It is encrypted at rest, withheld from anyone who cannot
+    edit the monitor, and kept out of every probe result — and it still travels to the prober inside the ordinary job
+    rather than in an envelope.`)}
+
+  <div class="card">
+    <header><h2>What is not refused</h2><span class="chip warnc">not detectable</span></header>
+    <div class="body stack">
+      <div class="frow" style="margin-top:0">
+        <span class="inp mono w38">x-tenant-secret</span>
+        <span class="inp mono grow">EXAMPLE-tenant-secret-not-a-real-value</span>
+      </div>
+      <div class="warnb"><div><b>Nothing stops this, and the editor says so rather than implying otherwise.</b>
+        <span style="display:block; margin-top:4px">This header is not in the credential-bearing set, so cerbix cannot
+        tell a token from ordinary data. Prefer a binding: <button class="btn link" style="color:inherit; text-decoration:underline">turn this value into a project secret</button>.</span></div></div>
+      <div class="hint">A hint, deliberately not a block: a rule that guesses at values would refuse legitimate data and
+        still miss the next credential. Making it enforceable means a typed request model for the scenario — an owner's
+        decision, recorded as such.</div>
+    </div>
+  </div>`;
+}
+
+/* ── 4. Save before test ───────────────────────────────────────────────────────────── */
+function sTest() {
+  return `
+  <div class="head">
+    <h1>Test, and the one thing it will not do</h1>
+    <p class="sub">The contract stated in the editor, at the button, before the click</p>
+  </div>
+
+  ${note("N4 · requirement 3", `<b>“Save before test” is a sentence in the form, not a 400 the operator discovers.</b>
+    The test endpoint builds an UNSAVED monitor and sends it in an ordinary job: there is no envelope on that path, so a
+    binding would travel as the literal text <span class="mono">${esc(PH("login"))}</span> and the probe would
+    authenticate with a placeholder. The refusal is deliberate (D10), so the UI owes the operator the reason and the
+    way forward in the same place.`)}
+
+  <div class="card">
+    <header><h2>Test connection</h2><span class="chip dorm">unavailable for this scenario</span></header>
+    <div class="body stack">
+      <div class="frow" style="margin-top:0">
+        <button class="btn" disabled>Test connection</button>
+        <span class="hint">2 bindings declared</span>
+      </div>
+      <div class="info">
+        <div><b>Save the monitor before testing it.</b> The secrets behind
+          <span class="bind"><span class="k">binding</span>login</span> and
+          <span class="bind"><span class="k">binding</span>upload_key</span> are resolved from the project inventory when
+          a check is dispatched, and the test path has no envelope to carry them. Save, and the next scheduled run —
+          or <b>Run now</b> on the saved monitor — exercises the real credentials.</div>
+      </div>
+      <div class="frow">
+        <button class="btn pri">Save monitor</button>
+        <button class="btn">Save and run now</button>
+      </div>
+      <div class="hint">Both buttons lead to the same place; the second is the one an operator who came here to test
+        actually wants.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>The same form, before any binding exists</h2><span class="chip acc">testable</span></header>
+    <div class="body stack">
+      <div class="frow" style="margin-top:0">
+        <button class="btn">Test connection</button>
+        <span class="hint">no bindings · the journey runs exactly as written</span>
+      </div>
+      <div class="info dash">
+        <div>Build and test the journey first, then add the binding, then save. That order is what the refusal is
+          steering towards, and the editor is where it should be said — not in a runbook.</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ── 5. The edges: viewer, dangling ref, bundle ────────────────────────────────────── */
+function sEdges() {
+  return `
+  <div class="head">
+    <h1>Edges</h1>
+    <p class="sub">Three states that exist today and that the editor must not paper over</p>
+  </div>
+
+  <div class="card">
+    <header><h2>A principal who may not edit this monitor</h2><span class="chip dorm">withheld</span></header>
+    <div class="body stack">
+      <div class="info dash">
+        <div>The scenario is not shown: it can carry credentials, so it is returned only to someone who may edit this
+          monitor. Ask for editor rights on this project to view or change it.</div>
+      </div>
+      <div class="hint">Shipped in stage 1 and unchanged here. It is a withheld notice, never an empty step builder —
+        an empty scaffold is a lie a reader would act on.</div>
+      ${note("NFR-023", `The boundary is a READER that never decrypts, not a redaction applied afterwards. The panel on
+        screen 1 is withheld with it: a viewer sees neither the bindings nor the mapping.`)}
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>The secret behind a binding was deleted</h2><span class="chip downc">cannot dispatch</span></header>
+    <div class="body stack">
+      <div class="frow" style="margin-top:0">
+        <span class="bind"><span class="k">binding</span>upload_key</span><span class="arrow">→</span>
+        <span class="sec" style="border-color:var(--down); color:var(--down)">${lock}files-upload-key</span>
+        <span class="chip downc">missing</span>
+      </div>
+      <div class="err"><div>Secret <b>files-upload-key</b> no longer exists in this project. This monitor cannot
+        dispatch until you pick an existing secret.</div></div>
+      <div class="hint">Deleting a referenced secret is refused while the reference stands, so this state comes from
+        the other order — the monitor was pointed at a name that later went away. Same wording as the existing
+        <span class="mono">password_ref</span> guard, because it is the same failure.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Monitoring as Code</h2><span class="chip dorm">not exportable</span></header>
+    <div class="body stack">
+      <div class="info dash">
+        <div>A synthetic monitor cannot be declared in a bundle. Stage 2 removed the secret-reference reason for that —
+          a bundle can now name an inventory secret in a flat key — but a bundle's flat
+          <span class="mono">settings</span> map still cannot carry a nested scenario.</div>
+      </div>
+      <div class="hint">Shown where an operator would look for an export, so the limitation is read rather than
+        discovered. It is D9, and it is open work, not a defect.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>What the server stores, for the whole screen 1</h2></header>
+    <div class="body">
+<pre class="code"><span class="c">// monitors.config — the scenario is ciphertext at rest; shown decrypted for a writer</span>
+{
+  <span class="k">"scenario"</span>: "{\\"steps\\":[
+      {\\"url\\":\\"https://api.internal/login\\",\\"method\\":\\"POST\\",
+       \\"headers\\":{\\"authorization\\":\\"${esc(PH("login"))}\\"}},
+      {\\"url\\":\\"https://files.internal/upload?session={{sid}}\\",\\"method\\":\\"POST\\",
+       \\"headers\\":{\\"x-api-key\\":\\"${esc(PH("upload_key"))}\\"}}]}",
+  <span class="k">"${esc(KEY("login"))}"</span>:      "checkout-api-token",
+  <span class="k">"${esc(KEY("upload_key"))}"</span>: "files-upload-key"
+}</pre>
+      <div class="hint" style="margin-top:10px">No credential value appears anywhere in this document. Each binding
+        becomes one field of the credential envelope at dispatch, the executor substitutes it into the scenario, and the
+        substituted copy is dropped when the probe ends.</div>
+    </div>
+  </div>`;
+}
+
+const SCREENS = [
+  ["scenario", "Scenario with bindings", sScenario],
+  ["declare", "Declaring a binding", sDeclare],
+  ["refusals", "Refusals & the residual", sRefusals],
+  ["test", "Save before test", sTest],
+  ["edges", "Edges", sEdges],
+];
+let active = "scenario";
+const nav = document.getElementById("screens");
+const view = document.getElementById("view");
+nav.innerHTML = SCREENS.map(([k, t], i) =>
+  `<button data-k="${k}" class="${k === active ? "on" : ""}"><span class="n">${i + 1}</span>${esc(t)}</button>`).join("");
+function render() {
+  const [, , fn] = SCREENS.find(([k]) => k === active);
+  view.innerHTML = fn();
+  nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.k === active));
+  window.scrollTo(0, 0);
+}
+nav.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-k]");
+  if (!b) return;
+  active = b.dataset.k;
+  render();
+});
+document.getElementById("themeBtn").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = getComputedStyle(root).getPropertyValue("--bg").trim() === "#0b0b0f";
+  root.setAttribute("data-theme", dark ? "light" : "dark");
+});
+const notesBtn = document.getElementById("notesBtn");
+notesBtn.addEventListener("click", () => {
+  const off = document.body.classList.toggle("hide-notes");
+  notesBtn.classList.toggle("on", !off);
+  notesBtn.setAttribute("aria-pressed", String(!off));
+});
+render();
+</script>

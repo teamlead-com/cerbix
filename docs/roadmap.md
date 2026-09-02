@@ -100,7 +100,9 @@ rows they would read actually exist.
 API- and file-reachable and not editor-reachable: the SPA can display a scenario to a writer but cannot
 declare `{{secret:<binding>}}` with its `scenario_secret_<binding>_ref`. Per process the mock comes
 first and needs the owner's visual approval before any SPA code. The reviewer gave the mock three
-requirements after approving stage 2 (D-0217), so it is not designed from a blank page: show the
+requirements after approving stage 2 (D-0217), so it was not designed from a blank page. **The mock exists:**
+[`docs/design/mock-synthetic-binding.html`](design/mock-synthetic-binding.html), five screens, awaiting the
+owner's visual approval in both themes — until that happens no Vue file is touched. It answers the three: show the
 binding → inventory mapping EXPLICITLY (which project secret fills which binding, by name, with the
 used-by state visible); carry D7's rule INLINE where the operator types a credential-bearing header,
 not as a refusal after a failed save; and state the "save before test" contract in the editor, since a

@@ -464,3 +464,46 @@ drives `:focus-visible`; the self-correcting hint on screen 3 is direct copy.
 - The NOT_CONFIGURED history row carries `not_configured` in its Reasons column like the by-id record.
 - The override by-id JSON is valid (comments outside the object); the D16 hint says "reasons and diagnostics go to stderr"
   and distinguishes `--json` (verbatim) from `jq` (a projection).
+
+---
+
+## FR-028 — Synthetic secret bindings (mock, AWAITING OWNER APPROVAL — 2026-09-02)
+
+> **Drawn after the requirement closed, not before it.** FR-028 stage 2 is DONE and approved (D-0217); the
+> editor is the one deferred half, and per the standing gate no Vue file is touched before the owner looks at
+> this mock in both themes. The reviewer gave three requirements for it after approving stage 2 (roadmap N4)
+> and those three are the mock's spine, not decoration.
+
+Source: `docs/design/mock-synthetic-binding.html`. Tokens VERBATIM from `frontend/src/style.css`; shell, `.note`
+overlay and screen switcher 1:1 with `mock-reliability-gate.html`. **No new colour** — a binding is not a status,
+so it never borrows `--up`/`--down`; it is the accent, the voice the secret inventory already speaks in.
+
+Five screens: Scenario with bindings (the mapping panel above the existing step builder) · Declaring a binding
+(the flow starting at the header field) · Refusals & the residual · Save before test · Edges (withheld, dangling
+ref, no bundle export).
+
+### What the mock decides, so the implementation invents nothing
+
+- **The mapping is a panel, not a tooltip.** Screen 1 opens with a table: binding → project secret → where it is
+  used → the flat key it is stored as. A binding chip is NEVER rendered alone anywhere in the mock — that pairing
+  is the reviewer's first requirement made structural rather than remembered.
+- **D7 is taught by the control, not by a refusal.** The moment a header NAME is in the credential-bearing set,
+  the value field stops being free text and offers the inventory. The literal refusal still exists (screen 3) and
+  uses the server's own words, but an operator should meet the rule before they paste, not after.
+- **"Save before test" is a sentence at the button.** The Test control is disabled with the reason and two ways
+  forward (Save · Save and run now), and the same card shows the credential-free scenario still testing. The
+  contract is D10's, and the UI owes it in the place the click happens.
+- **The residual gets its own card, in `--degraded`, not silence.** A credential in an unlisted header or a body
+  is NOT detectable and is NOT refused; the card says so and offers to turn the value into a project secret. A
+  panel that only showed what is enforced would read as a guarantee the product cannot keep (D7).
+- **The value never enters the browser.** The picker lists secret NAMES; the form cannot create a secret (that is
+  the inventory's job) — a credential typed into a monitor editor is the habit the requirement exists to end.
+- **D9 is visible where an export would be**, so the bundle limitation is read rather than discovered.
+- **Not shown and not built:** binding usage analytics, a "reveal" affordance of any kind, in-place secret
+  rotation from the monitor form, and any inline test that would need an envelope.
+
+### Open for the owner's look
+
+Whether the mapping panel sits ABOVE the steps (as drawn — the reference is read before the journey) or collapses
+into a summary row until a binding exists. The mock takes the first, because an empty panel is also how the
+operator learns the feature is there.

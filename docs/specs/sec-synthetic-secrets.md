@@ -248,6 +248,22 @@ defensible on availability grounds, and is rejected because a config the core wo
 not a config to execute. That refusal is safe to add precisely because stage 2 has never been released:
 no monitor anywhere carries such a key.
 
+**And "inert" was the wrong word for a row that predates the rule (party round 5, second pass).** The
+type gates stop such a key from reaching MATERIALIZATION — which is what keeps the monitor probing
+rather than failing for a key it cannot use — and they do not reach backwards. An existing
+`monitor_secret_refs` row is a real row: it counts against deleting its secret, it follows a rename, and
+the stored config key makes the monitor's next API edit fail validation until the key is dropped. The
+state is unreachable through any write path in any release, and that is a claim about RELEASES rather
+than about the code, so the code's behaviour is pinned by two tests that seed the row directly —
+`TestAPreFixNonSyntheticBindingRowBehavesAsDocumented` (probing continues, no envelope, the delete guard
+still counts it, the repair is an ordinary edit that clears the ref row with the key) and
+`TestAPreFixNonSyntheticBindingBlocksEditsUntilTheKeyIsDropped` (the 400 an operator meets, and the
+repair PATCH). `docs/runbook.md` carries the detection query and the repair. No migration: a migration
+for a state no release can produce is a permanent artifact writing to `monitors.config`, which is a worse
+trade than a documented one-line repair — and the store test disproved my own assumption that
+`UpdateMonitor` would refuse the edit, which is exactly the kind of thing a migration would have been
+written against.
+
 **D7 — literals are refused where a literal is DETECTABLE, and secrets are forbidden in the URL.**
 Implemented as the key-name reading, which is the only enforceable one: a header whose name is in the
 finite secret-capable set (`authorization`, `cookie`, `x-api-key`, …) must carry exactly one
@@ -395,6 +411,11 @@ protected and is not.
 15. Stage 2: a `scenario_secret_*` reference is refused on every non-synthetic type at the write
     boundary, contributes no `monitor_secret_refs` row, no envelope field and no execution key, and a
     crafted job carrying one on such a type is refused by the dispatch gate before the AEAD (D6b).
+16. Stage 2: a row seeded as a pre-rule write would have left it — the key in a non-synthetic monitor's
+    stored config plus its `monitor_secret_refs` row — keeps that monitor PROBING with no envelope, still
+    counts against deleting its secret, and blocks the monitor's next API edit with a refusal naming the
+    key; dropping the key on an ordinary edit clears the ref row with it and needs no migration (D6b,
+    second pass).
 
 ## 7. Required test matrix (written before the code)
 
@@ -443,6 +464,13 @@ use, with the LOCATION recorded per use) · `TestScenarioBindingsRefusals` (unde
 in a secret-capable header, placeholder in a URL, duplicate header keys case-insensitively, declared
 and unused, the binding cap) · `TestMalformedBindingReferenceIsRefusedByName` (a typo'd ref key was
 silently ignored, which is a binding the operator believes they declared).
+
+*Stage 2, the row that cannot exist (round 5, second pass):*
+`TestAPreFixNonSyntheticBindingRowBehavesAsDocumented` (live DB, seeded with raw SQL: probing continues
+and no envelope is built · the delete guard still counts the row · a writer read still carries the key ·
+the repair edit clears both) · `TestAPreFixNonSyntheticBindingBlocksEditsUntilTheKeyIsDropped` (the 400
+naming the key, and the repair PATCH). Both exist because "unreachable" is a statement about releases,
+not about behaviour.
 
 *Stage 2, the type boundary (round 5):* `TestScenarioBindingIsRefusedOnEveryNonSyntheticType` (http,
 tcp, postgres and promql each refused, and neither derived set treats the key as a credential) ·

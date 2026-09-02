@@ -302,3 +302,82 @@ func TestScenarioBindingRidesTheOrdinaryRefPath(t *testing.T) {
 		t.Fatalf("rotation changed the monitor: %+v", after.Config)
 	}
 }
+
+// The row that CANNOT exist, seeded anyway (party round 5). No released build ever accepted a
+// `scenario_secret_*` key on a non-synthetic monitor — the code that did lives only in unpushed
+// commits — so this state is unreachable through any write path. The review was still right that
+// calling such a row "inert" was inaccurate: the type gates stop it from reaching MATERIALIZATION,
+// and they do not reach backwards into a row that already exists. This test seeds one with raw SQL,
+// exactly as a pre-fix write would have left it, and states what actually happens to it, so the
+// claim is a description and not a hope.
+func TestAPreFixNonSyntheticBindingRowBehavesAsDocumented(t *testing.T) {
+	st, ctx := secretsTestStore(t)
+	_, projID := secretsFixture(t, st, ctx, "acme", "api")
+	sec, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "login-token", "v1")
+	if err != nil {
+		t.Fatalf("create secret: %v", err)
+	}
+	m, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: projID, Name: "api", Type: domain.MonitorHTTP, Target: "https://api.internal/health",
+		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create http monitor: %v", err)
+	}
+	key := domain.ScenarioSecretRefKey("login")
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE monitors SET config = config || jsonb_build_object($2::text, 'login-token') WHERE id = $1`,
+		m.ID, key); err != nil {
+		t.Fatalf("seed the config key: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO monitor_secret_refs (monitor_id, project_id, setting_key, secret_id) VALUES ($1, $2, $3, $4)`,
+		m.ID, projID, key, sec.ID); err != nil {
+		t.Fatalf("seed the ref row: %v", err)
+	}
+
+	// 1. The monitor KEEPS PROBING. This is the property that matters: the fix must not turn a
+	//    stale row into an outage, which is the whole reason the type gate lives in materialization
+	//    as well as at the write boundary.
+	execs, err := st.MaterializeExecutionConfigs(ctx, []string{m.ID}, nil)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(execs) != 1 || execs[0].Reason != "" {
+		t.Fatalf("a seeded row must not stop the monitor: %+v", execs)
+	}
+	if execs[0].Job.CredentialEnvelope != nil {
+		t.Fatal("the seeded row must not produce a credential envelope")
+	}
+
+	// 2. The ref row still COUNTS against deleting the secret. It is a real row; nothing in the
+	//    fix rewrites history, and the operator sees the secret as in use.
+	var inUse SecretInUseError
+	if err := st.DeleteProjectSecret(ctx, testSecretActor, projID, "login-token"); !errors.As(err, &inUse) || inUse.Count != 1 {
+		t.Fatalf("delete = %v, want SecretInUseError{Count: 1} — the seeded row is real", err)
+	}
+
+	// 3. The store itself does NOT refuse the edit — domain validation is the write BOUNDARY the
+	//    API and the file provider call, not something `UpdateMonitor` repeats. The refusal an
+	//    operator actually meets is asserted where it lives, in
+	//    `api.TestAPreFixNonSyntheticBindingBlocksEditsUntilTheKeyIsDropped`. Written down here
+	//    because I assumed the opposite when I first wrote this test and the test said otherwise.
+	edit, err := st.GetMonitorForWriter(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("writer read: %v", err)
+	}
+	if edit.Config[key] != "login-token" {
+		t.Fatalf("the seeded key must survive a writer read: %+v", edit.Config)
+	}
+
+	// 4. The repair needs no migration: drop the key on an ordinary write, and the monitor and the
+	//    secret are ordinary again. `monitorRefSettings` no longer contributes the key for an http
+	//    monitor, so the update clears the ref row with it.
+	delete(edit.Config, key)
+	if _, err := st.UpdateMonitor(ctx, edit); err != nil {
+		t.Fatalf("the repair edit must succeed: %v", err)
+	}
+	if err := st.DeleteProjectSecret(ctx, testSecretActor, projID, "login-token"); err != nil {
+		t.Fatalf("after the repair the secret must be deletable: %v", err)
+	}
+}

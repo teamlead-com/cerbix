@@ -429,6 +429,55 @@ The channel TYPE is not editable: another type requires another config, which is
 channel. A body carrying `type` is refused as an unknown field. Pausing is unchanged —
 `{"enabled":false}` keeps the config and delivery skips the channel.
 
+## Synthetic scenarios and their secrets (FR-028)
+
+A synthetic monitor's scenario is a credential-bearing document, and since 2026-09-02 it is
+treated as one:
+
+- **At rest** it is ciphertext in `monitors.config`, covered by key rotation and by an
+  idempotent startup backfill (`BackfillMonitorConfigEnc`). The backfill is NON-fatal — an
+  instance with no `security.encryption_key` starts, stays ready and keeps probing; what it
+  refuses is a scenario WRITE it cannot protect. Legacy plaintext scenarios stay plaintext
+  until a key is supplied, which is the stated cost of not trading a leak for an outage.
+- **On read** a principal who cannot write the monitor receives no scenario at all — not
+  plaintext, not ciphertext.
+- **In the record** no probe result carries a request URL, for any monitor type: a failure is
+  a bounded class plus a host.
+- **In the document** a declared credential is a NAMED BINDING: `{{secret:<binding>}}` in the
+  scenario, and the project secret's name in the config key
+  `scenario_secret_<binding>_ref`. The value is resolved server-side and delivered in the
+  credential envelope; it is never stored beside the scenario.
+
+**What is refused, and what is not.** A header whose name is credential-bearing
+(`authorization`, `cookie`, `x-api-key`, …) must hold exactly one placeholder and nothing
+else; no placeholder may resolve into a URL. A literal pasted into an ordinary header or into
+a body is NOT detectable and is not refused — it is protected by encryption at rest and by
+read scoping only. Two consequences for an upgrade: a synthetic monitor whose
+`authorization`-class header holds a literal fails validation on its next WRITE (it keeps
+probing — nothing re-validates on read), and a monitor target carrying credentials in its URL
+userinfo is now refused on every surface.
+
+**Testing a scenario before saving it.** A scenario that declares bindings is not testable
+before the monitor is saved: that path has no envelope to carry the credential, and the API
+answers 400 naming the binding. Build and test the journey first, add the binding, save.
+
+**A `scenario_secret_*` key on a monitor that is not synthetic.** It is refused at every write
+surface, and no released build ever accepted one — as of 2026-09-02 the key exists
+only in unreleased builds, and there it is synthetic-only. If a row from a pre-release build somehow exists, it does
+not stop the monitor from probing, but it does count against deleting its secret and it blocks
+the monitor's next edit. Detect and repair:
+
+```sql
+-- Detect (run per instance database):
+SELECT m.id, m.project_id, m.type, k AS stale_key
+  FROM monitors m, LATERAL jsonb_object_keys(m.config) k
+ WHERE m.type <> 'synthetic' AND k LIKE 'scenario\_secret\_%';
+```
+
+Repair is an ordinary edit, not a migration: PATCH the monitor with a `config` that omits the
+key (the editor already sends the full config on save). The stale `monitor_secret_refs` row is
+cleared by that same write, after which the secret is deletable again.
+
 ## Project secret inventory and credential dispatch (FR-020)
 
 Secret values are write-only project data. Core materializing roles (`all`, `api`,

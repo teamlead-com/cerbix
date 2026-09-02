@@ -67,8 +67,9 @@ func monitorRefSettings(m domain.Monitor) map[string]string {
 		}
 	}
 	// Synthetic only: the key means "scenario binding", and on any other type it means
-	// nothing at all. Domain validation refuses it there, and this gate keeps a row written
-	// before that rule existed from turning into a secret reference (review of stage 2).
+	// nothing at all. Domain validation refuses it there, and this gate stops a stored key
+	// from being written back as a reference — which is also what makes the repair an
+	// ordinary edit: drop the key, and the next update clears the ref row with it.
 	if m.Type == domain.MonitorSynthetic {
 		for _, key := range domain.ScenarioSecretRefKeys(m.Config) {
 			if name := strings.TrimSpace(m.Config[key]); name != "" {

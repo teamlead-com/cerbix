@@ -519,3 +519,37 @@ func TestScenarioBindingIsRefusedOnANonSyntheticMonitorAPI(t *testing.T) {
 		t.Fatalf("the refusal must name the key: %s", rec.Body.String())
 	}
 }
+
+// The operator-facing half of the pre-fix row (party round 5): a monitor whose STORED config still
+// carries a `scenario_secret_*` key cannot be edited until the key goes, because every PATCH
+// re-validates the merged monitor. The state is unreachable — no released build ever accepted the
+// key — but "unreachable" is a claim about releases, not about what the code would do, and this is
+// what the code does. The repair is an ordinary PATCH that sends a config without the key; no
+// migration, no support call.
+func TestAPreFixNonSyntheticBindingBlocksEditsUntilTheKeyIsDropped(t *testing.T) {
+	fs := seededStore()
+	key := domain.ScenarioSecretRefKey("login")
+	m := fs.monitors["mon1"]
+	m.Config = map[string]string{key: "login-token"}
+	fs.monitors["mon1"] = m
+	h := newHandler(fs)
+
+	// An edit that touches anything else is refused, and the refusal names the key.
+	rec := do(h, o1Admin, http.MethodPatch, "/api/v1/monitors/mon1", `{"name":"api renamed"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch = %d, want 400 while the stale key is stored (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), key) {
+		t.Fatalf("the refusal must name the key: %s", rec.Body.String())
+	}
+
+	// The repair: a config that no longer carries it. PATCH replaces config wholesale, so this is
+	// exactly what the editor already sends on save.
+	rec = do(h, o1Admin, http.MethodPatch, "/api/v1/monitors/mon1", `{"name":"api renamed","config":{}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("repair patch = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if _, still := fs.monitors["mon1"].Config[key]; still {
+		t.Fatalf("the repair left the key behind: %+v", fs.monitors["mon1"].Config)
+	}
+}

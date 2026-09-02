@@ -374,13 +374,19 @@ monitor edit. **Round 5 of the review read the shipped code and found one P0**: 
 on ANY monitor type, so an http monitor could be saved and then refused at dispatch — no credential
 escaped (every step fails closed) but a monitor broke for a config its write surface had accepted. The
 type is now decided at the write boundary and gated in the store, in both derived key sets and in the
-dispatch gate (D6b). Evidence: `TestScenarioBindingsAcceptsTheDeclaredShape`,
+dispatch gate (D6b). The review's follow-up was that calling a PRE-RULE row "inert" overstated the
+gates: such a row keeps its monitor probing, and it still counts against deleting its secret and blocks
+that monitor's next API edit. No release ever accepted the key, so the state is unreachable — and because
+that is a claim about releases rather than about behaviour, two tests seed the row and pin every outcome,
+with the detection query and the one-edit repair in `docs/runbook.md` instead of a migration. Evidence: `TestScenarioBindingsAcceptsTheDeclaredShape`,
 `TestScenarioBindingsRefusals`, `TestMalformedBindingReferenceIsRefusedByName`,
 `TestScenarioBindingIsSubstitutedIntoTheScenario`, `TestScenarioBindingGateFailsClosed`,
 `TestSyntheticTestBeforeSaveFailsClosed`, `TestScenarioBindingIsRefusedOnEveryNonSyntheticType`,
 `TestScenarioBindingIsRefusedOnANonSyntheticMonitorAPI`,
 `TestScenarioRefsAreContributedBySyntheticMonitorsOnly`,
-`TestScenarioBindingOnANonSyntheticTypeIsRefused`. **Not done:** the SPA
+`TestScenarioBindingOnANonSyntheticTypeIsRefused`,
+`TestAPreFixNonSyntheticBindingRowBehavesAsDocumented`,
+`TestAPreFixNonSyntheticBindingBlocksEditsUntilTheKeyIsDropped`. **Not done:** the SPA
 cannot declare a binding, so the feature is API- and file-reachable only; a synthetic monitor still
 cannot live in a bundle (D9). |
 | FR-SYN-1 | Type `synthetic`: a scenario of steps with extract/assert, normalized and validated in `domain`, with the scenario and its secrets in `config` encrypted like the other types. | DONE | The scenario half shipped with the type ([`internal/domain/synthetic.go`](../internal/domain/synthetic.go), [`internal/prober/synthetic.go`](../internal/prober/synthetic.go)); the ENCRYPTION half was false of the code from the day the requirement was written until FR-028 stage 1 (D-0216), which is why this row exists at all — the SYN requirements had no rows here, and that is how the false promise survived. Evidence for the half that was missing: `TestScenarioIsEncryptedAtRestAndReadPerMode`, `TestBackfillMonitorConfigEncIsIdempotent`. A DECLARED credential is now a binding resolved from the inventory (FR-028 stage 2); an undeclared literal in an unlisted header or a body is still legal and is protected by encryption and read scoping only. |

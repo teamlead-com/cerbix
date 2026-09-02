@@ -130,9 +130,15 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 			byID[m.ID] = entry
 			continue
 		}
-		// Synthetic only. A ref key on any other type is inert here by construction, so a
-		// row written before domain validation refused it cannot pull that monitor onto the
-		// credential path (review of stage 2).
+		// Synthetic only, and precisely: this gate stops a `scenario_secret_*` key on another
+		// type from pulling that monitor onto the credential path, so the monitor KEEPS
+		// PROBING instead of failing for a key it cannot use. It does NOT make such a key
+		// harmless everywhere — an existing `monitor_secret_refs` row still counts against
+		// deleting its secret and still follows a rename, and the stored key blocks the
+		// monitor's next API edit until it is dropped. No released build ever accepted the
+		// key; `TestAPreFixNonSyntheticBindingRowBehavesAsDocumented` seeds one anyway and
+		// states each of those outcomes, because the review was right that "inert" was not
+		// what this gate delivers.
 		var scenarioRefKeys []string
 		if m.Type == domain.MonitorSynthetic {
 			scenarioRefKeys = domain.ScenarioSecretRefKeys(stored)

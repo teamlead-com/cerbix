@@ -5763,7 +5763,45 @@ dependency sweep, four frontend majors) on 2026-09-03, against the recommendatio
 Recorded in `docs/roadmap.md` with both the cost and the reason, so a later reader sees a decision
 rather than a drift.
 
-**Status.** Design revision 1, NOT approved: in review with the independent reviewer, with three owner
-questions open (§11 — the 900 s ceiling, whether a named external reaping policy is mandatory for
-`lifecycle_prefix`, and whether private-address targets stay refused with no override in v1). No
-requirement rows and no code until it is approved.
+**The owner's three answers, same day (revision 2).** The ceiling went DOWN rather than up, and far
+enough to delete the mechanism: `async_canary` inherits the product's existing `maxTimeoutSeconds = 300`
+and there is no per-type bound at all. The smaller number is not tidiness — the in-flight deadline is
+derived from the timeout, so 900 s parked a crashed runner's monitor for a quarter of an hour inside a
+monitoring product; `interval >= timeout` made it four samples an hour where one failure is 25 % of the
+hour; and two confirmations pushed the page out to half an hour. What it costs is stated: a journey
+whose declared promise exceeds five minutes cannot be expressed in v1, and if the first use case can
+legitimately exceed it under load, phase C's first measurement — the journey's p99 — is what moves the
+number, with evidence rather than argument. The reaping policy is the OPERATOR's problem and not a
+schema field, which is also the honest call because cerbix holds no rights on the object store and a
+mandatory declaration would be an unverifiable claim. Private-address targets stay refused in v1 with
+no override.
+
+**The owner's sign-off on the one deviation from the brief (2026-09-03).** The brief wrote
+`secret_ref: <project-secret-name>` at each position; the design keeps the field NAME and makes its
+value a BINDING declared once under `workflow.secrets`. The owner chose the binding map explicitly
+after the alternative was offered twice, and the independent reviewer recommended the same on
+technical grounds: one reference per secret, the existing rename, delete-counting and rotation paths
+reused unchanged, and the positions covered by the execution digest without nested storage. The
+literal form would have needed either a nested-aware repoint or a synthesized binding name — the two
+options FR-028 already paid to compare. Recorded here so the deviation reads as a decision with a name
+on it rather than as an implementer's preference.
+
+**Status.** Design revision 8, **APPROVED** at party [66] (2026-09-03) — phase A closed: in review with the independent reviewer, who has returned
+eight P0s over two passes — three on revision 1 (an undecidable body-secret claim, a URL policy that
+contradicted its own E2E, and a target-controlled correlation id reaching a URL unescaped) and five on
+revision 3 (no accepted-status contract for submit, bounds written as adjectives instead of numbers, a
+nested secret reference with no rename/rotation/digest story, completion headers left undefined, and a
+header name pushed through a JSON-path grammar), and two on revision 4 — a claim that the flat ref
+key would let `repointSecretRefs` work unchanged, which was false because that function decodes
+`monitors.config` into a `map[string]string` and a nested object would have broken the rename for
+every monitor in the project; and a per-region concurrency limit with no enforcement point; two on revision 5, both contradictions
+introduced by the previous round's own fixes (a persisted `secrets` map that would go stale against
+the flat ref key a rename updates, and a three-strike saturation streak with no counter, storage or
+freshness semantics); and two on revision 6, both things I asserted without checking (a hash rule that
+contradicted itself on rename, and an SLI exclusion that reopened a decision the owner had made, on an
+analogy that was factually wrong about what "ungoverned" means in FR-021); and three on revision 7,
+two of which were one recurring mistake — changing a decision and leaving the test matrix demanding the
+old behaviour — plus a real hole where the cross-host credential rule covered completion and not
+submit, the request that actually carries the credential. All seventeen are answered in the spec. FR-029 and NFR-024
+are now `TODO` rows in `docs/status.md`; no code exists and `async_canary` is not a monitor type in
+the tree. Phase B is the next unit of work and carries its own gate.

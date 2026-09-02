@@ -25,11 +25,16 @@ first and R2/R3 wait. It is the largest single feature since FR-021 — a new mo
 (`async_canary`), one closed workflow kind (`async_transaction_v1`), capability-aware dispatch, a
 nested typed bundle schema, an embedded fixture registry, an in-flight lease, an idempotency contract
 and an SSRF policy — so it is SIX phases and not one iteration
-([`func-async-canary.md`](specs/func-async-canary.md), revision 1, in design review; D-0218).
+([`func-async-canary.md`](specs/func-async-canary.md), revision 8, **design APPROVED** 2026-09-03 after
+six review rounds and seventeen P0s; D-0218). FR-029 and NFR-024 are `TODO` rows in `status.md`, phase
+A is closed, and **phase B is the next unit of work**: the domain types, the typed parser,
+canonicalization and the semantic hash, with the type NOT yet admitted to bundles.
 Two architecture rulings are already made and are what keep it from being a rewrite: it is a
 CAPABILITY of the existing `worker`/`agent` roles rather than a fifth role, and one probe stays one
-heartbeat rather than splitting submit from await. Phase A is the design; nothing is implementable
-until the spec is approved and §11's three owner questions are answered.
+heartbeat rather than splitting submit from await. §11's owner questions are all answered, including the sign-off on the
+one deviation from the brief: `secret_ref` names a binding declared in `workflow.secrets`, because the
+flat key is what keeps rename, rotation and delete-counting on the path `password_ref` already runs
+on.
 
 **R2 — implement FR-026 / NFR-021 (incident audit).** *Deferred behind R5 by the owner, 2026-09-03 —
 written down so "designed and unbuilt" does not quietly become "forgotten".* The design is approved at revision 4 and the

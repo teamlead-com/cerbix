@@ -5,39 +5,20 @@ What is next, in the order it should happen, and why. Live requirement status is
 document holds only the ORDER and the reasoning for it. It is edited in place — an item leaves it by
 being done, or by being declined with its reason moved to §5.
 
-**Where the tree stands (2026-09-01).** Every requirement in `status.md` is `DONE` except FR-026 and
-NFR-021, which entered as `TODO` when their design was approved (D-0214). iter-0165 is closed; no
-iteration is open. **`v0.1.6` shipped on 2026-09-01** — 85 commits over `v0.1.5`, carrying two whole
-requirements (FR-024 reliability gate, FR-025 change intelligence), two migrations (`00093`, `00094`),
-two CLI verbs (`cerbix gate check`, `cerbix change record`) and the notification-channel edit; the
-release body is the CHANGELOG section and the image tags `0.1.6`, `0.1` and `latest` point at it. The
-release backlog that dominated this list is therefore empty, and what remains is one red pipeline, one
-designed requirement and a dependency sweep.
+**Where the tree stands (2026-09-03).** Every requirement in `status.md` is `DONE` except FR-026 and
+NFR-021, which entered as `TODO` when their design was approved (D-0214). iter-0166 and iter-0167 are
+closed; no iteration is open. Two releases since this paragraph last said anything true: **`v0.1.7`
+(2026-09-02)** — promql in Monitoring-as-Code bundles, optional basic auth, the Go pin that closed the
+`govulncheck` findings — and **`v0.1.8` (2026-09-03)**, which is FR-028 / NFR-023 end to end: a
+credential inside a synthetic scenario is a secret at rest, on read and in the record, plus the editor
+that declares one without an operator typing a credential. Both release bodies are their CHANGELOG
+section; for `v0.1.8` the image tags `0.1.8`, `0.1` and `latest` point at one digest and the GitHub
+release is `latest`. What remains is one designed-and-unbuilt requirement, a dependency sweep, and a
+design awaiting review.
 
 ---
 
-## 1. Now — the red pipeline, then the requirement that is already designed
-
-**R1 — make the Security workflow green, and keep it that way, BEFORE the next tag.** Both of its jobs
-fail on every push to `main`, and have since before the FR-024/FR-025 arc — `v0.1.6` shipped with the
-signal already red, which is the reason this is R1 rather than a footnote. A check that is always red
-is a check nobody reads, and the next release would inherit that.
-
-- **`govulncheck ./...`** reports vulnerabilities in the Go standard library against the version the
-  workflow pins through `go-version-file: go.mod` (`go 1.25.12` today). The fix is to move the pin to a
-  patch release that carries the fixes and re-run, not to silence the job. Reproduced locally against a
-  different toolchain (1.26.4), where it reports eight standard-library findings fixed in 1.26.5/1.26.6
-  plus two in imported packages and one in a required module that the code does not call — the exact
-  list under CI's pin will differ, the class will not.
-- **`gitleaks`** scans the full history (581 commits) and reports seven findings. The two that were
-  inspected are base64 32-byte keys in `internal/config/secrets_test.go` — test fixtures caught by the
-  `generic-api-key` rule. **The other five have not been reviewed**, and until they are, "false
-  positives" is a guess. The order matters: review all seven first, ROTATE anything genuine before
-  touching the config (the scan reads history, so a secret deleted by a later commit still leaks), and
-  only then allowlist the fixtures in `.gitleaks.toml` — by path or fingerprint, never by disabling the
-  rule.
-
-Cheap either way, and it is the one item that gates a release rather than being one.
+## 1. Now — the requirement that is already designed, then the sweep
 
 **R2 — implement FR-026 / NFR-021 (incident audit).** The design is approved at revision 4 and the
 spec is the contract: `func-incident-audit.md`. It is the only requirement in the tree that is
@@ -46,23 +27,41 @@ migration, no route, no read — but it carries two behaviour corrections (D8a, 
 regression care, and two fixture-tested AST guards that are new machinery for this repo. One
 iteration.
 
-**R3 — the dependency sweep.** Nine dependabot branches are unmerged and all of them are newer than
-the last sweep (iter-0159, 2026-08-19): the go-modules group, the golang base image, a GitHub action,
-the frontend group (6 updates), `vue-tsc`, and four MAJORS — TypeScript 5.9 → 7.0, Vite 6.4 → 8.2,
-vue-router 4.6 → 5.2, jsdom 26 → 30. iter-0159's rule applies unchanged: patch and minor together,
-each major alone with its own verification, and `make spa-snapshot` read back afterwards. Related to
-R1 but not the same work — R1's Go finding is a toolchain pin, which no dependabot branch touches.
+**R3 — the dependency sweep.** **Eight** open dependabot PRs as of 2026-09-03, all newer than the last
+sweep (iter-0159, 2026-08-19): the go-modules group (2 updates), the frontend group (3 updates),
+`docker/setup-buildx-action` 4.2.0 → 4.3.0, the `golang` base image 1.26.6 → **1.27.0**, and four
+MAJORS — TypeScript 5.9 → 7.0, Vite 6.4 → 8.2, vue-router 4.6 → 5.2, jsdom 26 → 30. (This paragraph
+said "nine branches" and named a different base-image bump until it was checked against the API; the
+count moves on its own, so treat it as a shape rather than an inventory.) iter-0159's rule applies
+unchanged: patch and minor together, each major alone with its own verification, and `make
+spa-snapshot` read back afterwards. The `golang` bump is NOT what closed R1 — that was a toolchain pin
+in `go.mod`, which no dependabot branch touches; this one moves the image the container is built on,
+and it is worth its own verification for that reason.
 
-**Order.** R4 is sequenced last of the four but is independent of the other three: it touches the
-logger and the deployment documents, nothing R1–R3 own. R1 first because it gates the next release and because every day it stays red is a day the
-habit of ignoring it hardens. R2 second because it is designed, bounded, and closes a named gap. R3
-third because it is interruptible: each branch is its own commit and the sweep can be paused between
-majors without leaving anything half-done.
+**Order.** R2 first: it is the only requirement in the tree that is specified and unbuilt, it is
+bounded, and it closes the last gap D-0171 left open. R3 second because it is interruptible — each
+branch is its own commit and the sweep can be paused between majors without leaving anything
+half-done. R4 is independent of both: it touches the logger and the deployment documents, nothing R2 or
+R3 own, and it cannot start until its design is approved.
 
-**Retired from this section.** *Cut `v0.1.6`* — done on 2026-09-01: the release carries the CHANGELOG
-section as its body (a workflow step now extracts it for any tag), the upgrade notes name the
-`incidents` index build and the leader's new maintenance pass, and `latest` moved in both GitHub and
-ghcr.
+**Retired from this section**, with what actually closed each — the labels stay put so the commits and
+review threads that name them keep resolving.
+
+*R1 — the red Security workflow* — closed in `v0.1.7` (2026-09-02). Both of its jobs had failed on
+every push to `main` since before the FR-024/FR-025 arc, and `v0.1.6` shipped with the signal already
+red, which is why it was R1 rather than a footnote. `govulncheck`: the Go pin moved to a patch release
+carrying the standard-library fixes, which moved the scan AND the release binaries because all three
+workflows read the version from `go.mod` — the job was never silenced. `gitleaks`: all seven findings
+were read one by one, not only the two that had been when this item was written, and each is a
+fabricated test fixture (two sequential-hex AES keys, the same two base64-encoded, and an
+`actor_label` in a committed CLI transcript, which is the server's derived name for a bearer and never
+the token). Nothing needed rotating; the allowlist entries are anchored to those exact literals, so any
+other high-entropy string in the same files still fails the scan. Green on `main` since, including on
+the `v0.1.8` push.
+
+*Cut `v0.1.6`* — done on 2026-09-01: the release carries the CHANGELOG section as its body (a workflow
+step now extracts it for any tag), the upgrade notes name the `incidents` index build and the leader's
+new maintenance pass, and `latest` moved in both GitHub and ghcr.
 
 **R4 — a log file an operator can grep (FR-027 / NFR-022).** Searching the history through
 `journalctl` is too slow on a systemd install: the journal is compressed and every record is
@@ -115,6 +114,27 @@ type gate (D6b). Nothing else in the product templates a credential today. If a 
 proposed, the type gate is the thing to widen deliberately — not the prefix match that produced the
 round-5 P0.
 
+**N6 — a canary cannot log in: D7 refuses an EXTRACTED token in a credential-bearing header.** Raised
+by the owner asking how to run an external canary, which is exactly the shape that hits it. A
+credential-bearing header must hold exactly one `{{secret:<binding>}}`, so the classic journey — `POST
+/login` → `extract` the session token → `Authorization: Bearer {{token}}` — is refused on every write
+surface. That is not a bug in the rule as written; it is the rule doing what D7 says, and the cost was
+not weighed when D7 was written because nobody had a login-then-act scenario in front of them.
+
+What exists today: a long-lived credential from the inventory as a binding (fine when the target
+accepts an API key or basic auth), or the extracted token in a NON-credential header — legal, and
+exactly the residual D7 tells operators to avoid, so it is a workaround that spends the rule's own
+credibility.
+
+The proposed fix, which needs a D7 amendment and a review round rather than a quiet patch: allow a
+credential-bearing header to interpolate variables EXTRACTED in the same scenario, because the rule's
+purpose is that no STORED credential sits in the document and an extracted value is stored nowhere —
+it comes from the target, at run time, and dies with the probe. Enforceable shape: the value may
+contain `{{secret:<binding>}}` and/or `{{var}}` where `var` is declared by an earlier step's `extract`,
+plus a bounded auth-scheme word (`Bearer`, `Basic`, `Token`), and nothing else. A literal token is
+still refused, because a literal is neither of those two things. Until this is decided, the canary
+recipe in `docs/runbook.md` should not pretend the login flow works.
+
 **N3 — the E2E environment skips.** Two specs skip conditionally — `mail.spec.ts` without the mail
 profile, `file-providers.spec.ts` without a file-managed monitor. Both are honest guards rather than
 defects, but a suite that reports "1 skipped" every run trains a reader to ignore the number. Either
@@ -139,12 +159,13 @@ These are named in specs as follow-up REQUIREMENTS rather than non-goals. None i
 
 - **Dependencies** — a sweep roughly monthly, under iter-0159's rules.
 - **Releases** — a tag when a requirement closes or a migration lands, so the gap the v0.1.6 item
-  fixed does not rebuild. **The next tag owes an upgrade note**: a monitor target carrying credentials
-  in its URL userinfo (`https://user:pass@host`) is now refused on every surface, not only in bundles
-  (D-0145 addendum). An installation relying on it will see its next monitor EDIT rejected — stored
-  monitors keep running, because nothing re-validates on read. **And a second one from FR-028 stage 2:**
-  a synthetic monitor whose `authorization`-class header holds a LITERAL now fails validation on its
-  next write — it keeps probing, and the refusal names the step and the header.
+  fixed does not rebuild. **Both upgrade notes this list was holding are DISCHARGED**: the URL-userinfo
+  refusal shipped with its note in `v0.1.7` (D-0145 addendum), and the literal-in-a-credential-header
+  refusal shipped with its note in `v0.1.8` — which also carries a third the list never anticipated,
+  that probe failure messages changed shape for EVERY monitor type, so anyone matching `heartbeat.msg`
+  substrings in alert rules has to look. **The next tag owes nothing today.** Add the obligation here
+  the moment a breaking change lands, not at release time: this list existed because the v0.1.6 cut
+  nearly shipped one unannounced.
 - **AC-SYN-2: a synthetic monitor on a GEO worker.** iter-0167 gave the type its first browser
   coverage, on `core` only, so the criterion is narrowed and still undischarged. It needs a case on
   the geo stack (`make geo-up-all` / `make geo-test`), where region affinity is what is actually being

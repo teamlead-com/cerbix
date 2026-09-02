@@ -5545,3 +5545,47 @@ validation and at dispatch. The unsupported case is now narrower and still named
 a scheme other than basic — a bearer-token proxy, mTLS — for which the agent-plus-unauthenticated-path
 answer of the D-0145 addendum still stands, with its own precise sentence about the agent not
 authenticating.
+
+## D-0216 — a credential inside a synthetic scenario, and the blast radius of protecting it (2026-09-02)
+
+**Context.** An operator asked whether a synthetic monitor could carry a bearer token. It can — and the
+token is then stored in cleartext in `monitors.config`, returned to every principal who may READ the
+monitor, skipped by key rotation, and echoed into `heartbeat.msg` with the whole request URL whenever a
+step's transport fails. `func-oncall-synthetic-pull.md` FR-SYN-1 already promised "encryption like the
+other types" and its §217 promised inclusion in `reencrypt`; D-0090 promised that the message "never
+echoes bodies/headers". So this is a spec-versus-code defect of the same class as FR-022's invariant 14,
+not a new feature — and the SYN requirements have no rows in `docs/status.md`, which is how a false
+promise survived unnoticed.
+
+**Three stages, decided separately (spec `sec-synthetic-secrets.md`, FR-028 / NFR-023).** Stage 0: no
+probe result carries a request URL. Stage 1: the scenario is encrypted at rest, covered by rotation and
+a backfill, and withheld from a principal who cannot write the monitor. Stage 2: a secret inside a
+scenario becomes a NAMED BINDING resolved from the project inventory, never a literal — which also
+removes the reason a synthetic monitor cannot be declared in a bundle, without delivering that.
+
+**What the review changed.** Two blockers, both verified before they moved the text: a scoped
+`setting_key` would break every inventory RENAME in a project, because `repointSecretRefs` looks the key
+up in the flat config and fails the whole rename when it is absent (deliberately); and the
+test-before-save path sends the literal scenario to a worker in an ordinary generation-1 job, which
+contradicted a non-goal the spec had written. The review also refused a design that redacted
+"secret-looking" values — secrets sit in bodies, URLs and assert values too, so a header-shaped guess
+is bypassable — and it demanded a canonical binding descriptor before the anti-relocation invariant
+could be tested at all.
+
+**The owner's ruling, which withdrew a decision the reviewer and I had both agreed on.** Revision 3
+made instance READINESS depend on a configured at-rest key and a completed migration. The owner
+rejected the premise: a service must not go down because of an unset environment variable or one
+misconfigured monitor. For a monitoring platform that is not taste — an instance that stops reporting
+ready removes visibility into everything else at the moment it is needed most. The product already
+holds that line and neither of us looked: an executor that cannot open a job's credential answers with
+a per-job typed diagnostic and flips readiness only when the failure PERSISTS
+(`internal/worker/worker.go`). So readiness is never coupled to the key or to the backfill; a scenario
+that cannot be protected is refused at WRITE time; one that cannot be opened is a per-monitor probe
+error with no heartbeat, status or SLA mutation; and the backfill is an ordinary idempotent task.
+
+**Consequence.** The cost is stated rather than hidden: on an instance with no key, legacy plaintext
+scenarios stay plaintext until an operator supplies one. That is preferable to trading a leak for an
+outage. Stage 0 ships with this record; stages 1 and 2 are specified and unbuilt. The URL rule is
+type-wide rather than synthetic-only, because the same defect was reproduced on an ordinary `http`
+monitor and on `promql`: `net/http` embeds the request URL in every error, so `Msg: err.Error()`
+published whatever the target's query carried.

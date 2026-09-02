@@ -107,6 +107,11 @@ new genre.
 **FR**
 - **FR-SYN-1** — Type `synthetic`: a scenario of steps with extract/assert; Normalize/Validate in `domain`;
   the scenario/secrets in `config` (encryption like the other types).
+  **FALSE OF THE CODE since it was written, corrected by FR-028 (D-0216):** only `config["password"]` is
+  encrypted and rotation covers only that set, so a scenario's secrets are cleartext at rest and are
+  returned to any principal who may read the monitor. Stage 1 of
+  [`sec-synthetic-secrets.md`](sec-synthetic-secrets.md) makes this sentence true; until it lands, the
+  sentence describes an intention.
 - **FR-SYN-2** — A synthetic probe yields a single `Heartbeat` (up/down + the latency of the whole scenario +
   a msg with the failed step/assert). The monitor's conditions are applied on top (as today).
 - **FR-SYN-3** — Synthetic executes on a regular worker, including geo (region-aware, like all Active).
@@ -114,6 +119,10 @@ new genre.
 **NFR**
 - **NFR-SYN-1** — The time budget of the whole scenario is bounded by `timeout_seconds` (a hard deadline on the chain).
 - **NFR-SYN-2** — The step-by-step result does not leak secrets into heartbeat.msg (redaction).
+  **Held for the assert path and NOT for the transport path until FR-028 stage 0 (D-0216):** a failed
+  connection returned `err.Error()`, and `net/http` embeds the request URL, so a step URL's query
+  string reached the message. Now every probe result is composed from a bounded failure class plus a
+  host, for every type — `internal/prober/failure.go`.
 
 **AC**
 - **AC-SYN-1** — Scenario round-trip; multi-step with extract→substitution passes against a stub server

@@ -6,6 +6,158 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [v0.1.8] - 2026-09-03
+
+A credential inside a synthetic monitor's scenario used to be stored in cleartext, returned to every
+principal who could READ the monitor, skipped by key rotation, and echoed into the heartbeat message
+with the whole request URL whenever a step's transport failed. This release closes all four, in three
+stages that were built and reviewed separately, and gives the editor a way to declare a credential
+without ever typing one. It BREAKS a synthetic monitor that keeps a token in an authorization-style
+header — read the upgrade note. No migration.
+
+This was a **spec-versus-code defect, not a new feature**: `func-oncall-synthetic-pull.md` FR-SYN-1
+already promised "encryption like the other types" and its §217 promised inclusion in `reencrypt`, and
+D-0090 promised the failure message "never echoes bodies/headers". None of the three was true of the
+code, and the SYN requirements had no rows in `docs/status.md` at all, which is how a false promise
+survived unnoticed. They have rows now.
+
+### ⚠️ Upgrade Notes
+
+- **A synthetic monitor whose credential-bearing header holds a LITERAL now fails validation on its
+  next write.** The affected headers are the finite credential-bearing set — `authorization`,
+  `proxy-authorization`, `cookie`, `x-api-key`, `api-key`, `x-auth-token`, `auth-token`,
+  `x-access-token`, `access-token`, `private-token` — whose value must now be exactly one
+  `{{secret:<binding>}}` placeholder. **Existing monitors keep probing**: nothing re-validates on
+  read, so the refusal appears the next time such a monitor is EDITED, and it names the step and the
+  header without echoing the value. Move the token into the project secret inventory and reference it
+  as a binding ([b3c99b6](https://github.com/teamlead-com/cerbix/commit/b3c99b6))
+- **No migration, and no readiness coupling.** The scenario stays in `monitors.config`; only its form
+  changes, to ciphertext. An instance with no `security.encryption_key` starts, reports ready and keeps
+  probing every monitor it was probing: what it refuses is a scenario WRITE it cannot protect. Legacy
+  plaintext scenarios stay plaintext until a key is supplied — that cost is stated rather than traded
+  for an outage ([cc90e4a](https://github.com/teamlead-com/cerbix/commit/cc90e4a))
+- **Probe failure messages changed shape for every monitor type, not only synthetic.** A transport
+  failure now reads as a bounded class plus the target's host (`dns: no such host (api.internal)`)
+  instead of Go's error text. If you have alert rules or dashboards matching on `heartbeat.msg`
+  substrings, check them. Nothing in the product parses that field to make a decision ([e6a3db8](https://github.com/teamlead-com/cerbix/commit/e6a3db8))
+
+### 🔒 Security
+
+**A credential in a scenario is a secret at rest, on read, and in the record (FR-028 / NFR-023)**
+
+- **Stage 0 — no probe result carries a request URL, for any type.** `net/http` embeds the request URL
+  in every error it returns, so `Msg: err.Error()` published whatever the target's query string
+  carried — reproduced on an ordinary `http` monitor and on `promql`, not only on synthetic. Every
+  failure is now composed from a bounded class plus a host, asserted per type through the real prober
+  registry with a secret planted in the URL, the query, a header and the body ([e6a3db8](https://github.com/teamlead-com/cerbix/commit/e6a3db8))
+- **Stage 1 — the scenario is ciphertext at rest, and withheld from anyone who cannot write the
+  monitor.** One secret set became three classifications by MEANING (encrypted-at-rest,
+  write-only-on-read, writer-only-display) and the store reader became an explicit MODE named by what
+  it decrypts. A viewer receives no scenario at all — not plaintext, not ciphertext — through a store
+  call chosen after the authorization decision rather than by redacting a decrypted document. Key
+  rotation covers scenarios, and an idempotent, compare-and-set, NON-fatal startup backfill converts
+  existing rows ([cc90e4a](https://github.com/teamlead-com/cerbix/commit/cc90e4a))
+- **Stage 2 — a declared credential is a NAMED BINDING resolved from the project inventory.** The
+  document carries `{{secret:<binding>}}` and the secret's NAME lives in a flat config key,
+  `scenario_secret_<binding>_ref`, so rename, delete-counting and rotation run on the path
+  `password_ref` already runs on. The value is delivered in the credential envelope, substituted into
+  the scenario by the executor, and the substituted copy is dropped when the probe ends ([b3c99b6](https://github.com/teamlead-com/cerbix/commit/b3c99b6))
+- **A moved placeholder cannot survive a valid envelope.** The scenario and its reference keys became
+  EXECUTION BINDING KEYS, so `EnvelopeV2`'s body digest covers the stored document: an attacker with a
+  valid envelope who rewrites a step's URL produces a different document and the AEAD fails before any
+  request. A binding therefore REQUIRES a body-bound envelope, and a region on an older carrier gets a
+  per-monitor `carrier_too_old` rather than a job that looks protected and is not ([b3c99b6](https://github.com/teamlead-com/cerbix/commit/b3c99b6))
+- **The binding belongs to a synthetic monitor and to nothing else**, decided once at the write
+  boundary and gated in the store, in both derived key sets, and at the dispatch gate — which refuses
+  rather than ignores such a job on any other type, permanently, on carrier integrity ([084b49d](https://github.com/teamlead-com/cerbix/commit/084b49d))
+  ([4fdedff](https://github.com/teamlead-com/cerbix/commit/4fdedff))
+
+**What this does NOT claim, stated because a security note that overstates is worse than none.** A
+literal secret is not detectable by shape, so the enforceable rule is the header-NAME one. A credential
+pasted into a header nobody would call a credential header, or into a body, is still legal: it is
+encrypted at rest, withheld from viewers and kept out of probe results, and it travels to the prober
+inside the ordinary job rather than in an envelope. Buying the stronger property needs a restrictive
+typed request model for the scenario, which is an owner's decision and separate work — and a heuristic
+over VALUES is refused rather than deferred ([900aa1b](https://github.com/teamlead-com/cerbix/commit/900aa1b))
+
+### New Features
+
+**Declaring a binding in the UI**
+
+- **The synthetic monitor form has a Scenario secrets panel** above the steps: pick a project secret,
+  name the binding, and the row then shows which secret fills it, where it is used, and the flat key it
+  is stored as. A binding name is never displayed without the secret it resolves to ([3a67106](https://github.com/teamlead-com/cerbix/commit/3a67106))
+- **A credential-bearing header stops being a free-text field.** Its value control is a binding
+  selector from the first keystroke of the header name — empty and disabled with "Add a binding first"
+  until one exists — so the rule is met before a token is pasted rather than after a failed save
+  ([95ee945](https://github.com/teamlead-com/cerbix/commit/95ee945))
+- **"Save before test" is stated at the button.** A scenario carrying bindings is deliberately not
+  testable before it is saved: that path builds an unsaved monitor with no envelope, so a placeholder
+  would travel to the target as literal text. The Test control is disabled with the reason and the way
+  forward; a credential-free scenario still tests unchanged ([3a67106](https://github.com/teamlead-com/cerbix/commit/3a67106))
+- **What is NOT protected is shown too**: a pasted-looking value in an ordinary header gets a hint
+  offering the inventory — never a refusal, because cerbix cannot tell a credential from data there
+  ([3a67106](https://github.com/teamlead-com/cerbix/commit/3a67106))
+
+### Bug Fixes
+
+- **A synthetic monitor could not be created from the SPA at all.** `canSubmit` required a target for
+  every active type while the form deliberately hides that field for `synthetic` — whose
+  `NeedsTarget()` is false — so **Create monitor was permanently disabled and unexplained**. Found by a
+  new component test, and it survived because no unit test and no browser test had ever submitted this
+  type ([3a67106](https://github.com/teamlead-com/cerbix/commit/3a67106))
+- **The form's default scenario opened INVALID.** The scaffold shipped
+  `Authorization: Bearer {{token}}`, which the new rule refuses, so merely choosing Synthetic
+  produced a form whose own example could not be saved. It now demonstrates `extract` → interpolate
+  with an id used in the next step's path, which is what `extract` is for ([95ee945](https://github.com/teamlead-com/cerbix/commit/95ee945))
+- **A malformed binding reference was silently ignored.** `scenario_secret_Login_ref` — capitalised, so
+  outside the grammar — meant the operator declared a binding, saw no error, and shipped a scenario the
+  credential was never wired into. It is refused by name now ([084b49d](https://github.com/teamlead-com/cerbix/commit/084b49d))
+
+### Improvements
+
+**Documentation that stopped lying**
+
+- **FR-SYN-1, NFR-SYN-2 and AC-SYN-2 corrected in place**, and the five SYN requirements given the
+  `docs/status.md` rows they never had — including two gaps stated rather than implied: no test names
+  the whole-scenario deadline, and no browser test puts a synthetic monitor on a GEO worker
+  ([4e6def8](https://github.com/teamlead-com/cerbix/commit/4e6def8))
+- **The binding key is documented in `openapi.yaml`** on all three monitor config schemas. The feature
+  was API-reachable and undocumented, which makes it unusable rather than merely un-designed
+  ([084b49d](https://github.com/teamlead-com/cerbix/commit/084b49d))
+- **The runbook gained an FR-028 section** covering what is protected at rest, on read and in the
+  record; the detection query and one-edit repair for a stale reference; and — as plainly — what is not
+  protected ([258adb5](https://github.com/teamlead-com/cerbix/commit/258adb5))
+
+**Repository hygiene**
+
+- **The SPA build runs as the developer, not as root.** Every docker build wrote
+  `frontend/node_modules` and its caches as root, so any tool later run by a developer failed with
+  EACCES on a tree it owned nothing in — it stopped an independent reviewer from running the frontend
+  tests at all. `make spa-snapshot` now passes `--user` and an in-container npm cache ([c321931](https://github.com/teamlead-com/cerbix/commit/c321931))
+- **The first browser coverage a synthetic monitor has ever had** (`e2e/tests/synthetic-bindings.spec.ts`):
+  declare a binding through the UI, meet the refusal, see the test blocked, save, and find the flat key
+  and the placeholder on the wire with no value anywhere ([3a67106](https://github.com/teamlead-com/cerbix/commit/3a67106))
+
+### API · Metrics · Schema
+
+- **API:** the monitor `config` description documents `scenario_secret_<binding>_ref` and its rules on
+  create, update and test; a `scenario_secret_*` key on any non-synthetic type is refused with 400
+  naming the key; test-before-save answers 400 naming the binding for a scenario that declares one.
+- **Metrics:** unchanged. A binding that cannot be materialized surfaces as the existing per-monitor
+  reason (`carrier_too_old`, `missing_reference`, `decrypt_failed`), never as a readiness flip.
+- **Schema:** no migration and no new column. `monitor_secret_refs` carries a binding through the same
+  `setting_key` shape as `password_ref`. The scenario's VALUE in `monitors.config` becomes
+  self-describing ciphertext, converted in place by the startup backfill.
+
+<sub>15 commits · decisions D-0216 (+ addendum) and D-0217 · FR-028 and NFR-023 DONE, FR-SYN-1/2/3 and
+NFR-SYN-1/2 given their first rows · iterations iter-0166 and iter-0167, both CLOSED and both approved
+by the independent reviewer after five and four rounds · full `-race` suite green (33 packages, with
+`internal/store` re-run idle to separate a pre-existing load-dependent FR-024 flake), vitest 38 files /
+418 tests, browser suite 60 passed / 1 skipped</sub>
+
+---
+
 ## [v0.1.7] - 2026-09-02
 
 PromQL grew up: it is expressible in a Monitoring-as-Code bundle and can authenticate to a Prometheus
@@ -55,12 +207,12 @@ read the upgrade note first. No migration.
   `net/http` ×2, `encoding/xml`, `encoding/asn1`, `html/template` — reached through ordinary product
   paths: the HTTP prober's `Client.Do`, the mailer's TLS handshake, the operational server's
   `ListenAndServe`. All seven are fixed in 1.25.13, and one line moves the scan AND the release
-  binaries, because all three workflows read the version from `go.mod` ({c('be75d51')})
+  binaries, because all three workflows read the version from `go.mod` ([be75d51](https://github.com/teamlead-com/cerbix/commit/be75d51))
 - **The full-history secret scan is clean, without weakening it.** Its seven findings were read one by
   one and are fabricated test fixtures — two sequential-hex AES keys, the same two base64-encoded, and
   an `actor_label` in a committed CLI transcript, which is the server's derived name for a bearer and
   never the token. Nothing needed rotating. The allowlist entries are anchored to those exact literals,
-  so any other high-entropy string in the same files still fails the scan ({c('7a9350d')})
+  so any other high-entropy string in the same files still fails the scan ([7a9350d](https://github.com/teamlead-com/cerbix/commit/7a9350d))
 
 ### Improvements
 

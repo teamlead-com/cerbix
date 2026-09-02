@@ -258,12 +258,13 @@ single fix is load-bearing: `monitorRefSettings` contributes the refs only for a
 two derived sets (`ExpectedCredentialFields`, `ExecutionBindingKeys`) return nothing for another type,
 and the dispatch gate REFUSES rather than ignores a crafted job that carries one — ignoring would be
 defensible on availability grounds, and is rejected because a config the core would never have stored is
-not a config to execute. That refusal is safe to add on an OPERATIONAL ASSUMPTION, marked as one because a long-lived
-specification must not waive data handling on an unproved deployment claim: at the time of writing no
-released build accepts the key. The evidence for that boundary, and the date it was taken, live in
-`docs/iterations/iter-0166.md` §3 — a spec is the wrong place for a fact that changes on the next tag.
-The assumption is not load-bearing on its own: the pre-rule row's behaviour is pinned by tests and its
-repair is documented, immediately below.
+not a config to execute. That refusal is PERMANENT, and it does not rest on the release boundary. The reviewer ruled it on the
+durable ground (2026-09-02): the executor's contract is carrier INTEGRITY, so a job whose config the core
+would never have stored is not a job to execute — in this release or any later one. The earlier
+justification, that no released build accepts the key, is a fact with a date on it: it is recorded in
+`docs/iterations/iter-0166.md` §3, marked there as an operational assumption, and it is NOT what holds
+this rule up. A spec is the wrong place for a fact that changes on the next tag, and a rule whose
+justification expires is a rule the next reader deletes.
 
 **And "inert" was the wrong word for a row that predates the rule (party round 5, second pass).** The
 type gates stop such a key from reaching MATERIALIZATION — which is what keeps the monitor probing

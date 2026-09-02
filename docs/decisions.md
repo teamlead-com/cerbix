@@ -5679,6 +5679,17 @@ with credentials in its URL userinfo is refused on every write surface (D-0145 a
 monitor whose `authorization`-class header holds a literal fails validation on its next write. Both keep
 probing; nothing re-validates on read.
 
+**Two follow-up rulings from the reviewer after approval, recorded so they are not re-litigated
+(2026-09-02).** First: the dispatch-side refusal of a `scenario_secret_*` key on a non-synthetic type is
+PERMANENT. I had justified it by "no release carries the key", an argument that expires at the first tag
+that ships stage 2 and would have left the rule standing on a dead reason; the ruling puts it on carrier
+INTEGRITY instead — a job whose config the core would never have stored is not a job to execute, now or
+later. The code comment says that, and no longer says the other thing. Second, for the SPA editor when
+the owner calls for it: the mock must show the binding → inventory mapping EXPLICITLY, carry D7's rule
+inline where the operator types a header rather than as a refusal after saving, and state the
+"save before test" contract in the editor itself. Those three are the mock's acceptance criteria, and
+they are in `docs/roadmap.md` beside the deferral so the mock is not designed from scratch.
+
 **A defect this arc found and did not fix, with an owner-visible pointer instead of silence:**
 `TestGateMaintCrashAfterEveryRemovalStatementConverges/after_drop.commit` (FR-024) fails under machine
 load, reproducing at `b3c99b6` in a clean worktree, so it predates this work. It is in the roadmap's

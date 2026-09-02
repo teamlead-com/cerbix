@@ -96,6 +96,23 @@ org-manage today. Both were declined for FR-026 as bigger than the gap being clo
 asked for by a user; they are candidates, not commitments, and they belong AFTER FR-026 ships so the
 rows they would read actually exist.
 
+**N4 — the synthetic binding editor, whose acceptance criteria already exist.** FR-028 stage 2 is
+API- and file-reachable and not editor-reachable: the SPA can display a scenario to a writer but cannot
+declare `{{secret:<binding>}}` with its `scenario_secret_<binding>_ref`. Per process the mock comes
+first and needs the owner's visual approval before any SPA code. The reviewer gave the mock three
+requirements after approving stage 2 (D-0217), so it is not designed from a blank page: show the
+binding → inventory mapping EXPLICITLY (which project secret fills which binding, by name, with the
+used-by state visible); carry D7's rule INLINE where the operator types a credential-bearing header,
+not as a refusal after a failed save; and state the "save before test" contract in the editor, since a
+scenario with bindings is deliberately not testable before it is stored. A fourth follows from D9 and
+should be visible rather than discovered: a synthetic monitor still cannot be exported to a bundle.
+
+**N5 — the second `{{secret:…}}` consumer, if one ever appears.** The binding grammar, the placeholder
+and the substitution live in `internal/domain/syntheticbindings.go` and are synthetic-only by explicit
+type gate (D6b). Nothing else in the product templates a credential today. If a second consumer is ever
+proposed, the type gate is the thing to widen deliberately — not the prefix match that produced the
+round-5 P0.
+
 **N3 — the E2E environment skips.** Two specs skip conditionally — `mail.spec.ts` without the mail
 profile, `file-providers.spec.ts` without a file-managed monitor. Both are honest guards rather than
 defects, but a suite that reports "1 skipped" every run trains a reader to ignore the number. Either

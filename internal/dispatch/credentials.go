@@ -311,12 +311,20 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 	var scenarioBindings []string
 	if refs := domain.ScenarioSecretRefKeys(job.Monitor.Config); len(refs) > 0 {
 		// Only a synthetic monitor has a scenario for a binding to land in. Domain
-		// validation refuses the key on every other type, and stage 2 has never been
-		// released, so a job that carries one here was not written by this product's write
-		// path: it is a crafted carrier, and it is refused rather than ignored. Ignoring
-		// would be defensible on availability grounds — the key holds a secret NAME, not a
-		// value, and with the type gates above it can no longer smuggle an envelope field —
-		// but a config the core would never have stored is not a config to execute.
+		// validation refuses the key on every other type, so a job that carries one here was
+		// not written by this product's write path: it is a crafted carrier, and it is
+		// refused rather than ignored.
+		//
+		// This refusal is PERMANENT, and the reasoning is deliberately not the one an earlier
+		// revision of this comment gave. That one leaned on "stage 2 has never been released,
+		// so no monitor carries the key" — an argument that expires at the first tag and would
+		// have left a future reader with a rule whose justification had quietly died. The
+		// reviewer ruled it on the durable ground instead (2026-09-02): the executor's contract
+		// is carrier INTEGRITY, and a job whose config the core would never have stored is not
+		// a job to execute, in this release or any later one. Ignoring it would be defensible
+		// on availability grounds — the key holds a secret NAME, not a value, and the type
+		// gates above already stop it smuggling an envelope field — and it is refused anyway,
+		// because "harmless as far as we can tell" is not the standard a credential path holds.
 		if job.Monitor.Type != domain.MonitorSynthetic {
 			return Materialized{}, fmt.Errorf("dispatch: %s monitor carries a scenario secret binding", job.Monitor.Type)
 		}

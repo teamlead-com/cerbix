@@ -341,6 +341,48 @@ func ResolveCredentialRequirement(typ MonitorType, settings map[string]string) (
 // expects, sorted. It is empty for a CredentialForbidden variant. The executor's
 // structural gate compares against this and never against what the payload carries.
 func ExpectedCredentialFields(typ MonitorType, settings map[string]string) ([]string, error) {
+	// A scenario's bindings are envelope fields too (FR-028 stage 2). They are derived from
+	// the config's ref keys rather than from a static schema, because the SET is per monitor:
+	// two synthetic monitors legitimately carry different bindings. The executor's structural
+	// gate compares against this, so the set the materializer builds and the set the gate
+	// expects come from one function.
+	scenario := scenarioExpectedFields(settings)
+	if !CredentialedType(typ) {
+		if len(scenario) > 0 {
+			return scenario, nil
+		}
+		// Unchanged contract: asking a type with no credential schema and no bindings is a
+		// caller error, and the message is the schema resolver's own.
+		_, err := resolveVariant(typ, settings)
+		return nil, err
+	}
+	typed, err := credentialExpectedFields(typ, settings)
+	if err != nil {
+		return nil, err
+	}
+	if len(scenario) == 0 {
+		return typed, nil
+	}
+	out := append(typed, scenario...)
+	sort.Strings(out)
+	return out, nil
+}
+
+// scenarioExpectedFields names one envelope field per declared scenario binding.
+func scenarioExpectedFields(settings map[string]string) []string {
+	var out []string
+	for _, key := range ScenarioSecretRefKeys(settings) {
+		if strings.TrimSpace(settings[key]) == "" {
+			continue
+		}
+		binding, _ := ScenarioBindingFromRefKey(key)
+		out = append(out, ScenarioBindingField(binding))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func credentialExpectedFields(typ MonitorType, settings map[string]string) ([]string, error) {
 	variant, err := resolveVariant(typ, settings)
 	if err != nil {
 		return nil, err
@@ -363,11 +405,25 @@ func ExpectedCredentialFields(typ MonitorType, settings map[string]string) ([]st
 // returned whether or not the map carries them: the digest is over the effective schema,
 // and normalization has already materialized the canonical defaults.
 func ExecutionBindingKeys(typ MonitorType, settings map[string]string) ([]string, error) {
+	// FR-028 stage 2: for a monitor whose credential is a scenario binding, the SCENARIO is
+	// the execution binding — it names the target of every step and the exact place each
+	// credential lands. Without it in the digest an attacker with a valid envelope can move
+	// a placeholder into a request of their choosing and the AEAD still opens; a test asserts
+	// exactly that relocation, and it failed before this line existed. The ref keys join too,
+	// so renaming which inventory secret fills a binding is a different execution.
+	scenarioKeys := scenarioExecutionKeys(settings)
+	if !CredentialedType(typ) {
+		if len(scenarioKeys) > 0 {
+			return scenarioKeys, nil
+		}
+		_, err := resolveVariant(typ, settings)
+		return nil, err
+	}
 	variant, err := resolveVariant(typ, settings)
 	if err != nil {
 		return nil, err
 	}
-	var out []string
+	out := append([]string(nil), scenarioKeys...)
 	for _, f := range variant.fields {
 		if f.binding == bindingExecution {
 			out = append(out, f.key)
@@ -377,12 +433,32 @@ func ExecutionBindingKeys(typ MonitorType, settings map[string]string) ([]string
 	return out, nil
 }
 
+// scenarioExecutionKeys is the scenario plus its ref keys, when the monitor declares any
+// binding. A monitor with no binding keeps the digest it had.
+func scenarioExecutionKeys(settings map[string]string) []string {
+	refs := ScenarioSecretRefKeys(settings)
+	if len(refs) == 0 {
+		return nil
+	}
+	out := append([]string{SyntheticScenarioKey}, refs...)
+	sort.Strings(out)
+	return out
+}
+
 // CanonicalSettingValue resolves one non-secret settings key to the value the EXECUTION
 // sees: what the map carries, or the field's declared canonical value when the key is
 // absent. The execution binding uses it so that a config which omits a key and one that
 // states its default explicitly produce the same digest — they describe the same probe,
 // and a digest that disagreed would reject legitimate jobs at random.
 func CanonicalSettingValue(typ MonitorType, settings map[string]string, key string) (string, error) {
+	// A scenario key has no schema field and no canonical default: it is what the operator
+	// wrote, byte for byte, which is exactly what the digest must bind.
+	if key == SyntheticScenarioKey {
+		return settings[key], nil
+	}
+	if _, ok := ScenarioBindingFromRefKey(key); ok {
+		return settings[key], nil
+	}
 	variant, err := resolveVariant(typ, settings)
 	if err != nil {
 		return "", err

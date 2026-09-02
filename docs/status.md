@@ -356,7 +356,21 @@ instance refuses a scenario WRITE (`ErrNoAtRestKey`) and stays ready. Evidence:
 `TestScenarioIsEncryptedAtRestAndReadPerMode`, `TestScenarioSurvivesAPartialUpdate`,
 `TestScenarioWriteRefusedWithoutAnAtRestKey`, `TestBackfillMonitorConfigEncIsIdempotent`,
 `TestSyntheticScenarioIsWriterOnly`. The materializer trap the review predicted is covered by the
-first of those — it failed before the fix. **Stage 2 is specified and unbuilt.** |
+first of those — it failed before the fix. **Stage 2 is DONE except the editor**: a credential in a scenario is a
+named binding (`{{secret:<binding>}}` in the document, the inventory name in the flat config key
+`scenario_secret_<binding>_ref`), so `repointSecretRefs`, `monitor_secret_refs`, rotation and deletion
+work untouched and the scenario-aware repoint the review demanded was never needed. The grammar and
+every refusal live in `internal/domain/syntheticbindings.go` and run from `Monitor.Validate`, so all
+four write surfaces share one rule; the executor builds one envelope field per binding, substitutes it
+into the scenario JSON-escaped, leaves no copy beside it, and refuses fail-closed on a missing
+envelope, a generation-1 carrier or an envelope that does not bind the body. The anti-relocation
+property comes from making the scenario an EXECUTION BINDING KEY — the digest covers the stored bytes,
+so a moved placeholder fails the AEAD before any request; the test asserting that relocation failed
+until the key existed. Evidence: `TestScenarioBindingsAcceptsTheDeclaredShape`,
+`TestScenarioBindingsRefusals`, `TestScenarioBindingIsSubstitutedIntoTheScenario`,
+`TestScenarioBindingGateFailsClosed`, `TestSyntheticTestBeforeSaveFailsClosed`. **Not done:** the SPA
+cannot declare a binding, so the feature is API- and file-reachable only; a synthetic monitor still
+cannot live in a bundle (D9). |
 
 ## Non-Functional Requirements
 

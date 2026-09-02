@@ -123,7 +123,9 @@ These are named in specs as follow-up REQUIREMENTS rather than non-goals. None i
   fixed does not rebuild. **The next tag owes an upgrade note**: a monitor target carrying credentials
   in its URL userinfo (`https://user:pass@host`) is now refused on every surface, not only in bundles
   (D-0145 addendum). An installation relying on it will see its next monitor EDIT rejected — stored
-  monitors keep running, because nothing re-validates on read.
+  monitors keep running, because nothing re-validates on read. **And a second one from FR-028 stage 2:**
+  a synthetic monitor whose `authorization`-class header holds a LITERAL now fails validation on its
+  next write — it keeps probing, and the refusal names the step and the header.
 - **The living documents** — `make docs-check` is the only mechanical guard; the failure it cannot
   catch is prose that is true of nothing, which is what the FR-025 closing arc kept finding.
 

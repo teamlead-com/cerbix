@@ -59,9 +59,30 @@ every job and every synthetic probe would have run with no scenario. The materia
 writer-only mode — the scenario is execution input, the credential is not, and the credential still
 travels as an envelope.
 
-**Stage 2 — not built.** D6 will store the ref NAME in a flat config key rather than inside the
-scenario JSON, which keeps `repointSecretRefs`, `monitor_secret_refs` and rotation working untouched
-and makes D6a unnecessary.
+**Stage 2 — done, except the UI.** The ref NAME lives in a FLAT config key
+(`scenario_secret_<binding>_ref`) and the scenario carries only `{{secret:<binding>}}`, which keeps
+`repointSecretRefs`, `monitor_secret_refs`, rotation and deletion working untouched — D6a, the
+scenario-aware repoint, is not needed and was not built. The grammar, the declaration and every
+refusal live in `internal/domain/syntheticbindings.go` and are enforced from `Monitor.Validate`, so all
+four write surfaces pass one rule. The executor builds one envelope field per binding, substitutes it
+INTO the scenario (JSON-escaped) and leaves no copy beside it, and the cleanup drops the substituted
+document. Three refusals are fail-closed: no envelope, a generation-1 carrier, and an envelope that
+does not bind the execution body.
+
+**What replaced D8a's canonical descriptor.** The scenario and its ref keys became EXECUTION BINDING
+KEYS, so the body digest covers the exact stored scenario bytes. A relocated placeholder is a different
+document, so the AEAD fails before any request — the property the descriptor was for, without the
+descriptor. This is also why a binding requires a body-bound envelope (`EnvelopeV2`, carrier generation
+3): on an older carrier nothing binds the body and the relocation would go undetected, so the
+materializer refuses with `carrier_too_old` per monitor.
+
+**Two things stage 2 does NOT do.** The SPA cannot declare a binding yet, so the feature is reachable
+through the API and Monitoring-as-Code and not through the editor. And a synthetic monitor still cannot
+live in a bundle (D9): the flat `settings map[string]string` cannot carry a nested scenario.
+
+**A breaking change, named:** an existing synthetic monitor whose `authorization`-class header holds a
+LITERAL now fails validation on its next write. It keeps probing — nothing re-validates on read — and
+the refusal names the step and the header. The next release owes this note.
 
 ## 1. What this is, in one paragraph
 
@@ -175,7 +196,13 @@ ref name, re-encode and re-encrypt with the same compare-and-set discipline, and
 fail-on-divergence rule — a binding that does not carry the old name is the same broken invariant and
 must fail the rename. Delete counting and the rotation fence can keep reading ref rows unchanged.
 
-**D7 — literals are refused from every secret-capable surface, and secrets are forbidden in the URL.**
+**D7 — literals are refused where a literal is DETECTABLE, and secrets are forbidden in the URL.**
+Implemented as the key-name reading, which is the only enforceable one: a header whose name is in the
+finite secret-capable set (`authorization`, `cookie`, `x-api-key`, …) must carry exactly one
+`{{secret:<binding>}}` and nothing else, while a credential pasted into a header nobody would call a
+credential header, or into a body, cannot be told from ordinary data. The specification says that
+plainly instead of implying a guarantee the set cannot give. The original wording, kept because it is
+the intent the rule serves:
 Not headers only (party round 1): a credential fits in a body and in an assert value just as well, and
 restricting the rule to headers would ban nothing while sounding like a rule. The URL is stricter still —
 no binding may resolve into a URL or query string, because that is the surface D2's leak came from and

@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -303,6 +304,14 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 		}
 		requirement = resolved
 	}
+	// FR-028 stage 2: a scenario binding is a credential requirement even for a type with no
+	// credential SCHEMA. Without this the envelope built for a synthetic monitor would be
+	// rejected as "on a schema that forbids one", which is how a security mechanism turns
+	// into an outage.
+	scenarioBindings := domain.ScenarioSecretRefKeys(job.Monitor.Config)
+	if len(scenarioBindings) > 0 {
+		requirement = domain.CredentialRequired
+	}
 	if requirement != domain.CredentialRequired {
 		if envelope != nil {
 			return Materialized{}, errors.New("dispatch: credential envelope on a schema that forbids one")
@@ -319,6 +328,12 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 	// value, so this is not a fallback the stripping attack can reach: on those carriers an
 	// absent envelope stays fatal.
 	if delivered.CarrierGeneration <= ProtocolV1 {
+		// A scenario binding has no legacy form: there is no inline value to honour, and a
+		// placeholder left unsubstituted would be SENT to the target as the literal text
+		// `{{secret:name}}`. Fail closed rather than probe with a broken credential.
+		if len(scenarioBindings) > 0 {
+			return Materialized{}, errors.New("dispatch: a scenario secret binding requires a generation-2 carrier")
+		}
 		if err := checkInlineCredential(job.Monitor); err != nil {
 			return Materialized{}, err
 		}
@@ -327,6 +342,14 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 
 	if envelope == nil {
 		return Materialized{}, errors.New("dispatch: credential required by schema but no envelope present")
+	}
+	// A scenario binding requires an envelope that BINDS THE BODY. Only EnvelopeV2 does, and
+	// the body digest is what makes a relocated placeholder fail: without it an attacker with
+	// a valid envelope rewrites the step's URL and the credential is delivered to a target of
+	// their choosing. A test asserts exactly that relocation, and it passed — wrongly — until
+	// this refusal existed (FR-028 D8a).
+	if len(scenarioBindings) > 0 && envelope.V < EnvelopeV2 {
+		return Materialized{}, errors.New("dispatch: a scenario secret binding requires a body-bound envelope")
 	}
 	if ring == nil {
 		return Materialized{}, errNoDispatchKey
@@ -407,7 +430,22 @@ func (r *CredentialKeyring) materialize(job CheckJob) (domain.Monitor, func(), e
 	for k, v := range m.Config {
 		cfg[k] = v
 	}
+	// A scenario binding is substituted INTO the scenario and never left in the config as a
+	// key of its own: the prober reads the scenario, and a value sitting beside it under a
+	// `scenario_secret_*` key would be a second copy nobody wipes. Everything else is
+	// injected as before, under the field name the schema expects (FR-028 stage 2 D8).
+	substituted := 0
 	for field, value := range fields {
+		if binding, ok := domain.ScenarioBindingFromField(field); ok {
+			next, n := replaceScenarioBinding(cfg[domain.SyntheticScenarioKey], binding, string(value))
+			if n == 0 {
+				WipeCredentialFields(fields)
+				return domain.Monitor{}, func() {}, fmt.Errorf("dispatch: scenario has no placeholder for binding %q", binding)
+			}
+			cfg[domain.SyntheticScenarioKey] = next
+			substituted += n
+			continue
+		}
 		cfg[field] = string(value)
 	}
 	m.Config = cfg
@@ -415,9 +453,35 @@ func (r *CredentialKeyring) materialize(job CheckJob) (domain.Monitor, func(), e
 		for field := range fields {
 			delete(cfg, field)
 		}
+		// The substituted scenario is a string, so it cannot be zeroed in place: replace it
+		// with the placeholder form so the materialized copy stops carrying the credential
+		// once the probe is done, and wipe the byte buffers the values came from.
+		if substituted > 0 {
+			delete(cfg, domain.SyntheticScenarioKey)
+		}
 		WipeCredentialFields(fields)
 	}
 	return m, cleanup, nil
+}
+
+// replaceScenarioBinding substitutes every `{{secret:<binding>}}` occurrence with the value,
+// JSON-escaping it because the scenario is a JSON document and a credential may contain a
+// quote or a backslash. Returns the new document and how many occurrences were replaced —
+// zero means the envelope carried a field the scenario does not use, which is a mismatch
+// rather than something to ignore.
+func replaceScenarioBinding(scenario, binding, value string) (string, int) {
+	placeholder := "{{secret:" + binding + "}}"
+	n := strings.Count(scenario, placeholder)
+	if n == 0 {
+		return scenario, 0
+	}
+	escaped, err := json.Marshal(value)
+	if err != nil {
+		return scenario, 0
+	}
+	// json.Marshal wraps a string in quotes; the placeholder already sits inside a JSON
+	// string literal, so the surrounding quotes are stripped.
+	return strings.ReplaceAll(scenario, placeholder, string(escaped[1:len(escaped)-1])), n
 }
 
 func WipeCredentialFields(fields map[string][]byte) {

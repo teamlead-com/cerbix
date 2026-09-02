@@ -277,6 +277,18 @@ func (h *Handler) testMonitor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// FR-028 stage 2, D10: this path builds an UNSAVED monitor and hands it to the tester,
+	// which wraps it in an ordinary generation-1 job — so a scenario binding would travel as
+	// the literal text `{{secret:name}}` and the probe would authenticate with a placeholder.
+	// One fail-closed contract, stated rather than discovered: a scenario carrying bindings
+	// is not testable before it is saved, and the response says which binding and why. A
+	// literal is already refused by Validate above, on this surface like every other.
+	if refs := domain.ScenarioSecretRefKeys(m.Config); len(refs) > 0 {
+		binding, _ := domain.ScenarioBindingFromRefKey(refs[0])
+		writeError(w, http.StatusBadRequest,
+			"save the monitor before testing it: the secret binding "+binding+" is resolved from the project inventory at dispatch, and this path has no envelope to carry it")
+		return
+	}
 	hb, err := h.tester.RunTest(r.Context(), m)
 	if err != nil {
 		// No worker in the target region (or the RPC failed): the probe result is

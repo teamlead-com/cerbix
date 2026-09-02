@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
@@ -17,8 +18,13 @@ const (
 	MaterializeDecryptFailed       = "decrypt_failed"
 	MaterializeNoDispatchKey       = "no_dispatch_key"
 	MaterializePayloadTooLarge     = "payload_too_large"
-	maxMaterializedJobBytes        = 1 << 20
-	materializeQueryTimeout        = 10 * time.Second
+	// MaterializeCarrierTooOld: a scenario secret binding needs an envelope that binds the
+	// execution body, which only the newest carrier generation issues. A region still on an
+	// older carrier gets this per-monitor reason instead of a job whose credential could be
+	// replayed into a relocated placeholder (FR-028 D8a).
+	MaterializeCarrierTooOld = "carrier_too_old"
+	maxMaterializedJobBytes  = 1 << 20
+	materializeQueryTimeout  = 10 * time.Second
 )
 
 // MaterializedExecution is one per-monitor result from a bounded authoritative batch.
@@ -118,14 +124,18 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 			continue
 		}
 		job := dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1, JobID: jobID, IssuedAt: issuedAt}
-		if !domain.CredentialedType(m.Type) {
-			entry.Job = job
-			byID[m.ID] = entry
-			continue
-		}
 		stored := map[string]string{}
 		if err := json.Unmarshal(rawConfig, &stored); err != nil {
 			entry.Reason = MaterializeDecryptFailed
+			byID[m.ID] = entry
+			continue
+		}
+		scenarioRefKeys := domain.ScenarioSecretRefKeys(stored)
+		// A monitor with neither a credential schema nor a scenario binding carries no
+		// envelope at all, exactly as before (FR-028 stage 2 adds the second half of this
+		// condition and nothing else to the ordinary path).
+		if !domain.CredentialedType(m.Type) && len(scenarioRefKeys) == 0 {
+			entry.Job = job
 			byID[m.ID] = entry
 			continue
 		}
@@ -136,7 +146,47 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 			continue
 		}
 		fields := map[string][]byte{}
-		if refName := stored["password_ref"]; refName != "" {
+		// One envelope field per scenario binding, named for the binding. The executor
+		// substitutes them into the scenario after the structural gate and wipes them; they
+		// never touch the monitor's config on the way out of here.
+		scenarioFailure := ""
+		// A binding cannot ride a carrier whose envelope does not bind the body: the
+		// anti-relocation property depends on it, so a region still on an older carrier gets
+		// a per-monitor reason rather than a job that looks protected and is not.
+		if len(scenarioRefKeys) > 0 {
+			generation := dispatch.ProtocolV2
+			if g, ok := carrierByRegion[m.Region]; ok && g > 0 {
+				generation = g
+			}
+			version, verr := envelopeForCarrier(generation)
+			if verr != nil || version < dispatch.EnvelopeV2 {
+				entry.Reason = MaterializeCarrierTooOld
+				byID[m.ID] = entry
+				continue
+			}
+		}
+		for _, key := range scenarioRefKeys {
+			binding, _ := domain.ScenarioBindingFromRefKey(key)
+			refName := strings.TrimSpace(stored[key])
+			ref, ok := bound[key]
+			if !ok || ref.Name != refName || ref.SecretID == "" || ref.Ciphertext == "" || s.cipher == nil {
+				scenarioFailure = MaterializeMissingReference
+				break
+			}
+			plain, err := s.cipher.DecryptBytes(ref.Ciphertext, secret.CanonicalAAD(m.ProjectID, ref.SecretID))
+			if err != nil {
+				scenarioFailure = MaterializeDecryptFailed
+				break
+			}
+			fields[domain.ScenarioBindingField(binding)] = plain
+		}
+		if scenarioFailure != "" {
+			dispatch.WipeCredentialFields(fields)
+			entry.Reason = scenarioFailure
+			byID[m.ID] = entry
+			continue
+		}
+		if refName := stored["password_ref"]; refName != "" && domain.CredentialedType(m.Type) {
 			ref, ok := bound["password_ref"]
 			if !ok || ref.Name != refName || ref.SecretID == "" || ref.Ciphertext == "" || s.cipher == nil {
 				entry.Reason = MaterializeMissingReference
@@ -150,7 +200,7 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 				continue
 			}
 			fields["password"] = plain
-		} else if encrypted := stored["password"]; encrypted != "" {
+		} else if encrypted := stored["password"]; encrypted != "" && domain.CredentialedType(m.Type) {
 			if s.cipher == nil {
 				entry.Reason = MaterializeDecryptFailed
 				byID[m.ID] = entry

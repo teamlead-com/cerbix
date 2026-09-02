@@ -424,3 +424,74 @@ func TestSyntheticScenarioIsWriterOnly(t *testing.T) {
 		})
 	}
 }
+
+// FR-028 stage 2, D10. The test-before-save path builds an unsaved monitor and sends it to a
+// worker in an ordinary job, so a scenario binding has no envelope to travel in. It must
+// refuse with a typed answer rather than probe with the placeholder text as a credential —
+// and a literal in a secret-capable header must be refused on this surface exactly as it is
+// on a save.
+func TestSyntheticTestBeforeSaveFailsClosed(t *testing.T) {
+	// A tester IS wired: the point is that the refusal comes from the contract and not from a
+	// deployment without a prober, which answers 501 before any of this.
+	h := api.New(seededStore(), slog.New(slog.NewTextHandler(io.Discard, nil)), 8).
+		WithTester(fakeProbe{hb: domain.Heartbeat{Up: true}}).Router()
+
+	body := func(config map[string]string) string {
+		// The test endpoint's body has no `name`: it probes a shape, not a stored monitor.
+		payload := map[string]any{
+			"type": "synthetic", "interval_seconds": 60, "timeout_seconds": 30, "config": config,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	scenario := func(headerValue string) string {
+		raw, err := json.Marshal(map[string]any{"steps": []map[string]any{
+			{"url": "https://api.internal/login", "headers": map[string]string{"authorization": headerValue}},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+
+	rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors/test", body(map[string]string{
+		"scenario":                  scenario("{{secret:login}}"),
+		"scenario_secret_login_ref": "login-token",
+	}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("a binding must not be testable before saving: %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "login") {
+		t.Fatalf("the refusal must name the binding: %s", rec.Body.String())
+	}
+
+	rec = do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors/test", body(map[string]string{
+		"scenario": scenario("Bearer s3cr3t-literal"),
+	}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("a literal credential must be refused here too: %d (%s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "s3cr3t-literal") {
+		t.Fatalf("the refusal echoed the credential: %s", rec.Body.String())
+	}
+
+	// A scenario with no credential at all still tests, so the guard is about bindings and
+	// literals rather than about synthetic monitors. The header here is NOT secret-capable:
+	// an `authorization` header may never hold a literal, which is the rule, while an
+	// ordinary header still may — a literal secret is not detectable and the design says so.
+	plain, err := json.Marshal(map[string]any{"steps": []map[string]any{
+		{"url": "https://api.internal/health", "headers": map[string]string{"accept": "application/json"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors/test", body(map[string]string{
+		"scenario": string(plain),
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a credential-free synthetic scenario must still be testable: %d (%s)", rec.Code, rec.Body.String())
+	}
+}

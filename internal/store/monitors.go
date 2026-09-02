@@ -51,19 +51,37 @@ var ErrMonitorSlugImmutable = errors.New("store: monitor slug is immutable")
 const revisionFenceSetSQL = `execution_revision = execution_revision + 1,
 		        last_result_ts = CASE WHEN type = 'push' THEN last_result_ts ELSE NULL END`
 
+// monitorRefSettings is the ONE place that decides which config keys are inventory
+// references. A credentialed type contributes `password_ref` as it always has; a synthetic
+// monitor contributes one `scenario_secret_<binding>_ref` per binding (FR-028 stage 2).
+// Keeping both in one function is what lets normalization, rename, rotation and deletion
+// treat a scenario binding as an ordinary reference — the reason the ref NAME lives in a
+// flat key rather than inside the scenario JSON.
+func monitorRefSettings(m domain.Monitor) map[string]string {
+	refs := map[string]string{}
+	if domain.CredentialedType(m.Type) {
+		for _, setting := range []string{"password_ref"} {
+			if name := m.Config[setting]; name != "" {
+				refs[setting] = name
+			}
+		}
+	}
+	for _, key := range domain.ScenarioSecretRefKeys(m.Config) {
+		if name := strings.TrimSpace(m.Config[key]); name != "" {
+			refs[key] = name
+		}
+	}
+	return refs
+}
+
 // monitorSecretBindings resolves every prepared *_ref setting under FOR KEY SHARE.
 // Callers MUST invoke it before locking/writing monitor rows: secret rows by id, then
 // monitor rows is the fixed §4.3 lock order shared with rename/rotation. The query carries
 // project_id in every predicate, so a same-named secret in another tenant is invisible.
 func (s *Store) monitorSecretBindings(ctx context.Context, tx pgx.Tx, projectID string, m domain.Monitor) (map[string]string, error) {
-	refs := map[string]string{}
-	if !domain.CredentialedType(m.Type) {
-		return refs, nil
-	}
-	for _, setting := range []string{"password_ref"} {
-		if name := m.Config[setting]; name != "" {
-			refs[setting] = name
-		}
+	refs := monitorRefSettings(m)
+	if len(refs) == 0 {
+		return map[string]string{}, nil
 	}
 	if len(refs) == 0 {
 		return refs, nil
@@ -124,20 +142,15 @@ func (s *Store) planSecretBindings(ctx context.Context, tx pgx.Tx, projectID str
 	uids := make([]string, 0, len(byUID))
 	names := map[string]bool{}
 	for uid, m := range byUID {
-		if !domain.CredentialedType(m.Type) {
+		refs := monitorRefSettings(m)
+		if len(refs) == 0 {
 			continue
 		}
-		refs := map[string]string{}
-		for _, setting := range []string{"password_ref"} {
-			if name := m.Config[setting]; name != "" {
-				refs[setting] = name
-				names[name] = true
-			}
+		for _, name := range refs {
+			names[name] = true
 		}
-		if len(refs) > 0 {
-			refsByUID[uid] = refs
-			uids = append(uids, uid)
-		}
+		refsByUID[uid] = refs
+		uids = append(uids, uid)
 	}
 	if len(refsByUID) == 0 {
 		return map[string]map[string]string{}, "", nil

@@ -238,6 +238,12 @@ func (m Monitor) Validate() error {
 		if len(sc.Steps) > maxSyntheticSteps {
 			return fmt.Errorf("monitor: a synthetic scenario may have at most %d steps", maxSyntheticSteps)
 		}
+		// FR-028 stage 2: a credential in a scenario is a named binding resolved from the
+		// project inventory. Validated HERE so every write surface — UI, API, file provider
+		// and test-before-save — passes through one rule rather than four.
+		if _, err := ScenarioBindings(sc, m.Config); err != nil {
+			return err
+		}
 	}
 	// A URL-style target may not carry credentials in its userinfo, on ANY surface
 	// (D-0145 addendum, 2026-09-01). Go's net/http turns https://user:pass@host into an

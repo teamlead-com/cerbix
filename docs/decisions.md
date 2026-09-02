@@ -5641,3 +5641,45 @@ synthetic monitor still cannot live in a Monitoring-as-Code bundle (D9). And the
 carries stage 2 owes two breaking-change notes: URL userinfo is refused on every write surface, and a
 synthetic monitor whose `authorization`-class header holds a literal now fails validation on its next
 write (it keeps probing; nothing re-validates on read).
+
+## D-0217 — FR-028 closed: a credential inside a synthetic scenario is a secret everywhere it can be one (2026-09-02)
+
+**Decision.** FR-028 and NFR-023 are DONE. The independent reviewer approved stage 2 at party [30] for
+`b3c99b6` + `084b49d` + `258adb5`, subject to the documentation diff committed as `900aa1b`, after five
+rounds and with its own verification of the domain, dispatch, api and store packages and of
+`make docs-check`. iter-0166 carries the per-range dispositions; D-0216 and its addendum carry the design
+and the three beliefs of mine that tests disproved.
+
+**What closes, in one line each.** No probe result carries a request URL, for any monitor type. A
+scenario is ciphertext at rest, covered by rotation and by an idempotent non-fatal backfill, and
+withheld from a principal who cannot write the monitor. A declared credential is a named binding
+resolved from the project inventory, validated by one rule on all four write surfaces, delivered in a
+body-bound envelope and substituted into the scenario with no copy beside it. And the binding belongs to
+a synthetic monitor and to nothing else, with the pre-rule row's lifecycle pinned by seeded tests rather
+than assumed away.
+
+**What does NOT close, and is not counted as closed anywhere.** The SPA cannot declare a binding, so the
+feature is reachable through the API and Monitoring-as-Code writes and not through the editor; per the
+process that needs an owner-approved mock before any SPA code exists. And a synthetic monitor still
+cannot live in a bundle (D9): stage 2 removed the secret-reference reason for the exclusion and not the
+nested-schema one. Both are named in the requirement rows. The reviewer's disposition calls them deferred
+product scope; the owner's call is what moves them.
+
+**The honest limit of the guarantee, stated here because a closure record is where people look for it.**
+FR-028 does not make it impossible to put a credential in a scenario. A literal is detectable only by
+KEY NAME — a header in the finite secret-capable set must hold exactly one placeholder — so a credential
+pasted into an ordinary header or into a body is legal, on every surface including test-before-save. It
+is encrypted at rest, withheld from viewers and kept out of probe results, and it travels to the executor
+inside the ordinary job rather than in an envelope. Buying the stronger property means a restrictive
+typed request model for the scenario; that is an owner's decision and separate work, and a heuristic over
+VALUES is refused rather than deferred.
+
+**One release obligation each for the next tag,** already carried in `docs/roadmap.md`: a monitor target
+with credentials in its URL userinfo is refused on every write surface (D-0145 addendum), and a synthetic
+monitor whose `authorization`-class header holds a literal fails validation on its next write. Both keep
+probing; nothing re-validates on read.
+
+**A defect this arc found and did not fix, with an owner-visible pointer instead of silence:**
+`TestGateMaintCrashAfterEveryRemovalStatementConverges/after_drop.commit` (FR-024) fails under machine
+load, reproducing at `b3c99b6` in a clean worktree, so it predates this work. It is in the roadmap's
+standing work with a starting point.

@@ -1,6 +1,6 @@
 # sec-synthetic-secrets — a credential inside a scenario is a secret everywhere (FR-028 / NFR-023)
 
-> **Lifecycle: ALL THREE STAGES IMPLEMENTED (2026-09-02); stage 2 has no editor yet.** Design approved
+> **Lifecycle: ALL THREE STAGES IMPLEMENTED AND APPROVED (2026-09-02); stage 2 has no editor yet.** Design approved
 > by the reviewer at revision 3 and amended by the owner's §10 ruling; the implementation notes below
 > record what the code actually does, so a reader never has to infer it from the design. Opened 2026-09-02 after an operator asked whether a
 > synthetic monitor could carry a bearer token, and the answer turned out to be "yes, in cleartext, to
@@ -50,6 +50,14 @@
 > D10's authoritative materialization — while §0 said stage 2 was done. The spec is the source of truth,
 > so it is reconciled here and `docs/status.md` follows it, not the other way round. The reviewer also
 > held FR-028 to its enforceable claim: see D7, which no longer says a scenario cannot contain a literal.
+>
+> **APPROVED at party [30] (2026-09-02):** stage 2 as implemented by `b3c99b6` + `084b49d` + `258adb5`,
+> subject to committing the documentation diff that landed as `900aa1b`, with independent verification of
+> the domain, dispatch, api and store packages and of `make docs-check`. The reviewer's own disposition of
+> the two remaining items: the SPA editor and the nested bundle (D9) are deferred product scope, not
+> approval blockers. FR-028 and NFR-023 are DONE in `docs/status.md` from that disposition, with both
+> deferrals named in their rows — a requirement that is discharged and a product that is finished are not
+> the same statement.
 
 ## 0. What is built, as of 2026-09-02
 

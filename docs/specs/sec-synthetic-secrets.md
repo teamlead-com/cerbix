@@ -104,9 +104,10 @@ dispatch gate (D6b). And the ordinary-ref-path claim that chose this whole shape
 rather than an argument: rename re-points the flat key and leaves the scenario byte-identical, the
 delete guard counts the binding, rotation needs no monitor edit.
 
-**Two things stage 2 does NOT do.** The SPA cannot declare a binding yet, so the feature is reachable
-through the API and Monitoring-as-Code and not through the editor. And a synthetic monitor still cannot
-live in a bundle (D9): the flat `settings map[string]string` cannot carry a nested scenario.
+**One thing stage 2 does NOT do.** A synthetic monitor still cannot live in a bundle (D9): the flat
+`settings map[string]string` cannot carry a nested scenario. The other gap — the SPA could not DECLARE a
+binding — was closed in iter-0167 against an owner-approved mock (2026-09-03): the mapping panel, the
+credential-bearing header as a binding picker, and the D10 refusal stated at the Test button.
 
 **A breaking change, named:** an existing synthetic monitor whose `authorization`-class header holds a
 LITERAL now fails validation on its next write. It keeps probing — nothing re-validates on read — and

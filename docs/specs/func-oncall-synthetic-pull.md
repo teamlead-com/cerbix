@@ -132,8 +132,9 @@ new genre.
 - **AC-SYN-1** — Scenario round-trip; multi-step with extract→substitution passes against a stub server
   (up), an assert failure → down with the step indicated (unit + httptest).
 - **AC-SYN-2** — A synthetic monitor in `region=geo1` is executed by a geo worker (reuses the geo E2E).
-  **NOT DISCHARGED, recorded 2026-09-02:** no E2E spec mentions `synthetic` at all, so there is nothing
-  for this criterion to reuse. Region affinity holds by construction — `synthetic` is an ordinary prober
+  **NOT DISCHARGED, recorded 2026-09-02; narrowed 2026-09-03:** `e2e/tests/synthetic-bindings.spec.ts`
+  now creates and edits a synthetic monitor, so the type has browser coverage — but on the CORE region
+  only. Nothing puts one on a geo worker, which is what this criterion actually asks. Region affinity holds by construction — `synthetic` is an ordinary prober
   registry entry with no region rule of its own — and that is an argument, not evidence. The row in
   `docs/status.md` for FR-SYN-3 says the same rather than implying coverage.
 

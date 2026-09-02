@@ -5665,6 +5665,11 @@ cannot live in a bundle (D9): stage 2 removed the secret-reference reason for th
 nested-schema one. Both are named in the requirement rows. The reviewer's disposition calls them deferred
 product scope; the owner's call is what moves them.
 
+> **Update, 2026-09-03:** the owner approved the mock and the editor landed in iter-0167, so the first of
+> those two is closed — the mapping panel, the credential-bearing header as a binding picker, the D10
+> notice at the Test button, and a defect the work found: `canSubmit` demanded a target the form hides for
+> `synthetic`, so that type could not be created from the SPA at all. D9 stands.
+
 **The honest limit of the guarantee, stated here because a closure record is where people look for it.**
 FR-028 does not make it impossible to put a credential in a scenario. A literal is detectable only by
 KEY NAME — a header in the finite secret-capable set must hold exactly one placeholder — so a credential

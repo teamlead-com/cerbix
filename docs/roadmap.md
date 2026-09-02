@@ -96,18 +96,18 @@ org-manage today. Both were declined for FR-026 as bigger than the gap being clo
 asked for by a user; they are candidates, not commitments, and they belong AFTER FR-026 ships so the
 rows they would read actually exist.
 
-**N4 — the synthetic binding editor, whose acceptance criteria already exist.** FR-028 stage 2 is
-API- and file-reachable and not editor-reachable: the SPA can display a scenario to a writer but cannot
-declare `{{secret:<binding>}}` with its `scenario_secret_<binding>_ref`. Per process the mock comes
-first and needs the owner's visual approval before any SPA code. The reviewer gave the mock three
-requirements after approving stage 2 (D-0217), so it was not designed from a blank page. **The mock exists:**
-[`docs/design/mock-synthetic-binding.html`](design/mock-synthetic-binding.html), five screens, awaiting the
-owner's visual approval in both themes — until that happens no Vue file is touched. It answers the three: show the
+**N4 — the synthetic binding editor. DONE in iter-0167 (2026-09-03), kept here for one line of
+history.** The mock was approved by the owner at revision 1
+([`docs/design/mock-synthetic-binding.html`](design/mock-synthetic-binding.html), five screens) and the
+editor was built to it, so FR-028 stage 2 is now editor-reachable and not only API-reachable. The work
+also fixed a defect older than itself: `canSubmit` demanded a target the form hides for `synthetic`, so
+that type could not be created from the SPA at all — no unit test and no E2E had ever submitted it. The
+reviewer's three requirements, all delivered: show the
 binding → inventory mapping EXPLICITLY (which project secret fills which binding, by name, with the
 used-by state visible); carry D7's rule INLINE where the operator types a credential-bearing header,
 not as a refusal after a failed save; and state the "save before test" contract in the editor, since a
-scenario with bindings is deliberately not testable before it is stored. A fourth follows from D9 and
-should be visible rather than discovered: a synthetic monitor still cannot be exported to a bundle.
+scenario with bindings is deliberately not testable before it is stored. A fourth followed from D9 and is
+visible rather than discovered: a synthetic monitor still cannot be exported to a bundle.
 
 **N5 — the second `{{secret:…}}` consumer, if one ever appears.** The binding grammar, the placeholder
 and the substitution live in `internal/domain/syntheticbindings.go` and are synthetic-only by explicit

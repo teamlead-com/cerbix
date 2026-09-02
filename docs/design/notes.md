@@ -467,12 +467,16 @@ drives `:focus-visible`; the self-correcting hint on screen 3 is direct copy.
 
 ---
 
-## FR-028 — Synthetic secret bindings (mock, AWAITING OWNER APPROVAL — 2026-09-02)
+## FR-028 — Synthetic secret bindings (mock, APPROVED by the owner 2026-09-03)
 
-> **Drawn after the requirement closed, not before it.** FR-028 stage 2 is DONE and approved (D-0217); the
-> editor is the one deferred half, and per the standing gate no Vue file is touched before the owner looks at
-> this mock in both themes. The reviewer gave three requirements for it after approving stage 2 (roadmap N4)
-> and those three are the mock's spine, not decoration.
+> **Approved visually by the owner on 2026-09-03**, at revision 1, with no changes requested. The standing gate
+> is lifted for this surface only: the SPA editor may now be built, to this mock. Drawn after the requirement
+> closed rather than before it — FR-028 stage 2 is DONE and approved (D-0217), and the editor was its one
+> deferred half. The reviewer gave three requirements for it after approving stage 2 (roadmap N4) and those
+> three are the mock's spine, not decoration.
+>
+> **The open question is answered by the approval itself:** the mapping panel sits ABOVE the steps, as drawn.
+> An empty panel is also how an operator learns the feature is there, and that is the reading the owner took.
 
 Source: `docs/design/mock-synthetic-binding.html`. Tokens VERBATIM from `frontend/src/style.css`; shell, `.note`
 overlay and screen switcher 1:1 with `mock-reliability-gate.html`. **No new colour** — a binding is not a status,

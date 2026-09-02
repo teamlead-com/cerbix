@@ -459,7 +459,17 @@ userinfo is now refused on every surface.
 
 **Testing a scenario before saving it.** A scenario that declares bindings is not testable
 before the monitor is saved: that path has no envelope to carry the credential, and the API
-answers 400 naming the binding. Build and test the journey first, add the binding, save.
+answers 400 naming the binding. Build and test the journey first, add the binding, save. The
+editor says this at the Test button rather than letting an operator discover it.
+
+**Declaring a binding in the UI** (since iter-0167). On the synthetic monitor form, the
+**Scenario secrets** panel sits above the steps: `+ binding` picks a project secret and names
+the binding, and the row then shows which secret fills it, where it is used, and the flat key
+it is stored as. In a credential-bearing header the value field becomes a binding picker — the
+rule is met before a token is pasted rather than after a failed save. Removing a binding on an
+ordinary save clears its `monitor_secret_refs` row with it, which is what makes the secret
+deletable again. Creating a secret is NOT part of this form: that stays in
+**Settings → Secrets**, deliberately.
 
 **A `scenario_secret_*` key on a monitor that is not synthetic.** It is refused at every write
 surface, and no released build ever accepted one — as of 2026-09-02 the key exists

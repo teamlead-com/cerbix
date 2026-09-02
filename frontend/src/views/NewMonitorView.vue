@@ -4,6 +4,18 @@ import { useRoute, useRouter } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import { applyCredentialSelection, isDanglingSecretRef } from "@/lib/monitorCredentials";
+import {
+  applyBindings,
+  bindingPlaceholder,
+  bindingsFromConfig,
+  firstBindingIssue,
+  isSecretCapableHeader,
+  malformedRefKeys,
+  MAX_SCENARIO_BINDINGS,
+  testBeforeSaveBlockedReason,
+  validateScenarioBindings,
+  type ScenarioBinding,
+} from "@/lib/scenarioBindings";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -118,6 +130,58 @@ const scenarioSteps = ref<SynStep[]>([
 function addStep() { scenarioSteps.value.push(blankStep()); }
 function removeStep(i: number) { scenarioSteps.value.splice(i, 1); if (!scenarioSteps.value.length) scenarioSteps.value.push(blankStep()); }
 
+// FR-028 stage 2 — a credential in a scenario is a NAMED BINDING (mock approved 2026-09-03).
+// The panel that maps binding → project secret is the feature's whole visible surface; the
+// placeholder in the document is what the operator sees in the header field. Every rule these
+// drive is the server's, mirrored in `lib/scenarioBindings.ts` so it is met at the field.
+const scenarioBindings = ref<ScenarioBinding[]>([]);
+const scenarioMalformedRefs = ref<string[]>([]);
+const newBinding = ref<ScenarioBinding | null>(null);
+const projectSecretNames = computed(() => projectSecrets.value.map((s) => s.name ?? ""));
+const bindingIssues = computed(() =>
+  validateScenarioBindings(
+    scenarioSteps.value.map((st) => ({ url: st.url, headers: st.headers, body: st.body })),
+    scenarioBindings.value,
+    projectSecretNames.value,
+    projectSecretsLoaded.value,
+    scenarioMalformedRefs.value,
+  ),
+);
+// A binding is usable only from a step; where it is USED is what the panel reports, and the
+// server refuses one that is declared and never sent.
+function bindingUses(name: string): string[] {
+  const out: string[] = [];
+  const ph = bindingPlaceholder(name);
+  scenarioSteps.value.forEach((st, si) => {
+    for (const h of st.headers) if (h.v.includes(ph)) out.push(`step ${si + 1} · ${h.k.trim().toLowerCase() || "header"}`);
+    if (st.body.includes(ph)) out.push(`step ${si + 1} · body`);
+  });
+  return out;
+}
+function addBinding() {
+  const b = newBinding.value;
+  if (!b || !b.name.trim() || !b.secret.trim()) return;
+  scenarioBindings.value.push({ name: b.name.trim(), secret: b.secret.trim() });
+  newBinding.value = null;
+}
+function removeBinding(i: number) { scenarioBindings.value.splice(i, 1); }
+// Insert the placeholder where the operator is: a credential-bearing header whose value is a
+// binding is the shape the server demands, so the control writes it rather than asking them to
+// type it correctly.
+// The name a header's value already carries, when it is exactly one placeholder — so the
+// select shows what is stored rather than resetting the operator's choice on every render.
+function headerBindingName(value: string): string {
+  const b = scenarioBindings.value.find((x) => value.trim() === bindingPlaceholder(x.name));
+  return b ? b.name : "";
+}
+function useBindingInHeader(si: number, hi: number, name: string) {
+  if (!name) return;
+  scenarioSteps.value[si].headers[hi].v = bindingPlaceholder(name);
+}
+// D10 at the button, not as a 400 afterwards: an unsaved test has no envelope to carry a
+// binding, so a placeholder would travel to the target as literal text.
+const testBlockedByBindings = computed(() => (isSynthetic.value ? testBeforeSaveBlockedReason(scenarioBindings.value) : ""));
+
 // True when an existing synthetic monitor came back without its scenario: the caller cannot
 // write it, so the server did not send it (FR-028 stage 1).
 const scenarioWithheld = ref(false);
@@ -129,7 +193,7 @@ const scenarioError = computed(() => {
     if (s.extract.some((e) => !e.var.trim() || ((e.from === "json" || e.from === "header") && !e.path.trim()))) return `Step ${i + 1}: an extract is missing var/path.`;
     if (s.assert.some((a) => a.that === "json" && !a.path.trim())) return `Step ${i + 1}: a json assert needs a path.`;
   }
-  return "";
+  return firstBindingIssue(bindingIssues.value);
 });
 // Serialize the builder to the compact scenario JSON the backend stores/validates.
 function syntheticConfig(): Record<string, string> {
@@ -144,7 +208,7 @@ function syntheticConfig(): Record<string, string> {
     if (s.assert.length) step.assert = s.assert.map((a) => ({ that: a.that, ...(a.op ? { op: a.op } : {}), ...(a.value ? { value: a.value } : {}), ...(a.path.trim() ? { path: a.path.trim() } : {}) }));
     return step;
   });
-  return { scenario: JSON.stringify({ steps }) };
+  return applyBindings({ scenario: JSON.stringify({ steps }) }, scenarioBindings.value);
 }
 const isRedis = computed(() => form.type === "redis");
 const isPromQL = computed(() => form.type === "promql");
@@ -485,6 +549,12 @@ const canSubmit = computed(() => {
   if (!writeAllowed.value || !form.name.trim() || submitting.value) return false;
   if (form.type === "push") return true;
   if (form.type === "composite") return childIds.value.size > 0;
+  // A synthetic monitor has NO target — the scenario is what it probes, and `showTarget`
+  // hides the field for it — so requiring one below left Create permanently disabled and
+  // unexplained: a synthetic monitor could not be created from this form at all. Found by
+  // `NewMonitorScenarioBinding.spec.ts` while proving the binding body; the gap survived
+  // because no test and no E2E had ever submitted this type (FR-SYN-3's named coverage gap).
+  if (isSynthetic.value) return !scenarioError.value;
   if (credentialRequired.value) {
     if (credentialMode.value === "ref" && !secretRef.value) return false;
     if (credentialMode.value === "value" && !pg.password && (!isEdit.value || initialCredentialMode.value !== "value")) return false;
@@ -665,6 +735,13 @@ async function loadForEdit() {
   // (FR-028 stage 1). Say so, rather than rendering an empty step builder that looks like a
   // monitor with no scenario — an empty scaffold is a lie a reader would act on.
   scenarioWithheld.value = m.type === "synthetic" && !m.config?.scenario;
+  // The reference keys are NOT secret — they hold a name — so they come back on every read and
+  // the panel can be rebuilt exactly. A key that does not parse is kept and named rather than
+  // dropped: silently discarding it would delete a declaration the operator made.
+  if (m.type === "synthetic") {
+    scenarioBindings.value = bindingsFromConfig(m.config as Record<string, string> | undefined);
+    scenarioMalformedRefs.value = malformedRefKeys(m.config as Record<string, string> | undefined);
+  }
   // Synthetic: parse the stored scenario JSON back into the visual step builder.
   if (m.type === "synthetic" && m.config?.scenario) {
     try {
@@ -1128,6 +1205,72 @@ const selectCls =
             The scenario is not shown: it can carry credentials, so it is returned only to someone who may edit this
             monitor. Ask for editor rights on this project to view or change it.
           </section>
+          <!-- FR-028: binding → project secret, always paired and never a binding name alone -->
+          <section v-if="isSynthetic && !scenarioWithheld" data-testid="scenario-secrets" class="rounded border border-border bg-surface shadow-card">
+            <div class="flex flex-wrap items-center gap-[10px] px-4 pt-[13px]">
+              <h2 class="text-[13px] font-semibold">Scenario secrets</h2>
+              <span v-if="scenarioBindings.length" class="rounded-sm border border-accent bg-accent-weak px-[7px] py-[2px] font-mono text-[10.5px] text-accent">{{ scenarioBindings.length }} of {{ MAX_SCENARIO_BINDINGS }} bindings</span>
+              <span class="flex-1"></span>
+              <RouterLink :to="{ name: 'settings' }" class="text-[12px] text-accent hover:underline">Manage project secrets</RouterLink>
+            </div>
+            <div class="flex flex-col gap-3 p-4">
+              <p class="text-[12px] text-ink-3">
+                A credential in a scenario is a named binding: the step carries <code v-pre>{{secret:name}}</code>, and the
+                project secret's NAME is stored beside it. The value is resolved when a check is dispatched — it never
+                reaches this page, and rotating the secret needs no edit here.
+              </p>
+
+              <div v-for="(b, bi) in scenarioBindings" :key="bi" data-testid="scenario-binding" class="rounded-sm border border-border bg-surface-2/50 p-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="inline-flex items-center gap-[6px] rounded-sm border border-accent bg-accent-weak px-2 py-[2px] font-mono text-[11.5px] text-accent">
+                    <span class="opacity-70">binding</span>{{ b.name }}
+                  </span>
+                  <span class="text-[12px] text-ink-3">→</span>
+                  <select v-model="b.secret" :class="[selectCls, 'h-[30px] max-w-[260px]']" data-testid="scenario-binding-secret">
+                    <option value="" disabled>Select a project secret</option>
+                    <option v-for="s in projectSecrets" :key="s.id" :value="s.name">{{ s.name }}</option>
+                  </select>
+                  <span class="flex-1"></span>
+                  <button type="button" class="text-[11.5px] text-ink-3 hover:text-down" @click="removeBinding(bi)">remove</button>
+                </div>
+                <div class="mt-[6px] flex flex-wrap items-center gap-[6px] text-[11.5px] text-ink-3">
+                  <span>used in</span>
+                  <span v-for="(u, ui) in bindingUses(b.name)" :key="ui" class="rounded-sm border border-border bg-surface px-[6px] py-[1px] font-mono text-[10.5px]">{{ u }}</span>
+                  <span v-if="!bindingUses(b.name).length" class="italic">nowhere yet</span>
+                  <span class="flex-1"></span>
+                  <span class="font-mono text-[10.5px]">scenario_secret_{{ b.name }}_ref</span>
+                </div>
+                <p v-if="bindingIssues.bindingErrors[b.name]" class="mt-[6px] text-[12px] text-down">{{ bindingIssues.bindingErrors[b.name] }}</p>
+              </div>
+
+              <div v-if="newBinding" class="rounded-sm border border-border-strong bg-surface-2 p-3">
+                <div class="mb-[9px] text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">New binding</div>
+                <div class="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1">
+                  <label class="flex flex-col gap-[5px]">
+                    <span class="text-[12px] font-semibold text-ink-2">Project secret</span>
+                    <select v-model="newBinding.secret" :class="[selectCls, 'h-[34px]']" data-testid="new-binding-secret">
+                      <option value="" disabled>Select a project secret</option>
+                      <option v-for="s in projectSecrets" :key="s.id" :value="s.name">{{ s.name }}</option>
+                    </select>
+                  </label>
+                  <label class="flex flex-col gap-[5px]">
+                    <span class="text-[12px] font-semibold text-ink-2">Binding name</span>
+                    <input v-model="newBinding.name" data-testid="new-binding-name" placeholder="login" class="h-[34px] rounded-sm border border-border bg-surface px-2 font-mono text-[12.5px]" />
+                    <span class="text-[11.5px] text-ink-3">lower-case letters, digits, <code>_</code> and <code>-</code>, starting with a letter</span>
+                  </label>
+                </div>
+                <div class="mt-[10px] flex flex-wrap items-center gap-[10px]">
+                  <button type="button" data-testid="add-binding" class="rounded-sm bg-accent px-3 py-[6px] text-[12.5px] font-semibold text-accent-ink hover:bg-accent-2 disabled:opacity-50" :disabled="!newBinding.name.trim() || !newBinding.secret.trim()" @click="addBinding">Add binding</button>
+                  <button type="button" class="text-[12.5px] text-ink-3 hover:text-ink" @click="newBinding = null">Cancel</button>
+                  <span v-if="newBinding.name.trim()" class="font-mono text-[11px] text-ink-3">the step gets {{ bindingPlaceholder(newBinding.name.trim()) }}</span>
+                </div>
+              </div>
+              <button v-else type="button" data-testid="new-binding" class="self-start rounded-sm border border-border bg-surface px-3 py-[7px] text-[12.5px] font-medium text-ink-2 hover:border-border-strong" @click="newBinding = { name: '', secret: '' }">+ binding</button>
+
+              <p v-for="(e, ei) in bindingIssues.errors" :key="ei" class="text-[12.5px] text-down">{{ e }}</p>
+            </div>
+          </section>
+
           <section v-if="isSynthetic && !scenarioWithheld" class="rounded border border-border bg-surface shadow-card">
             <div class="px-4 pt-[13px]"><h2 class="text-[13px] font-semibold">Scenario</h2></div>
             <div class="flex flex-col gap-3 p-4">
@@ -1143,14 +1286,36 @@ const selectCls =
                 </div>
                 <div class="mt-2 flex gap-2">
                   <select v-model="st.method" :class="selectCls"><option v-for="m in synMethods" :key="m" :value="m">{{ m }}</option></select>
-                  <input v-model="st.url" placeholder="https://api.internal/…  (supports {{var}})" class="h-[34px] flex-1 rounded-sm border border-border bg-surface px-2 font-mono text-[12.5px]" />
+                  <input v-model="st.url" placeholder="https://api.internal/…  (supports {{var}})" class="h-[34px] flex-1 rounded-sm border border-border bg-surface px-2 font-mono text-[12.5px]" :class="bindingIssues.urlErrors[si] && 'border-down bg-down-weak'" />
                 </div>
+                <p v-if="bindingIssues.urlErrors[si]" class="mt-[3px] text-[12px] text-down">{{ bindingIssues.urlErrors[si] }}</p>
                 <!-- headers -->
                 <div class="mt-2">
-                  <div v-for="(hd, hi) in st.headers" :key="hi" class="mb-1 flex items-center gap-2">
-                    <input v-model="hd.k" placeholder="Header" class="h-[30px] w-[38%] rounded-sm border border-border bg-surface px-2 text-[12.5px]" />
-                    <input v-model="hd.v" placeholder="value (supports {{var}})" class="h-[30px] flex-1 rounded-sm border border-border bg-surface px-2 font-mono text-[12.5px]" />
-                    <button type="button" class="text-[11.5px] text-ink-3 hover:text-down" @click="st.headers.splice(hi, 1)">×</button>
+                  <div v-for="(hd, hi) in st.headers" :key="hi" class="mb-1">
+                    <div class="flex items-center gap-2">
+                      <input v-model="hd.k" placeholder="Header" class="h-[30px] w-[38%] rounded-sm border border-border bg-surface px-2 text-[12.5px]" />
+                      <!-- A credential-bearing header stops being free text: D7 is taught by the
+                           control, not by a refusal after saving. -->
+                      <select
+                        v-if="isSecretCapableHeader(hd.k) && scenarioBindings.length"
+                        :value="headerBindingName(hd.v)"
+                        data-testid="header-binding"
+                        :class="[selectCls, 'h-[30px] flex-1']"
+                        @change="useBindingInHeader(si, hi, ($event.target as HTMLSelectElement).value)"
+                      >
+                        <option value="" disabled>Select a binding</option>
+                        <option v-for="b in scenarioBindings" :key="b.name" :value="b.name">{{ b.name }} → {{ b.secret || "no secret" }}</option>
+                      </select>
+                      <input v-else v-model="hd.v" placeholder="value (supports {{var}})" class="h-[30px] flex-1 rounded-sm border border-border bg-surface px-2 font-mono text-[12.5px]" :class="bindingIssues.headerErrors[si + ':' + hi] && 'border-down bg-down-weak'" />
+                      <button type="button" class="text-[11.5px] text-ink-3 hover:text-down" @click="st.headers.splice(hi, 1)">×</button>
+                    </div>
+                    <p v-if="bindingIssues.headerErrors[si + ':' + hi]" class="mt-[3px] text-[12px] text-down">{{ bindingIssues.headerErrors[si + ':' + hi] }}</p>
+                    <p v-else-if="isSecretCapableHeader(hd.k) && !scenarioBindings.length" class="mt-[3px] text-[12px] text-ink-3">
+                      <code>{{ hd.k.trim().toLowerCase() }}</code> is a credential-bearing header: its value must be a binding, not a token. Add one above.
+                    </p>
+                    <!-- The residual, said rather than implied: cerbix cannot tell a credential
+                         from data here, so nothing refuses it (D7). -->
+                    <p v-else-if="bindingIssues.residualHints[si + ':' + hi]" class="mt-[3px] text-[12px] text-degraded">{{ bindingIssues.residualHints[si + ':' + hi] }}</p>
                   </div>
                   <button type="button" class="text-[12px] text-accent hover:underline" @click="st.headers.push({ k: '', v: '' })">+ header</button>
                 </div>
@@ -1500,6 +1665,9 @@ const selectCls =
             </span>
           </div>
           <div v-if="testError" class="rounded-sm border border-down/40 bg-down-weak px-3 py-2 text-[13px] text-down">{{ testError }}</div>
+          <!-- D10 stated where the click happens: a scenario with bindings is deliberately not
+               testable before it is saved, so the form says so and offers the way forward. -->
+          <div v-if="testBlockedByBindings" data-testid="test-blocked" class="rounded-sm border border-border-strong bg-surface-2 px-3 py-2 text-[12.5px] text-ink-2">{{ testBlockedByBindings }}</div>
           <div v-if="isTestable && !selectedRegionLive" class="rounded-sm border border-degraded/40 bg-degraded-weak px-3 py-2 text-[12.5px] text-ink-2">
             Region <code>{{ form.region.trim() || "core" }}</code> has no connected worker — the probe runs in that region, so the test will report “no worker responded” until one is started with <code>--region {{ form.region.trim() || "core" }}</code>.
           </div>
@@ -1508,7 +1676,8 @@ const selectCls =
             <button
               v-if="isTestable"
               type="button"
-              :disabled="testing || !writeAllowed || (showTarget && !form.target.trim())"
+              data-testid="test-connection"
+              :disabled="testing || !writeAllowed || !!testBlockedByBindings || (showTarget && !form.target.trim())"
               class="mr-auto inline-flex h-[38px] items-center gap-[7px] rounded-sm border border-border bg-surface px-[15px] text-[13.5px] font-semibold text-ink-2 hover:border-border-strong disabled:opacity-50"
               @click="testConnection"
             >

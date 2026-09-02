@@ -8063,7 +8063,7 @@ export interface components {
             tags?: string[];
             /** @description Worker-pool region that probes this monitor; default core. Composite monitors must be core. */
             region?: string;
-            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}. */
+            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}; for synthetic: {scenario} plus one scenario_secret_<binding>_ref per credential, naming a project secret the scenario references as {{secret:<binding>}} — synthetic only, and refused on any other type. A credential-bearing header (authorization, cookie, x-api-key, ...) must hold exactly the placeholder, no placeholder may resolve into a URL, and a scenario carrying bindings is not testable before it is saved. */
             config?: {
                 [key: string]: string;
             };
@@ -8214,7 +8214,7 @@ export interface components {
             tags?: string[];
             /** @description Worker-pool region that probes this monitor; default core. Composite monitors must be core. */
             region?: string;
-            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}. */
+            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}; for synthetic: {scenario} plus one scenario_secret_<binding>_ref per credential, naming a project secret the scenario references as {{secret:<binding>}} — synthetic only, and refused on any other type. A credential-bearing header (authorization, cookie, x-api-key, ...) must hold exactly the placeholder, no placeholder may resolve into a URL, and a scenario carrying bindings is not testable before it is saved. */
             config?: {
                 [key: string]: string;
             };
@@ -8247,7 +8247,7 @@ export interface components {
             tags?: string[];
             /** @description Worker-pool region that probes this monitor; default core. Composite monitors must be core. */
             region?: string;
-            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}. */
+            /** @description Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}; for synthetic: {scenario} plus one scenario_secret_<binding>_ref per credential, naming a project secret the scenario references as {{secret:<binding>}} — synthetic only, and refused on any other type. A credential-bearing header (authorization, cookie, x-api-key, ...) must hold exactly the placeholder, no placeholder may resolve into a URL, and a scenario carrying bindings is not testable before it is saved. */
             config?: {
                 [key: string]: string;
             };

@@ -245,6 +245,17 @@ func (m Monitor) Validate() error {
 			return err
 		}
 	}
+	// A scenario binding belongs to a SYNTHETIC monitor and to no other type. The key is
+	// not a harmless unknown one: the store turns it into a `monitor_secret_refs` row, the
+	// materializer builds an envelope field for it, and the dispatch gate raises the carrier
+	// generation it demands. On any other type that produces a monitor this surface ACCEPTED
+	// and dispatch then refuses — a failure moved away from the person who caused it. Found
+	// in review of the shipped stage 2, where every helper acted on the key prefix alone.
+	if m.Type != MonitorSynthetic {
+		if refs := ScenarioSecretRefKeys(m.Config); len(refs) > 0 {
+			return fmt.Errorf("monitor: %s is not a synthetic monitor and must not declare %s", m.Type, refs[0])
+		}
+	}
 	// A URL-style target may not carry credentials in its userinfo, on ANY surface
 	// (D-0145 addendum, 2026-09-01). Go's net/http turns https://user:pass@host into an
 	// `Authorization: Basic` header by itself, so such a target WORKS — and the password is

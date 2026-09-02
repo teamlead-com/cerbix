@@ -1,6 +1,6 @@
 # sec-synthetic-secrets — a credential inside a scenario is a secret everywhere (FR-028 / NFR-023)
 
-> **Lifecycle: STAGES 0 AND 1 IMPLEMENTED (2026-09-02); stage 2 designed and unbuilt.** Design approved
+> **Lifecycle: ALL THREE STAGES IMPLEMENTED (2026-09-02); stage 2 has no editor yet.** Design approved
 > by the reviewer at revision 3 and amended by the owner's §10 ruling; the implementation notes below
 > record what the code actually does, so a reader never has to infer it from the design. Opened 2026-09-02 after an operator asked whether a
 > synthetic monitor could carry a bearer token, and the answer turned out to be "yes, in cleartext, to
@@ -36,6 +36,20 @@
 > invariant 4 changes accordingly. The pattern is not new — `internal/worker/worker.go` already answers
 > an unopenable credential with a per-job typed diagnostic and flips readiness only on a persistent
 > systemic failure.
+>
+> **Round 5 — the reviewer read the SHIPPED stage 2 and refused to call it done (2026-09-02).** Two P0s,
+> both correct, both fixed before this line was written. (1) A `scenario_secret_<binding>_ref` key was
+> accepted on ANY monitor type: every helper keyed on the PREFIX alone, so an http monitor could carry
+> one, the store wrote it into `monitor_secret_refs`, the materializer built an envelope field for it,
+> and the dispatch gate raised the carrier generation it demanded — until the executor refused a
+> scenario that does not exist. Nothing leaked, because every one of those steps fails closed; what
+> broke was AVAILABILITY, and it broke at dispatch for a config the write surface had accepted, which is
+> the failure the owner's blast-radius ruling exists to prevent. The type is now decided at the write
+> boundary and gated in all four places (D6b). (2) This document still described the design stage 2
+> REPLACED — the scoped `setting_key`, D6a's scenario-aware repoint, D8a's canonical descriptor and
+> D10's authoritative materialization — while §0 said stage 2 was done. The spec is the source of truth,
+> so it is reconciled here and `docs/status.md` follows it, not the other way round. The reviewer also
+> held FR-028 to its enforceable claim: see D7, which no longer says a scenario cannot contain a literal.
 
 ## 0. What is built, as of 2026-09-02
 
@@ -76,6 +90,12 @@ descriptor. This is also why a binding requires a body-bound envelope (`Envelope
 3): on an older carrier nothing binds the body and the relocation would go undetected, so the
 materializer refuses with `carrier_too_old` per monitor.
 
+**The type boundary, added in round 5.** A `scenario_secret_*` reference is refused on every
+non-synthetic type at the write boundary and gated in the store, in both derived sets and in the
+dispatch gate (D6b). And the ordinary-ref-path claim that chose this whole shape is now a live-DB test
+rather than an argument: rename re-points the flat key and leaves the scenario byte-identical, the
+delete guard counts the binding, rotation needs no monitor edit.
+
 **Two things stage 2 does NOT do.** The SPA cannot declare a binding yet, so the feature is reachable
 through the API and Monitoring-as-Code and not through the editor. And a synthetic monitor still cannot
 live in a bundle (D9): the flat `settings map[string]string` cannot carry a nested scenario.
@@ -103,9 +123,14 @@ and change it.
 - **FR-028 — a scenario's secrets are secret at rest, on read, and in the record.** Stage 0: no probe
   result carries a step's URL — the failure is named by step and by error class. Stage 1: the scenario
   is encrypted at rest under `secret.Cipher`, covered by rotation and by a startup backfill, and
-  withheld from any principal that cannot write the monitor. Stage 2: a secret inside a scenario is a
-  NAMED BINDING resolved from the project secret inventory, never a literal, on every write surface —
-  which also removes the reason a synthetic monitor cannot be declared in a Monitoring-as-Code bundle.
+  withheld from any principal that cannot write the monitor. Stage 2: a DECLARED secret inside a
+  scenario is a NAMED BINDING resolved from the project secret inventory — it reaches the executor in
+  the envelope and never in the document — and a literal is refused wherever a literal is DETECTABLE,
+  which is by header NAME and not by value (D7). The residual is stated rather than implied: a
+  credential pasted into a header nobody would call a credential header, or into a body, stays legal,
+  is encrypted at rest by stage 1, and still travels in the ordinary job. Stage 2 also removes the
+  reason a synthetic monitor cannot be declared in a Monitoring-as-Code bundle, without delivering it
+  (D9).
 - **NFR-023 — the definition stays visible to whoever owns it, and nothing degrades silently.** An
   operator who may write the monitor sees and edits the whole scenario; the encryption boundary is not a
   redaction applied after decryption but a reader that never decrypts what it must not hand out; a
@@ -178,13 +203,23 @@ that reports itself unready over a migration takes away the visibility it exists
 **D6 — stage 2: a secret is a NAMED BINDING, declared in the scenario and resolved from the inventory
 (party round 1).** Not `secret_ref_1..n`: positional slots read badly in YAML and make reordering steps
 change identity. The scenario declares bindings under a strict grammar; a step may reference only a
-declared binding, and only from a permitted location. The reference is stored as a scoped
-`setting_key` — `scenario.secret.<binding>` — so `monitor_secret_refs` keeps its tenant-safe foreign key
-and delete counting and rotation fencing retain their ref-row behaviour. Rename does NOT come for free —
-it requires D6a, and this sentence used to claim otherwise. A binding NAME is not a secret and stays visible:
+declared binding, and only from a permitted location. A binding NAME is not a secret and stays visible:
 that is what keeps the scenario readable.
 
-**D6a — rename does NOT keep working, and the spec must say what to build (BLOCKER, party round 2).**
+**As built, the reference is a FLAT config key** — `scenario_secret_<binding>_ref` — and NOT the scoped
+`setting_key` (`scenario.secret.<binding>`) revision 1 chose. The flat key is where `repointSecretRefs`
+already looks, so rename works with no scenario-aware code; `monitor_secret_refs` keeps its tenant-safe
+foreign key with no new convention; and delete counting and the rotation fence keep their behaviour
+unchanged. That is what withdraws D6a, the blocker of round 2. It is tested, not asserted:
+`TestScenarioBindingRidesTheOrdinaryRefPath` renames a bound secret and checks the flat key is
+re-pointed while the scenario is left byte-identical, refuses the delete with the same
+`SecretInUseError` count that protects `password_ref`, and rotates the value with no monitor edit.
+
+**D6a — WITHDRAWN by the flat-key shape; the blocker was real and its fix is not what it asked for.**
+Kept in full because the reasoning is what chose the shape in D6: under the SCOPED key this was
+correct and had to be built. Under the flat key there is nothing to build — the rename path finds the
+ref where it already looks — so no scenario is decrypted, parsed, rewritten and re-encrypted inside a
+rename transaction, and the code that would have done it does not exist.
 Revision 1 claimed a scoped `setting_key` leaves rename, delete and rotation untouched. Rename is
 broken by it: `repointSecretRefs` (`internal/store/secrets.go`) reads each ref row's `setting_key`,
 looks it up in the monitor's FLAT config, and fails the ENTIRE rename when the value is not the old
@@ -196,13 +231,38 @@ ref name, re-encode and re-encrypt with the same compare-and-set discipline, and
 fail-on-divergence rule — a binding that does not carry the old name is the same broken invariant and
 must fail the rename. Delete counting and the rotation fence can keep reading ref rows unchanged.
 
+**D6b — a binding reference belongs to a SYNTHETIC monitor, decided at the write boundary (P0, party
+round 5).** As first shipped, every helper matched the key PREFIX and no helper asked the type, so the
+key was accepted on any monitor. It is not an inert unknown key: it writes a `monitor_secret_refs` row,
+it adds an expected envelope FIELD, it joins the execution digest, and it raises the carrier generation
+the dispatch gate demands — so an http monitor could be saved and then refused at dispatch with
+`carrier_too_old` or, on a current carrier, fail in the executor for a scenario it does not have. No
+credential escaped, because each of those steps fails closed, and the value never left the core; what
+the defect cost is availability, moved away from the person who caused it. The rule is therefore
+decided ONCE, where the operator is: `Monitor.Validate` refuses the key by name on every non-synthetic
+type, which covers the UI, the API, the file provider and test-before-save. Three gates follow it so no
+single fix is load-bearing: `monitorRefSettings` contributes the refs only for a synthetic monitor, the
+two derived sets (`ExpectedCredentialFields`, `ExecutionBindingKeys`) return nothing for another type,
+and the dispatch gate REFUSES rather than ignores a crafted job that carries one — ignoring would be
+defensible on availability grounds, and is rejected because a config the core would never have stored is
+not a config to execute. That refusal is safe to add precisely because stage 2 has never been released:
+no monitor anywhere carries such a key.
+
 **D7 — literals are refused where a literal is DETECTABLE, and secrets are forbidden in the URL.**
 Implemented as the key-name reading, which is the only enforceable one: a header whose name is in the
 finite secret-capable set (`authorization`, `cookie`, `x-api-key`, …) must carry exactly one
 `{{secret:<binding>}}` and nothing else, while a credential pasted into a header nobody would call a
 credential header, or into a body, cannot be told from ordinary data. The specification says that
-plainly instead of implying a guarantee the set cannot give. The original wording, kept because it is
-the intent the rule serves:
+plainly instead of implying a guarantee the set cannot give, and neither FR-028 nor any status row may
+claim that a scenario cannot contain a literal.
+
+**The residual, in one sentence:** a credential in an unlisted header or in a body is not detectable and
+stays legal — it is encrypted at rest by stage 1, withheld from viewers, kept out of probe results by
+stage 0, and it still travels to the executor inside the ordinary job rather than in an envelope. Buying
+the stronger property means a restrictive typed request model for the scenario (a whitelist of fields
+with declared kinds), which is an owner's decision and a separate piece of work, not a heuristic over
+values: guessing at "this looks like a token" is how a rule becomes both leaky and annoying. The
+original wording, kept because it is the intent the rule serves:
 Not headers only (party round 1): a credential fits in a body and in an assert value just as well, and
 restricting the rule to headers would ban nothing while sounding like a rule. The URL is stricter still —
 no binding may resolve into a URL or query string, because that is the surface D2's leak came from and
@@ -217,7 +277,17 @@ and location — otherwise a carrier attacker keeps a valid envelope while reloc
 request of their choosing, which is a worse attack than an altered field set and the one the current
 typed digest cannot even represent.
 
-**D8a — "location" is a canonical descriptor, or invariant 11 is untestable (party round 2).** The
+**D8a — SUPERSEDED by making the scenario an execution binding key; the property it wanted is the
+property that shipped.** No descriptor is derived. The stored scenario BYTES and the declared ref keys
+joined `ExecutionBindingKeys`, so `EnvelopeV2`'s body digest covers the document exactly as stored —
+a relocated placeholder, a rewritten URL or an altered literal is a different document and the AEAD
+fails before any request (`TestScenarioBindingGateFailsClosed/relocated placeholder`). Two of the
+descriptor's rules survive as VALIDATION rather than as digest input, because bytes cannot distinguish
+them: duplicate header keys are refused case-insensitively, and a secret-capable header must be exactly
+one placeholder. The cost of this shape, named: any byte-level edit of the scenario invalidates
+outstanding envelopes, which is correct for a security boundary and is why the digest is not over a
+prettified form. The original reasoning:
+The
 reviewer offered two relocations that revision 1's wording would not catch: moving a token between
 duplicate or case-aliased header keys, and between two template occurrences in one body. So the digest
 covers a DESCRIPTOR derived from the parsed, strictly validated scenario, never raw JSON — map ordering
@@ -242,13 +312,20 @@ surface. Both cannot hold: `POST /api/v1/projects/{id}/monitors/test` builds an 
 generation-1 job (`internal/dispatch/amqp.go`), so the credential crosses the broker in cleartext. The
 `CredentialedType` branch beside it does not apply, because synthetic is not a credentialed type.
 
-The contract, chosen rather than left open: an unsaved synthetic test carrying DECLARED bindings runs
-through the same authoritative materialization the saved path uses — project-scoped refs resolved
-server-side, the envelope built, no plaintext in the payload — and a LITERAL in any secret-capable
-location is refused with a typed response naming the location. Nothing about this path may accept a
-literal "just to test it", and no broker or pull payload from it may contain one. Where the
-materialization cannot run at all (no key, per §10), the response is the typed refusal, not a
-best-effort test.
+**The contract as BUILT is the opposite half of the same fail-closed rule: a scenario carrying declared
+bindings is NOT testable before it is saved,** and the 400 names the binding and says why ("save the
+monitor before testing it: the secret binding <name> is resolved from the project inventory at
+dispatch, and this path has no envelope to carry it"). Revision 3 promised authoritative materialization
+here instead; both are defensible, and this one was chosen because the test path builds an UNSAVED
+monitor with no id, no execution revision and no stored refs, so "the same materialization the saved
+path uses" would have meant a second, parallel resolution path — new code on the exact surface whose
+job is to fail closed. A literal is refused here by the same `Monitor.Validate` call every other
+surface makes, and a credential-free scenario still tests unchanged. In the SPA this reads as: build
+and test the journey, add the binding, save, and the saved monitor's next scheduled run carries the
+envelope. `TestSyntheticTestBeforeSaveFailsClosed` pins both halves.
+
+Nothing about this path may accept a literal "just to test it", and no broker or pull payload from it
+may contain one.
 
 ## 4. What must move WITH the implementation, not after it
 
@@ -266,9 +343,14 @@ best-effort test.
 Stages 0 and 1: **no migration.** The scenario stays in `monitors.config`; only its value's form changes
 (ciphertext), and `secret.Cipher` output is self-describing, which is what makes the backfill idempotent.
 
-Stage 2: **no new table.** `monitor_secret_refs` already keys by `setting_key`, so a scoped key
-(`scenario.secret.<binding>`) fits without DDL. Whether the per-binding envelope needs a shape change in
-the dispatch payload is a stage-2 design question, not a schema one.
+Stage 2: **no new table and no new column.** `monitor_secret_refs` keys by `setting_key`, and the key
+stored there is the ordinary flat `scenario_secret_<binding>_ref` — the same shape as `password_ref`,
+which is why nothing in rename, delete or rotation needed changing. The dispatch payload needed no shape
+change either: one envelope FIELD per binding, named `scenario_secret_<binding>` by
+`domain.ScenarioBindingField`, inside the existing `credential_envelope`. What it did need is a
+GENERATION floor: a binding requires `EnvelopeV2` (carrier generation 3), because only V2 binds the
+body, and the materializer answers `carrier_too_old` per monitor rather than issuing a job that looks
+protected and is not.
 
 ## 6. Acceptance invariants (FR-028)
 
@@ -291,21 +373,28 @@ the dispatch payload is a stage-2 design question, not a schema one.
    readable and every synthetic monitor still executes.
 9. A synthetic monitor still runs under envelope mode: the execution reader supplies the scenario to the
    job, and the probe behaves as it did.
-10. Stage 2: a literal in any secret-capable location is refused on every write surface, naming the
-    location; a binding may resolve only into a permitted location, and never into a URL or query.
-11. Stage 2: the execution digest is over the canonical descriptor of D8a, and it changes when the
-    scenario's structure changes, when a binding is renamed, and when a binding MOVES — including
-    between duplicate or case-aliased header keys and between two occurrences in one body. A valid
-    envelope with a relocated placeholder fails the gate before any request is made, and duplicate
-    header keys are refused case-insensitively at validation rather than resolved by precedence.
-12. Stage 2: a bundle or API write naming an unknown or foreign binding is refused, and deleting a
-    referenced secret is refused by the same tenant-safe rule that protects `password_ref` today.
-13. Stage 2: renaming a referenced inventory secret succeeds and rewrites the binding inside the
-    scenario, in the rename's own transaction; a binding whose stored ref name does not match fails the
-    rename, exactly as a flat `*_ref` mismatch does today (D6a).
-14. Stage 2: an unsaved synthetic test with declared bindings runs with a server-resolved envelope and
-    no plaintext in any payload; one carrying a literal is refused with a typed response naming the
-    location (D10).
+10. Stage 2: a header whose NAME is in the secret-capable set carries exactly one
+    `{{secret:<binding>}}` and nothing else, on every write surface, and the refusal names the step and
+    the header; no placeholder resolves into a URL or query string; a placeholder naming an undeclared
+    binding, a declared binding nobody uses, and a ref key that does not parse are each refused by
+    name. What this invariant does NOT claim is in D7: a literal in an unlisted header or in a body is
+    not detectable and is not refused.
+11. Stage 2: the execution digest covers the stored scenario bytes and the declared ref keys, so a
+    valid envelope with a relocated placeholder, a rewritten URL or an altered literal fails the AEAD
+    before any request is made. Duplicate header keys are refused case-insensitively at validation
+    rather than resolved by precedence, and a secret-capable header may hold nothing but the
+    placeholder — the two cases bytes alone cannot separate (D8a as superseded).
+12. Stage 2: a write naming an unknown or foreign binding is refused, and deleting a referenced secret
+    is refused by the same tenant-safe rule and the same count that protects `password_ref` today.
+13. Stage 2: renaming a referenced inventory secret re-points the flat ref key and leaves the scenario
+    byte-identical, on the existing rename path with no scenario-aware code; rotating the referenced
+    secret's value needs no monitor edit (D6, D6a withdrawn).
+14. Stage 2: an unsaved synthetic test carrying declared bindings is refused with a 400 naming the
+    binding and saying why; a literal is refused there by the same rule as on a save; a
+    credential-free scenario still tests (D10 as built).
+15. Stage 2: a `scenario_secret_*` reference is refused on every non-synthetic type at the write
+    boundary, contributes no `monitor_secret_refs` row, no envelope field and no execution key, and a
+    crafted job carrying one on such a type is refused by the dispatch gate before the AEAD (D6b).
 
 ## 7. Required test matrix (written before the code)
 
@@ -342,17 +431,32 @@ the NEXT url, which is the case a naive fix misses. `http status` is asserted on
 classification; a non-2xx is an assert-shaped outcome today and the matrix says which it is rather than
 assuming.
 
-*Stage 2, rename (party round 2):* renaming a referenced secret rewrites the binding inside the
-encrypted scenario and leaves the ref row consistent · a scenario whose binding does not carry the old
-name fails the rename rather than being skipped · a rename concurrent with a monitor edit resolves by
-the same compare-and-set rule as `password_ref` · rotation of the referenced secret needs no monitor
-edit.
+*Stage 2, rename and the ordinary ref path (party round 2, as built):*
+`TestScenarioBindingRidesTheOrdinaryRefPath` — a live-DB test that renames a bound secret and asserts
+the flat ref key is re-pointed while the scenario stays byte-identical, that the delete guard counts the
+binding (`SecretInUseError{Count: 1}`), and that rotating the value needs no monitor edit. The row that
+demanded a scenario-aware repoint is gone with D6a; this test is what makes its absence a claim rather
+than an omission.
 
-*Stage 2:* the exact binding set the gate expects, per scenario · an unknown binding, a foreign one, a
-literal in a header, in a body, in an assert value and in a URL — each refused, each naming the
-location · a tampered carrier that relocates a placeholder fails before any HTTP request · a broker and
-pull payload searched for the secret value · a missing or malformed envelope fails closed · deleting a
-referenced secret refused · rotation of a referenced secret picked up without editing the monitor.
+*Stage 2, declaration and refusals:* `TestScenarioBindingsAcceptsTheDeclaredShape` (a header and a body
+use, with the LOCATION recorded per use) · `TestScenarioBindingsRefusals` (undeclared binding, literal
+in a secret-capable header, placeholder in a URL, duplicate header keys case-insensitively, declared
+and unused, the binding cap) · `TestMalformedBindingReferenceIsRefusedByName` (a typo'd ref key was
+silently ignored, which is a binding the operator believes they declared).
+
+*Stage 2, the type boundary (round 5):* `TestScenarioBindingIsRefusedOnEveryNonSyntheticType` (http,
+tcp, postgres and promql each refused, and neither derived set treats the key as a credential) ·
+`TestScenarioBindingIsRefusedOnANonSyntheticMonitorAPI` (400 from the create surface, naming the key) ·
+`TestScenarioRefsAreContributedBySyntheticMonitorsOnly` (no ref row, `password_ref` untouched) ·
+`TestScenarioBindingOnANonSyntheticTypeIsRefused` (the dispatch gate refuses a crafted carrier before
+the AEAD).
+
+*Stage 2, execution:* `TestScenarioBindingIsSubstitutedIntoTheScenario` (substituted into the document,
+JSON-escaped, no copy beside it, still parseable, and dropped by cleanup) ·
+`TestScenarioBindingGateFailsClosed` (no envelope · generation-1 carrier · an envelope that does not
+bind the body · a RELOCATED placeholder under a valid envelope · an envelope field the scenario does not
+use) · `TestSyntheticTestBeforeSaveFailsClosed` (the D10 refusal names the binding; a literal is refused
+without echoing it) · `TestSyntheticScenarioIsWriterOnly` (a viewer receives no scenario).
 
 ## 8. Threat model
 

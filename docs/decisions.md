@@ -5589,3 +5589,55 @@ outage. Stage 0 ships with this record; stages 1 and 2 are specified and unbuilt
 type-wide rather than synthetic-only, because the same defect was reproduced on an ordinary `http`
 monitor and on `promql`: `net/http` embeds the request URL in every error, so `Msg: err.Error()`
 published whatever the target's query carried.
+
+### Addendum — stage 2 as built, and the two things review caught in it (2026-09-02)
+
+Stage 2 shipped: a credential inside a scenario is a NAMED BINDING, declared as
+`{{secret:<binding>}}` in the document with the inventory secret's name in a FLAT config key,
+`scenario_secret_<binding>_ref`. The flat key is the decision. The design the reviewer approved put the
+reference in a scoped `setting_key` and, because `repointSecretRefs` looks a ref up in the flat config,
+that shape made every inventory rename in a project fail as soon as one synthetic monitor used it —
+BLOCKER 1 of round 2, which demanded a scenario-aware repoint inside the rename transaction. Under the
+flat key there is nothing to repoint specially: rename, delete counting and rotation run on the path
+`password_ref` already runs on, and `TestScenarioBindingRidesTheOrdinaryRefPath` proves it on a live
+database instead of asserting it. D6a is withdrawn, and the code it asked for does not exist.
+
+**Two beliefs of mine that tests disproved, both worth recording because the reasoning sounded right.**
+I argued the execution digest already covered the scenario, so a relocated placeholder could not
+survive; it covers the keys of a credential SCHEMA, and synthetic has none, so an attacker holding a
+valid envelope could rewrite a step's URL and have the credential delivered wherever they chose. The
+scenario and its ref keys became EXECUTION BINDING KEYS, which puts the stored bytes under
+`EnvelopeV2`'s body digest — the property D8a's canonical descriptor was for, without the descriptor.
+That exposed the second: only V2 binds the body, so a binding REQUIRES a body-bound envelope, and on an
+older carrier the materializer answers `carrier_too_old` per monitor rather than issuing a job that
+looks protected and is not.
+
+**D7 is narrowed to what it can enforce, and FR-028 no longer claims more.** A literal secret is not
+detectable by shape, so the rule is the header-NAME rule: a header in the finite secret-capable set must
+be exactly one placeholder. A credential in an unlisted header or in a body stays legal — encrypted at
+rest by stage 1, withheld from viewers, kept out of probe results by stage 0 — and the spec, the status
+row and this record all say so. The stronger property needs a restrictive typed request model for the
+scenario, which is an owner's decision and separate work; a heuristic over VALUES is not on the table.
+
+**D10 flipped, and the spec follows the code.** The approved text promised that an unsaved synthetic
+test would run through the same authoritative materialization the saved path uses. As built it is
+refused instead — "save the monitor before testing it", naming the binding — because that endpoint
+builds an unsaved monitor with no id, no execution revision and no stored refs, so honouring the
+promise meant a second resolution path on the one surface whose job is to fail closed.
+
+**D6b, the P0 review found in the SHIPPED code (round 5).** Every helper matched the
+`scenario_secret_` prefix and none asked the monitor TYPE, so the key was accepted on an http monitor —
+where it wrote a `monitor_secret_refs` row, added an expected envelope field, joined the execution
+digest and raised the carrier generation the dispatch gate demanded. No credential escaped: every step
+fails closed and the value never left the core. What broke is availability, and it broke at DISPATCH for
+a config the write surface had accepted — the shape of failure the owner's blast-radius ruling exists to
+prevent. The type is now decided once, at the write boundary, and gated in three more places so no
+single fix is load-bearing. The dispatch gate refuses rather than ignores such a job; that is safe to
+add only because stage 2 has never been released.
+
+**What is still not done, stated in the status row rather than implied by silence:** the SPA cannot
+declare a binding, so the feature is reachable through the API and not through the editor, and a
+synthetic monitor still cannot live in a Monitoring-as-Code bundle (D9). And the release that first
+carries stage 2 owes two breaking-change notes: URL userinfo is refused on every write surface, and a
+synthetic monitor whose `authorization`-class header holds a literal now fails validation on its next
+write (it keeps probing; nothing re-validates on read).

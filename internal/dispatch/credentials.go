@@ -308,8 +308,19 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 	// credential SCHEMA. Without this the envelope built for a synthetic monitor would be
 	// rejected as "on a schema that forbids one", which is how a security mechanism turns
 	// into an outage.
-	scenarioBindings := domain.ScenarioSecretRefKeys(job.Monitor.Config)
-	if len(scenarioBindings) > 0 {
+	var scenarioBindings []string
+	if refs := domain.ScenarioSecretRefKeys(job.Monitor.Config); len(refs) > 0 {
+		// Only a synthetic monitor has a scenario for a binding to land in. Domain
+		// validation refuses the key on every other type, and stage 2 has never been
+		// released, so a job that carries one here was not written by this product's write
+		// path: it is a crafted carrier, and it is refused rather than ignored. Ignoring
+		// would be defensible on availability grounds — the key holds a secret NAME, not a
+		// value, and with the type gates above it can no longer smuggle an envelope field —
+		// but a config the core would never have stored is not a config to execute.
+		if job.Monitor.Type != domain.MonitorSynthetic {
+			return Materialized{}, fmt.Errorf("dispatch: %s monitor carries a scenario secret binding", job.Monitor.Type)
+		}
+		scenarioBindings = refs
 		requirement = domain.CredentialRequired
 	}
 	if requirement != domain.CredentialRequired {

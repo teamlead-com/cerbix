@@ -130,7 +130,13 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 			byID[m.ID] = entry
 			continue
 		}
-		scenarioRefKeys := domain.ScenarioSecretRefKeys(stored)
+		// Synthetic only. A ref key on any other type is inert here by construction, so a
+		// row written before domain validation refused it cannot pull that monitor onto the
+		// credential path (review of stage 2).
+		var scenarioRefKeys []string
+		if m.Type == domain.MonitorSynthetic {
+			scenarioRefKeys = domain.ScenarioSecretRefKeys(stored)
+		}
 		// A monitor with neither a credential schema nor a scenario binding carries no
 		// envelope at all, exactly as before (FR-028 stage 2 adds the second half of this
 		// condition and nothing else to the ordinary path).

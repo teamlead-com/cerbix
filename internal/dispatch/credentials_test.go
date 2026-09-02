@@ -454,3 +454,29 @@ func TestScenarioBindingGateFailsClosed(t *testing.T) {
 		}
 	})
 }
+
+// A scenario binding on a type that has no scenario is a job this product's write path
+// cannot produce: domain validation refuses the key everywhere else. The gate refuses it
+// rather than ignoring it, and refuses BEFORE the AEAD, so a crafted carrier cannot use the
+// key to change which envelope contract applies.
+func TestScenarioBindingOnANonSyntheticTypeIsRefused(t *testing.T) {
+	ring := credentialTestRing(t)
+	monitor := domain.Monitor{
+		ID: "66666666-6666-6666-6666-666666666666", Region: "core", ExecutionRevision: 1,
+		Type: domain.MonitorHTTP, Target: "https://api.internal/health",
+		Config: map[string]string{domain.ScenarioSecretRefKey("login"): "login-token"},
+	}
+	job := CheckJob{Monitor: monitor, ProtocolVersion: ProtocolV2}
+	_, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2})
+	if err == nil {
+		t.Fatal("an http monitor carrying a scenario binding must be refused")
+	}
+	if !strings.Contains(err.Error(), "scenario secret binding") {
+		t.Fatalf("the refusal must say what it refused, got %v", err)
+	}
+	// And the derived sets no longer treat the key as a credential, which is what let the
+	// key raise the carrier generation an ordinary http monitor demanded.
+	if fields, _ := domain.ExpectedCredentialFields(domain.MonitorHTTP, monitor.Config); len(fields) > 0 {
+		t.Fatalf("expected fields for an http monitor with no credential = %v, want none", fields)
+	}
+}

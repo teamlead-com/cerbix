@@ -119,6 +119,16 @@ type ScenarioBindingUse struct {
 //   - duplicate header keys are refused case-insensitively, because two keys differing only
 //     in case are one location and the digest could not tell them apart.
 func ScenarioBindings(sc Scenario, config map[string]string) ([]ScenarioBindingUse, error) {
+	// A key that LOOKS like a ref key and does not parse is a typo, and a typo silently
+	// ignored is a binding the operator believes they declared. Refuse it by name.
+	for key := range config {
+		if !strings.HasPrefix(key, scenarioSecretPrefix) || !strings.HasSuffix(key, scenarioSecretSuffix) {
+			continue
+		}
+		if _, ok := ScenarioBindingFromRefKey(key); !ok {
+			return nil, fmt.Errorf("scenario: %q is not a valid binding reference; a binding name is %s", key, bindingNameRe.String())
+		}
+	}
 	declared := map[string]bool{}
 	for _, key := range ScenarioSecretRefKeys(config) {
 		name, _ := ScenarioBindingFromRefKey(key)

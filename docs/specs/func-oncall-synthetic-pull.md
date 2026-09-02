@@ -107,11 +107,15 @@ new genre.
 **FR**
 - **FR-SYN-1** — Type `synthetic`: a scenario of steps with extract/assert; Normalize/Validate in `domain`;
   the scenario/secrets in `config` (encryption like the other types).
-  **FALSE OF THE CODE since it was written, corrected by FR-028 (D-0216):** only `config["password"]` is
-  encrypted and rotation covers only that set, so a scenario's secrets are cleartext at rest and are
-  returned to any principal who may read the monitor. Stage 1 of
-  [`sec-synthetic-secrets.md`](sec-synthetic-secrets.md) makes this sentence true; until it lands, the
-  sentence describes an intention.
+  **This sentence was FALSE OF THE CODE from the day it was written until 2026-09-02, and is now true
+  (FR-028 stage 1, D-0216).** Only `config["password"]` was encrypted and rotation covered only that
+  set, so a scenario's secrets were cleartext at rest and were returned to any principal who could read
+  the monitor. `sec-synthetic-secrets.md` stage 1 made the scenario ciphertext at rest, covered by
+  rotation and by an idempotent startup backfill, and withheld from a principal who cannot write the
+  monitor; stage 2 made a DECLARED credential a named binding resolved from the project inventory. What
+  the sentence still does not promise: an undeclared literal in a header nobody would call a credential
+  header, or in a body, is not detectable and is not refused — it is protected by encryption and read
+  scoping only (FR-028 D7).
 - **FR-SYN-2** — A synthetic probe yields a single `Heartbeat` (up/down + the latency of the whole scenario +
   a msg with the failed step/assert). The monitor's conditions are applied on top (as today).
 - **FR-SYN-3** — Synthetic executes on a regular worker, including geo (region-aware, like all Active).
@@ -128,6 +132,10 @@ new genre.
 - **AC-SYN-1** — Scenario round-trip; multi-step with extract→substitution passes against a stub server
   (up), an assert failure → down with the step indicated (unit + httptest).
 - **AC-SYN-2** — A synthetic monitor in `region=geo1` is executed by a geo worker (reuses the geo E2E).
+  **NOT DISCHARGED, recorded 2026-09-02:** no E2E spec mentions `synthetic` at all, so there is nothing
+  for this criterion to reuse. Region affinity holds by construction — `synthetic` is an ordinary prober
+  registry entry with no region rule of its own — and that is an argument, not evidence. The row in
+  `docs/status.md` for FR-SYN-3 says the same rather than implying coverage.
 
 ### B.3 Affected files (guideline)
 `domain/monitor.go` (type `synthetic` + Active/NeedsTarget), `domain/synthetic.go` (step/extract/assert

@@ -126,6 +126,13 @@ These are named in specs as follow-up REQUIREMENTS rather than non-goals. None i
   monitors keep running, because nothing re-validates on read. **And a second one from FR-028 stage 2:**
   a synthetic monitor whose `authorization`-class header holds a LITERAL now fails validation on its
   next write — it keeps probing, and the refusal names the step and the header.
+- **A load-dependent flake in FR-024's gate maintenance** —
+  `TestGateMaintCrashAfterEveryRemovalStatementConverges/after_drop.commit` fails as `crashed=false
+  err=<nil>`: the crash injected after the drop's commit does not fire. Reproduced 2 of 5 runs with the
+  machine under a competing docker build, 12 of 12 clean when idle, and reproduced at `b3c99b6` in a
+  clean worktree — so it predates iter-0166 and is not caused by FR-028. It is a red CI gate under load
+  and it has no owner yet; whoever takes it should start from whether the crash hook's statement
+  boundary is what the pass actually executes when the purge is due at once (`PurgeEvery = 0`).
 - **The living documents** — `make docs-check` is the only mechanical guard; the failure it cannot
   catch is prose that is true of nothing, which is what the FR-025 closing arc kept finding.
 

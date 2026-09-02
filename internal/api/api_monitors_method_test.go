@@ -495,3 +495,27 @@ func TestSyntheticTestBeforeSaveFailsClosed(t *testing.T) {
 		t.Fatalf("a credential-free synthetic scenario must still be testable: %d (%s)", rec.Code, rec.Body.String())
 	}
 }
+
+// The write surface, not just the domain rule: a create carrying a scenario binding on a
+// type with no scenario must be refused with 400 naming the key. Before the fix it was
+// accepted here, and the monitor then failed at dispatch — a failure delivered to whoever
+// was on call rather than to the person who typed it.
+func TestScenarioBindingIsRefusedOnANonSyntheticMonitorAPI(t *testing.T) {
+	h := api.New(seededStore(), slog.New(slog.NewTextHandler(io.Discard, nil)), 8).Router()
+
+	payload, err := json.Marshal(map[string]any{
+		"name": "api", "type": "http", "target": "https://api.internal/health",
+		"interval_seconds": 60, "timeout_seconds": 10,
+		"config": map[string]string{"scenario_secret_login_ref": "login-token"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors", string(payload))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("an http monitor with a scenario binding must be refused: %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "scenario_secret_login_ref") {
+		t.Fatalf("the refusal must name the key: %s", rec.Body.String())
+	}
+}

@@ -346,7 +346,7 @@ func ExpectedCredentialFields(typ MonitorType, settings map[string]string) ([]st
 	// two synthetic monitors legitimately carry different bindings. The executor's structural
 	// gate compares against this, so the set the materializer builds and the set the gate
 	// expects come from one function.
-	scenario := scenarioExpectedFields(settings)
+	scenario := scenarioExpectedFields(typ, settings)
 	if !CredentialedType(typ) {
 		if len(scenario) > 0 {
 			return scenario, nil
@@ -368,8 +368,15 @@ func ExpectedCredentialFields(typ MonitorType, settings map[string]string) ([]st
 	return out, nil
 }
 
-// scenarioExpectedFields names one envelope field per declared scenario binding.
-func scenarioExpectedFields(settings map[string]string) []string {
+// scenarioExpectedFields names one envelope field per declared scenario binding — for a
+// SYNTHETIC monitor and no other type. The type gate is the fix for a defect the review
+// caught in the shipped stage 2: keyed on the prefix alone, a `scenario_secret_x_ref` key
+// on an http monitor made this function demand an envelope field that nothing would ever
+// substitute.
+func scenarioExpectedFields(typ MonitorType, settings map[string]string) []string {
+	if typ != MonitorSynthetic {
+		return nil
+	}
 	var out []string
 	for _, key := range ScenarioSecretRefKeys(settings) {
 		if strings.TrimSpace(settings[key]) == "" {
@@ -411,7 +418,7 @@ func ExecutionBindingKeys(typ MonitorType, settings map[string]string) ([]string
 	// a placeholder into a request of their choosing and the AEAD still opens; a test asserts
 	// exactly that relocation, and it failed before this line existed. The ref keys join too,
 	// so renaming which inventory secret fills a binding is a different execution.
-	scenarioKeys := scenarioExecutionKeys(settings)
+	scenarioKeys := scenarioExecutionKeys(typ, settings)
 	if !CredentialedType(typ) {
 		if len(scenarioKeys) > 0 {
 			return scenarioKeys, nil
@@ -435,7 +442,10 @@ func ExecutionBindingKeys(typ MonitorType, settings map[string]string) ([]string
 
 // scenarioExecutionKeys is the scenario plus its ref keys, when the monitor declares any
 // binding. A monitor with no binding keeps the digest it had.
-func scenarioExecutionKeys(settings map[string]string) []string {
+func scenarioExecutionKeys(typ MonitorType, settings map[string]string) []string {
+	if typ != MonitorSynthetic {
+		return nil
+	}
 	refs := ScenarioSecretRefKeys(settings)
 	if len(refs) == 0 {
 		return nil

@@ -66,9 +66,14 @@ func monitorRefSettings(m domain.Monitor) map[string]string {
 			}
 		}
 	}
-	for _, key := range domain.ScenarioSecretRefKeys(m.Config) {
-		if name := strings.TrimSpace(m.Config[key]); name != "" {
-			refs[key] = name
+	// Synthetic only: the key means "scenario binding", and on any other type it means
+	// nothing at all. Domain validation refuses it there, and this gate keeps a row written
+	// before that rule existed from turning into a secret reference (review of stage 2).
+	if m.Type == domain.MonitorSynthetic {
+		for _, key := range domain.ScenarioSecretRefKeys(m.Config) {
+			if name := strings.TrimSpace(m.Config[key]); name != "" {
+				refs[key] = name
+			}
 		}
 	}
 	return refs
@@ -82,9 +87,6 @@ func (s *Store) monitorSecretBindings(ctx context.Context, tx pgx.Tx, projectID 
 	refs := monitorRefSettings(m)
 	if len(refs) == 0 {
 		return map[string]string{}, nil
-	}
-	if len(refs) == 0 {
-		return refs, nil
 	}
 	if !s.secretsEnabled {
 		return nil, ErrSecretsFeatureDisabled

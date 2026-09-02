@@ -4821,7 +4821,7 @@ components:
         conditions: { type: array, items: { type: string } }
         tags: { type: array, items: { type: string }, description: 'Free-form labels (env:prod, team:x) for filtering.' }
         region: { type: string, description: 'Worker-pool region that probes this monitor; default core. Composite monitors must be core.' }
-        config: { type: object, additionalProperties: { type: string }, description: 'Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}.' }
+        config: { type: object, additionalProperties: { type: string }, description: 'Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}; for synthetic: {scenario} plus one scenario_secret_<binding>_ref per credential, naming a project secret the scenario references as {{secret:<binding>}} — synthetic only, and refused on any other type. A credential-bearing header (authorization, cookie, x-api-key, ...) must hold exactly the placeholder, no placeholder may resolve into a URL, and a scenario carrying bindings is not testable before it is saved.' }
         enabled: { type: boolean }
         auto_incident: { type: boolean, description: 'When true, an incident opens automatically when this monitor goes down.' }
         escalation_policy_id: { type: string, description: 'On-call escalation policy for down alerts. Empty = flat notification to all linked channels.' }
@@ -4912,7 +4912,7 @@ components:
           example: ["[STATUS] == 200", "[RESPONSE_TIME] < 500"]
         tags: { type: array, items: { type: string }, description: 'Free-form labels (env:prod, team:x) for filtering.' }
         region: { type: string, description: 'Worker-pool region that probes this monitor; default core. Composite monitors must be core.' }
-        config: { type: object, additionalProperties: { type: string }, description: 'Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}.' }
+        config: { type: object, additionalProperties: { type: string }, description: 'Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}; for synthetic: {scenario} plus one scenario_secret_<binding>_ref per credential, naming a project secret the scenario references as {{secret:<binding>}} — synthetic only, and refused on any other type. A credential-bearing header (authorization, cookie, x-api-key, ...) must hold exactly the placeholder, no placeholder may resolve into a URL, and a scenario carrying bindings is not testable before it is saved.' }
         enabled: { type: boolean, default: true }
         auto_incident: { type: boolean, default: true, description: 'Open an incident automatically when this monitor goes down.' }
         escalation_policy_id: { type: string, description: 'On-call escalation policy for down alerts (requires auto_incident). Empty = flat notification.' }
@@ -4936,7 +4936,7 @@ components:
         conditions: { type: array, items: { type: string } }
         tags: { type: array, items: { type: string }, description: 'Free-form labels (env:prod, team:x) for filtering.' }
         region: { type: string, description: 'Worker-pool region that probes this monitor; default core. Composite monitors must be core.' }
-        config: { type: object, additionalProperties: { type: string }, description: 'Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}.' }
+        config: { type: object, additionalProperties: { type: string }, description: 'Per-type config; for composite: {children:"id1,id2", mode:"all|any"}; for promql: {query, and with auth_mode:"basic" also username + password|password_ref}; for synthetic: {scenario} plus one scenario_secret_<binding>_ref per credential, naming a project secret the scenario references as {{secret:<binding>}} — synthetic only, and refused on any other type. A credential-bearing header (authorization, cookie, x-api-key, ...) must hold exactly the placeholder, no placeholder may resolve into a URL, and a scenario carrying bindings is not testable before it is saved.' }
         enabled: { type: boolean }
         auto_incident: { type: boolean }
         escalation_policy_id: { type: string }

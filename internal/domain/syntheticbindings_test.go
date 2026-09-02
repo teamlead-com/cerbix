@@ -136,3 +136,59 @@ func TestScenarioSecretRefKeyRoundTrip(t *testing.T) {
 		t.Fatalf("ref keys = %v, want the two scenario ones sorted", keys)
 	}
 }
+
+// A scenario binding belongs to a SYNTHETIC monitor and to no other type. Found in review
+// of the shipped stage 2: every helper acted on the key PREFIX alone, so an HTTP monitor
+// could save `scenario_secret_x_ref`, and from there the key changed what the store wrote
+// into monitor_secret_refs, what the materializer built, and which carrier the dispatch gate
+// demanded — until the executor failed on a scenario that does not exist. Nothing leaked:
+// every step fails closed. What broke is the monitor, at dispatch time, for a config the
+// write surface had accepted. The rule is now decided once, at the write boundary.
+func TestScenarioBindingIsRefusedOnEveryNonSyntheticType(t *testing.T) {
+	for _, typ := range []MonitorType{MonitorHTTP, MonitorTCP, MonitorPostgres, MonitorPromQL} {
+		m := Monitor{Name: "api", ProjectID: "p", Type: typ, Target: "https://x",
+			IntervalSeconds: 60, TimeoutSeconds: 10,
+			Config: map[string]string{ScenarioSecretRefKey("login"): "login-token"}}
+		err := m.Validate()
+		if err == nil {
+			t.Fatalf("%s accepted a scenario secret binding", typ)
+		}
+		if !strings.Contains(err.Error(), "scenario_secret_login_ref") {
+			t.Fatalf("%s: refusal must name the key, got %v", typ, err)
+		}
+		// And the two derived sets must not treat the key as a credential either: a crafted
+		// job carrying it must not be able to demand an envelope field or shift the digest.
+		cfg := m.Config
+		fields, ferr := ExpectedCredentialFields(typ, cfg)
+		for _, f := range fields {
+			if _, ok := ScenarioBindingFromField(f); ok {
+				t.Fatalf("%s: expected fields carry a scenario binding %q (err=%v)", typ, f, ferr)
+			}
+		}
+		keys, kerr := ExecutionBindingKeys(typ, cfg)
+		for _, k := range keys {
+			if k == SyntheticScenarioKey {
+				t.Fatalf("%s: execution keys carry the scenario (err=%v)", typ, kerr)
+			}
+			if _, ok := ScenarioBindingFromRefKey(k); ok {
+				t.Fatalf("%s: execution keys carry a ref key %q (err=%v)", typ, k, kerr)
+			}
+		}
+	}
+}
+
+// A key that looks like a binding reference and does not parse used to be ignored in
+// silence, which means the operator declares a binding, sees no error, and the credential
+// is simply never wired.
+func TestMalformedBindingReferenceIsRefusedByName(t *testing.T) {
+	sc := scenarioOf(t, `[{"url":"https://api.internal/act","headers":{"x-api-key":"{{secret:login}}"}}]`)
+	cfg := map[string]string{
+		ScenarioSecretRefKey("login"): "login-token",
+		"scenario_secret_Login_ref":   "login-token", // capitalised: not the grammar
+	}
+	if _, e := ScenarioBindings(sc, cfg); e == nil {
+		t.Fatal("a malformed reference key must be refused")
+	} else if !strings.Contains(e.Error(), "scenario_secret_Login_ref") {
+		t.Fatalf("the refusal must name the key, got %v", e)
+	}
+}

@@ -210,3 +210,95 @@ func jsonQuote(s string) string {
 	b.WriteByte('"')
 	return b.String()
 }
+
+// monitorRefSettings is the single source of the ref keys that rename, rotation, deletion
+// and materialization all act on. A `scenario_secret_*` key means "scenario binding" and
+// only a synthetic monitor has a scenario, so on any other type it must contribute nothing
+// — otherwise the key writes a monitor_secret_refs row for a monitor that can never consume
+// it, and dispatch then refuses a monitor the write surface accepted.
+func TestScenarioRefsAreContributedBySyntheticMonitorsOnly(t *testing.T) {
+	cfg := map[string]string{
+		domain.ScenarioSecretRefKey("login"): "login-token",
+		"password_ref":                       "db-password",
+	}
+	synthetic := monitorRefSettings(domain.Monitor{Type: domain.MonitorSynthetic, Config: cfg})
+	if synthetic[domain.ScenarioSecretRefKey("login")] != "login-token" {
+		t.Fatalf("a synthetic monitor must contribute its binding refs, got %v", synthetic)
+	}
+	http := monitorRefSettings(domain.Monitor{Type: domain.MonitorHTTP, Config: cfg})
+	if _, ok := http[domain.ScenarioSecretRefKey("login")]; ok {
+		t.Fatalf("an http monitor must contribute no scenario refs, got %v", http)
+	}
+	// The credentialed half is untouched: postgres still contributes password_ref.
+	pg := monitorRefSettings(domain.Monitor{Type: domain.MonitorPostgres, Config: cfg})
+	if pg["password_ref"] != "db-password" {
+		t.Fatalf("password_ref must still be contributed, got %v", pg)
+	}
+	if _, ok := pg[domain.ScenarioSecretRefKey("login")]; ok {
+		t.Fatalf("postgres must contribute no scenario refs, got %v", pg)
+	}
+}
+
+// The architectural claim of stage 2, tested rather than argued: because the inventory NAME
+// sits in an ordinary flat config key, a scenario binding rides the paths `password_ref`
+// already rides — delete counting, rename repointing and rotation — with no scenario-aware
+// code anywhere. The review's BLOCKER 1 demanded a scenario-aware repoint for the scoped-key
+// design; this test is what says it is not needed, and it would fail the moment the ref
+// moved back inside the JSON.
+func TestScenarioBindingRidesTheOrdinaryRefPath(t *testing.T) {
+	st, ctx := secretsTestStore(t)
+	_, projID := secretsFixture(t, st, ctx, "acme", "api")
+	if _, err := st.CreateProjectSecret(ctx, testSecretActor, projID, "login-token", "v1"); err != nil {
+		t.Fatalf("create secret: %v", err)
+	}
+	scenario := `{"steps":[{"url":"https://api.internal/login","headers":{"authorization":"{{secret:login}}"}}]}`
+	m, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: projID, Name: "checkout journey", Type: domain.MonitorSynthetic,
+		IntervalSeconds: 60, TimeoutSeconds: 30, Enabled: true,
+		Config: map[string]string{
+			domain.SyntheticScenarioKey:          scenario,
+			domain.ScenarioSecretRefKey("login"): "login-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create synthetic monitor with a binding: %v", err)
+	}
+
+	// Delete counting sees the binding: the same tenant-safe guard that protects password_ref.
+	var inUse SecretInUseError
+	if err := st.DeleteProjectSecret(ctx, testSecretActor, projID, "login-token"); !errors.As(err, &inUse) || inUse.Count != 1 {
+		t.Fatalf("delete of a bound secret = %v, want SecretInUseError{Count: 1}", err)
+	}
+
+	// Rename repoints the flat key, and the scenario is not touched at all — the placeholder
+	// names the BINDING, which a rename does not change.
+	newName := "login-token-renamed"
+	_, _, repointed, err := st.UpdateProjectSecret(ctx, testSecretActor, projID, "login-token", &newName, nil)
+	if err != nil || repointed != 1 {
+		t.Fatalf("rename = (repointed %d, %v), want (1, nil)", repointed, err)
+	}
+	got, err := st.GetMonitorForWriter(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("writer read: %v", err)
+	}
+	if got.Config[domain.ScenarioSecretRefKey("login")] != newName {
+		t.Fatalf("binding ref = %q, want re-pointed to %q", got.Config[domain.ScenarioSecretRefKey("login")], newName)
+	}
+	if got.Config[domain.SyntheticScenarioKey] != scenario {
+		t.Fatalf("the rename rewrote the scenario:\n got %s\nwant %s", got.Config[domain.SyntheticScenarioKey], scenario)
+	}
+
+	// Rotation of the value needs no monitor edit: the monitor references a NAME.
+	value := "v2"
+	_, rotated, _, err := st.UpdateProjectSecret(ctx, testSecretActor, projID, newName, nil, &value)
+	if err != nil || !rotated {
+		t.Fatalf("rotate = (%v, %v), want (true, nil)", rotated, err)
+	}
+	after, err := st.GetMonitorForWriter(ctx, m.ID)
+	if err != nil {
+		t.Fatalf("writer read after rotation: %v", err)
+	}
+	if after.Config[domain.ScenarioSecretRefKey("login")] != newName || after.Config[domain.SyntheticScenarioKey] != scenario {
+		t.Fatalf("rotation changed the monitor: %+v", after.Config)
+	}
+}

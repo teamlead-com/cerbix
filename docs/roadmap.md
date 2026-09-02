@@ -18,9 +18,21 @@ design awaiting review.
 
 ---
 
-## 1. Now — the requirement that is already designed, then the sweep
+## 1. Now — the canary, then the requirement that is already designed, then the sweep
 
-**R2 — implement FR-026 / NFR-021 (incident audit).** The design is approved at revision 4 and the
+**R5 — the typed external canary (FR-029 / NFR-024).** The owner's decision on 2026-09-03: this goes
+first and R2/R3 wait. It is the largest single feature since FR-021 — a new monitor type
+(`async_canary`), one closed workflow kind (`async_transaction_v1`), capability-aware dispatch, a
+nested typed bundle schema, an embedded fixture registry, an in-flight lease, an idempotency contract
+and an SSRF policy — so it is SIX phases and not one iteration
+([`func-async-canary.md`](specs/func-async-canary.md), revision 1, in design review; D-0218).
+Two architecture rulings are already made and are what keep it from being a rewrite: it is a
+CAPABILITY of the existing `worker`/`agent` roles rather than a fifth role, and one probe stays one
+heartbeat rather than splitting submit from await. Phase A is the design; nothing is implementable
+until the spec is approved and §11's three owner questions are answered.
+
+**R2 — implement FR-026 / NFR-021 (incident audit).** *Deferred behind R5 by the owner, 2026-09-03 —
+written down so "designed and unbuilt" does not quietly become "forgotten".* The design is approved at revision 4 and the
 spec is the contract: `func-incident-audit.md`. It is the only requirement in the tree that is
 specified and unbuilt, and it closes the last item D-0171 left open. Its shape is small — no
 migration, no route, no read — but it carries two behaviour corrections (D8a, D8b) that need their own
@@ -38,11 +50,14 @@ spa-snapshot` read back afterwards. The `golang` bump is NOT what closed R1 — 
 in `go.mod`, which no dependabot branch touches; this one moves the image the container is built on,
 and it is worth its own verification for that reason.
 
-**Order.** R2 first: it is the only requirement in the tree that is specified and unbuilt, it is
-bounded, and it closes the last gap D-0171 left open. R3 second because it is interruptible — each
-branch is its own commit and the sweep can be paused between majors without leaving anything
-half-done. R4 is independent of both: it touches the logger and the deployment documents, nothing R2 or
-R3 own, and it cannot start until its design is approved.
+**Order — R5, then R2, then R3, with R4 independent of all three.** The owner set this on 2026-09-03,
+against my recommendation to take R3 first; recorded that way rather than smoothed over, so the cost
+is visible if it bites. What the cost is: four frontend MAJORS (TypeScript 7, Vite 8, vue-router 5,
+jsdom 30) stay unmerged across a multi-phase feature that touches the frontend last, so the sweep will
+land on a larger surface than it would today. What the benefit is: the canary is the only item here
+with a waiting external use case, and its design questions are answered while they are fresh. R4 is
+independent of all three — it touches the logger and the deployment documents — and cannot start until
+its own design is approved.
 
 **Retired from this section**, with what actually closed each — the labels stay put so the commits and
 review threads that name them keep resolving.

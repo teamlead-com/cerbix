@@ -5699,3 +5699,71 @@ they are in `docs/roadmap.md` beside the deferral so the mock is not designed fr
 `TestGateMaintCrashAfterEveryRemovalStatementConverges/after_drop.commit` (FR-024) fails under machine
 load, reproducing at `b3c99b6` in a clean worktree, so it predates this work. It is in the roadmap's
 standing work with a starting point.
+
+## D-0218 — a typed external canary, and the two architecture rulings that keep it from being a rewrite (2026-09-03)
+
+**Context.** The owner asked for an external canary that can run a controlled asynchronous API
+journey — submit, correlate, await a terminal result, assert — with Charla Files as the first use case:
+a multipart upload answered by `202` and a `task_id`, an SSE `task.completed`, and assertions on
+`s3_path`, `byte_size` and `media_type`. The brief was explicit about what it must NOT become: not a
+browser runner, not a queue consumer, not a webhook receiver, not shell execution, not a plugin host,
+and above all not `synthetic` widened into a workflow DSL.
+
+**Decision.** A new monitor type `async_canary` with exactly one workflow kind,
+`async_transaction_v1`, specified in [`func-async-canary.md`](specs/func-async-canary.md) as FR-029 /
+NFR-024. Nested typed schema with closed unions, no `settings` map, no JSON string, no expression
+language, no user-supplied code. Monitoring-as-Code first; the UI comes last and only as a typed form.
+
+**Why not extend `synthetic`, in one sentence that this project paid for two weeks ago.** `synthetic`
+is an untyped document, so every rule about it has to GUESS — and FR-028's D7 is the receipt: unable
+to detect a credential by value, it fell back to a rule about header NAMES, which then refused the
+ordinary canary login flow (extract a token, send it as `Authorization: Bearer {{token}}`) because it
+cannot tell a runtime value from a pasted secret. A schema does not guess: a field either takes a
+`secret_ref` or it does not. The same root gives three more properties for free — a bundle can carry
+the type at all (FR-028 D9's blocker was the flat settings map), the semantic hash becomes a statement
+about FIELDS rather than bytes, and every bound is a typed maximum checked at the write boundary
+instead of re-derived at execution time.
+
+**Ruling 1 — a capability, not a fifth role.** The brief asked for `cerbix serve --role canary`. It is
+refused: `worker` (AMQP) and `agent` (pull) are already DB-less executors with region registration,
+token auth, readiness and lifecycle, and a fifth role would duplicate all four to gain nothing. The
+capability negotiation this needs is not new either — the scheduler already asks a region what it can
+open and lowers the carrier generation when the answer is no; that generalizes from one number to a
+SET of `workflow_kind@version`, and `no_capable_runner` falls out of it rather than being invented.
+Running the canary on its own host stays a DEPLOYMENT decision (another `agent`, own flag, own egress),
+which is where isolation belongs.
+
+**Ruling 2 — one probe stays one heartbeat; the transaction does not outlive its job.** Splitting
+submit from await was considered and rejected, and the reason is the product's spine: the executor
+answers the job it was given, and the heartbeat it returns is the whole measurement — status,
+confirmations, SLI and alerting all rest on that. A split forces an in-flight transaction into CORE
+storage, which means storing exactly the values NFR-024 forbids storing (the correlation id, the result
+path); it glues latency from two jobs with two clocks; and it turns one failure mode into four. The
+price of the chosen shape is a delivery held open for the duration, and the specification pays it in
+four named places rather than discovering it later: a per-TYPE timeout ceiling (900 s) so the global
+300 s bound is untouched for everything else, a per-JOB pull lease instead of today's 60-second
+constant (a 10-minute await under a 60-second lease is a re-claim, which is a duplicate external
+submit), a separate AMQP queue per workflow kind because prefetch is 16 and sixteen canaries would
+starve a region's ordinary checks, and stage-level bounds inside the one probe so a hung submit fails
+as `submit`.
+
+**The boundary where ruling 2 stops being right, named now rather than discovered.** It holds while
+the completion bound is minutes. A journey measured in hours cannot hold a delivery, and the answer
+then is a different feature — asynchronous result ingest — not a larger number. 900 seconds is the
+type's hard ceiling for exactly that reason.
+
+**What is honestly half-guaranteed, stated because FR-028 taught the cost of implying more.** The
+executor sends a stable `Idempotency-Key` derived from the monitor and the SCHEDULED RUN — not the job
+id, so a redelivery, a re-claim after a lease expiry and a transport retry all carry the same key.
+Whether a second submit with that key creates a second external task is the TARGET's contract, not
+ours. If the target ignores the header, retries duplicate, and no design here prevents it.
+
+**Order.** The owner put this ahead of R2 (FR-026 incident audit, designed and unbuilt) and R3 (the
+dependency sweep, four frontend majors) on 2026-09-03, against the recommendation to take R3 first.
+Recorded in `docs/roadmap.md` with both the cost and the reason, so a later reader sees a decision
+rather than a drift.
+
+**Status.** Design revision 1, NOT approved: in review with the independent reviewer, with three owner
+questions open (§11 — the 900 s ceiling, whether a named external reaping policy is mandatory for
+`lifecycle_prefix`, and whether private-address targets stay refused with no override in v1). No
+requirement rows and no code until it is approved.

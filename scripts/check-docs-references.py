@@ -48,8 +48,13 @@ def read(path, **kw):
 # record: its RELEASE NOTES cite code paths a reader is expected to open, and it carried a
 # `backend/internal/...` path — a tree layout this repository has never had — for weeks precisely
 # because nothing checked it (found while cutting v0.1.5-beta.1).
+# `docs/roadmap.md` joined on 2026-09-03 (owner). It was outside the guard while being exactly the
+# kind of document the guard is for: it cites code paths and specs a reader is expected to open, it
+# is edited in place rather than superseded, and it had already carried three claims that had
+# stopped being true. Found while mutation-testing the checker — an injected broken citation there
+# was not caught, because the file was never read.
 LIVING = ['docs/status.md', 'docs/traceability.md', 'docs/overview.md', 'docs/runbook.md',
-          'docs/project-description.md', 'README.md', 'CLAUDE.md',
+          'docs/project-description.md', 'docs/roadmap.md', 'README.md', 'CLAUDE.md',
           'CHANGELOG.md'] + sorted(glob.glob('docs/specs/*.md'))
 
 ALLOWED = {
@@ -90,11 +95,74 @@ def excused(line, end):
     """
     return GONE_RE.search(line[max(0, end - 60):end + 160]) is not None
 
+# Directories that hold no citable source and are enormous: walking them for every citation is
+# what made this checker take 79 seconds on a developer's machine (measured 2026-09-03, with
+# `resolves` alone accounting for 47 s of it).
+PRUNED_DIRS = {'.git', 'node_modules', 'dist', 'test-results', '__pycache__', '.venv',
+               'playwright-report', '.pytest_cache'}
+
+_TREE = None
+
+def tree_index():
+    """Every citable path in the repo, indexed ONCE.
+
+    The old implementation ran `glob.glob('**/' + tok, recursive=True)` per citation — a full
+    recursive walk of the tree for each of ~1800 lookups. Same answers, one walk: a set of
+    repo-relative paths, plus a suffix map so a citation like `store/heartbeats.go` still
+    resolves the way a `**/` glob resolved it.
+    """
+    global _TREE
+    if _TREE is not None:
+        return _TREE
+    paths, suffixes = set(), {}
+    for root, dirs, files in os.walk('.'):
+        dirs[:] = [d for d in dirs if d not in PRUNED_DIRS]
+        for f in files:
+            rel = os.path.relpath(os.path.join(root, f), '.').replace(os.sep, '/')
+            paths.add(rel)
+            suffixes.setdefault(f, []).append(rel)
+    _TREE = (paths, suffixes)
+    return _TREE
+
 def resolves(tok):
     if os.path.exists(tok):
         return True
-    # docs cite paths by suffix ("store/heartbeats.go", "migrations/00039_x.sql")
-    return bool(glob.glob('**/' + tok, recursive=True))
+    # Docs cite paths RELATIVELY to their own directory (`../internal/store/monitors.go` from
+    # `docs/`), and by suffix (`store/heartbeats.go`, `migrations/00039_x.sql`). The `**/` glob
+    # this replaced happened to resolve both, because expanding `**/` past a `..` lands back at
+    # the root; the index has to strip the climb explicitly or every relative citation in
+    # `status.md` reads as broken — which is exactly what the first version of this function did.
+    cand = tok
+    while cand.startswith('../') or cand.startswith('./'):
+        cand = cand.split('/', 1)[1]
+    if os.path.exists(cand):
+        return True
+    paths, suffixes = tree_index()
+    if cand in paths:
+        return True
+    base = cand.rsplit('/', 1)[-1]
+    needle = '/' + cand
+    return any(p.endswith(needle) for p in suffixes.get(base, ()))
+
+_TEST_TOKENS = None
+
+def test_tokens(src):
+    r"""Every `Test…` identifier that appears anywhere in the source, collected ONCE.
+
+    The old check ran `re.search(r'\bfunc\s+' + name + r'\b', src)` per cited name over the
+    whole concatenated source — 60 of the checker's 79 seconds. A cited name is matched by
+    TEST_RE, so it is always a `Test[A-Za-z0-9_]{4,}` token, and membership in the token set
+    answers both halves of the old condition (declared as a func, or mentioned anywhere).
+
+    It is also STRICTER in one way, deliberately: the old `name in src` was a substring test, so
+    a doc citing `TestFoo` passed on the strength of an unrelated `TestFooBar` in the tree. The
+    token set does not do that, and a citation that only ever passed that way is a stale citation
+    this checker exists to catch.
+    """
+    global _TEST_TOKENS
+    if _TEST_TOKENS is None:
+        _TEST_TOKENS = set(re.findall(r'\bTest[A-Za-z0-9_]{3,}', src))
+    return _TEST_TOKENS
 
 def source_text():
     parts = []
@@ -497,7 +565,7 @@ def discharge_row_evidence(src, cell, n, label):
     names = re.findall(r'`(Test[A-Za-z0-9_]+)`', cell)
     if names:
         for name in names:
-            if not (re.search(r'\bfunc\s+' + re.escape(name) + r'\b', src) or name in src):
+            if name not in test_tokens(src):
                 bad.append((DISCHARGE_DOC, 0, 'discharge', f'{label} {n} cites missing {name}'))
     elif 'INSPECTION:' not in cell and 'spec.ts' not in cell:
         bad.append((DISCHARGE_DOC, 0, 'discharge',
@@ -565,7 +633,7 @@ def main():
                 if name in ALLOWED:
                     continue
                 # Go test, or a TS/Vue test title
-                if re.search(r'\bfunc\s+' + re.escape(name) + r'\b', src) or name in src:
+                if name in test_tokens(src):
                     continue
                 if excused(line, line.find(name) + len(name)):
                     continue

@@ -165,6 +165,11 @@ lint:
 ## never existed, and five renamed tests were cited by `docs/traceability.md` — evidence that reads
 ## as runnable and is not. Iteration reports, review snapshots and `docs/decisions.md` are excluded
 ## on purpose: they are immutable or historical, and a later rename does not make them wrong.
+## It runs in well under a second. It used to take 79, which is long enough that a developer
+## stops running it — and a guard nobody runs guards nothing. Two causes, both measured rather
+## than guessed (2026-09-03): one recursive `**/` glob PER citation (47 s) and one regex over the
+## whole concatenated source PER cited test name (60 s of the 107 s under a profiler). Both are
+## now single passes; if this creeps back, profile before optimising.
 docs-check:
 	python3 -m unittest -q scripts/check_docs_references_test.py
 	python3 scripts/check-docs-references.py

@@ -291,3 +291,36 @@ class DecisionsAreVocabularyGuarded(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResolutionAndTestTokens(unittest.TestCase):
+    """The two lookups that carried the checker's whole runtime (79 s → 0.3 s, 2026-09-03).
+
+    Both were rewritten from a per-citation scan to a single indexed pass, and both have a shape
+    that a speedup can silently break: the path index has to undo the `../` a doc writes because
+    it cites relative to its OWN directory, and the test-name set has to keep answering the
+    question the old substring test answered. The first of those broke in the first version of
+    the rewrite and reported 352 healthy citations as missing.
+    """
+
+    def test_a_path_cited_relative_to_the_docs_directory_resolves(self):
+        # `docs/status.md` cites the tree as `../internal/...`, which is the common case.
+        self.assertTrue(cdr.resolves("../internal/store/monitors.go"))
+        self.assertTrue(cdr.resolves("internal/store/monitors.go"))
+
+    def test_a_path_cited_by_suffix_resolves(self):
+        self.assertTrue(cdr.resolves("store/monitors.go"))
+
+    def test_a_path_that_does_not_exist_does_not_resolve(self):
+        self.assertFalse(cdr.resolves("internal/store/definitely_not_here.go"))
+        self.assertFalse(cdr.resolves("../internal/store/definitely_not_here.go"))
+
+    def test_a_declared_test_name_is_found(self):
+        self.assertIn("TestScenarioBindingsRefusals", cdr.test_tokens(cdr.source_text()))
+
+    def test_a_prefix_of_a_real_test_name_is_NOT_found(self):
+        # The old check was `name in src`, a substring test, so a doc citing `TestScenarioBinding`
+        # passed on the strength of `TestScenarioBindingsRefusals` existing. Verified against the
+        # pre-rewrite implementation before this test was written: it passed there, and a citation
+        # that only ever passed that way is exactly the stale evidence this checker exists to catch.
+        self.assertNotIn("TestScenarioBinding", cdr.test_tokens(cdr.source_text()))

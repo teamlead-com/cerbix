@@ -1,11 +1,17 @@
 # func-monitor-description — a monitor says what it is for (FR-030)
 
-> **Lifecycle: APPROVED DESIGN, implementation in progress (2026-09-03).** The owner asked for it in
+> **Lifecycle: IMPLEMENTED — built and closed at iter-0173 (2026-09-03).** The owner asked for it in
 > one paragraph: a stranger who opens the product cannot tell a monitor's purpose from its name, so a
 > monitor gets an optional description with a character limit, shown where monitors are listed, and
 > nothing about existing monitors may break. The mock `docs/design/mock-monitor-description.html` was
 > approved the same day with two answers: **the limit is 200 characters**, and **search does not match
-> on it**. Decision record: D-0234.
+> on it**. Decision record: D-0234; FR-030 is `DONE` in `docs/status.md` and discharged in the FR-030
+> row of `docs/traceability.md`.
+>
+> **One thing this document got wrong and now states correctly** (reviewer P1/P2, 2026-09-03): the
+> dashboard card does NOT keep a fixed height. A description adds at most one line to a grid row, and
+> the truthful bounded contract is in §3 D3 — kept, at the owner's decision, over reserving a line on
+> every card. §4's list is what MOVED with the implementation, all of it done.
 
 ## 1. What this is, in one paragraph
 
@@ -84,7 +90,7 @@ clears it); the 400 for an over-long value names the field.
 `monitor.update`); the description's TEXT never reaches the audit target — D13 of that amendment already
 forbids document contents there.
 
-## 4. What must move WITH the implementation
+## 4. What moved WITH the implementation (all done at iter-0173)
 
 - `openapi.yaml` and the regenerated `frontend/src/api/schema.d.ts`.
 - `docs/status.md` — the FR-030 row; `docs/traceability.md` — the FR-030 row; `docs/overview.md` — the
@@ -122,14 +128,16 @@ at the END, in that order, and the create and update statements gain it (the cha
    target; search does not match on it.
 7. A description change is audited as `monitor.update`.
 
-## 7. Required test matrix
+## 7. Required test matrix (written before the code; every line exists)
 
 - `internal/domain`: the bound at the edge and one past it, Latin and multibyte; trimming.
 - `internal/store`: round trip through create and update; pre-migration rows read back empty; the
   bundle apply sets, keeps and clears per invariant 5.
 - `internal/api`: 400 naming the field; omitted vs `""` on update.
 - `frontend`: a component test of the form counter and refusal state (`n / 200`, `--down`, disabled
-  Create); the list/card/detail render with and without a description, the card on one line.
+  Create) — `NewMonitorDescription.spec.ts`; the card's own geometry — `MonitorCardDescription.spec.ts`
+  (one line and never two, no element when empty, and the height delta measured as exactly one more
+  flex child); the published bound mirrored — `monitorBounds.spec.ts`.
 - `e2e/tests/monitors.spec.ts`: create with a description through the API, see it on `/monitors` and on
   the detail page; a monitor without one shows no description element.
 

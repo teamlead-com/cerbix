@@ -220,11 +220,10 @@ Mapping from requirements to code, tests, and metrics. Updated every iteration.
 ## FR-029 acceptance discharge — the fourteen invariants of `func-async-canary.md` §6
 
 Same instrument as the maps below: `make docs-check` resolves every `Test*` name cited here and compares this
-table's row set against §6 of the spec, both directions. One row is `PARTIAL —` and says what is missing rather
-than citing a test that does not reach it: invariant 13's audit-trail clause has no audit row for a monitor write
-to attach to, because incident audit is FR-026 and monitor audit is not in any requirement yet. Invariant 6 was the
-other one until iter-0171 (D-0231) built the announcement, its dispatch filter and the transport barrier that a
-filter alone is not. Invariant 12 is discharged by unit tests reaching a fixture through an INJECTED DIALER and by a
+table's row set against §6 of the spec, both directions. **No row is `PARTIAL —` any more.** Two were: invariant 6
+until iter-0171 (D-0231) built the announcement, its dispatch filter and the transport barrier that a filter alone
+is not; and invariant 13's audit-trail clause until iter-0172 (D-0233) gave a monitor write an audit row at all —
+it had none, for any type, and the clause had nothing to attach to. Invariant 12 is discharged by unit tests reaching a fixture through an INJECTED DIALER and by a
 live-stack E2E on the real path — never by a product option, because a flag that relaxes the policy is the
 policy's own bypass.
 

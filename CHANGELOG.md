@@ -8,20 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [v0.1.9] - 2026-09-03
 
-Three things in one release, in the order the owner set: a **typed external canary** for async API
-journeys, an **audit trail for incident writes**, and the **dependency sweep** that had been waiting
-behind both. The canary is the largest single feature since FR-021 and it ships **partly built** — five
-of its six phases — with what is missing named in the requirement rows, the specification's own banner,
-the acceptance map and the runbook, rather than left to be discovered. No breaking change. Three
-migrations, all additive.
+Four things in one release, in the order the owner set: a **typed external canary** for async API
+journeys, an **audit trail for writes that change something** — incidents and now monitors — the
+**dependency sweep** that had been waiting behind both, and one small improvement that came last, an
+**optional description on a monitor**. The canary is the largest single feature since FR-021 and it
+ships **complete**: all six phases, including the capability announcement and the typed UI form that an
+earlier draft of these notes listed as missing. No breaking change. Five migrations, all additive.
 
 ### ⚠️ Upgrade Notes
 
-- **Upgrade a region's executors BEFORE declaring a canary there.** Capability announcement is designed
-  and not yet built, so nothing filters a canary job away from an older `worker` or `agent` binary. An
-  executor that predates this release picks the job up and answers `unsupported monitor type
-  "async_canary"` — an ordinary DOWN, per monitor, that recovers by itself the moment the region runs a
-  current binary. No queue backs up and no other monitor is affected.
+- **The order of a canary rollout no longer matters.** A canary reaches only an executor that
+  ANNOUNCED it can run one, so declaring a canary before a region is upgraded is safe: the run is
+  refused with one bounded DOWN per attempt — `no_capable_runner` when nothing there announced a canary
+  runner, `capability_mismatch` when what is there speaks another version — and it starts working by
+  itself when the executors arrive. An earlier draft of these notes told you to upgrade the region
+  first; that instruction is retired, not merely relaxed.
+- **An AMQP `worker` older than this release never receives a canary at all.** Canaries ride their own
+  queue (`checks.canary.<kind>@<version>.<region>`), which only a current binary binds, and on the
+  HTTP-pull transport a job carries the capability it requires while a claim carries what the agent
+  declared. That is the point: in a mixed fleet the old executor cannot take a job it would fail.
 - **A repeated incident acknowledgement is now a genuine no-op.** It used to rewrite the incident's
   `updated_at` on every retry. The acknowledger and the instant stay the FIRST ones, and the
   modification time no longer moves. If anything of yours sorts incidents by `updated_at` and relied on
@@ -35,7 +40,7 @@ migrations, all additive.
 
 ### ✨ Added
 
-**A typed external canary for async API journeys (FR-029 / NFR-024, `IN_PROGRESS`)**
+**A typed external canary for async API journeys (FR-029 / NFR-024)**
 
 A new monitor type, `async_canary`, runs ONE asynchronous transaction end to end and reports it as an
 ordinary monitor: submit, take a correlation id, await a terminal outcome, assert the declared fields,
@@ -61,7 +66,8 @@ and a key the schema does not name refuses the whole bundle by name.
   through a product option. The executor also drops EVERY binding-backed header on a cross-host
   redirect, which `net/http` does not do: it strips `Authorization` and has never heard of `x-api-key`.
 - **One run per monitor, four per region**, decided by the scheduler at dispatch. A refused run writes
-  one ordinary DOWN with a bounded reason (`region_saturated`, `already_in_flight`) and the monitor's own
+  one ordinary DOWN with a bounded reason (`region_saturated`, `already_in_flight`, `no_capable_runner`,
+  `capability_mismatch`) and the monitor's own
   `failure_threshold` decides the flip, so the sample counts as unavailable in the SLI like any other
   DOWN. Every submit carries an `Idempotency-Key` derived from the monitor, its execution revision and
   the scheduled window — whether a second submit with that key creates a second task is the target's
@@ -71,10 +77,31 @@ and a key the schema does not name refuses the whole bundle by name.
 - **New metrics** `cerbix_canary_stage_total` and `cerbix_canary_dispatch_refused_total`, both
   low-cardinality and carrying no monitor id, URL or correlation id.
 
-**What is NOT in this release, and is named in `docs/status.md` rather than implied:** capability
-announcement with `no_capable_runner`; the typed UI form (phase F — the mock exists at
-`docs/design/mock-async-canary.html` and awaits visual approval); the per-workflow-kind AMQP queue. A
-canary is declared in a bundle or through the API today.
+**An executor receives a canary only if it announced it can run one** (the last of the six phases).
+The announcement is a set of `<kind>@<version>` tokens, and an executor makes it from the runner it
+actually has: a pull agent in its heartbeat and again on every claim, an AMQP worker by consuming
+`checks.canary.[v3.]<token>.<region>`, and `--role=all` by construction. The scheduler dispatches only
+into a region that announced the token the DOCUMENT needs, and a region that announced nothing gets
+`no_capable_runner` while a version skew gets `capability_mismatch` — two reasons because the fix
+differs: start a runner, or finish the upgrade. The filter is not treated as the whole barrier, for the
+reason the credential envelopes already established: a capability CHECK does not stop a consumer from
+consuming, so an incapable executor is made unable to RECEIVE the job — a queue it does not bind on
+AMQP, and a per-claim capability filter on the pull transport.
+
+**A canary is declared in the SPA, in a bundle, or through the API.** The typed form is typed only:
+no JSON editor on the create view or the read view, the five stages laid out as stages, bindings as
+stage 0, and every refusal met AT THE FIELD rather than as a 400 after Create. A saved canary reads
+back into the same form, with the binding halves recombined from the document's marker and the flat
+reference key's name.
+
+**A monitor says what it is for.** A monitor carries an optional `description` — plain text, at most
+200 characters counted as Unicode code points, so a Cyrillic sentence is as long as a Latin one to the
+person writing it. It appears under the name on the monitor list (one line, the whole text as its
+tooltip), as the beginning of a line on a dashboard panel, and in full on the monitor's own page; it is
+editable on the create and edit forms with a live count, and declarable in a Monitoring-as-Code bundle.
+Every monitor that exists reads back with an empty description and every surface renders exactly as it
+did — the absence of an element is asserted per surface, not assumed. It is deliberately absent from
+public status pages, notification payloads and search.
 
 ### 🔒 Security
 
@@ -104,6 +131,26 @@ said nothing.
   defect the requirement exists to prevent, because Alertmanager posts with a project-write token and a
   token is a principal.
 
+**And a monitor write says who wrote it, by the same rules**
+
+Creating, editing or deleting a monitor through the API or the SPA left no audit row either. It now
+writes exactly one, in the mutating transaction, with three words — `monitor.create`,
+`monitor.update`, `monitor.delete`.
+
+- **The target names the document and never its contents**: the monitor's id, slug, type and region;
+  `enabled true→false` when the write was a pause or a resume, because that is the edit an operator
+  asks about; and, for an async canary whose workflow declares `cleanup.kind: none` with
+  `acknowledged: true`, the clause `cleanup=none acknowledged` — which is what makes that
+  acknowledgement visible in the trail, as its requirement promised. No config value, credential
+  reference, target URL, scenario or workflow body appears in a target, for any type.
+- **What the row says is read from the row the writer HOLDS**, not from what the caller passed: the
+  `FOR UPDATE` statement for a delete, the returned row for an update. Independent review found the
+  first version taking a whole monitor from the caller — a concurrent edit could make the audited region
+  stale, and a careless caller could file the row under another project's organization. The delete door
+  takes an id now, so there is nowhere to put a foreign project.
+- **A monitor applied from a Monitoring-as-Code bundle writes no row**: it is a machine write, and its
+  record is the bundle. Deleting a project leaves the organization's trail intact.
+
 ### 🔧 Changed
 
 - **A pull monitor with a timeout past 30 seconds is no longer re-claimable mid-probe.** The agent's
@@ -113,6 +160,12 @@ said nothing.
 - `async_canary` joins the `monitors_type_check` database constraint. Every Go test passed while the
   real table refused the type, because no store test writes to it — a live E2E found it, and the type
   vocabulary is now asserted against the database itself so the next new type cannot repeat it.
+- **A red CI job now names the tests that failed**, as annotations the check-runs API serves without
+  repository-admin rights. Two failures that had been unreadable from outside turned out to be tests
+  measuring the MACHINE rather than the product: one read a legitimate deferral of a partition drop —
+  correct behaviour while any older transaction is open — as a crash that never happened, and one gave a
+  repair slice two seconds and failed when the closing write missed it, where production keeps the range
+  under a sixty-second lease and resumes. Both tests are corrected; no product code changed.
 
 ### 📦 Dependencies
 
@@ -130,6 +183,34 @@ Seven of the eight open dependabot branches, verified one group and one major at
 
 The committed SPA snapshot (`internal/web/dist`) is regenerated with this: every asset filename hash
 moved, because Vite 8 hashes differently.
+
+### API · Metrics · Schema
+
+- **API:** `Monitor.description` on read, create and update (`maxLength: 200`, counted as code points;
+  omitted on update leaves it unchanged, `""` clears it, and a longer value is 400 naming the field).
+  The monitor `config` description documents the `async_canary` `workflow` document and its
+  `canary_secret_<binding>_ref` keys; the server canonicalizes the document on write, so an
+  API-created canary and a bundle-declared one store byte-identical documents. The agent protocol
+  gains one capability declaration in both directions: `workflow_kinds` in the heartbeat and
+  `X-Cerbix-Workflow-Kinds` on every job claim, bounded and grammar-checked before it reaches a
+  column.
+- **Metrics:** `cerbix_canary_stage_total` and `cerbix_canary_dispatch_refused_total`, both
+  low-cardinality and carrying no monitor id, URL or correlation id. The refusal metric's reasons are
+  the four bounded ones a heartbeat can carry.
+- **Schema:** five additive migrations — `00095` the canary in-flight lease, `00096` the per-job pull
+  claim lease, `00097` `async_canary` in `monitors_type_check`, `00098` `pull_jobs.workflow_kind` (NULL
+  for every job any agent may run), `00099` `monitors.description` (`NOT NULL DEFAULT ''`, which is the
+  whole compatibility promise in one default). No index added: nothing reads by a description, and
+  search over it was declined.
+
+<sub>Decisions D-0218 … D-0234 · FR-029, NFR-024, FR-026 (+ its §10 monitor amendment), NFR-021 and
+FR-030 DONE · iterations iter-0168 … iter-0173, all CLOSED, every range approved by the independent
+reviewer · full `-race` suite green (33 packages), vitest 46 files / 514 tests, browser suite 66 passed
+/ 1 skipped, geo topology suite 12 passed · hosted CI green on the pushed head, all seven jobs,
+including `Backend (timescaledb hypertables)` — the job whose two failures D-0225 could not read until
+the annotations step made a red run legible</sub>
+
+---
 
 ## [v0.1.8] - 2026-09-03
 

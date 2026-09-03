@@ -21,12 +21,12 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
+import ReliabilityCellReadout from "@/components/ReliabilityCellReadout.vue";
 import ReliabilityStrip, { type StripMark } from "@/components/ReliabilityStrip.vue";
 import {
-  CANONICAL_BUCKET_MS, buildCells, clusterTransitions, stackSlices, storageVerdict, transitionsOf,
+  buildCells, clusterTransitions, storageVerdict, transitionsOf,
   type Cell,
 } from "@/lib/reliabilitygeometry";
-import { utcCellExtentLabel, utcExtentLabel } from "@/lib/wallclock";
 import { canonicalObjective } from "@/lib/objective";
 
 type Report = components["schemas"]["ServiceWindowReport"];
@@ -351,48 +351,12 @@ function segmentStorage(seg: Segment) {
   return storageVerdict(seg, pts, stepMsOf());
 }
 
-// A cell's readout (§5.4). The strip had no tooltip at all; every cell now carries its extent in
-// the viewer's zone with the offset named, the canonical UTC line beneath it, the exact split, and
-// its bucket count. Identity stays UTC — a UTC day is never called the viewer's calendar day.
-const usToText = (us: number): string => {
-  const total = Math.round(us / 1_000_000);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const sec = total % 60;
-  return [h ? `${h}h` : "", m ? `${m}m` : "", !h && sec ? `${sec}s` : ""].filter(Boolean).join(" ") || "0s";
-};
-function cellReadout(cell: Cell) {
-  const fromIso = new Date(cell.startMs).toISOString();
-  const toIso = new Date(cell.endMs).toISOString();
-  const extentMinutes = (cell.endMs - cell.startMs) / CANONICAL_BUCKET_MS;
-  const rows: { label: string; value: string; state?: string }[] = [];
-  const push = (label: string, us: number, state?: string) => {
-    if (us > 0) rows.push({ label, value: usToText(us), state });
-  };
-  push("good", cell.sealed.good, "good");
-  push("down", cell.sealed.bad, "bad");
-  push("unknown", cell.sealed.unknown, "unknown");
-  push("excluded", cell.sealed.excluded, "excluded");
-  const prov = cell.provisional.good + cell.provisional.bad + cell.provisional.unknown + cell.provisional.excluded;
-  push("provisional", prov, "provisional");
-  const missing = Math.max(0, extentMinutes - cell.storedMinutes);
-  if (missing > 0) rows.push({ label: "no stored bucket", value: usToText(missing * CANONICAL_BUCKET_MS * 1000), state: "notStored" });
-  // The states the geometry could not bring up to their floor. The readout is where the promise is
-  // actually kept: the marker says one exists, and this names it with its exact duration. Measured
-  // at a nominal height because what is asked is WHICH states the allocation could not fund, and
-  // that is a property of the cell rather than of the strip's pixel height.
-  const belowFloor = stackSlices(cell, 100)
-    .filter((s) => s.belowFloor)
-    .map((s) => (s.provisional ? `provisional ${s.kind}` : s.kind));
-  return {
-    local: utcCellExtentLabel(fromIso, toIso),
-    utc: utcExtentLabel(fromIso, toIso),
-    rows,
-    stored: `${cell.storedMinutes} of ${Math.round(extentMinutes)}`,
-    repairing: cell.repairing,
-    belowFloor,
-  };
-}
+// The cell readout lives in `ReliabilityCellReadout.vue` and takes the slices the strip actually
+// DREW. It used to be markup in two places with a local formatter that recomputed the stack at a
+// nominal height — and the two drifted: the lane rendered only the time labels, so a marked cell in
+// a lane could carry a marker with nothing naming the state (reviewer P1 [186]). `belowFloor` is
+// not a property of a cell at all: the floor is fixed in pixels and the cap is a share of the
+// strip's height, so the same cell can be fully funded at 30px and marked at 14px.
 
 // ── The objective editor: the ONE client rule (lib/objective.ts, D-0165) ────────
 // A STORED objective stays editable ([218] P1-5, §11.3 — a mutable current-view
@@ -637,32 +601,8 @@ const pillClass: Record<string, string> = {
               :sealed-through-ms="axis.sealed"
               :marks="marks ?? []"
             >
-              <template #readout="{ cell }">
-                <div class="rounded-sm border border-border-strong bg-surface p-[9px_11px] text-[12px] shadow-card" data-testid="svc-cell-readout">
-                  <div class="font-mono text-[12.5px] text-ink">{{ cellReadout(cell).local }}</div>
-                  <div class="mb-[6px] font-mono text-[11.5px] text-ink-3">{{ cellReadout(cell).utc }}</div>
-                  <p v-if="cellReadout(cell).repairing" class="text-[11.5px] text-accent">
-                    being recomputed — rendered as work in progress, never as data
-                  </p>
-                  <table v-else class="border-collapse text-[11.5px]">
-                    <tbody>
-                      <tr v-for="(r, i) in cellReadout(cell).rows" :key="i">
-                        <td class="pr-[14px] text-ink-3">{{ r.label }}</td>
-                        <td class="text-right font-mono text-ink-2">{{ r.value }}</td>
-                      </tr>
-                      <tr>
-                        <td class="pr-[14px] text-ink-3">stored buckets</td>
-                        <td class="text-right font-mono text-ink-2">{{ cellReadout(cell).stored }}</td>
-                      </tr>
-                      <tr v-if="cellReadout(cell).belowFloor.length">
-                        <td colspan="2" class="pt-[6px] text-left text-degraded" data-testid="svc-cell-belowfloor">
-                          marked, too small to draw at this size:
-                          {{ cellReadout(cell).belowFloor.join(", ") }} — the durations above are exact
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
+              <template #readout="{ cell, slices }">
+                <ReliabilityCellReadout :cell="cell" :slices="slices" />
               </template>
             </ReliabilityStrip>
             <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-ink-3">
@@ -750,11 +690,8 @@ const pillClass: Record<string, string> = {
                   :height="14"
                   variant="lane"
                 >
-                  <template #readout="{ cell }">
-                    <div class="rounded-sm border border-border-strong bg-surface p-[8px_10px] text-[11.5px] shadow-card">
-                      <div class="font-mono text-ink">{{ cellReadout(cell).local }}</div>
-                      <div class="font-mono text-[11px] text-ink-3">{{ cellReadout(cell).utc }}</div>
-                    </div>
+                  <template #readout="{ cell, slices }">
+                    <ReliabilityCellReadout :cell="cell" :slices="slices" compact />
                   </template>
                 </ReliabilityStrip>
               </div>

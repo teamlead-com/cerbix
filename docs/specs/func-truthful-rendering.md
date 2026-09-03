@@ -174,7 +174,22 @@ other. The contract is now stated once, in two parts:
 2. **The marker, where it cannot.** A slice the grant could not bring up to the floor — the cap
    bound, or the cell had nothing to fund from — is **marked** with the same non-geometric
    vocabulary a sub-pixel segment gets, and the cell's readout **names the state and gives its
-   exact duration**. Height is bounded and can run out; a marker is not, so the promise lives there.
+   exact duration**. The readout takes the slices the strip ACTUALLY DREW: whether a slice was
+   funded depends on the strip's height, because the floor is fixed in pixels and the cap is a
+   share of that height, so the same cell can be fully funded on the 30px overview and marked in a
+   14px lane. A readout that recomputes the stack at some other height describes a picture nobody
+   is looking at — reviewer P1 at party [186], who found the overview and the lane rendering two
+   different readouts from one intention. There is one readout component for both, so they cannot
+   drift again.
+
+   **Reachability, stated so the tests are not read as more than they are.** The cap binds only
+   when the eligible count exceeds `0.3 × height` — five or more at 14px, ten or more at 30px — and
+   neither surface can produce that: a segment lane runs at 14px but excludes provisional points by
+   construction, so it has at most three eligible slices, and the overview runs at 30px where the
+   cap allows 18px against at most 12px of demand. The cap branch is therefore a property of the
+   allocation, pinned by a unit test. The path a SURFACE reaches is the no-funder one: a fully
+   stored cell with no good — a day of `unknown` with a minute of `bad` — has nothing to fund from,
+   and both surfaces mark it. Height is bounded and can run out; a marker is not, so the promise lives there.
    This is the same move §5.3 makes on the other axis for the same reason: where geometry cannot
    show something, something that is not geometry says so.
 

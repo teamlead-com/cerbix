@@ -27,7 +27,7 @@
 import { computed, ref } from "vue";
 
 import { kindClip, type StripMark } from "@/lib/changes";
-import { stackSlices, type Cell, type MarkCluster } from "@/lib/reliabilitygeometry";
+import { stackSlices, type Cell, type MarkCluster, type Slice } from "@/lib/reliabilitygeometry";
 
 export type { StripMark };
 
@@ -114,9 +114,16 @@ const fill: Record<string, string> = {
 // §5.4: the strip had NO tooltip at all — not one. Every cell is now hoverable AND focusable, and
 // the content is the parent's business (it owns the vocabulary), so it arrives through a scoped
 // slot. The strip only says which cell and where.
-const hovered = ref<{ cell: Cell; pct: number } | null>(null);
-function enter(cell: Cell) {
-  hovered.value = { cell, pct: ((x(cell.startMs) + (x(cell.endMs) - x(cell.startMs)) / 2) / W) * 100 };
+const hovered = ref<{ cell: Cell; slices: Slice[]; pct: number } | null>(null);
+function enter(cell: Cell, slices: Slice[]) {
+  hovered.value = {
+    cell,
+    // The slices as DRAWN at this strip's height. `belowFloor` depends on the height — the floor is
+    // fixed in pixels and the cap is a share of it — so a readout that recomputed the stack at some
+    // nominal height would describe a picture nobody is looking at (reviewer P1 [186]).
+    slices,
+    pct: ((x(cell.startMs) + (x(cell.endMs) - x(cell.startMs)) / 2) / W) * 100,
+  };
 }
 function leave() {
   hovered.value = null;
@@ -217,9 +224,9 @@ const placedMarks = computed(() => {
         :aria-label="cell.c.repairing ? 'interval being recomputed' : 'reliability interval'"
         data-testid="strip-cell-hit"
         :data-cell-start="cell.c.startMs"
-        @pointerenter="enter(cell.c)"
+        @pointerenter="enter(cell.c, cell.slices)"
         @pointerleave="leave()"
-        @focus="enter(cell.c)"
+        @focus="enter(cell.c, cell.slices)"
         @blur="leave()"
       />
 
@@ -255,7 +262,7 @@ const placedMarks = computed(() => {
       :style="{ left: hovered.pct + '%', top: '100%', transform: 'translateX(-50%)' }"
       data-testid="strip-readout"
     >
-      <slot name="readout" :cell="hovered.cell" />
+      <slot name="readout" :cell="hovered.cell" :slices="hovered.slices" />
     </div>
 
     <!-- A sub-pixel segment: a NON-GEOMETRIC marker at its start, saying it is not to scale.

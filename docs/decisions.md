@@ -6895,7 +6895,30 @@ such.
     die on it: the unfundable slice no longer marked, the marker drawn on every cell (which would
     make it mean nothing), and the zero-grant branch no longer marking.
 
-26. **The evidence count was internally inconsistent, and the fix is a distinction rather than a
+26. **`belowFloor` is not a property of a cell, and my comment saying it was is the finding.**
+    Reviewer P1 at party [186]. The floor is fixed in pixels and the cap is a share of the strip's
+    height, so the same cell is fully funded on the 30px overview and marked in a 14px lane — and
+    the readout recomputed the stack at a nominal height, so it described a picture nobody was
+    looking at. Worse, the lane's readout template rendered only the time labels, so a marker
+    visible in a lane could have nothing naming its state, which is invariant 6b broken on the
+    surface it was written for.
+
+    The readout is now ONE component (`ReliabilityCellReadout.vue`) rendered by both surfaces, and
+    it takes the slices the strip actually drew, handed over through the scoped slot. Two copies of
+    a readout drifting is precisely how this happened, so there is one. Six mutants die on it,
+    including the two that reproduce the original gap: the readout ignoring `belowFloor`, and the
+    lane readout back to labels only.
+
+    **And one thing the fix forced me to work out, which the tests were quietly implying was
+    false:** the cap-binding branch is UNREACHABLE from either surface. It needs more than
+    `0.3 × height` eligible slices — five at 14px, ten at 30px — while a lane excludes provisional
+    points by construction (at most three) and the overview's cap allows 18px against at most 12px
+    of demand. My first attempt at the lane regression built a six-state lane fixture that the
+    product cannot produce, and it failed for that reason. The reachable path is the no-funder one,
+    which both surfaces do produce and which the lane test now uses; §5.2 states the reachability so
+    the unit test is not read as covering a surface it cannot reach.
+
+27. **The evidence count was internally inconsistent, and the fix is a distinction rather than a
     number.** Party [177] said "thirteen mutants" while `traceability.md` said twelve and the
     iteration report said 576 tests against a later 585 — reviewer P2 at [178]. The thirteen came
     from folding a defect the tests CAUGHT into the count of mutants planted and KILLED. They are

@@ -705,9 +705,65 @@ describe("ServiceReliability honesty states", () => {
     await hit.trigger("focus");
     const readout = wrapper.find('[data-testid="svc-cell-belowfloor"]');
     expect(readout.exists()).toBe(true);
-    expect(readout.text()).toContain("bad");
+    // the operator's word is `down`, not the internal `bad`, and the exact duration rides with it
+    expect(readout.text()).toContain("down 1m");
     expect(readout.text()).toContain("too small to draw");
-    expect(wrapper.find('[data-testid="svc-cell-readout"]').text()).toContain("1m");
+    expect(readout.text()).not.toContain("bad");
+  });
+
+  it("names the marked state in a SEGMENT LANE too, at its own 14px height (reviewer P1 [186])", async () => {
+    // `belowFloor` is not a property of a cell: the floor is fixed in pixels and the cap is a share
+    // of the strip's HEIGHT, so the same cell can be fully funded at 30px and marked at 14px. The
+    // lane's readout used to render only the time labels, and the formatter recomputed the stack at
+    // a nominal height — so a marker in a lane could carry nothing naming its state. Both readouts
+    // are one component now, and it takes the slices the strip actually DREW.
+    //
+    // The reachable marker path is the NO-FUNDER one: a fully stored day of `unknown` with one
+    // minute of `bad` has no good and no absence, so nothing can fund the floor. (The cap-binding
+    // path needs five or more eligible slices at 14px and a lane excludes provisional points by
+    // construction, so it has at most three — that branch is a property of the pure function and is
+    // pinned in `reliabilitygeometry.spec.ts` rather than here.)
+    const laneSeries = {
+      from: "a", to: "b", step: "day",
+      points: [{
+        start: "2026-08-15T00:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 1440,
+        durations: { ...goodDurations, GoodUs: 0, BadUs: 60_000_000, UnknownUs: 86_340_000_000, HealthyUs: 0 },
+      }],
+    };
+    const seg = {
+      revision_id: "r1", revision: 1, epoch_id: "e1", epoch_seq: 1,
+      from: "2026-08-15T00:00:00Z", to: "2026-08-16T00:00:00Z",
+      buckets: 1440, durations: goodDurations, availability: 100, coverage: 1, declared_reconstruction: false,
+    };
+    const wrapper = mountWith(
+      {
+        ...okReport, availability: undefined, aggregate_withheld: "spans_definition_revisions",
+        segments: [seg, { ...seg, revision_id: "r2", revision: 2, epoch_id: "e2", epoch_seq: 2, from: "2026-08-16T00:00:00Z", to: "2026-08-16T11:58:00Z", buckets: 718 }],
+      },
+      undefined,
+      laneSeries,
+    );
+    await flushPromises();
+    const lane = wrapper.findAll('[data-testid="svc-segment-strip"]')[0];
+    expect(lane.exists()).toBe(true);
+    // the bad slice is far below the floor at the lane's own height…
+    const bad = lane.find('rect[data-state="bad"]');
+    expect(bad.exists()).toBe(true);
+    expect(Number(bad.attributes("height"))).toBeLessThan(2);
+    // …so the lane draws the marker…
+    const mark = lane.find('[data-testid="strip-belowfloor"]');
+    expect(mark.exists()).toBe(true);
+    expect(mark.attributes("data-affordance")).toBe("non-geometric");
+    // …and the LANE'S readout names the state with its exact duration, which is the gap that was
+    // here: the readout rendered only the time labels.
+    await lane.find('rect[data-testid="strip-cell-hit"]').trigger("focus");
+    const note = lane.find('[data-testid="svc-cell-belowfloor"]');
+    expect(note.exists()).toBe(true);
+    expect(note.text()).toContain("down 1m");
+    // and the lane's readout carries the full breakdown too, not just the labels
+    const readout = lane.find('[data-testid="svc-cell-readout"]');
+    expect(readout.text()).toContain("unknown");
+    expect(readout.text()).toContain("stored buckets");
   });
 
   it("does not mark a cell whose floors were funded, so the marker keeps its meaning", async () => {

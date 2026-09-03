@@ -283,11 +283,18 @@ describe("stackSlices — the floor is paid for, or it is not granted", () => {
     expect(total(c)).toBeCloseTo(H, 6);
   });
 
-  it("totals exactly h when the CAP BINDS: six near-zero problem slices in a 14px lane", () => {
+  it("totals exactly h when the CAP BINDS: six near-zero problem slices at a 14px height", () => {
     // The reviewer's counterexample at party [180], reproduced before it was accepted: six eligible
-    // slices ask for 2px each in a lane 14px tall, the cap allows 8.4px, and the earlier version
+    // slices ask for 2px each at a height of 14px, the cap allows 8.4px, and the earlier version
     // billed the capped amount while having already handed out the full 12px — returning 17.6px for
     // a 14px cell, which SVG clips.
+    //
+    // STATED so the test is not read as more than it is: the cap binds only when the eligible count
+    // exceeds 0.3h — five or more at 14px, ten or more at 30px — and neither surface can produce
+    // that. A segment lane runs at 14px but excludes provisional points by construction, so it has
+    // at most three eligible slices; the overview runs at 30px where the cap allows 18px against at
+    // most 12px of demand. This pins a property of the function, and the SURFACE path that reaches
+    // a marked slice is the no-funder one below, which `ServiceReliability.spec.ts` covers live.
     const LANE = 14;
     const t = 1 / 60; // one second of each
     const c = cell({ bad: t, unknown: t, excluded: t, provBad: t, provUnknown: t, provExcluded: t });

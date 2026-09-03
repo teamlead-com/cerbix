@@ -137,13 +137,20 @@ export function stackSlices(cell: Cell, h: number): Slice[] {
   if (cell.repairing) return [];
   const extentUs = (cell.endMs - cell.startMs) * 1000;
   if (extentUs <= 0 || h <= 0) return [];
-  const storedUs = Math.min(
-    extentUs,
+  const measuredUs =
     cell.sealed.good + cell.sealed.bad + cell.sealed.unknown + cell.sealed.excluded +
-      cell.provisional.good + cell.provisional.bad + cell.provisional.unknown + cell.provisional.excluded,
-  );
+    cell.provisional.good + cell.provisional.bad + cell.provisional.unknown + cell.provisional.excluded;
+  // The denominator is the LARGER of the cell's visible extent and the durations it actually
+  // holds. Both directions matter and the first version of this function got one of them wrong:
+  //   durations < extent  ->  the remainder is absence, and `notStored` shows it;
+  //   durations > extent  ->  the cell is CLIPPED to the requested range while its point still
+  //                           describes the whole rollup step, so the stack shows that step's
+  //                           COMPOSITION and reports no absence. Dividing by the clipped extent
+  //                           instead made a window starting mid-day overflow its own cell by the
+  //                           ratio of the step to the visible part.
+  const denomUs = Math.max(extentUs, measuredUs);
   const raw: Array<[SliceKind, number, boolean]> = [
-    ["notStored", extentUs - storedUs, false],
+    ["notStored", denomUs - measuredUs, false],
     ["bad", cell.sealed.bad, false],
     ["unknown", cell.sealed.unknown, false],
     ["excluded", cell.sealed.excluded, false],
@@ -157,7 +164,7 @@ export function stackSlices(cell: Cell, h: number): Slice[] {
   let owed = 0;
   for (const [kind, us, provisional] of raw) {
     if (us <= 0) continue;
-    let px = (us / extentUs) * h;
+    let px = (us / denomUs) * h;
     // The floor belongs to a PROBLEM or a missing verdict, and to nothing else. `good` is not
     // floored in either form: provisional good time is good time that is merely unsealed, so
     // flooring it would inflate good time and buy no honesty.

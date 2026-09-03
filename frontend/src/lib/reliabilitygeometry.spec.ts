@@ -210,3 +210,35 @@ describe("storageVerdict — the second axis of §11.2", () => {
     expect(storageVerdict(seg(5, 5, 0), [], DAY).extentMinutes).toBe(0);
   });
 });
+
+// The clipped-cell case, which the component's own tests exposed: a window that starts mid-step
+// gives its first cell a visible extent SHORTER than the step, while the point still describes the
+// whole step. Dividing by the clipped extent overflowed the cell by the ratio between them.
+describe("stackSlices — a clipped cell shows its step's composition and never overflows", () => {
+  const H = 34;
+  it("fills exactly h when the durations exceed the visible extent", () => {
+    const cell = {
+      startMs: F + 19 * 60 * CANONICAL_BUCKET_MS, // 05:00 into the day: a 5-hour visible extent
+      endMs: F + DAY,
+      sealed: { good: min(1440), bad: 0, unknown: 0, excluded: 0 }, // the whole day's durations
+      provisional: { good: 0, bad: 0, unknown: 0, excluded: 0 },
+      storedMinutes: 1440,
+      repairing: false,
+    };
+    const slices = stackSlices(cell, H);
+    expect(slices.reduce((s, x) => s + x.h, 0)).toBeCloseTo(H, 6);
+    // and it reports NO absence: there is more data than the visible slice, not less
+    expect(slices.some((s) => s.kind === "notStored")).toBe(false);
+  });
+
+  it("still reports absence when the durations fall short of the extent", () => {
+    const cell = {
+      startMs: F, endMs: F + DAY,
+      sealed: { good: min(150), bad: 0, unknown: 0, excluded: 0 },
+      provisional: { good: 0, bad: 0, unknown: 0, excluded: 0 },
+      storedMinutes: 150, repairing: false,
+    };
+    const ns = stackSlices(cell, H).find((s) => s.kind === "notStored")!;
+    expect(ns.h).toBeCloseTo((1290 / 1440) * H, 6);
+  });
+});

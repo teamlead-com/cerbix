@@ -21,7 +21,12 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
-import ReliabilityStrip, { type ReliabilityTick, type StripMark } from "@/components/ReliabilityStrip.vue";
+import ReliabilityStrip, { type StripMark } from "@/components/ReliabilityStrip.vue";
+import {
+  CANONICAL_BUCKET_MS, buildCells, clusterTransitions, storageVerdict, transitionsOf,
+  type Cell,
+} from "@/lib/reliabilitygeometry";
+import { utcCellExtentLabel, utcExtentLabel } from "@/lib/wallclock";
 import { canonicalObjective } from "@/lib/objective";
 
 type Report = components["schemas"]["ServiceWindowReport"];
@@ -252,90 +257,133 @@ function dayLabel(iso?: string): string {
   return `${d.getUTCDate().toString().padStart(2, "0")}.${(d.getUTCMonth() + 1).toString().padStart(2, "0")}.${d.getUTCFullYear()}`;
 }
 
-// ── Timeline ticks from the merged series ───────────────────────────────────
-// Worst-signal colouring per tick, TIME-WEIGHTED by the point's bucket count ([218] P1-3):
-// the API deliberately splits a rollup step at epoch/revision/provisional boundaries, so a
-// 6-bucket boundary fragment must not occupy the width of a 24-bucket day. A point
-// intersecting an active repair range is MASKED with the work encoding rather than
-// presented as data ([218] P1-4, §12.1).
+// ── The timeline, on CLOCK TIME (func-truthful-rendering §5, FR-031, D-0235) ──────────
+// The axis is the REQUESTED range, and cells come from it at the rollup grain — a step with no
+// stored bucket is still a cell, drawn in the `not-stored` encoding. The old code laid points out
+// consecutively by bucket count, so a 30-day window holding two and a half days of facts filled
+// its whole width: 6.6% of a month drawn as the month. Every rule lives in
+// `@/lib/reliabilitygeometry`, tested without a DOM.
+//
+// The provisional tail lies to the RIGHT of the window: it is DRAWN (at reduced opacity) and is in
+// no number (§11.3), so the axis extends past `report.to` to hold it while `sealed_through` marks
+// where the window actually ends.
 function stepMsOf(): number {
   return win.value === "24h" ? 3600_000 : 86400_000;
 }
-function intersectsRepair(startMs: number, endMs: number): boolean {
-  const ranges = report.value?.repairing ?? [];
-  if (!ranges.length) return false;
-  return ranges.some((r) => Date.parse(r.from) < endMs && startMs < Date.parse(r.to));
-}
-// clip: the point's REAL extent. `start` is the truncated rollup step start, so a point
-// from an exact segment request may describe only part of that step — the repair
-// intersection must use [max(stepStart, clip.from), min(stepStart+step, clip.to)) or a
-// repair confined to one reconstruction half would mask the other half too ([228] P1-3).
-function tickOf(
-  p: SeriesPoint,
-  prevEpoch: string,
-  prevRevision: string,
-  clip?: { fromMs: number; toMs: number },
-): ReliabilityTick {
-  const d = p.durations;
-  const stepStart = Date.parse(p.start);
-  const startMs = clip ? Math.max(stepStart, clip.fromMs) : stepStart;
-  const endMs = clip ? Math.min(stepStart + stepMsOf(), clip.toMs) : stepStart + stepMsOf();
-  let state: ReliabilityTick["state"] = "none";
-  // The ORDER is §9.1's display rule, not a convenience: bad, then UNKNOWN, then good, then
-  // excluded. Unknown outranking good is the half that matters and the half this once had
-  // backwards — a step that was partly unmeasured rendered green because some of it happened
-  // to be good, which is the picture claiming to have seen an hour it never saw. The rule is
-  // deliberately pessimistic for the same reason a one-second outage colours the whole tick:
-  // the timeline may overstate a problem, never hide one, and the exact number lives in the
-  // figure underneath.
-  if (intersectsRepair(startMs, endMs)) state = "repairing";
-  else if ((d.BadUs ?? 0) > 0) state = "bad";
-  else if ((d.UnknownUs ?? 0) > 0) state = "unknown";
-  else if ((d.GoodUs ?? 0) > 0) state = "good";
-  else if ((d.ExcludedUs ?? 0) > 0) state = "excluded";
-  return {
-    state,
-    weight: p.buckets || 1,
-    provisional: p.provisional,
-    revisionBoundary: prevRevision !== "" && p.revision_id !== prevRevision,
-    epochBoundary: prevEpoch !== "" && p.epoch_id !== prevEpoch && p.revision_id === prevRevision,
-    // The tick's real extent, so the strip can place a change mark by its instant (FR-025).
-    startMs,
-    endMs,
-  };
-}
-const ticks = computed<ReliabilityTick[]>(() => {
-  const out: ReliabilityTick[] = [];
-  let prevEpoch = "";
-  let prevRevision = "";
+
+const axis = computed(() => {
+  const r = report.value;
+  if (!r?.from || !r?.to) return null;
+  const from = Date.parse(r.from);
+  let to = Date.parse(r.to);
+  if (Number.isNaN(from) || Number.isNaN(to)) return null;
   for (const p of points.value) {
-    out.push(tickOf(p, prevEpoch, prevRevision));
-    prevEpoch = p.epoch_id;
-    prevRevision = p.revision_id;
+    if (!p.provisional || !p.start) continue;
+    const end = Date.parse(p.start) + stepMsOf();
+    if (!Number.isNaN(end) && end > to) to = end;
   }
-  return out;
+  if (to <= from) return null;
+  const sealed = r.sealed_through ? Date.parse(r.sealed_through) : Date.parse(r.to);
+  return { from, to, sealed: Number.isNaN(sealed) ? undefined : sealed };
 });
+
+const cells = computed<Cell[]>(() => {
+  const a = axis.value;
+  if (!a) return [];
+  return buildCells(a.from, a.to, stepMsOf(), points.value, report.value?.repairing ?? []);
+});
+
+/** revision_id → the revision NUMBER an operator reads, from the report's own segments. */
+const revisionOf = computed(() => {
+  const m = new Map<string, number>();
+  for (const seg of report.value?.segments ?? []) {
+    if (seg.revision_id) m.set(seg.revision_id, seg.revision ?? 0);
+  }
+  return (id?: string) => (id ? (m.get(id) ?? 0) : 0);
+});
+
+// Boundary marks CLUSTER when their fixed-width marks would collide (§5.3): several definition
+// changes minutes apart land inside one pixel at any window zoom. The cluster is anchored at its
+// EARLIEST real boundary — its only geometric claim — and carries its members so the readout can
+// list them chronologically. A segment's start is not a boundary; only a change BETWEEN
+// consecutive points is.
+const MARK_UNITS = 2.2;
+const clusters = computed(() => {
+  const a = axis.value;
+  if (!a) return [];
+  const unitsPerMs = 1000 / Math.max(1, a.to - a.from);
+  return clusterTransitions(transitionsOf(points.value, revisionOf.value), unitsPerMs, MARK_UNITS);
+});
+
 const provisionalBuckets = computed(() =>
   points.value.filter((p) => p.provisional).reduce((sum, p) => sum + (p.buckets || 0), 0),
 );
-const repairingMasked = computed(() =>
-  points.value.some((p) => {
-    const s = Date.parse(p.start);
-    return intersectsRepair(s, s + stepMsOf());
-  }),
-);
+const repairingMasked = computed(() => cells.value.some((c) => c.repairing));
 
-// The segment's own strip: a unique-epoch segment is the exact epoch slice of the global
-// series; a same-epoch reconstruction part comes from its own exact request ([228] P1-2).
-// Ticks are CLIPPED to the segment's [from,to) so a repair confined to one half never
-// masks the other ([228] P1-3). An entry that has not answered yet is PENDING, a null
-// entry is that segment's own transport failure.
-function segmentStrip(seg: Segment): { state: "pending" | "failed" | "ready"; ticks: ReliabilityTick[] } {
+// The segment's own lane, on the SAME axis as the overview (§5.3): length means duration again, a
+// one-day segment is short, and a lane whose projected width falls below a device pixel is MARKED
+// rather than widened. Cells are clipped to the segment's [from,to), so a repair confined to one
+// reconstruction half never masks the other ([228] P1-3). An entry that has not answered yet is
+// PENDING, a null entry is that segment's own transport failure.
+function segmentLane(seg: Segment): { state: "pending" | "failed" | "ready"; cells: Cell[] } {
   const pts = segmentPoints.value[segKey(seg)];
-  if (pts === undefined) return { state: "pending", ticks: [] };
-  if (pts === null) return { state: "failed", ticks: [] };
-  const clip = { fromMs: Date.parse(seg.from), toMs: Date.parse(seg.to) };
-  return { state: "ready", ticks: pts.map((p) => tickOf(p, "", "", clip)) };
+  if (pts === undefined) return { state: "pending", cells: [] };
+  if (pts === null) return { state: "failed", cells: [] };
+  const from = Date.parse(seg.from);
+  const to = Date.parse(seg.to);
+  if (Number.isNaN(from) || Number.isNaN(to) || to <= from) return { state: "ready", cells: [] };
+  return { state: "ready", cells: buildCells(from, to, stepMsOf(), pts, report.value?.repairing ?? []) };
+}
+
+// §11.2's SECOND axis, independent of coverage and required to pass alongside it: did we
+// materialize the range at all. A segment whose storage is incomplete quotes NO availability —
+// `coverage = 100%` says only that every observation that EXISTS was decidable, which a 27-day
+// hole makes worthless as a warrant. The explanation beside the dash is DISPLAY-ONLY grammar with
+// no code identity (party [176]): a client may derive presentation from the series it holds, but
+// it may not manufacture a wire verdict whose canonical meaning belongs server-side, so this never
+// leaves the component, never enters metrics, audit or the API, and never drives reliability state.
+const STORAGE_EXPLANATION: Record<string, string> = {
+  prefix: "records begin later in this segment",
+  interior: "missing records inside this segment",
+};
+function segmentStorage(seg: Segment) {
+  const pts = segmentPoints.value[segKey(seg)] ?? [];
+  return storageVerdict(seg, pts, stepMsOf());
+}
+
+// A cell's readout (§5.4). The strip had no tooltip at all; every cell now carries its extent in
+// the viewer's zone with the offset named, the canonical UTC line beneath it, the exact split, and
+// its bucket count. Identity stays UTC — a UTC day is never called the viewer's calendar day.
+const usToText = (us: number): string => {
+  const total = Math.round(us / 1_000_000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  return [h ? `${h}h` : "", m ? `${m}m` : "", !h && sec ? `${sec}s` : ""].filter(Boolean).join(" ") || "0s";
+};
+function cellReadout(cell: Cell) {
+  const fromIso = new Date(cell.startMs).toISOString();
+  const toIso = new Date(cell.endMs).toISOString();
+  const extentMinutes = (cell.endMs - cell.startMs) / CANONICAL_BUCKET_MS;
+  const rows: { label: string; value: string; state?: string }[] = [];
+  const push = (label: string, us: number, state?: string) => {
+    if (us > 0) rows.push({ label, value: usToText(us), state });
+  };
+  push("good", cell.sealed.good, "good");
+  push("down", cell.sealed.bad, "bad");
+  push("unknown", cell.sealed.unknown, "unknown");
+  push("excluded", cell.sealed.excluded, "excluded");
+  const prov = cell.provisional.good + cell.provisional.bad + cell.provisional.unknown + cell.provisional.excluded;
+  push("provisional", prov, "provisional");
+  const missing = Math.max(0, extentMinutes - cell.storedMinutes);
+  if (missing > 0) rows.push({ label: "no stored bucket", value: usToText(missing * CANONICAL_BUCKET_MS * 1000), state: "notStored" });
+  return {
+    local: utcCellExtentLabel(fromIso, toIso),
+    utc: utcExtentLabel(fromIso, toIso),
+    rows,
+    stored: `${cell.storedMinutes} of ${Math.round(extentMinutes)}`,
+    repairing: cell.repairing,
+  };
 }
 
 // ── The objective editor: the ONE client rule (lib/objective.ts, D-0165) ────────
@@ -571,11 +619,46 @@ const pillClass: Record<string, string> = {
           <p v-if="seriesError" class="mt-4 rounded border border-down/40 bg-down-weak p-3 text-[12.5px] text-down" data-testid="svc-series-error">
             The timeline request failed — a transport problem, not an empty timeline.
           </p>
-          <div v-else-if="ticks.length" class="mt-4" data-testid="svc-timeline">
-            <ReliabilityStrip :ticks="ticks" :height="30" :marks="marks ?? []" />
+          <div v-else-if="axis && cells.length" class="mt-4" data-testid="svc-timeline">
+            <ReliabilityStrip
+              :axis-from-ms="axis.from"
+              :axis-to-ms="axis.to"
+              :cells="cells"
+              :height="30"
+              :clusters="clusters"
+              :sealed-through-ms="axis.sealed"
+              :marks="marks ?? []"
+            >
+              <template #readout="{ cell }">
+                <div class="rounded-sm border border-border-strong bg-surface p-[9px_11px] text-[12px] shadow-card" data-testid="svc-cell-readout">
+                  <div class="font-mono text-[12.5px] text-ink">{{ cellReadout(cell).local }}</div>
+                  <div class="mb-[6px] font-mono text-[11.5px] text-ink-3">{{ cellReadout(cell).utc }}</div>
+                  <p v-if="cellReadout(cell).repairing" class="text-[11.5px] text-accent">
+                    being recomputed — rendered as work in progress, never as data
+                  </p>
+                  <table v-else class="border-collapse text-[11.5px]">
+                    <tr v-for="(r, i) in cellReadout(cell).rows" :key="i">
+                      <td class="pr-[14px] text-ink-3">{{ r.label }}</td>
+                      <td class="text-right font-mono text-ink-2">{{ r.value }}</td>
+                    </tr>
+                    <tr>
+                      <td class="pr-[14px] text-ink-3">stored buckets</td>
+                      <td class="text-right font-mono text-ink-2">{{ cellReadout(cell).stored }}</td>
+                    </tr>
+                  </table>
+                </div>
+              </template>
+            </ReliabilityStrip>
             <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-ink-3">
+              <span><span class="mr-[6px] inline-block h-[11px] w-[11px] rounded-xs bg-up align-[-2px]"></span>good</span>
+              <span><span class="mr-[6px] inline-block h-[11px] w-[11px] rounded-xs bg-down align-[-2px]"></span>down</span>
+              <span><span class="mr-[6px] inline-block h-[11px] w-[11px] rounded-xs bg-ink-3 align-[-2px]"></span>unknown — a decided verdict, never a hue</span>
+              <span><span class="mr-[6px] inline-block h-[11px] w-[11px] rounded-xs bg-maint align-[-2px]"></span>excluded</span>
+              <span data-testid="svc-legend-notstored"><span class="mr-[6px] inline-block h-[11px] w-[11px] rounded-xs border border-border-strong bg-inset align-[-2px]"></span>no stored bucket — absence, not a verdict</span>
+              <span><span class="mr-[6px] inline-block h-[11px] w-[11px] rounded-xs bg-up align-[-2px] opacity-[0.38]"></span>provisional — and nothing else uses opacity</span>
               <span><span class="mr-[6px] inline-block h-[12px] w-[2px] bg-accent align-[-2px]"></span>definition revision boundary</span>
               <span><span class="mr-[6px] inline-block h-[12px] w-px bg-ink-3 align-[-2px] opacity-70"></span>evaluation epoch marker</span>
+              <span><span class="mr-[6px] inline-block h-[12px] w-[2px] bg-ink-2 align-[-2px]"></span>sealed_through — the window ends here; everything right of it is in no number</span>
               <span v-if="provisionalBuckets" data-testid="svc-provisional-note">
                 {{ provisionalBuckets }} {{ provisionalBuckets === 1 ? "bucket" : "buckets" }} after sealed_through
                 {{ provisionalBuckets === 1 ? "is" : "are" }} drawn at reduced opacity and excluded from every number above.
@@ -611,17 +694,53 @@ const pillClass: Record<string, string> = {
                   data-testid="svc-reconstruction"
                 >declared reconstruction</span>
                 <div class="flex-1" />
-                <span class="font-mono text-[12px]">availability {{ pct(seg.availability) }}</span>
+                <span class="font-mono text-[12px]" data-testid="svc-segment-availability">
+                  availability {{ segmentStorage(seg).complete ? pct(seg.availability) : "—" }}
+                </span>
                 <span class="font-mono text-[12px] text-ink-3">coverage {{ fracPct(seg.coverage) }}</span>
+                <span
+                  class="font-mono text-[12px]"
+                  :class="segmentStorage(seg).complete ? 'text-ink-3' : 'text-degraded'"
+                  data-testid="svc-segment-storage"
+                >
+                  storage {{ segmentStorage(seg).complete
+                    ? "contiguous"
+                    : segmentStorage(seg).storedMinutes + " of " + Math.round(segmentStorage(seg).extentMinutes) + " · incomplete" }}
+                </span>
               </div>
-              <p v-if="segmentStrip(seg).state === 'failed'" class="mt-2 text-[11.5px] text-down" data-testid="svc-segment-series-error">
+              <!-- §11.2: storage continuity and decidable coverage are independent, and BOTH must
+                   pass. An incomplete segment quotes no availability; the explanation is display
+                   grammar with no code identity and never leaves this component ([176]). -->
+              <p
+                v-if="!segmentStorage(seg).complete"
+                class="mt-1 text-[11.5px] text-degraded"
+                data-testid="svc-segment-storage-note"
+              >
+                availability withheld — {{ STORAGE_EXPLANATION[segmentStorage(seg).shape] }}. Coverage stays
+                printed as its own fraction: it says every observation that exists was decidable, which is a
+                different question from whether the range was materialized.
+              </p>
+              <p v-if="segmentLane(seg).state === 'failed'" class="mt-2 text-[11.5px] text-down" data-testid="svc-segment-series-error">
                 This segment's timeline request failed — a transport problem, not an empty strip.
               </p>
-              <p v-else-if="segmentStrip(seg).state === 'pending'" class="mt-2 text-[11.5px] text-ink-3" data-testid="svc-segment-strip-pending">
+              <p v-else-if="segmentLane(seg).state === 'pending'" class="mt-2 text-[11.5px] text-ink-3" data-testid="svc-segment-strip-pending">
                 Loading this segment's timeline…
               </p>
-              <div v-else-if="segmentStrip(seg).ticks.length" class="mt-2" data-testid="svc-segment-strip">
-                <ReliabilityStrip :ticks="segmentStrip(seg).ticks" :height="16" />
+              <div v-else-if="axis && segmentLane(seg).cells.length" class="mt-2" data-testid="svc-segment-strip">
+                <ReliabilityStrip
+                  :axis-from-ms="axis.from"
+                  :axis-to-ms="axis.to"
+                  :cells="segmentLane(seg).cells"
+                  :height="14"
+                  variant="lane"
+                >
+                  <template #readout="{ cell }">
+                    <div class="rounded-sm border border-border-strong bg-surface p-[8px_10px] text-[11.5px] shadow-card">
+                      <div class="font-mono text-ink">{{ cellReadout(cell).local }}</div>
+                      <div class="font-mono text-[11px] text-ink-3">{{ cellReadout(cell).utc }}</div>
+                    </div>
+                  </template>
+                </ReliabilityStrip>
               </div>
             </div>
           </div>

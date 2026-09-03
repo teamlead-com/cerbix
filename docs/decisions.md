@@ -6948,3 +6948,33 @@ FR-032 stay open by design. The mock
 (`docs/design/mock-truthful-rendering.html`) is drawn, carries the two cases the reviewer asked
 to see — a sub-pixel segment with its marker and a UTC cell tooltip showing its true local extent
 — and awaits the owner's approval, which gates all frontend code.
+
+
+## D-0225 — closure: the hosted TimescaleDB gate is green (2026-09-04)
+
+**Context.** D-0225 and its addendum diagnosed two `internal/store` failures from the hosted
+job's log and corrected the tests without touching the product (`67e5aa9`, AC-0172-6). What the
+record could not claim then was a GREEN run: it needs a push, and the token in that session had no
+`actions:write` to trigger one (403). That outstanding external gate is what iter-0171's DoD named
+when it withheld release approval, and it is the last item that stood between "implementation
+approved" and "release ready".
+
+**Decision.** It is CLOSED. The owner reports the hosted TimescaleDB gate green on 2026-09-04.
+
+**What was verified in this session, and what was not** — stated separately because the two carry
+different weight:
+
+- Verified here: `origin/main` is `721c414`, and `67e5aa9` — the commit carrying the test
+  corrections D-0225 called for — is an ANCESTOR of it. So a green run on that branch exercises
+  exactly this fix rather than some earlier tree.
+- Verified here: the 15 commits that are local-only at the time of writing (`7cfb2ec` plus
+  iter-0174's fourteen) touch **no `.go` file, no migration, and neither `go.mod` nor `go.sum`** —
+  `git diff --name-only 721c414..HEAD` filtered for those returns nothing. iter-0174 is frontend
+  and documentation, so the hypertable store suite is byte-identical between `origin/main` and
+  this tree, and the gate's verdict carries over by construction rather than by assumption.
+- NOT verified here: the run itself. This environment has neither `gh` nor any GitHub Actions read
+  tool, so the green status is the **owner's report** and not this session's observation. Recorded
+  that way in `docs/status.md` too, at AC-0172-6 and DoD-0171.
+
+**Consequence.** The release withholding recorded in DoD-0171 no longer stands on this ground.
+Whether to release, push or tag remains the owner's decision and none of those has been done.

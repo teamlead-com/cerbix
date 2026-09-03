@@ -6852,7 +6852,26 @@ such.
     the give-back loop failed nothing, so the case with no funder at all did not exist yet. It does
     now, and it kills that mutant.
 
-24. **The evidence count was internally inconsistent, and the fix is a distinction rather than a
+24. **The floor's cap limited the DEBT and not the GRANTS, and the first fix left that branch
+    standing.** Reviewer P1 at party [180], reproduced here before acceptance: raising every eligible
+    slice to the floor and clamping the accumulated debt afterwards bills less than has already been
+    handed out, so the give-back loop sees no debt and returns nothing. Six near-zero problem slices
+    in a 14 px lane — the API can produce all six, because a sealed and a provisional point each
+    carry `bad`, `unknown` and `excluded` — asked for 12 px, were billed 8.4 px by the cap, and the
+    difference came from nobody: **17.6 px in a 14 px cell**. The allocation is now
+    `grant = min(requested, cap, available)`, granted in PROPORTION to what each slice asked for and
+    taken from the funders exactly, so the total is exact by construction rather than by a
+    reconciliation pass; when the cap binds, every floor shortens together.
+
+    The finding's second half is the one worth keeping: the sweep that was supposed to prevent this
+    could not reach the branch. It sat at `h = 34` with a helper that could construct neither
+    `excluded` nor a provisional problem, so 120 mixtures covered nothing near a binding cap. **A
+    sweep that cannot build a state is not a sweep over it.** The helper now reaches all six problem
+    categories and the sweep runs 432 mixtures at each of `h ∈ {14, 30, 34}`, the lane height
+    included — and three more mutants die on it: the cap limiting debt, first-come grants, and
+    absence removed as a funder.
+
+25. **The evidence count was internally inconsistent, and the fix is a distinction rather than a
     number.** Party [177] said "thirteen mutants" while `traceability.md` said twelve and the
     iteration report said 576 tests against a later 585 — reviewer P2 at [178]. The thirteen came
     from folding a defect the tests CAUGHT into the count of mutants planted and KILLED. They are

@@ -161,57 +161,55 @@ export function stackSlices(cell: Cell, h: number): Slice[] {
     ["good", cell.sealed.good, false],
   ];
   const slices: Slice[] = [];
-  const floored: Slice[] = [];
-  let owed = 0;
   for (const [kind, us, provisional] of raw) {
     if (us <= 0) continue;
-    let px = (us / denomUs) * h;
-    // The floor belongs to a PROBLEM or a missing verdict, and to nothing else. `good` is not
-    // floored in either form: provisional good time is good time that is merely unsealed, so
-    // flooring it would inflate good time and buy no honesty.
-    if (kind !== "notStored" && kind !== "good" && px < SLICE_FLOOR_PX) {
-      owed += SLICE_FLOOR_PX - px;
-      px = SLICE_FLOOR_PX;
-      const s = { kind, h: px, provisional };
-      slices.push(s);
-      floored.push(s);
-      continue;
-    }
-    slices.push({ kind, h: px, provisional });
+    slices.push({ kind, h: (us / denomUs) * h, provisional });
   }
-  owed = Math.min(owed, SLICE_FLOOR_CAP * h);
 
-  // THE FLOOR IS PAID FOR, OR IT IS NOT GRANTED. The stack must total exactly `h`: a cell that
-  // draws taller than its own extent claims more time than it has, which is this requirement's
-  // own subject. So the inflation is funded in a stated order and whatever cannot be funded is
-  // GIVEN BACK to the floored slices.
+  // THE STACK TOTALS EXACTLY `h`, BY CONSTRUCTION. A cell that draws taller than its own extent
+  // claims more time than it has — this requirement's own subject — and SVG clips the excess, so
+  // the picture would both overstate and hide the overstatement.
   //
-  // Order: sealed good, then provisional good, then — as a LAST RESORT — the absence.
+  // The cap therefore limits the GRANTS, not the debt. An earlier version raised every eligible
+  // slice to the floor first and clamped the accumulated debt afterwards, which billed less than it
+  // had already handed out: six near-zero problem slices in a 14 px lane asked for 12 px, were
+  // billed 8.4 px by the cap, and the difference was never taken from anyone. Reviewer P1 at party
+  // [180] found it, in the one branch this function's own sweep could not construct.
   //
-  // That last step is a deliberate change of my own earlier note, which said absence may never
-  // shrink. It cannot survive contact with the case the reviewer found: a cell holding one second
-  // of `bad` and no good at all has nothing else to fund a visible outage, and the three rules
-  // "the problem is visible", "absence never shrinks" and "the total is exact" cannot all hold
-  // there. The first is the promise ruled at party [143] — a one-second outage cannot vanish — and
-  // the third is not negotiable, so the second yields, bounded by SLICE_FLOOR_CAP: absence gives
-  // up at most that share, and only when nothing else can pay.
-  const fund = (pick: (s: Slice) => boolean) => {
-    for (const s of slices) {
-      if (owed <= 0) break;
-      if (!pick(s) || floored.includes(s)) continue;
-      const take = Math.min(owed, s.h);
-      s.h -= take;
-      owed -= take;
-    }
-  };
-  fund((s) => s.kind === "good" && !s.provisional);
-  fund((s) => s.kind === "good" && s.provisional);
-  fund((s) => s.kind === "notStored");
-  // Anything still unfunded is returned, so the floor never buys height the cell does not have.
-  for (let i = floored.length - 1; i >= 0 && owed > 0; i--) {
-    const give = Math.min(owed, floored[i].h);
-    floored[i].h -= give;
-    owed -= give;
+  // The floor belongs to a PROBLEM or a missing verdict and to nothing else: `good` is not floored
+  // in either form, because provisional good time is good time that is merely unsealed and
+  // inflating it would buy no honesty.
+  const eligible = slices.filter((s) => s.kind !== "notStored" && s.kind !== "good" && s.h < SLICE_FLOOR_PX);
+  const want = eligible.map((s) => SLICE_FLOOR_PX - s.h);
+  const wantTotal = want.reduce((a, b) => a + b, 0);
+  if (wantTotal <= 0) return slices;
+
+  // Funded in a stated order: sealed good, then provisional good, then — as a LAST RESORT — the
+  // absence. That last funder overrules this function's own earlier note that absence may never
+  // shrink: a cell holding one second of `bad` and no good at all has nothing else to pay with, and
+  // "the problem is visible" (ruled at party [143]), "absence never shrinks" and "the total is
+  // exact" cannot all hold there. The first was ruled and the third is not negotiable, so the
+  // second yields — bounded by the cap, and only when nothing else can pay.
+  const funders = [
+    ...slices.filter((s) => s.kind === "good" && !s.provisional),
+    ...slices.filter((s) => s.kind === "good" && s.provisional),
+    ...slices.filter((s) => s.kind === "notStored"),
+  ];
+  const available = funders.reduce((a, s) => a + s.h, 0);
+  const grant = Math.min(wantTotal, SLICE_FLOOR_CAP * h, available);
+  if (grant <= 0) return slices;
+
+  // Granted in proportion to what each slice asked for, so a cap that binds shortens every floor
+  // rather than paying some slices in full and others not at all.
+  const scale = grant / wantTotal;
+  eligible.forEach((s, i) => (s.h += want[i] * scale));
+
+  let owed = grant;
+  for (const f of funders) {
+    if (owed <= 0) break;
+    const take = Math.min(owed, f.h);
+    f.h -= take;
+    owed -= take;
   }
   return slices;
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  CANONICAL_BUCKET_MS, SLICE_FLOOR_PX,
+  CANONICAL_BUCKET_MS, SLICE_FLOOR_CAP, SLICE_FLOOR_PX,
   buildCells, clusterTransitions, stackSlices, storageVerdict, transitionsOf,
   type SeriesPointLike,
 } from "./reliabilitygeometry";
@@ -250,15 +250,23 @@ describe("stackSlices — a clipped cell shows its step's composition and never 
 describe("stackSlices — the floor is paid for, or it is not granted", () => {
   const H = 34;
   const us = (min: number) => min * CANONICAL_BUCKET_MS * 1000;
-  const cell = (o: { good?: number; bad?: number; unknown?: number; provGood?: number }, extentMin = 1440) => ({
+  // The helper reaches ALL SIX problem categories and both heights the product uses. The earlier
+  // version could construct neither `excluded` nor a PROVISIONAL problem, and swept only h=34 —
+  // which is exactly why its sweep could not reach the cap-binding branch a reviewer found by
+  // arithmetic (party [180]). A sweep that cannot build a state is not a sweep over it.
+  type Mix = {
+    good?: number; bad?: number; unknown?: number; excluded?: number;
+    provGood?: number; provBad?: number; provUnknown?: number; provExcluded?: number;
+  };
+  const cell = (o: Mix, extentMin = 1440) => ({
     startMs: F,
     endMs: F + extentMin * CANONICAL_BUCKET_MS,
-    sealed: { good: us(o.good ?? 0), bad: us(o.bad ?? 0), unknown: us(o.unknown ?? 0), excluded: 0 },
-    provisional: { good: us(o.provGood ?? 0), bad: 0, unknown: 0, excluded: 0 },
-    storedMinutes: (o.good ?? 0) + (o.bad ?? 0) + (o.unknown ?? 0) + (o.provGood ?? 0),
+    sealed: { good: us(o.good ?? 0), bad: us(o.bad ?? 0), unknown: us(o.unknown ?? 0), excluded: us(o.excluded ?? 0) },
+    provisional: { good: us(o.provGood ?? 0), bad: us(o.provBad ?? 0), unknown: us(o.provUnknown ?? 0), excluded: us(o.provExcluded ?? 0) },
+    storedMinutes: Object.values(o).reduce((a, v) => a + (v ?? 0), 0),
     repairing: false,
   });
-  const total = (c: Parameters<typeof stackSlices>[0]) => stackSlices(c, H).reduce((s, x) => s + x.h, 0);
+  const total = (c: Parameters<typeof stackSlices>[0], hh = H) => stackSlices(c, hh).reduce((s, x) => s + x.h, 0);
 
   it("totals exactly h for the reviewer's counterexample: one second of bad and NO good", () => {
     const c = cell({ bad: 1 / 60 });
@@ -275,20 +283,50 @@ describe("stackSlices — the floor is paid for, or it is not granted", () => {
     expect(total(c)).toBeCloseTo(H, 6);
   });
 
-  it("totals exactly h across a sweep of mixtures, so this class cannot return quietly", () => {
-    const mixes: Array<Parameters<typeof cell>[0]> = [];
-    for (const bad of [0, 1 / 60, 1, 9, 700]) {
-      for (const unknown of [0, 1 / 60, 8]) {
-        for (const good of [0, 1 / 60, 150, 1439]) {
-          for (const provGood of [0, 40]) mixes.push({ bad, unknown, good, provGood });
+  it("totals exactly h when the CAP BINDS: six near-zero problem slices in a 14px lane", () => {
+    // The reviewer's counterexample at party [180], reproduced before it was accepted: six eligible
+    // slices ask for 2px each in a lane 14px tall, the cap allows 8.4px, and the earlier version
+    // billed the capped amount while having already handed out the full 12px — returning 17.6px for
+    // a 14px cell, which SVG clips.
+    const LANE = 14;
+    const t = 1 / 60; // one second of each
+    const c = cell({ bad: t, unknown: t, excluded: t, provBad: t, provUnknown: t, provExcluded: t });
+    const slices = stackSlices(c, LANE);
+    expect(slices.reduce((s, x) => s + x.h, 0)).toBeCloseTo(LANE, 6);
+    // the cap binds, so every floor is SHORTENED in proportion rather than some paid in full
+    const problems = slices.filter((s) => s.kind !== "notStored" && s.kind !== "good");
+    expect(problems).toHaveLength(6);
+    for (const s of problems) expect(s.h).toBeCloseTo(problems[0].h, 9); // equal, not rounded
+    expect(problems.every((s) => s.h < SLICE_FLOOR_PX)).toBe(true);
+    // and the GRANT is exactly the cap: the slices' natural heights plus the cap, no more. Asserted
+    // against the natural heights rather than a rounded figure, because the rule is about the grant.
+    const natural = (t / (24 * 60)) * LANE; // one second of a day, at the lane's height
+    const grant = problems.reduce((a, x) => a + x.h, 0) - 6 * natural;
+    expect(grant).toBeCloseTo(SLICE_FLOOR_CAP * LANE, 9);
+    // absence funded all of it, and nothing beyond it
+    expect(slices.find((s) => s.kind === "notStored")!.h).toBeCloseTo(LANE - 6 * natural - grant, 9);
+  });
+
+  it("totals exactly h across a sweep over ALL six problem states and both heights", () => {
+    const mixes: Mix[] = [];
+    const tiny = 1 / 60;
+    for (const bad of [0, tiny, 9, 700]) {
+      for (const unknown of [0, tiny, 8]) {
+        for (const excluded of [0, tiny, 60]) {
+          for (const good of [0, tiny, 150, 1439]) {
+            for (const prov of [{}, { provGood: 40 }, { provBad: tiny, provUnknown: tiny, provExcluded: tiny }]) {
+              mixes.push({ bad, unknown, excluded, good, ...prov });
+            }
+          }
         }
       }
     }
-    for (const m of mixes) {
-      const sum = total(cell(m));
-      expect(sum, `mixture ${JSON.stringify(m)}`).toBeCloseTo(H, 6);
+    for (const hh of [14, 30, 34]) {
+      for (const m of mixes) {
+        expect(total(cell(m), hh), `h=${hh} mixture ${JSON.stringify(m)}`).toBeCloseTo(hh, 6);
+      }
     }
-    expect(mixes.length).toBe(120);
+    expect(mixes.length).toBe(432);
   });
 
   it("returns the floor it cannot fund, rather than overflowing — the case a mutant survived", () => {

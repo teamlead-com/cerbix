@@ -165,7 +165,18 @@ document's first revision, which said absence may never shrink: a cell holding o
 and no good at all has nothing else to pay with, and "the problem is visible", "absence never
 shrinks" and "the total is exact" cannot all hold there. The first is the promise ruled at party
 [143] and the third is not negotiable, so the second yields, bounded by the cap. Reviewer P1 at
-party [178] found the overflow: 33.9996 px of absence plus a floored 2 px of `bad` in a 34 px cell. Those three states and no others: the floor
+party [178] found the first overflow: 33.9996 px of absence plus a floored 2 px of `bad` in a 34 px
+cell.
+
+**The cap limits the GRANTS, not the debt.** Reviewer P1 at party [180] found the second overflow in
+the branch the first fix left: raising every eligible slice to the floor and clamping the accumulated
+debt afterwards bills less than has already been handed out. Six near-zero problem slices in a 14 px
+lane — the API can produce all six, because a sealed and a provisional point each carry `bad`,
+`unknown` and `excluded` — ask for 12 px, are billed 8.4 px by the cap, and the difference is taken
+from nobody: 17.6 px in a 14 px cell. So the grant total is `min(requested, cap, available)`, granted
+**in proportion** to what each slice asked for and taken from the funders exactly, which makes the
+total exact by construction rather than by a reconciliation pass. When the cap binds, every floor is
+shortened together rather than some paid in full and others not at all. Those three states and no others: the floor
 belongs to a problem or a missing verdict, and `provisional` good time is good time that is merely
 unsealed, so flooring it would inflate good time and buy no honesty. The first revision of this
 section said "a non-good slice", which reads as including provisional and is how the mock's first

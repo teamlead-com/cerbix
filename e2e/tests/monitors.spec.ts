@@ -59,6 +59,12 @@ test.describe("monitors", () => {
     const mon = await r.json();
 
     await page.goto(`/monitors/${mon.id}`);
+    // FR-031 §6: the Response time panel ships as points with an observation ruler and NO line.
+    // These assertions are deliberately independent of how many checks have run yet — the panel's
+    // data-dependent behaviour is pinned by `ResponseTimePanel.spec.ts` against real fixtures, and
+    // what a live run adds is proof that this panel is the one inside the embedded SPA.
+    await expect(page.getByTestId("lat-timeout")).toContainText("timeout 5s");
+    await expect(page.locator("text=observation ruler")).toBeVisible();
     // The Configuration card shows the full alerting config (D-0109).
     await expect(page.locator("dt", { hasText: "Failure threshold" })).toBeVisible();
     await expect(page.locator("dt", { hasText: "Re-notify" })).toBeVisible();

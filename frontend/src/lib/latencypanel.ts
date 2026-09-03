@@ -121,3 +121,21 @@ export function widestSpan(spans: EmptySpan[]): EmptySpan | null {
   if (!spans.length) return null;
   return spans.reduce((a, s) => (s.toMs - s.fromMs > a.toMs - a.fromMs ? s : a), spans[0]);
 }
+
+/**
+ * An interval in a unit that fits it.
+ *
+ * Found by looking at the running stack: a fixed `Math.round(ms / 60000)` renders an
+ * eleven-second interval as "0 min", which is not merely useless — it is a false statement about
+ * the interval, on a panel whose whole subject is not making those.
+ */
+export function gapLabel(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return rs ? `${m}m ${rs}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm ? `${h}h ${rm}m` : `${h}h`;
+}

@@ -55,9 +55,18 @@ test.describe("SLA editor", () => {
     await expect(page.getByTestId("project-objective")).toBeVisible();
     await expect(page.getByTestId("project-objective-unset")).toHaveText("not set");
 
+    // FR-031 §7: the card is READ-ONLY until Edit, and a successful save closes it again — a
+    // closed editor cannot hold a stale draft, which is what made an unsent draft and a stored
+    // fact render identically.
+    await expect(page.getByTestId("project-objective-input")).toHaveCount(0);
+    await page.getByTestId("project-objective-edit").click();
     await page.getByTestId("project-objective-input").fill("99.9");
+    await expect(page.getByTestId("project-objective-dirty")).toContainText("unsaved draft");
     await page.getByTestId("project-objective-save").click();
     await expect(page.getByTestId("project-objective-value")).toContainText("99.9");
+    // it closed, it said so, and the draft is gone
+    await expect(page.getByTestId("project-objective-input")).toHaveCount(0);
+    await expect(page.getByTestId("project-objective-saved")).toContainText("saved");
     // The report is what states the budget, so its presence proves the server derived it.
     await expect(page.getByTestId("project-objective-budget")).toBeVisible();
 
@@ -68,6 +77,11 @@ test.describe("SLA editor", () => {
     expect(w30?.objective).toBe(99.9);
     expect(w30?.error_budget).toBeTruthy();
 
+    await page.getByTestId("project-objective-edit").click();
+    // reopening prefills with the STORED value, so nothing is offered that would do nothing
+    await expect(page.getByTestId("project-objective-input")).toHaveValue("99.9");
+    await expect(page.getByTestId("project-objective-clean")).toContainText("nothing to save");
+    await expect(page.getByTestId("project-objective-save")).toBeDisabled();
     await page.getByTestId("project-objective-clear").click();
     await expect(page.getByTestId("project-objective-unset")).toHaveText("not set");
     const after = await apiGet(page, `/api/v1/projects/${projectID}/sla`);

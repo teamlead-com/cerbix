@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPoints, emptySpans, panelStats, widestSpan, type HeartbeatLike } from "./latencypanel";
+import { buildPoints, emptySpans, gapLabel, panelStats, widestSpan, type HeartbeatLike } from "./latencypanel";
 
 // func-truthful-rendering §6 (FR-031, D-0235).
 const T0 = Date.UTC(2026, 8, 3, 14, 12, 0);
@@ -113,5 +113,26 @@ describe("emptySpans — absence rendered positively, with no threshold on meani
   it("has nothing to say about a single point, and does not invent a span", () => {
     expect(emptySpans(buildPoints([{ ts: at(0), latency_ms: 1 }]), PXMS, 12)).toEqual([]);
     expect(widestSpan([])).toBeNull();
+  });
+});
+
+// Found by looking at the running stack rather than at a fixture: an eleven-second interval was
+// rendered as "0 min", which is a false statement about the interval on a panel whose subject is
+// not making those.
+describe("gapLabel — an interval in a unit that fits it", () => {
+  it("never renders a real interval as zero", () => {
+    expect(gapLabel(11_000)).toBe("11s");
+    expect(gapLabel(1_000)).toBe("1s");
+    expect(gapLabel(59_400)).toBe("59s");
+  });
+
+  it("uses minutes with seconds only when there are any", () => {
+    expect(gapLabel(7 * 60_000)).toBe("7m");
+    expect(gapLabel(7 * 60_000 + 30_000)).toBe("7m 30s");
+  });
+
+  it("reaches hours for a long silence", () => {
+    expect(gapLabel(3 * 3_600_000)).toBe("3h");
+    expect(gapLabel(3 * 3_600_000 + 20 * 60_000)).toBe("3h 20m");
   });
 });

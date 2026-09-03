@@ -9,7 +9,7 @@ import { useLive } from "@/stores/live";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import {
-  buildPoints, emptySpans, panelStats, widestSpan,
+  buildPoints, emptySpans, gapLabel, panelStats, widestSpan,
   type EmptySpan, type PanelPoint,
 } from "@/lib/latencypanel";
 import { instantLabel, utcInstantLabel } from "@/lib/wallclock";
@@ -738,8 +738,7 @@ watch(
           </p>
         </div>
         <p v-else-if="widestGap" class="mx-4 mb-3 text-[11.5px] text-ink-3" data-testid="lat-widest-gap">
-          widest interval between two recorded checks:
-          {{ Math.round((widestGap.toMs - widestGap.fromMs) / 60000) }} min,
+          widest interval between two recorded checks: {{ gapLabel(widestGap.toMs - widestGap.fromMs) }},
           {{ instantLabel(new Date(widestGap.fromMs).toISOString()) }} →
           {{ instantLabel(new Date(widestGap.toMs).toISOString()) }} — the panel says only that, never
           that a check was missed.

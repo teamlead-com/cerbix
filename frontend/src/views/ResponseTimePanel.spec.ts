@@ -109,7 +109,9 @@ describe("the Response time panel", () => {
     const w = await mountPanel();
     const note = w.find('[data-testid="lat-widest-gap"]').text();
     expect(note).toContain("widest interval between two recorded checks");
-    expect(note).toContain("7 min");
+    expect(note).toContain("7m");
+    // and never "0 min" for a real interval — the defect the running stack showed
+    expect(note).not.toMatch(/\b0\s*m(in)?\b/);
     // it says what it measured, and explicitly disclaims what it cannot know
     expect(note).toContain("never");
     expect(note).toContain("a check was missed");

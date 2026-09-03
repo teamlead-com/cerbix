@@ -6820,7 +6820,18 @@ such.
     two recorded checks here is 7 minutes, 19:33 → 19:40 — and the panel says only that, never that
     a check was missed."
 
-**Status.** Design approved; NOT implemented. The mock
+22. **One defect only the running stack could show, recorded because the lesson is the method.**
+    Photographed in the live app, the Response time panel read "widest interval between two recorded
+    checks: **0 min**" for an eleven-second interval — `Math.round(ms / 60000)`, which is a false
+    statement about the interval on the one panel whose subject is not making those. Every fixture
+    in the suite happens to use whole minutes, so nothing but looking at it would have caught it.
+    Fixed by `gapLabel`, which picks a unit that fits, with tests and an assertion that a real
+    interval is never rendered as zero. The iteration also records what was NOT photographed: the
+    Reliability card's live pixels, because the dev stack has no service and sealing one takes real
+    time.
+
+**Status.** IMPLEMENTED at iter-0174 (2026-09-03); FR-031 and NFR-025a are DONE, NFR-025b and
+FR-032 stay open by design. The mock
 (`docs/design/mock-truthful-rendering.html`) is drawn, carries the two cases the reviewer asked
 to see — a sub-pixel segment with its marker and a UTC cell tooltip showing its true local extent
 — and awaits the owner's approval, which gates all frontend code.

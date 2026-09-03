@@ -10,11 +10,11 @@ func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
 
 	// Enqueue three jobs for geo3 and one for core.
 	for i := 0; i < 3; i++ {
-		if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{"n":`+string(rune('0'+i))+`}`), 60); err != nil {
+		if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{"n":`+string(rune('0'+i))+`}`), 60, 0); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 	}
-	if err := st.EnqueuePullJob(ctx, "core", []byte(`{"c":1}`), 60); err != nil {
+	if err := st.EnqueuePullJob(ctx, "core", []byte(`{"c":1}`), 60, 0); err != nil {
 		t.Fatalf("enqueue core: %v", err)
 	}
 
@@ -64,7 +64,7 @@ func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
 	}
 
 	// An expired (TTL) job is never claimed, and is purged.
-	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{"old":1}`), 60); err != nil {
+	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{"old":1}`), 60, 0); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if _, err := st.pool.Exec(ctx, `UPDATE pull_jobs SET expires_at = now() - interval '1 minute' WHERE region='geo3'`); err != nil {
@@ -80,10 +80,10 @@ func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
 
 func TestPullQueueStats(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60); err != nil {
+	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60, 0); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60); err != nil {
+	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60, 0); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	// Backdate one so lag reflects the oldest.
@@ -108,7 +108,7 @@ func TestPullQueueStats(t *testing.T) {
 
 func TestPullProtocolClaimsArePhysicallySeparated(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
 		t.Fatal(err)
 	}
 	if jobs, err := st.ClaimPullJobs(ctx, "secure", 10, 30); err != nil || len(jobs) != 0 {
@@ -189,10 +189,10 @@ func TestAgentHeartbeatLiveRegions(t *testing.T) {
 // Enabling a security feature must never silently disable monitoring.
 func TestCapableClaimLeasesEveryGenerationAtOrBelowCapability(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60); err != nil {
+	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 10, 30)
@@ -217,10 +217,10 @@ func TestCapableClaimLeasesEveryGenerationAtOrBelowCapability(t *testing.T) {
 // generation. Widening the capable claim must not widen this one.
 func TestGeneration1ClaimNeverSeesNewerGeneration(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60); err != nil {
+	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := st.ClaimPullJobs(ctx, "secure", 10, 30)
@@ -239,10 +239,10 @@ func TestGeneration1ClaimNeverSeesNewerGeneration(t *testing.T) {
 func TestCapableClaimSharesOneMaxAcrossGenerations(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	for i := 0; i < 2; i++ {
-		if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60); err != nil {
+		if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+		if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -259,10 +259,10 @@ func TestCapableClaimSharesOneMaxAcrossGenerations(t *testing.T) {
 // generation can starve the other under sustained load.
 func TestCapableClaimOrdersByAgeNotGeneration(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60); err != nil {
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60); err != nil {
+	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0); err != nil {
 		t.Fatal(err)
 	}
 	// Make the ordering deterministic regardless of insert-timestamp resolution: the

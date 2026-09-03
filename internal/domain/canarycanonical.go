@@ -2,6 +2,7 @@ package domain
 
 import (
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -458,12 +459,16 @@ type CanaryFixture struct {
 	MediaType string
 	FileName  string
 	MaxBytes  int
-	SHA256    string // filled when the asset is embedded (phase E); empty means "not yet carried"
+	SHA256    string
+	Bytes     []byte
 }
 
 // CanaryFixtureRegistryMax is the hard ceiling for any registry entry, checked when the asset is
 // embedded as well as here, so a future fixture cannot quietly become a large upload.
 const CanaryFixtureRegistryMax = 1 << 20 // 1 MiB
+
+//go:embed canaryfixtures/small_wav_v1.wav
+var canarySmallWav []byte
 
 var canaryFixtures = map[string]CanaryFixture{
 	"small_wav_v1": {
@@ -471,7 +476,33 @@ var canaryFixtures = map[string]CanaryFixture{
 		MediaType: "audio/wav",
 		FileName:  "small_wav_v1.wav",
 		MaxBytes:  128 * 1024,
+		// Pinned. `TestCanaryFixtureDigestsArePinned` recomputes it from the embedded bytes, so a
+		// fixture cannot change without the digest changing with it — and changing a fixture is a
+		// RELEASE, which is the cost D11 accepted for taking the operator's file out of the loop.
+		SHA256: "352b9bd41553ac92a191d383a178c75315b6d0b4994ae14267593624912243b4",
+		Bytes:  canarySmallWav,
 	},
+}
+
+// CanaryFixtureBytes returns the asset and verifies its digest before handing it over. A binary
+// whose embedded asset does not match the pin is a supply-chain event, not a probe failure, so the
+// executor refuses to upload it rather than sending whatever it happens to carry.
+func CanaryFixtureBytes(ref string) ([]byte, error) {
+	f, ok := canaryFixtures[ref]
+	if !ok {
+		return nil, fmt.Errorf("fixture %q is not a registry key", ref)
+	}
+	if len(f.Bytes) == 0 {
+		return nil, fmt.Errorf("fixture %q carries no bytes", ref)
+	}
+	if len(f.Bytes) > f.MaxBytes || len(f.Bytes) > CanaryFixtureRegistryMax {
+		return nil, fmt.Errorf("fixture %q is larger than its declared maximum", ref)
+	}
+	sum := sha256.Sum256(f.Bytes)
+	if hex.EncodeToString(sum[:]) != f.SHA256 {
+		return nil, fmt.Errorf("fixture %q does not match its pinned digest", ref)
+	}
+	return f.Bytes, nil
 }
 
 // CanaryFixtureExists reports whether a key names a registry entry. Validation uses it so a bundle

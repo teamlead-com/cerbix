@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -121,5 +123,37 @@ func TestAnUnsaturatedCanaryRunIsDispatchedNormally(t *testing.T) {
 	}
 	if beats != 0 {
 		t.Fatalf("a healthy dispatch must not fabricate a heartbeat, got %d", beats)
+	}
+}
+
+// The scheduler's copy of the agent endpoint's default must not drift from the endpoint's own: the
+// two live in packages that deliberately do not import each other, so the agreement is asserted
+// rather than assumed.
+func TestThePullLeaseDefaultMatchesTheAgentEndpoint(t *testing.T) {
+	src, err := os.ReadFile("../api/handlers_agent.go")
+	if err != nil {
+		t.Fatalf("read the agent endpoint: %v", err)
+	}
+	want := "pullJobLeaseSeconds = " + strconv.Itoa(pullLeaseDefaultSeconds)
+	if !strings.Contains(string(src), want) {
+		t.Fatalf("the agent endpoint no longer declares %q — the scheduler's copy has drifted", want)
+	}
+}
+
+// A monitor whose probe fits the default asks for no lease of its own; one that outlives it asks for
+// its own, and that is written against the TIMEOUT rather than the type because the defect predates
+// the canary.
+func TestPullLeaseIsAskedForOnlyWhenTheProbeOutlivesTheDefault(t *testing.T) {
+	short := domain.Monitor{Type: domain.MonitorHTTP, TimeoutSeconds: 10}
+	if got := pullLeaseFor(short); got != 0 {
+		t.Fatalf("a 10s probe asked for a %ds lease, want the endpoint's default", got)
+	}
+	long := domain.Monitor{Type: domain.MonitorHTTP, TimeoutSeconds: 120}
+	if got := pullLeaseFor(long); got <= 120 {
+		t.Fatalf("a 120s probe asked for %ds, want its own budget plus slack", got)
+	}
+	canary := domain.Monitor{Type: domain.MonitorAsyncCanary, TimeoutSeconds: 300}
+	if got := pullLeaseFor(canary); got < 300 {
+		t.Fatalf("a canary asked for %ds, want at least its journey", got)
 	}
 }

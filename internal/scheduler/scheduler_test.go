@@ -25,6 +25,7 @@ type fakeStore struct {
 	canaryClaims     []string
 	canaryClaimErr   error
 	canaryHeartbeats []domain.Heartbeat
+	pullLeases       []int
 
 	serviceSlices int32
 	monitors      []domain.Monitor
@@ -278,9 +279,15 @@ func (f *fakeStore) EvaluateRegionWorkerAlerts(context.Context, map[string]bool,
 func (f *fakeStore) AdvanceEscalations(context.Context) (store.EscalationPass, error) {
 	return f.escalationPass, nil
 }
-func (f *fakeStore) EnqueuePullJob(context.Context, string, []byte, int) error   { return nil }
-func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int) error { return nil }
-func (f *fakeStore) EnqueuePullJobV3(context.Context, string, []byte, int) error { return nil }
+func (f *fakeStore) EnqueuePullJob(_ context.Context, _ string, _ []byte, _, lease int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pullLeases = append(f.pullLeases, lease)
+	return nil
+}
+
+func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int, int) error { return nil }
+func (f *fakeStore) EnqueuePullJobV3(context.Context, string, []byte, int, int) error { return nil }
 func (f *fakeStore) LiveCredentialReadyAgentRegions(context.Context, time.Duration, int) (map[string]bool, error) {
 	return map[string]bool{}, nil
 }

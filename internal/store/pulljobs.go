@@ -12,27 +12,36 @@ import (
 // EnqueuePullJob stores a check-job payload for a pull-served region with a TTL
 // (ttlSeconds), so an agent can claim it over HTTP. A non-positive TTL falls back to
 // 60s. The payload is an opaque JSON snapshot (a dispatch.CheckJob).
-func (s *Store) EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds int) error {
-	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 1)
+func (s *Store) EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 1)
 }
 
-func (s *Store) EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds int) error {
-	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 2)
+func (s *Store) EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 2)
 }
 
 // EnqueuePullJobV3 enqueues on the carrier generation that carries envelope v2. It is used
 // only for a region whose executors have declared capability 2 (§4.7, D-0160).
-func (s *Store) EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds int) error {
-	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, 3)
+func (s *Store) EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 3)
 }
 
-func (s *Store) enqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, protocolVersion int) error {
+// leaseSeconds is the per-JOB claim lease (FR-029 §4.2). Zero means "the endpoint's default", which
+// is what every existing caller and every short probe passes — a monitor whose probe outlives the
+// default is the only one that needs its own, and a job re-claimed while it still runs is a duplicate
+// probe for an ordinary type and a duplicate external TRANSACTION for a canary.
+func (s *Store) enqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds, protocolVersion int) error {
 	if ttlSeconds <= 0 {
 		ttlSeconds = 60
 	}
+	var lease *int
+	if leaseSeconds > 0 {
+		lease = &leaseSeconds
+	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO pull_jobs (region, payload, expires_at, protocol_version) VALUES ($1, $2, now() + make_interval(secs => $3), $4)`,
-		region, payload, ttlSeconds, protocolVersion)
+		`INSERT INTO pull_jobs (region, payload, expires_at, protocol_version, lease_seconds)
+		 VALUES ($1, $2, now() + make_interval(secs => $3), $4, $5)`,
+		region, payload, ttlSeconds, protocolVersion, lease)
 	if err != nil {
 		return fmt.Errorf("store: enqueue pull job: %w", err)
 	}
@@ -102,7 +111,8 @@ func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeco
 	}
 	rows, err := s.pool.Query(ctx,
 		`UPDATE pull_jobs SET claim_token = gen_random_uuid(),
-		        lease_expires_at = now() + make_interval(secs => $3)
+		        -- The job's OWN lease when it asked for one, the caller's default otherwise.
+		        lease_expires_at = now() + make_interval(secs => COALESCE(lease_seconds, $3))
 		  WHERE id IN (
 		     SELECT id FROM pull_jobs
 		      WHERE region = $1 AND protocol_version <= $4 AND expires_at > now()

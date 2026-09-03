@@ -1,11 +1,13 @@
 package prober
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -270,10 +272,16 @@ func (p canaryProber) do(ctx context.Context, client *http.Client, method, rawUR
 func (p canaryProber) await(ctx context.Context, client *http.Client, w domain.CanaryWorkflow,
 	secrets map[string]string, correlation string) (any, *canaryFailure) {
 
-	if w.Completion.Kind != domain.CanaryCompletionPollJSON {
+	target := canarySubstitute(w.Completion.URL, correlation)
+	switch w.Completion.Kind {
+	case domain.CanaryCompletionSSE:
+		return p.awaitSSE(ctx, client, w, secrets, target)
+	case domain.CanaryCompletionPollJSON:
+	default:
+		// An unknown kind is refused rather than treated as one of the two that exist: a document
+		// the schema would refuse can still reach here on a crafted carrier.
 		return nil, &canaryFailure{domain.CanaryStageAwaitResult, "completion kind not supported by this executor"}
 	}
-	target := canarySubstitute(w.Completion.URL, correlation)
 	poll := w.Completion.Poll
 	for attempt := 0; attempt < poll.MaxAttempts; attempt++ {
 		if attempt > 0 {
@@ -312,6 +320,133 @@ func (p canaryProber) await(ctx context.Context, client *http.Client, w domain.C
 	return nil, &canaryFailure{domain.CanaryStageAwaitResult, "poll attempts exhausted"}
 }
 
+// SSE bounds (§4b). They are constants for the same reason every other bound here is: a limit an
+// operator can raise is a limit that stops being one on the day someone is in a hurry.
+const (
+	canaryMaxSSELineBytes  = 16 * 1024
+	canaryMaxSSEEventBytes = 64 * 1024
+	canaryMaxSSETotalBytes = 8 * 1024 * 1024
+)
+
+// awaitSSE holds ONE stream open for the completion window and returns the payload of the event whose
+// type is `success_event` — that payload, and nothing else, is the RESULT DOCUMENT (§5.4).
+//
+// v1 does NOT reconnect. A dropped stream fails `await_result` with a transport class, because
+// resuming correctly needs a resume token this contract does not have, and a reconnect that silently
+// restarts the stream would re-read events the executor has already judged.
+func (p canaryProber) awaitSSE(ctx context.Context, client *http.Client, w domain.CanaryWorkflow,
+	secrets map[string]string, target string) (any, *canaryFailure) {
+
+	req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
+	if err != nil {
+		return nil, &canaryFailure{domain.CanaryStageAwaitResult, "request could not be built"}
+	}
+	var bindingBacked []string
+	for _, h := range w.Completion.Headers {
+		name := strings.ToLower(strings.TrimSpace(h.Name))
+		if h.SecretRef != "" {
+			value, ok := secrets[h.SecretRef]
+			if !ok {
+				return nil, &canaryFailure{domain.CanaryStageAwaitResult, "credential unavailable"}
+			}
+			req.Header.Set(name, value)
+			bindingBacked = append(bindingBacked, name)
+			continue
+		}
+		req.Header.Set(name, h.Value)
+	}
+	if len(bindingBacked) > 0 {
+		req.Header.Set(canaryBindingBackedHeader, strings.Join(bindingBacked, ","))
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, &canaryFailure{domain.CanaryStageAwaitResult, canaryTransportClass(err)}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, &canaryFailure{domain.CanaryStageAwaitResult, "stream status " + canaryStatusClass(resp.StatusCode)}
+	}
+	// The content type is PINNED: a JSON error page served with 200 is not a stream, and reading it
+	// as one is how a canary reports a terminal state that never happened.
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "text/event-stream") {
+		return nil, &canaryFailure{domain.CanaryStageAwaitResult, "stream content type is not text/event-stream"}
+	}
+
+	failure := map[string]bool{}
+	for _, e := range w.Completion.SSE.FailureEvents {
+		failure[e] = true
+	}
+
+	reader := bufio.NewReaderSize(io.LimitReader(resp.Body, canaryMaxSSETotalBytes+1), 4096)
+	var total int
+	var eventName string
+	var data strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		total += len(line)
+		if total > canaryMaxSSETotalBytes {
+			return nil, &canaryFailure{domain.CanaryStageAwaitResult, "response too large"}
+		}
+		if len(line) > canaryMaxSSELineBytes {
+			return nil, &canaryFailure{domain.CanaryStageAwaitResult, "event line too large"}
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, &canaryFailure{domain.CanaryStageAwaitResult, "completion timed out"}
+			}
+			// End of stream without a terminal event: no reconnect in v1, so this is the answer.
+			return nil, &canaryFailure{domain.CanaryStageAwaitResult, "stream ended without a terminal event"}
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+
+		switch {
+		case trimmed == "":
+			// Blank line ends one event.
+			name, payload := eventName, data.String()
+			eventName, data = "", strings.Builder{}
+			if name == "" {
+				continue // a comment or a keep-alive carries no event type
+			}
+			if failure[name] {
+				return nil, &canaryFailure{domain.CanaryStageAwaitResult, "declared failure event"}
+			}
+			if name != w.Completion.SSE.SuccessEvent {
+				continue // an intermediate event this contract does not judge
+			}
+			var doc any
+			if err := json.Unmarshal([]byte(payload), &doc); err != nil {
+				// A malformed success event is a failure and never a retry: the terminal event
+				// arrived and could not be read, which is a different thing from not arriving.
+				return nil, &canaryFailure{domain.CanaryStageAwaitResult, "success event payload is not JSON"}
+			}
+			for _, path := range w.Completion.SSE.RequiredJSONFields {
+				if _, ok := canaryLookup(doc, path); !ok {
+					return nil, &canaryFailure{domain.CanaryStageAwaitResult, "success event is missing a required field"}
+				}
+			}
+			return doc, nil
+		case strings.HasPrefix(trimmed, ":"):
+			// A comment line; SSE keep-alives use it.
+		case strings.HasPrefix(trimmed, "event:"):
+			eventName = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+		case strings.HasPrefix(trimmed, "data:"):
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(strings.TrimPrefix(strings.TrimPrefix(trimmed, "data:"), " "))
+			if data.Len() > canaryMaxSSEEventBytes {
+				return nil, &canaryFailure{domain.CanaryStageAwaitResult, "event too large"}
+			}
+		default:
+			// `id:`, `retry:` and anything unknown are ignored rather than refused: an unknown
+			// field is how SSE is meant to be extended, and refusing one would break on a server
+			// that adds a field this contract does not read.
+		}
+	}
+}
+
 // canaryBuildBody renders the submit body. `http_json` encodes the typed algebra with binding values
 // substituted at the leaves; `multipart_fixture` is phase E and is refused here rather than sent as
 // something else.
@@ -328,9 +463,58 @@ func canaryBuildBody(w domain.CanaryWorkflow, secrets map[string]string) ([]byte
 		}
 		return encoded, "application/json", nil
 	case domain.CanarySubmitMultipartFixture:
-		return nil, "", fmt.Errorf("submit kind not supported by this executor")
+		// The runner owns the boundary — which is why the schema refuses an author-supplied
+		// `content-type` on this kind — and the fixture comes from the closed registry with its
+		// digest verified before a byte is sent (D11).
+		asset, err := domain.CanaryFixtureBytes(w.Submit.FixtureRef)
+		if err != nil {
+			return nil, "", fmt.Errorf("fixture unavailable")
+		}
+		fixture, _ := domain.CanaryFixtureByRef(w.Submit.FixtureRef)
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		part, err := mw.CreateFormFile(w.Submit.Multipart.FileField, fixture.FileName)
+		if err != nil {
+			return nil, "", fmt.Errorf("body could not be encoded")
+		}
+		if _, err := part.Write(asset); err != nil {
+			return nil, "", fmt.Errorf("body could not be encoded")
+		}
+		for name, v := range w.Submit.Multipart.Fields {
+			rendered, err := canaryRenderValue(v, secrets)
+			if err != nil {
+				return nil, "", err
+			}
+			if err := mw.WriteField(name, canaryFieldString(rendered)); err != nil {
+				return nil, "", fmt.Errorf("body could not be encoded")
+			}
+		}
+		if err := mw.Close(); err != nil {
+			return nil, "", fmt.Errorf("body could not be encoded")
+		}
+		return buf.Bytes(), mw.FormDataContentType(), nil
 	default:
 		return nil, "", fmt.Errorf("submit kind not supported by this executor")
+	}
+}
+
+// canaryFieldString renders one multipart field value. A multipart field is text on the wire, so a
+// number and a boolean are written as they would be read — never as Go's default formatting of an
+// interface, which would put `%!s(bool=false)` in a request.
+func canaryFieldString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case json.RawMessage:
+		return string(t)
+	default:
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
 	}
 }
 

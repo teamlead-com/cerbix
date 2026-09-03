@@ -457,16 +457,19 @@ func TestCanaryLatencyPromiseIsSeparateFromTheTimeout(t *testing.T) {
 	}
 }
 
-func TestCanarySSEIsRefusedByThisExecutorRatherThanTreatedAsAPoll(t *testing.T) {
+// Phase C refused SSE outright and this case asserted that refusal. Phase E implements it, so the
+// case became a lie about the product — replaced rather than deleted, because what still needs
+// pinning is that an UNKNOWN completion kind is refused explicitly instead of being treated as one
+// of the two that exist.
+func TestCanaryAnUnknownCompletionKindIsRefusedExplicitly(t *testing.T) {
 	f := newCanaryFixture(t)
 	m := canaryMonitor(t, f.URL, func(w *domain.CanaryWorkflow) {
-		w.Completion.Kind = domain.CanaryCompletionSSE
+		w.Completion.Kind = "websocket_stream"
 		w.Completion.Poll = nil
-		w.Completion.SSE = &domain.CanarySSE{SuccessEvent: "task.completed"}
 	})
 	res := canaryTestProber().Probe(context.Background(), m)
 	if !strings.Contains(res.Msg, "not supported by this executor") {
-		t.Fatalf("msg = %q, want an explicit refusal until phase E", res.Msg)
+		t.Fatalf("msg = %q, want an explicit refusal for an unknown completion kind", res.Msg)
 	}
 }
 

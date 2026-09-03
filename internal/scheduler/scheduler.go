@@ -93,9 +93,12 @@ type Store interface {
 	EnqueueDueSLAReports(ctx context.Context) (int, error)
 	EvaluateRegionWorkerAlerts(ctx context.Context, live map[string]bool, graceSeconds int) (fired, resolved int, err error)
 	AdvanceEscalations(ctx context.Context) (store.EscalationPass, error)
-	EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds int) error
-	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds int) error
-	EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds int) error
+	// leaseSeconds is the per-JOB claim lease: a probe that outlives the endpoint's default would
+	// otherwise be re-claimed while it still runs — a duplicate probe for an ordinary type and a
+	// duplicate external TRANSACTION for a canary (FR-029 §4.2). Zero keeps today's default.
+	EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error
+	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error
+	EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error
 	LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error)
 	PurgeExpiredPullJobs(ctx context.Context) (int, error)
 	PurgeExpiredPullTests(ctx context.Context) (int, error)
@@ -304,6 +307,23 @@ const (
 // (FR-029 §4b). It is what bounds recovery after an executor crash: the slot returns on its own after
 // timeout + this, and the runbook states that number rather than leaving it to arithmetic.
 const canaryInflightSlack = 60 * time.Second
+
+// pullLeaseFor is the per-job claim lease a monitor needs: its own probe budget plus slack, or zero
+// for a probe short enough that the endpoint's default already covers it. Written against the
+// TIMEOUT rather than against the type, because the defect it closes predates the canary — any pull
+// monitor with a timeout past the default is re-claimable mid-probe today.
+func pullLeaseFor(m domain.Monitor) int {
+	timeout := int(m.Timeout() / time.Second)
+	if timeout <= pullLeaseDefaultSeconds {
+		return 0
+	}
+	return timeout + int(canaryInflightSlack/time.Second)
+}
+
+// pullLeaseDefaultSeconds mirrors the agent endpoint's own constant. It is duplicated deliberately
+// rather than imported: the scheduler must not depend on the API package, and a test asserts the two
+// agree so the copy cannot drift silently.
+const pullLeaseDefaultSeconds = 30
 
 // claimCanarySlot takes the in-flight slot for a canary and reports true when the job may be
 // dispatched. A monitor of any other type always may. Both dispatch paths call it, because a canary
@@ -1234,7 +1254,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						s.logger.Error("marshal_pull_job_failed", "monitor_id", m.ID, "error", err.Error())
 						continue // never enqueued → don't advance the cadence
 					}
-					if err := s.store.EnqueuePullJob(ctx, m.Region, payload, int(iv/time.Second)); err != nil {
+					if err := s.store.EnqueuePullJob(ctx, m.Region, payload, int(iv/time.Second), pullLeaseFor(m)); err != nil {
 						if ctx.Err() != nil {
 							return false
 						}
@@ -1482,11 +1502,11 @@ func (s *Scheduler) publishScheduledJob(ctx context.Context, job dispatch.CheckJ
 		// payload to an executor that did not declare the capability to open it.
 		switch {
 		case job.ProtocolVersion >= dispatch.ProtocolV3:
-			return s.store.EnqueuePullJobV3(ctx, region, payload, int(interval/time.Second))
+			return s.store.EnqueuePullJobV3(ctx, region, payload, int(interval/time.Second), pullLeaseFor(job.Monitor))
 		case job.ProtocolVersion == dispatch.ProtocolV2:
-			return s.store.EnqueuePullJobV2(ctx, region, payload, int(interval/time.Second))
+			return s.store.EnqueuePullJobV2(ctx, region, payload, int(interval/time.Second), pullLeaseFor(job.Monitor))
 		default:
-			return s.store.EnqueuePullJob(ctx, region, payload, int(interval/time.Second))
+			return s.store.EnqueuePullJob(ctx, region, payload, int(interval/time.Second), pullLeaseFor(job.Monitor))
 		}
 	}
 	return s.dispatcher.PublishJob(ctx, job)

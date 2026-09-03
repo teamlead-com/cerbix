@@ -79,7 +79,7 @@ func TestMaterializerSnapshotAndPayloadPlaintextAbsence(t *testing.T) {
 		if bytes.Contains(body, []byte(want[item.MonitorID])) {
 			t.Fatalf("transport payload leaked plaintext: %s", body)
 		}
-		if err := st.EnqueuePullJobV2(ctx, item.Job.Monitor.Region, body, item.Job.Monitor.IntervalSeconds); err != nil {
+		if err := st.EnqueuePullJobV2(ctx, item.Job.Monitor.Region, body, item.Job.Monitor.IntervalSeconds, 0); err != nil {
 			t.Fatalf("persist v2 pull payload: %v", err)
 		}
 		materialized, err := dispatch.ValidateAndMaterialize(ring,

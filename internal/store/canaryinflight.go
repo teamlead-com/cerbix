@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -44,6 +45,12 @@ func (s *Store) ClaimCanaryInflight(ctx context.Context, monitorID, region, runK
 	if ttl <= 0 {
 		return fmt.Errorf("store: canary in-flight ttl must be positive")
 	}
+	// A slot keyed by nothing cannot be released by key, so it would park its monitor for the whole
+	// TTL on every single run. Refusing here turns that silent stall into a loud
+	// `in_flight_claim_failed`, which is what a caller that forgot to stamp the run deserves.
+	if strings.TrimSpace(runKey) == "" {
+		return fmt.Errorf("store: canary in-flight claim needs a run key")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin canary claim: %w", err)
@@ -83,11 +90,19 @@ func (s *Store) ClaimCanaryInflight(ctx context.Context, monitorID, region, runK
 	return tx.Commit(ctx)
 }
 
-// ReleaseCanaryInflight frees the slot when a result arrives. A release for a run that no longer
-// holds the row is a no-op rather than an error: the row may have expired while the executor was
-// finishing, and failing here would turn a slow probe into an alert about cerbix.
-func (s *Store) ReleaseCanaryInflight(ctx context.Context, monitorID string) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM canary_inflight WHERE monitor_id = $1`, monitorID); err != nil {
+// ReleaseCanaryInflight frees the slot THAT RUN took. A release for a run that no longer holds the
+// row is a no-op rather than an error: the row may have expired while the executor was finishing,
+// and failing here would turn a slow probe into an alert about cerbix.
+//
+// Keyed by (monitor, run) and not by monitor alone. Keyed by monitor alone, a late result from an
+// expired run deletes the row a NEWER run is holding, and the next tick starts a third run beside
+// the second — the exact concurrency the lease exists to forbid (reviewer P0-3).
+func (s *Store) ReleaseCanaryInflight(ctx context.Context, monitorID, runKey string) error {
+	if strings.TrimSpace(runKey) == "" {
+		return nil // nothing to match: an unkeyed result releases nothing and the TTL applies
+	}
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM canary_inflight WHERE monitor_id = $1 AND run_key = $2`, monitorID, runKey); err != nil {
 		return fmt.Errorf("store: release canary in-flight: %w", err)
 	}
 	return nil

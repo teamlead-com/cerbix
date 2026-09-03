@@ -5955,3 +5955,43 @@ review is everything after the APPROVED design commit: `8626125..HEAD`.
 **And the release was cut before this gate closed.** v0.1.9 was tagged, pushed and published while the
 review request sat unanswered; the owner deleted the release by hand. The review is a GATE, not a
 notification, and a green local gate set is not a substitute for it — this P0 is what the gate was for.
+
+## D-0223 — the canary in-flight slot is keyed by the RUN, and a dispatch that never delivered gives it back (2026-09-03)
+
+**Context.** Two P0s from the independent reviewer's full pass over the canary range, both against
+FR-029 invariant 8 — "the scheduler never has two in-flight executions of one monitor" — which the
+implementation did not actually hold.
+
+**P0-2 — a claim without a delivery leaked the slot.** The scheduler claimed `canary_inflight` BEFORE
+the AMQP publish, the pull enqueue, the payload marshal and the credential-path publish, and none of
+those failure branches released it. Four transient faults therefore consumed a region's whole cap until
+`timeout + 60s`, and every canary in that region then reported `region_saturated` — a DOWN naming a
+cause that had nothing to do with what happened. A broker blip became a fleet of false outages.
+
+Every branch between the claim and a successful delivery now releases. A cancelled context is the one
+case that cannot, because no statement will run as the process goes away; the lease TTL is the backstop
+there, which is what a TTL is for.
+
+**P0-3 — a stale result released a newer run's slot.** The row persisted `run_key`, but
+`RecordScheduledResult` deleted by `monitor_id` alone and the heartbeat carried no run identity at all.
+So: run 1 claims, its lease lapses, run 2 claims — and run 1's late result deletes run 2's row, letting
+run 3 start beside run 2. That is precisely the concurrency the lease exists to forbid, reached through
+the door the lease did not cover.
+
+The scheduled run now travels the whole way — job → result → heartbeat (`Heartbeat.CanaryRunKey`,
+stamped in `prober.Runner.Run` beside the execution revision, because both answer the same question) —
+and both the release and `RecordScheduledResult` delete `WHERE monitor_id AND run_key`.
+
+**A third defect the fix uncovered, named rather than folded in silently.** The run key was written
+inline in the credential materializer, which the PLAIN dispatch path never reaches: a canary with no
+bindings claimed its slot with an EMPTY run key, and a slot keyed by nothing can never be released by
+key — it would have parked its monitor for the full TTL on every run. The formula now has one owner,
+`domain.CanaryRunKeyAt`, both paths stamp through it (onto a COPY of the config, because the snapshot's
+map is shared with every reader of that tick), and `ClaimCanaryInflight` refuses an empty key loudly
+instead of accepting an unreleasable row.
+
+**Consequences.** Four mutations killed: dropping the release after a failed publish, keying the
+release by monitor alone, accepting an empty run key, and dropping the plain path's stamp. The
+`Heartbeat` gains one optional field, so an executor older than this release simply returns no run key,
+releases nothing, and its slot returns at the TTL — degradation, not breakage, and it matches the
+upgrade order the runbook already states.

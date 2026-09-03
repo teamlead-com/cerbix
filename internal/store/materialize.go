@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -147,7 +146,7 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 		// straddles a window boundary on retry gets the next window's key, which is the honest
 		// reading: it IS the next run.
 		if m.Type == domain.MonitorAsyncCanary && m.IntervalSeconds > 0 {
-			stored[domain.CanaryRunKey] = strconv.FormatInt(time.Now().Unix()/int64(m.IntervalSeconds), 10)
+			stored[domain.CanaryRunKey] = domain.CanaryRunKeyAt(m.IntervalSeconds, time.Now())
 			m.Config = stored
 			job.Monitor = m
 		}

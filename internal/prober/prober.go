@@ -101,9 +101,14 @@ func NewRunnerWithGuard(g Guard) *Runner {
 // heartbeat. A check succeeds when the probe connects and all conditions pass;
 // with no conditions the default is a 2xx status (HTTP) or a successful connect.
 func (r *Runner) Run(ctx context.Context, m domain.Monitor) domain.Heartbeat {
+	// FR-029 P0-3: the SCHEDULED RUN travels back with every result, so the in-flight slot is
+	// released by the run that took it. Stamped here, beside the execution revision, because both
+	// answer the same question — which dispatch is this the answer to — and a result that carries
+	// one and not the other would be half an answer.
+	runKey := m.Config[domain.CanaryRunKey]
 	prober, ok := r.registry[m.Type]
 	if !ok {
-		return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), ExecutionRevision: m.ExecutionRevision, Up: false, Msg: fmt.Sprintf("unsupported monitor type %q", m.Type)}
+		return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), ExecutionRevision: m.ExecutionRevision, CanaryRunKey: runKey, Up: false, Msg: fmt.Sprintf("unsupported monitor type %q", m.Type)}
 	}
 
 	attempts := m.Retries + 1
@@ -115,7 +120,7 @@ func (r *Runner) Run(ctx context.Context, m domain.Monitor) domain.Heartbeat {
 
 		up, msg := r.judge(m, res)
 		if up {
-			return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), ExecutionRevision: m.ExecutionRevision, Up: true, LatencyMS: res.LatencyMS, Code: res.Code, Msg: msg}
+			return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), ExecutionRevision: m.ExecutionRevision, CanaryRunKey: runKey, Up: true, LatencyMS: res.LatencyMS, Code: res.Code, Msg: msg}
 		}
 		// Retry only makes sense if the context is still alive.
 		if ctx.Err() != nil {
@@ -126,7 +131,7 @@ func (r *Runner) Run(ctx context.Context, m domain.Monitor) domain.Heartbeat {
 	if msg == "" {
 		msg = res.Msg
 	}
-	return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), ExecutionRevision: m.ExecutionRevision, Up: false, LatencyMS: res.LatencyMS, Code: res.Code, Msg: msg}
+	return domain.Heartbeat{MonitorID: m.ID, Ts: r.clock(), ExecutionRevision: m.ExecutionRevision, CanaryRunKey: runKey, Up: false, LatencyMS: res.LatencyMS, Code: res.Code, Msg: msg}
 }
 
 // judge decides up/down for a probe result and returns an explanatory message.

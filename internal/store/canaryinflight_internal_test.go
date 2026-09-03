@@ -68,10 +68,17 @@ func TestCanaryInflightHoldsOneRunPerMonitorAndBoundsTheRegion(t *testing.T) {
 	// Releasing returns the slot, and releasing again is a no-op rather than an error: the row may
 	// have expired while a slow executor was finishing, and failing there would turn a slow probe
 	// into an alert about cerbix.
-	if err := st.ReleaseCanaryInflight(ctx, first); err != nil {
+	// A release keyed by the WRONG run frees nothing — which is the whole of P0-3 in one line.
+	if err := st.ReleaseCanaryInflight(ctx, first, "run-2"); err != nil {
+		t.Fatalf("a mismatched release must not error: %v", err)
+	}
+	if byRegion, _ := st.CanaryInflightRegions(ctx); byRegion["eu"] != CanaryRegionLimit {
+		t.Fatalf("a release for a run that does not hold the row freed it anyway: %v", byRegion)
+	}
+	if err := st.ReleaseCanaryInflight(ctx, first, "run-1"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if err := st.ReleaseCanaryInflight(ctx, first); err != nil {
+	if err := st.ReleaseCanaryInflight(ctx, first, "run-1"); err != nil {
 		t.Fatalf("second release must be a no-op: %v", err)
 	}
 	if err := st.ClaimCanaryInflight(ctx, overflow, "eu", "run", time.Minute); err != nil {
@@ -109,5 +116,75 @@ func TestCanaryInflightExpiresSoACrashedExecutorDoesNotParkAMonitor(t *testing.T
 	}
 	if row.RunKey != "run-2" {
 		t.Fatalf("run key = %q, want the new run", row.RunKey)
+	}
+}
+
+// P0-3, end to end against the real table: a LATE result from a run whose lease already expired
+// must not release the slot a NEWER run is holding. Keyed by monitor alone — which is what the first
+// version did — the stale release deletes run 2's row and the next tick starts run 3 beside it,
+// which is exactly the concurrency the lease exists to forbid.
+func TestAStaleCanaryResultCannotReleaseANewerRunsSlot(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	m, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "canary", Type: domain.MonitorHTTP, Target: "https://x",
+		IntervalSeconds: 300, TimeoutSeconds: 60, Enabled: true, Region: "eu",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 1 claims, then its lease expires the way a crashed executor's would.
+	if err := st.ClaimCanaryInflight(ctx, m.ID, "eu", "run-1", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE canary_inflight SET expires_at = now() - interval '1 second' WHERE monitor_id = $1`, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Run 2 claims the freed slot.
+	if err := st.ClaimCanaryInflight(ctx, m.ID, "eu", "run-2", time.Minute); err != nil {
+		t.Fatalf("run 2 must be able to claim after run 1's lease lapsed: %v", err)
+	}
+
+	// Run 1 finally answers. It must release NOTHING.
+	if err := st.ReleaseCanaryInflight(ctx, m.ID, "run-1"); err != nil {
+		t.Fatal(err)
+	}
+	var runKey string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT run_key FROM canary_inflight WHERE monitor_id = $1`, m.ID).Scan(&runKey); err != nil {
+		t.Fatalf("run 2's slot was deleted by run 1's late result: %v", err)
+	}
+	if runKey != "run-2" {
+		t.Fatalf("slot holds run %q, want run-2", runKey)
+	}
+	// And run 3 is still refused, because run 2 is genuinely in flight.
+	if err := st.ClaimCanaryInflight(ctx, m.ID, "eu", "run-3", time.Minute); !errors.Is(err, ErrCanaryMonitorInFlight) {
+		t.Fatalf("run 3 = %v, want ErrCanaryMonitorInFlight", err)
+	}
+}
+
+// A slot keyed by nothing could never be released by key, so it would park its monitor for the whole
+// TTL on every run. The claim refuses it loudly instead.
+func TestACanaryClaimWithoutARunKeyIsRefused(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	m, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "canary", Type: domain.MonitorHTTP, Target: "https://x",
+		IntervalSeconds: 300, TimeoutSeconds: 60, Enabled: true, Region: "eu",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"", "   "} {
+		if err := st.ClaimCanaryInflight(ctx, m.ID, "eu", key, time.Minute); err == nil {
+			t.Fatalf("a claim with run key %q was accepted", key)
+		}
+	}
+	if n := countSQL(t, st, ctx, `SELECT count(*) FROM canary_inflight WHERE monitor_id = $1`, m.ID); n != 0 {
+		t.Fatalf("a refused claim left %d rows", n)
 	}
 }

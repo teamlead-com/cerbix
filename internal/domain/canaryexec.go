@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -38,6 +39,20 @@ func CanaryBindingFromField(field string) (string, bool) {
 // expiry and a transport retry are all the SAME execution and must carry the same key, while the next
 // scheduled run must carry a different one (D8).
 const CanaryRunKey = "canary_run"
+
+// CanaryRunKeyAt is the SCHEDULED WINDOW a run belongs to — floor(unix / interval) — and is the ONE
+// place that formula lives.
+//
+// It used to be written inline in the credential materializer, which meant the PLAIN dispatch path
+// never produced one: a canary with no bindings never reaches that materializer, so it claimed its
+// in-flight slot with an empty run key, and a slot keyed by nothing cannot be released by key
+// (reviewer P0-3). Both dispatch paths now stamp the run through this function.
+func CanaryRunKeyAt(intervalSeconds int, at time.Time) string {
+	if intervalSeconds <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(at.Unix()/int64(intervalSeconds), 10)
+}
 
 // CanaryIdempotencyKey derives the stable key. An empty run key yields an empty result, and the
 // executor then sends NO `Idempotency-Key` header at all — an unstable key would be worse than none,

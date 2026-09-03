@@ -594,6 +594,13 @@ type Heartbeat struct {
 	// then the ordering check does not apply.
 	JobID       string    `json:"job_id,omitempty"`
 	JobIssuedAt time.Time `json:"job_issued_at,omitempty"`
+	// CanaryRunKey is the SCHEDULED RUN this result answers, carried back so the in-flight slot is
+	// released by the run that took it and not merely by monitor id. Without it a LATE result from
+	// run 1 — arriving after run 1's lease expired and run 2 claimed the slot — deleted run 2's row
+	// and let run 3 start alongside it, which is the one thing the lease exists to prevent
+	// (reviewer P0-3). Empty for every other monitor type, and empty from an executor older than
+	// this release: such a result releases nothing and the slot returns at its TTL instead.
+	CanaryRunKey string `json:"canary_run_key,omitempty"`
 	// ProbeError is the typed non-liveness result member used when an executor cannot
 	// authenticate/materialize a credential envelope. When set, the ingest path records
 	// diagnostics only: no heartbeat, status, SLA, incident, or transition mutation.

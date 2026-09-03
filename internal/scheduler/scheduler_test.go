@@ -23,6 +23,7 @@ import (
 type fakeStore struct {
 	mu               sync.Mutex
 	canaryClaims     []string
+	canaryReleases   []string
 	canaryClaimErr   error
 	canaryHeartbeats []domain.Heartbeat
 	pullLeases       []int
@@ -209,6 +210,15 @@ func (f *fakeStore) ClaimCanaryInflight(_ context.Context, monitorID, region, ru
 	defer f.mu.Unlock()
 	f.canaryClaims = append(f.canaryClaims, monitorID+"|"+region+"|"+runKey)
 	return f.canaryClaimErr
+}
+
+// canaryReleases records every slot the scheduler gave back. A release the scheduler FAILS to make
+// is the defect (P0-2), so the fake records what happened rather than what was intended.
+func (f *fakeStore) ReleaseCanaryInflight(_ context.Context, monitorID, runKey string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.canaryReleases = append(f.canaryReleases, monitorID+"|"+runKey)
+	return nil
 }
 
 func (f *fakeStore) InsertHeartbeat(_ context.Context, hb domain.Heartbeat) error {

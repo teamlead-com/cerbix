@@ -157,3 +157,98 @@ func TestPullLeaseIsAskedForOnlyWhenTheProbeOutlivesTheDefault(t *testing.T) {
 		t.Fatalf("a canary asked for %ds, want at least its journey", got)
 	}
 }
+
+// P0-2: a claim that is NOT followed by a delivery must give the slot back.
+//
+// Every branch between the claim and a successful publish is a branch where no external journey
+// started, and none of them used to release. Four transient publish failures therefore consumed a
+// region's whole cap until `timeout + 60s`, and every canary there reported a false
+// `region_saturated` DOWN for a broker fault that had nothing to do with saturation.
+func TestACanaryDispatchThatNeverPublishedGivesTheSlotBack(t *testing.T) {
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{canaryScheduleMonitor()}}
+	disp := &failingDispatcher{} // never heals: every publish fails
+	s := New(fs, disp, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		fs.mu.Lock()
+		released := len(fs.canaryReleases)
+		fs.mu.Unlock()
+		if released > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			fs.mu.Lock()
+			claims := len(fs.canaryClaims)
+			fs.mu.Unlock()
+			t.Fatalf("the slot was claimed %d time(s) and never released after a failed publish", claims)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	fs.mu.Lock()
+	claims := append([]string(nil), fs.canaryClaims...)
+	releases := append([]string(nil), fs.canaryReleases...)
+	beats := len(fs.canaryHeartbeats)
+	fs.mu.Unlock()
+
+	if len(claims) == 0 {
+		t.Fatal("no claim was made at all")
+	}
+	// Released for the SAME run that claimed it: a release keyed by anything else frees nothing.
+	wantRun := canaryScheduleMonitor().Config[domain.CanaryRunKey]
+	if !strings.HasSuffix(releases[0], "|"+wantRun) {
+		t.Fatalf("release = %q, want it keyed by run %q", releases[0], wantRun)
+	}
+	if !strings.HasSuffix(claims[0], "|"+wantRun) {
+		t.Fatalf("claim = %q, want it keyed by run %q", claims[0], wantRun)
+	}
+	// A failed publish is a transport fault, not a saturation report: no DOWN heartbeat is written
+	// for it, because the monitor is not down — cerbix could not ask.
+	if beats != 0 {
+		t.Fatalf("a failed publish wrote %d shortage heartbeat(s); that reason belongs to a REFUSED claim", beats)
+	}
+}
+
+// The plain dispatch path — a canary with no bindings — never reaches the credential materializer,
+// which is where the run key used to be stamped. It therefore claimed its slot with an EMPTY run
+// key, and a slot keyed by nothing can never be released by key.
+func TestABindinglessCanaryStillCarriesItsRun(t *testing.T) {
+	m := canaryScheduleMonitor()
+	delete(m.Config, domain.CanaryRunKey) // as the snapshot delivers it on the plain path
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{m}}
+	disp := dispatch.NewInProc(8)
+	s := New(fs, disp, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	select {
+	case delivered := <-disp.Jobs():
+		if got := delivered.Job.Monitor.Config[domain.CanaryRunKey]; got == "" {
+			t.Fatal("the dispatched job carries no run key, so its result could never release the slot")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the canary was never dispatched")
+	}
+
+	fs.mu.Lock()
+	claims := append([]string(nil), fs.canaryClaims...)
+	fs.mu.Unlock()
+	if len(claims) == 0 {
+		t.Fatal("no claim was made")
+	}
+	if strings.HasSuffix(claims[0], "|") {
+		t.Fatalf("claim = %q — the slot was taken with an empty run key", claims[0])
+	}
+	// And the snapshot's own map was not written into: it is shared with every other reader.
+	if _, leaked := m.Config[domain.CanaryRunKey]; leaked {
+		t.Fatal("the run key was written into the SHARED snapshot config instead of a copy")
+	}
+}

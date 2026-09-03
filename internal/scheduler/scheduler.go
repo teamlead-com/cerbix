@@ -82,6 +82,7 @@ type Store interface {
 	// is the only writer, so the check is a count inside the inserting transaction rather than a
 	// distributed semaphore.
 	ClaimCanaryInflight(ctx context.Context, monitorID, region, runKey string, ttl time.Duration) error
+	ReleaseCanaryInflight(ctx context.Context, monitorID, runKey string) error
 	// InsertHeartbeat is how a shortage becomes an ORDINARY monitor outcome rather than an
 	// indefinite pending: a run that could not be dispatched writes one DOWN heartbeat with a
 	// bounded reason, and the monitor's own failure_threshold decides whether that flips its status.
@@ -328,6 +329,45 @@ func pullLeaseFor(m domain.Monitor) int {
 // rather than imported: the scheduler must not depend on the API package, and a test asserts the two
 // agree so the copy cannot drift silently.
 const pullLeaseDefaultSeconds = 30
+
+// withCanaryRunKey stamps the SCHEDULED WINDOW on a canary, on a COPY of its config.
+//
+// A copy because the map in the snapshot is shared with every other reader of this tick, so writing
+// into it would be a race and would leak the value across ticks. The credential materializer stamps
+// the same key before it seals the execution digest, so a value already present is authoritative and
+// left alone; this exists for the PLAIN dispatch path, which never reaches that materializer and
+// therefore used to claim its slot with an empty run key (reviewer P0-3).
+func withCanaryRunKey(m domain.Monitor, at time.Time) domain.Monitor {
+	if m.Type != domain.MonitorAsyncCanary || m.Config[domain.CanaryRunKey] != "" {
+		return m
+	}
+	cfg := make(map[string]string, len(m.Config)+1)
+	for k, v := range m.Config {
+		cfg[k] = v
+	}
+	cfg[domain.CanaryRunKey] = domain.CanaryRunKeyAt(m.IntervalSeconds, at)
+	m.Config = cfg
+	return m
+}
+
+// releaseCanarySlot gives back a slot whose dispatch did NOT reach an executor.
+//
+// Every branch between the claim and a successful publish or enqueue is a branch where no journey
+// started, and none of them used to release. Four transient marshal, enqueue or publish failures
+// therefore consumed a region's whole cap until `timeout + 60s`, and every canary in that region
+// reported a false `region_saturated` DOWN for a fault that had nothing to do with saturation
+// (reviewer P0-2).
+//
+// A cancelled context is the one case this cannot help — the process is going away and no statement
+// will run — and the lease TTL is the backstop there, which is what a TTL is for.
+func (s *Scheduler) releaseCanarySlot(ctx context.Context, m domain.Monitor) {
+	if m.Type != domain.MonitorAsyncCanary || ctx.Err() != nil {
+		return
+	}
+	if err := s.store.ReleaseCanaryInflight(ctx, m.ID, m.Config[domain.CanaryRunKey]); err != nil {
+		s.logger.Error("release_canary_inflight_failed", "monitor_id", m.ID, "error", err.Error())
+	}
+}
 
 // claimCanarySlot takes the in-flight slot for a canary and reports true when the job may be
 // dispatched. A monitor of any other type always may. Both dispatch paths call it, because a canary
@@ -1251,6 +1291,9 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 				// FR-029 D9/D9a. BOTH dispatch paths take the lease: a canary with no binding never
 				// reaches the credential branch below, and the first version of this change put the
 				// claim only there — so a canary without secrets kept every guarantee off.
+				// The run must be stamped BEFORE the claim: the slot is keyed by it, and the job
+				// carries it so the result can release exactly that slot.
+				m = withCanaryRunKey(m, now)
 				if !s.claimCanarySlot(ctx, m) {
 					nextRun[m.ID] = now.Add(iv)
 					continue
@@ -1261,6 +1304,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					// Confirm-phase jobs carry the short TTL so stale fast probes don't stack.
 					payload, err := json.Marshal(dispatch.CheckJob{Monitor: m})
 					if err != nil {
+						s.releaseCanarySlot(ctx, m) // nothing was enqueued: the slot is not in flight
 						s.logger.Error("marshal_pull_job_failed", "monitor_id", m.ID, "error", err.Error())
 						continue // never enqueued → don't advance the cadence
 					}
@@ -1271,6 +1315,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						// Leave nextRun unchanged so the next tick retries this monitor
 						// promptly rather than skipping a whole interval after a transient
 						// enqueue failure.
+						s.releaseCanarySlot(ctx, m) // nothing was enqueued: the slot is not in flight
 						s.logger.Error("enqueue_pull_job_failed", "monitor_id", m.ID, "error", err.Error())
 						continue
 					}
@@ -1283,6 +1328,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					}
 					// During a broker outage every due monitor fails — aggregate
 					// into one line per tick instead of a line per monitor.
+					s.releaseCanarySlot(ctx, m) // nothing was published: the slot is not in flight
 					publishFailed++
 					publishErr = err.Error()
 					continue
@@ -1441,6 +1487,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 							if ctx.Err() != nil {
 								return false
 							}
+							s.releaseCanarySlot(ctx, m) // nothing was published: not in flight
 							publishFailed++
 							publishErr = err.Error()
 							// Retry eligibility is STATE, not a rate (§4.4.5, D-0160): the

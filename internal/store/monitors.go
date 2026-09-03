@@ -1277,10 +1277,17 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	// it, so the monitor's next scheduled run is not blocked by its own finished journey. Expiry
 	// stays the fallback for an executor that never answers; without this release, a canary whose
 	// interval equals its timeout would skip every other run waiting for its own lease to lapse.
-	// The statement is unconditional because it is keyed by monitor and costs nothing for a type
-	// that never claims one.
-	if _, err := tx.Exec(ctx, `DELETE FROM canary_inflight WHERE monitor_id = $1`, hb.MonitorID); err != nil {
-		return ResultOutcome{}, fmt.Errorf("store: release canary in-flight: %w", err)
+	// Keyed by (monitor, RUN) and not by monitor alone (reviewer P0-3): a late result from a run
+	// whose lease already expired must not delete the row a NEWER run is holding, because the next
+	// tick would then start a third run beside the second. A result carrying no run key — any other
+	// monitor type, or an executor older than this release — matches nothing and releases nothing,
+	// and the TTL remains the backstop it always was.
+	if hb.CanaryRunKey != "" {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM canary_inflight WHERE monitor_id = $1 AND run_key = $2`,
+			hb.MonitorID, hb.CanaryRunKey); err != nil {
+			return ResultOutcome{}, fmt.Errorf("store: release canary in-flight: %w", err)
+		}
 	}
 
 	// Step 2 — lock the monitor (existence + serialise vs config writes), read the DB clock,

@@ -1,0 +1,4 @@
+var e=[{key:`summary`,heading:`Summary`,placeholder:`What happened, in a sentence or two.`},{key:`rootCause`,heading:`Root cause`,placeholder:`Why it happened.`},{key:`resolution`,heading:`Resolution`,placeholder:`How it was fixed.`},{key:`actionItems`,heading:`Action items`,placeholder:`- Prevent recurrence…`}];function t(){return{summary:``,rootCause:``,resolution:``,actionItems:``}}function n(t){return e.filter(e=>t[e.key].trim()).map(e=>`## ${e.heading}\n\n${t[e.key].trim()}`).join(`
+
+`)}function r(n){let r=t();if(!n)return r;let i=n.split(/^##\s+/m),a=!1;for(let t of i){let n=t.indexOf(`
+`),i=(n===-1?t:t.slice(0,n)).trim().toLowerCase(),o=(n===-1?``:t.slice(n+1)).trim(),s=e.find(e=>e.heading.toLowerCase()===i);s&&(r[s.key]=o,a=!0)}return a||(r.summary=n.trim()),r}function i(t){let n=r(t);return e.filter(e=>n[e.key].trim()).map(e=>({heading:e.heading,content:n[e.key].trim()}))}export{n as a,i,t as n,r,e as t};

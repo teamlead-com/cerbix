@@ -1,0 +1,1 @@
+function e(e){if(!Number.isFinite(e)||e<=0||e>=100)return null;let t=Math.round(e*1e4)/1e4;return t<=0||t>=100?null:t}export{e as t};

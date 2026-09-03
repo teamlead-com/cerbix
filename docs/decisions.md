@@ -7017,6 +7017,32 @@ setting anywhere to reconcile them. Five hours of difference, unlabelled.
    and asserts the text carries `UTC±HH:MM` and no longer matches the old bare form. The source
    guard proves the construct is gone; this proves what an operator actually reads.
 
-**Gates.** `vue-tsc` clean; **600 tests over 50 files**; `make docs-check` green. No Go change and
-no API change. NFR-025 is `DONE` in full, both halves, and the row says which evidence belongs to
-which half.
+5. **CORRECTION, same day, reviewer P1 at party [195]: NFR-025 is NOT done, and the sentence that
+   said so was already false in the specification.** §9's acceptance criterion read "each of the
+   five call sites … **so no rendered timestamp anywhere in the SPA is missing its zone**". The
+   second clause does not follow from the first and never did: a `Date` can be rendered by hand,
+   and **29 such matches exist across 13 product files** — `toISOString().slice(0,10)`, `getUTC*`,
+   `get*` — with user-visible dates on the agent-token, secret, member, subscriber and monitor
+   surfaces carrying no zone at all. The clause was written at iter-0174 and I repeated it when
+   reporting the substitution done, which is the part that is mine.
+
+   The guard I was proud of only forbade the `toLocaleString` family, so it enforced exactly the
+   construct I had just removed and nothing else. A guard that covers only what you already fixed
+   is not evidence about the surface.
+
+   **NFR-025c** is opened for the hand-rolled surface, and it is not a substitution: each site
+   needs a decision. §9 enumerates it by kind — a bare UTC date shown as a fact; a UTC date that is
+   IDENTITY and should say so rather than be converted (`dayLabel`'s segment range); a compact
+   clock that is mostly unlabelled; two sites already honest in their own words (` UTC`, ` Z`); and
+   the sites that must STAY bare, with reasons — `datetime-local` INPUT values, whose HTML format
+   is local and offset-free, and day-grid map keys and day-boundary comparisons, which are never
+   rendered.
+
+   **The remainder is bounded rather than described.** A ratchet in `wallclock.spec.ts` counts the
+   idiom per file against an enumerated list with a reason each, and fails on a new file, a new
+   call, or a count that shrinks without the list being updated — a stale allow-list is how a
+   ratchet rots. Both directions are mutation-verified. NFR-025 is `IN_PROGRESS` with three parts,
+   and the row says which evidence belongs to which.
+
+**Gates.** `vue-tsc` clean; **601 tests over 50 files**; `make docs-check` green. No Go change and
+no API change. NFR-025 is `IN_PROGRESS`: (a) and (b) done, (c) open.

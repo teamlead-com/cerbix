@@ -152,6 +152,46 @@ describe("the mechanism's shape", () => {
     expect(offenders).toEqual([]);
   });
 
+  // A RATCHET, not a claim of completeness. Reviewer P1 at party [195] found what the
+  // `toLocaleString` guard above does not reach: timestamps rendered by hand out of a `Date` —
+  // `toISOString().slice(0,10)`, `getUTC*`, `get*` — several of them user-visible with no zone at
+  // all. NFR-025b substituted the five `toLocaleString` sites; these are a DIFFERENT and larger
+  // surface (NFR-025c), and each one needs a decision rather than a substitution: a UTC date must
+  // say UTC, a local one must name its offset, an input value must stay bare because the HTML
+  // format demands it, and a map key is not rendered at all.
+  //
+  // So this test does not assert the surface is clean. It asserts the surface is BOUNDED: exactly
+  // these files, with exactly these counts. A new file or a new call fails it, and so does a count
+  // that shrinks without the list being updated — a stale allow-list is how a ratchet rots.
+  it("keeps the hand-rolled date surface bounded, file by file (NFR-025c ratchet)", () => {
+    const IDIOM = /toISOString\(\)\.(?:slice|substring)|getUTC(?:Date|Month|FullYear|Hours|Minutes|Seconds)\(|\.get(?:Hours|Minutes|Seconds|Date|Month|FullYear)\(/g;
+    // file -> [count, why it is still here]
+    const KNOWN: Record<string, [number, string]> = {
+      "components/ServiceReliability.vue": [3, "dayLabel builds a segment range as a UTC date, unlabelled — that one needs a UTC LABEL, not a conversion"],
+      "components/settings/AgentTokensPanel.vue": [1, "created/revoked as a bare UTC date"],
+      "components/settings/MembersPanel.vue": [1, "added as a bare UTC date"],
+      "components/settings/SecretsPanel.vue": [1, "created/rotated as a bare UTC date"],
+      "lib/changes.ts": [14, "the change timeline's compact clock and date: one rendering already says ` Z`, the rest say nothing"],
+      "lib/changesTimeline.ts": [1, "a same-day comparison whose branch returns a bare clock"],
+      "lib/gate.ts": [6, "a bare UTC date, plus a datetime-local INPUT value that must stay offset-free by the HTML format"],
+      "lib/gateLedger.ts": [4, "a bare UTC date, plus UTC day boundaries used only for comparison"],
+      "views/DashboardView.vue": [2, "day-grid map keys — never rendered"],
+      "views/MonitorDetailView.vue": [3, "two day-grid keys (not rendered) plus created/updated as a bare UTC date"],
+      "views/PublicStatusView.vue": [4, "one rendering already says ` UTC`, one bare date, two day-grid keys"],
+      "views/SettingsView.vue": [5, "a datetime-local INPUT value that must stay offset-free, and its helpers"],
+      "views/StatusPagesView.vue": [1, "fmtSubDate: a subscriber date as a bare UTC date"],
+    };
+    const found: Record<string, number> = {};
+    for (const file of walk(SRC)) {
+      const rel = file.split("/src/")[1];
+      if (rel.startsWith("lib/wallclock") || rel.endsWith(".spec.ts")) continue;
+      const n = (readFileSync(file, "utf8").match(IDIOM) ?? []).length;
+      if (n > 0) found[rel] = n;
+    }
+    const expected = Object.fromEntries(Object.entries(KNOWN).map(([f, [n]]) => [f, n]));
+    expect(found).toEqual(expected);
+  });
+
   it("has no product call site passing the test-only zone argument", () => {
     const offenders: string[] = [];
     for (const file of walk(SRC)) {

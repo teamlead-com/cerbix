@@ -422,7 +422,7 @@ crosses a DST boundary, so this is the ordinary case rather than an edge. Ruled 
 
 It ships as one tested module under `frontend/src/lib/`, called from the surfaces of §5–§7.
 
-## 9. NFR-025b — the enumerated remainder, DONE 2026-09-04
+## 9. NFR-025b — the `toLocaleString` sites, DONE 2026-09-04 — and NFR-025c, which is not
 
 The SPA already renders browser-local times in four files without naming a zone, while the
 reliability card renders UTC dates, and nothing on screen says which is which. That predates
@@ -437,7 +437,14 @@ this package; it is not created by it, and it is not fixed by it either. It is r
 | silence-until, and token last-used | `frontend/src/views/SettingsView.vue` (two call sites) |
 
 **AC-NFR-025b — DONE 2026-09-04.** Each of the five call sites across these four files calls the
-§8 instant renderer, so no rendered timestamp anywhere in the SPA is missing its zone. Two
+§8 instant renderer.
+
+**The clause that used to follow that sentence was FALSE, and it was false when it was written at
+iter-0174:** "so no rendered timestamp anywhere in the SPA is missing its zone". Substituting the
+`toLocaleString` sites does not achieve that, because a `Date` can be rendered by hand —
+`toISOString().slice(0,10)`, `getUTC*`, `get*` — and **29 such matches exist across 13 product
+files**, several of them user-visible with no zone at all. Reviewer P1 at party [195] found it; the
+over-claim is this document's, repeated by me when I reported the substitution done. Two
 renderings were added to §8's mechanism for what the legacy sites needed, both instant-specific and
 neither a generic formatter: `instantLabelShort` (minute precision, offset kept — a shorter
 rendering does not get to drop the part the requirement is about) and `instantRangeLabel` (a window
@@ -448,8 +455,33 @@ has two).
 **The enforcement is a guard, not five edits.** A source scan in `wallclock.spec.ts` asserts that
 NO product file renders a timestamp through `toLocaleString`/`toLocaleDateString`/
 `toLocaleTimeString` — the exact construct that produced these five sites. Reverting any one of them
-fails it by name, which is how this requirement stays closed rather than being closed once. A
-surface assertion in `SlaView.spec.ts` reaches what an operator actually reads.
+fails it by name, which is how *that* construct stays gone rather than being removed once. A surface
+assertion in `SlaView.spec.ts` reaches what an operator actually reads.
+
+### NFR-025c — the hand-rolled date surface, `TODO`
+
+A **different and larger** surface from NFR-025b, and not a substitution: each site needs a
+decision, not a rename.
+
+| What it is | Where |
+| --- | --- |
+| a bare UTC date shown as a fact | `AgentTokensPanel.vue` (created/revoked), `SecretsPanel.vue` (created/rotated), `MembersPanel.vue` (added), `StatusPagesView.vue` (subscriber), `MonitorDetailView.vue` (created/updated), `PublicStatusView.vue`, `lib/gate.ts`, `lib/gateLedger.ts` |
+| a UTC date that is IDENTITY and should say so rather than be converted | `ServiceReliability.vue` `dayLabel` — a segment's range |
+| a compact clock, UTC, mostly unlabelled | `lib/changes.ts`, `lib/changesTimeline.ts` — one rendering there already says `` Z`` |
+| already honest in its own words | `PublicStatusView.vue` (` UTC`), `lib/changes.ts` (` Z`) |
+| **legitimately bare, and must stay so** | `datetime-local` INPUT values (`lib/gate.ts`, `SettingsView.vue`) — the HTML format is local and offset-free; day-grid MAP KEYS (`DashboardView.vue`, `MonitorDetailView.vue`, `PublicStatusView.vue`) and day-boundary comparisons (`gateLedger.ts`) — never rendered |
+
+**AC-NFR-025c:** every site in the first three rows renders through a named §8 function — a UTC
+date says UTC, a local one names its offset — and the last row is exempt with its reason recorded.
+
+**The remainder is BOUNDED rather than described.** `wallclock.spec.ts` carries a ratchet: the
+hand-rolled idiom is counted per file and compared against an enumerated list with a reason each. A
+new file or a new call fails it, and so does a listed count that shrinks without the list being
+updated — a stale allow-list is how a ratchet rots. Both directions are mutation-verified.
+
+**NFR-025 is `IN_PROGRESS`, not `DONE`:** (a) the mechanism and the FR-031 surfaces, done at
+iter-0174; (b) the five `toLocaleString` sites, done 2026-09-04; (c) this. Any row that says
+otherwise repeats the over-claim above.
 
 Deliberately not in this package's scope: widening it to four unrelated views. The reviewer
 approved this split at party [143] on that ground.

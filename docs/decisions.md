@@ -7079,5 +7079,21 @@ setting anywhere to reconcile them. Five hours of difference, unlabelled.
    Recorded in the ratchet's ledger entry for the file so the work that fixes the rendering also
    settles the name.
 
+9. **The guard matched by the EXPORTED name while a call site uses the LOCAL one.** Reviewer P2 at
+   party [201]: `import { instantLabel as compact }` followed by `compact(ts, "UTC")` walked past
+   it, and `import * as wallclock` past that. Aliases are resolved into a local→exported map now,
+   and namespace imports are searched as `ns.fn(`. Neither form exists in the tree; the guard covers
+   them so a later refactor cannot introduce one silently.
+
+   **And fixing it produced the failure mode a guard must never have.** The dotted callee needed its
+   dot escaped, and my first escaping turned it into a literal backslash — so the namespace case
+   matched NOTHING and the suite went green while guarding zero namespace calls. It was caught only
+   because the mutation for that case failed to fail. Four mutations now pin it: alias-with-zone and
+   namespace-with-zone must fail, alias-without-zone and namespace-without-zone must pass.
+
+   Its remaining boundary is stated in the test rather than claimed away: a RE-EXPORT barrel would
+   put a second hop between importer and source, and this scan follows one. No barrel exists — every
+   importer reaches `lib/wallclock` directly — and the comment says where to teach it if one appears.
+
 **Gates.** `vue-tsc` clean; **601 tests over 50 files**; `make docs-check` green. No Go change and
 no API change. NFR-025 is `IN_PROGRESS`: (a) and (b) done, (c) open.

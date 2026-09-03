@@ -136,7 +136,11 @@ describe("the mechanism's shape", () => {
   /** Every argument list passed to `fn(` in `text`, balanced across nesting and strings. */
   function callArgs(text: string, fn: string): string[] {
     const out: string[] = [];
-    const re = new RegExp(`\\b${fn}\\s*\\(`, "g");
+    // `fn` may be dotted (`ns.instantLabel`), so every regex-special character is escaped. An
+    // earlier version turned the dot into a LITERAL BACKSLASH and matched nothing — the failure
+    // mode a guard must never have: it passed while guarding zero namespace calls.
+    const lit = fn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?<![\\w.])${lit}\\s*\\(`, "g");
     for (const m of text.matchAll(re)) {
       let depth = 1, quote = "", buf = "";
       for (let i = m.index! + m[0].length; i < text.length && depth > 0; i++) {
@@ -247,23 +251,50 @@ describe("the mechanism's shape", () => {
       instantLabel: 1, instantLabelShort: 1, utcCellExtentLabel: 2, instantRangeLabel: 2,
     });
 
-    // IMPORT-AWARE, and it has to be: `lib/changes.ts` defines its OWN `instantLabel(iso, now)`,
-    // a different function with the same name and a second argument that is not a zone. The first
-    // version of this scan flagged its call sites, which is a false positive AND a real hazard
-    // worth naming — the collision is recorded in the NFR-025c ledger entry for that file, because
-    // the compact clock that shadows the mechanism's name is one of the sites (c) has to decide.
+    // IMPORT-AWARE, and it has to be twice over.
+    //
+    // First, because `lib/changes.ts` defines its OWN `instantLabel(iso, now)` — a different
+    // function with the same name whose second argument is a clock reference, not a zone. The first
+    // version of this scan flagged its call sites: a false positive AND a real hazard, recorded in
+    // the NFR-025c ledger for that file, since the compact clock that shadows the mechanism's name
+    // is one of the sites (c) has to decide.
+    //
+    // Second, because the LOCAL name is what a call site uses. Matching by the exported name let
+    // `import { instantLabel as compact }` followed by `compact(ts, "UTC")` walk straight past, and
+    // `import * as wallclock` past that — reviewer P2 at party [201]. Aliases are resolved into a
+    // local -> exported map, and namespace imports are searched as `ns.fn(`. Neither form exists
+    // today; the guard covers them so a later refactor cannot introduce one silently.
+    //
+    // ITS REMAINING BOUNDARY, stated rather than claimed away: a RE-EXPORT barrel
+    // (`export { instantLabel } from "@/lib/wallclock"` in some other module) would put a second
+    // hop between the import and the source, and this scan follows one hop. No such barrel exists —
+    // every importer above reaches `lib/wallclock` directly — and if one is ever added, this is
+    // where it has to be taught about.
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
       if (file.endsWith("wallclock.ts") || file.endsWith("wallclock.spec.ts")) continue;
       const text = readFileSync(file, "utf8");
-      const imported = new Set<string>();
-      for (const im of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*["'][^"']*lib\/wallclock["']/g)) {
-        for (const name of im[1].split(",")) imported.add(name.trim().split(/\s+as\s+/)[0].trim());
+      const WC = /["'][^"']*lib\/wallclock["']/;
+      /** what this file calls it -> what the module exports */
+      const local: Record<string, string> = {};
+      for (const im of text.matchAll(/import\s*(?:type\s+)?\{([^}]*)\}\s*from\s*(["'][^"']*["'])/g)) {
+        if (!WC.test(im[2])) continue;
+        for (const clause of im[1].split(",")) {
+          const [exported, alias] = clause.trim().split(/\s+as\s+/).map((x) => x.trim());
+          if (exported) local[alias || exported] = exported;
+        }
       }
-      for (const [fn, idx] of Object.entries(zoneArg)) {
-        if (!imported.has(fn)) continue;
-        for (const args of callArgs(text, fn)) {
-          if (splitTopLevel(args).length > idx) offenders.push(`${file.split("/src/")[1]}: ${fn}(${args})`);
+      for (const im of text.matchAll(/import\s*\*\s*as\s+(\w+)\s*from\s*(["'][^"']*["'])/g)) {
+        if (!WC.test(im[2])) continue;
+        for (const fn of Object.keys(zoneArg)) local[`${im[1]}.${fn}`] = fn;
+      }
+      for (const [callee, exported] of Object.entries(local)) {
+        const idx = zoneArg[exported];
+        if (idx === undefined) continue;
+        for (const args of callArgs(text, callee)) {
+          if (splitTopLevel(args).length > idx) {
+            offenders.push(`${file.split("/src/")[1]}: ${callee}(${args})`);
+          }
         }
       }
     }

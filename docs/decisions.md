@@ -6059,6 +6059,15 @@ says the suite died before running, and unrecognised output prints the last twen
 **What this does NOT do.** It does not diagnose the outstanding hypertable failure. That has not
 reproduced locally in four configurations — store alone, the whole `./...`, declarative-partition mode
 on a throwaway `postgres:16-alpine`, and pinned to two cores — and the failure moves between matrix
-jobs by runner load, which points at a second test of the class `ee74890` fixed. Candidates exist in
-the tree, and none of them will be "fixed" on a hypothesis: the next red run now names the test
-itself, and the fix will follow the fact.
+jobs by runner load, which points at a second test of the class `ee74890` fixed.
+
+**The strongest candidate, named so the next red run can be matched against it in one step — and
+deliberately NOT changed.** `internal/store/gatemaintenance_timeline_internal_test.go:159` takes
+`passStart` from `time.Now()` and uses a `> 500ms` threshold to tell the PREAMBLE survey ("at ~0")
+apart from the removal-phase survey. On a starved runner the preamble survey can itself land past
+500 ms, be misidentified as the removal-phase one, and fail something downstream — the same class as
+the storm: a real-clock threshold standing in for a logical distinction. It is left alone because it
+has not been observed failing, and it sits in the most intricate suite in the tree (FR-024, twelve
+review rounds); a change made on a hypothesis there risks breaking a property that is real and that I
+do not fully hold. If the next annotation names it, the fix is a logical discriminator instead of a
+duration. If it names something else, this paragraph is a wrong guess kept on the record.

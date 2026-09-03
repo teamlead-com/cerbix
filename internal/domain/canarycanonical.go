@@ -324,6 +324,14 @@ func ParseCanaryConfig(config map[string]string) (CanaryWorkflow, error) {
 	var cw canonicalWorkflow
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
+	// UseNumber keeps a body number as its EXACT TOKEN instead of routing it through float64.
+	//
+	// Without it `parseCanonicalBodyValue`'s `case json.Number` was dead code and every number arrived
+	// as a float64, so canonicalisation REWROTE the operator's value: `9007199254740993` was stored as
+	// `9.007199254740992e+15` and `1.10` as `1.1`. That is not a validation gap, it is the stored
+	// document — the one the execution digest covers and the executor sends — silently disagreeing
+	// with what was written. Found while fixing the client half of the same defect (reviewer P1-B).
+	dec.UseNumber()
 	if err := dec.Decode(&cw); err != nil {
 		return CanaryWorkflow{}, fmt.Errorf("workflow: stored document does not parse: %w", err)
 	}

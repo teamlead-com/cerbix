@@ -129,6 +129,37 @@ function variants(): { name: string; form: CanaryForm }[] {
   add("edge: sixteen required fields", (f) => {
     f.resultRequiredFields = Array.from({ length: 16 }, (_, i) => `f${i}`).join(", ");
   });
+  // The encoding variants (P1-A / P1-B, party [93]). These are the ones a positive fixture CAN carry:
+  // documents the form calls valid whose bytes previously disagreed with Go. The server half proves
+  // the disagreement is gone rather than merely re-measured on this side.
+  add("encoding: a body of HTML characters, just under the byte bound", (f) => {
+    // Go writes SIX bytes per `<`. Six rows of 200 keeps every leaf inside the 1024-byte string
+    // bound while the whole body lands near 7.3 KB canonical — legal, and impossible to measure
+    // correctly with JSON.stringify, which would have counted about 1.3 KB.
+    f.bodyFields = Array.from({ length: 6 }, (_, i) => ({
+      key: `angle${i}`,
+      value: "<".repeat(200),
+      secretRef: "",
+    }));
+  });
+  add("encoding: a number past float64's exact range", (f) => {
+    f.bodyFields = [{ key: "big", value: "9007199254740993", secretRef: "" }];
+  });
+  add("encoding: a number with a trailing zero and an exponent", (f) => {
+    f.bodyFields = [
+      { key: "trailing", value: "1.10", secretRef: "" },
+      { key: "small", value: "0.1", secretRef: "" },
+    ];
+  });
+  add("encoding: a large token a float64 cannot hold exactly but CAN represent", (f) => {
+    // The server's rule is representability, not exactness: `Float64()` succeeds here, so the token
+    // is legal and reaches the target with its digits intact. A 400-digit token overflows and is
+    // refused by BOTH sides — that case is a negative one and lives in canaryWorkflow.spec.ts.
+    f.bodyFields = [{ key: "huge", value: "1" + "0".repeat(300), secretRef: "" }];
+  });
+  add("encoding: multibyte and control characters in a value", (f) => {
+    f.bodyFields = [{ key: "text", value: "héllo мир 日本\tand a tab", secretRef: "" }];
+  });
   add("edge: eight bindings, every one used", (f) => {
     f.bindings = Array.from({ length: 8 }, (_, i) => ({ name: `b${i}`, secret: "upload-token" }));
     f.bodyFields = f.bindings.map((b) => ({ key: b.name, value: "", secretRef: b.name }));
@@ -155,7 +186,7 @@ describe("the form's valid documents are valid to the server", () => {
         [],
       );
     }
-    expect(rows.length).toBeGreaterThanOrEqual(15);
+    expect(rows.length).toBeGreaterThanOrEqual(20);
 
     const want =
       JSON.stringify(

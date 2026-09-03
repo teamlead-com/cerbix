@@ -41,9 +41,14 @@ func TestCanaryBoundsArePublishedForTheClient(t *testing.T) {
 		"CANARY_MAX_JSON_PATH_BYTES":     CanaryMaxJSONPathBytes,
 		"CANARY_MAX_CORRELATION_BYTES":   CanaryMaxCorrelationBytes,
 	}
-	// A bound that exists in the block above and is missing from this map would never reach the
-	// client and nothing would say so, which is the failure this whole test exists to end. The count
-	// is asserted so adding a constant without publishing it fails HERE, before the client side.
+	// The count is asserted so that adding a bound to `canary.go` and forgetting THIS map fails here
+	// rather than silently reaching no client.
+	//
+	// What this is NOT, stated because an earlier version of this comment claimed it and the reviewer
+	// was right to correct it (party [93]): it is not automatic source-level enumeration. It fires
+	// only when a maintainer updates this map, and a constant added to a different block is invisible
+	// to it. It narrows the window; it does not close it. Closing it would take parsing the const
+	// block — worth doing, and recorded as debt rather than pretended away.
 	if len(bounds) != 21 {
 		t.Fatalf("the published set has %d bounds; the const block in canary.go has 21 — publish the new one", len(bounds))
 	}

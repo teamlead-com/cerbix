@@ -690,3 +690,58 @@ func TestNormalizeLeavesAnUnparseableWorkflowForValidateToRefuse(t *testing.T) {
 		t.Fatal("Validate accepted an unparseable workflow")
 	}
 }
+
+// A body number survives canonicalisation as the operator wrote it.
+//
+// The decoder did not call `UseNumber`, so `parseCanonicalBodyValue`'s `json.Number` branch was dead
+// code and every number arrived as a float64. Canonicalisation then REWROTE the value: a 17-digit
+// integer became `9.007199254740992e+15` and `1.10` became `1.1`. That is not a validation gap — it is
+// the STORED document, the one the execution digest covers and the executor sends, silently
+// disagreeing with what was written. Found while fixing the client half of the same defect (reviewer
+// P1-B, party [93]): the reviewer proved the form corrupted large numbers, and the server did too.
+func TestABodyNumberSurvivesCanonicalisationExactly(t *testing.T) {
+	for _, in := range []string{
+		"9007199254740993", // one past float64's exact-integer range
+		"1.10",             // a trailing zero is part of what was written
+		"1e3",              // an exponent is a legal token and not a licence to rewrite it
+		"0.1",              // the classic float64 round-trip
+		"-0",
+		"123456789012345678901234567890",
+	} {
+		t.Run(in, func(t *testing.T) {
+			doc := `{"kind":"async_transaction_v1","submit":{"kind":"http_json","method":"POST",` +
+				`"url":"https://x.example.com/u","submit_timeout":30,"accepted_status":[202],` +
+				`"body":{"n":` + in + `}},` +
+				`"correlate":{"source":"response_json","path":"task_id"},` +
+				`"completion":{"kind":"poll_json","url":"https://x.example.com/t","timeout":240,` +
+				`"poll":{"interval":5,"max_attempts":48,"success_path":"status","success_value":"done"}},` +
+				`"result":{"max_latency":240,"required_json_fields":["a"],"lifecycle_path":"a"},` +
+				`"cleanup":{"kind":"none","acknowledged":true}}`
+			m := Monitor{
+				ProjectID: "p", Name: "c", Type: MonitorAsyncCanary, Region: "core",
+				IntervalSeconds: 300, TimeoutSeconds: 300, Enabled: true,
+				Config: map[string]string{CanaryWorkflowKey: doc},
+			}
+			m.Normalize()
+			if err := m.Validate(); err != nil {
+				t.Fatalf("a legal number was refused: %v", err)
+			}
+			w, err := ParseCanaryConfig(m.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(w.Submit.Body["n"].Num); got != in {
+				t.Fatalf("canonicalisation rewrote the operator's number: wrote %q, stored %q", in, got)
+			}
+			// And it survives a SECOND pass, because a monitor is normalized on every write.
+			m.Normalize()
+			w2, err := ParseCanaryConfig(m.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(w2.Submit.Body["n"].Num); got != in {
+				t.Fatalf("a second normalize rewrote it: %q", got)
+			}
+		})
+	}
+}

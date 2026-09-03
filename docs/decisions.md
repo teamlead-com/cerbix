@@ -6218,3 +6218,50 @@ value, `.length` substituted for byte length, and one per newly applied bound. 4
 The general lesson, third statement of it in this arc and the first one that is structural rather than
 verbal: **when two implementations must agree on a set, publish the set and gate on the difference.**
 Enumerating by hand is how the third omission happened after two rounds of promising to be careful.
+
+**Correction, recorded because I overstated it.** The `len(bounds) == 21` assertion does NOT provide
+automatic source-level enumeration: it fires only when a maintainer updates that map, and a constant
+added to a different block is invisible to it. I claimed it made forgetting impossible; the reviewer
+corrected that (party [93]) and was right. It narrows the window rather than closing it. Closing it
+would take parsing the const block, which is worth doing and is carried as debt rather than pretended
+away.
+
+## D-0229 — the client encoded differently from the server, and the server rewrote the operator's numbers (2026-09-03)
+
+**Context.** Two P1s on the phase-F bounds fix (party [93]). Not missing rules this time: rules applied
+to the wrong bytes.
+
+**P1-A — the body-size check measured something the server does not.** `fieldRowRefusals` measured
+`JSON.stringify(...)`; Go measures `json.Marshal(...)`, which HTML-escapes `<`, `>` and `&` into
+six-byte `<` sequences. A body of eight rows of a thousand angle brackets measured ~8 KB here and
+~48 KB to Go, so the bound was unenforceable — six times out, not the "within a few bytes" an earlier
+comment of mine claimed. That comment is the same defect as the one D-0228 recorded: **a comment that
+overstates removes the reader's reason to check.**
+
+**P1-B — numeric coercion was lossy, and silently so.** `typedValue` routed every numeric-looking
+value through `Number(raw)`: `9007199254740993` became `…92` before the server ever saw it, and a
+400-digit token became `Infinity` and then `null`, a value the closed algebra refuses. A 400 is a bad
+outcome; a silently altered document is a worse one, because nothing reports it.
+
+**And the server had the same defect from the other side, which the client finding exposed.**
+`ParseCanaryConfig` did not call `dec.UseNumber()`, so `parseCanonicalBodyValue`'s `json.Number` branch
+was dead and every number arrived as a `float64`. Canonicalisation then REWROTE the stored document:
+`9007199254740993` was stored as `9.007199254740992e+15` and `1.10` as `1.1`. That is the document the
+execution digest covers and the executor sends. Measured, not inferred — the probe is in
+`TestABodyNumberSurvivesCanonicalisationExactly`.
+
+**Decision.** The server calls `UseNumber()` and keeps the token. The client stops using
+`JSON.stringify` for the document: `canaryEncode` mirrors Go's escaping (`<`, `>`, `&`, U+2028/9,
+control characters) and emits numbers as RAW TOKENS, so one mechanism fixes both P1s — the measurement
+now counts what Go counts, and the operator's digits reach the wire untouched.
+
+The rule the client mirrors for numbers is the server's actual one: **representability, not
+exactness.** `json.Number.Float64()` must succeed, so a 400-digit token is refused on both sides while
+`9007199254740993` is legal and preserved — a float64 cannot hold it exactly, and nothing asks it to.
+The seam found this: the 400-digit variant was refused by Go, and that refusal is what turned a guess
+about the rule into the rule.
+
+**Consequences.** 41 library cases, 20 seam variants (five new ones exercising the encoding: HTML
+characters near the byte bound, a number past float64's exact range, a trailing zero and an exponent, a
+300-digit token, multibyte and control characters), and mutations killed for measuring with
+`JSON.stringify`, for dropping the HTML escapes, and for re-introducing `Number()` coercion. 475 tests.

@@ -46,6 +46,81 @@ export function canaryByteLength(s: string): number {
   return new TextEncoder().encode(s).length;
 }
 
+/**
+ * A JSON encoder that agrees with Go's `encoding/json` on the two things that matter here.
+ *
+ * `JSON.stringify` disagrees with Go twice, and both showed up as client-valid 400s:
+ *
+ *  1. **Escaping.** Go HTML-escapes `<`, `>` and `&` into six-byte `\u003c` sequences (and escapes
+ *     U+2028/U+2029), while `JSON.stringify` leaves them literal. So a body of `"<".repeat(1000)`
+ *     rows measured ~8 KB here and ~48 KB to Go — a six-fold difference, not the "few bytes" an
+ *     earlier comment claimed. Measuring the body with `JSON.stringify` could not enforce
+ *     `CanaryMaxBodyBytes` at all.
+ *  2. **Numbers.** A number must reach the wire as the operator's exact TOKEN. Routing it through a
+ *     JS `Number` silently rewrote `9007199254740993` to `…92`, and turned a 400-digit value into
+ *     `null` — a document the closed algebra refuses. The server had the same defect from the other
+ *     direction until `UseNumber` was added.
+ *
+ * The shapes are the closed set this form builds: string, raw number token, boolean, array, object.
+ */
+export type CanaryJSON =
+  | string
+  | boolean
+  | { __rawNumber: string }
+  | CanaryJSON[]
+  | { [k: string]: CanaryJSON };
+
+const GO_ESCAPES: Record<string, string> = {
+  '"': '\\"',
+  "\\": "\\\\",
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+  "<": "\\u003c",
+  ">": "\\u003e",
+  "&": "\\u0026",
+  "\u2028": "\\u2028",
+  "\u2029": "\\u2029",
+};
+
+function goQuote(s: string): string {
+  let out = '"';
+  for (const ch of s) {
+    const mapped = GO_ESCAPES[ch];
+    if (mapped !== undefined) {
+      out += mapped;
+      continue;
+    }
+    const code = ch.codePointAt(0)!;
+    if (code < 0x20) {
+      out += "\\u" + code.toString(16).padStart(4, "0");
+      continue;
+    }
+    out += ch;
+  }
+  return out + '"';
+}
+
+/** A raw number token, preserved verbatim so no JS Number ever touches the operator's digits. */
+export function canaryRawNumber(token: string): { __rawNumber: string } {
+  return { __rawNumber: token };
+}
+
+function isRawNumber(v: CanaryJSON): v is { __rawNumber: string } {
+  return typeof v === "object" && v !== null && !Array.isArray(v) && "__rawNumber" in v;
+}
+
+export function canaryEncode(v: CanaryJSON): string {
+  if (typeof v === "string") return goQuote(v);
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (isRawNumber(v)) return v.__rawNumber;
+  if (Array.isArray(v)) return "[" + v.map(canaryEncode).join(",") + "]";
+  // Keys sorted, as Go marshals a map — so a measurement and a document do not depend on the order
+  // rows happen to sit in.
+  const keys = Object.keys(v).sort();
+  return "{" + keys.map((k) => goQuote(k) + ":" + canaryEncode((v as Record<string, CanaryJSON>)[k])).join(",") + "}";
+}
+
 /** The two closed unions the form switches on. A `default` that accepts is an undocumented escape. */
 export const CANARY_SUBMIT_KINDS = ["http_json", "multipart_fixture"] as const;
 export const CANARY_COMPLETION_KINDS = ["sse", "poll_json"] as const;
@@ -359,21 +434,35 @@ function fieldRowRefusals(rows: CanaryFieldRow[], field: string, bindings: Canar
     if (ref === "" && !isTypedScalar(row.value) && canaryByteLength(row.value) > CANARY_MAX_STRING_LEAF_BYTES) {
       out.push({ field: at, message: `a value is at most ${CANARY_MAX_STRING_LEAF_BYTES} bytes` });
     }
+    // A number token must be REPRESENTABLE: the server calls `json.Number.Float64()` and refuses a
+    // token that overflows, so a 400-digit value is not a number to it either. The token is still
+    // preserved verbatim for everything inside the range, including values a float64 cannot hold
+    // EXACTLY — `Float64()` succeeds there and the digits reach the target unchanged.
+    if (ref === "" && isNumberToken(row.value) && !Number.isFinite(Number(row.value.trim()))) {
+      out.push({ field: at, message: `${k || "a value"} is out of range for a number` });
+    }
   });
-  // And the encoded body as a whole, which `validateCanaryBody` measures after canonicalising it.
-  // Approximated by encoding the same map the form will send: within a few bytes of the server's
-  // number, and the point of the bound is an order of magnitude, not a byte.
-  const encoded = canaryByteLength(JSON.stringify(fieldMap(rows)));
+  // The encoded body as a whole, measured with the SAME escaping Go uses. `JSON.stringify` leaves
+  // `<`, `>` and `&` literal where Go writes six-byte `\u003c` sequences, so a body of angle
+  // brackets measured here at 8 KB and to Go at 48 KB — the earlier "within a few bytes" comment was
+  // wrong by six times and the bound was unenforceable.
+  const encoded = canaryByteLength(canaryEncode(fieldMap(rows)));
   if (encoded > CANARY_MAX_BODY_BYTES) {
     out.push({ field, message: `the body is at most ${CANARY_MAX_BODY_BYTES} bytes encoded` });
   }
   return out;
 }
 
+/** True when a value string will be emitted as a NUMBER token rather than a string leaf. */
+function isNumberToken(raw: string): boolean {
+  const v = raw.trim();
+  return v !== "" && /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(v);
+}
+
 /** True when a value string will be emitted as a number or a boolean rather than a string leaf. */
 function isTypedScalar(raw: string): boolean {
   const v = raw.trim();
-  return v === "true" || v === "false" || (v !== "" && /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(v));
+  return v === "true" || v === "false" || isNumberToken(v);
 }
 
 /** Mirrors `validateCanaryJSONPath` in full: presence, BYTE length, grammar, and DEPTH. */
@@ -648,8 +737,6 @@ export function canaryRefusals(f: CanaryForm, monitorTimeout: number, projectSec
 
 // ── What goes on the wire ──────────────────────────────────────────────────────────────────────
 
-type JSONValue = string | number | boolean | JSONValue[] | { [k: string]: JSONValue };
-
 /**
  * A typed scalar from a form field. Numbers and booleans are recognised so the document carries the
  * type the schema expects; everything else is a string. A `secretRef` row becomes a
@@ -657,31 +744,34 @@ type JSONValue = string | number | boolean | JSONValue[] | { [k: string]: JSONVa
  * residual is stated where the operator can see it: a credential pasted as an ordinary string leaf is
  * not detectable and is not refused.
  */
-function typedValue(row: CanaryFieldRow): JSONValue {
+function typedValue(row: CanaryFieldRow): CanaryJSON {
   const ref = row.secretRef.trim();
   if (ref !== "") return { secret_ref: ref };
   const raw = row.value.trim();
   if (raw === "true") return true;
   if (raw === "false") return false;
-  if (raw !== "" && /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(raw)) return Number(raw);
+  // The operator's exact DIGITS, never `Number(raw)`: coercion rewrote `9007199254740993` to `…92`
+  // and turned a 400-digit value into `null`, which the closed algebra refuses. A token that a
+  // JS number cannot hold is still a legal JSON number, and the server keeps it verbatim.
+  if (isNumberToken(raw)) return canaryRawNumber(raw);
   return row.value;
 }
 
-function headerDocs(rows: CanaryHeaderRow[]): JSONValue[] {
-  return rows.map((h): JSONValue => {
+function headerDocs(rows: CanaryHeaderRow[]): CanaryJSON[] {
+  return rows.map((h): CanaryJSON => {
     const name = h.name.trim().toLowerCase();
     const ref = h.secretRef.trim();
     // A header is a binding OR a value, never both: the union is closed here exactly as it is in the
     // schema, so a row cannot reach the wire carrying an empty `value` beside a `secret_ref`.
-    const doc: { [k: string]: JSONValue } = { name };
+    const doc: { [k: string]: CanaryJSON } = { name };
     if (ref !== "") doc.secret_ref = ref;
     else doc.value = h.value;
     return doc;
   });
 }
 
-function fieldMap(rows: CanaryFieldRow[]): { [k: string]: JSONValue } {
-  const out: { [k: string]: JSONValue } = {};
+function fieldMap(rows: CanaryFieldRow[]): { [k: string]: CanaryJSON } {
+  const out: { [k: string]: CanaryJSON } = {};
   for (const row of rows) {
     const k = row.key.trim();
     if (k !== "") out[k] = typedValue(row);
@@ -702,12 +792,12 @@ function fieldMap(rows: CanaryFieldRow[]): { [k: string]: JSONValue } {
  * surface; a second implementation here is how two surfaces start disagreeing about identity.
  */
 export function buildCanaryConfig(f: CanaryForm): Record<string, string> {
-  const submit: { [k: string]: JSONValue } = {
+  const submit: { [k: string]: CanaryJSON } = {
     kind: f.submitKind,
     method: "POST",
     url: f.submitURL.trim(),
-    submit_timeout: Number(f.submitTimeout),
-    accepted_status: splitList(f.acceptedStatus).map(Number),
+    submit_timeout: canaryRawNumber(String(Number(f.submitTimeout))),
+    accepted_status: splitList(f.acceptedStatus).map((c) => canaryRawNumber(String(Number(c)))),
     headers: headerDocs(f.submitHeaders),
   };
   if (f.submitKind === "multipart_fixture") {
@@ -724,15 +814,15 @@ export function buildCanaryConfig(f: CanaryForm): Record<string, string> {
     submit.body = fieldMap(f.bodyFields);
   }
 
-  const correlate: { [k: string]: JSONValue } =
+  const correlate: { [k: string]: CanaryJSON } =
     f.correlateSource === "response_json"
       ? { source: "response_json", path: f.correlatePath.trim() }
       : { source: "response_header", header_name: f.correlateHeaderName.trim().toLowerCase() };
 
-  const completion: { [k: string]: JSONValue } = {
+  const completion: { [k: string]: CanaryJSON } = {
     kind: f.completionKind,
     url: f.completionURL.trim(),
-    timeout: Number(f.completionTimeout),
+    timeout: canaryRawNumber(String(Number(f.completionTimeout))),
     headers: headerDocs(f.completionHeaders),
   };
   if (f.completionKind === "sse") {
@@ -743,8 +833,8 @@ export function buildCanaryConfig(f: CanaryForm): Record<string, string> {
     };
   } else {
     completion.poll = {
-      interval: Number(f.pollInterval),
-      max_attempts: Number(f.pollMaxAttempts),
+      interval: canaryRawNumber(String(Number(f.pollInterval))),
+      max_attempts: canaryRawNumber(String(Number(f.pollMaxAttempts))),
       success_path: f.pollSuccessPath.trim(),
       success_value: f.pollSuccessValue.trim(),
       failure_path: f.pollFailurePath.trim(),
@@ -752,13 +842,13 @@ export function buildCanaryConfig(f: CanaryForm): Record<string, string> {
     };
   }
 
-  const doc: { [k: string]: JSONValue } = {
+  const doc: { [k: string]: CanaryJSON } = {
     kind: CANARY_WORKFLOW_KIND,
     submit,
     correlate,
     completion,
     result: {
-      max_latency: Number(f.maxLatency),
+      max_latency: canaryRawNumber(String(Number(f.maxLatency))),
       required_json_fields: splitList(f.resultRequiredFields),
       lifecycle_path: f.lifecyclePath.trim(),
     },
@@ -769,7 +859,7 @@ export function buildCanaryConfig(f: CanaryForm): Record<string, string> {
     },
   };
 
-  const config: Record<string, string> = { [CANARY_WORKFLOW_KEY]: JSON.stringify(doc) };
+  const config: Record<string, string> = { [CANARY_WORKFLOW_KEY]: canaryEncode(doc) };
   for (const b of f.bindings) {
     if (b.name !== "" && b.secret.trim() !== "") config[canarySecretRefKey(b.name)] = b.secret.trim();
   }

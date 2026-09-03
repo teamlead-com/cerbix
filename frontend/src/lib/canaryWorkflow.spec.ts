@@ -3,6 +3,9 @@ import {
   buildCanaryConfig,
   canaryRefusals,
   canarySecretRefKey,
+  canaryEncode,
+  canaryByteLength,
+  canaryRawNumber,
   emptyCanaryForm,
   isCredentialHeader,
   parseCanaryConfig,
@@ -475,5 +478,96 @@ describe("bounds the mirror omitted — at the edge and one past it", () => {
     const f = validForm();
     f.submitHeaders.push({ name: "x-big", value: "v".repeat(1025), secretRef: "" });
     expect(at(f, "submitHeaders.2").map((r) => r.message).join()).toMatch(/at most 1024 bytes/);
+  });
+});
+
+// P1-A and P1-B (party [93]). Both are cases where the CLIENT's own encoding disagreed with the
+// server's — not a missing rule this time, but a rule applied to the wrong bytes.
+describe("the client encodes the way the server does", () => {
+  it("P1-A: measures the body with Go's escaping, where < > & cost six bytes each", () => {
+    // Go's encoder writes `<` for `<`. Eight rows of a thousand angle brackets is ~8 KB to
+    // `JSON.stringify` and ~48 KB to Go: the old measurement could not enforce the bound at all.
+    const f = validForm();
+    f.bodyFields = Array.from({ length: 8 }, (_, i) => ({
+      key: `k${i}`,
+      value: "<".repeat(1000),
+      secretRef: "",
+    }));
+    expect(at(f, "bodyFields").map((r) => r.message).join()).toMatch(/at most 8192 bytes encoded/);
+
+    // And the encoder is what makes the difference visible, not the count alone.
+    expect(canaryEncode({ v: "<&>" })).toBe('{"v":"\\u003c\\u0026\\u003e"}');
+    expect(canaryByteLength(canaryEncode({ v: "<" }))).toBeGreaterThan(
+      canaryByteLength(JSON.stringify({ v: "<" })),
+    );
+  });
+
+  it("P1-B: a number reaches the wire as the operator's exact token", () => {
+    const f = validForm();
+    f.bodyFields = [
+      { key: "big", value: "9007199254740993", secretRef: "" },
+      { key: "trailing", value: "1.10", secretRef: "" },
+    ];
+    expect(canaryRefusals(f, 300, ["upload-token"])).toEqual([]);
+    const doc = buildCanaryConfig(f)[CANARY_WORKFLOW_KEY];
+    // `Number("9007199254740993")` is 9007199254740992: coercion changed the operator's value before
+    // the server ever saw it, which is worse than a 400 because nothing reports it.
+    expect(doc).toContain('"big":9007199254740993');
+    expect(doc).toContain('"trailing":1.10');
+    expect(doc).not.toContain("9007199254740992");
+  });
+
+  it("P1-B: a token that overflows float64 is refused, as the server refuses it", () => {
+    // The server's rule is REPRESENTABILITY, not exactness: `json.Number.Float64()` must succeed. A
+    // 400-digit token overflows and `validateCanaryValue` calls it "not a number", so the form must
+    // say so too — found by the cross-surface seam, which rejected this variant on the Go side.
+    const f = validForm();
+    f.bodyFields = [{ key: "huge", value: "9".repeat(400), secretRef: "" }];
+    expect(at(f, "bodyFields.0").map((r) => r.message).join()).toMatch(/out of range for a number/);
+
+    // And a token a float64 cannot hold EXACTLY is still legal, because `Float64()` succeeds: the
+    // digits are preserved and reach the target unchanged. Exactness and representability are
+    // different questions and the server asks only the second.
+    const ok = validForm();
+    ok.bodyFields = [{ key: "big", value: "9007199254740993", secretRef: "" }];
+    expect(at(ok, "bodyFields.0")).toEqual([]);
+  });
+
+  it("P1-B: an unbounded numeric input never becomes null", () => {
+    // `Number("9".repeat(400))` is Infinity, and `JSON.stringify(Infinity)` is `null` — a value the
+    // closed algebra refuses, produced by the form itself with no refusal shown.
+    const f = validForm();
+    f.bodyFields = [{ key: "n", value: "9".repeat(400), secretRef: "" }];
+    const doc = buildCanaryConfig(f)[CANARY_WORKFLOW_KEY];
+    // Refused above, but even so the BUILDER must not manufacture `null`: a refused form can still
+    // be serialized by a preview, and `JSON.stringify(Infinity)` is how that used to happen.
+    expect(doc).not.toContain("null");
+    expect(doc).toContain('"n":' + "9".repeat(400));
+    // It still parses as JSON: a huge token is a legal JSON number.
+    expect(() => JSON.parse(doc)).not.toThrow();
+  });
+
+  it("the encoder is a correct JSON encoder, and differs from JSON.stringify only where Go does", () => {
+    const samples = [
+      { a: "plain", b: true, c: false },
+      { nested: { x: "y" } },
+      { list: ["a", "b"] },
+      { quote: 'he said "hi"', slash: "a\\b", nl: "a\nb", tab: "a\tb" },
+      { unicode: "héllo мир 日본" },
+    ];
+    for (const v of samples) {
+      // Correctness: it round-trips. A hand-rolled encoder earns its place only if this holds.
+      expect(JSON.parse(canaryEncode(v as never))).toEqual(v);
+      // And it differs from the standard one ONLY in key order (Go marshals a map sorted) and in the
+      // three HTML characters — never in ordinary escaping, which is where a hand-rolled encoder
+      // would otherwise quietly corrupt a value.
+      const single = Object.entries(v)[0];
+      const one = { [single[0]]: single[1] } as Record<string, unknown>;
+      if (!/[<>&]/.test(JSON.stringify(one))) {
+        expect(canaryEncode(one as never)).toBe(JSON.stringify(one));
+      }
+    }
+    // Key order is sorted, deliberately: a measurement must not depend on the order rows sit in.
+    expect(canaryEncode({ b: "1", a: "2" })).toBe('{"a":"2","b":"1"}');
   });
 });

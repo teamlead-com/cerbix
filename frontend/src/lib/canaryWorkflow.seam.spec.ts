@@ -145,11 +145,22 @@ function variants(): { name: string; form: CanaryForm }[] {
   add("encoding: a number past float64's exact range", (f) => {
     f.bodyFields = [{ key: "big", value: "9007199254740993", secretRef: "" }];
   });
-  add("encoding: a number with a trailing zero and an exponent", (f) => {
+  add("encoding: a trailing zero, and exponents in all three spellings", (f) => {
+    // The earlier version of this variant was named "trailing zero and an exponent" and contained no
+    // exponent — the name promised coverage the fixture did not have, which is how `1e3` stayed
+    // broken through a review round.
     f.bodyFields = [
       { key: "trailing", value: "1.10", secretRef: "" },
       { key: "small", value: "0.1", secretRef: "" },
+      { key: "exp", value: "1e3", secretRef: "" },
+      { key: "expPlus", value: "1.5E+10", secretRef: "" },
+      { key: "expMinus", value: "2e-7", secretRef: "" },
     ];
+  });
+  add("encoding: short escapes Go writes short", (f) => {
+    // Backspace and form feed cost two bytes to Go and six to a naive encoder; a vertical tab costs
+    // six to both. Carrying all three keeps the difference measurable rather than remembered.
+    f.bodyFields = [{ key: "escapes", value: "a\bb\fc\vd", secretRef: "" }];
   });
   add("encoding: a large token a float64 cannot hold exactly but CAN represent", (f) => {
     // The server's rule is representability, not exactness: `Float64()` succeeds here, so the token
@@ -186,7 +197,7 @@ describe("the form's valid documents are valid to the server", () => {
         [],
       );
     }
-    expect(rows.length).toBeGreaterThanOrEqual(20);
+    expect(rows.length).toBeGreaterThanOrEqual(21);
 
     const want =
       JSON.stringify(

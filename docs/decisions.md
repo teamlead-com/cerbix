@@ -6265,3 +6265,37 @@ about the rule into the rule.
 characters near the byte bound, a number past float64's exact range, a trailing zero and an exponent, a
 300-digit token, multibyte and control characters), and mutations killed for measuring with
 `JSON.stringify`, for dropping the HTML escapes, and for re-introducing `Number()` coercion. 475 tests.
+
+## D-0230 — the escaping table stops being remembered, and a number is the whole JSON grammar (2026-09-03)
+
+**Context.** Two findings on the encoder that D-0229 introduced (party [95]). Neither is a missing
+rule: both are the client disagreeing with Go about bytes it had just promised to match.
+
+**The escaping, wrong twice in opposite directions.** `JSON.stringify` UNDER-counted a body because Go
+HTML-escapes `<`, `>` and `&` into six bytes each. The hand-rolled replacement OVER-counted, because Go
+writes SHORT escapes for backspace and form feed where it wrote six-byte ones. Under-counting lets the
+server refuse what the form accepted; over-counting makes the form refuse what the server would take.
+Both break the same promise, and both came from recalling Go's source rather than reading it — I was
+wrong about `encoding/json` twice in two rounds, from memory, with the answer one test away.
+
+So the table is published, not recalled. `internal/domain/canaryencoding_test.go` writes what
+`encoding/json` ACTUALLY produces for 28 inputs — every control character, the HTML three,
+U+2028/U+2029, multibyte, an emoji, DEL (which Go leaves literal), and a map — and
+`frontend/src/lib/canaryEncoding.spec.ts` asserts the client reproduces each byte for byte. The
+mutations that pass through it are the reviewer's own finding, a dropped U+2028 escape, and escaping
+DEL when Go does not.
+
+**A number is the whole JSON grammar, or the type changes silently.** `isNumberToken` omitted
+`[eE][+-]?digits`, so `1e3` was emitted as a STRING while the server accepts `json.Number("1e3")` and
+preserves it — a semantic type change with no refusal shown.
+
+**And the seam variant meant to cover it was named for coverage it did not have.** "a number with a
+trailing zero and an exponent" contained `1.10` and `0.1` and no exponent at all. That is the third
+form of the same defect this arc keeps producing — a comment that overstates, a claim that outruns its
+test, and now a NAME that promises what the fixture omits. All three remove the reader's reason to
+check, and all three were mine.
+
+**Consequences.** 43 test files / 506 tests. 21 seam variants, two new: every exponent spelling, and
+the short-escape characters carried so the byte difference stays measurable rather than remembered.
+Mutations killed for restoring the six-byte escapes, for dropping U+2028, for escaping DEL, and for
+removing the exponent from the grammar.

@@ -38,7 +38,7 @@ func TestEveryClientValidFormVariantIsValidToTheServer(t *testing.T) {
 	}
 	// A fixture that quietly shrank to nothing would make this test pass while proving nothing, which
 	// is the exact failure mode the reviewer caught in its predecessor.
-	if len(fixture.Variants) < 20 {
+	if len(fixture.Variants) < 21 {
 		t.Fatalf("the fixture carries %d variants; it is meant to cover every union variant of the form",
 			len(fixture.Variants))
 	}

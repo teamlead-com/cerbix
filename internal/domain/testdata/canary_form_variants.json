@@ -114,9 +114,16 @@
       }
     },
     {
-      "name": "encoding: a number with a trailing zero and an exponent",
+      "name": "encoding: a trailing zero, and exponents in all three spellings",
       "config": {
-        "workflow": "{\"cleanup\":{\"acknowledged\":false,\"kind\":\"lifecycle_prefix\",\"prefix\":\"canary/\"},\"completion\":{\"headers\":[],\"kind\":\"poll_json\",\"poll\":{\"failure_path\":\"\",\"failure_values\":[],\"interval\":5,\"max_attempts\":48,\"success_path\":\"status\",\"success_value\":\"completed\"},\"timeout\":240,\"url\":\"https://files.example.com/tasks/{{ correlation_id }}\"},\"correlate\":{\"path\":\"task_id\",\"source\":\"response_json\"},\"kind\":\"async_transaction_v1\",\"result\":{\"lifecycle_path\":\"s3_path\",\"max_latency\":240,\"required_json_fields\":[\"s3_path\",\"byte_size\"]},\"submit\":{\"accepted_status\":[202],\"body\":{\"small\":0.1,\"trailing\":1.10},\"headers\":[{\"name\":\"authorization\",\"secret_ref\":\"upload\"},{\"name\":\"x-tenant\",\"value\":\"canary\"}],\"kind\":\"http_json\",\"method\":\"POST\",\"submit_timeout\":30,\"url\":\"https://files.example.com/files/upload\"}}",
+        "workflow": "{\"cleanup\":{\"acknowledged\":false,\"kind\":\"lifecycle_prefix\",\"prefix\":\"canary/\"},\"completion\":{\"headers\":[],\"kind\":\"poll_json\",\"poll\":{\"failure_path\":\"\",\"failure_values\":[],\"interval\":5,\"max_attempts\":48,\"success_path\":\"status\",\"success_value\":\"completed\"},\"timeout\":240,\"url\":\"https://files.example.com/tasks/{{ correlation_id }}\"},\"correlate\":{\"path\":\"task_id\",\"source\":\"response_json\"},\"kind\":\"async_transaction_v1\",\"result\":{\"lifecycle_path\":\"s3_path\",\"max_latency\":240,\"required_json_fields\":[\"s3_path\",\"byte_size\"]},\"submit\":{\"accepted_status\":[202],\"body\":{\"exp\":1e3,\"expMinus\":2e-7,\"expPlus\":1.5E+10,\"small\":0.1,\"trailing\":1.10},\"headers\":[{\"name\":\"authorization\",\"secret_ref\":\"upload\"},{\"name\":\"x-tenant\",\"value\":\"canary\"}],\"kind\":\"http_json\",\"method\":\"POST\",\"submit_timeout\":30,\"url\":\"https://files.example.com/files/upload\"}}",
+        "canary_secret_upload_ref": "upload-token"
+      }
+    },
+    {
+      "name": "encoding: short escapes Go writes short",
+      "config": {
+        "workflow": "{\"cleanup\":{\"acknowledged\":false,\"kind\":\"lifecycle_prefix\",\"prefix\":\"canary/\"},\"completion\":{\"headers\":[],\"kind\":\"poll_json\",\"poll\":{\"failure_path\":\"\",\"failure_values\":[],\"interval\":5,\"max_attempts\":48,\"success_path\":\"status\",\"success_value\":\"completed\"},\"timeout\":240,\"url\":\"https://files.example.com/tasks/{{ correlation_id }}\"},\"correlate\":{\"path\":\"task_id\",\"source\":\"response_json\"},\"kind\":\"async_transaction_v1\",\"result\":{\"lifecycle_path\":\"s3_path\",\"max_latency\":240,\"required_json_fields\":[\"s3_path\",\"byte_size\"]},\"submit\":{\"accepted_status\":[202],\"body\":{\"escapes\":\"a\\bb\\fc\\u000bd\"},\"headers\":[{\"name\":\"authorization\",\"secret_ref\":\"upload\"},{\"name\":\"x-tenant\",\"value\":\"canary\"}],\"kind\":\"http_json\",\"method\":\"POST\",\"submit_timeout\":30,\"url\":\"https://files.example.com/files/upload\"}}",
         "canary_secret_upload_ref": "upload-token"
       }
     },

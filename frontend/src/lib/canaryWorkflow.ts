@@ -76,6 +76,13 @@ const GO_ESCAPES: Record<string, string> = {
   "\n": "\\n",
   "\r": "\\r",
   "\t": "\\t",
+  // Short, because Go writes them short. Emitting six-byte forms here made the client OVER-count a
+  // body and refuse what the server accepts — a client-only rule, which the parity promise forbids
+  // as plainly as the under-counting it replaced (reviewer, party [95]). The table is now published
+  // by `internal/domain/canaryencoding_test.go` and asserted entry by entry, so it is no longer
+  // something anyone recalls from the Go source.
+  "\b": "\\b",
+  "\f": "\\f",
   "<": "\\u003c",
   ">": "\\u003e",
   "&": "\\u0026",
@@ -453,10 +460,18 @@ function fieldRowRefusals(rows: CanaryFieldRow[], field: string, bindings: Canar
   return out;
 }
 
-/** True when a value string will be emitted as a NUMBER token rather than a string leaf. */
+/**
+ * True when a value string will be emitted as a NUMBER token rather than a string leaf.
+ *
+ * The COMPLETE JSON number grammar, exponents included. The first version omitted `[eE][+-]?digits`,
+ * so an operator's `1e3` was emitted as a STRING while the server accepts `json.Number("1e3")` and
+ * preserves it — a semantic type change with no refusal shown, and my own seam variant was NAMED
+ * "trailing zero and an exponent" while containing no exponent at all (reviewer, party [95]). A name
+ * that promises coverage it does not have is the same defect as a comment that overstates.
+ */
 function isNumberToken(raw: string): boolean {
   const v = raw.trim();
-  return v !== "" && /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(v);
+  return v !== "" && /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/.test(v);
 }
 
 /** True when a value string will be emitted as a number or a boolean rather than a string leaf. */

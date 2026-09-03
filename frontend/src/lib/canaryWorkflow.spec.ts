@@ -533,6 +533,27 @@ describe("the client encodes the way the server does", () => {
     expect(at(ok, "bodyFields.0")).toEqual([]);
   });
 
+  it("P1-B: the complete JSON number grammar reaches the wire unquoted, exponents included", () => {
+    // `1e3` was emitted as a STRING because the grammar omitted the exponent, while the server
+    // accepts `json.Number("1e3")` and preserves it — a semantic type change with no refusal shown.
+    // Worse, the seam variant meant to cover this was NAMED "trailing zero and an exponent" and
+    // contained no exponent: a name that promises coverage it does not have is the same defect as a
+    // comment that overstates (reviewer, party [95]).
+    const f = validForm();
+    f.bodyFields = [
+      { key: "exp", value: "1e3", secretRef: "" },
+      { key: "expPlus", value: "1.5E+10", secretRef: "" },
+      { key: "expMinus", value: "2e-7", secretRef: "" },
+      { key: "negative", value: "-0", secretRef: "" },
+    ];
+    expect(canaryRefusals(f, 300, ["upload-token"])).toEqual([]);
+    const doc = buildCanaryConfig(f)[CANARY_WORKFLOW_KEY];
+    for (const token of ["1e3", "1.5E+10", "2e-7", "-0"]) {
+      expect(doc, `${token} must reach the wire as a number token`).toContain(`:${token}`);
+      expect(doc, `${token} must not be quoted`).not.toContain(`"${token}"`);
+    }
+  });
+
   it("P1-B: an unbounded numeric input never becomes null", () => {
     // `Number("9".repeat(400))` is Infinity, and `JSON.stringify(Infinity)` is `null` — a value the
     // closed algebra refuses, produced by the form itself with no refusal shown.

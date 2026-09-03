@@ -171,7 +171,11 @@ unique target that already exists.
     resolves a service incident through the same handlers, under the same tenancy check (`project_id`,
     which survives the service's deletion), with the same 404 for a foreigner. **An audit trail for
     incident writes is a real gap and is recorded as such** — it belongs to its own requirement, where it
-    can be designed for both anchors at once, rather than to a clause smuggled in beside a schema change;
+    can be designed for both anchors at once, rather than to a clause smuggled in beside a schema change.
+    That requirement is **FR-026 / NFR-021** ([`func-incident-audit.md`](func-incident-audit.md)), and it
+    is **DONE** (iter-0168, D-0219): every PRINCIPAL incident write now carries one `audit_logs` row
+    committed by the mutating transaction, for both anchors; machine writes are excluded by decision and
+    enumerated, and their record stays the incident's own timeline;
 15. an auto-opened service incident RESOLVES in the same transaction as the close that ends its
     announcement, with an update saying so — and an incident a human already resolved is untouched, because
     a machine must not reopen or re-annotate a person's conclusion (D1b);

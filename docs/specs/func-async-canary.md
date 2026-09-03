@@ -1,10 +1,18 @@
 # func-async-canary — a typed external canary for async API journeys (FR-029 / NFR-024)
 
-> **Lifecycle: DESIGN APPROVED — revision 8 (2026-09-03).** Approved by the independent reviewer at
-> party [66] after six review rounds and seventeen P0s, with the owner's sign-off on §11.4. Phase A is
-> closed; the phases in §12 are separate iterations and each carries its own gate. Nothing outside
-> phase B may begin before phase B lands. FR-029 and NFR-024 get their rows in
-> `docs/status.md` at that point, and the phases in §12 are separate iterations, not one.
+> **Lifecycle: PARTLY IMPLEMENTED — revision 8, phases A–E built at iter-0169 (2026-09-03).** The design
+> was approved by the independent reviewer at party [66] after six review rounds and seventeen P0s, with
+> the owner's sign-off on §11.4. FR-029 and NFR-024 are `IN_PROGRESS` rows in `docs/status.md`, and the
+> fourteen invariants of §6 are discharged in the FR-029 map in `docs/traceability.md`, where **two rows
+> are `PARTIAL` and name what is missing**.
+>
+> **What is NOT built, stated here so the document cannot read as finished:** (1) **capability
+> announcement**, its dispatch filter and `no_capable_runner` (invariant 6) — until it lands, an
+> executor binary older than this release answers `unsupported monitor type` as an ordinary DOWN, so a
+> region's executors are upgraded BEFORE a canary is declared there (`docs/runbook.md` §FR-029);
+> (2) **phase F, the typed UI form** — `docs/design/mock-async-canary.html` exists and awaits the
+> owner's visual approval, the standing gate for every SPA surface in this repo; (3) the
+> per-workflow-kind AMQP queue — the kind rides the existing per-region queue.
 >
 > **Revision 2 — the owner's three answers (§11).** The transaction ceiling went DOWN far enough to
 > delete the mechanism: the type inherits `maxTimeoutSeconds = 300` and there is no per-type bound.

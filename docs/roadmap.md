@@ -20,15 +20,19 @@ design awaiting review.
 
 ## 1. Now — the canary, then the requirement that is already designed, then the sweep
 
-**R5 — the typed external canary (FR-029 / NFR-024).** The owner's decision on 2026-09-03: this goes
-first and R2/R3 wait. It is the largest single feature since FR-021 — a new monitor type
+**R5 — the typed external canary (FR-029 / NFR-024).** *Phases A–E are BUILT (2026-09-03); phase F, the
+typed UI form, is the one item outstanding and is gated on the owner's visual approval of
+[`mock-async-canary.html`](design/mock-async-canary.html), which now exists.* The owner's decision on 2026-09-03: this goes
+first and R2/R3 follow in that order, all three in one release (v0.1.9). It is the largest single feature since FR-021 — a new monitor type
 (`async_canary`), one closed workflow kind (`async_transaction_v1`), capability-aware dispatch, a
 nested typed bundle schema, an embedded fixture registry, an in-flight lease, an idempotency contract
 and an SSRF policy — so it is SIX phases and not one iteration
 ([`func-async-canary.md`](specs/func-async-canary.md), revision 8, **design APPROVED** 2026-09-03 after
-six review rounds and seventeen P0s; D-0218). FR-029 and NFR-024 are `TODO` rows in `status.md`, phase
-A is closed, and **phase B is the next unit of work**: the domain types, the typed parser,
-canonicalization and the semantic hash, with the type NOT yet admitted to bundles.
+six review rounds and seventeen P0s; D-0218). FR-029 and NFR-024 are `TODO` rows in `status.md`, phases A–E
+are closed — the domain contract and the canonical hash, the executor and its own SSRF guard, the
+in-flight lease and the idempotency key, SSE with the pinned fixture, the per-job pull lease, admission
+to `fileSupportedTypes`, the metrics and the runbook. **Phase F is what is left**, and it is gated the
+way every SPA surface in this repo is: an owner-approved mock first.
 Two architecture rulings are already made and are what keep it from being a rewrite: it is a
 CAPABILITY of the existing `worker`/`agent` roles rather than a fifth role, and one probe stays one
 heartbeat rather than splitting submit from await. §11's owner questions are all answered, including the sign-off on the
@@ -36,28 +40,34 @@ one deviation from the brief: `secret_ref` names a binding declared in `workflow
 flat key is what keeps rename, rotation and delete-counting on the path `password_ref` already runs
 on.
 
-**R2 — implement FR-026 / NFR-021 (incident audit).** *Deferred behind R5 by the owner, 2026-09-03 —
-written down so "designed and unbuilt" does not quietly become "forgotten".* The design is approved at revision 4 and the
-spec is the contract: `func-incident-audit.md`. It is the only requirement in the tree that is
-specified and unbuilt, and it closes the last item D-0171 left open. Its shape is small — no
-migration, no route, no read — but it carries two behaviour corrections (D8a, D8b) that need their own
-regression care, and two fixture-tested AST guards that are new machinery for this repo. One
-iteration.
+**R2 — implement FR-026 / NFR-021 (incident audit). DONE at iter-0168 (2026-09-03, D-0219).** Built to
+the approved revision 4, with the two behaviour corrections (D8a, D8b) and the two fixture-driven AST
+guards. Two things the implementation found that the design had wrong are recorded in the spec's banner
+rather than smoothed over: the guard's `handlers_alertmanager.go` exemption hid the very defect FR-026
+exists to prevent (the receiver posts with a token, and a token is a principal), and D2a's "the writer
+holds the row lock" cannot be observed the way the matrix asked, because the postmortem's foreign key
+takes a key-share lock on the same row either way. No requirement in the tree is now specified and
+unbuilt.
 
-**R3 — the dependency sweep.** **Eight** open dependabot PRs as of 2026-09-03, all newer than the last
-sweep (iter-0159, 2026-08-19): the go-modules group (2 updates), the frontend group (3 updates),
-`docker/setup-buildx-action` 4.2.0 → 4.3.0, the `golang` base image 1.26.6 → **1.27.0**, and four
-MAJORS — TypeScript 5.9 → 7.0, Vite 6.4 → 8.2, vue-router 4.6 → 5.2, jsdom 26 → 30. (This paragraph
-said "nine branches" and named a different base-image bump until it was checked against the API; the
-count moves on its own, so treat it as a shape rather than an inventory.) iter-0159's rule applies
-unchanged: patch and minor together, each major alone with its own verification, and `make
-spa-snapshot` read back afterwards. The `golang` bump is NOT what closed R1 — that was a toolchain pin
-in `go.mod`, which no dependabot branch touches; this one moves the image the container is built on,
-and it is worth its own verification for that reason.
+**R3 — the dependency sweep. DONE at iter-0170 (2026-09-03, D-0221).** Seven of the eight open
+dependabot branches are taken: the go-modules group, the frontend group, `docker/setup-buildx-action`
+4.3.0, the `golang` base image 1.27.0, and three of the four MAJORS — jsdom 30, Vite 8 and vue-router 5.
+Two things the sweep learned. **vue-router 5 and Vite 8 are one decision, not two**: vue-router 5
+declares `peerOptional vite@"^7.3.0 || ^8.0.0"` and the install fails outright on Vite 6, so
+iter-0159's "each major alone" rule cannot be applied to that pair, and the report says so rather than
+claiming two verifications that never happened. **TypeScript 7 is DECLINED with a verified reason**:
+`vue-tsc` 3.3.11 cannot drive it — `npm run type-check` dies with `ERR_PACKAGE_PATH_NOT_EXPORTED`
+before checking a file. That is upstream of this repository; the branch stays open on purpose, because
+closing it would lose the reason.
 
-**Order — R5, then R2, then R3, with R4 independent of all three.** The owner set this on 2026-09-03,
-against my recommendation to take R3 first; recorded that way rather than smoothed over, so the cost
-is visible if it bites. What the cost is: four frontend MAJORS (TypeScript 7, Vite 8, vue-router 5,
+**Order — R5, then R2, then R3, with R4 independent of all three. All three shipped in v0.1.9 on
+2026-09-03.** The owner set this order on 2026-09-03, against my recommendation to take R3 first;
+recorded that way rather than smoothed over, so the cost would be visible if it bit. **It did not
+bite**: the sweep landed on the larger surface without a single frontend regression — 38 files / 418
+vitest tests green through every major — and the one bump that failed (TypeScript 7) failed for a
+reason that had nothing to do with the order. The original reasoning is kept below because a
+prediction that turned out wrong is worth as much as one that turned out right. What the predicted cost
+was: four frontend MAJORS (TypeScript 7, Vite 8, vue-router 5,
 jsdom 30) stay unmerged across a multi-phase feature that touches the frontend last, so the sweep will
 land on a larger surface than it would today. What the benefit is: the canary is the only item here
 with a waiting external use case, and its design questions are answered while they are fresh. R4 is

@@ -5805,3 +5805,122 @@ old behaviour — plus a real hole where the cross-host credential rule covered 
 submit, the request that actually carries the credential. All seventeen are answered in the spec. FR-029 and NFR-024
 are now `TODO` rows in `docs/status.md`; no code exists and `async_canary` is not a monitor type in
 the tree. Phase B is the next unit of work and carries its own gate.
+
+## D-0219 — an incident write says who wrote it: FR-026 / NFR-021 implemented, and the two design claims the code found wrong (2026-09-03)
+
+**Context.** FR-022 promised, as invariant 14, that "every write is audited with actor and tenant, in the
+mutating transaction". Building its discharge map found the promise false of the PRODUCT rather than
+merely unimplemented: an incident write left no `audit_logs` row for either anchor. D-0171 named the gap,
+iter-0156 §2.8 proved it, and D-0214 approved a design for it at revision 4. This is that design built,
+as the second leg of the v0.1.9 arc the owner ordered on 2026-09-03 as canary → R2 → R3, with the
+independent review deferred to one request at the end.
+
+**Decision.** FR-026 and NFR-021 are DONE at iter-0168. Every incident mutation made by a PRINCIPAL
+writes exactly one `audit_logs` row in the same transaction, through a door whose signature requires the
+actor; the nine enumerated MACHINE writers keep their own doors and write nothing, because their record
+is the incident's own timeline and auditing them would bury a tenant's log under a flapping service. The
+vocabulary is five typed constants; the target carries ids and both ends of a transition and never a
+body. No migration, no route, no read.
+
+**Two claims in the approved design that the implementation found wrong, recorded rather than quietly
+corrected.**
+
+1. *The guard exemption.* Invariant 4's `internal/api` guard was first built with
+   `handlers_alertmanager.go` exempted BY NAME, on the reasoning that the receiver is "a machine writer
+   that happens to arrive over HTTP". D1 says otherwise, and so does the product: Alertmanager posts with
+   a project-write token, a token is a principal, and the receiver's create and resolve are audited. The
+   exemption hid the very defect the guard exists to catch — the receiver was wired to the system doors
+   and audited nothing. There is no exemption now, and both guards are additionally driven by fixtures
+   that contain the violation. The general lesson is the one this repository keeps relearning: an
+   exemption written to make a guard pass is a guard that has stopped guarding.
+
+2. *What D2a's row lock can be observed to do.* The design asked for the incident's row lock and the
+   matrix asked for "a competing timeline write that must serialize behind it". That assertion cannot
+   distinguish the lock, because `postmortems.incident_id` is a foreign key and the insert takes a KEY
+   SHARE lock on the same row either way. What the explicit `FOR UPDATE` buys is the ORDER — the tenant
+   is resolved before the write, so an unknown incident is `ErrNotFound` rather than a foreign-key error
+   and the `created`/`updated` decision is taken with the row held — and that is what the test now says
+   and the mutation now catches. The waiting assertion is kept and labelled with what it cannot see.
+
+**Consequences.** FR-022's invariant 14 now names the requirement that closed it and its state. No
+requirement in the tree is now specified and unbuilt.
+`make docs-check` gained an FR-026 gate that compares §6 as a SET against the discharge map in both
+directions, verified by removing a row and watching it fail. Two user-visible behaviours changed, both
+making an existing claim true rather than adding behaviour: a repeated acknowledgement is a genuine
+no-op and no longer moves the incident's modification time (D8a), and a duplicate alert delivery that
+arrives concurrently is ignored with HTTP 200 and `ignored=1` instead of answering 500 (D8b). Nine
+mutations were killed; the two that survived are written down with the reason, in the iteration report
+and in the tests themselves.
+
+## D-0220 — the canary is built for five of its six phases, and what is missing is written down (2026-09-03)
+
+**Context.** D-0218 approved the design at revision 8. The owner then ordered the whole of v0.1.9 as
+canary → R2 → R3, all phases without stopping, reviewed once at the end. This records what phases B–E
+actually produced and — more importantly — what they did not, because a requirement that ships partly
+built and reads as finished is the failure mode this repository has spent several iterations correcting.
+
+**Decision.** FR-029 and NFR-024 are `IN_PROGRESS`, not `DONE`. Phases B–E are built and their §6
+invariants are discharged, with two rows `PARTIAL` and naming the gap. Three things are carried
+forward, each stated in the rows, the spec's lifecycle banner, the discharge map and the runbook:
+
+1. **Capability announcement, its dispatch filter and `no_capable_runner`.** Nothing filters a canary
+   job away from an executor binary older than this release; that binary answers `unsupported monitor
+   type "async_canary"` — an ordinary DOWN, per monitor, self-healing on upgrade. The operational rule
+   is therefore: upgrade a region's executors BEFORE declaring a canary there. That belongs in the
+   runbook and is in it, rather than being discovered by whoever declares the first canary.
+2. **Phase F, the typed UI form.** The mock exists (`docs/design/mock-async-canary.html`) and waits on
+   the owner's visual approval, which is the standing gate for every SPA surface here (D-0207). The
+   mock's own contract is that there is no JSON editor on any screen, including the read view — a
+   textual view of a canonical document is a view somebody edits as text.
+3. **The per-workflow-kind AMQP queue.** The kind rides the existing per-region queue.
+
+**Two things worth keeping beyond this feature.**
+
+- **A defect older than the canary was found by building it**: the agent's pull-claim lease was
+  hardcoded at 30 seconds, so ANY pull monitor with a timeout past 30 s was re-claimable mid-probe.
+  Migration 00096 makes the lease per-job. The canary did not cause it; the canary is what made it
+  visible.
+- **The Go suite could not see a database constraint.** Every Go test passed while the real `monitors`
+  table refused `async_canary`, because no store test writes to that table — a live E2E found it.
+  Migration 00097 fixes the constraint and `TestEveryValidMonitorTypeIsAcceptedByTheDatabase` now
+  asserts the type vocabulary against the database itself, so the next new type cannot repeat it. The
+  general shape — a test suite that agrees with itself about a fact only the database owns — is worth
+  remembering.
+
+## D-0221 — the dependency sweep, and two majors that turned out to be one decision (2026-09-03)
+
+**Context.** Eight open dependabot branches, all newer than the last sweep (iter-0159, 2026-08-19),
+including four frontend MAJORS. The owner ordered this third, behind the canary and the incident audit,
+against my recommendation to take it first — recorded in the roadmap that way so the cost would be
+visible if it bit.
+
+**Decision.** Seven of the eight are taken: the go-modules group (`amqp091-go` 1.14.0, `grpc` 1.83.1),
+the frontend group (`@types/node`, `eslint`, `vue-tsc`), `docker/setup-buildx-action` 4.3.0, the
+`golang` build image 1.27.0-bookworm, and the majors `jsdom` 30, `vite` 8 and `vue-router` 5.
+
+**Two things worth keeping.**
+
+1. **iter-0159's rule — "each major alone with its own verification" — has an exception the rule could
+   not have anticipated.** `vue-router@5` declares `peerOptional vite@"^7.3.0 || ^8.0.0"`, so on Vite 6
+   the install fails outright with `ERESOLVE`. The two majors are ONE decision. What was done, and what
+   is written down, is: Vite 8 alone first (verified), then vue-router 5 on top of it (verified again).
+   The alternative — presenting two independent verifications that never happened — is the shape of
+   claim this repository has spent iterations learning to refuse.
+2. **TypeScript 7 is DECLINED, with a reason, and its branch stays open.** `vue-tsc` 3.3.11 cannot
+   drive the native compiler port: `npm run type-check` dies inside `vue-tsc/index.js` with
+   `ERR_PACKAGE_PATH_NOT_EXPORTED` before type-checking a single file. There is nothing here to fix and
+   no workaround short of dropping the type-check from the build, which would trade a real gate for a
+   version number. Closing the dependabot branch would lose the reason, so it stays open.
+
+**On the order.** The predicted cost of taking this last was that four majors would land on a larger
+surface after a feature that touches the frontend. It did not bite: 38 files / 418 vitest tests stayed
+green through every bump, and the one failure had nothing to do with the order. The prediction is kept
+in the roadmap beside the outcome, because a wrong prediction is worth as much to a later reader as a
+right one.
+
+**On the test database, which cost about an hour.** The full `-race` suite failed 43 tests with
+`TruncateAll` deadlocks and organization-slug conflicts, and none of it was the code: another agent was
+running its own verification against the SAME `cerbix_test` database, visible directly in
+`pg_stat_activity`. The fix is per-run isolation — a private database named so that `TruncateAll`'s
+"name must contain test" guard accepts it — not coordination. Worth remembering the next time a suite
+fails in a way that looks systemic and reproduces nowhere.

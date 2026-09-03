@@ -498,6 +498,15 @@ declared in a Monitoring-as-Code bundle as a nested `workflow:` block; there is 
 runs on an ordinary `worker` or `agent` in the monitor's region. Running it on its own host — a VPS in
 another provider, outbound HTTPS only — is a DEPLOYMENT choice: start another `agent` for that region.
 
+**Upgrade the region's executors BEFORE declaring a canary there.** Capability ANNOUNCEMENT is designed
+and not yet built (FR-029 invariant 6, carried forward), so nothing filters a canary job away from an
+older `worker` or `agent` binary. An executor that predates this release picks the job up and answers
+`unsupported monitor type "async_canary"` — an ordinary DOWN, per monitor, that recovers by itself the
+moment the region runs a current binary. Nothing else in the region is affected, no queue backs up and
+no other monitor changes; the cost is a canary that reads DOWN for the wrong reason until the fleet is
+current. Until the announcement lands, the fleet order is: upgrade the region, then declare the
+canary.
+
 **The URL policy is not configurable.** HTTPS only; loopback, link-local, private ranges and cloud
 metadata are refused after DNS resolution and re-validated on every redirect hop. There is no setting
 that relaxes it, in v1 or as a hidden flag, because a flag reachable in production is the policy's own
@@ -1298,3 +1307,39 @@ and the range (`internal/config/config.go`; the example block in `docker/config.
 | `correlation_note_max` | 5 | 1..20 | entries named in the `🚀 Changes:` note; the rest are counted |
 | `retention_days` | 400 | 30..1460 | age bound on change groups, judged by the group's LATEST phase |
 | `retention_groups_per_batch` | 250 | 10..2500 | group keys selected per retention statement (≤ 4 rows each; one advisory lock each) |
+
+## Who wrote this incident? (FR-026 / NFR-021)
+
+Since iter-0168 every incident write made by a PRINCIPAL leaves a row in the organization's audit log,
+written by the same transaction as the change. To answer "who resolved this incident", open
+**Organization → Audit** (or `GET /api/v1/organizations/{orgID}/audit`) and read the five incident
+actions:
+
+| Action | Written by | Target |
+| --- | --- | --- |
+| `incident.create` | the manual create, and the Alertmanager receiver's open | `incident <id> · <anchor> · impact=<i> · source=<s>` |
+| `incident.status` | any update that MOVES the status, the receiver's resolve included | `incident <id> · <from> → <to>` |
+| `incident.note` | a timeline note that changes nothing | `incident <id> · note` |
+| `incident.acknowledge` | the first acknowledgement only | `incident <id> · acknowledged` |
+| `incident.postmortem` | the postmortem upsert | `incident <id> · postmortem created\|updated` |
+
+A row written by an API TOKEN has no `actor_user_id` — a token identity has no user row — so its label
+is appended to the target as `· actor=token:<name>`. A row written by a person carries the user id, and
+survives that user's deletion with a NULL actor and its text intact.
+
+**What is NOT here, by decision.** A MACHINE write leaves no audit row: the monitor and service
+auto-incidents and their auto-resolves, the `⚡ Context:` note, both `⏸ Suppressed:` notes, the
+`🚀 Changes:` note and the `🕸 Impact:` links. That is not a gap — their record is the incident's OWN
+TIMELINE, which names `system` as the author and is the document to read for them. Auditing them would
+bury a tenant's log under a flapping service's heartbeat, the same reasoning that keeps gate DECISIONS
+out of `audit_logs` while gate policy and override mutations stay in it.
+
+**Also not here:** what was WRITTEN. No note body, postmortem body or alert annotation ever reaches an
+audit row — the trail says what happened, and the incident's timeline holds the text.
+
+Two behaviours changed with this, and an operator can see both. Acknowledging an already-acknowledged
+incident is now a genuine no-op: the acknowledger and the instant stay the FIRST one, the incident's
+`updated_at` does not move, and no second audit row appears. And two identical Alertmanager deliveries
+that arrive at the same moment now both answer HTTP 200 — one reports `opened: 1` (or `resolved: 1`)
+and the other `ignored: 1` — where the loser of that race used to answer 500 while the sequential retry
+one millisecond later answered 200.

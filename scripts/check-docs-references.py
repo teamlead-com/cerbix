@@ -187,6 +187,14 @@ FR025_SPEC = 'docs/specs/func-change-intelligence.md'
 DECISIONS_DOC = 'docs/decisions.md'
 FR025_HEADING = '### FR-025 invariants (§6 of func-change-intelligence.md)'
 FR025_MATRIX_HEADING = '### FR-025 required test matrix (§7, written before the code)'
+# FR-026 (func-incident-audit.md): §6 as a SET, same discipline. It has no §7 table of its own in the
+# map — the matrix is discharged inside the invariant rows, which is what the spec's §7 groups by.
+FR026_SPEC = 'docs/specs/func-incident-audit.md'
+FR026_HEADING = '### FR-026 invariants (§6 of func-incident-audit.md)'
+# FR-029 (func-async-canary.md): §6 as a SET. Two rows are PARTIAL and say what is missing; the gate
+# checks that every invariant HAS a row, which is what stops a carried-forward phase from evaporating.
+FR029_SPEC = 'docs/specs/func-async-canary.md'
+FR029_HEADING = '### FR-029 invariants (§6 of func-async-canary.md)'
 
 
 def discharge_rows(text, heading):
@@ -506,13 +514,13 @@ def fr021_invariant_numbers():
     return set(seen)
 
 
-def fr025_invariant_numbers():
-    """The SET of invariant numbers §6 of the FR-025 spec states — FR-021's discipline: a set, not a
+def spec_invariant_numbers(spec, label):
+    """The SET of invariant numbers §6 of `spec` states — FR-021's discipline: a set, not a
     maximum, a renamed section a loud failure, a duplicate number a loud failure."""
-    text = read(FR025_SPEC)
+    text = read(spec)
     i = text.find('\n## 6.')
     if i < 0:
-        raise SystemExit(f'check-docs-references: {FR025_SPEC} has no "## 6." section; the FR-025 '
+        raise SystemExit(f'check-docs-references: {spec} has no "## 6." section; the {label} '
                          'invariant gate has nothing to compare the discharge map against')
     section = text[i + 1:]
     end = re.search(r'\n## ', section)
@@ -520,12 +528,24 @@ def fr025_invariant_numbers():
         section = section[:end.start()]
     seen = [int(m) for m in re.findall(r'^\s{0,4}(\d{1,3})\.\s', section, re.M)]
     if not seen:
-        raise SystemExit('check-docs-references: the FR-025 spec states no invariants at all')
+        raise SystemExit(f'check-docs-references: the {label} spec states no invariants at all')
     dupes = sorted({n for n in seen if seen.count(n) > 1})
     if dupes:
-        raise SystemExit('check-docs-references: the FR-025 spec states invariant number(s) '
+        raise SystemExit(f'check-docs-references: the {label} spec states invariant number(s) '
                          f'{dupes} more than once')
     return set(seen)
+
+
+def fr025_invariant_numbers():
+    return spec_invariant_numbers(FR025_SPEC, 'FR-025')
+
+
+def fr026_invariant_numbers():
+    return spec_invariant_numbers(FR026_SPEC, 'FR-026')
+
+
+def fr029_invariant_numbers():
+    return spec_invariant_numbers(FR029_SPEC, 'FR-029')
 
 
 def check_invariant_set(src, text, expected, heading=INV_HEADING, label='FR-021'):
@@ -587,6 +607,8 @@ def check_discharge(src):
     # The FR-021 invariants are compared as a SET; the other tables are still contiguous 1..N.
     bad += check_invariant_set(src, text, fr021)
     bad += check_invariant_set(src, text, fr025_invariant_numbers(), FR025_HEADING, 'FR-025')
+    bad += check_invariant_set(src, text, fr026_invariant_numbers(), FR026_HEADING, 'FR-026')
+    bad += check_invariant_set(src, text, fr029_invariant_numbers(), FR029_HEADING, 'FR-029')
     for heading, count, label in ((MATRIX_HEADING, 24, 'scenario'),
                                   (FR022_HEADING, 16, 'FR-022 invariant'),
                                   (FR022_MATRIX_HEADING, 16, 'FR-022 scenario'),
@@ -647,7 +669,7 @@ def main():
         print('docs references: OK — every path and Test* name in the living documents resolves, '
               'and every acceptance map is complete (FR-021 invariants compared as a SET against '
               'the spec, plus 24 scenarios; FR-022: 16+16, FR-023: 16+19; FR-025: §6 as a SET + 9 '
-              'scenario groups, its retired spellings refused); '
+              'scenario groups, its retired spellings refused; FR-026 and FR-029: §6 as a SET); '
               'every requirement row states one of the three statuses, and no spec calls itself '
               'unbuilt while its requirement is DONE')
         return 0

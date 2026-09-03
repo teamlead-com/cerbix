@@ -1,6 +1,6 @@
 # func-incident-audit — an incident write says who wrote it (FR-026 / NFR-021)
 
-> **Lifecycle: DESIGN — revision 4, awaiting approval.** Opened after iter-0165 from the gap D-0171
+> **Lifecycle: IMPLEMENTED — revision 4, built at iter-0168 (2026-09-03, D-0219).** Opened after iter-0165 from the gap D-0171
 > named and iter-0156 §2.8 proved: incident writes carry no audit row for EITHER anchor. The owner
 > settled the three questions that size it (2026-09-01): only PRINCIPAL writes are audited, the row is
 > written in the mutating transaction, and the read surface stays the organization's existing audit
@@ -27,8 +27,21 @@
 > declarations of `internal/store` (D3, invariant 4, §7). P2: D1's table said "the seven" while listing
 > nine writers.
 >
-> No requirement row exists in `docs/status.md` yet — FR-026 and NFR-021 get theirs when this design is
-> approved, per the rule iter-0164 followed for FR-025.
+> FR-026 and NFR-021 have their rows in `docs/status.md`, and the §6 invariants are discharged in the
+> FR-026 map in `docs/traceability.md`.
+>
+> **Two things the implementation found that the design had wrong, both recorded rather than quietly
+> corrected.** (1) The `internal/api` guard of invariant 4 was first built with `handlers_alertmanager.go`
+> exempted BY NAME, on the reasoning that the receiver is "a machine writer that happens to arrive over
+> HTTP" — and the exemption hid the exact defect FR-026 exists to prevent, because D1 audits the
+> receiver's create and its resolve: Alertmanager posts with a project-write token, and a token is a
+> principal. The guard now has no exemption, and both guards are additionally driven by fixtures that
+> DO contain the violation. (2) D2a asked for the incident's row lock, and the first test written for it
+> asserted that a competing holder makes the postmortem WAIT — which it does either way, because
+> `postmortems.incident_id` is a foreign key and the insert takes a KEY SHARE lock on the same row. What
+> the `FOR UPDATE` actually buys is the ORDER: the tenant is resolved before the write, so an unknown
+> incident is `ErrNotFound` rather than a foreign-key error, and the `created`/`updated` decision is
+> taken with the row held. The test now says which half distinguishes what.
 
 ## 1. What this is, in one paragraph
 

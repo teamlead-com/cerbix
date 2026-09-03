@@ -511,3 +511,44 @@ ref, no bundle export).
 Whether the mapping panel sits ABOVE the steps (as drawn — the reference is read before the journey) or collapses
 into a summary row until a binding exists. The mock takes the first, because an empty panel is also how the
 operator learns the feature is there.
+
+## `mock-async-canary.html` — FR-029 phase F, the typed canary form (2026-09-03)
+
+Four screens: the typed form in full, the refusals, what a run is allowed to report, and the file-owned
+view. Built AFTER phases B–E, so every rule drawn here already exists in
+`internal/domain/canary.go` and `internal/prober/canary.go` — the mock chooses where each refusal
+belongs on screen and nothing else.
+
+### What the mock decides, so the implementation invents nothing
+
+- **There is no JSON editor, on any screen, including the read view.** The stored document is one
+  canonical string, and the detail panel renders it as the same typed sections the form uses. A textual
+  view is a view somebody edits as text, and the whole reason this type exists is that the brief refused
+  an opaque settings blob.
+- **The secrets map is a numbered stage (0), above the five.** A binding is declared once and every
+  position refers to it by name — the same grammar the FR-028 mock established, and the same chip: a
+  binding is never shown without the project secret that fills it.
+- **D7 is taught by the control**, exactly as in FR-028: typing a credential-bearing header name replaces
+  the value input with the binding picker. The literal refusal exists and uses the server's words, and
+  it offers the fix (choose a binding · declare one) rather than only the complaint.
+- **Bounds are printed under the field from the moment the form opens**, not after the value is wrong:
+  interval ≥ timeout, completion timeout ≤ the monitor's, `interval × max_attempts` ≤ completion timeout,
+  `max_latency` a promise inside the limit. A canary that overlaps itself would report
+  `already_in_flight` forever, and the form is where that is cheap to prevent.
+- **The correlation-id placeholder is legal in exactly one field** and the refusal says why: nothing has
+  produced an id at submit time.
+- **A cross-host completion binding is refused in the form**, with the redirect rule stated beside it.
+- **The run view carries a stage and a bounded class, and nothing else** — no URL, no correlation id, no
+  object path, no secret. The threat model is a screen, not a paragraph in a spec.
+- **The monitor form hides `target`** for this type rather than asking for a value it would ignore.
+- **A file-owned canary is read-only**, like every other file-owned type, with host names shown and full
+  URLs not.
+- **Not shown and not built:** a JSON or YAML editor of any kind, an in-form "run once" (a canary is
+  tested by running it from its region, so the form saves first), a fixture upload (the registry key is
+  the only fixture reference there is), and any control that would relax the SSRF policy.
+
+### Open for the owner's look
+
+The submit stage is the only one long enough to want collapsing. The mock leaves all five expanded,
+because a canary is read end to end far more often than it is edited, and a collapsed stage is where a
+wrong bound hides.

@@ -6,6 +6,131 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [v0.1.9] - 2026-09-03
+
+Three things in one release, in the order the owner set: a **typed external canary** for async API
+journeys, an **audit trail for incident writes**, and the **dependency sweep** that had been waiting
+behind both. The canary is the largest single feature since FR-021 and it ships **partly built** — five
+of its six phases — with what is missing named in the requirement rows, the specification's own banner,
+the acceptance map and the runbook, rather than left to be discovered. No breaking change. Three
+migrations, all additive.
+
+### ⚠️ Upgrade Notes
+
+- **Upgrade a region's executors BEFORE declaring a canary there.** Capability announcement is designed
+  and not yet built, so nothing filters a canary job away from an older `worker` or `agent` binary. An
+  executor that predates this release picks the job up and answers `unsupported monitor type
+  "async_canary"` — an ordinary DOWN, per monitor, that recovers by itself the moment the region runs a
+  current binary. No queue backs up and no other monitor is affected.
+- **A repeated incident acknowledgement is now a genuine no-op.** It used to rewrite the incident's
+  `updated_at` on every retry. The acknowledger and the instant stay the FIRST ones, and the
+  modification time no longer moves. If anything of yours sorts incidents by `updated_at` and relied on
+  a re-acknowledgement bumping them, it will not any more.
+- **Two identical Alertmanager deliveries that arrive at the same moment now both answer HTTP 200** —
+  one reporting `opened: 1` (or `resolved: 1`) and the other `ignored: 1`. The loser of that race used
+  to answer 500, while the sequential retry a millisecond later answered 200. If you alert on 5xx from
+  the receiver, that source of noise is gone.
+- **The `golang` build image moves to 1.27.0** and `docker/setup-buildx-action` to 4.3.0. Neither
+  changes the language version in `go.mod`.
+
+### ✨ Added
+
+**A typed external canary for async API journeys (FR-029 / NFR-024, `IN_PROGRESS`)**
+
+A new monitor type, `async_canary`, runs ONE asynchronous transaction end to end and reports it as an
+ordinary monitor: submit, take a correlation id, await a terminal outcome, assert the declared fields,
+validate the cleanup boundary — and return ONE heartbeat carrying up/down, total latency, the failed
+stage and a bounded code class. It is declared in a Monitoring-as-Code bundle as a nested, typed
+`workflow:` block with closed unions and no free-form field anywhere: no `settings` map, no JSON string,
+and a key the schema does not name refuses the whole bundle by name.
+
+- **The contract is a type, not a convention.** Two submit kinds (`http_json`, `multipart_fixture`), two
+  completion kinds (`sse`, `poll_json`), two correlation sources, three assertion kinds, two restricted
+  grammars, and every bound with a number. `{{ correlation_id }}` is legal in exactly one field — the
+  completion URL — because nothing has produced an id at submit time.
+- **Credentials are bindings, never values.** A binding is declared once under `workflow.secrets` and
+  referenced by name at each position; the value is resolved at dispatch, delivered in the existing
+  credential envelope, held in memory for one execution and wiped. A credential-bearing header accepts a
+  binding and nothing else. **What is not protected, stated plainly:** a credential pasted into an
+  ordinary header or under an innocuous body key is not detectable and is not refused — the same
+  residual FR-028 named.
+- **The URL policy is strict and has no off switch.** HTTPS only; loopback, link-local, private ranges
+  and cloud metadata are refused AFTER DNS resolution and re-validated on every redirect hop. There is
+  no setting that relaxes it, in v1 or as a hidden flag, because a flag reachable in production is the
+  policy's own bypass — tests reach a local fixture through an injected dialer at the seam, never
+  through a product option. The executor also drops EVERY binding-backed header on a cross-host
+  redirect, which `net/http` does not do: it strips `Authorization` and has never heard of `x-api-key`.
+- **One run per monitor, four per region**, decided by the scheduler at dispatch. A refused run writes
+  one ordinary DOWN with a bounded reason (`region_saturated`, `already_in_flight`) and the monitor's own
+  `failure_threshold` decides the flip, so the sample counts as unavailable in the SLI like any other
+  DOWN. Every submit carries an `Idempotency-Key` derived from the monitor, its execution revision and
+  the scheduled window — whether a second submit with that key creates a second task is the target's
+  contract, not cerbix's.
+- **Nothing it touches leaks.** No heartbeat, log line, error or metric label carries a URL, a body, a
+  header value, a secret, the correlation id or the result object path.
+- **New metrics** `cerbix_canary_stage_total` and `cerbix_canary_dispatch_refused_total`, both
+  low-cardinality and carrying no monitor id, URL or correlation id.
+
+**What is NOT in this release, and is named in `docs/status.md` rather than implied:** capability
+announcement with `no_capable_runner`; the typed UI form (phase F — the mock exists at
+`docs/design/mock-async-canary.html` and awaits visual approval); the per-workflow-kind AMQP queue. A
+canary is declared in a bundle or through the API today.
+
+### 🔒 Security
+
+**An incident write says who wrote it (FR-026 / NFR-021)**
+
+FR-022 promised, as its invariant 14, that "every write is audited with actor and tenant, in the
+mutating transaction". That was false of the PRODUCT rather than merely unimplemented: an incident
+write left **no** `audit_logs` row, for a monitor incident or a service one. A member could resolve
+someone else's incident, publish a postmortem or acknowledge a page, and the organization's audit trail
+said nothing.
+
+- **Every incident mutation made by a PRINCIPAL now writes exactly one audit row in the same
+  transaction** — the manual create, the Alertmanager receiver's create and its resolve, a status
+  change, a note, the first acknowledgement, and a postmortem create or update. A committed change
+  without its row cannot exist, and a rolled-back one leaves none.
+- **The vocabulary is five words** — `incident.create`, `incident.status`, `incident.note`,
+  `incident.acknowledge`, `incident.postmortem` — and the target carries ids and both ends of a
+  transition and **never a body**: no note text, postmortem text or alert annotation reaches the trail.
+- **Machine writes are excluded by decision and enumerated**: the reconciler's auto-open and
+  auto-resolve, the service auto-incident and its resolve, the `⚡ Context:` note, both `⏸ Suppressed:`
+  writers, `🚀 Changes:` and `🕸 Impact:`. Their record is the incident's own timeline, which names
+  `system` as the author. Auditing them would bury a tenant's log under a flapping service's heartbeat.
+- **No read is added.** The rows appear in the organization's existing audit listing and never in the
+  instance one. `docs/runbook.md` now answers "who resolved this incident" directly.
+- Two AST guards hold the door surface, each driven by a fixture that contains the violation. The first
+  version of one guard exempted the Alertmanager receiver by name — and the exemption hid the exact
+  defect the requirement exists to prevent, because Alertmanager posts with a project-write token and a
+  token is a principal.
+
+### 🔧 Changed
+
+- **A pull monitor with a timeout past 30 seconds is no longer re-claimable mid-probe.** The agent's
+  claim lease was hardcoded at 30 s, so any pull monitor slower than that could be handed to a second
+  agent while the first was still working. The lease is now per job. This is older than the canary; the
+  canary is what made it visible.
+- `async_canary` joins the `monitors_type_check` database constraint. Every Go test passed while the
+  real table refused the type, because no store test writes to it — a live E2E found it, and the type
+  vocabulary is now asserted against the database itself so the next new type cannot repeat it.
+
+### 📦 Dependencies
+
+Seven of the eight open dependabot branches, verified one group and one major at a time (iter-0170).
+
+- go-modules: `rabbitmq/amqp091-go` 1.13.0 → 1.14.0, `google.golang.org/grpc` 1.83.0 → 1.83.1
+- github-actions: `docker/setup-buildx-action` 4.2.0 → 4.3.0 (SHA-pinned)
+- docker: the `golang` build image 1.26.6-bookworm → **1.27.0-bookworm**
+- frontend: `@types/node` → 26.4.1, `eslint` → 10.9.1, `vue-tsc` → 3.3.11, and three MAJORS —
+  `jsdom` 26 → **30**, `vite` 6.4 → **8.2**, `vue-router` 4.6 → **5.3**. The last two are one decision,
+  not two: vue-router 5 declares `peerOptional vite@"^7.3.0 || ^8.0.0"` and will not install on Vite 6.
+- **Not taken: TypeScript 7.** `vue-tsc` 3.3.11 cannot drive the native compiler port —
+  `npm run type-check` dies with `ERR_PACKAGE_PATH_NOT_EXPORTED` before checking a file. Upstream of
+  this repository; the bump waits for a `vue-tsc` that supports it.
+
+The committed SPA snapshot (`internal/web/dist`) is regenerated with this: every asset filename hash
+moved, because Vite 8 hashes differently.
+
 ## [v0.1.8] - 2026-09-03
 
 A credential inside a synthetic monitor's scenario used to be stored in cleartext, returned to every

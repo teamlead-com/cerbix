@@ -198,6 +198,23 @@ and postmortem (NFR-017); the `⚡` and `⏸` system notes keep their one home, 
 and an open service incident moves no component STATUS on a status page — it is rendered as an
 incident, next to a status the §15.0 precedence table still derives from health alone.
 
+**Incident audit (FR-026 / NFR-021, iter-0168).** An incident write says WHO wrote it. Every mutation
+made by a PRINCIPAL — a session user or an API token, both anchors, plus the Alertmanager receiver's
+create and resolve, which arrive with a project-write token — writes exactly one `audit_logs` row in
+the SAME transaction as the mutation, so a committed change without its row cannot exist and a rolled
+back one leaves none. The vocabulary is five words: `incident.create`, `incident.status`,
+`incident.note`, `incident.acknowledge`, `incident.postmortem`; the target carries ids and both ends of
+a transition and **never a body** — no note text, postmortem text or alert annotation reaches the trail.
+MACHINE writes are excluded by decision and enumerated (the reconciler's auto-open and auto-resolve, the
+service auto-incident and its resolve, the `⚡ Context:`, both `⏸ Suppressed:` writers, `🚀 Changes:`
+and `🕸 Impact:`): their record is the incident's own timeline, which names `system` as the author, and
+auditing them would bury a tenant's log under a flapping service's heartbeat. No read is added — the
+rows appear in the organization's existing audit listing and never in the instance one. Two user-visible
+behaviour changes come with it, both making an existing claim true rather than adding behaviour: a
+repeated acknowledgement is now a genuine no-op and no longer moves the incident's modification time,
+and a duplicate alert delivery that arrives CONCURRENTLY is ignored with HTTP 200 and `ignored=1`
+instead of answering 500.
+
 **Reliability gate (FR-024, iter-0163).** A deploy pipeline asks whether the error budget allows a
 release and gets a machine-readable answer: an observed `state` (`ALLOW`, `WARN`, `BLOCK`, `UNKNOWN`,
 or `NOT_CONFIGURED` when the service has no policy) and an effective `action` (`ALLOW`, `WARN`, `BLOCK`;
@@ -374,8 +391,26 @@ page and the `actions` list on the token form — no control writes a change; th
 The operational side — the CI-token recipe, "a pipeline reports out of order", the alert rows, the
 retention knobs and what `pending` versus `withheld` means to a reader — is in `runbook.md`.
 
+**Async canary (FR-029, iter-0169).** A monitor of type `async_canary` runs ONE asynchronous API
+journey end to end and reports it as an ordinary monitor: submit, take a correlation id from the
+response, await a terminal outcome by SSE or polling, assert the declared result fields, validate the
+cleanup boundary — and return ONE heartbeat carrying up/down, total latency, the failed STAGE and a
+bounded code class. It is declared as a nested typed `workflow:` block with closed unions and no
+free-form field anywhere: no `settings` map, no JSON string, and a key the schema does not name refuses
+the whole bundle by name. A credential is a BINDING declared once and referenced at each position; the
+value is resolved at dispatch through the existing envelope and never enters the document. The URL
+policy is strict and has no off switch — HTTPS only, no loopback, link-local, private or metadata
+address after resolution, re-validated on every redirect hop — and the executor drops every
+binding-backed header on a cross-host redirect, which `net/http` does not do. One run per monitor and
+four per region are decided by the scheduler at dispatch; a refused run is an ordinary DOWN with a
+bounded reason, counted in the SLI like any other. A canary is an ordinary member of a Service: nothing
+here adds a second reliability path. It is **partly built** — capability announcement and the typed UI
+form are named as outstanding in `status.md`, and until the first lands, a region's executors are
+upgraded before a canary is declared there.
+
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
-`mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `push` (dead-man's-switch).
+`mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `synthetic`, `async_canary`,
+`push` (dead-man's-switch).
 HTTP-like types use the declarative conditions engine
 (`[STATUS] == 200`, `[RESPONSE_TIME] < 500`, `[BODY].status == "UP"`). All of them except
 `composite` and `synthetic` are expressible in a Monitoring-as-Code bundle — `promql` since the

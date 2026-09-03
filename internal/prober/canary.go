@@ -170,7 +170,7 @@ func (p canaryProber) client() *http.Client {
 				// Normalized host OR PORT changed: drop every header a binding produced, and do it
 				// for the whole binding-backed set rather than for the one name Go knows about.
 				for name := range req.Header {
-					if canaryBindingBacked(via[0], name) {
+					if canaryBindingBacked(req.Context(), name) {
 						req.Header.Del(name)
 					}
 				}
@@ -180,22 +180,35 @@ func (p canaryProber) client() *http.Client {
 	}
 }
 
-// canaryBindingBackedHeader marks a header as carrying a credential, so the redirect policy can drop
-// exactly those. It is carried on the ORIGINAL request and read back on each hop, because the
-// schema — not the transport — is what knows which headers those are.
-const canaryBindingBackedHeader = "X-Cerbix-Binding-Backed"
+// The binding-backed header NAMES travel with the request so the redirect policy can drop exactly
+// those, because the schema — not the transport — is what knows which headers those are.
+//
+// They travel on the CONTEXT and never on the wire. The first version of this carried them in an
+// `X-Cerbix-Binding-Backed` request header and deleted it after the response returned — which is
+// after `client.Do`, so the initial target AND every redirect hop received an undeclared internal
+// header describing which of the request's headers hold credentials. That is a worse thing to send
+// than the marker looks: it tells an untrusted endpoint exactly which header to attack. A context
+// value reaches `CheckRedirect` through `req.Context()` on every hop and reaches no socket at all.
+type canaryBindingCtxKey struct{}
 
-func canaryBindingBacked(original *http.Request, name string) bool {
-	marked := original.Header.Get(canaryBindingBackedHeader)
-	if marked == "" {
+func canaryWithBindingBacked(ctx context.Context, names []string) context.Context {
+	if len(names) == 0 {
+		return ctx
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[strings.ToLower(strings.TrimSpace(n))] = struct{}{}
+	}
+	return context.WithValue(ctx, canaryBindingCtxKey{}, set)
+}
+
+func canaryBindingBacked(ctx context.Context, name string) bool {
+	set, ok := ctx.Value(canaryBindingCtxKey{}).(map[string]struct{})
+	if !ok {
 		return false
 	}
-	for _, n := range strings.Split(marked, ",") {
-		if strings.EqualFold(strings.TrimSpace(n), name) {
-			return true
-		}
-	}
-	return false
+	_, marked := set[strings.ToLower(strings.TrimSpace(name))]
+	return marked
 }
 
 func canaryOrigin(u *url.URL) string {
@@ -237,8 +250,9 @@ func (p canaryProber) do(ctx context.Context, client *http.Client, method, rawUR
 		}
 		req.Header.Set(name, h.Value)
 	}
+	// Out of band (never a wire header): the redirect policy reads this from `req.Context()`.
 	if len(bindingBacked) > 0 {
-		req.Header.Set(canaryBindingBackedHeader, strings.Join(bindingBacked, ","))
+		req = req.WithContext(canaryWithBindingBacked(req.Context(), bindingBacked))
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
@@ -254,7 +268,6 @@ func (p canaryProber) do(ctx context.Context, client *http.Client, method, rawUR
 		return nil, nil, &canaryFailure{stage, canaryTransportClass(err)}
 	}
 	defer resp.Body.Close()
-	req.Header.Del(canaryBindingBackedHeader)
 
 	limited := io.LimitReader(resp.Body, canaryMaxResponseBytes+1)
 	read, err := io.ReadAll(limited)
@@ -355,8 +368,9 @@ func (p canaryProber) awaitSSE(ctx context.Context, client *http.Client, w domai
 		}
 		req.Header.Set(name, h.Value)
 	}
+	// Out of band (never a wire header): the redirect policy reads this from `req.Context()`.
 	if len(bindingBacked) > 0 {
-		req.Header.Set(canaryBindingBackedHeader, strings.Join(bindingBacked, ","))
+		req = req.WithContext(canaryWithBindingBacked(req.Context(), bindingBacked))
 	}
 	req.Header.Set("Accept", "text/event-stream")
 

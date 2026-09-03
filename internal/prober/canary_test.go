@@ -499,3 +499,70 @@ func TestCanaryRespectsTheCompletionDeadline(t *testing.T) {
 		t.Fatalf("the deadline did not bound the stage: %s", elapsed)
 	}
 }
+
+// The redirect policy needs to know WHICH headers a binding produced. That provenance must not be
+// something the target can read: the first version carried it in an `X-Cerbix-Binding-Backed`
+// request header and deleted it only after `client.Do` returned, so the initial target and every
+// redirect hop received an undeclared internal header naming exactly which of the request's headers
+// hold credentials — a map of what to attack. Found by the independent reviewer as a P0 on the
+// v0.1.9 canary range.
+//
+// This asserts BOTH ends of that: no internal header reaches either target, and the redirect
+// stripping it exists to drive still works.
+func TestCanaryProvenanceNeverReachesEitherTargetOnTheWire(t *testing.T) {
+	var firstHop, secondHop http.Header
+	targetMux := http.NewServeMux()
+	targetMux.HandleFunc("/files/upload", func(w http.ResponseWriter, r *http.Request) {
+		secondHop = r.Header.Clone()
+		w.WriteHeader(202)
+		_ = json.NewEncoder(w).Encode(map[string]any{"task_id": "task-42"})
+	})
+	targetMux.HandleFunc("/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed", "s3_path": "canary/x.wav", "byte_size": 1})
+	})
+	target := httptest.NewServer(targetMux)
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstHop = r.Header.Clone()
+		http.Redirect(w, r, target.URL+"/files/upload", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	m := canaryMonitor(t, redirector.URL, func(w *domain.CanaryWorkflow) {
+		w.Submit.Headers = []domain.CanaryHeader{
+			{Name: "authorization", SecretRef: "upload"},
+			{Name: "x-api-key", SecretRef: "upload"},
+			{Name: "x-tenant", Value: "canary"},
+		}
+		w.Completion.URL = target.URL + "/tasks/{{ correlation_id }}"
+	})
+	canaryTestProber().Probe(context.Background(), m)
+
+	if firstHop == nil {
+		t.Fatal("the first hop was never reached")
+	}
+	if secondHop == nil {
+		t.Fatal("the redirect target was never reached")
+	}
+	// Nothing internal on EITHER hop. Asserted by PREFIX rather than by the one name, so a future
+	// marker with a different spelling cannot slip onto the wire past this test.
+	for hop, h := range map[string]http.Header{"first hop": firstHop, "redirect target": secondHop} {
+		for name := range h {
+			if strings.HasPrefix(strings.ToLower(name), "x-cerbix-") {
+				t.Errorf("%s received an internal header %q: provenance must not travel on the wire", hop, name)
+			}
+		}
+	}
+	// And the rule that provenance exists to drive is intact: credentials dropped cross-host, the
+	// ordinary header kept.
+	if got := secondHop.Get("authorization"); got != "" {
+		t.Fatalf("authorization survived a cross-host redirect: %q", got)
+	}
+	if got := secondHop.Get("x-api-key"); got != "" {
+		t.Fatalf("x-api-key survived a cross-host redirect: %q", got)
+	}
+	if got := secondHop.Get("x-tenant"); got != "canary" {
+		t.Fatalf("x-tenant = %q, want it preserved", got)
+	}
+}

@@ -5924,3 +5924,34 @@ running its own verification against the SAME `cerbix_test` database, visible di
 `pg_stat_activity`. The fix is per-run isolation — a private database named so that `TruncateAll`'s
 "name must contain test" guard accepts it — not coordination. Worth remembering the next time a suite
 fails in a way that looks systemic and reproduces nowhere.
+
+## D-0222 — the redirect policy's provenance is a context value, not a wire header (2026-09-03)
+
+**Context.** A reviewer P0 on the v0.1.9 canary range. `internal/prober/canary.go` needs to know which
+of a request's headers a BINDING produced, so the cross-host redirect rule can drop exactly those —
+`net/http` strips only `Authorization` and has never heard of `x-api-key`. The first implementation
+carried that set in an `X-Cerbix-Binding-Backed` request header and removed it after `client.Do`
+returned. `client.Do` is when the request is SENT, so the removal was always too late: the initial
+target and every redirect hop received an undeclared internal header enumerating which headers hold
+credentials.
+
+**Decision.** Provenance travels on the request CONTEXT. `CheckRedirect` reads it from `req.Context()`,
+which is available on every hop and serialized onto no socket. No wire header is set, and none needs
+deleting.
+
+**Why the tests missed it.** Phase C's redirect tests asserted what the target must not KEEP and what it
+must keep. None asserted what the target must never RECEIVE. That is a distinct question, and the new
+test asks it on both hops — by `x-cerbix-` PREFIX rather than by the one header name, so the next
+internal marker cannot reach the wire past this guard either. The general lesson: for anything a
+request carries, "is it stripped correctly?" and "is it sent at all?" are two assertions, and passing
+the first says nothing about the second.
+
+**Also corrected: the review range itself.** The single review request named `bd92df7..dc48509`, which
+begins AFTER the canary implementation commits (`f04ea0d` phase B, `24b3230` C, `c634406` D, `02c05a1`
+and `bd92df7` E). It therefore asked for approval of "the whole arc" over a range containing almost
+none of it — the reviewer refused it as a P0, correctly. The effective range for the implementation
+review is everything after the APPROVED design commit: `8626125..HEAD`.
+
+**And the release was cut before this gate closed.** v0.1.9 was tagged, pushed and published while the
+review request sat unanswered; the owner deleted the release by hand. The review is a GATE, not a
+notification, and a green local gate set is not a substitute for it — this P0 is what the gate was for.

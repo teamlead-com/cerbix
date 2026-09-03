@@ -45,20 +45,24 @@ func (s *Store) UpdateMonitorByPrincipal(ctx context.Context, m domain.Monitor, 
 	if err := actor.valid(); err != nil {
 		return domain.Monitor{}, err
 	}
+	// `updated` is the row the UPDATE returned, so the target's slug and enabled flag are the stored
+	// facts, not what the caller claimed.
 	return s.updateMonitor(ctx, m, func(ctx context.Context, tx pgx.Tx, updated domain.Monitor, prevEnabled bool) error {
 		return insertProjectAudit(ctx, tx, updated.ProjectID, actor, string(MonitorAuditUpdate), MonitorUpdateTarget(actor, updated, prevEnabled))
 	})
 }
 
-// DeleteMonitorByPrincipal is the only exported delete door. It takes the monitor rather than its id
-// because the target names slug, type and region, and after the DELETE there is no row to read them
-// from; the handler already holds the row it authorized against.
-func (s *Store) DeleteMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor AuditActor) error {
+// DeleteMonitorByPrincipal is the only exported delete door. It takes an ID and nothing else: the
+// target names slug, type and region, and those come from the row `deleteMonitor` holds FOR UPDATE at
+// the moment of the delete — not from a copy the caller read earlier, which a concurrent update can
+// have made stale and a careless caller can have assembled from another monitor (reviewer P1 [112]).
+// The tenant the row lands under is the locked row's project, for the same reason.
+func (s *Store) DeleteMonitorByPrincipal(ctx context.Context, id string, actor AuditActor) error {
 	if err := actor.valid(); err != nil {
 		return err
 	}
-	return s.deleteMonitor(ctx, m.ID, func(ctx context.Context, tx pgx.Tx, _ domain.Monitor, _ bool) error {
-		return insertProjectAudit(ctx, tx, m.ProjectID, actor, string(MonitorAuditDelete), MonitorDeleteTarget(actor, m))
+	return s.deleteMonitor(ctx, id, func(ctx context.Context, tx pgx.Tx, locked domain.Monitor, _ bool) error {
+		return insertProjectAudit(ctx, tx, locked.ProjectID, actor, string(MonitorAuditDelete), MonitorDeleteTarget(actor, locked))
 	})
 }
 

@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -51,7 +52,7 @@ func TestCanaryBoundsArePublishedForTheClient(t *testing.T) {
 	// fails HERE, without anyone remembering a count — which is what the earlier `len(bounds) == 21`
 	// could not do (reviewer [93]: it fired only when a maintainer updated the map). Published values
 	// are then asserted against the client by canaryBounds.spec.ts.
-	declared := canaryBoundIdentifiersDeclaredIn(t, "canary.go", "canarycanonical.go", "canaryexec.go", "canarycapability.go")
+	declared := canaryBoundIdentifiersDeclaredIn(t, ".")
 	published := canaryBoundIdentifiersPublishedBy(t, "canarybounds_test.go")
 	for name := range declared {
 		if !published[name] {
@@ -84,15 +85,30 @@ func TestCanaryBoundsArePublishedForTheClient(t *testing.T) {
 	}
 }
 
-// canaryBoundIdentifiersDeclaredIn parses the named domain files and returns every top-level constant
-// whose name says it is a bound: CanaryMax… or CanaryMin…. The naming rule is the contract: a bound
-// spelled otherwise is invisible to the client gate and must be renamed, which is a review-visible
-// edit rather than a silent omission.
-func canaryBoundIdentifiersDeclaredIn(t *testing.T, files ...string) map[string]bool {
+// canaryBoundIdentifiersDeclaredIn parses EVERY non-test `canary*.go` in dir and returns every top-level
+// constant whose name says it is a bound: CanaryMax… or CanaryMin…. The file set is discovered, not
+// listed (reviewer P2 [112]: a hand list is the hand count in another form — a new canary file was
+// invisible until somebody remembered to add it). Two rules are the contract, and both are review-
+// visible edits rather than silent omissions: a bound lives in a file named `canary*.go`, and it is
+// spelled `CanaryMax…`/`CanaryMin…`.
+func canaryBoundIdentifiersDeclaredIn(t *testing.T, dir string) map[string]bool {
 	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "canary*.go"))
+	if err != nil {
+		t.Fatalf("glob canary sources: %v", err)
+	}
+	var sources []string
+	for _, f := range files {
+		if !strings.HasSuffix(f, "_test.go") {
+			sources = append(sources, f)
+		}
+	}
+	if len(sources) == 0 {
+		t.Fatalf("no canary*.go source in %s — the naming rule or the directory has drifted", dir)
+	}
 	out := map[string]bool{}
 	fset := token.NewFileSet()
-	for _, name := range files {
+	for _, name := range sources {
 		f, err := parser.ParseFile(fset, name, nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
@@ -165,4 +181,38 @@ func canaryBoundIdentifiersPublishedBy(t *testing.T, file string) map[string]boo
 		t.Fatal("the bounds map was not found in this file — the enumeration reads nothing")
 	}
 	return out
+}
+
+// The enumeration is by DIRECTORY, so a bound declared in a canary file nobody listed is still found.
+// Proven against a copy: the real sources plus a `canary_phantom.go` that exists nowhere in the tree.
+func TestTheBoundEnumerationSeesAnUnlistedCanaryFile(t *testing.T) {
+	dir := t.TempDir()
+	real := canaryBoundIdentifiersDeclaredIn(t, ".")
+	if len(real) < 21 {
+		t.Fatalf("the real directory declares %d bounds, fewer than the 21 known — the glob lost files", len(real))
+	}
+	srcs, _ := filepath.Glob("canary*.go")
+	for _, f := range srcs {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.Base(f)), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	phantom := "package domain\n\nconst CanaryMaxPhantomThing = 7\n"
+	if err := os.WriteFile(filepath.Join(dir, "canary_phantom.go"), []byte(phantom), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := canaryBoundIdentifiersDeclaredIn(t, dir)
+	if !got["CanaryMaxPhantomThing"] {
+		t.Fatal("a bound in a canary file the old hand list never named was not found — discovery is not by directory")
+	}
+	if len(got) != len(real)+1 {
+		t.Fatalf("copy declares %d, real %d: the copy should differ by exactly the phantom", len(got), len(real))
+	}
 }

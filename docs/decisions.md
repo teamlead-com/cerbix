@@ -6460,6 +6460,16 @@ re-encryption sweep and the secret-rename re-point touch monitor rows and are no
 the sense an operator asks about; they are named here so their absence from the trail reads as a
 decision.
 
+**Correction from review (party [112], P1).** The first version let the CALLER decide what the delete
+row said: `DeleteMonitorByPrincipal` took a whole `domain.Monitor` and built the target and the tenant
+from it, while the writer deleted by id alone. Two consequences, both real: a concurrent update between
+the handler's read and the delete lock made the audited region stale, and an internal caller could pass
+monitor A's id with monitor B's project — deleting A while filing the row under B's organization. The
+door now takes an ID; `deleteMonitor` reads project, slug, type and region in the same statement that
+takes `FOR UPDATE`, and the audit is built from THAT row. The update hook likewise gets the `RETURNING`
+row rather than the caller's struct, so an omitted slug (legal: "keep it") still names the stored one.
+Two regressions and two mutations: auditing a caller-shaped struct fails both.
+
 **Evidence.** Store: one row per door, in the transaction, rolled back with it, with the D13 shapes
 including the canary suffix; a zero-valued actor refused before any statement. API: the second guard
 extended — `internal/store` declares no exported bare monitor writer outside test files, with a fixture
@@ -6518,3 +6528,10 @@ the published map references, and each set must equal the other. Adding `CanaryM
 the const block fails the test with its name, without anyone remembering a number. The naming rule is
 the contract — a bound spelled otherwise is invisible to the client gate and must be renamed, a
 review-visible edit rather than a silent omission.
+
+**And the first version of that fix repeated the defect it replaced (party [112], P2).** It parsed a
+hand-written list of four file names, so a bound in a new `canary*.go` was invisible until somebody
+remembered to extend the list — the hand count in another form, which is exactly what D-0228 set out to
+remove. The enumeration now globs every non-test `canary*.go` in the package directory, fails if the glob
+finds none, and `TestTheBoundEnumerationSeesAnUnlistedCanaryFile` proves it against a COPY of the
+directory carrying a `canary_phantom.go` that exists nowhere in the tree.

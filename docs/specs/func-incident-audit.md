@@ -332,6 +332,10 @@ The five that follow are the §10 amendment (2026-09-03, D-0233) — a monitor w
 17. Every principal monitor write — create, update, delete — produces exactly ONE audit row, committed
     by the same transaction; a failed insert aborts the write and the caller reads back the unchanged
     monitor (or its continued existence, for delete).
+17a. The target and the tenant of a monitor audit row are read from the row the writer HOLDS — the
+    `FOR UPDATE` statement for a delete, the `RETURNING` row for an update — never from a caller's copy
+    of the monitor, which a concurrent write can have made stale and a caller can have assembled from
+    another monitor (reviewer P1, 2026-09-03).
 18. A monitor write cannot reach the store without an actor: the three principal doors are the only
     exported writers, the bare writers are unexported, and a zero-valued actor is refused before any
     statement. The second guard asserts `internal/store` declares no exported `CreateMonitor`,

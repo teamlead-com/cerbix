@@ -87,7 +87,7 @@ func TestAMonitorWriteLeavesOneAuditRowInItsTransaction(t *testing.T) {
 		t.Fatalf("after a rename: %+v, want a third row without an enabled clause", rows)
 	}
 
-	if err := st.DeleteMonitorByPrincipal(ctx, renamed, tokenActor); err != nil {
+	if err := st.DeleteMonitorByPrincipal(ctx, renamed.ID, tokenActor); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	rows = monitorAuditRows(t, st, ctx, orgID)
@@ -181,7 +181,7 @@ func TestAZeroValuedActorRefusesAMonitorWriteBeforeAnyStatement(t *testing.T) {
 	if _, err := st.UpdateMonitorByPrincipal(ctx, seeded, AuditActor{}); err == nil {
 		t.Fatal("update accepted a zero-valued actor")
 	}
-	if err := st.DeleteMonitorByPrincipal(ctx, seeded, AuditActor{}); err == nil {
+	if err := st.DeleteMonitorByPrincipal(ctx, seeded.ID, AuditActor{}); err == nil {
 		t.Fatal("delete accepted a zero-valued actor")
 	}
 	if rows := monitorAuditRows(t, st, ctx, orgID); len(rows) != 0 {
@@ -238,5 +238,80 @@ monitors: {}
 	}
 	if n != 0 {
 		t.Fatalf("the file provider wrote %d monitor audit row(s); a machine write is recorded by its bundle, not here", n)
+	}
+}
+
+// Reviewer P1 [112]: the delete target and its tenant come from the row held FOR UPDATE, never from a
+// caller's copy. Two organizations, so a wrong attribution would be visible as a row in the wrong trail;
+// then a stale read, so a region changed after the caller last looked is named as it IS at delete time.
+func TestTheDeleteAuditNamesTheLockedRowNotTheCallersCopy(t *testing.T) {
+	st, ctx, orgA, projA := auditIncidentFixture(t)
+	orgB, _ := st.CreateOrganization(ctx, "other", "Other")
+	projB, _ := st.CreateProject(ctx, orgB.ID, "other-api", "Other API")
+
+	a := auditedHTTPMonitor(projA)
+	a.Name = "monitor-a"
+	createdA, err := st.CreateMonitor(ctx, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := auditedHTTPMonitor(projB.ID)
+	b.Name = "monitor-b"
+	b.Region = "eu"
+	createdB, err := st.CreateMonitor(ctx, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A concurrent edit moves A to another region after "the caller" read it.
+	stale := createdA
+	moved := createdA
+	moved.Region = "apac"
+	if _, err := st.UpdateMonitor(ctx, moved); err != nil {
+		t.Fatal(err)
+	}
+	_ = stale // the door takes an id: there is no stale struct to hand it, and that is the fix
+
+	if err := st.DeleteMonitorByPrincipal(ctx, createdA.ID, tokenActor); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	rowsA := monitorAuditRows(t, st, ctx, orgA)
+	if len(rowsA) != 1 || rowsA[0].Action != string(MonitorAuditDelete) {
+		t.Fatalf("org A rows = %+v, want exactly the delete", rowsA)
+	}
+	for _, part := range []string{"monitor " + createdA.ID, createdA.Slug, "region=apac", "· deleted"} {
+		if !strings.Contains(rowsA[0].Target, part) {
+			t.Fatalf("delete target %q lacks %q — it must name the row as it was at delete time", rowsA[0].Target, part)
+		}
+	}
+	if strings.Contains(rowsA[0].Target, "region=core") {
+		t.Fatalf("delete target %q names the region the caller last read, not the locked row's", rowsA[0].Target)
+	}
+	if rowsB := monitorAuditRows(t, st, ctx, orgB.ID); len(rowsB) != 0 {
+		t.Fatalf("a delete in org A left a row in org B: %+v", rowsB)
+	}
+	var left int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*)::int FROM monitors WHERE id = $1`, createdB.ID).Scan(&left); err != nil || left != 1 {
+		t.Fatalf("monitor B: left=%d err=%v", left, err)
+	}
+}
+
+// The update target reads the STORED slug from the returned row: a caller that omits the slug (legal —
+// an omitted slug means "keep it") still produces a target that names it.
+func TestTheUpdateAuditNamesTheStoredSlug(t *testing.T) {
+	st, ctx, orgID, projID := auditIncidentFixture(t)
+	created, err := st.CreateMonitor(ctx, auditedHTTPMonitor(projID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit := created
+	edit.Slug = "" // the caller does not repeat the slug
+	edit.Name = "renamed"
+	if _, err := st.UpdateMonitorByPrincipal(ctx, edit, tokenActor); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	rows := monitorAuditRows(t, st, ctx, orgID)
+	if len(rows) != 1 || !strings.Contains(rows[0].Target, created.Slug) {
+		t.Fatalf("update target %+v does not name the stored slug %q", rows, created.Slug)
 	}
 }

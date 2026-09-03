@@ -434,7 +434,7 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 		if !h.applyDependencies(w, r, &created, proj.ID, body.DependsOn) {
 			// Keep the create atomic from the client's view: roll the monitor back. Audited as the
 			// same principal's delete — the trail shows a create and a delete, which is what happened.
-			_ = h.store.DeleteMonitorByPrincipal(r.Context(), created, auditActor(p))
+			_ = h.store.DeleteMonitorByPrincipal(r.Context(), created.ID, auditActor(p))
 			return
 		}
 	}
@@ -704,7 +704,7 @@ func (h *Handler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, _ := h.principal(r) // monitorAccess above already required one
-	if err := h.store.DeleteMonitorByPrincipal(r.Context(), mon, auditActor(p)); err != nil {
+	if err := h.store.DeleteMonitorByPrincipal(r.Context(), mon.ID, auditActor(p)); err != nil {
 		if h.rejectIfManaged(w, r, mon.ID, err) {
 			return
 		}

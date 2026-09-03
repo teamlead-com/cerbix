@@ -781,7 +781,7 @@ func (s *Store) updateMonitor(ctx context.Context, m domain.Monitor, audit monit
 		return domain.Monitor{}, err
 	}
 	if audit != nil {
-		if err := audit(ctx, tx, m, prevEnabled); err != nil {
+		if err := audit(ctx, tx, updated, prevEnabled); err != nil {
 			return domain.Monitor{}, err
 		}
 	}
@@ -1568,12 +1568,19 @@ func (s *Store) deleteMonitor(ctx context.Context, id string, audit monitorAudit
 		return err
 	}
 
-	var exists int
-	if err := tx.QueryRow(ctx, `SELECT 1 FROM monitors WHERE id = $1 FOR UPDATE`, id).Scan(&exists); noRows(err) {
+	// The row is locked AND read in one statement: what the audit names — tenant, slug, type,
+	// region — comes from the row being deleted, under its lock, never from a caller's copy of it
+	// (reviewer P1 [112]: a stale or forged struct would otherwise attribute the delete to another
+	// project's organization or name a region the monitor no longer had).
+	locked := domain.Monitor{ID: id}
+	var typ string
+	if err := tx.QueryRow(ctx, `SELECT project_id::text, slug, type, region FROM monitors WHERE id = $1 FOR UPDATE`, id).
+		Scan(&locked.ProjectID, &locked.Slug, &typ, &locked.Region); noRows(err) {
 		return ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("store: lock monitor: %w", err)
 	}
+	locked.Type = domain.MonitorType(typ)
 	if err := assertNotFileManagedTx(ctx, tx, id); err != nil {
 		return err
 	}
@@ -1594,7 +1601,7 @@ func (s *Store) deleteMonitor(ctx context.Context, id string, audit monitorAudit
 		return fmt.Errorf("store: delete monitor: %w", err)
 	}
 	if audit != nil {
-		if err := audit(ctx, tx, domain.Monitor{ID: id, ProjectID: projectID}, false); err != nil {
+		if err := audit(ctx, tx, locked, false); err != nil {
 			return err
 		}
 	}

@@ -56,7 +56,7 @@ type Store interface {
 	UpdateMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor store.AuditActor) (domain.Monitor, error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, time.Time, error)
-	DeleteMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor store.AuditActor) error
+	DeleteMonitorByPrincipal(ctx context.Context, id string, actor store.AuditActor) error
 	MonitorProvenance(ctx context.Context, monitorID string) (store.FileManagement, bool, error)
 	MonitorProvenanceBatch(ctx context.Context, monitorIDs []string) (map[string]store.FileManagement, error)
 	FileProviderDiagnostics(ctx context.Context, orgID string) ([]store.FileProviderDiagnostic, error)

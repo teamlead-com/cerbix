@@ -508,9 +508,8 @@ func (f *fakeStore) UpdateMonitorByPrincipal(_ context.Context, m domain.Monitor
 	f.monitors[m.ID] = m
 	return m, nil
 }
-func (f *fakeStore) DeleteMonitorByPrincipal(_ context.Context, m domain.Monitor, actor store.AuditActor) error {
+func (f *fakeStore) DeleteMonitorByPrincipal(_ context.Context, id string, actor store.AuditActor) error {
 	f.auditActors = append(f.auditActors, string(store.MonitorAuditDelete)+"|"+actor.Label)
-	id := m.ID
 	if _, ok := f.monitors[id]; !ok {
 		return store.ErrNotFound
 	}

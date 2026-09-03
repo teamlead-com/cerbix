@@ -6928,6 +6928,21 @@ such.
     tests over 50 files. Every gate figure in this arc is from a run in this session's own
     environment; the reviewer has no npm and none of it is attributed to him.
 
+28. **The canonical map went stale a third time, and the fix is to stop counting by hand.** The
+    invariant discharge map was repaired at [185] while the PRIMARY FR-031 row above it still
+    reported 29 and 28 test cases, fifteen mutants, and no mention of `ReliabilityCellReadout.vue`
+    or the marker mechanism at all — reviewer P2 at [188], who is right that
+    `docs/traceability.md` is the canonical requirement-to-code map and may not contradict the
+    invariant map beside it.
+
+    Corrected, and the method changed with it: **every per-file test figure in the row and in the
+    iteration report is now read from vitest's own JSON reporter**, not counted by eye. That is the
+    third stale-count finding in this arc ([178], [188] and the mutant tally at [178]), and all
+    three came from the same habit. The row also names the readout component and the
+    marker/readout mechanism now, and a sweep over `traceability.md`, `status.md`, the iteration
+    report and this file confirms no superseded figure survives outside the historical narrative of
+    decision 27, where the old numbers are the subject rather than a claim.
+
 **Status.** IMPLEMENTED at iter-0174 (2026-09-03); FR-031 and NFR-025a are DONE, NFR-025b and
 FR-032 stay open by design. The mock
 (`docs/design/mock-truthful-rendering.html`) is drawn, carries the two cases the reviewer asked

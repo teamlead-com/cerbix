@@ -1465,6 +1465,17 @@ coverage and segment states, the declaration editor, and the revision/epoch/prov
 product's existing uptime-signal motif; `UNKNOWN` is a short tick and `PROVISIONAL` is reduced
 opacity on the same grid, so neither can be read as a status colour.
 
+**Superseded in part (iter-0174, D-0235), kept as the record of what was approved in 2026-08:**
+the SHORT-TICK encoding for `UNKNOWN` is retired. The timeline's cells become proportional
+stacks of the states measured within them, and height therefore carries a slice's QUANTITY —
+which leaves it unavailable to carry a slice's identity. `UNKNOWN` becomes a solid `--ink-3`
+slice with no status hue, unstored time gains its own hatched `not-stored` encoding distinct
+from `UNKNOWN`, and `PROVISIONAL` keeps opacity as its sole user. The geometry moves from
+bucket-count space to clock time in the same change, which refines rather than reverses the
+time-weighted ruling of party [218] P1-3. The contract is
+[`func-truthful-rendering.md`](func-truthful-rendering.md) (FR-031); this paragraph states only
+that §12.2's own sentence above no longer describes the product.
+
 ## 13. Alerting boundary
 
 Phase 1–2: service SLOs **calculate = yes, display = yes, alert = no**.

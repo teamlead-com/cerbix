@@ -1,0 +1,892 @@
+<title>Cerbix Truthful Rendering</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries).
+   This change adds ONE new visual: a HATCH for `not-stored`. It is deliberately not a colour —
+   absence is not a verdict, so it may not borrow a status hue, and it may not borrow opacity
+   either, because opacity already means `provisional`. Everything else here re-uses hues the
+   product already owns. Spec: docs/specs/func-truthful-rendering.md (FR-031, D-0235). */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+
+.page{max-width:1180px; margin:0 auto; padding:28px 22px 80px; display:flex; flex-direction:column; gap:40px}
+.head h1{font-size:21px; letter-spacing:-.01em}
+.head p{margin-top:8px; color:var(--ink-2); font-size:13.5px; max-width:900px}
+.note{
+  border:1px solid var(--note-border); background:var(--note-bg); color:var(--ink-2);
+  border-radius:6px; padding:11px 13px; font-size:12.5px; line-height:1.55;
+}
+.note b{color:var(--note)}
+.sec{display:flex; flex-direction:column; gap:14px}
+.sec>h2{font-size:15px; letter-spacing:-.005em}
+.sec>h2 small{font-weight:400; color:var(--ink-3); font-size:12px; margin-left:8px}
+.card{border:1px solid var(--border); background:var(--surface); border-radius:6px; box-shadow:var(--shadow)}
+.card-h{display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card-h h3{font-size:13px; font-weight:600}
+.card-b{padding:16px}
+.stateline{display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--ink-3); margin-bottom:6px}
+.stateline .pill{
+  border:1px solid var(--border-strong); border-radius:3px; padding:1px 7px;
+  font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-2);
+}
+.tabs{display:flex; gap:2px; margin-left:auto; border:1px solid var(--border); border-radius:5px; padding:2px}
+.tabs span{padding:3px 10px; border-radius:3px; font-size:12px; color:var(--ink-3)}
+.tabs span.on{background:var(--surface-2); color:var(--ink); font-weight:500}
+.kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:16px}
+.kpi{border:1px solid var(--border); background:var(--surface-2); border-radius:5px; padding:12px 14px}
+.kpi .v{font-size:24px; font-weight:500; letter-spacing:-.02em; margin-top:6px}
+.kpi .s{font-size:11.5px; color:var(--ink-3); margin-top:4px}
+.legend{display:flex; flex-wrap:wrap; gap:6px 18px; margin-top:12px; font-size:11.5px; color:var(--ink-3)}
+.legend i{display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:-2px; margin-right:6px}
+.tip{
+  border:1px solid var(--border-strong); background:var(--surface); border-radius:5px;
+  box-shadow:var(--shadow); padding:9px 11px; font-size:12px; width:max-content; max-width:340px;
+}
+.tip .t{font-size:12.5px; color:var(--ink); margin-bottom:5px}
+.tip .u{color:var(--ink-3); font-size:11.5px; margin-bottom:7px}
+.tip table{border-collapse:collapse; font-size:11.5px}
+.tip td{padding:1px 0}
+.tip td:first-child{padding-right:14px; color:var(--ink-3)}
+.tip td:last-child{text-align:right; color:var(--ink-2)}
+.tip .sw{display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:6px; vertical-align:0}
+.lane-row{display:flex; flex-direction:column; gap:6px; border:1px solid var(--border); background:var(--surface-2); border-radius:5px; padding:11px 12px}
+.lane-meta{display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:11.5px; color:var(--ink-3)}
+.chip{border:1px solid var(--border-strong); border-radius:3px; padding:1px 7px; font-size:11px; color:var(--ink-3)}
+.chip.rev{border-color:color-mix(in srgb, var(--accent) 50%, transparent); color:var(--accent)}
+.chip.warn{border-color:color-mix(in srgb, var(--degraded) 50%, transparent); color:var(--degraded)}
+.grow{flex:1}
+.tbl{width:100%; border-collapse:collapse; font-size:13px}
+.tbl th{text-align:left; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); border-bottom:1px solid var(--border); padding:9px 14px; font-weight:600}
+.tbl td{border-bottom:1px solid var(--border); padding:9px 14px}
+.tbl tr.hi td{background:var(--accent-weak)}
+.code{border-radius:3px; padding:0 6px; font-size:12.5px}
+.code.up{background:var(--up-weak); color:var(--up)}
+.code.dn{background:var(--down-weak); color:var(--down)}
+.btn{height:32px; border-radius:4px; padding:0 14px; font-size:12.5px; border:1px solid var(--border-strong); color:var(--ink-2)}
+.btn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink)}
+.btn[disabled]{opacity:.45; cursor:not-allowed}
+.inp{height:32px; width:110px; border:1px solid var(--border-strong); background:var(--surface); border-radius:4px; padding:0 10px; text-align:right; color:var(--ink)}
+.row{display:flex; align-items:center; gap:10px}
+.ok{color:var(--up)}
+.variants{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:960px){.variants{grid-template-columns:1fr} .kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+
+<div class="page">
+
+<div class="head">
+  <h1>A rendering claims no more than the facts behind it</h1>
+  <p>Mock for FR-031 / NFR-025a — <span class="mono">docs/specs/func-truthful-rendering.md</span>,
+  decision record <span class="mono">D-0235</span>. Three surfaces, one rule. Every state below is
+  drawn <b>open</b> rather than behind a hover, so the whole contract is visible at once. Reviewed
+  design; nothing here is implemented.</p>
+</div>
+
+<div class="note">
+  <b>Every figure on surface 1 and 2 is DERIVED, not typed.</b> One fixture
+  (<span class="mono">FACTS</span> in the script) produces every cell, every lane, every segment
+  percentage and every KPI, through the spec's own formulas —
+  <span class="mono">availability = good/(good+bad)</span>,
+  <span class="mono">coverage = (good+bad)/(good+bad+unknown)</span>, `excluded` in neither
+  denominator, and the provisional tail excluded from every number
+  (<span class="mono">func-service-reliability.md</span> §11.1, §11.3). A mock about pictures that
+  claim too much may not itself display a number nothing computed: the first drawing showed segment
+  figures borrowed from a screenshot beside geometry from its own fixture, which is the same defect
+  one level up (reviewer P1, party [159]). The <span class="mono">/sla</span> card on surface 3 is
+  the one exception, and it is labelled there.
+</div>
+
+<!-- ════════════════ SURFACE A — the reliability timeline ════════════════ -->
+<div class="sec">
+  <h2>1 · Services → Reliability <small>spec §5 — F1 geometry, F2 padding, F3 stacks, F4 lanes</small></h2>
+
+  <div class="card">
+    <div class="card-h">
+      <h3>Reliability</h3>
+      <span class="mono" style="font-size:11.5px;color:var(--ink-3)">window [sealed_through − 30d, sealed_through)</span>
+      <span class="tabs"><span>24h</span><span>7d</span><span class="on">30d</span><span>90d</span></span>
+    </div>
+    <div class="card-b">
+
+      <div class="note" style="margin-bottom:16px">
+        <b>⌀ No single availability number for this window.</b> What availability means for this
+        service changed inside these 30d. A number spanning that boundary would average two
+        different definitions, so it is not offered. Each segment below is complete on its own terms.
+      </div>
+
+      <div class="kpis">
+        <div class="kpi"><div class="lbl">Availability · 30d</div><div class="v mono">—</div><div class="s">no single number for this window</div></div>
+        <div class="kpi"><div class="lbl">Error budget</div><div class="v mono">—</div><div class="s">no objective set</div></div>
+        <div class="kpi"><div class="lbl">Burn rate</div><div class="v mono">—</div><div class="s">no objective set</div></div>
+        <div class="kpi"><div class="lbl">Decidable coverage</div><div class="v mono" id="k-cov">—</div><div class="s" id="k-store">—</div></div>
+      </div>
+
+      <div class="stateline"><span class="pill">§5.1 + §5.2</span> the timeline, on clock time, with five encodings</div>
+      <svg id="strip" width="1120" height="44" role="img" aria-label="reliability timeline"></svg>
+      <div id="axis" class="mono" style="position:relative;height:15px;font-size:10.5px;color:var(--ink-3);width:1120px"></div>
+      <div class="mono" style="width:1120px;text-align:right;font-size:10.5px;color:var(--ink-3)">cells are UTC days · every readout below is local, with its offset named</div>
+
+      <div class="legend">
+        <span><i style="background:var(--up)"></i>good</span>
+        <span><i style="background:var(--down)"></i>down</span>
+        <span><i style="background:var(--ink-3)"></i>unknown <span style="opacity:.7">— a decided verdict, never a hue</span></span>
+        <span><i style="background:var(--maint)"></i>excluded</span>
+        <span><i id="lg-hatch" style="border:1px solid var(--border-strong)"></i>no stored bucket <span style="opacity:.7">— absence, not a verdict</span></span>
+        <span><i style="background:var(--up);opacity:.38"></i>provisional <span style="opacity:.7">— opacity, and nothing else uses it</span></span>
+        <span><i style="width:2px;background:var(--accent)"></i>definition revision boundary</span>
+        <span><i style="width:2px;background:var(--ink-2)"></i>sealed_through <span style="opacity:.7">— the window ends here; everything right of it is excluded from every number</span></span>
+      </div>
+
+      <!-- ── cell readouts, drawn open: §8's UTC-cell form ── -->
+      <div class="stateline" style="margin-top:22px"><span class="pill">§1.2 · §8</span> a cell's readout — its TRUE local extent, and the UTC instant beneath it</div>
+      <div id="tips" style="display:flex;gap:16px;flex-wrap:wrap"></div>
+      <p class="note" style="margin-top:12px">
+        <b>The boundary is never renamed.</b> These cells are <b>UTC days</b>. For a viewer at
+        UTC+05 each begins at 05:00 their time, so the readout says so and never calls a cell their
+        <span class="mono">31.08</span>. Labelling a UTC bucket as a local calendar day is the same
+        class of lie as F1 — spec §8.
+      </p>
+
+      <!-- ── segment lanes on the shared axis ── -->
+      <div class="stateline" style="margin-top:22px"><span class="pill">§5.3</span> segments as lanes on the SAME axis — length is duration again, and a lane shows its own emptiness</div>
+      <div id="lanes" style="display:flex;flex-direction:column;gap:8px"></div>
+
+      <p class="note" style="margin-top:14px">
+        <b>Two mechanisms, two axes — deliberately not one rule.</b> Inside a cell, height carries
+        <b>quantity</b>, so a <span class="mono">bad</span>, <span class="mono">unknown</span> or
+        <span class="mono">excluded</span> slice may be floored to stay visible (capped, presentation
+        only, and never applied to provisional good time). Across the axis, width carries
+        <b>duration</b>, so a lane is never floored and a sub-pixel segment gets a marker that says
+        it is not to scale. The floor and the marker are not two flavours of the same fix.
+      </p>
+
+      <p class="note" style="margin-top:10px">
+        <b>Boundary marks cluster by the same rule as the lanes.</b> The two definition transitions
+        in this window are four minutes apart, so their marks land inside one pixel at any window
+        zoom. Rather than a second convention for the same problem, the lane ruling is extended:
+        <b>cluster the events whose fixed marks collide; anchor the ONE non-geometric accent marker
+        at the earliest real boundary</b>, never at the cluster's midpoint; show the count with the
+        exact local <span class="mono">[first, last]</span> extent and its numeric offset, with the
+        UTC instants beneath; and <b>list every revision in the cluster chronologically</b>, because
+        a count must not pretend to be one change. Spec §5.3, invariant 10a, D-0235 decision 14.
+      </p>
+      <div class="stateline" style="margin-top:8px"><span class="pill">§5.3</span> the collapsed boundary mark, its count, and what it opens</div>
+      <svg id="bmark" width="1120" height="48"></svg>
+      <div id="btip" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════ SURFACE B — the Response time panel ════════════════ -->
+<div class="sec">
+  <h2>2 · Monitor → Response time <small>spec §6 — P1 dropped failures, P2 index axis, P3 two populations</small></h2>
+
+  <div class="card">
+    <div class="card-h">
+      <h3>Response time</h3>
+      <span class="mono" id="latA-h" style="font-size:11.5px;color:var(--ink-3)">—</span>
+      <span class="grow"></span>
+      <span class="mono" id="latA-to" style="font-size:11.5px;color:var(--ink-3)">—</span>
+    </div>
+    <div class="card-b">
+      <div class="stateline">
+        <span class="pill">§6.1 · §6.2</span>
+        <span id="latA-sub">—</span>
+      </div>
+      <svg id="latA" width="1088" height="196" role="img" aria-label="response time, last 60 checks"></svg>
+      <svg id="ruler" width="1088" height="18" role="img" aria-label="observation ruler: one tick per recorded check"></svg>
+      <div id="latAaxis" class="mono" style="position:relative;height:15px;width:1088px;font-size:10.5px;color:var(--ink-3)"></div>
+      <div class="mono" style="width:1088px;text-align:right;font-size:10.5px;color:var(--ink-3)">times are local · UTC+05</div>
+
+      <div class="legend">
+        <span><i style="background:var(--accent);border-radius:50%;width:8px;height:8px"></i>a recorded check</span>
+        <span><i style="background:var(--down);border-radius:50%;width:8px;height:8px"></i>down with no latency recorded — drawn on the baseline, not dropped</span>
+        <span><i style="width:14px;height:0;border-top:2px dashed var(--degraded)"></i><span id="lg-p95">p95</span></span>
+        <span><i style="width:2px;height:11px;background:var(--ink-2)"></i>observation ruler — one tick per recorded check; its empty spans ARE unobserved time</span>
+      </div>
+
+      <p class="note" style="margin-top:14px">
+        <b>Why there is no line, and why the absence is drawn instead of left blank.</b> Two
+        designs for earning a stroke were proposed and both were wrong, the second on three
+        readings of the tree: a run may occupy <span class="mono">(retries+1) × timeout</span>,
+        <span class="mono">result.allowed_skew</span> bounds a clock test and not delivery, and
+        <span class="mono">job_issued_at</span> is not a column of <span class="mono">heartbeats</span>
+        at all. So two received heartbeats bound <b>observed spacing</b> and nothing more — queue
+        wait is unbounded under broker trouble, leader absence leaves no trace, and cerbix cannot
+        witness its own absence. Rather than leave that as whitespace, the <b>observation ruler</b>
+        renders it positively: one tick per recorded check, and its emptiness is the picture of
+        unobserved time. The <b id="gap-note">—</b> What would earn the stroke back is
+        <b>FR-032</b>, a durable expected-run ledger — a reliability-data-model change with its own
+        specification, not a line item here.
+      </p>
+      <p class="note" style="margin-top:10px">
+        <b>No threshold, deliberately.</b> A fixed 12&nbsp;CSS-pixel rule for marking gaps was
+        specified and then withdrawn once the arithmetic was done: this panel runs at
+        <b><span id="pxmin">—</span>&nbsp;px per minute</b>, so 12&nbsp;px would have marked all
+        <span id="nint">—</span> intervals and told
+        the six-minute hole apart from an ordinary minute not at all — and any threshold relative
+        to the panel's own spacing would be a data-dependent selector, which is the inference this
+        contract forbids. The ruler needs no threshold because it makes the same statement
+        everywhere: a six-minute hole is 99&nbsp;px of empty band and an ordinary minute is
+        16&nbsp;px of empty band, and neither is called special.
+      </p>
+      <p class="note" style="margin-top:10px">
+        <b>One population, named.</b> The header's avg and p95 and the dashed rule are all computed
+        over <b>the drawn series</b>, not over a 24h window that happens to be a different set of
+        checks. That is P3's fix: §6.3 allows either recomputing or labelling the other window's
+        name, and this panel recomputes, so nothing on it describes a population it did not draw.
+      </p>
+
+      <div class="stateline" style="margin-top:20px"><span class="pill">§6.2</span> the same ruler at a denser window — where adjacent spans MERGE for interaction only</div>
+      <svg id="ruler2" width="1088" height="18" role="img" aria-label="observation ruler at a denser window"></svg>
+      <p class="note" style="margin-top:8px">
+        <b id="merge-note">—</b> Merging is an <b>interaction</b> affordance: every tick and every
+        real x position is preserved, the drawing is byte-identical to what it would be without
+        merging, and a merged readout states its actual outer bounds. Interaction grouping is
+        never rendered as semantic grouping.
+      </p>
+
+      <div class="stateline" style="margin-top:22px"><span class="pill">§6.2 · §8</span> the ruler's readout — one meaning, uniformly, and a merged focus target</div>
+      <div id="ruler-tips" style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start"></div>
+
+      <div class="stateline" style="margin-top:22px"><span class="pill">§6.1 · §8</span> a point's readout, and the row it belongs to</div>
+      <div id="latA-tips" style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h">
+      <h3>Response time</h3>
+      <span class="mono" id="latB-h" style="font-size:11.5px;color:var(--ink-3)">—</span>
+      <span class="grow"></span>
+      <span class="mono" id="latB-to" style="font-size:11.5px;color:var(--ink-3)">—</span>
+    </div>
+    <div class="card-b">
+      <div class="stateline">
+        <span class="pill">§6.3</span>
+        the same panel when a check actually timed out — the timeout is now INSIDE the extent, so it is drawn
+      </div>
+      <svg id="latB" width="1088" height="196" role="img" aria-label="response time with a timeout"></svg>
+      <p class="note" style="margin-top:12px">
+        <b>avg above p95 is not an error here.</b> One 10-second timeout among sixty checks pulls
+        the mean past the 95th percentile — which is exactly why the panel prints both and why the
+        timeout gets its own line rather than being folded into a summary figure. Both numbers are
+        computed from the drawn series.
+      </p>
+      <p class="note" style="margin-top:10px">
+        <b>A factual boundary, not a threshold.</b> The timeout is stated in the header of both
+        panels and drawn only when it falls inside the computed plot extent. No percentage decides
+        it: a probe that times out is recorded at roughly the timeout
+        (<span class="mono">internal/prober/prober.go</span> records elapsed latency on failure),
+        so a real timeout raises the extent to include the line by itself.
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════ SURFACE C — the project objective card ════════════════ -->
+<div class="sec">
+  <h2>3 · SLA → Project objective <small>spec §7 — S1 no signal, S2 draft = fact, S3/S4 two P0 context defects</small></h2>
+
+  <div class="note">
+    <b>These four cards are illustrative, and say so.</b> Unlike surfaces 1 and 2 there is no
+    fixture to derive them from: the objective is an operator's typed number and the budget beside
+    it belongs to a different feature's arithmetic. What this surface specifies is a
+    <b>state machine</b>, not a figure, so the numbers are placeholders and the four states are the
+    contract.
+  </div>
+
+  <div class="variants">
+
+    <div class="card"><div class="card-b">
+      <div class="stateline"><span class="pill">state 1</span> stored — read only</div>
+      <div class="row" style="align-items:baseline;gap:10px">
+        <span class="lbl">Project objective · 30d</span>
+        <span class="grow"></span>
+        <span class="mono" style="font-size:12px;color:var(--ink-3)" title="A project objective cannot page.">reporting only</span>
+      </div>
+      <div class="row" style="align-items:flex-end;gap:14px;margin-top:10px">
+        <span class="mono" style="font-size:32px;font-weight:500;letter-spacing:-.02em">99.9<small style="font-size:16px;color:var(--ink-3)">%</small></span>
+        <span style="font-size:12px;color:var(--ink-3);padding-bottom:4px">89% of the project's own budget left</span>
+        <span class="grow"></span>
+        <button class="btn">Edit</button>
+      </div>
+    </div></div>
+
+    <div class="card"><div class="card-b">
+      <div class="stateline"><span class="pill">state 2</span> editing — draft equals stored, so Save would do nothing</div>
+      <div class="row" style="align-items:baseline;gap:10px">
+        <span class="lbl">Project objective · 30d</span>
+        <span class="grow"></span>
+        <span class="mono" style="font-size:12px;color:var(--ink-3)">reporting only</span>
+      </div>
+      <div class="row" style="align-items:flex-end;gap:14px;margin-top:10px">
+        <span class="mono" style="font-size:32px;font-weight:500;letter-spacing:-.02em;color:var(--ink-3)">99.9<small style="font-size:16px">%</small></span>
+        <span class="grow"></span>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <input class="inp mono" value="99.9" aria-label="Project objective">
+        <button class="btn pri" disabled>Save</button>
+        <button class="btn">Cancel</button>
+        <span class="grow"></span>
+        <button class="btn">Clear</button>
+      </div>
+      <p style="margin-top:8px;font-size:11.5px;color:var(--ink-3)">unchanged — nothing to save</p>
+    </div></div>
+
+    <div class="card"><div class="card-b">
+      <div class="stateline"><span class="pill">state 3</span> editing — the draft differs, and the card says so</div>
+      <div class="row" style="align-items:baseline;gap:10px">
+        <span class="lbl">Project objective · 30d</span>
+        <span class="grow"></span>
+        <span class="mono" style="font-size:12px;color:var(--ink-3)">reporting only</span>
+      </div>
+      <div class="row" style="align-items:flex-end;gap:14px;margin-top:10px">
+        <span class="mono" style="font-size:32px;font-weight:500;letter-spacing:-.02em;color:var(--ink-3)">99.9<small style="font-size:16px">%</small></span>
+        <span style="font-size:12px;color:var(--accent);padding-bottom:4px">unsaved draft 99.95%</span>
+        <span class="grow"></span>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <input class="inp mono" value="99.95" aria-label="Project objective" style="border-color:var(--accent)">
+        <button class="btn pri">Save</button>
+        <button class="btn">Cancel</button>
+        <span class="grow"></span>
+        <button class="btn">Clear</button>
+      </div>
+    </div></div>
+
+    <div class="card"><div class="card-b">
+      <div class="stateline"><span class="pill">state 4</span> just saved — closed, and it says so for a moment</div>
+      <div class="row" style="align-items:baseline;gap:10px">
+        <span class="lbl">Project objective · 30d</span>
+        <span class="grow"></span>
+        <span class="mono" style="font-size:12px;color:var(--ink-3)">reporting only</span>
+      </div>
+      <div class="row" style="align-items:flex-end;gap:14px;margin-top:10px">
+        <span class="mono" style="font-size:32px;font-weight:500;letter-spacing:-.02em">99.95<small style="font-size:16px;color:var(--ink-3)">%</small></span>
+        <span style="font-size:12px;color:var(--ink-3);padding-bottom:4px">89% of the project's own budget left</span>
+        <span class="grow"></span>
+        <span class="ok mono" style="font-size:12.5px;padding-bottom:5px">✓ saved</span>
+        <button class="btn">Edit</button>
+      </div>
+    </div></div>
+
+  </div>
+
+  <p class="note">
+    <b>The shape is the fix, and it is not the whole fix.</b> A closed editor cannot hold a stale
+    draft, which is why the Edit shape retires S2 by construction. But <b>an open form is not a
+    substitute for a draft-state model</b>: the two P0 defects are invisible in any drawing, so they
+    are stated here as acceptance criteria rather than pictured —
+    <b>(a)</b> the context reset must cover the card's own draft, error and busy state and run
+    <i>before</i> the next project's data renders, or a value typed for project A is saved into
+    project B; <b>(b)</b> both writers must gate every assignment on the load generation they
+    started under, as every neighbouring writer in that file already does. Visibility stops a stale
+    draft being <i>shown</i>; the generation guard stops a stale response being <i>written</i>.
+    They are complementary. Spec §7, D-0235 decision 11.
+  </p>
+</div>
+
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════════════════
+   ONE FIXTURE. Every cell, lane, segment figure and KPI on surfaces 1 and 2 is
+   DERIVED from it, through the spec's own formulas. Nothing here is a number
+   copied from a screenshot — the first drawing did that and it was the mock
+   committing, one level up, the defect it exists to fix (reviewer P1, party [159]).
+
+     availability = good / (good + bad)                     func-service-reliability §11.1
+     coverage     = (good + bad) / (good + bad + unknown)
+     excluded appears in NEITHER denominator
+     the window is [sealed_through − 30d, sealed_through) and the provisional tail
+     right of sealed_through is excluded from every number        §11.3
+
+   Clock: now = 2026-09-03T14:41Z, sealed_through = 2026-09-03T00:00Z (day-aligned so
+   every figure below can be checked by hand). Window = [2026-08-04T00:00Z,
+   2026-09-03T00:00Z) = 30 UTC days = 43200 canonical minute buckets. Viewer at UTC+05.
+   ══════════════════════════════════════════════════════════════════════════════ */
+const DAY = 1440, WIN_DAYS = 30, WIN_MIN = WIN_DAYS * DAY, TAIL_MIN = 881, OFF = "UTC+05";
+const WIN_START_UTC = Date.UTC(2026, 7, 4);             // 2026-08-04T00:00Z
+const VIEW_OFFSET_MIN = 5 * 60;
+
+/* minutes per state, per (segment, UTC day index from the window start) */
+const FACTS = [
+  { seg: "rev1", day: 27, good: 150 },                            // 31.08 21:30→24:00
+  { seg: "rev1", day: 28, good: 150 },                            // 01.09 00:00→02:30
+  { seg: "rev2", day: 28, good: 2, unknown: 2 },                  // 01.09 02:30→02:34
+  { seg: "rev3", day: 28, good: 1286 },                           // 01.09 02:34→24:00
+  { seg: "rev3", day: 29, good: 1423, bad: 9, unknown: 8 },        // 02.09 full day
+  { seg: "rev3", day: 30, provGood: 881 },                        // right of sealed_through
+];
+const SEGS = [
+  { id: "rev1", rev: 1, epoch: 1, from: 0,            to: 28 * DAY + 150, recon: false },
+  { id: "rev2", rev: 2, epoch: 2, from: 28*DAY + 150, to: 28 * DAY + 154, recon: true  },
+  { id: "rev3", rev: 3, epoch: 3, from: 28*DAY + 154, to: WIN_MIN,        recon: false },
+];
+const SEALED = (r) => r.day < WIN_DAYS;   // provisional tail is outside the window
+
+/* The payload's own withholding vocabulary, copied verbatim from
+   frontend/src/components/ServiceReliability.vue so the mock speaks the shipped words. */
+const REASON = {
+  window_precedes_materialization_era: "The window reaches before this service's history begins.",
+  storage_gap: "Stored buckets are missing inside the window; the surviving rows cannot vouch for it.",
+};
+
+const sum = (rows) => rows.reduce((o, r) => {
+  for (const k of ["good", "bad", "unknown", "excluded", "provGood"]) o[k] += r[k] || 0;
+  return o;
+}, { good: 0, bad: 0, unknown: 0, excluded: 0, provGood: 0 });
+const availability = (t) => (t.good + t.bad === 0 ? null : (t.good / (t.good + t.bad)) * 100);
+/* §11.2's SECOND axis, independent of coverage: did we materialize the range at all. A segment
+   whose storage is incomplete quotes NO availability — `coverage = 100%` says only that every
+   observation that EXISTS was decidable, which a 27-day hole makes worthless as a warrant.
+   The reason is DERIVED: storage missing as a contiguous prefix is the materialization era;
+   missing in the middle is a storage gap. */
+function storageOf(segId, from, to) {
+  const rows = FACTS.filter((f) => f.seg === segId && SEALED(f));
+  const t = sum(rows);
+  const stored = t.good + t.bad + t.unknown + t.excluded;
+  const extent = to - from;
+  if (stored >= extent) return { stored, extent, complete: true, reason: null };
+  const days = rows.map((r) => r.day).sort((a, b) => a - b);
+  const lastDay = Math.floor((to - 1) / DAY);
+  const prefixOnly = days.length > 0 && days[days.length - 1] === lastDay &&
+                     days.every((d, i) => i === 0 || d === days[i - 1] + 1);
+  return { stored, extent, complete: false,
+           reason: prefixOnly ? "window_precedes_materialization_era" : "storage_gap" };
+}
+const coverage = (t) => { const n = t.good + t.bad, d = n + t.unknown; return d === 0 ? null : n / d; };
+/* the product's own two formatters, mirrored */
+const pct = (v) => v == null ? "—" : v.toFixed(3).replace(/\.?0+$/, "") + "%";
+const fracPct = (v) => v == null ? "—" : (v * 100).toFixed(1).replace(/\.0$/, "") + "%";
+
+const SVGNS = "http://www.w3.org/2000/svg";
+const el = (n, a) => { const e = document.createElementNS(SVGNS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+const HUE = { good: "var(--up)", bad: "var(--down)", unknown: "var(--ink-3)", excluded: "var(--maint)" };
+const HATCH_CSS = "repeating-linear-gradient(45deg, var(--border-strong) 0 1px, transparent 1px 5px)";
+function defs(svg) {
+  const id = "h" + Math.random().toString(36).slice(2), d = el("defs");
+  const p = el("pattern", { id, width: 6, height: 6, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
+  p.appendChild(el("rect", { width: 6, height: 6, fill: "var(--inset)" }));
+  p.appendChild(el("line", { x1: 0, y1: 0, x2: 0, y2: 6, stroke: "var(--border-strong)", "stroke-width": 1 }));
+  d.appendChild(p); svg.appendChild(d); return id;
+}
+
+/* ── local-time rendering: §8's two named functions, never one generic formatter ── */
+const winMinToUTC = (m) => new Date(WIN_START_UTC + m * 60000);
+const p2 = (n) => String(n).padStart(2, "0");
+function localInstant(m) {                       // an INSTANT
+  const d = new Date(WIN_START_UTC + (m + VIEW_OFFSET_MIN) * 60000);
+  return `${p2(d.getUTCDate())}.${p2(d.getUTCMonth() + 1)} ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}`;
+}
+function localExtent(from, to) {                 // a UTC CELL EXTENT
+  return `${localInstant(from)} → ${localInstant(to)} (${OFF})`;
+}
+const utcISO = (m) => winMinToUTC(m).toISOString().replace(".000Z", "Z");
+
+/* ── a cell: height carries QUANTITY. Order top→bottom is stable so cells compare.
+      The floor keeps bad/unknown/excluded visible; it is capped and paid out of `good`,
+      never out of `notStored`, and never applied to provisional good time. ── */
+const H = 34, FLOOR = 2;
+function slices(t, extentMin, h) {
+  const stored = t.good + t.bad + t.unknown + t.excluded + t.provGood;
+  const raw = [["notStored", extentMin - stored], ["bad", t.bad], ["unknown", t.unknown],
+               ["excluded", t.excluded], ["provGood", t.provGood], ["good", t.good]]
+    .filter(([, m]) => m > 0).map(([k, m]) => [k, (m / extentMin) * h]);
+  let owed = 0;
+  const out = raw.map(([k, v]) => {
+    if ((k === "bad" || k === "unknown" || k === "excluded") && v < FLOOR) { owed += FLOOR - v; return [k, FLOOR]; }
+    return [k, v];
+  });
+  owed = Math.min(owed, 0.6 * h);
+  const g = out.find(([k]) => k === "good");
+  if (g && owed > 0) g[1] = Math.max(0, g[1] - owed);
+  return out;
+}
+function paint(svg, hid, x, w, cells, h, y0) {
+  let y = y0;
+  for (const [k, hh] of cells) {
+    if (k === "notStored") svg.appendChild(el("rect", { x, y, width: w, height: hh, fill: `url(#${hid})`, stroke: "var(--border-strong)", "stroke-width": .7, rx: 1 }));
+    else svg.appendChild(el("rect", { x, y, width: w, height: hh, fill: HUE[k === "provGood" ? "good" : k], opacity: k === "provGood" ? .38 : 1, rx: 1 }));
+    y += hh;
+  }
+}
+
+/* ── the overview strip: 30 UTC-day cells plus the provisional tail clipped at `now` ── */
+const W = 1120, TOTAL_MIN = WIN_MIN + TAIL_MIN, PXMIN = W / TOTAL_MIN, PAD = 2;
+function drawStrip() {
+  const svg = document.getElementById("strip"), hid = defs(svg);
+  for (let d = 0; d <= WIN_DAYS; d++) {
+    const from = d * DAY, extent = Math.min(DAY, TOTAL_MIN - from);
+    if (extent <= 0) break;
+    const x = from * PXMIN + PAD, w = extent * PXMIN - PAD * 2;
+    paint(svg, hid, x, w, slices(sum(FACTS.filter((f) => f.day === d)), extent, H), H, 4);
+  }
+  /* sealed_through: the window's own right edge */
+  svg.appendChild(el("rect", { x: WIN_MIN * PXMIN - 1, y: 0, width: 2, height: H + 8, fill: "var(--ink-2)" }));
+  const st = el("text", { x: WIN_MIN * PXMIN - 4, y: H + 14, fill: "var(--ink-2)", "font-size": 10, "text-anchor": "end" });
+  st.textContent = "sealed_through"; svg.appendChild(st);
+  /* the clustered boundary mark, anchored at the EARLIEST transition */
+  const cl = cluster();
+  svg.appendChild(el("rect", { x: cl.first * PXMIN, y: 0, width: 2.5, height: H + 8, fill: "var(--accent)" }));
+  const c = el("text", { x: cl.first * PXMIN + 4, y: 10, fill: "var(--accent)", "font-size": 10 });
+  c.textContent = "×" + cl.n; svg.appendChild(c);
+
+  const axis = document.getElementById("axis");
+  [0, 7, 14, 21, 28].forEach((d) => {
+    const s = document.createElement("span");
+    s.style.cssText = `position:absolute;left:${d * DAY * PXMIN}px;top:2px`;
+    /* the axis labels CELL IDENTITY, which is UTC — the local extent lives in the readout */
+    const u = winMinToUTC(d * DAY);
+    s.textContent = `${p2(u.getUTCDate())}.${p2(u.getUTCMonth() + 1)}`; axis.appendChild(s);
+  });
+}
+
+/* transitions INSIDE the window: a segment's start is a boundary only when another
+   segment ends there. rev1's start is the window's own edge, not a transition. */
+function cluster() {
+  const t = SEGS.slice(1).map((s) => s.from);
+  return { n: t.length, first: t[0], last: t[t.length - 1], all: t };
+}
+
+/* ── lanes: real time on the SAME axis, and a lane shows its own emptiness ── */
+function drawLanes() {
+  const host = document.getElementById("lanes");
+  for (const s of SEGS) {
+    const t = sum(FACTS.filter((f) => f.seg === s.id && SEALED(f)));
+    const st = storageOf(s.id, s.from, s.to);
+    const row = document.createElement("div");
+    row.className = "lane-row";
+    row.innerHTML =
+      `<div class="lane-meta">
+         <span class="chip rev">rev ${s.rev}</span><span class="chip">epoch ${s.epoch}</span>
+         <span class="mono">${localExtent(s.from, s.to)}</span>
+         ${s.recon ? '<span class="chip warn">declared reconstruction</span>' : ""}
+         <span class="grow"></span>
+         <span class="mono" style="color:var(--ink-2)">availability ${st.complete ? pct(availability(t)) : "—"}</span>
+         <span class="mono">coverage ${fracPct(coverage(t))}</span>
+         <span class="mono" style="color:${st.complete ? "var(--ink-3)" : "var(--degraded)"}">storage ${st.complete ? "contiguous" : `${st.stored} of ${st.extent} · incomplete`}</span>
+       </div>` +
+      (st.complete ? "" :
+       `<div class="lane-meta" style="color:var(--degraded)">
+          availability withheld · <span class="mono">${st.reason}</span> — ${REASON[st.reason]}
+          Coverage stays printed as its own fraction: it says every observation that EXISTS was
+          decidable, which is a different question from whether the range was materialized (§11.2,
+          both must pass).
+        </div>`);
+    const svg = el("svg", { width: W, height: 16 });
+    row.appendChild(svg);
+    const hid = defs(svg);
+    const lw = (s.to - s.from) * PXMIN;
+    if (lw < 1) {
+      /* sub-pixel: a NON-GEOMETRIC marker at the segment's start. Hollow and dashed so it
+         cannot be read as a measured extent. Width is never floored. */
+      const x = s.from * PXMIN, g = el("g", { transform: `translate(${x},8)` });
+      g.appendChild(el("rect", { x: -4.5, y: -4.5, width: 9, height: 9, transform: "rotate(45)", fill: "none", stroke: "var(--degraded)", "stroke-width": 1.4, "stroke-dasharray": "2 1.6" }));
+      g.appendChild(el("line", { x1: 0, y1: 5, x2: 0, y2: 12, stroke: "var(--degraded)", "stroke-width": 1 }));
+      svg.appendChild(g);
+      const tx = el("text", { x: x - 10, y: 12, fill: "var(--degraded)", "font-size": 10.5, "text-anchor": "end" });
+      tx.textContent = `sub-pixel segment · ${s.to - s.from} min of a 30-day axis · not to scale`;
+      svg.appendChild(tx);
+      const n = document.createElement("div");
+      n.className = "lane-meta"; n.style.color = "var(--degraded)";
+      n.textContent = "◆ marked, not widened: a lane's width claims duration, so it keeps it — and availability 100% over 2 decidable minutes is exactly why coverage is printed beside it.";
+      row.appendChild(n);
+    } else {
+      for (let d = 0; d <= WIN_DAYS; d++) {
+        const from = Math.max(s.from, d * DAY), to = Math.min(s.to, (d + 1) * DAY);
+        if (to <= from) continue;
+        const x = from * PXMIN + (to - from > DAY / 2 ? PAD : 0);
+        const w = Math.max(.6, (to - from) * PXMIN - (to - from > DAY / 2 ? PAD * 2 : 0));
+        paint(svg, hid, x, w, slices(sum(FACTS.filter((f) => f.seg === s.id && f.day === d)), to - from, 12), 12, 2);
+      }
+    }
+    host.appendChild(row);
+  }
+}
+
+/* ── the cell readouts, drawn open ── */
+function drawTips() {
+  const host = document.getElementById("tips");
+  for (const d of [27, 29]) {
+    const t = sum(FACTS.filter((f) => f.day === d)), from = d * DAY, to = from + DAY;
+    const stored = t.good + t.bad + t.unknown + t.excluded;
+    const rows = [["good", t.good, "var(--up)"], ["down", t.bad, "var(--down)"], ["unknown", t.unknown, "var(--ink-3)"]]
+      .filter(([, m]) => m > 0)
+      .map(([k, m, c]) => `<tr><td><span class="sw" style="background:${c}"></span>${k}</td><td class="mono">${dur(m)}</td></tr>`).join("");
+    const ns = DAY - stored;
+    const div = document.createElement("div");
+    div.className = "tip";
+    div.innerHTML =
+      `<div class="t mono">${localExtent(from, to)}</div>
+       <div class="u mono">${utcISO(from)} → ${utcISO(to)} · 1 UTC day</div>
+       <table>${rows}
+         ${ns > 0 ? `<tr><td><span class="sw hatch" style="border:1px solid var(--border-strong)"></span>no stored bucket</td><td class="mono">${dur(ns)}</td></tr>` : ""}
+         <tr><td>stored buckets</td><td class="mono">${stored} of ${DAY}</td></tr>
+         ${t.bad > 0 ? '<tr><td colspan="2" style="padding-top:6px;color:var(--ink-3);text-align:left">the red slice is drawn at its floor — 9 minutes of a day is thinner than a pixel</td></tr>' : ""}
+       </table>`;
+    host.appendChild(div);
+  }
+}
+const dur = (m) => { const h = Math.floor(m / 60), mm = m % 60; return (h ? h + "h " : "") + (mm || !h ? mm + "m" : "").trim(); };
+
+/* ── the collapsed boundary mark, zoomed to three days so the collision is visible ── */
+function drawBoundaryMark() {
+  const svg = document.getElementById("bmark"), hid = defs(svg);
+  const days = [27, 28, 29], dW = W / days.length, z0 = 27 * DAY, zpx = W / (days.length * DAY);
+  days.forEach((d, i) => {
+    const x = i * dW + PAD;
+    paint(svg, hid, x, dW - PAD * 2, slices(sum(FACTS.filter((f) => f.day === d)), DAY, H), H, 4);
+  });
+  const cl = cluster(), bx = (cl.first - z0) * zpx;
+  svg.appendChild(el("rect", { x: bx, y: 0, width: 2.5, height: H + 8, fill: "var(--accent)" }));
+  const t = el("text", { x: bx + 8, y: H + 15, fill: "var(--accent)", "font-size": 10.5 });
+  t.textContent = `×${cl.n} revision boundaries · ${localInstant(cl.first).slice(6)} – ${localInstant(cl.last).slice(6)} (${OFF}) — anchored at the earliest`;
+  svg.appendChild(t);
+  const a = el("text", { x: 0, y: H + 15, fill: "var(--ink-3)", "font-size": 10.5 });
+  a.textContent = localInstant(z0).slice(0, 5); svg.appendChild(a);
+
+  document.getElementById("btip").innerHTML =
+    `<div class="tip">
+       <div class="t mono">×${cl.n} revision boundaries</div>
+       <div class="t mono" style="margin-bottom:2px">${localExtent(cl.first, cl.last)}</div>
+       <div class="u mono">${utcISO(cl.first)} → ${utcISO(cl.last)}</div>
+       <table>
+         ${cl.all.map((m, i) => `<tr><td class="mono">${localInstant(m).slice(6)}</td><td>rev ${i + 1} → rev ${i + 2}</td></tr>`).join("")}
+         <tr><td colspan="2" style="padding-top:6px;color:var(--ink-3);text-align:left">chronological — a count may not stand in for the changes it counts</td></tr>
+       </table>
+     </div>
+     <p class="note" style="flex:1;min-width:300px">
+       <b>Why ${cl.n} and not 3.</b> The three segments start at ${localInstant(SEGS[0].from).slice(6)},
+       ${localInstant(SEGS[1].from).slice(6)} and ${localInstant(SEGS[2].from).slice(6)} local, but only
+       <b>${localInstant(cl.first).slice(6)}</b> and <b>${localInstant(cl.last).slice(6)}</b> are
+       <i>transitions between two definitions inside the window</i>. rev 1's start is the window's own
+       left edge, four weeks away. The first drawing counted it and claimed ×3 over a four-minute
+       extent — two things that could not both be true of one cluster (reviewer P1, party [157]).
+     </p>`;
+}
+
+/* ── the latency panel: POINTS ONLY, real time on x, everything in the header derived ── */
+function pctile(a, p) { const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.ceil(p * s.length) - 1)]; }
+function drawLatency(id, o) {
+  const svg = document.getElementById(id), w = 1088, h = 196, l = 8, r = 8, tp = 14, bt = 16;
+  const pw = w - l - r, ph = h - tp - bt;
+  const vals = o.pts.filter((p) => p.ms != null).map((p) => p.ms);
+  const p95 = pctile(vals, .95), avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const extent = Math.max(...vals) * 1.15;
+  const drawTimeout = o.timeout <= extent;
+  const t0 = o.pts[0].min, t1 = o.pts[o.pts.length - 1].min;
+  const X = (m) => l + ((m - t0) / (t1 - t0)) * pw, Y = (v) => tp + (1 - v / extent) * ph;
+  svg.appendChild(el("line", { x1: l, y1: tp + ph, x2: l + pw, y2: tp + ph, stroke: "var(--border)", "stroke-width": 1 }));
+  if (drawTimeout) {
+    svg.appendChild(el("line", { x1: l, y1: Y(o.timeout), x2: l + pw, y2: Y(o.timeout), stroke: "var(--down)", "stroke-width": 1.4, "stroke-dasharray": "6 4" }));
+    const tt = el("text", { x: l + 4, y: Y(o.timeout) - 5, fill: "var(--down)", "font-size": 10.5 });
+    tt.textContent = "timeout " + fmtMs(o.timeout); svg.appendChild(tt);
+  }
+  svg.appendChild(el("line", { x1: l, y1: Y(p95), x2: l + pw, y2: Y(p95), stroke: "var(--degraded)", "stroke-width": 1.4, "stroke-dasharray": "5 4", opacity: .9 }));
+  const pl = el("text", { x: l + pw, y: Y(p95) - 5, fill: "var(--degraded)", "font-size": 10.5, "text-anchor": "end" });
+  pl.textContent = "p95 · last " + o.pts.length + " checks"; svg.appendChild(pl);
+  o.pts.forEach((p) => {
+    if (p.ms == null) { svg.appendChild(el("rect", { x: X(p.min) - 1.5, y: tp + ph - 9, width: 3, height: 9, fill: "var(--down)", rx: 1 })); return; }
+    svg.appendChild(el("circle", { cx: X(p.min), cy: Y(p.ms), r: p.hi ? 4.2 : 2.6, fill: "var(--accent)", stroke: p.hi ? "var(--surface)" : "none", "stroke-width": p.hi ? 1.6 : 0 }));
+  });
+  document.getElementById(id + "-h").textContent = `avg ${fmtMs(Math.round(avg))} · p95 ${fmtMs(p95)} · last ${o.pts.length} checks`;
+  document.getElementById(id + "-to").textContent = drawTimeout ? `timeout ${fmtMs(o.timeout)}` : `timeout ${fmtMs(o.timeout)} — outside this scale`;
+  if (o.axis) {
+    const ax = document.getElementById(o.axis);
+    o.ticks.forEach((m) => {
+      const s = document.createElement("span");
+      s.style.cssText = `position:absolute;left:${X(m) - 16}px;top:2px`;
+      s.textContent = hhmm(m); ax.appendChild(s);
+    });
+  }
+  return { avg, p95, drawTimeout };
+}
+const fmtMs = (v) => v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0).replace(/\.0$/, "") + "s" : v + "ms";
+const hhmm = (m) => `${p2(Math.floor(m / 60) % 24)}:${p2(m % 60)}`;
+
+/* 62 minutes of checks a minute apart from 19:12 local, with a REAL 6-minute hole and one
+   zero-latency down that today's chart drops entirely. */
+const jit = [4,-3,6,-5,2,9,-2,5,-6,3,7,-4,1,8,-5,2,6,-3,4,-7,5,3,-2,8,-4,6,1,-5,7,2];
+const HOLE = [1174, 1179], DOWN_AT = 1181, SPIKE = 1195, HOVER = 1204;
+const ptsA = [], ptsB = [];
+/* The API returns ROWS, not minutes: 60 recorded checks, whose span is therefore 66 minutes
+   because six of them never happened. The first version drew 62 minutes and called it 60
+   checks, which is a small version of the same conflation this whole mock is about. */
+for (let i = 0; ptsA.length < 60; i++) {
+  const min = 1152 + i;
+  if (min >= HOLE[0] && min <= HOLE[1]) continue;
+  if (min === DOWN_AT) { ptsA.push({ min, ms: null }); continue; }
+  ptsA.push({ min, ms: min === SPIKE ? 118 : 75 + jit[i % jit.length], hi: min === HOVER });
+}
+for (let i = 0; i < 60; i++) ptsB.push({ min: 1152 + i, ms: 1152 + i === 1188 ? 10000 : 780 + jit[i % jit.length] * 12 });
+
+/* ── the observation ruler (§6.2, ruled at party [171]) ────────────────────────────
+   One neutral tick per RECORDED heartbeat at its real x, and nothing between them. Its empty
+   spans are the rendering of unobserved time, and they carry ONE meaning uniformly: no check was
+   recorded between adjacent points. Not late, not missed, not covered, not anomalous. There is no
+   threshold of any kind — a fixed pixel rule was specified at [169] and withdrawn at [171] once
+   the arithmetic showed it marks every interval at this density. It is not a status series, it
+   does not touch the latency points, and nothing downstream reads it. */
+function drawRuler(id, pts) {
+  const svg = document.getElementById(id), w = 1088, l = 8, r = 8, pw = w - l - r;
+  const t0 = pts[0].min, t1 = pts[pts.length - 1].min;
+  const X = (m) => l + ((m - t0) / (t1 - t0)) * pw;
+  svg.appendChild(el("rect", { x: l, y: 7, width: pw, height: 1, fill: "var(--border)" }));
+  pts.forEach((p) => svg.appendChild(el("rect", { x: X(p.min) - 0.75, y: 2, width: 1.5, height: 11, fill: "var(--ink-2)", rx: .5 })));
+  /* Every empty span is focusable; adjacent sub-hit-target spans may be MERGED for interaction
+     only, and a merged readout states its actual outer bounds. Interaction grouping is never
+     rendered as semantic grouping, so nothing about the drawing changes when spans merge. */
+  const HIT = 12;
+  let group = null;
+  const groups = [];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1].min, b = pts[i].min, wpx = X(b) - X(a);
+    if (wpx >= HIT) { if (group) { groups.push(group); group = null; } groups.push({ from: a, to: b, merged: false }); continue; }
+    if (!group) group = { from: a, to: b, merged: false };
+    else { group.to = b; group.merged = true; }
+  }
+  if (group) groups.push(group);
+  return groups;
+}
+
+drawStrip(); drawLanes(); drawTips(); drawBoundaryMark();
+const A = drawLatency("latA", { pts: ptsA, timeout: 10000, axis: "latAaxis", ticks: [1152, 1170, 1190, 1212] });
+const RGROUPS = drawRuler("ruler", ptsA);
+/* the denser fixture: 20-second cadence over the same span, with the same real hole, so some
+   spans clear the hit target on their own and the rest must merge */
+const ptsDense = [];
+for (let m = 1152; m <= 1217; m += 1 / 3) {
+  if (m >= HOLE[0] && m <= HOLE[1] + 1) continue;
+  ptsDense.push({ min: Math.round(m * 1000) / 1000, ms: 75 });
+}
+const RGROUPS2 = drawRuler("ruler2", ptsDense);
+drawLatency("latB", { pts: ptsB, timeout: 10000 });
+
+/* the ruler's readouts, drawn open: the widest empty span, and a merged interaction group */
+const wide = RGROUPS.reduce((a, g) => (g.to - g.from > a.to - a.from ? g : a), RGROUPS[0]);
+const mergedG = RGROUPS.find((g) => g.merged) || RGROUPS[0];
+
+/* the KPI row, and the two prose figures that must not drift from the fixture */
+const win = sum(FACTS.filter(SEALED));
+document.getElementById("k-cov").textContent = fracPct(coverage(win));
+document.getElementById("k-store").textContent = `storage ${win.good + win.bad + win.unknown} of ${WIN_MIN} buckets`;
+document.getElementById("latA-sub").textContent =
+  `last ${ptsA.length} checks · ${hhmm(ptsA[0].min)} → ${hhmm(ptsA[ptsA.length - 1].min)} (${OFF}) · ` +
+  `points only, no stroke and no fill — every interval between adjacent points is time cerbix did not observe, ` +
+  `and this panel makes no claim about whether a check was due there`;
+document.getElementById("lg-p95").textContent = `p95 · last ${ptsA.length} checks`;
+/* The first version read "6-minute hole" — a COUNT OF MISSING CHECKS, which is precisely the
+   inference this contract forbids: it assumes six checks were due. The honest statement is the
+   interval between two recorded checks, which is what the ruler itself means. */
+document.getElementById("gap-note").textContent =
+  `widest interval between two recorded checks here is ${wide.to - wide.from} minutes, ` +
+  `${hhmm(wide.from)} → ${hhmm(wide.to)} — and the panel says only that, never that a check was missed.`;
+document.getElementById("latA-tips").innerHTML =
+  `<div class="tip">
+     <div class="t mono">${hhmm(HOVER)}:31 (${OFF}) · ${ptsA.find((p) => p.min === HOVER).ms} ms</div>
+     <div class="u mono">2026-09-03T${hhmm(HOVER - VIEW_OFFSET_MIN)}:31Z</div>
+     <table><tr><td>status</td><td class="mono ok">Operational</td></tr>
+     <tr><td>code</td><td class="mono">HTTP 200</td></tr>
+     <tr><td>result</td><td class="mono">ok</td></tr></table>
+   </div>
+   <div class="tip">
+     <div class="t mono">${hhmm(DOWN_AT)}:02 (${OFF}) · no latency recorded</div>
+     <div class="u mono">2026-09-03T${hhmm(DOWN_AT - VIEW_OFFSET_MIN)}:02Z</div>
+     <table><tr><td>status</td><td class="mono" style="color:var(--down)">Down</td></tr>
+     <tr><td>code</td><td class="mono">—</td></tr>
+     <tr><td>result</td><td class="mono">bad request: unsupported scheme</td></tr>
+     <tr><td colspan="2" style="padding-top:6px;color:var(--ink-3);text-align:left">today this check is absent from the chart entirely</td></tr></table>
+   </div>
+   <div style="flex:1;min-width:320px;border:1px solid var(--border);border-radius:5px;overflow:hidden">
+     <table class="tbl">
+       <tr><th>Time</th><th>Status</th><th>Code</th><th>Latency</th></tr>
+       <tr class="hi"><td class="mono">${hhmm(HOVER)}:31</td><td>Operational</td><td><span class="code up mono">200</span></td><td class="mono">${ptsA.find((p) => p.min === HOVER).ms} ms</td></tr>
+       <tr><td class="mono">${hhmm(HOVER - 1)}:31</td><td>Operational</td><td><span class="code up mono">200</span></td><td class="mono">${ptsA.find((p) => p.min === HOVER - 1).ms} ms</td></tr>
+       <tr><td class="mono">${hhmm(DOWN_AT)}:02</td><td>Down</td><td><span class="code dn mono">—</span></td><td class="mono">—</td></tr>
+     </table>
+     <div style="padding:9px 14px;font-size:11.5px;color:var(--ink-3)">hovering a point highlights its row — one object, one hover</div>
+   </div>`;
+const spanTip = (g, extra) =>
+  `<div class="tip">
+     <div class="t mono">no check recorded between ${hhmm(g.from)}:00 and ${hhmm(g.to)}:00 (${OFF})</div>
+     <div class="u mono">2026-09-03T${hhmm(g.from - VIEW_OFFSET_MIN)}:00Z → 2026-09-03T${hhmm(g.to - VIEW_OFFSET_MIN)}:00Z</div>
+     <table><tr><td>this interval</td><td class="mono">${g.to - g.from} min unobserved</td></tr>
+     <tr><td colspan="2" style="padding-top:6px;color:var(--ink-3);text-align:left">${extra}</td></tr></table>
+   </div>`;
+document.getElementById("ruler-tips").innerHTML =
+  spanTip(wide, "not late, not missed, not covered, not anomalous — only that no check was recorded here") +
+  spanTip(mergedG, mergedG.merged
+    ? `a MERGED focus target: ${mergedG.to - mergedG.from} adjacent one-minute intervals too narrow to focus separately. The readout states its real outer bounds; the drawing is unchanged, because interaction grouping is never semantic grouping.`
+    : "at this density every interval is its own focus target, so nothing is merged here");
+/* the two prose figures the threshold argument rests on, derived from this panel's geometry */
+const PXMIN_LAT = (1088 - 16) / (ptsA[ptsA.length - 1].min - ptsA[0].min);
+document.getElementById("pxmin").textContent = PXMIN_LAT.toFixed(1);
+document.getElementById("nint").textContent = String(ptsA.length - 1);
+document.getElementById("merge-note").textContent =
+  `${ptsDense.length} checks over the same span put adjacent ticks ` +
+  `${((1088 - 16) / (ptsDense[ptsDense.length - 1].min - ptsDense[0].min) / 3).toFixed(1)}px apart, ` +
+  `so ${RGROUPS2.filter((g) => g.merged).length} of ${RGROUPS2.length} focus targets are merged spans ` +
+  `and ${RGROUPS2.filter((g) => !g.merged).length} ${RGROUPS2.filter((g) => !g.merged).length === 1 ? "clears" : "clear"} the hit target alone.`;
+document.getElementById("lg-hatch").style.background = HATCH_CSS;
+document.querySelectorAll(".sw.hatch").forEach((s) => (s.style.background = HATCH_CSS));
+</script>

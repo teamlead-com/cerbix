@@ -592,3 +592,108 @@ it where monitors are listed, without breaking existing monitors.
 Approved as drawn, with the two open questions answered: **the limit is 200 characters** and **search
 does not match on the description**. Decision record D-0234; specification
 `docs/specs/func-monitor-description.md`.
+
+## mock-truthful-rendering.html — a rendering claims no more than the facts behind it (iter-0174)
+
+Specification `docs/specs/func-truthful-rendering.md` (FR-031 / NFR-025a), decision record
+`D-0235`. Design reviewed at party [133]–[173] before the drawing existed; the mock is drawn
+against the approved contract rather than proposing one.
+
+### APPROVED by the owner, 2026-09-03
+
+Approved as drawn. The independent reviewer approved it as a design gate at party [173] after
+six P1 findings, every one of which is recorded in `D-0235` rather than quietly fixed. The owner
+noted that he could not see the observation ruler's change when he opened the page; the ruler was
+verified to render (headless Chrome: 61 rects in the first ruler, 179 in the denser one, every
+derived figure filled), an offer to strengthen it by drawing its empty spans in the strip's own
+hatch-and-outline was made, and he approved the drawing as it stands. Recorded because the
+ruler's whole purpose is to be seen: if it reads too quietly in the shipped UI, that is a finding
+against the panel and not a new design question.
+
+Three surfaces, one rule: a picture must not claim more than the facts behind it, and it must be
+able to distinguish the states it claims to distinguish.
+
+- **The reliability timeline on clock time.** Cells come from the requested UTC range at the
+  rollup grain, so 27 of 30 days in the fixture are honestly empty instead of being squeezed out
+  of existence while three days stretch across the full width. Inter-tick padding is a fixed
+  width, never a fraction of the tick — the old 8% made the holes look like absence.
+- **Five encodings, and no two of them can be confused.** `good`/`down`/`excluded` keep their
+  hues; `unknown` is a solid `--ink-3` slice, because it is a decided verdict and must not read as
+  a status colour; `no stored bucket` is a hatch with a cell outline, because absence is not a
+  verdict and may borrow neither a hue nor opacity; `provisional` keeps opacity and is its only
+  user. The short-tick encoding for `unknown` is **retired** — inside a stack, height is the
+  slice's quantity, so it cannot also carry its identity.
+- **A cell is a proportional stack.** A day at 99.5% good is mostly green with a red sliver at its
+  floor, not a whole red day. The floor is presentation only, capped, and applies to `bad`,
+  `unknown` and `excluded` alone — flooring provisional good time would inflate good time and buy
+  no honesty. Every cell's exact durations and bucket counts are in its tooltip.
+- **Segments are lanes on the same axis, and a lane's width is never floored.** Length means
+  duration again: a one-day segment is short. A sub-pixel segment gets a hollow, dashed,
+  explicitly non-geometric marker reading "not to scale", and colliding markers stack vertically
+  up to three before collapsing into a count — never spread sideways, because a marker's x is the
+  only honest thing about it. Two mechanisms for two axes: height tolerates a floor, width does not.
+- **Times are local, identity is UTC.** Every readout renders in the browser's zone with its
+  offset named and the UTC instant beneath it, and a UTC day is never called the viewer's calendar
+  day — for a viewer at UTC+05 the tooltip says `01.09 05:00 → 02.09 05:00 (UTC+05)`. The axis
+  labels UTC days and says so.
+- **The Response time panel draws points, and renders absence positively.** Real timestamps on x;
+  every fetched heartbeat drawn, including the zero-latency downs today's chart silently drops (a
+  baseline mark); no stroke and no fill. The owner asked for the line back and it turned out it
+  cannot be earned from the facts that exist — a run may occupy `(retries+1) × timeout`,
+  `result.allowed_skew` bounds a clock test rather than delivery, and `job_issued_at` is not a
+  column of `heartbeats` — so two heartbeats bound observed spacing and nothing more. Rather than
+  leave that as whitespace, an **observation ruler** under the plot carries one neutral tick per
+  recorded check, and its empty spans ARE the rendering of unobserved time: one meaning uniformly,
+  no threshold of any kind, no server classifier, and no claim outside the first and last point.
+  A fixed 12 CSS-pixel rule was specified and then withdrawn once the arithmetic was done — at
+  16.5 px per minute it marks all 59 intervals and tells the hole apart from an ordinary minute not
+  at all. A second, denser ruler is drawn to show the accessibility merge (178 checks → 3 focus
+  targets, 2 merged), with the rule stated that interaction grouping is never semantic grouping.
+  The timeout is stated in the header always and drawn only when it falls inside the computed
+  extent — a factual boundary, drawn in the second panel where a real timeout raises the extent
+  itself. What would earn the stroke back is **FR-032**, its own requirement and specification.
+- **The /sla project objective becomes read-only with an explicit Edit**, in four states: stored,
+  editing-unchanged with Save disabled, editing-changed with the draft named as a draft, and
+  just-saved with a bounded ✓. A closed editor cannot hold a stale draft. The two P0 defects
+  behind it are invisible in any drawing and are written on the mock as acceptance criteria
+  instead: the context reset must cover the card's own draft/error/busy state before the next
+  project renders, and both writers must gate on their load generation.
+
+- **Colliding marks cluster by the lane rule, extended rather than duplicated.** Revision
+  boundaries minutes apart put their marks inside one pixel at any window zoom. One mark, anchored
+  at the **earliest real boundary** — its only geometric claim, and it stays true — carrying the
+  count, the exact local `[first, last]` extent with its offset, the UTC instants, and a readout
+  that lists every revision in the cluster chronologically, because a count may not stand in for
+  the changes it counts.
+
+**Every figure on the two derived surfaces comes from ONE fixture.** The mock holds a single
+`FACTS` table and computes every cell, lane, segment percentage and KPI from it through the
+spec's own formulas — `availability = good/(good+bad)`,
+`coverage = (good+bad)/(good+bad+unknown)`, `excluded` in neither denominator, the provisional
+tail right of `sealed_through` excluded from every number. Its script is executed under a DOM
+stub while preparing it, so the figures are run rather than asserted: window coverage 99.7% over
+3030 of 43200 stored buckets; rev 1 availability 100% / coverage 100%; rev 2 availability 100% /
+coverage **50%** (perfect availability over two decidable minutes out of four — the case the
+product exists to be honest about); rev 3 availability 99.669% / coverage 99.7%; every day cell
+summing to exactly 34px. The `/sla` cards are the one exception and say so on the page: an
+operator's typed objective has no fixture behind it, and that surface specifies a state machine
+rather than a figure.
+
+- **A lane states its storage, and withholds availability without it.** The real-time axis
+  exposed a defect nothing else had: rev 1 spans 28 days with 300 stored minutes, so it renders 27
+  days of hatch — and the first drawing printed `availability 100% · coverage 100%` beside that.
+  A segment now reads `storage contiguous` or `300 of 40470 · incomplete`, and an incomplete
+  segment quotes no availability: a dash with the payload's own derived reason
+  (`window_precedes_materialization_era` here, `storage_gap` when the hole is interior). Coverage
+  stays printed as its own fraction, because "every observation that exists was decidable" is a
+  different claim from "the range was materialized" — §11.2, both must pass.
+
+Corrections made to the specification and to this drawing during review, all recorded in
+`D-0235`: the `NFR-025` contradiction (an instance-wide invariant beside a deliberate exclusion of
+five call sites); the floor rule's ambiguous "non-good slice", which the drawing's own arithmetic
+exposed by inflating provisional good time; a fixture that totalled 2770 stored buckets while the
+KPI drawn above it read 2873; an axis identity label that overlapped the terminal date tick at
+1440px; a boundary cluster that claimed ×3 over a four-minute extent when only two of the
+three lane starts are transitions inside the window; segment and KPI figures borrowed from a
+screenshot instead of derived from the fixture, which was the mock committing its own subject
+defect; and a panel that drew 62 minutes of checks while calling them "last 60 checks".

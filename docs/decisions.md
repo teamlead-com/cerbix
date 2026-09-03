@@ -6588,3 +6588,230 @@ neighbour and the ROW grows by that line, an undescribed card in it gaining trai
 the line on every card was declined — it would change every existing dashboard for people who never
 write a description. Rewriting the sentence to match the code was not treated as sufficient on its own:
 the geometry is now asserted structurally, in the regression the reviewer asked for.
+
+## D-0235 — a rendering claims no more than the facts behind it (2026-09-03)
+
+**Context.** The owner brought two complaints and one question. On the monitor page he wanted
+Grafana-style hover values on the Response time panel, and asked whether that steps onto
+Grafana's territory at all; on the Services page he did not like the long red and green bars in
+Reliability. Reading the code for the second one turned a padding complaint into a truthfulness
+problem, and the same shape turned out to sit on a third surface he pointed at later, the /sla
+project-objective card. Specification:
+[`func-truthful-rendering.md`](specs/func-truthful-rendering.md) (FR-031, NFR-025). Reviewed
+across party [133]–[151]; every geometry, encoding and tenant-context question below carries the
+reviewer's ruling, and two of this session's own proposals were overruled and are recorded as
+such.
+
+**Decisions.**
+
+1. **The question is answered no.** A hover readout over data the page has already fetched is
+   not observability tooling. The line is drawn explicitly and permanently for this package: no
+   query builder, no time-range picker on these panels, no drag-zoom, no panel composition, no
+   second metric or overlaid series. What justified the work was not "only one panel" but that
+   the panel was **less defensible than the table beside it** — it dropped an enumerable class
+   of real failures and had no time axis at all.
+
+2. **The timeline's geometry becomes clock time.** Cells are generated from the requested UTC
+   range at the rollup grain instead of from whichever points the response happens to carry, and
+   unstored time occupies width in its own encoding. A 30d window over a service with two and a
+   half days of facts was filling 100% of the strip while the KPI directly above it read
+   `storage 2873 of 43200 buckets`. This **refines** party [218] P1-3 rather than reversing it:
+   bucket count was a proxy for time extent, the two agree wherever storage is complete, and
+   they diverge only in a storage hole. Ruled at [140].
+
+3. **The gaps were decoration.** Padding was 8% of each tick's own width, which is a hairline at
+   ninety ticks and a canyon at three, reading as absence while meaning nothing. Confirmed by
+   pixel measurement of the owner's screenshot against the model — predicted gaps 54.0 px and
+   81.2 px against 54 px and 81 px measured, cells summing to 1076 px against a 1075 px strip —
+   rather than by eye, after a first version of the finding cited eyeballed numbers.
+
+4. **A cell becomes a proportional stack, and the short tick is retired.** Winner-takes-all
+   colouring rendered a service at `availability 99.667%` as a wall of red once only three wide
+   ticks were on screen. The replacement carries a **capped, presentation-only floor** on the
+   non-good slice so a one-second outage still cannot vanish — recorded as a trade-off, because
+   "bad wins the cell" was a *semantic* guarantee and a pixel floor is a *rendering* one. The
+   consequence is a deliberate change to the motif approved in 2026-08 (§12.2 of
+   `func-service-reliability.md`, amended in place): inside a stack, height is the slice's
+   quantity, so height can no longer carry its identity. Ruled at [143] and [138].
+
+5. **`not-stored` is not `unknown`, and gets a fifth encoding.** `unknown` is a decided verdict
+   with `unknown_us` behind it; a missing bucket row is the absence of a verdict. `unknown`
+   becomes a solid `--ink-3` slice with no status hue, `not-stored` a hatched slice with a cell
+   outline labelled "no stored bucket", and `provisional` remains the sole user of opacity. This
+   session had them conflated; corrected at [136].
+
+6. **Segment lanes ride the shared axis, and their width is never floored.** A one-day and a
+   three-day segment were the same length, so length said nothing. A lane's horizontal extent
+   claims duration, so a sub-pixel segment is met by a **non-geometric anchored marker** that
+   says it is not to scale, with collisions stacking vertically — never by a silently widened
+   lane, which would reintroduce the very defect on the surface being fixed. The slice floor and
+   the lane rule are therefore two mechanisms for two axes: height tolerates a floor, width does
+   not. This session proposed widening-with-a-label and was overruled at [140].
+
+7. **The Response time panel draws real timestamps, and no stroke across unprovable time.** Two
+   of this session's proposals were overruled and the rulings are better. An ordinal axis with a
+   wall-clock tooltip still invites slope-as-rate, so the axis carries real time ([134]). And the
+   frontend may not derive "a due check is missing" from `interval_seconds` plus a tolerance:
+   cadence, probe overlap and dispatch delay are application semantics, and such a formula is a
+   product contract only once specified and tested, not a chart heuristic ([136]). **v1 therefore
+   draws points with no connecting stroke and no area fill** — the fill implies a continuity the
+   data cannot support — with the panel's value moving into the hover readout. The owner accepted
+   that consequence explicitly. The named follow-up that earns the line back is a
+   contiguous-segment fact computed where cadence is actually known.
+
+8. **The timeout is stated always and drawn only inside the plot extent.** This session proposed
+   drawing it once samples reached 25% of it; the reviewer called that a magic number, correctly,
+   and the extent boundary is factual instead. It is also doubly sufficient: a timeout that
+   actually occurs is recorded at roughly the timeout, so it raises the extent itself. The
+   session's own objection to the extent rule was withdrawn on that evidence.
+
+9. **Identity is UTC; presentation is local.** The owner asked whether the range could be
+   browser time. Grain, requested range, cell identity and all arithmetic stay UTC — local-day
+   cells would stop decomposing the number printed above them, and two viewers in different zones
+   would read different per-cell figures for one published availability. Every human-readable
+   time renders in the browser's zone with its offset named, plus the UTC instant for log
+   correlation, and **a UTC cell is never labelled as the viewer's calendar day**: a UTC day
+   starts at 05:00 for a UTC+5 viewer, so the tooltip states its true local extent. The
+   mechanism is **two named functions** — one for an instant, one for a UTC cell extent — with no
+   generic formatter that could be handed a bucket and produce a local calendar day, and offsets
+   resolved **at the instant** via `Intl` rather than from a cached current offset, since a 30d
+   window in late March or October crosses a DST boundary as the ordinary case. No timezone
+   setting in v1. Ruled at [143].
+
+10. **The /sla project-objective card becomes read-only with an explicit Edit.** The owner's
+    report was that the buttons stay after Save and mislead; the mechanism was that a successful
+    save never cleared the draft while Clear did, so an unsent draft and a stored fact rendered
+    identically. The owner chose the Edit shape over keeping the form open, and the reviewer
+    recommended the same, for a structural reason: a closed editor cannot hold a stale draft.
+    **An open form is not a substitute for a draft-state model**, so all of it holds regardless
+    of shape — clear the draft on success, a bounded success confirmation, Save disabled when it
+    would do nothing (by the existing D-0165 rule), and the two P0 items below. Recorded as a
+    change to an **approved** mock (`docs/design/mock-project-objective.html`, iter-0155).
+
+11. **Two P0 tenant-context defects on that card, found while reading it and not reported by the
+    owner.** `resetMaintenanceState()` resets seven pieces of editor and busy state and its own
+    comment claims to cover every one, but not `projDraft`/`projErr`/`projSaving` — so a value
+    typed for project A is still in the box under project B, where Save writes it as a
+    perfectly legitimate write the store cannot refuse. And neither writer takes a load
+    generation, while every neighbouring writer in the file does and one says why ("the project
+    moved under this response"). The two fixes are **complementary, not alternatives**: one stops
+    a stale draft being displayed, the other stops a stale response being written. Ruled P0 at
+    [147]; the second was the reviewer's find, verified here against the code before acceptance.
+
+12. **The pre-existing zone inconsistency is NFR-025, split into a half that ships and a half
+    that stays open.** Four SPA files render browser-local times without naming a zone while the
+    reliability card renders UTC, and nothing says which is which. It predates this package and
+    is not fixed by it. **NFR-025a** — the §8 mechanism plus every timestamp on the FR-031
+    surfaces going through it — ships here; **NFR-025b** — the five enumerated call sites
+    substituted onto it — stays `TODO`, and iter-0174 may not report NFR-025 as DONE.
+    The split exists because the specification's first revision asserted an instance-wide
+    invariant ("every rendered timestamp in the SPA names its zone") while §9 deliberately
+    excluded those five sites: two statements that cannot both be the shipped contract. Reviewer
+    P1 at [153], accepted; the contradiction was resolved by scoping the SHIPPED invariant, not
+    by weakening the follow-up, which keeps its identifier, its acceptance criterion and its open
+    status. Widening this iteration to four unrelated views was declined at [143].
+
+13. **Scope is one iteration, by the owner's override.** The reviewer proposed scoping the
+    segment-lane work separately; the owner wants the card fixed in one visit. It carries its own
+    acceptance row and its own discharge so it can fail without dragging the rest down. Recording
+    the heartbeat request's `limit` bound as a spec constraint was declined by the owner.
+
+14. **Colliding marks cluster by the lane rule, extended rather than duplicated.** Drawing the
+    mock produced a case the design had not covered: several definition changes minutes apart put
+    their boundary marks inside one pixel at *any* window zoom. The contract — cluster the
+    colliding events into one mark; anchor it at the **earliest real boundary**, never at a
+    midpoint, because the anchor is the cluster mark's only geometric claim; carry the count with
+    the exact local `[first, last]` extent, its numeric offset and the UTC instants; and list every
+    event in the cluster **chronologically** in the readout, because a count may not stand in for
+    the changes it counts. Ruled at [157].
+
+15. **Every figure a mock displays must be derived from its own fixture.** The most instructive
+    finding of the whole arc: the drawing's segment percentages and KPI were borrowed from the
+    owner's screenshot while its geometry came from the mock's own fixture, so
+    `availability 99.667%` and `coverage 98.5%` sat beside cells that computed something else —
+    the mock committing, one level up, exactly the defect it exists to fix. The mock now holds ONE
+    fixture and derives every cell, lane, segment figure and KPI from it through the spec's own
+    formulas (`func-service-reliability.md` §11.1), with the provisional tail excluded per §11.3;
+    its script is executed under a DOM stub as part of preparing it, so the figures are run rather
+    than asserted. The `/sla` cards are the one exception and say so on the page: there is no
+    fixture behind an operator's typed objective, and what that surface specifies is a state
+    machine rather than a figure. Reviewer P1 at [159].
+
+16. **A lane's readout carries its storage verdict, and withholds availability without it.** The
+    real-time axis of decision 6 immediately exposed a defect nothing else had: a segment spanning
+    28 days with 300 stored minutes renders 27 days of `not-stored` and, in the first drawing,
+    printed `availability 100% · coverage 100%` beside it. `coverage = 100%` says only that every
+    observation that exists was decidable, which a storage hole makes worthless as a warrant, and
+    `func-service-reliability.md` §11.2 makes the two axes independent with both required. So each
+    segment now states `storage contiguous` or `<stored> of <extent> · incomplete`, and an
+    incomplete segment quotes no availability — a dash carrying the payload's OWN reason, derived
+    rather than typed: `window_precedes_materialization_era` when the missing storage is a
+    contiguous prefix, `storage_gap` when it is missing inside the range. Coverage stays printed as
+    its own separately named fraction, because it answers a different question. Reviewer P1 at
+    [161]; the vocabulary is the shipped one from `ServiceReliability.vue`, not a new one.
+
+17. **Four corrections the mock's own review forced, recorded because a drawing that gates an
+    implementation has to be right.** (a) The fixture's stored buckets totalled 2770 while the KPI
+    drawn above the strip read `2873 of 43200` — a mock whose computed evidence disagrees with its
+    own stated source cannot gate anything; the fixture now totals 2873 and every dependent label
+    moved with it. (b) At 1440px the axis's identity label overlapped the terminal date tick, and
+    an identity label may not overwrite a fact; it lives on its own line now, on both the strip and
+    the latency panel. (c) The proposed boundary cluster claimed `×3` over a four-minute extent
+    while only **two** of the three lane starts are transitions inside the window — the third is
+    the first segment's start, four weeks away at the window's own left edge. It reads `×2` with
+    the exact two transitions listed. (a)–(c) were reviewer P1s at [157]. (d) The panel drew 62
+    minutes of checks and labelled it "last 60 checks" while six of those minutes hold no check at
+    all — the API returns ROWS, so sixty recorded checks span sixty-six minutes here. Found by
+    executing the mock's own script rather than reading it.
+
+18. **The owner asked for the line back, and it cannot be earned — the reason is structural.** He
+    chose to bring the contiguity fact into this iteration rather than take it as a follow-up, on a
+    cost estimate of this session's that was wrong: "no migration needed". The design was rejected
+    at [166] on three readings of the tree, verified here before acceptance and two of them this
+    session's own misreadings. `internal/prober/prober.go` runs `Retries + 1` attempts each under
+    its own `context.WithTimeout(m.Timeout())`, so a run may occupy `(retries+1) × timeout` and not
+    one timeout. `result.allowed_skew` is only step 4b's clock test in `internal/store/monitors.go`
+    (`ts.Before(hb.JobIssuedAt.Add(-skew))`) — a bound on how far *before* its job's issue an
+    observation may claim to be, bounding neither queue delay nor delivery; using it in a spacing
+    allowance was not a stretch of its meaning but the wrong quantity. And `job_issued_at` is not a
+    column of `heartbeats` at all. So two received heartbeats bound **observed spacing** and
+    nothing more: queue wait is unbounded under broker trouble, leader absence leaves no trace, and
+    cerbix cannot witness its own absence. No fifth term rescues a formula whose subject is absent
+    from the data. The corrected cost went back to the owner and he re-decided for the honest panel.
+
+19. **Absence is rendered positively: the observation ruler.** A thin band under the plot carries
+    one neutral tick per recorded heartbeat and nothing between them, so unobserved time is drawn
+    rather than left as whitespace — uniformly, with a six-minute interval and an ordinary minute
+    being the same statement at different sizes. An empty span means only "no check was recorded
+    between adjacent points": not late, missed, covered or anomalous. **It has no threshold**, and
+    that is the load-bearing part: a fixed 12 CSS-pixel rule was specified at [169] and
+    **withdrawn** at [171] after this session did the arithmetic and brought it back — the panel
+    runs at 16.5 px per minute, so 12 px marks all 59 intervals and distinguishes the hole from an
+    ordinary minute not at all, while any threshold relative to the panel's own spacing would be
+    the anomaly detector [166] removed wearing a legibility costume. Accessibility may merge
+    adjacent sub-hit-target spans into one focus target, preserving every tick and the real
+    geometry, and **interaction grouping is never rendered as semantic grouping**. Declared
+    maintenance is out of scope: with no stroke, no value crosses excluded time, so the truth
+    condition holds by construction and a band is recorded as a named optional.
+
+20. **FR-032 is opened for the fact cerbix does not record.**
+    `docs/specs/func-expected-run-ledger.md` states the problem, the evidence that the fact is
+    missing, and the four facts a solution must carry — materialized due windows; issue, claim and
+    terminal-outcome timestamps; configuration bound to the *historical* run rather than the
+    monitor's current fields; and retention semantics. It contains **no design**, and says so: no
+    schema, no API, no retention rule, with volume, ownership and the DB-less roles named as open
+    questions. Only its acceptance criteria may ever permit a stroke between adjacent covered
+    windows. It is deliberately not carried by iter-0174, which ships the honest panel while this
+    changes the reliability data model.
+
+21. **One more of this session's own forbidden inferences, caught by executing the mock rather than
+    reading it.** The panel's prose read "6-minute hole" — a count of *missing checks*, which
+    assumes six checks were due, which is exactly what decision 18 establishes cannot be known. It
+    now states the interval between two recorded checks and nothing else: "widest interval between
+    two recorded checks here is 7 minutes, 19:33 → 19:40 — and the panel says only that, never that
+    a check was missed."
+
+**Status.** Design approved; NOT implemented. The mock
+(`docs/design/mock-truthful-rendering.html`) is drawn, carries the two cases the reviewer asked
+to see — a sub-pixel segment with its marker and a UTC cell tooltip showing its true local extent
+— and awaits the owner's approval, which gates all frontend code.

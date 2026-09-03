@@ -61,6 +61,12 @@ engine, scheduling and execution (scheduler → Dispatcher → worker → ingest
 
 ## Open questions / next
 
+- The monitor page's Response time panel is specified by
+  [`func-truthful-rendering.md`](func-truthful-rendering.md) §6 (FR-031, D-0235): every fetched
+  heartbeat drawn including those with no latency, a real-time x axis, no stroke or fill across
+  time whose continuity is unproven, and the monitor's timeout stated always and drawn only
+  inside the plot extent. Prober and scheduling behaviour in this document are unchanged by it.
+
 - RabbitMQ implementation of `Dispatcher` for cross-process roles (scheduler/worker separate).
 - ICMP prober (needs privileges/CAP_NET_RAW), Push (dead-man's-switch + push endpoint),
   DNS/TLS (D-0058), gRPC (D-0059), **composite/group** (D-0061), **PostgreSQL** (D-0062),

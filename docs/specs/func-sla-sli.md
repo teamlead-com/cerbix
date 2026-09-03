@@ -43,6 +43,12 @@ Code: `internal/sla/sla.go` (pure functions), `internal/store/sla.go`
 
 ## Open questions / next
 
+- The project-objective card's PRESENTATION is specified by
+  [`func-truthful-rendering.md`](func-truthful-rendering.md) §7 (FR-031, D-0235): read-only
+  stored state with an explicit Edit, a draft cleared on success, and the two P0 tenant-context
+  fixes — the context reset covering the card's own draft/error/busy refs, and a load-generation
+  guard on both writers. The model and the API in this document are unchanged by it.
+
 - TimescaleDB hypertable + CAGG for 90d at large volumes (D-0017).
 - ~~Project-level SLO targets + an aggregated error budget per project.~~ DELIVERED: AC-0155-3,
   migration 00083, `GET`/`PUT`/`DELETE /api/v1/projects/{projectID}/sla-target`. A project target

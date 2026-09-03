@@ -47,12 +47,24 @@ key clears it. Stated here so nobody expects a UI edit to survive a re-apply —
 | Surface | File | How |
 | --- | --- | --- |
 | `/monitors` | `frontend/src/views/MonitorsView.vue` | a second line under the name, `--ink-2`, single line, ellipsis, full text as the cell's tooltip; NOT a sixth column — the table is five wide and a description belongs to the name it explains |
-| dashboard panels | `frontend/src/components/MonitorCard.vue` | one line under the name row, `--ink-3`, 12 px, cut by the panel's own width with a CSS ellipsis so no card grows taller than its neighbours |
+| dashboard panels | `frontend/src/components/MonitorCard.vue` | one line under the name row, `--ink-3`, 12 px, cut by the panel's own width with a CSS ellipsis, so the line can never become two whatever the text |
 | monitor detail | `frontend/src/views/MonitorDetailView.vue` | the whole text, wrapped at a readable measure, between the title row and the target line |
 | create / edit | `frontend/src/views/NewMonitorView.vue` | a textarea under Name, optional, with a live `n / 200` counter; over the limit the counter turns `--down`, the message says what to do, and Create/Save stays disabled |
 
-A monitor with no description renders identically to today on every surface: no empty line, no
-placeholder, no change in row or card height.
+A monitor with no description renders identically to today on every surface: no empty line and no
+placeholder — no element at all.
+
+**The dashboard's height, stated exactly** (owner's decision, 2026-09-03, after reviewer P1). A card
+with a description is ONE LINE taller than one without: the line is a flex child of the card, and
+`truncate` stops it becoming two lines but cannot remove the one. Inside a grid row the items stretch,
+so no card is ever taller than its neighbour — the ROW is one line taller when any card in it has a
+description, and an undescribed card in that row gains trailing space. This is what the approved mock
+renders, and it is how the card already behaves for content it has always had: a `push` monitor has no
+latency column and no error-budget meter, so it is shorter than an `http` monitor beside it. The
+earlier wording here — "so the panel keeps its height and its grid" — was false of this component for
+any field, and is corrected rather than defended. The alternative, reserving the line on every card,
+was declined by the owner because it would change every existing dashboard for people who never write
+a description.
 
 **D4 — where it deliberately does not appear.** Public status pages (a description is written for the team
 and may name internal hosts; components keep their own public wording). Alerts, notifications and incident
@@ -94,11 +106,15 @@ at the END, in that order, and the create and update statements gain it (the cha
    multibyte sample alike, so the count is by code points on both sides.
 2. Omitted on create → empty; omitted on update → unchanged; `""` on update → cleared; whitespace is
    trimmed and a whitespace-only value is empty.
-3. Every monitor that existed before the migration reads back with `description: ""` and every surface
-   renders it exactly as before — no empty line on the list, no line on the card, nothing on the detail.
+3. Every monitor that existed before the migration reads back with `description: ""` and carries NO
+   description element on any surface — no empty line on the list, no line on the card, nothing on the
+   detail. Its card is unchanged in itself; in a grid row shared with a described card it stretches to
+   that row's height, exactly as it already stretches beside a taller card today.
 4. The monitor list shows the description under the name as one line with the full text as tooltip; the
-   dashboard card shows one line cut by CSS; the detail page shows the whole text; the form shows the
-   live count, the refusal state and keeps Create/Save disabled while over the limit.
+   dashboard card shows ONE line, cut by CSS and never wrapping — asserted structurally, as exactly one
+   more flex child than an undescribed card, so the height difference is a measured number rather than
+   a promise; the detail page shows the whole text; the form shows the live count, the refusal state
+   and keeps Create/Save disabled while over the limit.
 5. A bundle with `description` sets it; a bundle without the key leaves it empty and applies unchanged;
    a bundle that changes only the description is a change; removing the key clears it; the re-apply of an
    identical bundle is not a change; and the UI cannot write a file-managed monitor's description at all.

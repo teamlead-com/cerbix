@@ -6569,3 +6569,22 @@ Specification: `docs/specs/func-monitor-description.md` (FR-030).
    writes (`ErrManagedByFile`). The test found that; the record says what is true instead.
 6. **A description change is a monitor update** and audits as one (D-0233); its text never reaches the
    audit target.
+
+**Correction from review (P1, 2026-09-03): the dashboard height contract as written was false.** The
+spec said the card "keeps its height and its grid". It does not: the description is a flex child of a
+`flex flex-col gap-[13px]` card, so a described card is one line (~23px) taller, and `truncate` only
+prevents a SECOND line. Measured with `MonitorCardDescription.spec.ts` — a described card has exactly
+one more flex child — rather than argued.
+
+Two facts shaped the resolution. The approved mock renders exactly what the code renders, so the false
+thing was the prose, not the appearance. And this card's height has always depended on its content:
+`v-if="monitor.type !== 'push'"` (latency) and the error-budget meter mean a push monitor is already
+shorter than an http monitor beside it — the same test asserts that, so "the panel keeps its height"
+was never true of this component for any field.
+
+The owner chose to keep the second line and state the real contract (2026-09-03): a card with a
+description is one line taller; inside a grid row the items stretch, so no card is taller than its
+neighbour and the ROW grows by that line, an undescribed card in it gaining trailing space. Reserving
+the line on every card was declined — it would change every existing dashboard for people who never
+write a description. Rewriting the sentence to match the code was not treated as sufficient on its own:
+the geometry is now asserted structurally, in the regression the reviewer asked for.

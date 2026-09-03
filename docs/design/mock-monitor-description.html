@@ -238,7 +238,7 @@ pre.yaml .n{color:var(--note)}
         <div class="stats"><div class="k"><span class="lbl">Uptime 30d</span><span class="v">100%</span></div><div class="k"><span class="lbl">Latency</span><span class="v">48 ms</span></div></div>
       </a>
     </div>
-    <div class="note"><b>Rules on this surface.</b> Cut by the panel's own width with an ellipsis — the CSS does the cutting, so nothing wraps and no card grows taller than its neighbours. Quieter than the name (<span class="mono">--ink-3</span>, 12 px): a glance tells you what the panel is for, the click tells you the rest. The third card is a monitor with no description: unchanged, including its height.</div>
+    <div class="note"><b>Rules on this surface.</b> Cut by the panel's own width with an ellipsis — the CSS does the cutting, so the line never wraps into a second one. Quieter than the name (<span class="mono">--ink-3</span>, 12 px): a glance tells you what the panel is for, the click tells you the rest. <b>Height, exactly:</b> a described card is one line taller than an undescribed one; inside a grid row the cards stretch to the row, so none is taller than its neighbour and the third card here — a monitor with no description — simply gains trailing space. That is what this mock renders, and it is how the card already behaves for content it has always had (a push monitor has no latency column and no budget meter). An earlier version of this note claimed the panel keeps its height; it does not, and the claim is corrected rather than defended.</div>
   </section>
 
   <!-- 3 · detail -->

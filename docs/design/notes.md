@@ -569,8 +569,13 @@ it where monitors are listed, without breaking existing monitors.
 
 - **A second line under the name on `/monitors`, not a sixth column** — the table is five wide and a
   description belongs to the name it explains. One line, ellipsis, the full text as the cell's tooltip.
-- **The beginning of the description on a dashboard panel**, cut by the panel's own width in CSS, so no
-  card grows taller than its neighbours and the grid keeps its shape; quieter than the name (`--ink-3`).
+- **The beginning of the description on a dashboard panel**, cut by the panel's own width in CSS so it
+  can never become two lines; quieter than the name (`--ink-3`). A described card is one line taller
+  than an undescribed one — inside a grid row the items stretch, so no card is taller than its
+  neighbour and the row grows by that line. The sentence originally written here ("so no card grows
+  taller than its neighbours and the grid keeps its shape") read as a promise that the panel's height
+  is unchanged, which is false of this card for any field: a `push` monitor is already shorter than an
+  `http` one beside it. Corrected after reviewer P1, with the owner keeping the mock as drawn.
 - **The whole text on the monitor page**, between the title row and the target line, at a readable
   measure.
 - **A textarea under Name with a live `n / 200` count**; over the limit the count turns `--down`, the

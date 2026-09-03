@@ -6,31 +6,32 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/metrics"
 )
 
 // EnqueuePullJob stores a check-job payload for a pull-served region with a TTL
 // (ttlSeconds), so an agent can claim it over HTTP. A non-positive TTL falls back to
 // 60s. The payload is an opaque JSON snapshot (a dispatch.CheckJob).
-func (s *Store) EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error {
-	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 1)
+func (s *Store) EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int, workflowKind string) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 1, workflowKind)
 }
 
-func (s *Store) EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error {
-	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 2)
+func (s *Store) EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int, workflowKind string) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 2, workflowKind)
 }
 
 // EnqueuePullJobV3 enqueues on the carrier generation that carries envelope v2. It is used
 // only for a region whose executors have declared capability 2 (§4.7, D-0160).
-func (s *Store) EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error {
-	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 3)
+func (s *Store) EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int, workflowKind string) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 3, workflowKind)
 }
 
 // leaseSeconds is the per-JOB claim lease (FR-029 §4.2). Zero means "the endpoint's default", which
 // is what every existing caller and every short probe passes — a monitor whose probe outlives the
 // default is the only one that needs its own, and a job re-claimed while it still runs is a duplicate
 // probe for an ordinary type and a duplicate external TRANSACTION for a canary.
-func (s *Store) enqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds, protocolVersion int) error {
+func (s *Store) enqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds, protocolVersion int, workflowKind string) error {
 	if ttlSeconds <= 0 {
 		ttlSeconds = 60
 	}
@@ -38,10 +39,16 @@ func (s *Store) enqueuePullJob(ctx context.Context, region string, payload []byt
 	if leaseSeconds > 0 {
 		lease = &leaseSeconds
 	}
+	// NULL, not "", for a job any agent may run: the claim filter is `IS NULL OR = ANY(...)`, and an
+	// empty string would be a capability nobody ever announces — every ordinary job unclaimable.
+	var kind *string
+	if workflowKind != "" {
+		kind = &workflowKind
+	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO pull_jobs (region, payload, expires_at, protocol_version, lease_seconds)
-		 VALUES ($1, $2, now() + make_interval(secs => $3), $4, $5)`,
-		region, payload, ttlSeconds, protocolVersion, lease)
+		`INSERT INTO pull_jobs (region, payload, expires_at, protocol_version, lease_seconds, workflow_kind)
+		 VALUES ($1, $2, now() + make_interval(secs => $3), $4, $5, $6)`,
+		region, payload, ttlSeconds, protocolVersion, lease, kind)
 	if err != nil {
 		return fmt.Errorf("store: enqueue pull job: %w", err)
 	}
@@ -67,8 +74,8 @@ type PullJob struct {
 }
 
 // ClaimPullJobs serves the generation-1 endpoint: generation-1 rows only.
-func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
-	return s.claimPullJobs(ctx, region, max, leaseSeconds, 1)
+func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeconds int, workflowKinds []string) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 1, workflowKinds)
 }
 
 // ClaimPullJobsV2 serves the capability-2 endpoint and leases EVERY generation at or below
@@ -82,13 +89,13 @@ func (s *Store) ClaimPullJobs(ctx context.Context, region string, max, leaseSeco
 // heartbeat, no DOWN, no alert. Two sequential single-generation claims are NOT an
 // equivalent fix: the long poll sleeps out its window on whichever generation is empty, and
 // two independent claims each honour `max` separately and over-lease.
-func (s *Store) ClaimPullJobsV2(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
-	return s.claimPullJobs(ctx, region, max, leaseSeconds, 2)
+func (s *Store) ClaimPullJobsV2(ctx context.Context, region string, max, leaseSeconds int, workflowKinds []string) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 2, workflowKinds)
 }
 
 // ClaimPullJobsV3 serves the capability-2 endpoint: every generation up to 3.
-func (s *Store) ClaimPullJobsV3(ctx context.Context, region string, max, leaseSeconds int) ([]PullJob, error) {
-	return s.claimPullJobs(ctx, region, max, leaseSeconds, 3)
+func (s *Store) ClaimPullJobsV3(ctx context.Context, region string, max, leaseSeconds int, workflowKinds []string) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 3, workflowKinds)
 }
 
 // claimPullJobs atomically LEASES up to max claimable jobs for a region, of any generation
@@ -102,7 +109,7 @@ func (s *Store) ClaimPullJobsV3(ctx context.Context, region string, max, leaseSe
 //
 // Ordering by created_at across the whole set is what keeps generations from starving each
 // other: rows compete on age, not on which generation they belong to.
-func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeconds, maxProtocolVersion int) ([]PullJob, error) {
+func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeconds, maxProtocolVersion int, workflowKinds []string) ([]PullJob, error) {
 	if max <= 0 {
 		max = 16
 	}
@@ -117,12 +124,16 @@ func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeco
 		     SELECT id FROM pull_jobs
 		      WHERE region = $1 AND protocol_version <= $4 AND expires_at > now()
 		        AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+		        -- FR-029 invariant 6: a job that names a capability goes only to a claim that
+		        -- DECLARED it. NULL is the ordinary job every agent may run, so nothing about the
+		        -- existing path depends on what the claimant announced.
+		        AND (workflow_kind IS NULL OR workflow_kind = ANY($5))
 		      ORDER BY created_at
 		      LIMIT $2
 		      FOR UPDATE SKIP LOCKED
 		  )
 		  RETURNING claim_token::text, payload, protocol_version`,
-		region, max, leaseSeconds, maxProtocolVersion)
+		region, max, leaseSeconds, maxProtocolVersion, declaredKinds(workflowKinds))
 	if err != nil {
 		return nil, fmt.Errorf("store: claim pull jobs: %w", err)
 	}
@@ -136,6 +147,20 @@ func (s *Store) claimPullJobs(ctx context.Context, region string, max, leaseSeco
 		out = append(out, job)
 	}
 	return out, rows.Err()
+}
+
+// declaredKinds normalizes what a claim announced into a form `= ANY($n)` can take.
+//
+// It is not load-bearing for the current clause, and a mutation test proved that: pgx sends a nil
+// slice as NULL, `workflow_kind = ANY(NULL)` is NULL, and a WHERE treats NULL as not-true — the same
+// answer the empty array gives. It stays because that agreement rests on three-valued logic holding
+// under a clause nobody has negated yet, and "declared nothing" is better said in the value than
+// discovered in the semantics.
+func declaredKinds(kinds []string) []string {
+	if kinds == nil {
+		return []string{}
+	}
+	return kinds
 }
 
 // AckPullJobs removes leased jobs by their claim tokens — the agent's confirmation
@@ -187,11 +212,23 @@ func (s *Store) PullQueueStats(ctx context.Context) ([]metrics.PullStat, error) 
 
 // RecordAgentHeartbeat upserts a pull agent's last-seen time for its region.
 func (s *Store) RecordAgentHeartbeat(ctx context.Context, region, agentID string) error {
-	return s.RecordAgentCapabilities(ctx, region, agentID, 0, false)
+	return s.RecordAgentCapabilities(ctx, region, agentID, 0, false, nil)
 }
 
-func (s *Store) RecordAgentCapabilities(ctx context.Context, region, agentID string, credentialEnvelope int, credentialReady bool) error {
-	capabilities, err := json.Marshal(map[string]int{"credential_envelope": credentialEnvelope})
+// RecordAgentCapabilities upserts what an agent says it can do. `workflowKinds` is the FR-029
+// announcement: the `<kind>@<version>` tokens this agent's binary executes, alongside the envelope
+// generation it can open. Both live in one JSONB document because they answer one question — what
+// may core send here — and splitting them would make a reader check two places to answer it.
+func (s *Store) RecordAgentCapabilities(ctx context.Context, region, agentID string,
+	credentialEnvelope int, credentialReady bool, workflowKinds []string) error {
+
+	if workflowKinds == nil {
+		workflowKinds = []string{}
+	}
+	capabilities, err := json.Marshal(map[string]any{
+		"credential_envelope":      credentialEnvelope,
+		domain.CanaryCapabilityKey: workflowKinds,
+	})
 	if err != nil {
 		return fmt.Errorf("store: encode agent capabilities: %w", err)
 	}
@@ -237,6 +274,58 @@ func (s *Store) LiveCredentialReadyAgentRegions(ctx context.Context, within time
 			return nil, fmt.Errorf("store: scan credential-ready agent region: %w", err)
 		}
 		out[region] = true
+	}
+	return out, rows.Err()
+}
+
+// LiveCanaryAgentCapabilities is the FR-029 half of the same existential question
+// `LiveCredentialReadyAgentRegions` answers for envelopes: what did the live agents in each region
+// ANNOUNCE they can run?
+//
+// It returns the announced tokens instead of a yes/no because a boolean cannot tell the two
+// dispatch failures apart. A region with no canary-capable agent and a region whose agents announce
+// only a version core is not emitting are the same "false", but the operator's fix differs — start a
+// runner, or finish an upgrade — so the scheduler is given the set and names the reason from it.
+// Union across agents: a region is as capable as its most capable live agent, and the in-flight cap
+// is what stops one lucky agent from being handed everything.
+func (s *Store) LiveCanaryAgentCapabilities(ctx context.Context, within time.Duration) (map[string][]string, error) {
+	secs := int(within.Seconds())
+	if secs <= 0 {
+		secs = 60
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT region, capabilities->'`+domain.CanaryCapabilityKey+`'
+		   FROM agent_heartbeats
+		  WHERE seen_at > now() - make_interval(secs => $1)
+		    AND jsonb_typeof(capabilities->'`+domain.CanaryCapabilityKey+`') = 'array'`, secs)
+	if err != nil {
+		return nil, fmt.Errorf("store: live canary agent capabilities: %w", err)
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	seen := map[string]map[string]bool{}
+	for rows.Next() {
+		var region string
+		var raw []byte
+		if err := rows.Scan(&region, &raw); err != nil {
+			return nil, fmt.Errorf("store: scan canary agent capabilities: %w", err)
+		}
+		var tokens []string
+		if err := json.Unmarshal(raw, &tokens); err != nil {
+			// A malformed announcement is not a capability. Skipped rather than failing the whole
+			// lookup, which would make every region look incapable because one agent wrote junk.
+			continue
+		}
+		if seen[region] == nil {
+			seen[region] = map[string]bool{}
+		}
+		for _, t := range tokens {
+			if t == "" || seen[region][t] {
+				continue
+			}
+			seen[region][t] = true
+			out[region] = append(out[region], t)
+		}
 	}
 	return out, rows.Err()
 }

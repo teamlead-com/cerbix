@@ -520,8 +520,11 @@ flowchart TB
 - **Postgres 16 (TimescaleDB image)** — primary + streaming replica; time series on regular
   RANGE partitions + the `heartbeats_daily` rollup, retention drops old partitions (leader).
 - **RabbitMQ 4.3** — preferred cluster after the staged upgrade; durable regional
-  `checks.jobs.<region>` / `checks.jobs.v2.<region>` queues plus shared
-  `checks.results` / `checks.dead` and auto-delete regional test queues.
+  `checks.jobs.<region>` / `checks.jobs.v2.<region>` / `checks.jobs.v3.<region>` queues, the
+  per-capability `checks.canary.[v3.]<kind>@<version>.<region>` (FR-029) plus shared
+  `checks.results` / `checks.dead` and auto-delete regional test queues. A queue per carrier and per
+  capability is deliberate: an executor that cannot open or cannot run a payload must be unable to
+  RECEIVE it, because a capability check does not stop a consumer from consuming.
 - **Keycloak** — OIDC IdP (realm/client `cerbix`). Local login remains as a lockout fallback.
 - **Secrets** — `security.encryption_key` from a secret manager/environment variable; rotation via
   `cerbix reencrypt`.
@@ -660,6 +663,11 @@ of a pull region (for the picker and the "region without a worker" alert) — vi
   re-sends them as a **historical backfill** (`POST /agent/backfill`) — filling the SLA gap **without** running old
   events through alerting (no incident storm after the fact). Idempotent (unique `monitor_id, ts`).
 - **Result scoping:** an agent cannot post another region's results (403).
+- **Capability, declared per claim:** an agent declares what it can OPEN (`X-Cerbix-Credential-Envelope`) and
+  what it can RUN (`X-Cerbix-Workflow-Kinds`, `<kind>@<version>` — FR-029) on every claim, not once at
+  startup. A job may carry a required capability (`pull_jobs.workflow_kind`, NULL for everything any agent
+  may run) and the claim only leases what it declared. That is what keeps a MIXED fleet honest: an agent
+  that predates a monitor type never receives one, while still claiming every ordinary job.
 - **Observability:** metrics `cerbix_pull_jobs_pending{region}` and `cerbix_pull_agent_lag_seconds{region}`. Page
   on **lag** (a stuck agent that heartbeats but doesn't drain the queue):
 

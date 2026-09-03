@@ -97,10 +97,11 @@ type Store interface {
 	// leaseSeconds is the per-JOB claim lease: a probe that outlives the endpoint's default would
 	// otherwise be re-claimed while it still runs — a duplicate probe for an ordinary type and a
 	// duplicate external TRANSACTION for a canary (FR-029 §4.2). Zero keeps today's default.
-	EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error
-	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error
-	EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int) error
+	EnqueuePullJob(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int, workflowKind string) error
+	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int, workflowKind string) error
+	EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int, workflowKind string) error
 	LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error)
+	LiveCanaryAgentCapabilities(ctx context.Context, within time.Duration) (map[string][]string, error)
 	PurgeExpiredPullJobs(ctx context.Context) (int, error)
 	PurgeExpiredPullTests(ctx context.Context) (int, error)
 	PurgeStaleAgentHeartbeats(ctx context.Context, olderThan time.Duration) (int, error)
@@ -200,6 +201,10 @@ type LiveRegionSource interface {
 type CredentialLiveRegionSource interface {
 	LiveCredentialJobRegions(ctx context.Context) (map[string]bool, error)
 	LiveCredentialV3JobRegions(ctx context.Context) (map[string]bool, error)
+	// LiveCanaryJobRegions is the AMQP half of the FR-029 capability question: a region qualifies
+	// only when something is consuming the per-workflow-kind queue. A consumer on the ordinary job
+	// queue is not evidence that anything there can run a canary.
+	LiveCanaryJobRegions(ctx context.Context) (map[string][]string, error)
 }
 
 const (
@@ -313,6 +318,11 @@ const (
 // timeout + this, and the runbook states that number rather than leaving it to arithmetic.
 const canaryInflightSlack = 60 * time.Second
 
+// canaryCapabilityWindow is how recently a pull agent must have been seen for its announcement to
+// count. Same 45s the credential readiness lookups use: three missed 15s heartbeats, which is a real
+// outage rather than one slow poll.
+const canaryCapabilityWindow = 45 * time.Second
+
 // pullLeaseFor is the per-job claim lease a monitor needs: its own probe budget plus slack, or zero
 // for a probe short enough that the endpoint's default already covers it. Written against the
 // TIMEOUT rather than against the type, because the defect it closes predates the canary — any pull
@@ -367,6 +377,98 @@ func (s *Scheduler) releaseCanarySlot(ctx context.Context, m domain.Monitor) {
 	if err := s.store.ReleaseCanaryInflight(ctx, m.ID, m.Config[domain.CanaryRunKey]); err != nil {
 		s.logger.Error("release_canary_inflight_failed", "monitor_id", m.ID, "error", err.Error())
 	}
+}
+
+// canaryRunnerAvailable reports whether the monitor's region announced a runner for the workflow the
+// job carries. A monitor of any other type always may go, and the announcement is fetched through
+// `announced` so a tick with no due canary never pays for the lookup.
+//
+// The reason it is a refusal and not silence: a job published into a region with no capable consumer
+// sits on a queue until its TTL and the monitor reports NOTHING, which is the indefinite pending the
+// brief forbids. One bounded DOWN per run says the same thing in the units the operator already
+// reads, and the monitor's own `failure_threshold` decides whether it flips.
+func (s *Scheduler) canaryRunnerAvailable(ctx context.Context, m domain.Monitor, announced func() map[string][]string) bool {
+	if m.Type != domain.MonitorAsyncCanary {
+		return true
+	}
+	// The required token comes from the DOCUMENT, not from this binary's constant: a workflow of a
+	// kind core does not know must ask for a runner that announces THAT kind rather than being
+	// dispatched hopefully to whatever is there.
+	required := domain.CanaryCapabilityRequiredByConfig(m.Config)
+	here := announced()[m.Region]
+	if domain.CanaryCapabilityAnnounced(here, required) {
+		return true
+	}
+	// Which of the two reasons it is, decided by what the region ANNOUNCED rather than guessed: a
+	// region that announced some canary capability but not this one is a version skew, and one that
+	// announced none at all is an absence. An operator reads a different sentence for each because
+	// the fix differs — finish the upgrade, or start a runner.
+	reason := "no_capable_runner"
+	if len(here) > 0 {
+		reason = "capability_mismatch"
+	}
+	s.reportCanaryShortage(ctx, m, reason)
+	return false
+}
+
+// pullWorkflowKindFor is the capability a pull-queued job REQUIRES, empty for every type that any
+// agent may run. It is the pull transport's equivalent of the canary's own AMQP queue: the row
+// carries the requirement so the claim can filter on it, because an announcement that only the
+// scheduler consults still lets a mixed fleet's older agent take the job first.
+func pullWorkflowKindFor(m domain.Monitor) string {
+	if m.Type != domain.MonitorAsyncCanary {
+		return ""
+	}
+	return domain.CanaryCapabilityRequiredByConfig(m.Config)
+}
+
+// canaryAnnouncements merges the THREE places an executor can announce itself, which are the same
+// three readiness already uses: a live pull agent's heartbeat, a consumer on the per-token AMQP
+// queue, and an in-process executor whose capability is ours by construction.
+//
+// A lookup that fails contributes nothing rather than failing the tick — the consequence is a
+// bounded refusal with a reason, which is the same outcome as a genuinely absent runner and is
+// visible in the log and the metric. Silently dispatching into a region core could not verify is the
+// one outcome the invariant does not allow.
+func (s *Scheduler) canaryAnnouncements(ctx context.Context) map[string][]string {
+	out := map[string][]string{}
+	add := func(region string, tokens ...string) {
+		for _, t := range tokens {
+			if t != "" && !domain.CanaryCapabilityAnnounced(out[region], t) {
+				out[region] = append(out[region], t)
+			}
+		}
+	}
+	if byRegion, err := s.store.LiveCanaryAgentCapabilities(ctx, canaryCapabilityWindow); err != nil {
+		if ctx.Err() == nil {
+			s.logger.Warn("canary_agent_capability_lookup_failed", "error", err.Error())
+		}
+	} else {
+		for region, tokens := range byRegion {
+			// Pull-only: an agent heartbeat says nothing about a region served over AMQP, exactly as
+			// the credential readiness split already treats it.
+			if s.pullRegions[region] {
+				add(region, tokens...)
+			}
+		}
+	}
+	if s.credentialLiveRegions != nil {
+		if byRegion, err := s.credentialLiveRegions.LiveCanaryJobRegions(ctx); err != nil {
+			if ctx.Err() == nil {
+				s.logger.Warn("canary_worker_capability_lookup_failed", "error", err.Error())
+			}
+		} else {
+			for region, tokens := range byRegion {
+				if !s.pullRegions[region] {
+					add(region, tokens...)
+				}
+			}
+		}
+	}
+	for region := range s.localCanaryRegions {
+		add(region, domain.CanaryCapabilityOfThisBinary())
+	}
+	return out
 }
 
 // claimCanarySlot takes the in-flight slot for a canary and reports true when the job may be
@@ -433,10 +535,15 @@ type Scheduler struct {
 	liveRegions            LiveRegionSource
 	credentialLiveRegions  CredentialLiveRegionSource
 	localCredentialRegions map[string]bool
-	pullRegions            map[string]bool // regions served over HTTP-pull (jobs go to pull_jobs, not AMQP)
-	pullMetrics            PullStatsSink
-	serviceMetrics         ServiceStatsSink
-	statsEvery             time.Duration // test override for the stats cadence
+	// localCanaryRegions are regions served by an executor INSIDE this process (role=all). Its
+	// capability is ours by construction — there is no wire and no version skew to discover — and
+	// without this the common single-binary deployment would find no capable region and refuse every
+	// canary, which is the shape of defect the credential path already paid for once.
+	localCanaryRegions map[string]bool
+	pullRegions        map[string]bool // regions served over HTTP-pull (jobs go to pull_jobs, not AMQP)
+	pullMetrics        PullStatsSink
+	serviceMetrics     ServiceStatsSink
+	statsEvery         time.Duration // test override for the stats cadence
 	// alertSuccess is when each alerting arm last SUCCEEDED, and it is what makes a persistently
 	// failing evaluator visible. Readiness cannot be derived from lag alone: a pass that rolled
 	// back reports no lag at all, so an arm erroring every cadence would keep the last successful
@@ -566,6 +673,21 @@ func (s *Scheduler) WithLocalCredentialRegions(regions ...string) *Scheduler {
 	}
 	for _, region := range regions {
 		s.localCredentialRegions[region] = true
+	}
+	return s
+}
+
+// WithLocalCanaryRegions authorizes in-process canary execution for --role=all, where there is no
+// AMQP consumer and no agent heartbeat to discover but the executor is this very binary. Without it
+// the commonest deployment would announce nothing, find no capable region, and refuse every canary
+// with `no_capable_runner` — which is what the credential path already learned the hard way when the
+// same omission left role=all stuck a generation behind (FR-029 invariant 6).
+func (s *Scheduler) WithLocalCanaryRegions(regions ...string) *Scheduler {
+	if s.localCanaryRegions == nil {
+		s.localCanaryRegions = map[string]bool{}
+	}
+	for _, region := range regions {
+		s.localCanaryRegions[region] = true
 	}
 	return s
 }
@@ -1267,6 +1389,18 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			// in one bounded DB batch immediately before dispatch (§4.4.3/4).
 			publishFailed, publishErr := 0, ""
 			credentialByRegion := map[string][]string{}
+			// FR-029 invariant 6. Which capability TOKENS each region announced, resolved at most
+			// once per tick and only when a canary is actually due: an instance with no canaries
+			// must not pay a management-API call and a query every tick for an answer nothing reads.
+			var canaryAnnounced map[string][]string
+			canaryResolved := false
+			announcedCanary := func() map[string][]string {
+				if !canaryResolved {
+					canaryResolved = true
+					canaryAnnounced = s.canaryAnnouncements(ctx)
+				}
+				return canaryAnnounced
+			}
 			for _, m := range monitors {
 				if m.Type == domain.MonitorPush || !m.Type.Active() {
 					continue
@@ -1291,6 +1425,13 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 				// FR-029 D9/D9a. BOTH dispatch paths take the lease: a canary with no binding never
 				// reaches the credential branch below, and the first version of this change put the
 				// claim only there — so a canary without secrets kept every guarantee off.
+				// FR-029 invariant 6: a canary goes only to a region that ANNOUNCED it can run one.
+				// Checked BEFORE the in-flight claim, so an incapable region does not consume a
+				// slot it can never release.
+				if !s.canaryRunnerAvailable(ctx, m, announcedCanary) {
+					nextRun[m.ID] = now.Add(iv)
+					continue
+				}
 				// The run must be stamped BEFORE the claim: the slot is keyed by it, and the job
 				// carries it so the result can release exactly that slot.
 				m = withCanaryRunKey(m, now)
@@ -1308,7 +1449,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						s.logger.Error("marshal_pull_job_failed", "monitor_id", m.ID, "error", err.Error())
 						continue // never enqueued → don't advance the cadence
 					}
-					if err := s.store.EnqueuePullJob(ctx, m.Region, payload, int(iv/time.Second), pullLeaseFor(m)); err != nil {
+					if err := s.store.EnqueuePullJob(ctx, m.Region, payload, int(iv/time.Second), pullLeaseFor(m), pullWorkflowKindFor(m)); err != nil {
 						if ctx.Err() != nil {
 							return false
 						}
@@ -1479,6 +1620,10 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						// second dispatch of the same monitor would submit a SECOND external
 						// transaction, and a region with several executors has no worker-local way
 						// to bound how many long journeys run at once. Both are decided here.
+						if !s.canaryRunnerAvailable(ctx, m, announcedCanary) {
+							nextRun[m.ID] = now.Add(iv)
+							continue
+						}
 						if !s.claimCanarySlot(ctx, m) {
 							nextRun[m.ID] = now.Add(iv)
 							continue
@@ -1559,11 +1704,11 @@ func (s *Scheduler) publishScheduledJob(ctx context.Context, job dispatch.CheckJ
 		// payload to an executor that did not declare the capability to open it.
 		switch {
 		case job.ProtocolVersion >= dispatch.ProtocolV3:
-			return s.store.EnqueuePullJobV3(ctx, region, payload, int(interval/time.Second), pullLeaseFor(job.Monitor))
+			return s.store.EnqueuePullJobV3(ctx, region, payload, int(interval/time.Second), pullLeaseFor(job.Monitor), pullWorkflowKindFor(job.Monitor))
 		case job.ProtocolVersion == dispatch.ProtocolV2:
-			return s.store.EnqueuePullJobV2(ctx, region, payload, int(interval/time.Second), pullLeaseFor(job.Monitor))
+			return s.store.EnqueuePullJobV2(ctx, region, payload, int(interval/time.Second), pullLeaseFor(job.Monitor), pullWorkflowKindFor(job.Monitor))
 		default:
-			return s.store.EnqueuePullJob(ctx, region, payload, int(interval/time.Second), pullLeaseFor(job.Monitor))
+			return s.store.EnqueuePullJob(ctx, region, payload, int(interval/time.Second), pullLeaseFor(job.Monitor), pullWorkflowKindFor(job.Monitor))
 		}
 	}
 	return s.dispatcher.PublishJob(ctx, job)

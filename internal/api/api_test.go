@@ -28,6 +28,10 @@ import (
 type fakePullRow struct {
 	payload    []byte
 	generation int
+	// workflowKind is the capability the row REQUIRES (FR-029 invariant 6). Empty means any agent
+	// may run it, which is every ordinary job; the fake filters on it exactly as the SQL does, so a
+	// handler that dropped the claim's declaration is visible here.
+	workflowKind string
 }
 
 type fakePullTest struct {
@@ -43,6 +47,14 @@ type fakeStore struct {
 	// that silently dropped the actor would let a test assert an audited write that never carried
 	// its principal, which is the property FR-026 exists for.
 	auditActors []string
+
+	// announcedWorkflowKinds records what an agent's heartbeat claimed it can run (FR-029
+	// invariant 6). A fake that dropped it would let a receiver test pass while announcing
+	// nothing, which is exactly the silent-incapability failure the invariant guards.
+	announcedWorkflowKinds []string
+	// declaredWorkflowKinds records what each CLAIM declared, which is a different assertion from
+	// the heartbeat's: the header is re-asserted per request and is what the SQL filter uses.
+	declaredWorkflowKinds []string
 
 	rep *fakeReporting
 	// deleteServiceErr injects a store-level delete failure (e.g. the §14.2 file pin).
@@ -773,22 +785,23 @@ func (f *fakeStore) acknowledgeIncident(id, by string) (domain.Incident, error) 
 // The fake models real generations rather than delegating: a fake that always returns
 // generation 0 cannot catch a handler that forgets to stamp, which is the whole point of
 // the response field.
-func (f *fakeStore) ClaimPullJobs(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
-	return f.claimPullJobsUpTo(ctx, region, 1)
+func (f *fakeStore) ClaimPullJobs(ctx context.Context, region string, max, lease int, kinds []string) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 1, kinds)
 }
-func (f *fakeStore) ClaimPullJobsV2(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
-	return f.claimPullJobsUpTo(ctx, region, 2)
+func (f *fakeStore) ClaimPullJobsV2(ctx context.Context, region string, max, lease int, kinds []string) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 2, kinds)
 }
 
-func (f *fakeStore) ClaimPullJobsV3(ctx context.Context, region string, max, lease int) ([]store.PullJob, error) {
-	return f.claimPullJobsUpTo(ctx, region, 3)
+func (f *fakeStore) ClaimPullJobsV3(ctx context.Context, region string, max, lease int, kinds []string) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 3, kinds)
 }
 
 func (f *fakeStore) ClaimPullTestV3(ctx context.Context, region string) (string, []byte, int, bool, error) {
 	return f.claimPullTestUpTo(ctx, region, 3)
 }
 
-func (f *fakeStore) claimPullJobsUpTo(_ context.Context, region string, maxGeneration int) ([]store.PullJob, error) {
+func (f *fakeStore) claimPullJobsUpTo(_ context.Context, region string, maxGeneration int, kinds []string) ([]store.PullJob, error) {
+	f.declaredWorkflowKinds = append(f.declaredWorkflowKinds, kinds...)
 	if f.pullJobs == nil {
 		return nil, nil
 	}
@@ -800,6 +813,10 @@ func (f *fakeStore) claimPullJobsUpTo(_ context.Context, region string, maxGener
 			generation = 1
 		}
 		if generation > maxGeneration {
+			kept = append(kept, row)
+			continue
+		}
+		if row.workflowKind != "" && !domain.CanaryCapabilityAnnounced(kinds, row.workflowKind) {
 			kept = append(kept, row)
 			continue
 		}
@@ -868,7 +885,8 @@ func (f *fakeStore) RecordAgentHeartbeat(_ context.Context, region, agentID stri
 	f.agentHeartbeats[region] = agentID
 	return nil
 }
-func (f *fakeStore) RecordAgentCapabilities(ctx context.Context, region, agentID string, _ int, _ bool) error {
+func (f *fakeStore) RecordAgentCapabilities(ctx context.Context, region, agentID string, _ int, _ bool, kinds []string) error {
+	f.announcedWorkflowKinds = append(f.announcedWorkflowKinds, kinds...)
 	return f.RecordAgentHeartbeat(ctx, region, agentID)
 }
 func (f *fakeStore) RecordHistoricalResults(_ context.Context, hbs []domain.Heartbeat) (int, int, error) {

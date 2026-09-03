@@ -13,6 +13,7 @@ import (
 
 	"github.com/teamlead-com/cerbix/internal/api"
 	"github.com/teamlead-com/cerbix/internal/dispatch"
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func agentReq(h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
@@ -558,5 +559,118 @@ func TestAgentHeartbeatAcceptsTheNewestCapability(t *testing.T) {
 	// And readiness without any envelope capability remains a contradiction.
 	if rec := agentReq(h, http.MethodPost, path, "s3cr3t", body(0, true)); rec.Code != http.StatusBadRequest {
 		t.Fatalf("credential_ready without a capability accepted: %d", rec.Code)
+	}
+}
+
+// FR-029 invariant 6, receiver half. The announcement is untrusted input that lands in a JSONB
+// column an existential query reads, so it is bounded and grammar-checked before it gets there —
+// and what survives the check must reach the store unaltered, because a receiver that quietly
+// dropped it would make every region look incapable forever.
+func TestTheAgentAnnouncementIsBoundedGrammarCheckedAndStored(t *testing.T) {
+	fs := seededStore()
+	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).
+		WithAgentToken("s3cr3t").AgentRouter()
+	path := "/api/v1/agent/heartbeat?region=geo3&agent_id=a1"
+
+	good := `{"capabilities":{"credential_envelope":2,"workflow_kinds":["async_transaction_v1@1"]},"credential_ready":true}`
+	if rec := agentReq(h, http.MethodPost, path, "s3cr3t", good); rec.Code != http.StatusNoContent {
+		t.Fatalf("announcement = %d, want 204 (%s)", rec.Code, rec.Body.String())
+	}
+	if got := fs.announcedWorkflowKinds; len(got) != 1 || got[0] != "async_transaction_v1@1" {
+		t.Fatalf("stored %#v, want the announced token", got)
+	}
+
+	for name, body := range map[string]string{
+		"no version":     `{"capabilities":{"workflow_kinds":["async_transaction_v1"]}}`,
+		"empty token":    `{"capabilities":{"workflow_kinds":[""]}}`,
+		"upper case":     `{"capabilities":{"workflow_kinds":["Async@1"]}}`,
+		"huge version":   `{"capabilities":{"workflow_kinds":["async_transaction_v1@1234"]}}`,
+		"json injection": `{"capabilities":{"workflow_kinds":["async@1\"]}}"]}}`,
+		"too many":       `{"capabilities":{"workflow_kinds":["a@1","b@1","c@1","d@1","e@1","f@1","g@1","h@1","i@1"]}}`,
+	} {
+		if rec := agentReq(h, http.MethodPost, path, "s3cr3t", body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want 400", name, rec.Code)
+		}
+	}
+	// The refusals must not have written anything: a rejected announcement that still reached the
+	// column would be the injection the check exists to stop.
+	if len(fs.announcedWorkflowKinds) != 1 {
+		t.Fatalf("a refused announcement reached the store: %#v", fs.announcedWorkflowKinds)
+	}
+
+	// An agent that predates FR-029 sends no such key at all. That is a correct answer — it
+	// announces nothing and is therefore never sent a canary — not a request to reject.
+	if rec := agentReq(h, http.MethodPost, path, "s3cr3t", `{"capabilities":{"credential_envelope":1}}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("legacy agent heartbeat = %d, want 204", rec.Code)
+	}
+}
+
+// FR-029 invariant 6, claim half. The scheduler refuses to enqueue into a region that announced
+// nothing — but in a mixed fleet the region DID announce, via its new agent, and the OLD agent
+// claiming from the same queue would take the canary and fail it. So the claim itself declares, per
+// request, exactly as the envelope capability does.
+func TestAClaimReceivesOnlyTheWorkflowsItDeclared(t *testing.T) {
+	token := domain.CanaryCapabilityOfThisBinary()
+	fs := seededStore()
+	fs.pullJobs = map[string][]fakePullRow{
+		"geo3": {
+			{payload: []byte(`{"Monitor":{"id":"m1","type":"http","target":"https://x","region":"geo3"}}`)},
+			{payload: []byte(`{"Monitor":{"id":"m2","type":"async_canary","region":"geo3"}}`), workflowKind: token},
+		},
+	}
+	h := api.New(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 8).
+		WithAgentToken("s3cr3t").AgentRouter()
+
+	claim := func(header string) []json.RawMessage {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agent/jobs?region=geo3", nil)
+		req.Header.Set("Authorization", "Bearer s3cr3t")
+		if header != "" {
+			req.Header.Set("X-Cerbix-Workflow-Kinds", header)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("claim = %d (%s)", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Jobs []json.RawMessage `json:"jobs"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out.Jobs
+	}
+
+	// An agent that predates FR-029 sends no header and takes only the ordinary job.
+	if got := claim(""); len(got) != 1 || !strings.Contains(string(got[0]), `"m1"`) {
+		t.Fatalf("legacy claim took %d job(s): %s", len(got), got)
+	}
+	// The declaration reaches the store verbatim — a handler that read the header and dropped it
+	// would pass every assertion above.
+	if len(fs.declaredWorkflowKinds) != 0 {
+		t.Fatalf("a claim with no header declared %#v", fs.declaredWorkflowKinds)
+	}
+	if got := claim(token); len(got) != 1 || !strings.Contains(string(got[0]), `"m2"`) {
+		t.Fatalf("capable claim took %d job(s): %s", len(got), got)
+	}
+	if len(fs.declaredWorkflowKinds) != 1 || fs.declaredWorkflowKinds[0] != token {
+		t.Fatalf("the store saw %#v, want the declared token", fs.declaredWorkflowKinds)
+	}
+
+	// Same bound and grammar as the heartbeat's, because it reaches a SQL parameter.
+	for name, header := range map[string]string{
+		"malformed": "async_transaction_v1",
+		"injection": "a@1,b@1'; --",
+		"too many":  "a@1,b@1,c@1,d@1,e@1,f@1,g@1,h@1,i@1",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agent/jobs?region=geo3", nil)
+		req.Header.Set("Authorization", "Bearer s3cr3t")
+		req.Header.Set("X-Cerbix-Workflow-Kinds", header)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s header = %d, want 400", name, rec.Code)
+		}
 	}
 }

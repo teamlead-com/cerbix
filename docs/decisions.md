@@ -6299,3 +6299,85 @@ check, and all three were mine.
 the short-escape characters carried so the byte difference stays measurable rather than remembered.
 Mutations killed for restoring the six-byte escapes, for dropping U+2028, for escaping DEL, and for
 removing the exponent from the grammar.
+
+## D-0231 — the canary's capability announcement: the queue is the barrier, and the claim declares (2026-09-03)
+
+**Context.** FR-029 invariant 6 was the last unbuilt half of the canary, and iter-0169 named it as such
+rather than implying it: *"The executor receives a job ONLY if it announced the workflow kind and
+version; a region with no such executor produces `no_capable_runner`, a version skew produces
+`capability_mismatch`, and both are bounded, per-monitor and eventually a normal monitor DOWN — never
+an indefinite pending."* Until now a canary in a region whose binaries predate the type answered
+`unsupported monitor type` — an ordinary DOWN with the wrong reason, and the runbook told operators to
+upgrade a region's executors before declaring a canary there.
+
+**Decision 1 — the announcement is a SET of `<kind>@<version>` tokens, generalized from the envelope
+generation.** §D1 of the spec pointed at this: the credential path already answers "is this region
+ready for what I am about to emit" and it does so generationally, because an executor that can open
+generation 1 is not evidence for a region core is about to emit generation 2 into. A canary has the
+same shape — a future `async_transaction_v2` must not land on a runner that knows only v1 — so the
+announcement carries the version and the scheduler asks for the token it is about to emit. Matching is
+EXACT in both directions: a newer runner does not silently accept an older contract it may have stopped
+honouring.
+
+The token a job needs comes from the DOCUMENT, not from core's constant. A workflow of a kind this core
+does not run asks for a runner that announces that kind, so it is refused rather than dispatched
+hopefully. That is one line of code and it is the difference between a capability check and a guess.
+
+**Decision 2 — the two failures are named separately, because the operator's fix differs.** A region
+that announced nothing needs a runner started; a region that announced another version needs an upgrade
+finished. From a boolean they are the same "false", so the sources return the announced SET and the
+scheduler names `no_capable_runner` or `capability_mismatch` from the difference. A lookup that FAILS
+refuses too — not evidence of capability, and dispatching into a region core could not verify is the
+one outcome the invariant forbids.
+
+**Decision 3 — the AMQP half is a queue, not a flag.** D-0160 settled this argument once already for
+envelopes: *a capability CHECK does not stop a consumer from consuming.* A canary published to the
+shared per-region queue in a mixed fleet is taken by whichever worker gets there first, including the
+one that cannot run it. So a canary rides `checks.canary.<kind>@<version>.<region>`, bound only by a
+worker whose RUNNER has the type — and consuming that queue IS the announcement core reads back
+through the management API. Two carriers, not one, because `secrets.enabled: false` must keep a
+SECRETLESS canary working on a worker that can open no envelope at all, and that worker must remain
+physically unable to receive one: `checks.canary.<token>.<region>` for generation 1 and
+`checks.canary.v3.<token>.<region>` for generation 3. Both announce the same capability; whether the
+region can also take an envelope is a different question the credential readiness check already
+answers, and asking it twice would give two answers that can disagree.
+
+The publisher's envelope rule on that carrier is EXACT rather than the generic "generation 2 and up
+must carry one": a canary needs an envelope precisely when its workflow binds a secret. Stated that
+way it refuses both mistakes — a stripped envelope, and an envelope on the queue a capability-0 worker
+consumes.
+
+**Decision 4 — the pull half filters at the CLAIM, because a queue cannot do it there.** Every agent in
+a region claims from one table, so the scheduler's refusal to enqueue is not the whole barrier: in a
+mixed fleet the region DOES announce (its new agent did), and the old agent would take the canary and
+fail it. `pull_jobs` therefore carries the capability the job REQUIRES (migration 00098, NULL for
+everything that any agent may run), the claim declares what it can run in `X-Cerbix-Workflow-Kinds` —
+per request, exactly as `X-Cerbix-Credential-Envelope` is — and the claim query filters. An agent that
+declares nothing still claims every ordinary job, which is the direction that matters: a barrier that
+starved the ordinary path would be the worse bug, and that is the shape of the D-0160 defect where a
+capable claim returned only its own generation and left every ordinary monitor's row to expire.
+
+**Decision 5 — role=all announces from its runner, not from a constant.** The in-process executor's
+capability is this binary's, and the credential path already paid for forgetting that: until D-0160's
+local wiring existed, the commonest deployment never moved past generation 2 and the whole amendment
+was inert there. So `WithLocalCanaryRegions` exists — and both it and the AMQP worker's declaration are
+derived from `runner.Supports(domain.MonitorAsyncCanary)`, one check, so the two paths cannot drift
+into announcing different things.
+
+**What the tests reach, and the mutations killed.** The gate: a region that announced nothing writes one
+DOWN with `no_capable_runner` and takes NO in-flight slot (the check precedes the lease, so an
+incapable region cannot park a slot it can never release); a skewed region says `capability_mismatch`;
+an agent announcement does not speak for an AMQP region; a failed lookup refuses; an instance with no
+canary pays for no lookup at all. Mutations killed: the gate always passing, the reason collapsed to
+one value, and the resolver made eager. The store: the announcement is unioned across LIVE agents only,
+proven by AGEING the row rather than by shrinking the window — a non-positive window falls back to the
+function's own default and would have proven nothing. The claim filter: an old agent takes the ordinary
+job and only that, a v2 agent takes neither, the capable agent takes the canary; mutation killed for
+removing the clause.
+
+**And one comment corrected before a reviewer had to.** `declaredKinds` normalizes nil to an empty
+array, and my comment claimed a nil slice would make the comparison NULL "rather than false" and leave
+every ordinary job unclaimable. A mutation proved that false: pgx sends nil as NULL, `= ANY(NULL)` is
+NULL, and a WHERE treats NULL as not-true — the same answer. The helper stays because that agreement
+rests on three-valued logic holding under a clause nobody has negated yet, but the comment now says so.
+Fourth instance in this arc of the defect D-0228 named: **a claim that outruns its test.**

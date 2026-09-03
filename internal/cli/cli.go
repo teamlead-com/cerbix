@@ -969,6 +969,16 @@ func runServe(args []string) int {
 		if st != nil {
 			runner.WithChildStatus(st.MonitorStatuses) // composite monitors read child statuses
 		}
+		// FR-029 invariant 6. The announcement is derived from the RUNNER, never from a constant:
+		// what this process can execute is the only honest thing to announce, and a token that
+		// outruns the runner would make the region take canaries it then fails.
+		canaryToken := ""
+		if runner.Supports(domain.MonitorAsyncCanary) {
+			canaryToken = domain.CanaryCapabilityOfThisBinary()
+		}
+		if amqpd, ok := disp.(*dispatch.AMQP); ok && *role == "worker" {
+			amqpd.WithCanaryCapability(canaryToken)
+		}
 		if apiHandler != nil {
 			// "Test connection" runs in the target region. Pull regions dispatch the probe
 			// to their agent over HTTP (pull_tests); AMQP regions dispatch it to a worker
@@ -1045,6 +1055,13 @@ func runServe(args []string) int {
 			ch, _ := cn.Subscribe()
 			return ch
 		}
+		// role=all executes non-pull regions in this very process, so its capability is this
+		// process's — announced from the same runner check the AMQP worker uses, and empty if the
+		// runner has no canary, so the two paths cannot drift into announcing different things.
+		var localCanaryRegions []string
+		if canaryToken != "" {
+			localCanaryRegions = append(localCanaryRegions, domain.DefaultRegion)
+		}
 		switch *role {
 		case "all":
 			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
@@ -1053,7 +1070,8 @@ func runServe(args []string) int {
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
 				WithLocalCredentialRegions(domain.DefaultRegion).
-				WithPullRegions(cfg.Pull.Regions). // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
+				WithLocalCanaryRegions(localCanaryRegions...). // FR-029: the in-proc worker IS the announcement in role=all
+				WithPullRegions(cfg.Pull.Regions).             // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
 				WithPullMetrics(registry).
 				WithServiceMetrics(registry).                    // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges
 				WithGateMaintenance(store.GateMaintenanceConfig{ // FR-024 D10: the ledger's fenced partition pass, on its own advisory session

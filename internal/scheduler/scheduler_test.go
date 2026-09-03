@@ -21,12 +21,20 @@ import (
 )
 
 type fakeStore struct {
-	mu               sync.Mutex
-	canaryClaims     []string
-	canaryReleases   []string
-	canaryClaimErr   error
-	canaryHeartbeats []domain.Heartbeat
-	pullLeases       []int
+	mu             sync.Mutex
+	canaryClaims   []string
+	canaryReleases []string
+	canaryClaimErr error
+	// canaryCapabilities is per region the set of `<kind>@<version>` its live agents announced;
+	// canaryCapabilitiesErr makes the lookup itself fail, which must refuse the run rather than
+	// dispatch into a region core could not verify.
+	canaryCapabilities    map[string][]string
+	canaryCapabilitiesErr error
+	// canaryCapabilityLookups counts the calls, so a test can assert the resolver is not paid for
+	// on ticks that have no canary due.
+	canaryCapabilityLookups int
+	canaryHeartbeats        []domain.Heartbeat
+	pullLeases              []int
 
 	serviceSlices int32
 	monitors      []domain.Monitor
@@ -84,6 +92,12 @@ func (s staticCredentialRegions) LiveCredentialV3JobRegions(context.Context) (ma
 
 func (s staticCredentialRegions) LiveCredentialJobRegions(context.Context) (map[string]bool, error) {
 	return s, nil
+}
+
+// No canary consumer by default, for the same reason: a region is capable only when something there
+// announced it, and a fake that announced by default would hide the check entirely.
+func (s staticCredentialRegions) LiveCanaryJobRegions(context.Context) (map[string][]string, error) {
+	return map[string][]string{}, nil
 }
 
 func (f *fakeStore) ListEnabledMonitors(context.Context) ([]domain.Monitor, error) {
@@ -289,17 +303,38 @@ func (f *fakeStore) EvaluateRegionWorkerAlerts(context.Context, map[string]bool,
 func (f *fakeStore) AdvanceEscalations(context.Context) (store.EscalationPass, error) {
 	return f.escalationPass, nil
 }
-func (f *fakeStore) EnqueuePullJob(_ context.Context, _ string, _ []byte, _, lease int) error {
+func (f *fakeStore) EnqueuePullJob(_ context.Context, _ string, _ []byte, _, lease int, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pullLeases = append(f.pullLeases, lease)
 	return nil
 }
 
-func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int, int) error { return nil }
-func (f *fakeStore) EnqueuePullJobV3(context.Context, string, []byte, int, int) error { return nil }
+func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int, int, string) error {
+	return nil
+}
+func (f *fakeStore) EnqueuePullJobV3(context.Context, string, []byte, int, int, string) error {
+	return nil
+}
 func (f *fakeStore) LiveCredentialReadyAgentRegions(context.Context, time.Duration, int) (map[string]bool, error) {
 	return map[string]bool{}, nil
+}
+
+// canaryCapabilities is what the region's live agents announced (FR-029 invariant 6). nil means
+// "nothing announced", which is the state a fresh fake must start in: a fake that announced by
+// default would let a dispatch test pass without the capability ever being checked.
+func (f *fakeStore) LiveCanaryAgentCapabilities(context.Context, time.Duration) (map[string][]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.canaryCapabilityLookups++
+	if f.canaryCapabilitiesErr != nil {
+		return nil, f.canaryCapabilitiesErr
+	}
+	out := map[string][]string{}
+	for region, tokens := range f.canaryCapabilities {
+		out[region] = append([]string(nil), tokens...)
+	}
+	return out, nil
 }
 func (f *fakeStore) PurgeExpiredPullJobs(context.Context) (int, error) { return 0, nil }
 func (f *fakeStore) PurgeDeliveredOutbox(context.Context, time.Duration) (int, error) {

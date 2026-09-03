@@ -11,12 +11,19 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 const (
 	jobsQueuePrefix   = "checks.jobs."
 	jobsV2QueuePrefix = "checks.jobs.v2."
 	jobsV3QueuePrefix = "checks.jobs.v3."
+	// FR-029: the per-workflow-kind queue. Additive by construction — a new queue and a new
+	// binding, with every existing queue and consumer untouched, so an executor that does not
+	// announce the capability simply never sees a canary job.
+	canaryQueuePrefix = "checks.canary."
+	canaryV3Infix     = "v3."
 )
 
 // Client queries the RabbitMQ management API.
@@ -116,6 +123,45 @@ func (c *Client) LiveCredentialV3JobRegions(ctx context.Context) (map[string]boo
 		if q.Consumers > 0 && strings.HasPrefix(q.Name, jobsV3QueuePrefix) {
 			live[strings.TrimPrefix(q.Name, jobsV3QueuePrefix)] = true
 		}
+	}
+	return live, nil
+}
+
+// LiveCanaryJobRegions returns, per region, the capability TOKENS a live worker there announced —
+// one entry per `checks.canary.<token>.<region>` queue that currently has a consumer.
+//
+// It returns the tokens rather than a boolean because the two failures an operator must tell apart
+// look identical from a boolean: a region with no canary worker at all, and a region whose workers
+// speak a version core is not emitting. The first says "start a runner", the second "finish the
+// upgrade", and only the announced set distinguishes them. Existential and never vacuous, exactly as
+// the envelope checks are: a consumer on `checks.jobs.<region>` says nothing about whether anything
+// there can run an async transaction.
+func (c *Client) LiveCanaryJobRegions(ctx context.Context) (map[string][]string, error) {
+	queues, err := c.liveQueues(ctx)
+	if err != nil {
+		return nil, err
+	}
+	live := map[string][]string{}
+	// Deduplicated: the two carriers of one capability are two queues, and a caller that saw the
+	// token twice would have to know that to count announcements.
+	seen := map[string]bool{}
+	for _, q := range queues {
+		if q.Consumers == 0 || !strings.HasPrefix(q.Name, canaryQueuePrefix) {
+			continue
+		}
+		// Both canary carriers announce the SAME capability: the workflow kind and version. Whether
+		// the region can also take an envelope is a different question, and the credential readiness
+		// check already answers it — asking it twice here would give two answers that can disagree.
+		suffix := strings.TrimPrefix(strings.TrimPrefix(q.Name, canaryQueuePrefix), canaryV3Infix)
+		token, region, ok := domain.SplitCanaryQueueSuffix(suffix)
+		if !ok {
+			continue
+		}
+		if seen[region+"\x00"+token] {
+			continue
+		}
+		seen[region+"\x00"+token] = true
+		live[region] = append(live[region], token)
 	}
 	return live, nil
 }

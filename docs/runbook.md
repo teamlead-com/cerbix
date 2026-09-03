@@ -502,14 +502,36 @@ halves recombined from the document's `secret_ref` marker and the flat reference
 runs on an ordinary `worker` or `agent` in the monitor's region. Running it on its own host — a VPS in
 another provider, outbound HTTPS only — is a DEPLOYMENT choice: start another `agent` for that region.
 
-**Upgrade the region's executors BEFORE declaring a canary there.** Capability ANNOUNCEMENT is designed
-and not yet built (FR-029 invariant 6, carried forward), so nothing filters a canary job away from an
-older `worker` or `agent` binary. An executor that predates this release picks the job up and answers
-`unsupported monitor type "async_canary"` — an ordinary DOWN, per monitor, that recovers by itself the
-moment the region runs a current binary. Nothing else in the region is affected, no queue backs up and
-no other monitor changes; the cost is a canary that reads DOWN for the wrong reason until the fleet is
-current. Until the announcement lands, the fleet order is: upgrade the region, then declare the
-canary.
+**A canary reaches only an executor that ANNOUNCED it can run one** (FR-029 invariant 6, built at
+iter-0171). An executor announces `<workflow kind>@<version>` — `async_transaction_v1@1` today — and it
+announces it from the runner it actually has, three ways depending on the transport:
+
+| Transport | How the executor announces | What an operator checks |
+| --- | --- | --- |
+| AMQP `worker` | it consumes `checks.canary.<token>.<region>` (and `checks.canary.v3.<token>.<region>` when secrets are enabled) | the queue exists and has a consumer, in the RabbitMQ management UI |
+| HTTP-pull `agent` | `workflow_kinds` in its heartbeat, and `X-Cerbix-Workflow-Kinds` on every claim | `SELECT region, capabilities FROM agent_heartbeats` |
+| `--role=all` | the in-process runner is this binary | nothing to check — it is announced by construction |
+
+**What a region that cannot run it does.** The scheduler refuses the run and writes ONE ordinary DOWN
+heartbeat with a bounded reason, and the two reasons are different because the fix is:
+
+- `no_capable_runner` — nothing in that region announced a canary runner at all. **Start or upgrade an
+  executor there.** This is also what you get while a capability lookup is failing (the broker's
+  management API is unreachable, the database is down): core refuses rather than dispatching into a
+  region it could not verify.
+- `capability_mismatch` — a runner IS there and announced another version. **Finish the upgrade**, in
+  either direction: core does not send an older contract to a newer runner either.
+
+Both are per-monitor, bounded, and self-healing the moment the fleet is current — nothing queues up,
+no other monitor is affected, and the monitor's own `failure_threshold` decides whether it flips. The
+old advice ("upgrade the region BEFORE declaring a canary there") is no longer needed: a canary
+declared into an un-upgraded region reads DOWN with a reason that names the fix, and starts working by
+itself when the executors arrive.
+
+An older `worker` or `agent` binary is not merely filtered by the scheduler — it is physically unable to
+receive the job. The AMQP canary queue is one it does not bind; on the pull transport the job carries
+the capability it requires and the claim only takes what it declared. That matters in a MIXED fleet,
+where the region does announce (its new executor did) and the old one would otherwise get there first.
 
 **The URL policy is not configurable.** HTTPS only; loopback, link-local, private ranges and cloud
 metadata are refused after DNS resolution and re-validated on every redirect hop. There is no setting
@@ -538,7 +560,7 @@ that acknowledgement is visible in the API and the audit trail.
 
 **Concurrency and shortages.** One execution per monitor and at most four per region, both decided by
 the scheduler at dispatch. A refused run writes ONE ordinary DOWN heartbeat with a bounded reason —
-`region_saturated`, `already_in_flight` — and the monitor's own `failure_threshold` decides whether
+`region_saturated`, `already_in_flight`, `no_capable_runner`, `capability_mismatch` — and the monitor's own `failure_threshold` decides whether
 that flips its status. Those samples **count as unavailable in the service SLI**, like any other DOWN;
 the attribution lives in the reason, in `cerbix_canary_dispatch_refused_total` and in the region alert,
 not in a silent exclusion from the number.

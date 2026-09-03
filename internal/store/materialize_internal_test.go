@@ -79,7 +79,7 @@ func TestMaterializerSnapshotAndPayloadPlaintextAbsence(t *testing.T) {
 		if bytes.Contains(body, []byte(want[item.MonitorID])) {
 			t.Fatalf("transport payload leaked plaintext: %s", body)
 		}
-		if err := st.EnqueuePullJobV2(ctx, item.Job.Monitor.Region, body, item.Job.Monitor.IntervalSeconds, 0); err != nil {
+		if err := st.EnqueuePullJobV2(ctx, item.Job.Monitor.Region, body, item.Job.Monitor.IntervalSeconds, 0, ""); err != nil {
 			t.Fatalf("persist v2 pull payload: %v", err)
 		}
 		materialized, err := dispatch.ValidateAndMaterialize(ring,
@@ -97,7 +97,7 @@ func TestMaterializerSnapshotAndPayloadPlaintextAbsence(t *testing.T) {
 	// The physical pull-queue row is the transport persistence boundary. It must carry
 	// only the envelope ciphertext; neither inventory nor legacy inline plaintext may
 	// survive the authoritative materialization step.
-	persisted, err := st.ClaimPullJobsV2(ctx, "core", len(items), 30)
+	persisted, err := st.ClaimPullJobsV2(ctx, "core", len(items), 30, nil)
 	if err != nil || len(persisted) != len(items) {
 		t.Fatalf("claim persisted v2 payloads: count=%d err=%v", len(persisted), err)
 	}

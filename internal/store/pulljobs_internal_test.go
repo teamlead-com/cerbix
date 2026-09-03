@@ -1,8 +1,11 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
@@ -10,16 +13,16 @@ func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
 
 	// Enqueue three jobs for geo3 and one for core.
 	for i := 0; i < 3; i++ {
-		if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{"n":`+string(rune('0'+i))+`}`), 60, 0); err != nil {
+		if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{"n":`+string(rune('0'+i))+`}`), 60, 0, ""); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 	}
-	if err := st.EnqueuePullJob(ctx, "core", []byte(`{"c":1}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJob(ctx, "core", []byte(`{"c":1}`), 60, 0, ""); err != nil {
 		t.Fatalf("enqueue core: %v", err)
 	}
 
 	// Claim only geo3 jobs (leases them); core's is untouched.
-	got, err := st.ClaimPullJobs(ctx, "geo3", 10, 30)
+	got, err := st.ClaimPullJobs(ctx, "geo3", 10, 30, nil)
 	if err != nil || len(got) != 3 {
 		t.Fatalf("claim geo3 = %d jobs err=%v (want 3)", len(got), err)
 	}
@@ -29,10 +32,10 @@ func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
 		}
 	}
 	// A second claim returns nothing while the lease is live (not re-delivered).
-	if again, _ := st.ClaimPullJobs(ctx, "geo3", 10, 30); len(again) != 0 {
+	if again, _ := st.ClaimPullJobs(ctx, "geo3", 10, 30, nil); len(again) != 0 {
 		t.Fatalf("re-claim under live lease returned %d, want 0", len(again))
 	}
-	if core, _ := st.ClaimPullJobs(ctx, "core", 10, 30); len(core) != 1 {
+	if core, _ := st.ClaimPullJobs(ctx, "core", 10, 30, nil); len(core) != 1 {
 		t.Fatalf("core claim = %d, want 1 (region isolation)", len(core))
 	}
 
@@ -55,7 +58,7 @@ func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `UPDATE pull_jobs SET lease_expires_at = now() - interval '1 second' WHERE region='geo3'`); err != nil {
 		t.Fatalf("lapse lease: %v", err)
 	}
-	reclaimed, err := st.ClaimPullJobs(ctx, "geo3", 10, 30)
+	reclaimed, err := st.ClaimPullJobs(ctx, "geo3", 10, 30, nil)
 	if err != nil || len(reclaimed) != 1 {
 		t.Fatalf("reclaim after lease lapse = %d err=%v (want 1)", len(reclaimed), err)
 	}
@@ -64,13 +67,13 @@ func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
 	}
 
 	// An expired (TTL) job is never claimed, and is purged.
-	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{"old":1}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{"old":1}`), 60, 0, ""); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if _, err := st.pool.Exec(ctx, `UPDATE pull_jobs SET expires_at = now() - interval '1 minute' WHERE region='geo3'`); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
-	if exp, _ := st.ClaimPullJobs(ctx, "geo3", 10, 30); len(exp) != 0 {
+	if exp, _ := st.ClaimPullJobs(ctx, "geo3", 10, 30, nil); len(exp) != 0 {
 		t.Fatalf("expired job claimed = %d, want 0", len(exp))
 	}
 	if n, err := st.PurgeExpiredPullJobs(ctx); err != nil || n != 2 {
@@ -80,10 +83,10 @@ func TestPullJobsClaimLeaseAckReclaimAndTTL(t *testing.T) {
 
 func TestPullQueueStats(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60, 0, ""); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60, 0, ""); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	// Backdate one so lag reflects the oldest.
@@ -108,13 +111,13 @@ func TestPullQueueStats(t *testing.T) {
 
 func TestPullProtocolClaimsArePhysicallySeparated(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if jobs, err := st.ClaimPullJobs(ctx, "secure", 10, 30); err != nil || len(jobs) != 0 {
+	if jobs, err := st.ClaimPullJobs(ctx, "secure", 10, 30, nil); err != nil || len(jobs) != 0 {
 		t.Fatalf("v1 claim saw v2 row: jobs=%d err=%v", len(jobs), err)
 	}
-	jobs, err := st.ClaimPullJobsV2(ctx, "secure", 10, 30)
+	jobs, err := st.ClaimPullJobsV2(ctx, "secure", 10, 30, nil)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("v2 claim: jobs=%d err=%v", len(jobs), err)
 	}
@@ -122,19 +125,19 @@ func TestPullProtocolClaimsArePhysicallySeparated(t *testing.T) {
 
 func TestCredentialReadyAgentRegionIsExistential(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.RecordAgentCapabilities(ctx, "secure", "legacy", 0, false); err != nil {
+	if err := st.RecordAgentCapabilities(ctx, "secure", "legacy", 0, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute, 1); err != nil || ready["secure"] {
 		t.Fatalf("legacy-only region reported ready: %#v err=%v", ready, err)
 	}
-	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-degraded", 1, false); err != nil {
+	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-degraded", 1, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if ready, _ := st.LiveCredentialReadyAgentRegions(ctx, time.Minute, 1); ready["secure"] {
 		t.Fatalf("degraded v2 agent reported ready: %#v", ready)
 	}
-	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-ready", 1, true); err != nil {
+	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-ready", 1, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute, 1); err != nil || !ready["secure"] {
@@ -189,13 +192,13 @@ func TestAgentHeartbeatLiveRegions(t *testing.T) {
 // Enabling a security feature must never silently disable monitoring.
 func TestCapableClaimLeasesEveryGenerationAtOrBelowCapability(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 10, 30)
+	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 10, 30, nil)
 	if err != nil {
 		t.Fatalf("capable claim: %v", err)
 	}
@@ -217,13 +220,13 @@ func TestCapableClaimLeasesEveryGenerationAtOrBelowCapability(t *testing.T) {
 // generation. Widening the capable claim must not widen this one.
 func TestGeneration1ClaimNeverSeesNewerGeneration(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := st.ClaimPullJobs(ctx, "secure", 10, 30)
+	claimed, err := st.ClaimPullJobs(ctx, "secure", 10, 30, nil)
 	if err != nil {
 		t.Fatalf("legacy claim: %v", err)
 	}
@@ -239,14 +242,14 @@ func TestGeneration1ClaimNeverSeesNewerGeneration(t *testing.T) {
 func TestCapableClaimSharesOneMaxAcrossGenerations(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	for i := 0; i < 2; i++ {
-		if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0); err != nil {
+		if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0, ""); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
+		if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
-	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 3, 30)
+	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 3, 30, nil)
 	if err != nil {
 		t.Fatalf("capable claim: %v", err)
 	}
@@ -259,10 +262,10 @@ func TestCapableClaimSharesOneMaxAcrossGenerations(t *testing.T) {
 // generation can starve the other under sustained load.
 func TestCapableClaimOrdersByAgeNotGeneration(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJobV2(ctx, "secure", []byte(`{"protocol":2}`), 60, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJob(ctx, "secure", []byte(`{"protocol":1}`), 60, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	// Make the ordering deterministic regardless of insert-timestamp resolution: the
@@ -271,7 +274,7 @@ func TestCapableClaimOrdersByAgeNotGeneration(t *testing.T) {
 		`UPDATE pull_jobs SET created_at = now() - interval '1 minute' WHERE protocol_version = 2`); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 1, 30)
+	claimed, err := st.ClaimPullJobsV2(ctx, "secure", 1, 30, nil)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("capable claim: rows=%d err=%v", len(claimed), err)
 	}
@@ -285,4 +288,93 @@ func firstGeneration(jobs []PullJob) int {
 		return 0
 	}
 	return jobs[0].ProtocolVersion
+}
+
+// FR-029 invariant 6, storage half: what a region's LIVE agents announced, unioned, and nothing
+// else. The union matters because a region is as capable as its most capable live agent — the
+// in-flight cap, not the announcement, is what keeps one agent from being handed everything.
+func TestLiveCanaryAgentCapabilitiesUnionsOnlyLiveAgents(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	token := domain.CanaryCapabilityOfThisBinary()
+
+	if err := st.RecordAgentCapabilities(ctx, "geo1", "old", 2, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordAgentCapabilities(ctx, "geo1", "new", 2, true, []string{token}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordAgentCapabilities(ctx, "geo2", "skewed", 2, true, []string{"async_transaction_v1@2"}); err != nil {
+		t.Fatal(err)
+	}
+	byRegion, err := st.LiveCanaryAgentCapabilities(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
+	if got := byRegion["geo1"]; len(got) != 1 || got[0] != token {
+		t.Fatalf("geo1 = %#v, want exactly the announced token (the silent agent adds nothing)", got)
+	}
+	// A region whose only runner speaks another version is NOT the same as a region with none: the
+	// caller names two different reasons from this difference.
+	if got := byRegion["geo2"]; len(got) != 1 || got[0] != "async_transaction_v1@2" {
+		t.Fatalf("geo2 = %#v, want the skewed token preserved", got)
+	}
+
+	// Liveness is the whole point of the window: an announcement from an agent that stopped
+	// heartbeating is not evidence that anything there can run a canary NOW. Aged in the table
+	// rather than by shrinking the window, because a non-positive window falls back to the
+	// function's own default and would prove nothing about staleness.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE agent_heartbeats SET seen_at = now() - interval '10 minutes' WHERE region = 'geo1'`); err != nil {
+		t.Fatalf("age the heartbeat: %v", err)
+	}
+	stale, err := st.LiveCanaryAgentCapabilities(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("stale window: %v", err)
+	}
+	if len(stale["geo1"]) != 0 {
+		t.Fatalf("a stale agent still announced %#v", stale["geo1"])
+	}
+	if len(stale["geo2"]) != 1 {
+		t.Fatalf("the live region stopped announcing: %#v", stale)
+	}
+}
+
+// FR-029 invariant 6 on the PULL transport. The scheduler already refuses to enqueue into a region
+// that announced nothing, but that is not the whole barrier: in a mixed fleet the region DOES
+// announce (the new agent did), and the old agent claiming from the same table would take the canary
+// and fail it. A capability check does not stop a consumer from consuming — the claim has to filter.
+func TestAClaimTakesOnlyTheCapabilitiesItDeclared(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	token := domain.CanaryCapabilityOfThisBinary()
+
+	if err := st.EnqueuePullJob(ctx, "geo9", []byte(`{"ordinary":1}`), 60, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnqueuePullJob(ctx, "geo9", []byte(`{"canary":1}`), 60, 0, token); err != nil {
+		t.Fatal(err)
+	}
+
+	// The old agent: declares nothing, and must see only the job that requires nothing. It must
+	// still see THAT one — a barrier that starved the ordinary path would be the worse bug.
+	old, err := st.ClaimPullJobs(ctx, "geo9", 10, 30, nil)
+	if err != nil {
+		t.Fatalf("legacy claim: %v", err)
+	}
+	if len(old) != 1 || !strings.Contains(string(old[0].Payload), "ordinary") {
+		t.Fatalf("legacy claim = %#v, want exactly the ordinary job", old)
+	}
+
+	// The wrong version is not a substitute for the right one.
+	if skewed, _ := st.ClaimPullJobs(ctx, "geo9", 10, 30, []string{"async_transaction_v1@2"}); len(skewed) != 0 {
+		t.Fatalf("a v2 agent claimed %d job(s) that require v1", len(skewed))
+	}
+
+	// The capable agent takes it.
+	capable, err := st.ClaimPullJobs(ctx, "geo9", 10, 30, []string{token})
+	if err != nil {
+		t.Fatalf("capable claim: %v", err)
+	}
+	if len(capable) != 1 || !strings.Contains(string(capable[0].Payload), "canary") {
+		t.Fatalf("capable claim = %#v, want the canary", capable)
+	}
 }

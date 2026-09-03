@@ -14,14 +14,14 @@ func TestAJobCarriesItsOwnClaimLease(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 
 	// A short job takes the endpoint's default (0 = "use the caller's"), a long one asks for more.
-	if err := st.EnqueuePullJob(ctx, "geo9", []byte(`{"short":1}`), 300, 0); err != nil {
+	if err := st.EnqueuePullJob(ctx, "geo9", []byte(`{"short":1}`), 300, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnqueuePullJob(ctx, "geo9", []byte(`{"long":1}`), 300, 360); err != nil {
+	if err := st.EnqueuePullJob(ctx, "geo9", []byte(`{"long":1}`), 300, 360, ""); err != nil {
 		t.Fatal(err)
 	}
 
-	claimed, err := st.ClaimPullJobs(ctx, "geo9", 10, 30)
+	claimed, err := st.ClaimPullJobs(ctx, "geo9", 10, 30, nil)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}

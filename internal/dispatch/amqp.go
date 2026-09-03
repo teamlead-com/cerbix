@@ -33,6 +33,22 @@ const (
 	// on a shared queue would take a message it cannot open, and a capability check does
 	// not stop a consumer from consuming (func-secret-inventory §4.7, D-0160).
 	jobsV3QueuePrefix = "checks.jobs.v3."
+	// FR-029 invariant 6. A canary rides its OWN queue, named for the capability token the
+	// executor announces: `checks.canary.<kind>@<version>.<region>`. Physically separate for the
+	// same reason generation 3 is separate from generation 2 (D-0160) — a capability CHECK does
+	// not stop a consumer from consuming, so a worker that cannot run an async transaction must be
+	// unable to receive one, not merely discouraged. It is additive: every existing queue, binding
+	// and consumer is untouched, so an old worker simply never sees a canary.
+	//
+	// The queue is also the ANNOUNCEMENT: consumers > 0 on it is what tells core the region has a
+	// runner of that kind and version. That is why the token is in the name — a v2 runner binds a
+	// different queue, and core can see the skew instead of publishing into a queue whose consumers
+	// cannot honour the contract.
+	canaryQueuePrefix = "checks.canary."
+	// canaryV3Infix marks the envelope-bearing canary carrier. Two queues, not one, because
+	// `secrets.enabled: false` must keep a SECRETLESS canary working on a worker that can open no
+	// envelope at all — and that worker must still be physically unable to receive one.
+	canaryV3Infix = "v3."
 	// Test probes ("Test connection") are RPCs per region: the API publishes to
 	// checks.tests.<region> with a reply queue; a worker in that region runs the
 	// probe and replies. The queue is durable+auto-delete: it can be shared by N
@@ -111,6 +127,28 @@ func testsV3QueueForRegion(region string) string {
 // jobsQueueForGeneration maps a carrier generation to its physical queue. The mapping is
 // explicit and total: a generation with no queue is a programming error, never a silent
 // fallback onto an older carrier that its consumers could misread.
+func canaryQueueForRegion(token, region string) string {
+	return canaryQueuePrefix + domain.CanaryQueueSuffix(token, region)
+}
+
+func canaryV3QueueForRegion(token, region string) string {
+	return canaryQueuePrefix + canaryV3Infix + domain.CanaryQueueSuffix(token, region)
+}
+
+// canaryQueueForGeneration picks the carrier a canary job rides. Generation 2 is deliberately
+// absent: a canary secret binding requires a BODY-BOUND envelope (envelope v2, carrier 3), so a
+// generation-2 canary carrier could only ever carry a job the executor's gate must refuse.
+func canaryQueueForGeneration(token, region string, generation int) (string, bool) {
+	switch generation {
+	case ProtocolV1:
+		return canaryQueueForRegion(token, region), true
+	case ProtocolV3:
+		return canaryV3QueueForRegion(token, region), true
+	default:
+		return "", false
+	}
+}
+
 func jobsQueueForGeneration(region string, generation int) (string, bool) {
 	switch generation {
 	case ProtocolV1:
@@ -175,6 +213,7 @@ type AMQP struct {
 
 	jobRegion            string          // region this dispatcher's Jobs() consumes (worker); default core
 	credentialCapability int             // highest envelope generation this worker can open (0 = none)
+	canaryCapability     string          // the `<kind>@<version>` this worker announces ("" = no canary runner)
 	declaredMu           sync.Mutex      // guards declared
 	declared             map[string]bool // idempotent-declare cache for per-region job queues
 
@@ -377,6 +416,18 @@ func (d *AMQP) WithCredentialCapability(capability int) *AMQP {
 	return d
 }
 
+// WithCanaryCapability declares the workflow token this executor can run, which decides whether it
+// consumes the region's canary queues at all. Empty (the default, and every binary that predates
+// FR-029) means the executor never sees a canary — it does not merely decline one it was handed.
+//
+// The caller must derive the token from the RUNNER, not from this binary's constant: an executor
+// that announces a workflow its runner does not have would take the job and fail it, which is the
+// one outcome the capability exists to prevent.
+func (d *AMQP) WithCanaryCapability(token string) *AMQP {
+	d.canaryCapability = token
+	return d
+}
+
 // declareJobQueue idempotently declares a per-region job queue (cached). Publishing
 // to an undeclared queue via the default exchange is silently dropped, so both the
 // publisher and the consuming worker must ensure their queue exists.
@@ -473,6 +524,9 @@ func (d *AMQP) PublishJob(_ context.Context, job CheckJob) error {
 	if generation == 0 {
 		generation = ProtocolV1
 	}
+	if job.Monitor.Type == domain.MonitorAsyncCanary {
+		return d.publishCanaryJob(job, region, generation)
+	}
 	queue, ok := jobsQueueForGeneration(region, generation)
 	if !ok {
 		return fmt.Errorf("dispatch: no jobs carrier for generation %d", generation)
@@ -491,6 +545,52 @@ func (d *AMQP) PublishJob(_ context.Context, job CheckJob) error {
 		expiration = strconv.Itoa(s * 1000)
 	}
 	return d.publishTo(queue, job, expiration)
+}
+
+// publishCanaryJob routes a canary onto its own carrier. The envelope rule here is EXACT rather than
+// the generic "generation 2 and up must carry one": a canary needs an envelope precisely when its
+// workflow binds a secret, so a secretless canary rides the plain carrier and one with bindings must
+// not ride it. Stated this way the publisher refuses both mistakes — a stripped envelope and an
+// envelope on the carrier a capability-0 worker consumes — instead of only the first.
+func (d *AMQP) publishCanaryJob(job CheckJob, region string, generation int) error {
+	queue, err := canaryCarrierFor(job, region, generation)
+	if err != nil {
+		return err
+	}
+	if err := d.declareJobQueue(queue); err != nil {
+		return fmt.Errorf("dispatch: declare %s: %w", queue, err)
+	}
+	var expiration string
+	if s := job.Monitor.IntervalSeconds; s > 0 {
+		expiration = strconv.Itoa(s * 1000)
+	}
+	return d.publishTo(queue, job, expiration)
+}
+
+// canaryCarrierFor is the routing DECISION, separated from the publish so it can be exercised
+// without a broker: which queue a canary belongs on, or why it belongs on none.
+func canaryCarrierFor(job CheckJob, region string, generation int) (string, error) {
+	token := domain.CanaryCapabilityRequiredByConfig(job.Monitor.Config)
+	bindings := len(domain.CanarySecretRefKeys(job.Monitor.Config)) > 0
+	if bindings && generation != ProtocolV3 {
+		return "", fmt.Errorf("dispatch: a canary secret binding requires carrier generation %d, got %d", ProtocolV3, generation)
+	}
+	if !bindings {
+		// Not pedantry: the v3 canary queue is consumed only by envelope-capable workers, so
+		// emitting a secretless canary there would narrow, silently, which regions can run it.
+		generation = ProtocolV1
+	}
+	queue, ok := canaryQueueForGeneration(token, region, generation)
+	if !ok {
+		return "", fmt.Errorf("dispatch: no canary carrier for generation %d", generation)
+	}
+	if bindings == (job.CredentialEnvelope == nil) {
+		if bindings {
+			return "", errors.New("dispatch: canary with a secret binding is missing its credential envelope")
+		}
+		return "", errors.New("dispatch: canary with no secret binding cannot carry a credential envelope")
+	}
+	return queue, nil
 }
 
 // PublishResult publishes a result heartbeat to the durable results queue.
@@ -529,6 +629,15 @@ func (d *AMQP) Jobs() <-chan DeliveredJob {
 		}
 		if d.credentialCapability >= EnvelopeV2 {
 			consumeQueue(jobsV3QueueForRegion(d.jobRegion), "jobs.v3", ProtocolV3)
+		}
+		// FR-029 invariant 6: consuming the canary queue IS this executor's announcement, so it is
+		// bound only when the runner in this process actually has the workflow. The envelope-bearing
+		// canary carrier is bound under exactly the same condition as jobs.v3, for the same reason.
+		if d.canaryCapability != "" {
+			consumeQueue(canaryQueueForRegion(d.canaryCapability, d.jobRegion), "canary", ProtocolV1)
+			if d.credentialCapability >= EnvelopeV2 {
+				consumeQueue(canaryV3QueueForRegion(d.canaryCapability, d.jobRegion), "canary.v3", ProtocolV3)
+			}
 		}
 	})
 	return d.jobsCh

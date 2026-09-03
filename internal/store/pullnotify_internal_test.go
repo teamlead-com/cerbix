@@ -26,7 +26,7 @@ func TestPullNotifierWakesOnEnqueue(t *testing.T) {
 	}()
 	time.Sleep(100 * time.Millisecond) // ensure the waiter is registered before NOTIFY
 
-	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60, 0); err != nil {
+	if err := st.EnqueuePullJob(ctx, "geo3", []byte(`{}`), 60, 0, ""); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	select {

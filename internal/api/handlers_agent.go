@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -138,6 +139,34 @@ func requireEnvelopeCapability(w http.ResponseWriter, r *http.Request, minimum i
 	return true
 }
 
+// declaredWorkflowKinds reads the per-claim announcement, under the SAME bound and grammar the
+// heartbeat's is checked against — it reaches a SQL parameter, and one spelling of the rule is one
+// place for it to be wrong.
+func declaredWorkflowKinds(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	raw := strings.TrimSpace(r.Header.Get(workflowKindsHeader))
+	if raw == "" {
+		return nil, true
+	}
+	kinds := strings.Split(raw, ",")
+	if len(kinds) > maxAnnouncedWorkflowKinds {
+		writeError(w, http.StatusBadRequest, "too many "+workflowKindsHeader+" entries")
+		return nil, false
+	}
+	for i, k := range kinds {
+		kinds[i] = strings.TrimSpace(k)
+		if !announcedWorkflowKind.MatchString(kinds[i]) {
+			writeError(w, http.StatusBadRequest, "malformed "+workflowKindsHeader+" entry")
+			return nil, false
+		}
+	}
+	return kinds, true
+}
+
+// workflowKindsHeader carries the per-claim capability declaration, mirroring
+// X-Cerbix-Credential-Envelope. Absent means "nothing beyond the ordinary types", which is what
+// every agent that predates FR-029 sends and is a correct answer rather than a missing one.
+const workflowKindsHeader = "X-Cerbix-Workflow-Kinds"
+
 func (h *Handler) agentJobsProtocol(w http.ResponseWriter, r *http.Request, protocolVersion int) {
 	region := r.URL.Query().Get("region")
 	if region == "" {
@@ -163,7 +192,14 @@ func (h *Handler) agentJobsProtocol(w http.ResponseWriter, r *http.Request, prot
 	case 3:
 		claim = h.store.ClaimPullJobsV3
 	}
-	claimed, err := claim(r.Context(), region, max, pullJobLeaseSeconds)
+	// FR-029 invariant 6: what this CLAIM says it can run, re-asserted per request exactly as the
+	// envelope capability is — a heartbeat says what an agent was a moment ago, the header says what
+	// it is for this request. An agent that declares nothing claims only jobs that require nothing.
+	kinds, ok := declaredWorkflowKinds(w, r)
+	if !ok {
+		return
+	}
+	claimed, err := claim(r.Context(), region, max, pullJobLeaseSeconds, kinds)
 	if err != nil {
 		h.serverError(w, "agent_claim_jobs", err)
 		return
@@ -173,7 +209,7 @@ func (h *Handler) agentJobsProtocol(w http.ResponseWriter, r *http.Request, prot
 	// the query rate to near-zero while keeping dispatch near-instant, over plain HTTP.
 	if len(claimed) == 0 && h.pullWaiter != nil {
 		h.pullWaiter.Wait(r.Context(), region, agentLongPollHold)
-		if claimed, err = claim(r.Context(), region, max, pullJobLeaseSeconds); err != nil {
+		if claimed, err = claim(r.Context(), region, max, pullJobLeaseSeconds, kinds); err != nil {
 			h.serverError(w, "agent_claim_jobs", err)
 			return
 		}
@@ -376,6 +412,12 @@ func (h *Handler) agentTestResult(w http.ResponseWriter, r *http.Request) {
 
 // agentHeartbeat records that an agent is alive for its region (so the region reads as
 // live in the picker and the region-worker alert).
+// An announcement is bounded and grammar-checked: `<kind>@<version>`, a handful at most. The core
+// stores it and an existential query reads it, so it is untrusted input reaching a table.
+const maxAnnouncedWorkflowKinds = 8
+
+var announcedWorkflowKind = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}@[0-9]{1,3}$`)
+
 func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	agentID := r.URL.Query().Get("agent_id")
@@ -386,6 +428,10 @@ func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Capabilities struct {
 			CredentialEnvelope int `json:"credential_envelope"`
+			// FR-029: the `<kind>@<version>` tokens this agent's binary executes. Absent from an
+			// agent older than this release, which is exactly right — it announces no canary
+			// capability and the scheduler never sends it one.
+			WorkflowKinds []string `json:"workflow_kinds"`
 		} `json:"capabilities"`
 		CredentialReady bool `json:"credential_ready"`
 	}
@@ -407,7 +453,20 @@ func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "credential_ready requires a credential_envelope capability")
 		return
 	}
-	if err := h.store.RecordAgentCapabilities(r.Context(), region, agentID, body.Capabilities.CredentialEnvelope, body.CredentialReady); err != nil {
+	// Bounded and shape-checked before it reaches a JSONB column an existential query reads: an
+	// unbounded list from an executor is a place to put arbitrary data into the core's own tables.
+	if len(body.Capabilities.WorkflowKinds) > maxAnnouncedWorkflowKinds {
+		writeError(w, http.StatusBadRequest, "too many workflow_kinds")
+		return
+	}
+	for _, k := range body.Capabilities.WorkflowKinds {
+		if !announcedWorkflowKind.MatchString(k) {
+			writeError(w, http.StatusBadRequest, "malformed workflow_kinds entry")
+			return
+		}
+	}
+	if err := h.store.RecordAgentCapabilities(r.Context(), region, agentID,
+		body.Capabilities.CredentialEnvelope, body.CredentialReady, body.Capabilities.WorkflowKinds); err != nil {
 		h.serverError(w, "agent_heartbeat", err)
 		return
 	}

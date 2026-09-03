@@ -19,6 +19,10 @@ type fixedRunner struct{ hb domain.Heartbeat }
 
 func (f fixedRunner) Run(context.Context, domain.Monitor) domain.Heartbeat { return f.hb }
 
+// Supports: this fake executes whatever it is handed, and announcing async_canary would make every
+// test agent claim a capability it does not have.
+func (f fixedRunner) Supports(domain.MonitorType) bool { return false }
+
 type fakeCredentialHealth struct {
 	mu     sync.Mutex
 	ready  bool
@@ -304,6 +308,10 @@ func (r *recordingRunner) Run(_ context.Context, m domain.Monitor) domain.Heartb
 	r.ran = append(r.ran, m.ID)
 	return domain.Heartbeat{MonitorID: m.ID, Up: true}
 }
+
+// Supports reports what this fake can execute, and the announcement tests drive it through the
+// type: a runner that says no must produce a heartbeat announcing nothing.
+func (r *recordingRunner) Supports(t domain.MonitorType) bool { return t == domain.MonitorAsyncCanary }
 
 // TestCapableAgentExecutesMixedGenerationClaim is the agent-side half of the r7
 // availability regression (D-0160). A capable claim now returns both an ordinary

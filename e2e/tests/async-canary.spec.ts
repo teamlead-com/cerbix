@@ -120,4 +120,65 @@ test.describe("async canary", () => {
     expect(body).toContain("credential-bearing");
     expect(body, "the refusal echoed the credential").not.toContain("e2e-literal-token");
   });
+
+  // FR-029 invariant 6 on the REAL path. `pull1` is a declared pull region of the dev stack with no
+  // agent running in it, so nothing there announces a canary runner — which is exactly the situation
+  // an operator hits when they declare a canary before upgrading a region. The promise the runbook
+  // now makes is that this is one bounded DOWN naming the fix, not an indefinite pending, and only a
+  // live stack can prove the scheduler's own dispatch decision.
+  test("a canary in a region with no capable runner reports one bounded DOWN, not silence", async ({ page }) => {
+    await page.goto("/");
+    const { projectID } = await ensureE2EWorkspace(page);
+
+    const workflow = {
+      kind: "async_transaction_v1",
+      submit: {
+        kind: "http_json",
+        method: "POST",
+        url: "https://canary-uncovered.internal.invalid/files/upload",
+        submit_timeout: 5,
+        accepted_status: [202],
+        body: { tenant: "e2e" },
+      },
+      correlate: { source: "response_json", path: "task_id" },
+      completion: {
+        kind: "poll_json",
+        url: "https://canary-uncovered.internal.invalid/tasks/{{ correlation_id }}",
+        timeout: 20,
+        poll: { interval: 5, max_attempts: 4, success_path: "status", success_value: "completed" },
+      },
+      result: { max_latency: 20, required_json_fields: ["s3_path"], lifecycle_path: "s3_path" },
+      cleanup: { kind: "none", acknowledged: true },
+    };
+
+    const created = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+      name: "e2e-canary-uncovered",
+      type: "async_canary",
+      region: "pull1",
+      interval_seconds: 30,
+      timeout_seconds: 30,
+      failure_threshold: 1,
+      config: { workflow: JSON.stringify(workflow) },
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    const monitor = await created.json();
+
+    let msg = "";
+    await expect
+      .poll(
+        async () => {
+          const beats = await apiGet(page, `/api/v1/monitors/${monitor.id}/heartbeats?limit=5`);
+          const first = (beats as any[])[0];
+          msg = first?.msg ?? "";
+          return msg !== "";
+        },
+        { timeout: 90_000, message: "an uncovered region produced no heartbeat at all — the pending state the invariant forbids" },
+      )
+      .toBe(true);
+
+    // The reason names the fix: nothing announced a runner. Not `capability_mismatch` (which would
+    // mean a runner is there speaking another version) and not a stage failure (which would mean the
+    // job was dispatched after all).
+    expect(msg, `heartbeat message: ${msg}`).toBe("dispatch: no_capable_runner");
+  });
 });

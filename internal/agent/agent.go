@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +40,8 @@ const (
 // Runner executes a single monitor check (implemented by *prober.Runner).
 type Runner interface {
 	Run(ctx context.Context, m domain.Monitor) domain.Heartbeat
+	// Supports is the capability announcement: what this binary can execute (FR-029).
+	Supports(t domain.MonitorType) bool
 }
 
 type CredentialHealth interface {
@@ -374,6 +377,12 @@ func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []str
 	if capability := a.envelopeCapability(); capability > 0 {
 		req.Header.Set("X-Cerbix-Credential-Envelope", strconv.Itoa(capability))
 	}
+	// FR-029 invariant 6: what this agent can run, declared on the claim itself. Without it the
+	// server hands out only jobs that require nothing, so an agent that stopped announcing (or was
+	// never able to) cannot take a canary even if one is queued for its region.
+	if kinds := a.announcedWorkflowKinds(); len(kinds) > 0 {
+		req.Header.Set("X-Cerbix-Workflow-Kinds", strings.Join(kinds, ","))
+	}
 	resp, err := a.http.Do(req)
 	if err != nil {
 		return nil, nil, nil, err
@@ -544,6 +553,16 @@ func (a *Agent) postHeartbeats(ctx context.Context, path string, results []domai
 	return nil
 }
 
+// announcedWorkflowKinds is what this agent claims it can execute. Derived from the prober registry
+// rather than hard-coded, so an agent built without the canary executor announces nothing and a
+// future kind announces itself by existing.
+func (a *Agent) announcedWorkflowKinds() []string {
+	if !a.runner.Supports(domain.MonitorAsyncCanary) {
+		return []string{}
+	}
+	return []string{domain.CanaryCapabilityOfThisBinary()}
+}
+
 func (a *Agent) heartbeat(ctx context.Context) {
 	url := fmt.Sprintf("%s/api/v1/agent/heartbeat?region=%s&agent_id=%s", a.serverURL, a.region, a.agentID)
 	// The declared capability is the highest ENVELOPE generation this agent can open, and
@@ -552,7 +571,14 @@ func (a *Agent) heartbeat(ctx context.Context) {
 	// handing an agent a payload it cannot open (§4.7, D-0160).
 	capability := a.envelopeCapability()
 	body, err := json.Marshal(map[string]any{
-		"capabilities":     map[string]int{"credential_envelope": capability},
+		"capabilities": map[string]any{
+			"credential_envelope": capability,
+			// FR-029: what this BINARY can execute, so core never emits a canary into a region
+			// whose runners predate the type. An older agent sends no such key and is therefore
+			// never sent one — the announcement is the whole barrier, and its absence is a
+			// correct answer rather than a missing one.
+			domain.CanaryCapabilityKey: a.announcedWorkflowKinds(),
+		},
 		"credential_ready": capability > 0 && a.credentialReady.Load(),
 	})
 	if err != nil {

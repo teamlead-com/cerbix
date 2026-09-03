@@ -379,7 +379,8 @@ func (r *Registry) RecordCanaryStage(kind, stage, outcome string) {
 }
 
 // RecordCanaryDispatchRefused counts a run cerbix could not dispatch, by its bounded reason
-// (`region_saturated`, `already_in_flight`). It is the ATTRIBUTION half of the decision that those
+// (`region_saturated`, `already_in_flight`, `in_flight_claim_failed`, and from FR-029 invariant 6
+// `no_capable_runner` and `capability_mismatch`). It is the ATTRIBUTION half of the decision that those
 // samples still count as unavailable in the SLI: the number stays honest and the cause stays visible.
 func (r *Registry) RecordCanaryDispatchRefused(reason string) {
 	r.mu.Lock()

@@ -49,7 +49,10 @@ func TestASaturatedCanaryRunReportsDownRatherThanQueueing(t *testing.T) {
 	fs := &fakeStore{leader: true, monitors: []domain.Monitor{canaryScheduleMonitor()}}
 	fs.canaryClaimErr = store.ErrCanaryRegionSaturated
 	disp := dispatch.NewInProc(8)
-	s := New(fs, disp, testLogger())
+	// Same wiring role=all uses: the executor is in this process, so the region announces the
+	// workflow this binary runs. Without it the capability gate refuses before any of these
+	// assertions can be reached — which is itself asserted, separately, below.
+	s := New(fs, disp, testLogger()).WithLocalCanaryRegions("core")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -98,7 +101,10 @@ func TestASaturatedCanaryRunReportsDownRatherThanQueueing(t *testing.T) {
 func TestAnUnsaturatedCanaryRunIsDispatchedNormally(t *testing.T) {
 	fs := &fakeStore{leader: true, monitors: []domain.Monitor{canaryScheduleMonitor()}}
 	disp := dispatch.NewInProc(8)
-	s := New(fs, disp, testLogger())
+	// Same wiring role=all uses: the executor is in this process, so the region announces the
+	// workflow this binary runs. Without it the capability gate refuses before any of these
+	// assertions can be reached — which is itself asserted, separately, below.
+	s := New(fs, disp, testLogger()).WithLocalCanaryRegions("core")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -167,7 +173,10 @@ func TestPullLeaseIsAskedForOnlyWhenTheProbeOutlivesTheDefault(t *testing.T) {
 func TestACanaryDispatchThatNeverPublishedGivesTheSlotBack(t *testing.T) {
 	fs := &fakeStore{leader: true, monitors: []domain.Monitor{canaryScheduleMonitor()}}
 	disp := &failingDispatcher{} // never heals: every publish fails
-	s := New(fs, disp, testLogger())
+	// Same wiring role=all uses: the executor is in this process, so the region announces the
+	// workflow this binary runs. Without it the capability gate refuses before any of these
+	// assertions can be reached — which is itself asserted, separately, below.
+	s := New(fs, disp, testLogger()).WithLocalCanaryRegions("core")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -223,7 +232,10 @@ func TestABindinglessCanaryStillCarriesItsRun(t *testing.T) {
 	delete(m.Config, domain.CanaryRunKey) // as the snapshot delivers it on the plain path
 	fs := &fakeStore{leader: true, monitors: []domain.Monitor{m}}
 	disp := dispatch.NewInProc(8)
-	s := New(fs, disp, testLogger())
+	// Same wiring role=all uses: the executor is in this process, so the region announces the
+	// workflow this binary runs. Without it the capability gate refuses before any of these
+	// assertions can be reached — which is itself asserted, separately, below.
+	s := New(fs, disp, testLogger()).WithLocalCanaryRegions("core")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

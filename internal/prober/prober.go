@@ -97,6 +97,14 @@ func NewRunnerWithGuard(g Guard) *Runner {
 	return r
 }
 
+// Supports reports whether this runner has a prober for a type. It is how an executor ANNOUNCES what
+// it can do (FR-029 invariant 6) instead of a constant somewhere claiming it: a binary built without
+// a prober for a type announces nothing for it, and cannot then be sent one.
+func (r *Runner) Supports(t domain.MonitorType) bool {
+	_, ok := r.registry[t]
+	return ok
+}
+
 // Run executes a monitor check (timeout + retries + conditions) and returns a
 // heartbeat. A check succeeds when the probe connects and all conditions pass;
 // with no conditions the default is a 2xx status (HTTP) or a successful connect.

@@ -47,9 +47,17 @@ const savedId = ref<string | null>(null); // row that just saved, for a brief �
 // The current objective is read from the project SLA REPORT rather than through a second GET: the
 // report already states the objective and the budget for a window that has one (and says nothing for a
 // window that does not), so a separate read could only disagree with it.
+// FR-031 §7 / D-0235: the card is READ-ONLY with an explicit Edit, and a successful save closes
+// it. A closed editor cannot hold a stale draft, which retires by construction the state where an
+// unsent draft and a stored fact rendered identically. But an open form is not a substitute for a
+// draft-state model, so the five rules below hold regardless of the shape — visibility stops a
+// stale draft being SHOWN, and the generation guard stops a stale response being WRITTEN.
 const projDraft = ref("");
 const projErr = ref("");
 const projSaving = ref(false);
+const projEditing = ref(false);
+const projSaved = ref(false);
+let projSavedTimer: ReturnType<typeof setTimeout> | undefined;
 const projWindow = "30d"; // the approved mock's window; other windows show dashes until they have one
 const projTarget = computed(() => projectWindows.value.find((w) => w.window === projWindow));
 const projObjective = computed(() => projTarget.value?.objective ?? null);
@@ -58,15 +66,51 @@ const projBudgetLeft = computed(() => {
   return eb ? Math.max(0, 100 - (eb.burned_percent ?? 0)) : null;
 });
 
-async function saveProjectObjective() {
+/** The canonical draft, or null when it is empty or outside the one rule. */
+const projCanonical = computed(() => {
   const raw = String(projDraft.value ?? "").trim();
+  return raw ? canonicalObjective(Number(raw)) : null;
+});
+/**
+ * Save is offered only when it would DO something: a control that cannot change anything is not
+ * offered. Equality is by the canonical value (D-0165), so `99.90` is not a change to `99.9`.
+ */
+const projDirty = computed(() => projCanonical.value !== null && projCanonical.value !== projObjective.value);
+/**
+ * The refusal is met AT THE FIELD, live, exactly as the monitor-description form meets its own:
+ * with Save disabled for a value the server would refuse, requiring a CLICK to learn why would be
+ * worse than the always-open form this replaces. `projErr` stays for transport failures only.
+ */
+const projInvalid = computed(() => String(projDraft.value ?? "").trim() !== "" && projCanonical.value === null);
+
+function openProjectEditor() {
+  projErr.value = "";
+  projSaved.value = false;
+  projDraft.value = projObjective.value != null ? String(projObjective.value) : "";
+  projEditing.value = true;
+}
+function cancelProjectEditor() {
+  projEditing.value = false;
+  projDraft.value = "";
+  projErr.value = "";
+}
+function flashProjectSaved() {
+  projSaved.value = true;
+  clearTimeout(projSavedTimer);
+  projSavedTimer = setTimeout(() => (projSaved.value = false), 2500);
+}
+
+async function saveProjectObjective() {
   // The same ONE rule as every other scope, mirrored client-side (D-0165) so the operator reads why
   // instead of a 400: the open interval (0,100), four decimals, half-up.
-  const objective = raw ? canonicalObjective(Number(raw)) : null;
+  const objective = projCanonical.value;
   if (objective === null) {
     projErr.value = "Enter a target above 0 and below 100 (max 99.9999, e.g. 99.9).";
     return;
   }
+  // The generation guard every neighbouring writer in this file already takes: a save fired under
+  // project A that returns after the switch must write NOTHING into project B's screen.
+  const gen = loadGen;
   projErr.value = "";
   projSaving.value = true;
   try {
@@ -74,31 +118,40 @@ async function saveProjectObjective() {
       params: { path: { projectID: ws.projectId } },
       body: { window: projWindow, objective },
     });
+    if (gen !== loadGen) return;
     if (res.error) {
       projErr.value = "Could not save the project objective.";
       return;
     }
+    // The draft is cleared and the editor closed on success, so an unsent draft can never render
+    // as a stored fact — the defect the owner reported as "the buttons just stay there".
+    projDraft.value = "";
+    projEditing.value = false;
+    flashProjectSaved();
     await load();
   } finally {
-    projSaving.value = false;
+    if (gen === loadGen) projSaving.value = false;
   }
 }
 
 async function clearProjectObjective() {
+  const gen = loadGen;
   projErr.value = "";
   projSaving.value = true;
   try {
     const res = await api.DELETE("/api/v1/projects/{projectID}/sla-target", {
       params: { path: { projectID: ws.projectId }, query: { window: projWindow } },
     });
+    if (gen !== loadGen) return;
     if (res.error) {
       projErr.value = "Could not clear the project objective.";
       return;
     }
     projDraft.value = "";
+    projEditing.value = false;
     await load();
   } finally {
-    projSaving.value = false;
+    if (gen === loadGen) projSaving.value = false;
   }
 }
 
@@ -446,6 +499,14 @@ function resetMaintenanceState() {
   // …and so is every piece of editor and busy state. A toggle rendered from project A while
   // B loads, or a busy flag a late response never clears, misleads exactly as long as the
   // stale collections would have.
+  // …the project-objective card included. It was the ONE editor this function did not cover, and
+  // a value typed for project A was still in the box under project B, where Save wrote it as a
+  // perfectly legitimate write the store cannot refuse (D-0235 decision 11, reviewer P0).
+  projDraft.value = "";
+  projErr.value = "";
+  projSaving.value = false;
+  projEditing.value = false;
+  projSaved.value = false;
   reportEnabled.value = false;
   reportSaving.value = false;
   editingId.value = null;
@@ -671,35 +732,73 @@ watch(() => ws.projectId, () => {
               </span>
               <span v-else class="pb-1 text-[12px] text-ink-3">the card below is a mean across monitors — not a promise about the project</span>
             </div>
-            <div v-if="canWrite" class="flex items-center gap-[10px]">
-              <input
-                v-model="projDraft"
-                type="number"
-                step="0.0001"
-                :placeholder="projObjective != null ? String(projObjective) : '99.9'"
-                class="h-[32px] w-[110px] rounded-sm border border-border-strong bg-surface px-[10px] text-right font-mono text-[13px] text-ink"
-                aria-label="Project objective"
-                data-testid="project-objective-input"
-              />
+            <!-- Read-only with an explicit Edit; a successful save closes it. A closed editor
+                 cannot hold a stale draft (FR-031 §7). -->
+            <div v-if="canWrite && !projEditing" class="flex items-center gap-[10px]">
+              <span v-if="projSaved" class="font-mono text-[12.5px] text-up" data-testid="project-objective-saved">✓ saved</span>
+              <span class="flex-1"></span>
               <button
                 type="button"
-                class="h-[32px] rounded-sm border border-accent bg-accent px-[14px] text-[12.5px] text-accent-ink disabled:opacity-60"
-                :disabled="projSaving"
-                data-testid="project-objective-save"
-                @click="saveProjectObjective"
+                class="h-[32px] rounded-sm border border-border-strong px-[14px] text-[12.5px] text-ink-2 hover:border-accent hover:text-accent"
+                data-testid="project-objective-edit"
+                @click="openProjectEditor"
               >
-                Save
+                Edit
               </button>
-              <button
-                v-if="projObjective != null"
-                type="button"
-                class="h-[32px] rounded-sm border border-border-strong px-[12px] text-[12.5px] text-ink-2 hover:border-accent hover:text-accent disabled:opacity-60"
-                :disabled="projSaving"
-                data-testid="project-objective-clear"
-                @click="clearProjectObjective"
-              >
-                Clear
-              </button>
+            </div>
+            <div v-else-if="canWrite" class="flex flex-col gap-[6px]">
+              <div class="flex items-center gap-[10px]">
+                <input
+                  v-model="projDraft"
+                  type="number"
+                  step="0.0001"
+                  :placeholder="projObjective != null ? String(projObjective) : '99.9'"
+                  class="h-[32px] w-[110px] rounded-sm border bg-surface px-[10px] text-right font-mono text-[13px] text-ink"
+                  :class="projDirty ? 'border-accent' : 'border-border-strong'"
+                  aria-label="Project objective"
+                  data-testid="project-objective-input"
+                />
+                <button
+                  type="button"
+                  class="h-[32px] rounded-sm border border-accent bg-accent px-[14px] text-[12.5px] text-accent-ink disabled:cursor-not-allowed disabled:opacity-45"
+                  :disabled="projSaving || !projDirty"
+                  data-testid="project-objective-save"
+                  @click="saveProjectObjective"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  class="h-[32px] rounded-sm border border-border-strong px-[12px] text-[12.5px] text-ink-2 hover:border-accent hover:text-accent disabled:opacity-60"
+                  :disabled="projSaving"
+                  data-testid="project-objective-cancel"
+                  @click="cancelProjectEditor"
+                >
+                  Cancel
+                </button>
+                <span class="flex-1"></span>
+                <button
+                  v-if="projObjective != null"
+                  type="button"
+                  class="h-[32px] rounded-sm border border-border-strong px-[12px] text-[12.5px] text-ink-2 hover:border-accent hover:text-accent disabled:opacity-60"
+                  :disabled="projSaving"
+                  data-testid="project-objective-clear"
+                  @click="clearProjectObjective"
+                >
+                  Clear
+                </button>
+              </div>
+              <!-- The card can SAY which state it is in, which is the whole fix: an unsent draft
+                   and a stored fact used to render identically. -->
+              <p v-if="projInvalid" class="text-[11.5px] text-down" data-testid="project-objective-invalid">
+                Enter a target above 0 and below 100 (max 99.9999, e.g. 99.9).
+              </p>
+              <p v-else-if="projDirty" class="text-[11.5px] text-accent" data-testid="project-objective-dirty">
+                unsaved draft {{ projCanonical }}%
+              </p>
+              <p v-else class="text-[11.5px] text-ink-3" data-testid="project-objective-clean">
+                unchanged — nothing to save
+              </p>
             </div>
             <p v-if="projErr" class="text-[12.5px] text-down" data-testid="project-objective-error">{{ projErr }}</p>
           </div>

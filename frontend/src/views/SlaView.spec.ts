@@ -317,36 +317,110 @@ describe("SlaView project objective", () => {
     expect(second.wrapper.find('[data-testid="project-objective-budget"]').text()).toContain("74%");
   });
 
-  it("rejects an impossible objective before sending it", async () => {
+  it("does not carry a typed draft across a project switch (P0)", async () => {
+    // D-0235 decision 11 / reviewer P0: `resetMaintenanceState` reset seven pieces of editor and
+    // busy state and its own comment claimed to cover EVERY one, but not this card's. A value
+    // typed for project A was still in the box under project B, where Save wrote it as a
+    // perfectly legitimate write the store cannot refuse — not the one the operator meant.
+    wire(99.9);
+    const { wrapper, ws } = mountView();
+    await flushPromises();
+
+    await wrapper.find('[data-testid="project-objective-edit"]').trigger("click");
+    await wrapper.find('[data-testid="project-objective-input"]').setValue("95");
+    expect(wrapper.find('[data-testid="project-objective-dirty"]').text()).toContain("95");
+
+    ws.projectId = "project-b";
+    await nextTick();
+    await flushPromises();
+
+    // the editor is closed and the draft is gone BEFORE any of B's data renders
+    expect(wrapper.find('[data-testid="project-objective-input"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("unsaved draft 95");
+    // and reopening under B shows B's own stored value, never A's typed one
+    await wrapper.find('[data-testid="project-objective-edit"]').trigger("click");
+    expect((wrapper.find('[data-testid="project-objective-input"]').element as HTMLInputElement).value).not.toBe("95");
+  });
+
+  it("drops a deferred objective save from the previous project (P0)", async () => {
+    // The card's two writers took no load generation while every neighbour in this file does and
+    // one of them says why: "the project moved under this response". A save fired under A that
+    // returns after the switch wrote A's error into B's screen and cleared B's busy flag.
+    wire(99.9);
+    const putA = deferred<{ error: { error: string } }>();
+    apiMock.PUT.mockImplementation(() => putA.promise);
+
+    const { wrapper, ws } = mountView();
+    await flushPromises();
+    await wrapper.find('[data-testid="project-objective-edit"]').trigger("click");
+    await wrapper.find('[data-testid="project-objective-input"]').setValue("95");
+    await wrapper.find('[data-testid="project-objective-save"]').trigger("click");
+
+    ws.projectId = "project-b";
+    await nextTick();
+    await flushPromises();
+
+    // A's save fails, late. It must change NOTHING about the screen that now belongs to B.
+    putA.resolve({ error: { error: "boom" } });
+    await flushPromises();
+    expect(wrapper.find('[data-testid="project-objective-error"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Could not save the project objective");
+    // B's editor is still closed and untouched by A's response
+    expect(wrapper.find('[data-testid="project-objective-input"]').exists()).toBe(false);
+  });
+
+  it("meets an impossible objective at the field, live, with Save unable to send it", async () => {
+    // FR-031 §7: the card is read-only until Edit, and the refusal is met AT THE FIELD as the
+    // operator types — requiring a click to learn why would be worse than the form this replaced.
     wire();
     const { wrapper } = mountView();
     await flushPromises();
 
+    // closed by default: a closed editor cannot hold a stale draft
+    expect(wrapper.find('[data-testid="project-objective-input"]').exists()).toBe(false);
+    await wrapper.find('[data-testid="project-objective-edit"]').trigger("click");
+
     await wrapper.find('[data-testid="project-objective-input"]').setValue("100");
+    expect(wrapper.find('[data-testid="project-objective-invalid"]').text()).toContain("below 100");
+    // and a control that cannot do anything is not offered
+    expect(wrapper.find('[data-testid="project-objective-save"]').attributes("disabled")).toBeDefined();
     await wrapper.find('[data-testid="project-objective-save"]').trigger("click");
     await flushPromises();
-
-    expect(wrapper.find('[data-testid="project-objective-error"]').text()).toContain("below 100");
-    // Nothing was sent: the client mirrors the server's one rule so the operator reads why, not a 400.
     expect(apiMock.PUT).not.toHaveBeenCalled();
   });
 
-  it("sends the canonical value and clears through the API", async () => {
+  it("sends the canonical value, closes on success and says so, then clears through the API", async () => {
     wire(99.9);
     const { wrapper } = mountView();
     await flushPromises();
 
+    await wrapper.find('[data-testid="project-objective-edit"]').trigger("click");
+    // opening prefills with the STORED value, which is therefore not a change yet
+    expect((wrapper.find('[data-testid="project-objective-input"]').element as HTMLInputElement).value).toBe("99.9");
+    expect(wrapper.find('[data-testid="project-objective-clean"]').text()).toContain("nothing to save");
+    expect(wrapper.find('[data-testid="project-objective-save"]').attributes("disabled")).toBeDefined();
+
     await wrapper.find('[data-testid="project-objective-input"]').setValue("99.99994");
+    // the card can now SAY which state it is in — the defect was that it could not
+    expect(wrapper.find('[data-testid="project-objective-dirty"]').text()).toContain("unsaved draft 99.9999%");
+    expect(wrapper.find('[data-testid="project-objective-save"]').attributes("disabled")).toBeUndefined();
+
     await wrapper.find('[data-testid="project-objective-save"]').trigger("click");
     await flushPromises();
     expect(apiMock.PUT).toHaveBeenCalled();
     const body = apiMock.PUT.mock.calls[0][1].body;
     expect(body.objective).toBe(99.9999);
     expect(body.window).toBe("30d");
+    // a successful save CLOSES the editor, clears the draft and confirms itself: an unsent draft
+    // can no longer render identically to a stored fact
+    expect(wrapper.find('[data-testid="project-objective-input"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="project-objective-saved"]').text()).toContain("saved");
 
+    await wrapper.find('[data-testid="project-objective-edit"]').trigger("click");
     await wrapper.find('[data-testid="project-objective-clear"]').trigger("click");
     await flushPromises();
     expect(apiMock.DELETE).toHaveBeenCalled();
     expect(apiMock.DELETE.mock.calls[0][1].params.query.window).toBe("30d");
+    expect(wrapper.find('[data-testid="project-objective-input"]').exists()).toBe(false);
   });
 });

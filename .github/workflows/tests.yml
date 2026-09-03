@@ -94,7 +94,36 @@ jobs:
           CERBIX_TEST_DATABASE_DSN: postgres://test:test@localhost:5432/cerbixtest?sslmode=disable
         # The store package carries FR-024's ledger-maintenance suite (real lock waits, DETACH CONCURRENTLY,
         # fencing) and exceeds go test's default 10 m per-package timeout under contention (iter-0163).
-        run: go test -race -count=1 -timeout 40m ./...
+        #
+        # The output is captured to a file and echoed, so the NEXT step can turn the failures into
+        # annotations. No pipe: `run:` uses `bash -e` WITHOUT pipefail, so `go test | tee` would report
+        # the exit code of `tee` and this gate would go green on a failing suite. The explicit
+        # capture-then-exit keeps go's status.
+        run: |
+          go test -race -count=1 -timeout 40m ./... > /tmp/gotest.log 2>&1 || failed=1
+          cat /tmp/gotest.log
+          [ -z "$failed" ] || exit 1
+
+      - name: Surface the failing tests as annotations
+        if: failure()
+        # A red job whose cause needs repository ADMIN to read is a broken feedback loop: the person
+        # who has to fix it cannot see it. `GET /actions/jobs/{id}/logs` is admin-only, and it cost a
+        # release cycle on v0.1.9 — two matrix failures were diagnosed only after a human pasted the
+        # log by hand. Annotations are readable from the check-runs API without admin, so the failing
+        # test names go there and the next red run explains itself.
+        run: |
+          if [ ! -f /tmp/gotest.log ]; then
+            echo "::error::the suite produced no output file — it died before running"
+            exit 0
+          fi
+          grep -E '^(--- FAIL|panic:|FAIL[[:space:]]|[[:space:]]+[a-z_]+_test\.go:[0-9]+:)' /tmp/gotest.log \
+            | head -60 > /tmp/gofail.log || true
+          if [ ! -s /tmp/gofail.log ]; then
+            echo "::error::the suite failed with no recognisable FAIL line — check the step log; last 20 lines follow"
+            tail -20 /tmp/gotest.log | while IFS= read -r l; do echo "::error::$l"; done
+            exit 0
+          fi
+          while IFS= read -r l; do echo "::error::$l"; done < /tmp/gofail.log
 
   frontend:
     name: Frontend (type-check, build, schema drift)

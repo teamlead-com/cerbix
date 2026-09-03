@@ -6026,3 +6026,39 @@ containing the name and watching `make docs-check` fail on it.
 **Why this is a decision and not a tidy-up.** Example data names nobody. A customer name in a spec, a
 fixture or a mock outlives the conversation it came from and ships in the repository — and it reached
 the tree through six commits and a design review without anyone catching it, mine included.
+
+## D-0225 — a red CI job must be readable by whoever has to fix it (2026-09-03)
+
+**Context.** `Backend (declarative partitions)` went red on the v0.1.9 release commit and
+`Backend (timescaledb hypertables)` went red on the commit after it. Both times the cause was
+unreadable from here: `GET /actions/jobs/{id}/logs` requires repository ADMIN, which this token does
+not have, and the web view needs a signed-in session. The first failure was diagnosed only after a
+human pasted the log by hand — and it turned out to be a test asserting a property of the MACHINE
+(`storm too weak to be meaningful: only 61 writes`), fixed in `ee74890`. The second is still
+undiagnosed. The independent reviewer named it in the release disposition: "no accessible
+log/reproduction, поэтому release gate фактически не пройден" (party [79]).
+
+**Decision.** The failing test names go into the job's ANNOTATIONS, which the check-runs API serves
+without admin. `.github/workflows/tests.yml` gains a `Surface the failing tests as annotations` step
+(`if: failure()`) that extracts `--- FAIL`, `<file>_test.go:NN:`, `panic:` and `FAIL<tab>` lines and
+emits them as `::error::`.
+
+**Two things verified rather than assumed, because this is a change to a GATE.**
+
+1. **The gate still fails on a failing suite.** The output is captured to a file and `cat`-ed rather
+   than piped: `run:` in GitHub Actions is `bash -e` WITHOUT `pipefail`, so `go test | tee` would
+   report `tee`'s exit code and the job would go GREEN on failing tests. Turning a gate off while
+   appearing to improve it is the worst available outcome, so the capture is followed by an explicit
+   `exit 1`. Checked in both directions: failing → 1, green → 0.
+2. **The extraction produces what is needed.** Run against a real failing `go test` with two distinct
+   failures; the annotations carry the test names, the `file:line` and the messages.
+
+Two fallbacks keep "red for no visible reason" from being a reachable state: no output file at all
+says the suite died before running, and unrecognised output prints the last twenty lines.
+
+**What this does NOT do.** It does not diagnose the outstanding hypertable failure. That has not
+reproduced locally in four configurations — store alone, the whole `./...`, declarative-partition mode
+on a throwaway `postgres:16-alpine`, and pinned to two cores — and the failure moves between matrix
+jobs by runner load, which points at a second test of the class `ee74890` fixed. Candidates exist in
+the tree, and none of them will be "fixed" on a hypothesis: the next red run now names the test
+itself, and the fix will follow the fact.

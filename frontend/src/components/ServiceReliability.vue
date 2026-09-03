@@ -637,14 +637,16 @@ const pillClass: Record<string, string> = {
                     being recomputed — rendered as work in progress, never as data
                   </p>
                   <table v-else class="border-collapse text-[11.5px]">
-                    <tr v-for="(r, i) in cellReadout(cell).rows" :key="i">
-                      <td class="pr-[14px] text-ink-3">{{ r.label }}</td>
-                      <td class="text-right font-mono text-ink-2">{{ r.value }}</td>
-                    </tr>
-                    <tr>
-                      <td class="pr-[14px] text-ink-3">stored buckets</td>
-                      <td class="text-right font-mono text-ink-2">{{ cellReadout(cell).stored }}</td>
-                    </tr>
+                    <tbody>
+                      <tr v-for="(r, i) in cellReadout(cell).rows" :key="i">
+                        <td class="pr-[14px] text-ink-3">{{ r.label }}</td>
+                        <td class="text-right font-mono text-ink-2">{{ r.value }}</td>
+                      </tr>
+                      <tr>
+                        <td class="pr-[14px] text-ink-3">stored buckets</td>
+                        <td class="text-right font-mono text-ink-2">{{ cellReadout(cell).stored }}</td>
+                      </tr>
+                    </tbody>
                   </table>
                 </div>
               </template>

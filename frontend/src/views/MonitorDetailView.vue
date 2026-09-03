@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
@@ -8,6 +8,11 @@ import StatusPill from "@/components/StatusPill.vue";
 import { useLive } from "@/stores/live";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
+import {
+  buildPoints, emptySpans, panelStats, widestSpan,
+  type EmptySpan, type PanelPoint,
+} from "@/lib/latencypanel";
+import { instantLabel, utcInstantLabel } from "@/lib/wallclock";
 
 type Monitor = components["schemas"]["Monitor"];
 type WindowSLA = components["schemas"]["WindowSLA"];
@@ -72,26 +77,73 @@ const deleting = ref(false);
 const pausing = ref(false);
 
 const isPush = computed(() => monitor.value?.type === "push");
-const win = (name: string) => windows.value.find((w) => w.window === name);
-const win30 = computed(() => win("30d"));
 
-// Latency chart (area + line + p95 reference), oldest→newest.
-const latencySeries = computed(() =>
-  heartbeats.value.slice().reverse().map((h) => h.latency_ms ?? 0).filter((v) => v > 0),
-);
-const p95Chart = computed(() => win("24h")?.p95_latency_ms || win30.value?.p95_latency_ms || 0);
-const chart = computed(() => {
-  const vals = latencySeries.value;
-  if (vals.length < 2) return null;
-  const W = 1000, H = 170, pl = 8, pr = 8, pt = 14, pb = 12;
-  const max = Math.max(...vals, p95Chart.value) * 1.15 || 1;
-  const X = (i: number) => pl + (i / (vals.length - 1)) * (W - pl - pr);
-  const Y = (v: number) => pt + (1 - v / max) * (H - pt - pb);
-  const pts = vals.map((v, i) => [X(i), Y(v)] as const);
-  const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
-  const area = `${line} L${pts[pts.length - 1][0].toFixed(1)} ${H - pb} L${pts[0][0].toFixed(1)} ${H - pb} Z`;
-  return { W, H, line, area, p95y: p95Chart.value ? Y(p95Chart.value).toFixed(1) : null, end: pts[pts.length - 1] };
+// ── The Response time panel (func-truthful-rendering §6, FR-031, D-0235) ──────────────
+// POINTS ONLY, on real timestamps, drawing every heartbeat the page fetched. What this replaces:
+// a `.filter((v) => v > 0)` that dropped every failure carrying no latency, a bare-index x axis
+// that carried no time, and a dashed reference taken from the 24h window while the drawn series
+// was the last <=60 checks. There is no connecting stroke and no fill, because neither can span
+// time whose continuity is not proven — and it cannot be proven from stored facts at all, which
+// is what FR-032 exists for. Absence is rendered positively by the observation ruler instead.
+const panelPoints = computed(() => buildPoints(heartbeats.value));
+const timeoutMs = computed(() => (monitor.value?.timeout_seconds ?? 0) * 1000);
+const stats = computed(() => panelStats(panelPoints.value, timeoutMs.value));
+
+// The ruler's hit target is a CSS-PIXEL rule, so it is measured rather than guessed from the
+// viewBox. Without a ResizeObserver the panel falls back to its designed width, which changes
+// which empty spans MERGE for interaction and nothing else.
+const PLOT_FALLBACK_PX = 1072;
+const HIT_PX = 12;
+const plotBox = ref<SVGSVGElement | null>(null);
+const plotPx = ref(PLOT_FALLBACK_PX);
+let plotRO: ResizeObserver | null = null;
+onMounted(() => {
+  if (typeof ResizeObserver === "undefined" || !plotBox.value) return;
+  plotRO = new ResizeObserver((entries) => {
+    const w = entries[0]?.contentRect.width;
+    if (w && w > 0) plotPx.value = w;
+  });
+  plotRO.observe(plotBox.value);
 });
+onUnmounted(() => plotRO?.disconnect());
+
+const chart = computed(() => {
+  const pts = panelPoints.value;
+  if (pts.length < 2) return null;
+  const W = 1000, H = 170, pl = 8, pr = 8, pt = 14, pb = 16;
+  const t0 = pts[0].ms;
+  const t1 = pts[pts.length - 1].ms;
+  const span = Math.max(1, t1 - t0);
+  const max = stats.value.extent || 1;
+  const X = (ms: number) => pl + ((ms - t0) / span) * (W - pl - pr);
+  const Y = (v: number) => pt + (1 - v / max) * (H - pt - pb);
+  return {
+    W, H, baseY: H - pb, t0, t1,
+    dots: pts.filter((p) => p.latency != null).map((p) => ({ p, x: X(p.ms), y: Y(p.latency as number) })),
+    // a failure with no latency is a baseline mark: visible, and never a fabricated value
+    marks: pts.filter((p) => p.latency == null).map((p) => ({ p, x: X(p.ms) })),
+    ticks: pts.map((p) => ({ p, x: X(p.ms) })),
+    p95y: stats.value.p95 != null ? Y(stats.value.p95) : null,
+    timeoutY: stats.value.timeoutInScale ? Y(timeoutMs.value) : null,
+    x: X,
+  };
+});
+
+const rulerSpans = computed(() => {
+  const pts = panelPoints.value;
+  if (pts.length < 2) return [];
+  const span = Math.max(1, pts[pts.length - 1].ms - pts[0].ms);
+  return emptySpans(pts, plotPx.value / span, HIT_PX);
+});
+const widestGap = computed(() => widestSpan(rulerSpans.value));
+
+/** The hovered/focused point or empty span drives the readouts and the Recent-checks highlight. */
+const hoverPoint = ref<PanelPoint | null>(null);
+const hoverSpan = ref<EmptySpan | null>(null);
+function spanLabel(s: EmptySpan): string {
+  return `no check recorded between ${instantLabel(new Date(s.fromMs).toISOString())} and ${instantLabel(new Date(s.toMs).toISOString())}`;
+}
+const fmtMs = (v: number) => (v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0).replace(/\.0$/, "") + "s" : Math.round(v) + "ms");
 
 // 90-day availability strip.
 const timeline = computed(() => {
@@ -549,24 +601,149 @@ watch(
       <section v-if="!isPush" class="mb-4 rounded border border-border bg-surface shadow-card">
         <div class="flex items-center gap-[10px] border-b border-border px-4 py-[13px]">
           <h3 class="text-[13px] font-semibold">Response time</h3>
-          <span class="text-[11.5px] font-mono text-ink-3">
-            <template v-if="win('24h')">avg {{ Math.round(win('24h')!.avg_latency_ms ?? 0) }}ms · p95 {{ Math.round(win('24h')!.p95_latency_ms ?? 0) }}ms</template>
+          <span class="font-mono text-[11.5px] text-ink-3" data-testid="lat-header">
+            <template v-if="stats.avg != null">
+              avg {{ fmtMs(stats.avg) }} · p95 {{ fmtMs(stats.p95!) }} ·
+              <template v-if="stats.measured === stats.drawn">last {{ stats.drawn }} checks</template>
+              <template v-else>{{ stats.measured }} of {{ stats.drawn }} checks with a recorded latency</template>
+            </template>
+            <template v-else-if="stats.drawn">no check recorded a latency</template>
+          </span>
+          <span class="flex-1"></span>
+          <span class="font-mono text-[11.5px] text-ink-3" data-testid="lat-timeout">
+            timeout {{ monitor?.timeout_seconds }}s<template v-if="!stats.timeoutInScale && stats.avg != null"> — outside this scale</template>
           </span>
         </div>
-        <div class="px-4 pt-4">
-          <svg v-if="chart" :viewBox="`0 0 ${chart.W} ${chart.H}`" class="block w-full" :style="{ height: '180px' }" preserveAspectRatio="none">
-            <defs><linearGradient id="latGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity="0.2" /><stop offset="1" stop-color="var(--accent)" stop-opacity="0" /></linearGradient></defs>
-            <line v-if="chart.p95y" x1="0" :y1="chart.p95y" :x2="chart.W" :y2="chart.p95y" stroke="var(--degraded)" stroke-width="1.4" stroke-dasharray="5 4" stroke-opacity="0.9" />
-            <path :d="chart.area" fill="url(#latGrad)" />
-            <path :d="chart.line" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-            <circle :cx="chart.end[0]" :cy="chart.end[1]" r="3" fill="var(--accent)" />
+        <div class="px-4 pt-3">
+          <!-- The invariant, stated once (§6.2): the space between points is unobserved time, and
+               this panel makes no claim about whether a check was due there. -->
+          <p class="mb-2 text-[11.5px] text-ink-3" data-testid="lat-subtitle">
+            <template v-if="chart">
+              last {{ stats.drawn }} checks · {{ instantLabel(new Date(chart.t0).toISOString()) }} →
+              {{ instantLabel(new Date(chart.t1).toISOString()) }} · points only, no stroke and no fill —
+              every interval between adjacent points is time cerbix did not observe, and this panel makes
+              no claim about whether a check was due there.
+            </template>
+          </p>
+          <svg
+            v-if="chart"
+            ref="plotBox"
+            :viewBox="`0 0 ${chart.W} ${chart.H}`"
+            class="block w-full"
+            :style="{ height: '180px' }"
+            preserveAspectRatio="none"
+            data-testid="lat-plot"
+          >
+            <line x1="8" :y1="chart.baseY" :x2="chart.W - 8" :y2="chart.baseY" stroke="var(--border)" stroke-width="1" />
+            <line
+              v-if="chart.timeoutY !== null"
+              x1="0" :y1="chart.timeoutY" :x2="chart.W" :y2="chart.timeoutY"
+              stroke="var(--down)" stroke-width="1.4" stroke-dasharray="6 4" data-testid="lat-timeout-rule"
+            />
+            <line
+              v-if="chart.p95y !== null"
+              x1="0" :y1="chart.p95y" :x2="chart.W" :y2="chart.p95y"
+              stroke="var(--degraded)" stroke-width="1.4" stroke-dasharray="5 4" stroke-opacity="0.9"
+            />
+            <!-- a failure that recorded no latency: a baseline mark, never a dropped point -->
+            <rect
+              v-for="(m, i) in chart.marks"
+              :key="'m' + i"
+              :x="m.x - 1.6" :y="chart.baseY - 9" width="3.2" height="9" rx="1"
+              fill="var(--down)"
+              data-testid="lat-baseline-mark"
+              :data-ts="m.p.hb.ts"
+              @pointerenter="hoverPoint = m.p" @pointerleave="hoverPoint = null"
+            />
+            <circle
+              v-for="(d, i) in chart.dots"
+              :key="'d' + i"
+              :cx="d.x" :cy="d.y"
+              :r="hoverPoint === d.p ? 4.2 : 2.6"
+              fill="var(--accent)"
+              :stroke="hoverPoint === d.p ? 'var(--surface)' : 'none'"
+              :stroke-width="hoverPoint === d.p ? 1.6 : 0"
+              tabindex="0"
+              data-testid="lat-point"
+              :data-ts="d.p.hb.ts"
+              @pointerenter="hoverPoint = d.p" @pointerleave="hoverPoint = null"
+              @focus="hoverPoint = d.p" @blur="hoverPoint = null"
+            />
           </svg>
-          <p v-else class="py-6 text-[13px] text-ink-3">No latency samples yet.</p>
+          <p v-else class="py-6 text-[13px] text-ink-3">No checks recorded yet.</p>
+
+          <!-- The observation ruler (§6.2): one neutral tick per RECORDED check and nothing
+               between them, so unobserved time is drawn rather than left as whitespace. Its empty
+               spans carry ONE meaning uniformly and there is no threshold on that meaning. -->
+          <svg
+            v-if="chart"
+            :viewBox="`0 0 ${chart.W} 14`"
+            class="block w-full"
+            :style="{ height: '14px' }"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="observation ruler: one tick per recorded check"
+            data-testid="lat-ruler"
+          >
+            <line x1="8" y1="7" :x2="chart.W - 8" y2="7" stroke="var(--border)" stroke-width="1" />
+            <rect v-for="(t, i) in chart.ticks" :key="'t' + i" :x="t.x - 0.8" y="1" width="1.6" height="11" rx="0.5" fill="var(--ink-2)" data-testid="lat-ruler-tick" />
+            <rect
+              v-for="(sp, i) in rulerSpans"
+              :key="'s' + i"
+              :x="chart.x(sp.fromMs)" y="0" :width="Math.max(0.4, chart.x(sp.toMs) - chart.x(sp.fromMs))" height="14"
+              fill="transparent" tabindex="0" role="button"
+              :aria-label="spanLabel(sp)"
+              data-testid="lat-ruler-span"
+              :data-intervals="sp.intervals"
+              :data-merged="sp.merged ? 'true' : undefined"
+              @pointerenter="hoverSpan = sp" @pointerleave="hoverSpan = null"
+              @focus="hoverSpan = sp" @blur="hoverSpan = null"
+            />
+          </svg>
         </div>
-        <div class="flex gap-4 px-4 pb-3 pt-2 text-[12px] text-ink-3">
-          <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-0 w-[14px] border-t-2 border-accent"></i> Response time</span>
-          <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-0 w-[14px] border-t-2 border-dashed border-degraded"></i> p95</span>
+
+        <div class="flex flex-wrap gap-x-4 gap-y-1 px-4 pb-3 pt-2 text-[12px] text-ink-3">
+          <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[8px] w-[8px] rounded-full bg-accent"></i> a recorded check</span>
+          <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[9px] w-[3px] rounded-xs bg-down"></i> down with no latency recorded — drawn on the baseline, not dropped</span>
+          <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-0 w-[14px] border-t-2 border-dashed border-degraded"></i> p95 · last {{ stats.drawn }} checks</span>
+          <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[11px] w-[2px] bg-ink-2"></i> observation ruler — its empty spans ARE unobserved time</span>
         </div>
+
+        <!-- Readouts. Times are local with the offset named, over the canonical UTC instant. -->
+        <div v-if="hoverPoint" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-point-readout">
+          <div class="font-mono text-[12.5px]">
+            {{ instantLabel(hoverPoint.hb.ts) }} ·
+            {{ hoverPoint.latency != null ? fmtMs(hoverPoint.latency) : "no latency recorded" }}
+          </div>
+          <div class="font-mono text-[11.5px] text-ink-3">{{ utcInstantLabel(hoverPoint.hb.ts) }}</div>
+          <div class="mt-1 text-[12px] text-ink-2">
+            <span :class="hoverPoint.hb.up ? 'text-up' : 'text-down'">{{ hoverPoint.hb.up ? "Operational" : "Down" }}</span>
+            · <span class="font-mono">{{ heartbeatCode(hoverPoint.hb as Heartbeat) }}</span>
+            · {{ hoverPoint.hb.msg || "ok" }}
+          </div>
+        </div>
+        <div v-else-if="hoverSpan" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-span-readout">
+          <div class="font-mono text-[12.5px]">{{ spanLabel(hoverSpan) }}</div>
+          <div class="font-mono text-[11.5px] text-ink-3">
+            {{ utcInstantLabel(new Date(hoverSpan.fromMs).toISOString()) }} → {{ utcInstantLabel(new Date(hoverSpan.toMs).toISOString()) }}
+          </div>
+          <p class="mt-1 text-[11.5px] text-ink-3">
+            <template v-if="hoverSpan.merged">
+              one focus target covering {{ hoverSpan.intervals }} adjacent intervals too narrow to focus
+              separately — its bounds are the real outer bounds, and the drawing is unchanged.
+            </template>
+            <template v-else>
+              not late, not missed, not covered, not anomalous — only that no check was recorded here.
+            </template>
+          </p>
+        </div>
+        <p v-else-if="widestGap" class="mx-4 mb-3 text-[11.5px] text-ink-3" data-testid="lat-widest-gap">
+          widest interval between two recorded checks:
+          {{ Math.round((widestGap.toMs - widestGap.fromMs) / 60000) }} min,
+          {{ instantLabel(new Date(widestGap.fromMs).toISOString()) }} →
+          {{ instantLabel(new Date(widestGap.toMs).toISOString()) }} — the panel says only that, never
+          that a check was missed.
+        </p>
       </section>
 
       <!-- availability 90d -->
@@ -601,7 +778,14 @@ watch(
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(h, i) in heartbeats.slice(0, 12)" :key="i" class="hover:bg-surface-2">
+                <tr
+                  v-for="(h, i) in heartbeats.slice(0, 12)"
+                  :key="i"
+                  class="hover:bg-surface-2"
+                  :class="hoverPoint && hoverPoint.hb.ts === h.ts ? 'bg-accent-weak' : ''"
+                  :data-highlighted="hoverPoint && hoverPoint.hb.ts === h.ts ? 'true' : undefined"
+                  data-testid="recent-check-row"
+                >
                   <td class="border-b border-border px-4 py-[9px] font-mono text-ink-3">{{ relTime(h.ts) }} ago</td>
                   <td class="border-b border-border px-4 py-[9px]">
                     <span class="inline-flex items-center gap-[7px]"><span class="h-[7px] w-[7px] rounded-full" :class="h.up ? 'bg-up' : 'bg-down'"></span><span class="text-[12.5px] text-ink-2">{{ h.up ? "Operational" : "Down" }}</span></span>

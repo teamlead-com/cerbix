@@ -6177,3 +6177,44 @@ mutations against the seam itself (a non-registry fixture, a shrunken fixture, a
 segment fragment) plus one against the form (drift in what it produces). The general lesson, and it is
 the second time this arc has taught it: a parity claim between two implementations needs a test that
 ENUMERATES, not one that demonstrates.
+
+## D-0228 — a bound the client forgets is a defect the reviewer finds, so the constants stop being remembered (2026-09-03)
+
+**Context.** The residual half of the phase-F P1 (party [91]). After D-0227 mirrored the five named
+categories, the reviewer ran complete client-valid forms again and found three more families the mirror
+still omitted: `CanaryMaxJSONPathDepth` (a nine-segment path passed the form everywhere a path is
+taken), `CanaryMaxStringLeafBytes` and `CanaryMaxBodyBytes` (a 1025-byte leaf and a 9 KB body), and the
+1024-byte cap on `cleanup.prefix`. They also noted that a comment claiming `fieldListRefusals` mirrors
+`validateCanaryFieldList` was false — the helper omitted depth while saying it did not.
+
+**The shape of the problem, which matters more than the three items.** This is the third review round
+finding the same defect: the form mirrors most of a rule set and silently omits one member. Fixing each
+named omission is not a mechanism; it is waiting for the next reviewer. The reviewer put it exactly:
+the 15 positive seam variants "cannot detect an omitted negative rule" — a positive fixture proves what
+IS built and is blind to what is missing.
+
+**Decision — the bounds stop being something a client remembers.**
+`internal/domain/canarybounds_test.go` publishes all 21 bounds to a fixture and asserts the published
+set matches the size of the const block, so adding a bound without publishing it fails in Go.
+`frontend/src/lib/canaryBounds.spec.ts` asserts every published bound is either MIRRORED with the same
+value or listed as unreachable from the form **with a reason in writing** — "not used" is how an
+omission disguises itself as a decision. A stale justification fails too: a bound justified as
+unreachable that IS mirrored, or that no longer exists in Go, is its own defect.
+
+Three of the 21 are declared unreachable and say why: body depth and list elements (the form's body is
+flat — one row is one top-level key holding a scalar or a binding) and the correlation-id length (the
+target produces it at run time and the form never carries one).
+
+**Bytes, not code units.** Go's `len` counts bytes; JavaScript's `.length` counts UTF-16 code units, so
+`"é"` is one there and two to Go. Every byte-valued bound now goes through `canaryByteLength`, and the
+parity spec asserts the difference on a 600-character, 1200-byte string — a gap that only ever opens
+for non-ASCII input, which no happy-path test produces.
+
+**Consequences.** 37 library cases (5 new boundary families, each asserted AT the bound and one step
+past it, because a bound tested only past its edge cannot tell a correct limit from an off-by-one), the
+bounds gate itself, and seven killed mutations: a forgotten constant, a constant mirrored with the wrong
+value, `.length` substituted for byte length, and one per newly applied bound. 42 files / 470 tests.
+
+The general lesson, third statement of it in this arc and the first one that is structural rather than
+verbal: **when two implementations must agree on a set, publish the set and gate on the difference.**
+Enumerating by hand is how the third omission happened after two rounds of promising to be careful.

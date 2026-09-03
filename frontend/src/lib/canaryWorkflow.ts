@@ -30,6 +30,21 @@ export const CANARY_MIN_POLL_INTERVAL = 1;
 export const CANARY_MAX_POLL_INTERVAL = 60;
 export const CANARY_MAX_POLL_ATTEMPTS = 600;
 export const CANARY_MAX_JSON_PATH_BYTES = 200;
+export const CANARY_MAX_JSON_PATH_DEPTH = 8;
+export const CANARY_MAX_STRING_LEAF_BYTES = 1024;
+export const CANARY_MAX_BODY_BYTES = 8 * 1024;
+export const CANARY_MIN_POLL_ATTEMPTS = 1;
+
+/**
+ * Byte length, because the server counts BYTES.
+ *
+ * Go's `len(s)` is bytes; JavaScript's `.length` is UTF-16 code units, so `"é"` is one there and two
+ * to Go. A client measuring `.length` accepts values the server refuses — and only for non-ASCII
+ * input, which no happy-path test ever produces.
+ */
+export function canaryByteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
 
 /** The two closed unions the form switches on. A `default` that accepts is an undocumented escape. */
 export const CANARY_SUBMIT_KINDS = ["http_json", "multipart_fixture"] as const;
@@ -246,7 +261,7 @@ function headerRefusals(
     if (!CANARY_HEADER_NAME_RE.test(name)) {
       out.push({ field: at, message: `${name} is not a valid header name` });
     }
-    if (name.length > CANARY_MAX_HEADER_NAME_BYTES) {
+    if (canaryByteLength(name) > CANARY_MAX_HEADER_NAME_BYTES) {
       out.push({ field: at, message: `a header name is at most ${CANARY_MAX_HEADER_NAME_BYTES} bytes` });
     }
     // Case-insensitive duplicates: the canonical form is what the digest covers, so two headers
@@ -276,7 +291,7 @@ function headerRefusals(
       if (h.value === "") {
         out.push({ field: at, message: `${name} has no value` });
       }
-      if (h.value.length > CANARY_MAX_HEADER_VALUE_BYTES) {
+      if (canaryByteLength(h.value) > CANARY_MAX_HEADER_VALUE_BYTES) {
         out.push({ field: at, message: `a header value is at most ${CANARY_MAX_HEADER_VALUE_BYTES} bytes` });
       }
     }
@@ -303,11 +318,10 @@ function fieldListRefusals(raw: string, field: string, what: string, required: b
   }
   const seen = new Set<string>();
   for (const p of list) {
-    if (p.length > CANARY_MAX_JSON_PATH_BYTES) {
-      out.push({ field, message: `a path is at most ${CANARY_MAX_JSON_PATH_BYTES} bytes` });
-    } else if (!CANARY_JSON_PATH_RE.test(p)) {
-      out.push({ field, message: `${p} uses dotted keys and numeric indices only — no expressions` });
-    }
+    // The SAME checker every other path uses, so a rule added there cannot be missing here — which
+    // is how the depth bound came to be enforced in one place and not the other.
+    const bad = pathRefusal(p, field, `path ${p}`);
+    if (bad) out.push(bad);
     if (seen.has(p)) out.push({ field, message: `${p} is listed twice` });
     seen.add(p);
   }
@@ -340,18 +354,42 @@ function fieldRowRefusals(rows: CanaryFieldRow[], field: string, bindings: Canar
     if (ref !== "" && row.value.trim() !== "") {
       out.push({ field: at, message: `${k || "a field"} takes a value or a binding, not both` });
     }
+    // A string LEAF is bounded in bytes by `validateCanaryValue`. Only a string leaf: a row that
+    // parses as a number or a boolean is not a string, and the form types it as such.
+    if (ref === "" && !isTypedScalar(row.value) && canaryByteLength(row.value) > CANARY_MAX_STRING_LEAF_BYTES) {
+      out.push({ field: at, message: `a value is at most ${CANARY_MAX_STRING_LEAF_BYTES} bytes` });
+    }
   });
+  // And the encoded body as a whole, which `validateCanaryBody` measures after canonicalising it.
+  // Approximated by encoding the same map the form will send: within a few bytes of the server's
+  // number, and the point of the bound is an order of magnitude, not a byte.
+  const encoded = canaryByteLength(JSON.stringify(fieldMap(rows)));
+  if (encoded > CANARY_MAX_BODY_BYTES) {
+    out.push({ field, message: `the body is at most ${CANARY_MAX_BODY_BYTES} bytes encoded` });
+  }
   return out;
 }
 
+/** True when a value string will be emitted as a number or a boolean rather than a string leaf. */
+function isTypedScalar(raw: string): boolean {
+  const v = raw.trim();
+  return v === "true" || v === "false" || (v !== "" && /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(v));
+}
+
+/** Mirrors `validateCanaryJSONPath` in full: presence, BYTE length, grammar, and DEPTH. */
 function pathRefusal(raw: string, field: string, what: string): CanaryRefusal | null {
   const p = raw.trim();
   if (p === "") return { field, message: `${what} is required` };
-  if (p.length > CANARY_MAX_JSON_PATH_BYTES) {
+  if (canaryByteLength(p) > CANARY_MAX_JSON_PATH_BYTES) {
     return { field, message: `${what} is at most ${CANARY_MAX_JSON_PATH_BYTES} bytes` };
   }
   if (!CANARY_JSON_PATH_RE.test(p)) {
     return { field, message: `${what} uses dotted keys and numeric indices only — no expressions` };
+  }
+  // The depth bound was omitted for two review rounds while the comment claimed the mirror was
+  // complete: a nine-segment path passed the form and met a 400.
+  if (p.split(".").length > CANARY_MAX_JSON_PATH_DEPTH) {
+    return { field, message: `${what} is at most ${CANARY_MAX_JSON_PATH_DEPTH} segments deep` };
   }
   return null;
 }
@@ -527,8 +565,11 @@ export function canaryRefusals(f: CanaryForm, monitorTimeout: number, projectSec
         message: `between ${CANARY_MIN_POLL_INTERVAL} and ${CANARY_MAX_POLL_INTERVAL} seconds`,
       });
     }
-    if (!Number.isInteger(pa) || pa < 1 || pa > CANARY_MAX_POLL_ATTEMPTS) {
-      out.push({ field: "pollMaxAttempts", message: `between 1 and ${CANARY_MAX_POLL_ATTEMPTS}` });
+    if (!Number.isInteger(pa) || pa < CANARY_MIN_POLL_ATTEMPTS || pa > CANARY_MAX_POLL_ATTEMPTS) {
+      out.push({
+        field: "pollMaxAttempts",
+        message: `between ${CANARY_MIN_POLL_ATTEMPTS} and ${CANARY_MAX_POLL_ATTEMPTS}`,
+      });
     }
     if (Number.isInteger(pi) && Number.isInteger(pa) && Number.isInteger(ct) && pi * pa > ct) {
       out.push({
@@ -577,6 +618,8 @@ export function canaryRefusals(f: CanaryForm, monitorTimeout: number, projectSec
   if (f.cleanupKind === "lifecycle_prefix") {
     if (f.cleanupPrefix.trim() === "") {
       out.push({ field: "cleanupPrefix", message: "a lifecycle prefix is required" });
+    } else if (canaryByteLength(f.cleanupPrefix) > CANARY_MAX_STRING_LEAF_BYTES) {
+      out.push({ field: "cleanupPrefix", message: `a prefix is at most ${CANARY_MAX_STRING_LEAF_BYTES} bytes` });
     }
 
   } else if (!f.cleanupAcknowledged) {

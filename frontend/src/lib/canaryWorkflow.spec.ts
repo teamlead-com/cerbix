@@ -378,3 +378,102 @@ describe("client/server parity — the branches the reviewer found", () => {
     expect(at(f, "submitHeaders.2")).toEqual([]);
   });
 });
+
+// The residual P1 (party [91]): three families of bound the mirror still omitted after the first
+// fix. Each is asserted AT the bound and one step past it, because a bound tested only past its edge
+// cannot tell a correct limit from one that is off by one.
+//
+// The structural answer to "which bound will be forgotten next" is `canaryBounds.spec.ts`, which
+// makes an unmirrored constant fail on its own. These cases are the behavioural half: they prove the
+// mirrored constant is actually APPLIED at the position it belongs to.
+describe("bounds the mirror omitted — at the edge and one past it", () => {
+  it("JSON path depth, everywhere a path is taken", () => {
+    const deep = "a.b.c.d.e.f.g.h"; // 8 segments — the limit
+    const tooDeep = "a.b.c.d.e.f.g.h.i"; // 9
+
+    const ok = validForm();
+    ok.resultRequiredFields = deep;
+    ok.correlatePath = deep;
+    ok.lifecyclePath = deep;
+    ok.pollSuccessPath = deep;
+    expect(canaryRefusals(ok, 300, ["upload-token"])).toEqual([]);
+
+    // Every position that takes a path, because the omission was in the shared helper and the first
+    // fix touched only one caller.
+    for (const [field, mut] of [
+      ["resultRequiredFields", (f: CanaryForm) => (f.resultRequiredFields = tooDeep)],
+      ["correlatePath", (f: CanaryForm) => (f.correlatePath = tooDeep)],
+      ["lifecyclePath", (f: CanaryForm) => (f.lifecyclePath = tooDeep)],
+      ["pollSuccessPath", (f: CanaryForm) => (f.pollSuccessPath = tooDeep)],
+    ] as [string, (f: CanaryForm) => void][]) {
+      const f = validForm();
+      mut(f);
+      expect(at(f, field).map((r) => r.message).join(), `${field} accepts a nine-segment path`).toMatch(
+        /8 segments deep/,
+      );
+    }
+
+    // And the SSE list, which goes through the same shared checker.
+    const sse = validForm();
+    sse.completionKind = "sse";
+    sse.sseSuccessEvent = "task.completed";
+    sse.sseRequiredFields = tooDeep;
+    expect(at(sse, "sseRequiredFields").map((r) => r.message).join()).toMatch(/8 segments deep/);
+  });
+
+  it("a string leaf is bounded in BYTES, and a non-ASCII value is measured as the server measures it", () => {
+    const atLimit = "x".repeat(1024);
+    const past = "x".repeat(1025);
+
+    const ok = validForm();
+    ok.bodyFields = [{ key: "note", value: atLimit, secretRef: "" }];
+    expect(at(ok, "bodyFields.0")).toEqual([]);
+
+    const f = validForm();
+    f.bodyFields = [{ key: "note", value: past, secretRef: "" }];
+    expect(at(f, "bodyFields.0").map((r) => r.message).join()).toMatch(/at most 1024 bytes/);
+
+    // 513 two-byte characters are 513 UTF-16 code units and 1026 BYTES. A client measuring `.length`
+    // would accept this and the server would refuse it — and only ever for non-ASCII input.
+    const multibyte = "é".repeat(513);
+    expect(multibyte.length).toBeLessThan(1024);
+    const g = validForm();
+    g.bodyFields = [{ key: "note", value: multibyte, secretRef: "" }];
+    expect(at(g, "bodyFields.0").map((r) => r.message).join()).toMatch(/at most 1024 bytes/);
+
+    // A multipart field is the same position with a different name.
+    const mp = validForm();
+    mp.submitKind = "multipart_fixture";
+    mp.bodyFields = [];
+    mp.fixtureRef = "small_wav_v1";
+    mp.multipartFields = [{ key: "note", value: past, secretRef: "" }];
+    expect(at(mp, "multipartFields.0").map((r) => r.message).join()).toMatch(/at most 1024 bytes/);
+  });
+
+  it("the whole encoded body is bounded", () => {
+    const f = validForm();
+    // Nine rows of a kilobyte each: every leaf is legal, the body is not.
+    f.bodyFields = Array.from({ length: 9 }, (_, i) => ({
+      key: `k${i}`,
+      value: "x".repeat(1024),
+      secretRef: "",
+    }));
+    expect(at(f, "bodyFields").map((r) => r.message).join()).toMatch(/at most 8192 bytes encoded/);
+  });
+
+  it("the cleanup prefix is bounded", () => {
+    const ok = validForm();
+    ok.cleanupPrefix = "c".repeat(1024);
+    expect(at(ok, "cleanupPrefix")).toEqual([]);
+
+    const f = validForm();
+    f.cleanupPrefix = "c".repeat(1025);
+    expect(at(f, "cleanupPrefix").map((r) => r.message).join()).toMatch(/at most 1024 bytes/);
+  });
+
+  it("a header name and value are bounded in bytes", () => {
+    const f = validForm();
+    f.submitHeaders.push({ name: "x-big", value: "v".repeat(1025), secretRef: "" });
+    expect(at(f, "submitHeaders.2").map((r) => r.message).join()).toMatch(/at most 1024 bytes/);
+  });
+});

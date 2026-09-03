@@ -6871,7 +6871,31 @@ such.
     included — and three more mutants die on it: the cap limiting debt, first-come grants, and
     absence removed as a funder.
 
-25. **The evidence count was internally inconsistent, and the fix is a distinction rather than a
+25. **The specification promised something the implementation cannot deliver, and the fix is to
+    move the promise rather than to soften it.** §5.2 said a `bad`/`unknown`/`excluded` slice "never
+    renders thinner than a stated minimum" and invariant 6 said such a slice is "never invisible" —
+    while this iteration's own tests asserted sub-floor heights whenever the cap binds or nothing
+    can fund the grant. Reviewer P1 at party [184] refused the incoherence and, correctly, refused
+    to pick the product trade-off: a documented trade-off paragraph does not reconcile two promises
+    that exclude each other.
+
+    Of the two coherent options he named, this iteration takes the one that keeps the promise
+    ABSOLUTE. **A problem is never hidden** is the contract; the floor is only the first mechanism
+    for keeping it, and height is bounded by the cell, so the floor is a GRANT that can run out.
+    Where it does, the slice is **marked** with the same non-geometric vocabulary a sub-pixel
+    segment gets, and the readout names the state with its exact duration. That is the same move
+    §5.3 already makes on the other axis for the same reason — where geometry cannot show
+    something, something that is not geometry says so — so the iteration keeps one rule instead of
+    two. The alternative, redefining the floor as a bounded aggregate visibility grant, would have
+    left a one-second outage genuinely invisible in some cells, which is the thing the promise
+    exists to prevent.
+
+    The absolute "never thinner than the minimum" claim is therefore WITHDRAWN in writing, in §5.2,
+    in invariant 6 and in the discharge map, and invariant 6b carries the marker. Three more mutants
+    die on it: the unfundable slice no longer marked, the marker drawn on every cell (which would
+    make it mean nothing), and the zero-grant branch no longer marking.
+
+26. **The evidence count was internally inconsistent, and the fix is a distinction rather than a
     number.** Party [177] said "thirteen mutants" while `traceability.md` said twelve and the
     iteration report said 576 tests against a later 585 — reviewer P2 at [178]. The thirteen came
     from folding a defect the tests CAUGHT into the count of mutants planted and KILLED. They are

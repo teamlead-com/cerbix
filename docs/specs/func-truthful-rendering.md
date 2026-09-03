@@ -155,36 +155,36 @@ Ruled at party [143]:
 a missing bucket row is the absence of a verdict. Unmeasured time is never painted as unknown,
 and the product must actually hold an unknown bucket before an unknown slice is drawn.
 
-**The slice floor.** A **`bad`, `unknown` or `excluded`** slice never renders thinner than a
-stated minimum, so a one-second outage cannot vanish. **The floor is paid for, or it is not
-granted:** the stack totals exactly the cell's height, because a cell that draws taller than its own
-extent claims more time than it has, which is this document's own subject. The inflation is funded
-in a stated order — sealed good, then provisional good, then, as a last resort, the absence — and
-whatever cannot be funded is GIVEN BACK to the floored slice. That last funder overrules this
-document's first revision, which said absence may never shrink: a cell holding one second of `bad`
-and no good at all has nothing else to pay with, and "the problem is visible", "absence never
-shrinks" and "the total is exact" cannot all hold there. The first is the promise ruled at party
-[143] and the third is not negotiable, so the second yields, bounded by the cap. Reviewer P1 at
-party [178] found the first overflow: 33.9996 px of absence plus a floored 2 px of `bad` in a 34 px
-cell.
+**A PROBLEM IS NEVER HIDDEN. The floor is the first mechanism for keeping that, not the promise
+itself.** The distinction is load-bearing and this document's earlier revisions did not draw it:
+they promised that a `bad`, `unknown` or `excluded` slice "never renders thinner than a stated
+minimum", which the implementation cannot deliver in every cell — height is bounded by the cell, so
+the floor is a GRANT and a grant can run out. Reviewer P1 at party [184] refused the incoherence:
+the normative sentence and invariant 6 said "never invisible" while the tests asserted sub-floor
+heights, and a documented trade-off paragraph does not reconcile two promises that exclude each
+other. The contract is now stated once, in two parts:
 
-**The cap limits the GRANTS, not the debt.** Reviewer P1 at party [180] found the second overflow in
-the branch the first fix left: raising every eligible slice to the floor and clamping the accumulated
-debt afterwards bills less than has already been handed out. Six near-zero problem slices in a 14 px
-lane — the API can produce all six, because a sealed and a provisional point each carry `bad`,
-`unknown` and `excluded` — ask for 12 px, are billed 8.4 px by the cap, and the difference is taken
-from nobody: 17.6 px in a 14 px cell. So the grant total is `min(requested, cap, available)`, granted
-**in proportion** to what each slice asked for and taken from the funders exactly, which makes the
-total exact by construction rather than by a reconciliation pass. When the cap binds, every floor is
-shortened together rather than some paid in full and others not at all. Those three states and no others: the floor
-belongs to a problem or a missing verdict, and `provisional` good time is good time that is merely
-unsealed, so flooring it would inflate good time and buy no honesty. The first revision of this
-section said "a non-good slice", which reads as including provisional and is how the mock's first
-drawing behaved — corrected while verifying that drawing's arithmetic. The floor is **presentation only** and **capped** so the
-remaining slices still fit, and the tooltip carries exact durations and bucket counts. This is
-recorded as a trade-off rather than an improvement: "bad wins the cell" was a *semantic*
-guarantee and a pixel floor is a *rendering* one. It is weaker, and it is accepted because the
-exact figures sit in the row beside it.
+1. **The floor, where the cell can fund it.** A `bad`, `unknown` or `excluded` slice thinner than
+   the stated minimum is granted the difference. The grant total is
+   `min(requested, cap, available)` and is distributed **in proportion** to what each slice asked
+   for, then taken from the funders exactly — so the stack totals the cell's height by construction
+   rather than by a reconciliation pass. Funders, in order: sealed good, provisional good, and — as
+   a last resort — the absence. `good` is never floored in either form, because provisional good
+   time is good time that is merely unsealed and inflating it would buy no honesty.
+2. **The marker, where it cannot.** A slice the grant could not bring up to the floor — the cap
+   bound, or the cell had nothing to fund from — is **marked** with the same non-geometric
+   vocabulary a sub-pixel segment gets, and the cell's readout **names the state and gives its
+   exact duration**. Height is bounded and can run out; a marker is not, so the promise lives there.
+   This is the same move §5.3 makes on the other axis for the same reason: where geometry cannot
+   show something, something that is not geometry says so.
+
+Two overflows were found in this allocation before it settled, both by the reviewer and both
+reproduced before acceptance. At party [178]: the floor was paid only out of `good`, so one second
+of `bad` in a 34 px cell with none returned 35.9996 px. At party [180]: the cap clamped the
+accumulated DEBT after every eligible slice had already been raised, so six near-zero problem
+slices in a 14 px lane asked for 12 px, were billed 8.4 px, and the difference came from nobody —
+17.6 px in a 14 px cell. The API produces all six of those states, because a sealed and a
+provisional point each carry `bad`, `unknown` and `excluded`.
 
 **Consequence, recorded as a deliberate change to the motif of §12.2 of
 `docs/specs/func-service-reliability.md`:** the short-tick encoding is RETIRED. Inside a
@@ -447,10 +447,16 @@ Discharged as a SET in `docs/traceability.md`.
 4. `not-stored` and `unknown` are distinct encodings, and unmeasured time is never drawn as
    `unknown`.
 5. `unknown` carries no status hue; `provisional` is the only user of opacity.
-6. A `bad`, `unknown` or `excluded` slice is never invisible, and its floor is capped so the
-   other slices still fit. No other state is floored — `provisional` good time is not.
-6a. A cell's stack totals exactly its height: the floor is funded in the order sealed good,
-   provisional good, absence, and any part that cannot be funded is returned to the floored slice.
+6. A PROBLEM IS NEVER HIDDEN. A `bad`, `unknown` or `excluded` slice thinner than the stated
+   minimum is granted the difference where the cell can fund it; no other state is floored, and
+   `provisional` good time is not. This is a grant, not an absolute floor — the claim that such a
+   slice never renders thinner than the minimum is withdrawn, because height is bounded by the cell.
+6a. A cell's stack totals exactly its height, by construction: the grant total is
+   `min(requested, cap, available)`, distributed in proportion to what each slice asked for and
+   taken from the funders — sealed good, then provisional good, then absence — exactly.
+6b. A slice the grant could not bring up to the floor is MARKED with the non-geometric vocabulary,
+   and the cell's readout names the state and gives its exact duration. The promise of invariant 6
+   is kept there when height runs out.
 7. The exact durations and bucket counts behind every cell are reachable from that cell.
 8. No timeline surface uses height to carry a slice's identity.
 9. A segment lane's width is never floored.

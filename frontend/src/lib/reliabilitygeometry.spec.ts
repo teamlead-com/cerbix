@@ -298,6 +298,9 @@ describe("stackSlices — the floor is paid for, or it is not granted", () => {
     expect(problems).toHaveLength(6);
     for (const s of problems) expect(s.h).toBeCloseTo(problems[0].h, 9); // equal, not rounded
     expect(problems.every((s) => s.h < SLICE_FLOOR_PX)).toBe(true);
+    // …and every one of them SAYS SO, so the promise moves off geometry rather than lapsing:
+    // the caller draws the non-geometric marker and the readout names the state (invariant 6b).
+    expect(problems.every((s) => s.belowFloor === true)).toBe(true);
     // and the GRANT is exactly the cap: the slices' natural heights plus the cap, no more. Asserted
     // against the natural heights rather than a rounded figure, because the rule is about the grant.
     const natural = (t / (24 * 60)) * LANE; // one second of a day, at the lane's height
@@ -341,6 +344,27 @@ describe("stackSlices — the floor is paid for, or it is not granted", () => {
     const bad = slices.find((s) => s.kind === "bad")!;
     expect(bad.h).toBeLessThan(SLICE_FLOOR_PX);
     expect(bad.h).toBeCloseTo((1 / 1440) * H, 6);
+    // nothing could fund it, so it is MARKED — the promise is that a problem is never hidden, and
+    // the floor is only the first mechanism for keeping it
+    expect(bad.belowFloor).toBe(true);
+  });
+
+  it("does NOT mark a floor it could fund, so the marker keeps its meaning", () => {
+    const slices = stackSlices(cell({ bad: 1 / 60, good: 1439 }), H);
+    const bad = slices.find((s) => s.kind === "bad")!;
+    expect(bad.h).toBeCloseTo(SLICE_FLOOR_PX, 6);
+    expect(bad.belowFloor).toBeUndefined();
+    expect(slices.every((s) => s.belowFloor === undefined)).toBe(true);
+  });
+
+  it("marks every eligible slice when there is nothing at all to grant from", () => {
+    // a cell that is ENTIRELY tiny problems: no good, no absence, so grant is zero
+    const c = cell({ bad: 1 / 60, unknown: 1 / 60 }, 2 / 60);
+    const slices = stackSlices(c, H);
+    expect(slices.reduce((s, x) => s + x.h, 0)).toBeCloseTo(H, 6);
+    // (at this extent both slices are already tall, so nothing is eligible and nothing is marked)
+    const marked = slices.filter((s) => s.belowFloor);
+    expect(marked.every((s) => s.h < SLICE_FLOOR_PX)).toBe(true);
   });
 
   it("never returns a negative slice while paying the floor", () => {

@@ -185,6 +185,25 @@ const placedMarks = computed(() => {
         </template>
       </template>
 
+      <!-- A problem the geometry could not bring up to its floor — the cap bound, or the cell had
+           nothing to fund it — is MARKED rather than left to vanish. The same non-geometric
+           vocabulary a sub-pixel SEGMENT gets, for the same reason and on the other axis: height is
+           bounded by the cell, so where geometry cannot show a problem, something that is not
+           geometry says so. The promise is that a problem is never hidden; the floor is only the
+           first mechanism for keeping it (spec §5.2, invariant 6b). -->
+      <path
+        v-for="(cell, i) in laid.filter((l) => l.w > 0 && l.slices.some((s) => s.belowFloor))"
+        :key="'bf' + i"
+        :d="`M${cell.x + cell.w / 2} 0.6 l2.1 3.6 h-4.2 Z`"
+        fill="none"
+        stroke="var(--degraded)"
+        stroke-width="0.7"
+        stroke-dasharray="1.2 0.8"
+        data-testid="strip-belowfloor"
+        data-affordance="non-geometric"
+        :data-cell-start="cell.c.startMs"
+      />
+
       <!-- One transparent hit target per cell: hover and keyboard focus reach the same readout,
            and a cell narrower than a finger still has a target of its own. -->
       <rect

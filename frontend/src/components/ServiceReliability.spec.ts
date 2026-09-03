@@ -676,6 +676,55 @@ describe("ServiceReliability honesty states", () => {
     expect(emptyDay.map((r) => r.attributes("data-state"))).toEqual(["notStored"]);
   });
 
+  it("marks a problem too small to draw and names it in the readout (invariant 6b)", async () => {
+    // The promise is that a problem is never hidden. The floor is only the FIRST mechanism for
+    // keeping it — height is bounded by the cell, so a cap that binds or a cell with nothing to
+    // fund from leaves a slice below the floor. Where geometry cannot show it, the same
+    // non-geometric vocabulary a sub-pixel SEGMENT gets says so (reviewer P1 [184]).
+    const wrapper = mountWith(okReport, undefined, {
+      from: "a", to: "b", step: "day",
+      points: [{
+        // a whole day of `unknown` with one minute of `bad` inside it: nothing can fund the floor
+        start: "2026-08-15T00:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 1440,
+        durations: { ...goodDurations, GoodUs: 0, BadUs: 60_000_000, UnknownUs: 86_340_000_000, HealthyUs: 0 },
+      }],
+    });
+    await flushPromises();
+    const timeline = wrapper.find('[data-testid="svc-timeline"]');
+    const at = Date.parse("2026-08-15T00:00:00Z");
+    // the bad slice really is below the floor…
+    const bad = timeline.find(`rect[data-cell-start="${at}"][data-state="bad"]`);
+    expect(bad.exists()).toBe(true);
+    expect(Number(bad.attributes("height"))).toBeLessThan(2);
+    // …so the cell carries the non-geometric marker
+    const mark = timeline.find(`[data-testid="strip-belowfloor"][data-cell-start="${at}"]`);
+    expect(mark.exists()).toBe(true);
+    expect(mark.attributes("data-affordance")).toBe("non-geometric");
+    // …and the readout NAMES it with its exact duration beside it
+    const hit = timeline.find(`rect[data-testid="strip-cell-hit"][data-cell-start="${at}"]`);
+    await hit.trigger("focus");
+    const readout = wrapper.find('[data-testid="svc-cell-belowfloor"]');
+    expect(readout.exists()).toBe(true);
+    expect(readout.text()).toContain("bad");
+    expect(readout.text()).toContain("too small to draw");
+    expect(wrapper.find('[data-testid="svc-cell-readout"]').text()).toContain("1m");
+  });
+
+  it("does not mark a cell whose floors were funded, so the marker keeps its meaning", async () => {
+    const wrapper = mountWith(okReport, undefined, {
+      from: "a", to: "b", step: "day",
+      points: [{
+        start: "2026-08-15T00:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 1440,
+        durations: { ...goodDurations, GoodUs: 86_340_000_000, BadUs: 60_000_000, UnknownUs: 0 },
+      }],
+    });
+    await flushPromises();
+    const at = Date.parse("2026-08-15T00:00:00Z");
+    const timeline = wrapper.find('[data-testid="svc-timeline"]');
+    expect(timeline.find(`rect[data-cell-start="${at}"][data-state="bad"]`).exists()).toBe(true);
+    expect(timeline.find(`[data-testid="strip-belowfloor"][data-cell-start="${at}"]`).exists()).toBe(false);
+  });
+
   it("draws a sub-pixel cell at its exact width, never widened to be seen (reviewer P1 [178])", async () => {
     // Width carries duration, so a FACTUAL rect keeps its exact projected width even when that is
     // sub-pixel: a cell too short to see at this zoom is a cell whose duration is too short to

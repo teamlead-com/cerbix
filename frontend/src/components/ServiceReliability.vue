@@ -23,7 +23,7 @@ import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import ReliabilityStrip, { type StripMark } from "@/components/ReliabilityStrip.vue";
 import {
-  CANONICAL_BUCKET_MS, buildCells, clusterTransitions, storageVerdict, transitionsOf,
+  CANONICAL_BUCKET_MS, buildCells, clusterTransitions, stackSlices, storageVerdict, transitionsOf,
   type Cell,
 } from "@/lib/reliabilitygeometry";
 import { utcCellExtentLabel, utcExtentLabel } from "@/lib/wallclock";
@@ -377,12 +377,20 @@ function cellReadout(cell: Cell) {
   push("provisional", prov, "provisional");
   const missing = Math.max(0, extentMinutes - cell.storedMinutes);
   if (missing > 0) rows.push({ label: "no stored bucket", value: usToText(missing * CANONICAL_BUCKET_MS * 1000), state: "notStored" });
+  // The states the geometry could not bring up to their floor. The readout is where the promise is
+  // actually kept: the marker says one exists, and this names it with its exact duration. Measured
+  // at a nominal height because what is asked is WHICH states the allocation could not fund, and
+  // that is a property of the cell rather than of the strip's pixel height.
+  const belowFloor = stackSlices(cell, 100)
+    .filter((s) => s.belowFloor)
+    .map((s) => (s.provisional ? `provisional ${s.kind}` : s.kind));
   return {
     local: utcCellExtentLabel(fromIso, toIso),
     utc: utcExtentLabel(fromIso, toIso),
     rows,
     stored: `${cell.storedMinutes} of ${Math.round(extentMinutes)}`,
     repairing: cell.repairing,
+    belowFloor,
   };
 }
 
@@ -645,6 +653,12 @@ const pillClass: Record<string, string> = {
                       <tr>
                         <td class="pr-[14px] text-ink-3">stored buckets</td>
                         <td class="text-right font-mono text-ink-2">{{ cellReadout(cell).stored }}</td>
+                      </tr>
+                      <tr v-if="cellReadout(cell).belowFloor.length">
+                        <td colspan="2" class="pt-[6px] text-left text-degraded" data-testid="svc-cell-belowfloor">
+                          marked, too small to draw at this size:
+                          {{ cellReadout(cell).belowFloor.join(", ") }} — the durations above are exact
+                        </td>
                       </tr>
                     </tbody>
                   </table>

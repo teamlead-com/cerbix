@@ -26,7 +26,12 @@
 /** The fixed width every fact is keyed by — the client mirror of `domain.CanonicalBucket`. */
 export const CANONICAL_BUCKET_MS = 60_000;
 
-/** Minimum drawn height of a `bad` / `unknown` / `excluded` slice, in the strip's own units. */
+/**
+ * Minimum drawn height a `bad` / `unknown` / `excluded` slice is GRANTED where the cell can fund
+ * it. It is not an absolute floor and the specification does not claim one: height is bounded by
+ * the cell, so a cap that binds or a cell with nothing to fund from leaves a slice below it. What
+ * IS absolute is that the problem is not hidden — see `Slice.belowFloor`.
+ */
 export const SLICE_FLOOR_PX = 2;
 /** The floor's cap: floors together may not take more than this share of a cell. */
 export const SLICE_FLOOR_CAP = 0.6;
@@ -124,7 +129,19 @@ export function buildCells(
 }
 
 export type SliceKind = "notStored" | "bad" | "unknown" | "excluded" | "good";
-export type Slice = { kind: SliceKind; h: number; provisional: boolean };
+export type Slice = {
+  kind: SliceKind;
+  h: number;
+  provisional: boolean;
+  /**
+   * A problem slice the geometry could NOT bring up to the floor — the cap bound, or nothing could
+   * fund it. The promise is that a problem is never hidden, and the floor is only the FIRST
+   * mechanism for keeping it: height is bounded by the cell, so it can run out. When it does, the
+   * caller draws the same non-geometric marker a sub-pixel SEGMENT gets, for the same reason —
+   * geometry cannot show this at this size, so something that is not geometry says so.
+   */
+  belowFloor?: boolean;
+};
 
 /**
  * A cell's stack, top to bottom, in a fixed order so cells stay comparable:
@@ -183,6 +200,8 @@ export function stackSlices(cell: Cell, h: number): Slice[] {
   const want = eligible.map((s) => SLICE_FLOOR_PX - s.h);
   const wantTotal = want.reduce((a, b) => a + b, 0);
   if (wantTotal <= 0) return slices;
+  // If nothing can be granted at all, every eligible slice stays sub-floor and says so.
+  const markAll = () => eligible.forEach((s) => (s.belowFloor = true));
 
   // Funded in a stated order: sealed good, then provisional good, then — as a LAST RESORT — the
   // absence. That last funder overrules this function's own earlier note that absence may never
@@ -197,12 +216,19 @@ export function stackSlices(cell: Cell, h: number): Slice[] {
   ];
   const available = funders.reduce((a, s) => a + s.h, 0);
   const grant = Math.min(wantTotal, SLICE_FLOOR_CAP * h, available);
-  if (grant <= 0) return slices;
+  if (grant <= 0) {
+    markAll();
+    return slices;
+  }
 
   // Granted in proportion to what each slice asked for, so a cap that binds shortens every floor
   // rather than paying some slices in full and others not at all.
   const scale = grant / wantTotal;
-  eligible.forEach((s, i) => (s.h += want[i] * scale));
+  eligible.forEach((s, i) => {
+    s.h += want[i] * scale;
+    // Marked, not widened: the cell has no more height to give, so the promise moves off geometry.
+    if (s.h < SLICE_FLOOR_PX) s.belowFloor = true;
+  });
 
   let owed = grant;
   for (const f of funders) {

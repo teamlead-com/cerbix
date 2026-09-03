@@ -189,10 +189,16 @@ difference visible: a segment spanning 28 days with 300 stored minutes renders 2
 that *exists* was decidable, which a storage hole makes worthless as a warrant. Therefore:
 
 - Each segment readout states **storage** — `contiguous`, or `<stored> of <extent> · incomplete`.
-- A segment whose storage is incomplete quotes **no availability**: a dash with the payload's own
-  reason (`window_precedes_materialization_era` when the missing storage is a contiguous prefix,
-  `storage_gap` when it is missing inside the range). The vocabulary is the shipped one, not a new
-  one.
+- A segment whose storage is incomplete quotes **no availability**: a dash with a **local display
+  explanation and no code identity** — "records begin later in this segment" when the missing
+  storage is a contiguous prefix, "missing records inside this segment" when it is interior.
+  **It is presentation, not a payload reason.** The client may derive presentation from the series
+  it already holds, but it may not manufacture a wire verdict whose canonical meaning belongs
+  server-side, so the explanation never leaves the component, never enters metrics, audit or the
+  API, and never drives reliability state. Ruled at party [176], correcting this document's first
+  revision, which had the component asserting the canonical codes
+  `window_precedes_materialization_era` and `storage_gap`. Publishing the canonical identifier for
+  a segment is a follow-up server contract, not a client inference.
 - **Coverage stays printed** as its own separately named fraction, because it answers a different
   question and hiding it would lose information the operator needs.
 
@@ -418,8 +424,8 @@ Discharged as a SET in `docs/traceability.md`.
 8. No timeline surface uses height to carry a slice's identity.
 9. A segment lane's width is never floored.
 9a. A segment states its storage verdict, and quotes no availability while that storage is
-   incomplete — a dash with the payload's own reason. Coverage remains printed as its own
-   separately named fraction.
+   incomplete — a dash with a display-only explanation carrying no code identity, which never
+   leaves the component. Coverage remains printed as its own separately named fraction.
 10. A sub-pixel segment is represented by a non-geometric marker that says it is not to scale,
     and colliding markers never spread horizontally.
 10a. A cluster mark is anchored at the earliest real event in its cluster, carries its count and

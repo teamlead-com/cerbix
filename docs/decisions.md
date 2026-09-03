@@ -6744,11 +6744,20 @@ such.
     observation that exists was decidable, which a storage hole makes worthless as a warrant, and
     `func-service-reliability.md` §11.2 makes the two axes independent with both required. So each
     segment now states `storage contiguous` or `<stored> of <extent> · incomplete`, and an
-    incomplete segment quotes no availability — a dash carrying the payload's OWN reason, derived
-    rather than typed: `window_precedes_materialization_era` when the missing storage is a
-    contiguous prefix, `storage_gap` when it is missing inside the range. Coverage stays printed as
-    its own separately named fraction, because it answers a different question. Reviewer P1 at
-    [161]; the vocabulary is the shipped one from `ServiceReliability.vue`, not a new one.
+    incomplete segment quotes no availability. Coverage stays printed as its own separately named
+    fraction, because it answers a different question. Reviewer P1 at [161].
+
+    **Corrected at [176], before any code:** the first revision had the withheld dash carrying the
+    canonical payload codes `window_precedes_materialization_era` / `storage_gap`, derived in the
+    component. That crosses an ownership boundary — a client may derive PRESENTATION from the
+    series it holds, but it may not manufacture a wire verdict whose canonical meaning belongs
+    server-side. The dash now carries a **display-only explanation with no code identity**
+    ("records begin later in this segment" / "missing records inside this segment") under an
+    explicit display-only fence: it never leaves the component, never enters metrics, audit or the
+    API, and never drives reliability state. The numerical storage verdict stays client-derived
+    under the same fence. Publishing a canonical per-segment reason is a follow-up server contract.
+    This session flagged the risk when starting implementation instead of discovering it in
+    review, which is the only reason it cost a paragraph rather than a rewrite.
 
 17. **Four corrections the mock's own review forced, recorded because a drawing that gates an
     implementation has to be right.** (a) The fixture's stored buckets totalled 2770 while the KPI

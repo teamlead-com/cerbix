@@ -484,11 +484,15 @@ const SEGS = [
 ];
 const SEALED = (r) => r.day < WIN_DAYS;   // provisional tail is outside the window
 
-/* The payload's own withholding vocabulary, copied verbatim from
-   frontend/src/components/ServiceReliability.vue so the mock speaks the shipped words. */
-const REASON = {
-  window_precedes_materialization_era: "The window reaches before this service's history begins.",
-  storage_gap: "Stored buckets are missing inside the window; the surviving rows cannot vouch for it.",
+/* DISPLAY-ONLY grammar, with no code identity (ruled at party [176]). A client may derive
+   presentation from the series it holds; it may not manufacture a wire verdict whose canonical
+   meaning belongs server-side. So this is an explanation a reader sees and nothing else: it never
+   leaves the component, never enters metrics, audit or the API, and never drives reliability
+   state. An earlier revision asserted the payload's own codes here, which was the boundary
+   violation this replaces. */
+const EXPLAIN = {
+  prefix:   "records begin later in this segment",
+  interior: "missing records inside this segment",
 };
 
 const sum = (rows) => rows.reduce((o, r) => {
@@ -511,8 +515,7 @@ function storageOf(segId, from, to) {
   const lastDay = Math.floor((to - 1) / DAY);
   const prefixOnly = days.length > 0 && days[days.length - 1] === lastDay &&
                      days.every((d, i) => i === 0 || d === days[i - 1] + 1);
-  return { stored, extent, complete: false,
-           reason: prefixOnly ? "window_precedes_materialization_era" : "storage_gap" };
+  return { stored, extent, complete: false, shape: prefixOnly ? "prefix" : "interior" };
 }
 const coverage = (t) => { const n = t.good + t.bad, d = n + t.unknown; return d === 0 ? null : n / d; };
 /* the product's own two formatters, mirrored */
@@ -628,10 +631,10 @@ function drawLanes() {
        </div>` +
       (st.complete ? "" :
        `<div class="lane-meta" style="color:var(--degraded)">
-          availability withheld · <span class="mono">${st.reason}</span> — ${REASON[st.reason]}
+          availability withheld — ${EXPLAIN[st.shape]}.
           Coverage stays printed as its own fraction: it says every observation that EXISTS was
           decidable, which is a different question from whether the range was materialized (§11.2,
-          both must pass).
+          both must pass). This explanation is display only and carries no code identity.
         </div>`);
     const svg = el("svg", { width: W, height: 16 });
     row.appendChild(svg);

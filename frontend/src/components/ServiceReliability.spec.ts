@@ -676,6 +676,40 @@ describe("ServiceReliability honesty states", () => {
     expect(emptyDay.map((r) => r.attributes("data-state"))).toEqual(["notStored"]);
   });
 
+  it("draws a sub-pixel cell at its exact width, never widened to be seen (reviewer P1 [178])", async () => {
+    // Width carries duration, so a FACTUAL rect keeps its exact projected width even when that is
+    // sub-pixel: a cell too short to see at this zoom is a cell whose duration is too short to
+    // see. The earlier `Math.max(0.25, …)` floored every cell's drawn width, which on a 30-day
+    // axis drew anything under ~10.8 minutes as ~10.8 minutes. The interaction affordance is
+    // separate and says so.
+    // three minutes before a DAY boundary, so the first cell really is a three-minute fragment —
+    // clipping is to the step, so a window starting at 11:57 would give a twelve-hour first cell
+    const from = "2026-07-17T23:57:00Z";
+    const wrapper = mountWith(
+      { ...okReport, from, sealed_through: okReport.to },
+      undefined,
+      {
+        from: "a", to: "b", step: "day",
+        points: [{ start: "2026-07-17T00:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 3, durations: goodDurations }],
+        // (the point's step is the 17th; the cell under test is that step CLIPPED to the window)
+      },
+    );
+    await flushPromises();
+    const timeline = wrapper.find('[data-testid="svc-timeline"]');
+    const axisSpanMs = Date.parse(okReport.to) - Date.parse(from);
+    // the first cell is the clipped three-minute fragment
+    const first = timeline.find(`rect[data-cell-start="${Date.parse(from)}"][data-state]`);
+    expect(first.exists()).toBe(true);
+    const projected = (3 * 60_000 / axisSpanMs) * 1000; // in the strip's 1000-unit viewBox
+    expect(parseFloat(first.attributes("width")!)).toBeCloseTo(projected, 3);
+    expect(projected).toBeLessThan(0.25); // the value the old floor would have imposed
+    // …and it is still REACHABLE: the hit target is widened and marked as non-geometric
+    const hit = timeline.find(`rect[data-testid="strip-cell-hit"][data-cell-start="${Date.parse(from)}"]`);
+    expect(hit.exists()).toBe(true);
+    expect(hit.attributes("data-affordance")).toBe("non-geometric");
+    expect(parseFloat(hit.attributes("width")!)).toBeGreaterThan(projected);
+  });
+
   it("withholds a segment's availability while its storage is incomplete, and keeps coverage", async () => {
     // The defect the real-time axis exposed (D-0235 decision 16): a segment could quote
     // `availability 100%` over a range it never materialized, and that was invisible for as long

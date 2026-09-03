@@ -6830,6 +6830,38 @@ such.
     Reliability card's live pixels, because the dev stack has no service and sealing one takes real
     time.
 
+23. **Two P1s in the implementation, and both are the same mistake in two places: a rendering
+    convenience quietly overriding the invariant above it.** Found at party [178] and verified here
+    before acceptance.
+    (a) **The drawn width was floored.** `Math.max(0.25, …)` applied to every cell, so on a 30-day
+    axis anything under ~10.8 minutes was drawn as ~10.8 minutes — width overstating duration, on
+    the surface built to stop exactly that. Fixed by separating the FACTUAL width (exact, never
+    floored, drawn only when positive) from the HIT TARGET (widened, centred, and marked
+    `data-affordance="non-geometric"`), so a sub-pixel cell stays reachable without its drawing
+    claiming the extra time.
+    (b) **The floor could buy height the cell did not have.** It floored the slice, capped the debt,
+    and paid only out of `good` — so a 34 px cell holding one second of `bad` and no good returned
+    35.9996 px, which SVG clips, making a picture that claims more time than it has AND hides the
+    evidence of doing so. Fixed by funding the floor in a stated order (sealed good → provisional
+    good → absence) and RETURNING whatever cannot be funded. The last funder overrules this
+    session's own earlier note that absence may never shrink: with one second of `bad` and no good,
+    "the problem is visible", "absence never shrinks" and "the total is exact" cannot all hold, and
+    the first was ruled at [143] while the third is not negotiable. Recorded as spec invariant 6a.
+
+    One of the three regression tests for (b) was written only because a MUTATION SURVIVED: removing
+    the give-back loop failed nothing, so the case with no funder at all did not exist yet. It does
+    now, and it kills that mutant.
+
+24. **The evidence count was internally inconsistent, and the fix is a distinction rather than a
+    number.** Party [177] said "thirteen mutants" while `traceability.md` said twelve and the
+    iteration report said 576 tests against a later 585 — reviewer P2 at [178]. The thirteen came
+    from folding a defect the tests CAUGHT into the count of mutants planted and KILLED. They are
+    different kinds of evidence: a killed mutant says a test would notice a regression, a caught
+    defect says a test noticed a mistake. The records now state both separately — **fifteen mutants
+    killed, four defects caught with nothing planted, and one the running stack caught** — with 585
+    tests over 50 files. Every gate figure in this arc is from a run in this session's own
+    environment; the reviewer has no npm and none of it is attributed to him.
+
 **Status.** IMPLEMENTED at iter-0174 (2026-09-03); FR-031 and NFR-025a are DONE, NFR-025b and
 FR-032 stay open by design. The mock
 (`docs/design/mock-truthful-rendering.html`) is drawn, carries the two cases the reviewer asked

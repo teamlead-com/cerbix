@@ -161,6 +161,7 @@ export function stackSlices(cell: Cell, h: number): Slice[] {
     ["good", cell.sealed.good, false],
   ];
   const slices: Slice[] = [];
+  const floored: Slice[] = [];
   let owed = 0;
   for (const [kind, us, provisional] of raw) {
     if (us <= 0) continue;
@@ -171,24 +172,46 @@ export function stackSlices(cell: Cell, h: number): Slice[] {
     if (kind !== "notStored" && kind !== "good" && px < SLICE_FLOOR_PX) {
       owed += SLICE_FLOOR_PX - px;
       px = SLICE_FLOOR_PX;
+      const s = { kind, h: px, provisional };
+      slices.push(s);
+      floored.push(s);
+      continue;
     }
     slices.push({ kind, h: px, provisional });
   }
   owed = Math.min(owed, SLICE_FLOOR_CAP * h);
-  // Paid out of `good`, SEALED FIRST and provisional only if sealed good cannot cover it; never
-  // out of `notStored`, which is the one slice that may not shrink — absence is the fact a hole is
-  // made of. The payment order is explicit rather than the stack's own order: paying in stack
-  // order takes from provisional good first, which zeroes it and makes unsealed time vanish to
-  // pay for a floor. That is its own dishonesty, and it is what the first version of this function
-  // did until `reliabilitygeometry.spec.ts` caught it.
-  for (const wantProvisional of [false, true]) {
+
+  // THE FLOOR IS PAID FOR, OR IT IS NOT GRANTED. The stack must total exactly `h`: a cell that
+  // draws taller than its own extent claims more time than it has, which is this requirement's
+  // own subject. So the inflation is funded in a stated order and whatever cannot be funded is
+  // GIVEN BACK to the floored slices.
+  //
+  // Order: sealed good, then provisional good, then — as a LAST RESORT — the absence.
+  //
+  // That last step is a deliberate change of my own earlier note, which said absence may never
+  // shrink. It cannot survive contact with the case the reviewer found: a cell holding one second
+  // of `bad` and no good at all has nothing else to fund a visible outage, and the three rules
+  // "the problem is visible", "absence never shrinks" and "the total is exact" cannot all hold
+  // there. The first is the promise ruled at party [143] — a one-second outage cannot vanish — and
+  // the third is not negotiable, so the second yields, bounded by SLICE_FLOOR_CAP: absence gives
+  // up at most that share, and only when nothing else can pay.
+  const fund = (pick: (s: Slice) => boolean) => {
     for (const s of slices) {
       if (owed <= 0) break;
-      if (s.kind !== "good" || s.provisional !== wantProvisional) continue;
+      if (!pick(s) || floored.includes(s)) continue;
       const take = Math.min(owed, s.h);
       s.h -= take;
       owed -= take;
     }
+  };
+  fund((s) => s.kind === "good" && !s.provisional);
+  fund((s) => s.kind === "good" && s.provisional);
+  fund((s) => s.kind === "notStored");
+  // Anything still unfunded is returned, so the floor never buys height the cell does not have.
+  for (let i = floored.length - 1; i >= 0 && owed > 0; i--) {
+    const give = Math.min(owed, floored[i].h);
+    floored[i].h -= give;
+    owed -= give;
   }
   return slices;
 }

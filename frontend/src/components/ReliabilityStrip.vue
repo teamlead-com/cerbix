@@ -53,6 +53,16 @@ const props = withDefaults(
 /** Fixed, in the strip's own user units — never a share of a cell (F2). */
 const PAD = 1.2;
 const MARK_W = 2.2;
+/**
+ * A cell's HIT TARGET may be widened to stay reachable; a cell's DRAWN WIDTH may not.
+ *
+ * Width carries duration, so a factual rect keeps its exact projected width even when that is
+ * sub-pixel — a cell too short to see at this zoom is a cell whose duration is too short to see,
+ * and widening it would overstate the time it covers. The earlier `Math.max(0.25, …)` floored
+ * every cell's drawn width, which at a 30-day axis drew anything under ~10.8 minutes as ~10.8
+ * minutes (reviewer P1). The interaction affordance is separate and explicitly non-geometric.
+ */
+const HIT_W = 1.5;
 
 const span = computed(() => Math.max(1, props.axisToMs - props.axisFromMs));
 /** The strip is drawn in a 1000-unit viewBox, so 1 unit is 0.1% of the axis. */
@@ -61,14 +71,24 @@ const x = (ms: number) => ((ms - props.axisFromMs) / span.value) * W;
 
 const h = computed(() => props.height);
 const laid = computed(() =>
-  props.cells
-    .map((c) => {
-      const x0 = x(c.startMs);
-      const w = x(c.endMs) - x0;
-      const pad = w > PAD * 3 ? PAD : 0; // a fragment narrower than its own padding keeps its width
-      return { c, x: x0 + pad, w: Math.max(0.25, w - pad * 2), slices: stackSlices(c, h.value) };
-    })
-    .filter((cell) => cell.w > 0),
+  props.cells.map((c) => {
+    const x0 = x(c.startMs);
+    const w = x(c.endMs) - x0;
+    const pad = w > PAD * 3 ? PAD : 0; // a fragment narrower than its own padding keeps its width
+    // `w` is the FACTUAL width: exact, never floored, and drawn only when it is positive.
+    // `hitX`/`hitW` are the interaction affordance, widened and centred so a sub-pixel cell stays
+    // reachable by pointer and keyboard without its drawing claiming the extra time.
+    const factual = Math.max(0, w - pad * 2);
+    const hitW = Math.max(w, HIT_W);
+    return {
+      c,
+      x: x0 + pad,
+      w: factual,
+      hitX: x0 + (w - hitW) / 2,
+      hitW,
+      slices: stackSlices(c, h.value),
+    };
+  }),
 );
 
 /** A lane whose whole extent is under a device pixel is MARKED, never widened. */
@@ -135,7 +155,7 @@ const placedMarks = computed(() => {
       </defs>
 
       <template v-if="!subPixel">
-        <template v-for="(cell, i) in laid" :key="i">
+        <template v-for="(cell, i) in laid.filter((l) => l.w > 0)" :key="i">
           <!-- an active repair is rendered as WORK, never as data (§12.1) -->
           <rect
             v-if="cell.c.repairing"
@@ -170,10 +190,11 @@ const placedMarks = computed(() => {
       <rect
         v-for="(cell, i) in laid"
         :key="'hit' + i"
-        :x="cell.x" y="0" :width="cell.w" :height="h + 5"
+        :x="cell.hitX" y="0" :width="cell.hitW" :height="h + 5"
         fill="transparent"
         tabindex="0"
         role="button"
+        data-affordance="non-geometric"
         :aria-label="cell.c.repairing ? 'interval being recomputed' : 'reliability interval'"
         data-testid="strip-cell-hit"
         :data-cell-start="cell.c.startMs"

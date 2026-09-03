@@ -242,3 +242,72 @@ describe("stackSlices — a clipped cell shows its step's composition and never 
     expect(ns.h).toBeCloseTo((1290 / 1440) * H, 6);
   });
 });
+
+// Reviewer P1 at party [178]: the floor could buy height the cell did not have. It floored the
+// issue slice, capped the debt, and then paid only out of `good` — so a cell holding one second of
+// `bad` and no good at all returned notStored 33.9996px + bad 2px = 35.9996px against a 34px cell.
+// SVG clips that, which makes it a picture claiming more time than it has and hiding the evidence.
+describe("stackSlices — the floor is paid for, or it is not granted", () => {
+  const H = 34;
+  const us = (min: number) => min * CANONICAL_BUCKET_MS * 1000;
+  const cell = (o: { good?: number; bad?: number; unknown?: number; provGood?: number }, extentMin = 1440) => ({
+    startMs: F,
+    endMs: F + extentMin * CANONICAL_BUCKET_MS,
+    sealed: { good: us(o.good ?? 0), bad: us(o.bad ?? 0), unknown: us(o.unknown ?? 0), excluded: 0 },
+    provisional: { good: us(o.provGood ?? 0), bad: 0, unknown: 0, excluded: 0 },
+    storedMinutes: (o.good ?? 0) + (o.bad ?? 0) + (o.unknown ?? 0) + (o.provGood ?? 0),
+    repairing: false,
+  });
+  const total = (c: Parameters<typeof stackSlices>[0]) => stackSlices(c, H).reduce((s, x) => s + x.h, 0);
+
+  it("totals exactly h for the reviewer's counterexample: one second of bad and NO good", () => {
+    const c = cell({ bad: 1 / 60 });
+    expect(total(c)).toBeCloseTo(H, 6);
+    // the outage is still visible — the promise ruled at [143] — and absence funded it
+    const slices = stackSlices(c, H);
+    expect(slices.find((s) => s.kind === "bad")!.h).toBeCloseTo(SLICE_FLOOR_PX, 6);
+    expect(slices.find((s) => s.kind === "notStored")!.h).toBeCloseTo(H - SLICE_FLOOR_PX, 6);
+  });
+
+  it("totals exactly h when the whole cell is one tiny problem and nothing else at all", () => {
+    // extent one minute, one second of bad, no absence to fund from either
+    const c = cell({ bad: 1 / 60 }, 1 / 60);
+    expect(total(c)).toBeCloseTo(H, 6);
+  });
+
+  it("totals exactly h across a sweep of mixtures, so this class cannot return quietly", () => {
+    const mixes: Array<Parameters<typeof cell>[0]> = [];
+    for (const bad of [0, 1 / 60, 1, 9, 700]) {
+      for (const unknown of [0, 1 / 60, 8]) {
+        for (const good of [0, 1 / 60, 150, 1439]) {
+          for (const provGood of [0, 40]) mixes.push({ bad, unknown, good, provGood });
+        }
+      }
+    }
+    for (const m of mixes) {
+      const sum = total(cell(m));
+      expect(sum, `mixture ${JSON.stringify(m)}`).toBeCloseTo(H, 6);
+    }
+    expect(mixes.length).toBe(120);
+  });
+
+  it("returns the floor it cannot fund, rather than overflowing — the case a mutant survived", () => {
+    // Built deliberately after a mutation showed nothing reached it: a cell FULL of problem states
+    // has neither good nor absence to fund a floor. One minute of `bad` beside 1439 of `unknown`
+    // asks for 1.98px it cannot get, so the floor is given back and `bad` keeps its real height.
+    // Nothing good is hidden by that: the cell is entirely problem states either way.
+    const c = cell({ bad: 1, unknown: 1439 });
+    const slices = stackSlices(c, H);
+    expect(slices.reduce((s, x) => s + x.h, 0)).toBeCloseTo(H, 6);
+    expect(slices.some((s) => s.kind === "notStored")).toBe(false);
+    const bad = slices.find((s) => s.kind === "bad")!;
+    expect(bad.h).toBeLessThan(SLICE_FLOOR_PX);
+    expect(bad.h).toBeCloseTo((1 / 1440) * H, 6);
+  });
+
+  it("never returns a negative slice while paying the floor", () => {
+    for (const m of [{ bad: 1 / 60 }, { bad: 1 / 60, good: 1 / 60 }, { bad: 1 / 60, unknown: 1 / 60 }]) {
+      for (const s of stackSlices(cell(m), H)) expect(s.h).toBeGreaterThanOrEqual(0);
+    }
+  });
+});

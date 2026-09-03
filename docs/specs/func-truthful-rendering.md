@@ -130,6 +130,13 @@ under both. Ruled at party [140].
 Inter-tick padding is a **fixed** width, never a fraction of the tick, so the grid motif reads
 as a grid at every tick count.
 
+**A cell's DRAWN width is never floored**, even when its projected width is sub-pixel: a cell too
+short to see at this zoom is a cell whose duration is too short to see, and widening it would
+overstate the time it covers. Its **hit target** may be widened and is marked as a non-geometric
+affordance, so a sub-pixel cell stays reachable by pointer and keyboard without its drawing claiming
+the extra time. Reviewer P1 at party [178] found the first implementation flooring every cell's
+drawn width, which on a 30-day axis drew anything under ~10.8 minutes as ~10.8 minutes.
+
 ### 5.2 Five states, five encodings (answers F3)
 
 A cell is a **proportional stack** of the states measured within it, not one winning hue.
@@ -149,7 +156,16 @@ a missing bucket row is the absence of a verdict. Unmeasured time is never paint
 and the product must actually hold an unknown bucket before an unknown slice is drawn.
 
 **The slice floor.** A **`bad`, `unknown` or `excluded`** slice never renders thinner than a
-stated minimum, so a one-second outage cannot vanish. Those three states and no others: the floor
+stated minimum, so a one-second outage cannot vanish. **The floor is paid for, or it is not
+granted:** the stack totals exactly the cell's height, because a cell that draws taller than its own
+extent claims more time than it has, which is this document's own subject. The inflation is funded
+in a stated order — sealed good, then provisional good, then, as a last resort, the absence — and
+whatever cannot be funded is GIVEN BACK to the floored slice. That last funder overrules this
+document's first revision, which said absence may never shrink: a cell holding one second of `bad`
+and no good at all has nothing else to pay with, and "the problem is visible", "absence never
+shrinks" and "the total is exact" cannot all hold there. The first is the promise ruled at party
+[143] and the third is not negotiable, so the second yields, bounded by the cap. Reviewer P1 at
+party [178] found the overflow: 33.9996 px of absence plus a floored 2 px of `bad` in a 34 px cell. Those three states and no others: the floor
 belongs to a problem or a missing verdict, and `provisional` good time is good time that is merely
 unsealed, so flooring it would inflate good time and buy no honesty. The first revision of this
 section said "a non-good slice", which reads as including provisional and is how the mock's first
@@ -413,6 +429,8 @@ Discharged as a SET in `docs/traceability.md`.
 
 1. A cell's width is its real time extent; unstored time occupies width and is drawn in the
    `not-stored` encoding.
+1a. A cell's DRAWN width is never floored, even when its projection is sub-pixel; its hit target
+   may be widened and says it is not geometry.
 2. Inter-tick padding is a fixed width, independent of tick width.
 3. A boundary fragment's width stays proportional to its real time extent.
 4. `not-stored` and `unknown` are distinct encodings, and unmeasured time is never drawn as
@@ -420,6 +438,8 @@ Discharged as a SET in `docs/traceability.md`.
 5. `unknown` carries no status hue; `provisional` is the only user of opacity.
 6. A `bad`, `unknown` or `excluded` slice is never invisible, and its floor is capped so the
    other slices still fit. No other state is floored — `provisional` good time is not.
+6a. A cell's stack totals exactly its height: the floor is funded in the order sealed good,
+   provisional good, absence, and any part that cannot be funded is returned to the floored slice.
 7. The exact durations and bucket counts behind every cell are reachable from that cell.
 8. No timeline surface uses height to carry a slice's identity.
 9. A segment lane's width is never floored.

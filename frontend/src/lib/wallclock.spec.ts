@@ -115,6 +115,43 @@ describe("the UTC line", () => {
 describe("the mechanism's shape", () => {
   const SRC = resolve(__dirname, "..");
 
+  /** Split an argument or parameter list at TOP-LEVEL commas only. */
+  function splitTopLevel(text: string): string[] {
+    const out: string[] = [];
+    let depth = 0, quote = "", cur = "";
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quote) {
+        if (c === quote && text[i - 1] !== "\\") quote = "";
+      } else if (c === '"' || c === "'" || c === "`") quote = c;
+      else if ("([{<".includes(c)) depth++;
+      else if (")]}>".includes(c)) depth--;
+      else if (c === "," && depth === 0) { out.push(cur); cur = ""; continue; }
+      cur += c;
+    }
+    if (cur.trim()) out.push(cur);
+    return out.filter((x) => x.trim().length > 0);
+  }
+
+  /** Every argument list passed to `fn(` in `text`, balanced across nesting and strings. */
+  function callArgs(text: string, fn: string): string[] {
+    const out: string[] = [];
+    const re = new RegExp(`\\b${fn}\\s*\\(`, "g");
+    for (const m of text.matchAll(re)) {
+      let depth = 1, quote = "", buf = "";
+      for (let i = m.index! + m[0].length; i < text.length && depth > 0; i++) {
+        const c = text[i];
+        if (quote) { if (c === quote && text[i - 1] !== "\\") quote = ""; }
+        else if (c === '"' || c === "'" || c === "`") quote = c;
+        else if (c === "(") depth++;
+        else if (c === ")") { depth--; if (depth === 0) break; }
+        buf += c;
+      }
+      out.push(buf);
+    }
+    return out;
+  }
+
   function walk(dir: string): string[] {
     const out: string[] = [];
     for (const name of readdirSync(dir)) {
@@ -171,7 +208,7 @@ describe("the mechanism's shape", () => {
       "components/settings/AgentTokensPanel.vue": [1, "created/revoked as a bare UTC date"],
       "components/settings/MembersPanel.vue": [1, "added as a bare UTC date"],
       "components/settings/SecretsPanel.vue": [1, "created/rotated as a bare UTC date"],
-      "lib/changes.ts": [14, "the change timeline's compact clock and date: one rendering already says ` Z`, the rest say nothing"],
+      "lib/changes.ts": [14, "the change timeline's compact clock and date: one rendering already says ` Z`, the rest say nothing — and it defines its OWN `instantLabel(iso, now)`, a name collision with the mechanism that (c) should settle"],
       "lib/changesTimeline.ts": [1, "a same-day comparison whose branch returns a bare clock"],
       "lib/gate.ts": [6, "a bare UTC date, plus a datetime-local INPUT value that must stay offset-free by the HTML format"],
       "lib/gateLedger.ts": [4, "a bare UTC date, plus UTC day boundaries used only for comparison"],
@@ -192,20 +229,41 @@ describe("the mechanism's shape", () => {
     expect(found).toEqual(expected);
   });
 
-  it("has no product call site passing the test-only zone argument", () => {
+  it("has no product call site passing the test-only zone argument, on ANY export that takes one", () => {
+    // The list is DERIVED from the module's own signatures, not written by hand. The first version
+    // enumerated `instantLabel` and `utcCellExtentLabel`; two exports were added later that also
+    // take `zone`, and the guard did not follow them — reviewer P2 at party [199]. A hand list is
+    // what rots, so this one reads the parameter position out of the source and a future export
+    // taking a `zone` is covered the moment it exists.
+    const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
+    const zoneArg: Record<string, number> = {};
+    for (const m of src.matchAll(/export function (\w+)\(([\s\S]*?)\):/g)) {
+      const params = splitTopLevel(m[2]);
+      const i = params.findIndex((prm) => /^zone\??\s*:/.test(prm.trim()));
+      if (i >= 0) zoneArg[m[1]] = i;
+    }
+    // the derivation itself is asserted, or a broken regex would silently guard nothing
+    expect(zoneArg).toEqual({
+      instantLabel: 1, instantLabelShort: 1, utcCellExtentLabel: 2, instantRangeLabel: 2,
+    });
+
+    // IMPORT-AWARE, and it has to be: `lib/changes.ts` defines its OWN `instantLabel(iso, now)`,
+    // a different function with the same name and a second argument that is not a zone. The first
+    // version of this scan flagged its call sites, which is a false positive AND a real hazard
+    // worth naming — the collision is recorded in the NFR-025c ledger entry for that file, because
+    // the compact clock that shadows the mechanism's name is one of the sites (c) has to decide.
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
       if (file.endsWith("wallclock.ts") || file.endsWith("wallclock.spec.ts")) continue;
       const text = readFileSync(file, "utf8");
-      for (const fn of ["instantLabel", "utcCellExtentLabel"]) {
-        // a third argument to instantLabel, or a third to the extent label, is the zone
-        const re = new RegExp(`${fn}\\(([^()]|\\([^()]*\\))*,\\s*["'\`]`, "g");
-        for (const m of text.matchAll(re)) {
-          const call = m[0];
-          const commas = (call.match(/,/g) ?? []).length;
-          if ((fn === "instantLabel" && commas >= 1) || (fn === "utcCellExtentLabel" && commas >= 2)) {
-            offenders.push(`${file}: ${call.trim()}`);
-          }
+      const imported = new Set<string>();
+      for (const im of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*["'][^"']*lib\/wallclock["']/g)) {
+        for (const name of im[1].split(",")) imported.add(name.trim().split(/\s+as\s+/)[0].trim());
+      }
+      for (const [fn, idx] of Object.entries(zoneArg)) {
+        if (!imported.has(fn)) continue;
+        for (const args of callArgs(text, fn)) {
+          if (splitTopLevel(args).length > idx) offenders.push(`${file.split("/src/")[1]}: ${fn}(${args})`);
         }
       }
     }

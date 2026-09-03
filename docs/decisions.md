@@ -7060,5 +7060,24 @@ setting anywhere to reconcile them. Five hours of difference, unlabelled.
    generic formatter**, which is true at two renderers and at six, and is what actually stops a
    caller handing a bucket to something that will call it the viewer's calendar day.
 
+7. **The zone guard covered two exports and the module now has four that take a zone — and the
+   fix is to stop writing the list.** Reviewer P2 at party [199]: `instantLabelShort` and
+   `instantRangeLabel` also accept the test-only `zone`, while the module contract still said no
+   product call site passes it. The guard now **derives** the list from the module's own signatures,
+   reading each export's parameter position out of the source, so an export added later is covered
+   the moment it exists; the derivation itself is asserted, or a broken regex would silently guard
+   nothing. Two mutants killed: a product call site hard-coding a zone on one of the new exports,
+   and a new zone-taking export appearing unlisted.
+
+8. **A name collision the guard walked into, worth recording because NFR-025c has to settle it.**
+   The first version of the derived scan flagged three call sites, and they were not the invariant
+   being broken: **`lib/changes.ts` defines its own `instantLabel(iso, now)`** — a different
+   function with the same name as the mechanism's, whose second argument is a clock reference and
+   not a zone. The scan is import-aware now and checks only files that import the name from
+   `lib/wallclock`. The collision itself stands: that file is one of NFR-025c's sites, its compact
+   clock renders UTC mostly unlabelled, and it shadows the mechanism's own name while doing it.
+   Recorded in the ratchet's ledger entry for the file so the work that fixes the rendering also
+   settles the name.
+
 **Gates.** `vue-tsc` clean; **601 tests over 50 files**; `make docs-check` green. No Go change and
 no API change. NFR-025 is `IN_PROGRESS`: (a) and (b) done, (c) open.

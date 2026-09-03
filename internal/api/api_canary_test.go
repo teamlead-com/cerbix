@@ -53,7 +53,7 @@ func canaryCreateBody(t *testing.T, doc string, extra map[string]string) string 
 		config[k] = v
 	}
 	raw, err := json.Marshal(map[string]any{
-		"name": "charla journey", "type": "async_canary", "region": "core",
+		"name": "media upload journey", "type": "async_canary", "region": "core",
 		"interval_seconds": 300, "timeout_seconds": 300, "config": config,
 	})
 	if err != nil {

@@ -214,7 +214,7 @@ function sForm() {
   return `
   <div class="head">
     <h1>New monitor · Async canary</h1>
-    <p class="sub">Charla · <span class="mono">async_canary</span> · one workflow kind,
+    <p class="sub">Acme · <span class="mono">async_canary</span> · one workflow kind,
       <span class="mono">async_transaction_v1</span> — the five stages the executor already runs</p>
   </div>
 
@@ -228,7 +228,7 @@ function sForm() {
       <span class="chip mono">region eu-probe</span></header>
     <div class="body stack">
       <div class="grid2">
-        <div><div class="lbl">Name</div><div class="frow"><div class="inp grow">Charla Files · upload journey</div></div></div>
+        <div><div class="lbl">Name</div><div class="frow"><div class="inp grow">Media upload journey</div></div></div>
         <div><div class="lbl">Region</div><div class="frow"><div class="inp grow sel">eu-probe</div></div></div>
       </div>
       <div class="grid2">
@@ -252,7 +252,7 @@ function sForm() {
         <div class="tblwrap"><table class="tbl">
           <thead><tr><th>Binding</th><th>Project secret</th><th></th></tr></thead>
           <tbody>
-            <tr><td>${map("upload", "charla-upload-token")}</td>
+            <tr><td>${map("upload", "upload-token")}</td>
                 <td class="hint">used by <span class="mono">submit.headers[authorization]</span>,
                   <span class="mono">completion.headers[authorization]</span></td>
                 <td style="text-align:right"><button class="btn link">Remove</button></td></tr>
@@ -280,7 +280,7 @@ function sForm() {
           <tbody>
             <tr><td><span class="chip mono">authorization</span>
                     <span class="chip warnc" style="margin-left:6px">credential-bearing</span></td>
-                <td>${map("upload", "charla-upload-token")}</td>
+                <td>${map("upload", "upload-token")}</td>
                 <td style="text-align:right"><button class="btn link">Remove</button></td></tr>
             <tr><td><span class="chip mono">x-tenant</span></td>
                 <td><div class="inp mono" style="max-width:220px">canary</div></td>
@@ -315,7 +315,7 @@ function sForm() {
         <div class="lbl" style="margin-top:12px">Headers <span style="text-transform:none; font-weight:400; letter-spacing:0">— completion never inherits submit's (D3c)</span></div>
         <div class="tblwrap"><table class="tbl">
           <tbody><tr><td style="width:34%"><span class="chip mono">authorization</span></td>
-            <td>${map("upload", "charla-upload-token")}</td>
+            <td>${map("upload", "upload-token")}</td>
             <td style="text-align:right"><button class="btn link">Remove</button></td></tr></tbody>
         </table></div>
         <div class="lbl" style="margin-top:12px">SSE</div>
@@ -403,7 +403,7 @@ function sRefusals() {
       <div class="frow"><div class="inp grow mono">https://events.<b>other</b>.example.com/tasks/{{ correlation_id }}/events</div></div></div>
     <div class="tblwrap"><table class="tbl"><tbody><tr>
       <td style="width:34%"><span class="chip mono">authorization</span></td>
-      <td>${map("upload", "charla-upload-token")}</td></tr></tbody></table></div>
+      <td>${map("upload", "upload-token")}</td></tr></tbody></table></div>
     <div class="err"><b>Refused.</b> <span>A completion header may carry a binding only when the completion host equals
       the submit host (D3c1). Sending the submit credential to a different origin is the mistake this rule exists to
       make impossible — and on a cross-host <b>redirect</b> the executor drops every binding-backed header, which
@@ -436,7 +436,7 @@ function sRefusals() {
 function sRun() {
   return `
   <div class="head">
-    <h1>Charla Files · upload journey</h1>
+    <h1>Media upload journey</h1>
     <p class="sub">Monitor detail · what a canary is allowed to tell you</p>
   </div>
 
@@ -497,8 +497,8 @@ function sFile() {
     already follows — so this screen shows the workflow rendered, with the editor closed and the reason named.`)}
 
   <div class="card">
-    <header><h2>Charla Files · upload journey</h2><div class="spacer"></div>
-      <span class="chip file mono">file-owned · charla/canaries.yaml</span></header>
+    <header><h2>Media upload journey</h2><div class="spacer"></div>
+      <span class="chip file mono">file-owned · bundles/canaries.yaml</span></header>
     <div class="body stack">
       <div class="warnb"><b>Managed by a file provider.</b> <span>Edit the bundle and let the provider reconcile.
         Changing it here would be overwritten at the next apply, so the form is not offered.</span></div>
@@ -509,7 +509,7 @@ function sFile() {
           <tr><th>Completion</th><td class="mono">sse · task.completed</td></tr>
           <tr><th>Result</th><td class="mono">s3_path, byte_size, media_type · max_latency 4m</td></tr>
           <tr><th>Cleanup</th><td class="mono">lifecycle_prefix · canary/</td></tr>
-          <tr><th>Bindings</th><td>${map("upload", "charla-upload-token")}</td></tr>
+          <tr><th>Bindings</th><td>${map("upload", "upload-token")}</td></tr>
         </tbody>
       </table></div>
       <div class="info dash">Host names appear; full URLs do not. The bundle is the document that holds them, and it is
@@ -525,7 +525,7 @@ function sFile() {
 workflow:
   kind: async_transaction_v1
   <span class="k">secrets:</span>
-    upload: charla-upload-token   <span class="c"># input only — projected to canary_secret_upload_ref</span>
+    upload: upload-token   <span class="c"># input only — projected to canary_secret_upload_ref</span>
   submit:
     kind: multipart_fixture
     headers:

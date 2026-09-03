@@ -5703,7 +5703,7 @@ standing work with a starting point.
 ## D-0218 — a typed external canary, and the two architecture rulings that keep it from being a rewrite (2026-09-03)
 
 **Context.** The owner asked for an external canary that can run a controlled asynchronous API
-journey — submit, correlate, await a terminal result, assert — with Charla Files as the first use case:
+journey — submit, correlate, await a terminal result, assert — with an async media-upload API as the first use case:
 a multipart upload answered by `202` and a `task_id`, an SSE `task.completed`, and assertions on
 `s3_path`, `byte_size` and `media_type`. The brief was explicit about what it must NOT become: not a
 browser runner, not a queue consumer, not a webhook receiver, not shell execution, not a plugin host,
@@ -5999,3 +5999,30 @@ release by monitor alone, accepting an empty run key, and dropping the plain pat
 `Heartbeat` gains one optional field, so an executor older than this release simply returns no run key,
 releases nothing, and its slot returns at the TTL — degradation, not breakage, and it matches the
 upgrade order the runbook already states.
+
+## D-0224 — the phase-F mock is approved, and a real project name is scrubbed from every example (2026-09-03)
+
+**Decision.** The owner approved `docs/design/mock-async-canary.html` visually on 2026-09-03, which
+lifts the standing gate on FR-029 phase F: the typed UI form may now be built to it. The mock's
+contract stands as drawn — there is no JSON editor on any screen, including the read view, because a
+textual view of a canonical document is a view somebody edits as text.
+
+**The correction that came with the approval.** The owner found a REAL project name used as example
+data in the mock. It had spread far past the mock: 37 occurrences across `func-async-canary.md`,
+`docs/decisions.md`, the mock itself, and THREE `_test.go` fixture files — because the original brief
+named the real first use case and that name was carried straight into every example rather than
+replaced with a placeholder at the moment the first example was written.
+
+Everything is now neutral (`Media upload journey`, `upload-token`, `media-upload`,
+`bundles/canaries.yaml`), and the sweep was tree-wide rather than mock-only, since the owner's
+instruction was to clean it everywhere and most of it was not in the mock.
+
+**And it is kept clean by a gate, not by care.** `scripts/check-docs-references.py` gained
+`check_customer_names()`, which walks `docs`, `internal`, `e2e`, `cmd` and `scripts` — the whole tree,
+not the living-document list, precisely because the living-document list would have missed the fixture
+files that held most of the leak. Verified the way every gate here has to be: by planting a file
+containing the name and watching `make docs-check` fail on it.
+
+**Why this is a decision and not a tidy-up.** Example data names nobody. A customer name in a spec, a
+fixture or a mock outlives the conversation it came from and ships in the repository — and it reached
+the tree through six commits and a design review without anyone catching it, mine included.

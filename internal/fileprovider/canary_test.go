@@ -15,8 +15,8 @@ const canaryBundleHead = `format: 2
 organization: acme
 project: api
 monitors:
-  charla-upload:
-    name: Charla upload journey
+  media-upload:
+    name: Media upload journey
     type: async_canary
     interval: 5m
     timeout: 5m
@@ -30,7 +30,7 @@ func canaryDecode(t *testing.T, body string) (*DesiredProject, error) {
 }
 
 const canaryPollBody = `      secrets:
-        upload: charla-upload-token
+        upload: upload-token
       submit:
         kind: http_json
         method: POST
@@ -75,7 +75,7 @@ const canaryPollBody = `      secrets:
 `
 
 const canarySSEBody = `      secrets:
-        upload: charla-upload-token
+        upload: upload-token
       submit:
         kind: multipart_fixture
         method: POST
@@ -117,7 +117,7 @@ func TestCanaryBundleAcceptsBothValidShapes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("a valid bundle was refused: %v", err)
 			}
-			dm, ok := proj.Monitors["charla-upload"]
+			dm, ok := proj.Monitors["media-upload"]
 			if !ok {
 				t.Fatal("the monitor is missing from the decoded project")
 			}
@@ -130,10 +130,10 @@ func TestCanaryBundleAcceptsBothValidShapes(t *testing.T) {
 			if doc == "" {
 				t.Fatal("the monitor carries no canonical workflow")
 			}
-			if strings.Contains(doc, "charla-upload-token") {
+			if strings.Contains(doc, "upload-token") {
 				t.Fatalf("the persisted document carries a project-secret name:\n%s", doc)
 			}
-			if dm.Monitor.Config[domain.CanarySecretRefKey("upload")] != "charla-upload-token" {
+			if dm.Monitor.Config[domain.CanarySecretRefKey("upload")] != "upload-token" {
 				t.Fatal("the flat ref key must carry the project secret name")
 			}
 			if dm.Hash == "" {
@@ -235,7 +235,7 @@ func TestCanaryBundleHashSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := base.Monitors["charla-upload"].Hash
+	h := base.Monitors["media-upload"].Hash
 
 	// Reordering a set-like list and re-casing a header name is the SAME document.
 	reordered := strings.Replace(canaryPollBody,
@@ -245,17 +245,17 @@ func TestCanaryBundleHashSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if same.Monitors["charla-upload"].Hash != h {
+	if same.Monitors["media-upload"].Hash != h {
 		t.Fatal("reordering a set and re-casing a header name must not move the hash")
 	}
 
 	// Pointing the binding at a DIFFERENT project secret is a semantic change.
-	remapped := strings.Replace(canaryPollBody, "        upload: charla-upload-token", "        upload: another-secret", 1)
+	remapped := strings.Replace(canaryPollBody, "        upload: upload-token", "        upload: another-secret", 1)
 	moved, err := canaryDecode(t, canaryBundleHead+remapped)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if moved.Monitors["charla-upload"].Hash == h {
+	if moved.Monitors["media-upload"].Hash == h {
 		t.Fatal("re-pointing a binding at another secret must move the hash")
 	}
 
@@ -265,7 +265,7 @@ func TestCanaryBundleHashSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed.Monitors["charla-upload"].Hash == h {
+	if changed.Monitors["media-upload"].Hash == h {
 		t.Fatal("a changed promise must move the hash")
 	}
 }

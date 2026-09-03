@@ -437,6 +437,40 @@ def check_change_stale_spellings(paths=None):
     return bad
 
 
+# A real customer/project name leaked into the FR-029 design documents and into four test files as
+# example data — the owner found it in the phase-F mock on 2026-09-03. It is scrubbed, and this keeps
+# it scrubbed: example data names nobody. The guard reads the whole tree rather than only the living
+# documents, because the leak reached `_test.go` fixtures too, and a checker that watched the docs
+# alone would have missed most of it.
+CUSTOMER_NAMES = [re.compile(r'charla', re.I)]
+NAME_GUARD_DIRS = ('docs', 'internal', 'e2e', 'cmd', 'scripts')
+NAME_GUARD_SKIP = ('node_modules', 'dist', '.git')
+
+
+def check_customer_names():
+    """No real customer or project name anywhere in the tree. Example data is a placeholder."""
+    bad = []
+    for root_dir in NAME_GUARD_DIRS:
+        for dirpath, dirnames, filenames in os.walk(root_dir):
+            dirnames[:] = [d for d in dirnames if d not in NAME_GUARD_SKIP]
+            for fn in filenames:
+                if not fn.endswith(('.md', '.go', '.html', '.yaml', '.yml', '.ts', '.vue', '.py')):
+                    continue
+                path = os.path.join(dirpath, fn)
+                if os.path.abspath(path) == os.path.abspath(__file__):
+                    continue  # the guard states the name it forbids
+                try:
+                    lines = read(path).split('\n')
+                except (FileNotFoundError, UnicodeDecodeError):
+                    continue
+                for n, line in enumerate(lines, 1):
+                    for rx in CUSTOMER_NAMES:
+                        if rx.search(line):
+                            bad.append((path, n, 'name',
+                                        'a real customer/project name in example data — use a placeholder'))
+    return bad
+
+
 def check_spec_banners():
     """No spec says it is unbuilt while status.md marks one of its requirements DONE."""
     status_path = 'docs/status.md'
@@ -665,11 +699,13 @@ def main():
     bad += check_spec_banners()
     bad += check_gate_stale_spellings()
     bad += check_change_stale_spellings()
+    bad += check_customer_names()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
               'and every acceptance map is complete (FR-021 invariants compared as a SET against '
               'the spec, plus 24 scenarios; FR-022: 16+16, FR-023: 16+19; FR-025: §6 as a SET + 9 '
               'scenario groups, its retired spellings refused; FR-026 and FR-029: §6 as a SET); '
+              'no real customer name appears in example data; '
               'every requirement row states one of the three statuses, and no spec calls itself '
               'unbuilt while its requirement is DONE')
         return 0

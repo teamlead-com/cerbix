@@ -119,7 +119,7 @@ its own executor and its own tests.
 
     submit → correlation id → await terminal result → assertions → normalized heartbeat
 
-First use case, and the one the contract is proven against: **Charla Files** — upload a fixture as
+First use case, and the one the contract is proven against: **an async media-upload API** — upload a fixture as
 multipart, receive `202` with a `task_id`, await an SSE `task.completed`, and assert that the result
 carries `s3_path`, `byte_size` and `media_type`.
 
@@ -202,7 +202,7 @@ with a type and a bound, or a list of those. There is no `config: map[string]str
 JSON, no expression language and no user-supplied code. Unknown fields are REFUSED, not ignored —
 `unsupported_field` with the key named, as the file provider already does for flat settings.
 
-**D3d — submit declares which statuses mean "accepted" (P0, review round 2).** Charla answers `202`;
+**D3d — submit declares which statuses mean "accepted" (P0, review round 2).** the target answers `202`;
 the schema had no way to say so, which left `200`, `204` and `500`-with-a-parseable-body undefined.
 `submit.accepted_status` is a non-empty list of **2xx** statuses (200..299), deduplicated and sorted
 canonically, evaluated against the FINAL response after redirects — the reviewer's narrowing (P1,
@@ -291,7 +291,7 @@ declares, and resolves a declared binding at dispatch so no secret value ever ap
 ordinary string leaf in a body, and no rule in this specification pretends otherwise — the same
 residual as FR-028 D7, in the same words, because it is the same undecidable thing. The rejected
 alternative was an operation-specific closed schema per target API, which would require cerbix to know
-Charla's request shape; that is not a general product, it is a client library.
+the target's request shape; that is not a general product, it is a client library.
 
 **D3b — a secret is a NAMED BINDING declared once, and its POSITION is what the digest covers (P0,
 review round 2).** Revision 3 wrote `secret_ref: <project-secret-name>` at each position and said the
@@ -437,7 +437,7 @@ different transaction.
 
 **Half of this guarantee is the target's, and the specification says so rather than implying
 otherwise:** cerbix guarantees the same key for the same execution. Whether a second submit with that
-key creates a second task is Charla's contract, not ours. If the target ignores the header, retries
+key creates a second task is the target's contract, not ours. If the target ignores the header, retries
 create duplicates and no design here prevents it — the runbook says that in those words.
 
 **D9a — per-region concurrency is enforced where dispatch happens, and saturation is a bounded
@@ -637,9 +637,9 @@ leaving it to arithmetic.
 # One monitor of type `async_canary`, in a Monitoring-as-Code bundle. Nested and typed:
 # no `settings` map, no JSON string, no free-form field anywhere below.
 monitors:
-  - uid: charla-files-upload
+  - uid: media-upload-journey
     type: async_canary
-    name: Charla Files · upload journey
+    name: Media upload journey
     region: eu-probe
     interval: 5m             # >= timeout (D9)
     timeout: 5m              # <= 300s — the product's existing bound, no per-type ceiling (D2a)
@@ -656,7 +656,7 @@ monitors:
       # document keeps the `secret_ref: upload` markers and no project-secret name at all, so a
       # rename touches one place and the stored document does not go stale behind it.
       secrets:
-        upload: charla-upload-token      # binding name → project secret name
+        upload: upload-token      # binding name → project secret name
 
       submit:
         kind: multipart_fixture          # | http_json
@@ -971,7 +971,7 @@ Nothing outside itself. Each of these is an invariant, not an aspiration:
 1. **The transaction ceiling — lower.** The owner asked whether it could be smaller than the proposed
    900 s. It can, to the point of deleting the mechanism: the type inherits the product's existing
    `maxTimeoutSeconds = 300` (D2a). **One thing this makes urgent rather than optional:** the first use
-   case's real duration. If a Charla upload can legitimately exceed five minutes under load, 300 s is
+   case's real duration. If such an upload can legitimately exceed five minutes under load, 300 s is
    the wrong number and the wrong failure — a healthy-but-slow service reported DOWN. Phase C's first
    measurement is the p99 of that journey, and the number is revisited then with evidence rather than
    argued now.

@@ -547,8 +547,16 @@ belongs on screen and nothing else.
   tested by running it from its region, so the form saves first), a fixture upload (the registry key is
   the only fixture reference there is), and any control that would relax the SSRF policy.
 
-### Open for the owner's look
+### APPROVED by the owner, 2026-09-03
 
-The submit stage is the only one long enough to want collapsing. The mock leaves all five expanded,
-because a canary is read end to end far more often than it is edited, and a collapsed stage is where a
-wrong bound hides.
+Approved visually at revision 2, after one correction the owner found and I had not: the mock carried a
+REAL project name as its example data. It had spread past the mock — 37 occurrences across the FR-029
+spec, `docs/decisions.md` and three `_test.go` fixture files — because the original brief named the real
+first use case and I carried that name straight into every example. All of it is now a neutral
+placeholder (`Media upload journey`, `upload-token`), and `make docs-check` gained
+`check_customer_names()`, which scans the WHOLE tree rather than only the living documents, because most
+of the leak was in fixtures. Verified by planting a file and watching the gate fail.
+
+The one thing the owner did not ask to change, left as drawn: the submit stage is the only one long
+enough to want collapsing, and all five stay expanded — a canary is read end to end far more often than
+it is edited, and a collapsed stage is where a wrong bound hides.

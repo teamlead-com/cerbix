@@ -16,7 +16,7 @@ const canaryTimeout = 300
 func validMultipartWorkflow() CanaryWorkflow {
 	return CanaryWorkflow{
 		Kind:    CanaryWorkflowKind,
-		Secrets: map[string]string{"upload": "charla-upload-token"},
+		Secrets: map[string]string{"upload": "upload-token"},
 		Submit: CanarySubmit{
 			Kind:           CanarySubmitMultipartFixture,
 			Method:         "POST",
@@ -486,10 +486,10 @@ func TestTheCanonicalDocumentCarriesNoProjectSecretName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(cfg[CanaryWorkflowKey], "charla-upload-token") {
+	if strings.Contains(cfg[CanaryWorkflowKey], "upload-token") {
 		t.Fatalf("the persisted document carries a project-secret name:\n%s", cfg[CanaryWorkflowKey])
 	}
-	if cfg[CanarySecretRefKey("upload")] != "charla-upload-token" {
+	if cfg[CanarySecretRefKey("upload")] != "upload-token" {
 		t.Fatalf("the flat ref key must hold the project secret name, got %q", cfg[CanarySecretRefKey("upload")])
 	}
 	if !strings.Contains(cfg[CanaryWorkflowKey], `"secret_ref":"upload"`) {
@@ -555,7 +555,7 @@ func TestParseCanaryConfigRoundTrips(t *testing.T) {
 		if again[CanaryWorkflowKey] != cfg[CanaryWorkflowKey] {
 			t.Fatalf("round trip is not stable:\n%s\n%s", cfg[CanaryWorkflowKey], again[CanaryWorkflowKey])
 		}
-		if back.Secrets["upload"] != "charla-upload-token" {
+		if back.Secrets["upload"] != "upload-token" {
 			t.Fatalf("the binding mapping must come back from the flat key, got %q", back.Secrets["upload"])
 		}
 	}

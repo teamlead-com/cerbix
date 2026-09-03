@@ -755,21 +755,30 @@ func TestLeaderLoopEventStormBounded(t *testing.T) {
 	done.Add(1)
 	go func() { defer done.Done(); p.leaderLoop(ctx, fa.sess()) }()
 
-	// Storm: rewrite the same file ~continuously for 300ms, each write a different size so the
-	// fingerprint changes on every poll and the debounce keeps re-arming (never settles).
+	// Storm: rewrite the same file until it has produced a MEANINGFUL number of changes, each write
+	// a different size so the fingerprint changes on every poll and the debounce keeps re-arming
+	// (never settles).
+	//
+	// The storm is bounded by a COUNT, not by a wall-clock window. It used to run for a fixed 300 ms
+	// and then assert it had managed at least 100 writes — which is an assertion about the MACHINE
+	// rather than about the product, and it is the assertion that failed: a saturated CI runner
+	// produced 61 writes and reported "storm too weak to be meaningful" while the invariant under
+	// test was never in doubt (v0.1.9, `Backend (declarative partitions)`). Counting leaves the
+	// property being proven identical — hundreds of changes, a small constant number of applies —
+	// and makes a slow machine take longer instead of going red.
+	//
+	// The deadline is not a fallback that lets the test pass anyway: if the storm cannot reach its
+	// size in twenty seconds, the machine genuinely cannot produce one and the run proves nothing,
+	// which is still a failure and still says so.
+	const stormWrites = 150
 	var writes atomic.Int64
-	stormEnd := make(chan struct{})
 	var storm sync.WaitGroup
 	storm.Add(1)
+	stormDeadline := time.Now().Add(20 * time.Second)
 	go func() {
 		defer storm.Done()
 		i := 0
-		for {
-			select {
-			case <-stormEnd:
-				return
-			default:
-			}
+		for writes.Load() < stormWrites && time.Now().Before(stormDeadline) {
 			i++
 			body := bundle("acme", "payments") + "\n# " + strings.Repeat("x", i%400+1)
 			if err := os.WriteFile(filepath.Join(dir, "a.yaml"), []byte(body), 0o600); err == nil {
@@ -778,8 +787,6 @@ func TestLeaderLoopEventStormBounded(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}()
-	time.Sleep(300 * time.Millisecond)
-	close(stormEnd)
 	storm.Wait()
 	// Let the debounce settle and fire at most one coalesced reconcile.
 	time.Sleep(150 * time.Millisecond)
@@ -787,8 +794,9 @@ func TestLeaderLoopEventStormBounded(t *testing.T) {
 	done.Wait()
 
 	n := int64(writes.Load())
-	if n < 100 {
-		t.Fatalf("storm too weak to be meaningful: only %d writes", n)
+	if n < stormWrites {
+		t.Fatalf("the machine could not produce a storm: %d writes in 20s, want %d — this run proves nothing",
+			n, stormWrites)
 	}
 	applies := int64(len(fa.sess().calls))
 	// 1 initial reconcile + ~1 post-settle. Anything near the write count means unbounded queuing.

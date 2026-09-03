@@ -422,7 +422,7 @@ crosses a DST boundary, so this is the ordinary case rather than an edge. Ruled 
 
 It ships as one tested module under `frontend/src/lib/`, called from the surfaces of §5–§7.
 
-## 9. NFR-025b — the enumerated remainder, which this iteration does NOT discharge
+## 9. NFR-025b — the enumerated remainder, DONE 2026-09-04
 
 The SPA already renders browser-local times in four files without naming a zone, while the
 reliability card renders UTC dates, and nothing on screen says which is which. That predates
@@ -436,15 +436,20 @@ this package; it is not created by it, and it is not fixed by it either. It is r
 | outbox row dates | `frontend/src/views/AdminOutboxView.vue` |
 | silence-until, and token last-used | `frontend/src/views/SettingsView.vue` (two call sites) |
 
-**AC-NFR-025b:** each of the five call sites across these four files calls the §8 instant
-function, so no rendered timestamp anywhere in the SPA is missing its zone. The mechanism is
-already built by then, so the change is a call-site substitution with the design risk retired.
-Traceability target: the NFR-025 row of `docs/traceability.md`, carrying NFR-025a as `DONE` and
-NFR-025b as `TODO` — two statuses on one requirement, because the mechanism and its instance-wide
-adoption are two different claims.
+**AC-NFR-025b — DONE 2026-09-04.** Each of the five call sites across these four files calls the
+§8 instant renderer, so no rendered timestamp anywhere in the SPA is missing its zone. Two
+renderings were added to §8's mechanism for what the legacy sites needed, both instant-specific and
+neither a generic formatter: `instantLabelShort` (minute precision, offset kept — a shorter
+rendering does not get to drop the part the requirement is about) and `instantRangeLabel` (a window
+between two instants an operator chose, distinct from a UTC cell's extent; it names the offset once
+when both ends share it and twice when the window crosses a DST change, because then it genuinely
+has two).
 
-**iter-0174 may not report NFR-025 as DONE.** It closes NFR-025a. Any status row that says
-otherwise is claiming the whole SPA is fixed when four files are untouched by design.
+**The enforcement is a guard, not five edits.** A source scan in `wallclock.spec.ts` asserts that
+NO product file renders a timestamp through `toLocaleString`/`toLocaleDateString`/
+`toLocaleTimeString` — the exact construct that produced these five sites. Reverting any one of them
+fails it by name, which is how this requirement stays closed rather than being closed once. A
+surface assertion in `SlaView.spec.ts` reaches what an operator actually reads.
 
 Deliberately not in this package's scope: widening it to four unrelated views. The reviewer
 approved this split at party [143] on that ground.

@@ -97,6 +97,25 @@ describe("SlaView tenant context", () => {
     expect(wrapper.text()).not.toContain("a-window");
   });
 
+  it("renders a maintenance window's times with their zone named (NFR-025b)", async () => {
+    // The source guard in `wallclock.spec.ts` proves no product file renders a timestamp through
+    // `toLocaleString` any more. This reaches the SURFACE: what an operator actually reads on this
+    // screen now carries the offset, where it used to read `03.09.2026, 17:55` with nothing saying
+    // whose 17:55 — beside a reliability card rendering UTC dates.
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path.endsWith("/maintenance")) return Promise.resolve({ data: [maintWindow("mw-1", "e2e-window")] });
+      if (path.endsWith("/sla")) return Promise.resolve({ data: { windows: [] } });
+      return Promise.resolve({ data: [] });
+    });
+    const { wrapper } = mountView();
+    await flushPromises();
+    const text = wrapper.text();
+    expect(text).toContain("e2e-window");
+    expect(text).toMatch(/UTC[+-]\d{2}:\d{2}/);
+    // and the old bare rendering, which had a comma between date and time and no zone, is gone
+    expect(text).not.toMatch(/\d{2}\.\d{2}\.\d{4},\s\d{2}:\d{2}(?!\s\()/);
+  });
+
   it("drops a deferred mutation error from the previous project", async () => {
     apiMock.GET.mockImplementation((path: string) => {
       if (path.endsWith("/sla")) return Promise.resolve({ data: { windows: [] } });

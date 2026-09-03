@@ -6978,3 +6978,45 @@ different weight:
 
 **Consequence.** The release withholding recorded in DoD-0171 no longer stands on this ground.
 Whether to release, push or tag remains the owner's decision and none of those has been done.
+
+
+## D-0236 — NFR-025b: every rendered timestamp names its zone, and a guard keeps it that way (2026-09-04)
+
+**Context.** NFR-025 was split at iter-0174 because the specification's first revision asserted an
+instance-wide invariant beside a deliberate exclusion of five call sites — reviewer P1 at party
+[153]. NFR-025a shipped the mechanism; NFR-025b was the remainder: `SlaView.vue`,
+`EscalationView.vue`, `AdminOutboxView.vue` and `SettingsView.vue` (twice) rendered browser-local
+times through a bare `toLocaleString`, so an operator read `03.09.2026, 17:55` with nothing saying
+whose 17:55 — on the same product whose reliability card renders UTC dates, and with no timezone
+setting anywhere to reconcile them. Five hours of difference, unlabelled.
+
+**Decisions.**
+
+1. **All five sites call the §8 mechanism.** Each was already wrapped in a small local formatter
+   (`fmt`, `fmtRange`, `fmtDate`) or inlined in one expression, so the change is contained.
+
+2. **Two renderings were added, and both are instant-specific.** The rule the mechanism was built
+   under — explicit functions for an instant and for a UTC cell's extent, and no generic formatter
+   that could be handed a bucket and produce the viewer's calendar day — is preserved, and the
+   export-shape test that enforces it was updated to the new list rather than relaxed.
+   - `instantLabelShort` — minute precision for a list or a table cell, offset kept. A shorter
+     rendering does not get to drop the part the requirement is about.
+   - `instantRangeLabel` — a window between two instants an operator CHOSE, which is a different
+     object from a UTC bucket's extent and must not borrow its function. It names the offset once
+     when both ends share it and **twice when the window crosses a DST change**, because then it
+     genuinely has two; the date collapses the same way.
+
+3. **The enforcement is a guard, not five edits.** A source scan in `wallclock.spec.ts` asserts
+   that NO product file renders a timestamp through
+   `toLocaleString`/`toLocaleDateString`/`toLocaleTimeString` — the exact construct that produced
+   these five sites. Reverting any one of them fails it **by name**, verified by mutation. This is
+   the difference between closing a requirement once and keeping it closed, and it is the same
+   shape as the guard that asserts no product call site passes the mechanism's test-only zone.
+
+4. **A surface assertion, not only a source scan.** `SlaView.spec.ts` renders a maintenance window
+   and asserts the text carries `UTC±HH:MM` and no longer matches the old bare form. The source
+   guard proves the construct is gone; this proves what an operator actually reads.
+
+**Gates.** `vue-tsc` clean; **600 tests over 50 files**; `make docs-check` green. No Go change and
+no API change. NFR-025 is `DONE` in full, both halves, and the row says which evidence belongs to
+which half.

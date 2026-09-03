@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
+import { instantLabelShort } from "@/lib/wallclock";
 
 type OutboxEvent = components["schemas"]["OutboxEvent"];
 
@@ -47,7 +48,9 @@ async function replayAll() {
   }
 }
 
-const fmtDate = (s?: string) => (s ? new Date(s).toLocaleString() : "—");
+// NFR-025b: an outbox row's time names its zone. Correlating a delivery with a provider's log is
+// the whole use of this screen, and it was rendering a local time silently.
+const fmtDate = (s?: string) => instantLabelShort(s);
 function prettyPayload(p: unknown): string {
   try {
     return JSON.stringify(p, null, 2);

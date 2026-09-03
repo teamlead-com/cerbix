@@ -100,6 +100,56 @@ export function utcCellExtentLabel(
 }
 
 /**
+ * The same rule as `instantLabel` at MINUTE precision, for a list or a table cell where seconds
+ * are noise. It still names the offset — that is the part NFR-025 is about, and a shorter
+ * rendering does not get to drop it.
+ *
+ *   instantLabelShort("2026-09-03T12:55:00Z")  ->  "03.09.2026 17:55 (UTC+05:00)"
+ */
+export function instantLabelShort(iso: string | null | undefined, zone?: string): string {
+  const d = parse(iso);
+  if (!d) return ABSENT;
+  const p = partsAt(d, zone, {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+  return `${dmy(p)} ${hm(p)} (${offsetAt(d, zone)})`;
+}
+
+/**
+ * A window between two INSTANTS — an escalation override, a silence, a maintenance range. This is
+ * not `utcCellExtentLabel`: that one describes a UTC bucket and exists to stop a bucket being
+ * called the viewer's calendar day, while this describes two instants an operator chose.
+ *
+ * The offset is named ONCE when both ends share it, and TWICE when they do not, because a window
+ * that crosses a DST change genuinely has two — and repeating an identical offset in one cell is
+ * noise, not honesty. The date collapses the same way.
+ *
+ *   same day, one offset:   "03.09.2026 17:55 → 18:55 (UTC+05:00)"
+ *   across midnight:        "03.09.2026 23:55 → 04.09.2026 00:55 (UTC+05:00)"
+ *   across a DST change:    "29.03.2026 01:55 (UTC+01:00) → 29.03.2026 03:55 (UTC+02:00)"
+ */
+export function instantRangeLabel(
+  fromIso: string | null | undefined,
+  toIso: string | null | undefined,
+  zone?: string,
+): string {
+  const a = parse(fromIso);
+  const b = parse(toIso);
+  if (!a || !b) return ABSENT;
+  const oa = offsetAt(a, zone);
+  const ob = offsetAt(b, zone);
+  if (oa !== ob) return `${instantLabelShort(fromIso, zone)} → ${instantLabelShort(toIso, zone)}`;
+  const opts: Intl.DateTimeFormatOptions = {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+  };
+  const pa = partsAt(a, zone, opts);
+  const pb = partsAt(b, zone, opts);
+  const head = `${dmy(pa)} ${hm(pa)}`;
+  const tail = dmy(pa) === dmy(pb) ? hm(pb) : `${dmy(pb)} ${hm(pb)}`;
+  return `${head} → ${tail} (${oa})`;
+}
+
+/**
  * The UTC instant itself, for the second line of a readout: an engineer correlating a cell with
  * logs needs the canonical time, and the facts are UTC.
  */

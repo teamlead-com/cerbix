@@ -22,6 +22,7 @@ import {
 import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
+import { instantLabelShort } from "@/lib/wallclock";
 
 type Channel = components["schemas"]["NotificationChannel"];
 type ChannelType = NonNullable<Channel["type"]>;
@@ -1212,7 +1213,7 @@ watch(tab, loadActive);
             <span class="text-[12px] text-ink-3">Empty — silenced until switched off manually. With a date, alert delivery resumes automatically (facts keep recording either way).</span>
           </div>
           <div v-if="alerting.enabled" class="rounded bg-down-weak px-3 py-2 text-[12.5px] text-down">
-            Alerts are currently silenced instance-wide{{ alerting.until ? " until " + new Date(alerting.until).toLocaleString() : "" }}.
+            Alerts are currently silenced instance-wide{{ alerting.until ? " until " + instantLabelShort(alerting.until) : "" }}.
           </div>
           <span v-if="alerting.saved" class="text-[12.5px] text-up">✓ Saved</span>
         </section>
@@ -1407,7 +1408,7 @@ watch(tab, loadActive);
                   </span>
                 </td>
                 <td class="border-b border-border px-4 py-[11px] font-mono text-[12px] text-ink-3">{{ t.created_by_email || "—" }}</td>
-                <td class="border-b border-border px-4 py-[11px] text-ink-3">{{ t.last_used_at ? new Date(t.last_used_at).toLocaleString() : "never" }}</td>
+                <td class="border-b border-border px-4 py-[11px] text-ink-3">{{ t.last_used_at ? instantLabelShort(t.last_used_at) : "never" }}</td>
                 <td class="border-b border-border px-4 py-[11px] text-right"><button v-if="canManageOrg" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteToken(t)">Revoke</button></td>
               </tr>
               <tr v-if="!tokens.length && !loading"><td colspan="7" class="px-4 py-10 text-center text-[13px] text-ink-3">No tokens yet.</td></tr>

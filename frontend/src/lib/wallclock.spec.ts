@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { instantLabel, utcCellExtentLabel, utcExtentLabel, utcInstantLabel } from "./wallclock";
+import {
+  instantLabel, instantLabelShort, instantRangeLabel,
+  utcCellExtentLabel, utcExtentLabel, utcInstantLabel,
+} from "./wallclock";
 
 // func-truthful-rendering §8 (FR-031 / NFR-025a, D-0235): identity is UTC, presentation is local,
 // and the offset is resolved AT THE INSTANT. Every case here is a rule the specification states,
@@ -125,10 +128,28 @@ describe("the mechanism's shape", () => {
   it("exports named instant and cell-extent functions and no generic date formatter", () => {
     const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
     const exported = [...src.matchAll(/export function (\w+)/g)].map((m) => m[1]).sort();
-    expect(exported).toEqual(["instantLabel", "utcCellExtentLabel", "utcExtentLabel", "utcInstantLabel"]);
+    expect(exported).toEqual([
+      "instantLabel", "instantLabelShort", "instantRangeLabel",
+      "utcCellExtentLabel", "utcExtentLabel", "utcInstantLabel",
+    ]);
     // A name like formatDate / formatTime is exactly what a caller reaches for when it has a
     // bucket and wants "a date"; there is deliberately nothing here to reach for.
     expect(src).not.toMatch(/export function format(Date|Time|Timestamp)?\b/);
+  });
+
+  // NFR-025b's enforcement, and the reason it stays closed rather than being closed once: a
+  // product file may not render a timestamp with `toLocaleString` and friends, because that is
+  // exactly how five call sites came to show a local time with no zone beside a card showing UTC.
+  it("has no product file rendering a timestamp through toLocaleString and friends", () => {
+    const offenders: string[] = [];
+    for (const file of walk(SRC)) {
+      if (file.endsWith("wallclock.ts") || file.endsWith("wallclock.spec.ts")) continue;
+      const text = readFileSync(file, "utf8");
+      for (const m of text.matchAll(/toLocale(?:Date|Time)?String\s*\(/g)) {
+        offenders.push(`${file.split("/src/")[1]}: ${m[0]}`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 
   it("has no product call site passing the test-only zone argument", () => {
@@ -149,5 +170,48 @@ describe("the mechanism's shape", () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+// NFR-025b: the two renderings the five legacy call sites needed. Both name the offset, because a
+// shorter rendering does not get to drop the part the requirement is about.
+describe("instantLabelShort", () => {
+  it("drops the seconds and keeps the offset", () => {
+    expect(instantLabelShort("2026-09-03T12:55:31Z", "Asia/Yekaterinburg")).toBe("03.09.2026 17:55 (UTC+05:00)");
+  });
+
+  it("resolves the offset at the instant here too", () => {
+    expect(instantLabelShort("2026-01-15T12:00:00Z", "Europe/Berlin")).toBe("15.01.2026 13:00 (UTC+01:00)");
+    expect(instantLabelShort("2026-07-15T12:00:00Z", "Europe/Berlin")).toBe("15.07.2026 14:00 (UTC+02:00)");
+  });
+
+  it("is a dash for an absent instant", () => {
+    expect(instantLabelShort(null)).toBe("—");
+    expect(instantLabelShort("nope")).toBe("—");
+  });
+});
+
+describe("instantRangeLabel", () => {
+  it("names one offset and one date when both ends share them", () => {
+    expect(instantRangeLabel("2026-09-03T12:55:00Z", "2026-09-03T13:55:00Z", "Asia/Yekaterinburg")).toBe(
+      "03.09.2026 17:55 → 18:55 (UTC+05:00)",
+    );
+  });
+
+  it("keeps the second date when the window crosses local midnight", () => {
+    expect(instantRangeLabel("2026-09-03T18:55:00Z", "2026-09-03T19:55:00Z", "Asia/Yekaterinburg")).toBe(
+      "03.09.2026 23:55 → 04.09.2026 00:55 (UTC+05:00)",
+    );
+  });
+
+  it("names BOTH offsets when the window crosses a DST change, rather than picking one", () => {
+    expect(instantRangeLabel("2026-03-29T00:55:00Z", "2026-03-29T01:55:00Z", "Europe/Berlin")).toBe(
+      "29.03.2026 01:55 (UTC+01:00) → 29.03.2026 03:55 (UTC+02:00)",
+    );
+  });
+
+  it("is a dash when either end is absent, so a half-known window is never drawn", () => {
+    expect(instantRangeLabel(null, "2026-09-03T13:55:00Z")).toBe("—");
+    expect(instantRangeLabel("2026-09-03T12:55:00Z", null)).toBe("—");
   });
 });

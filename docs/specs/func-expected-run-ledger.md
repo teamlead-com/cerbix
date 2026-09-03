@@ -58,16 +58,36 @@ verdict may permit a stroke between adjacent windows.
 - **FR-032** — cerbix records that a run was expected, so a surface can distinguish an interval
   nothing was due in from an interval whose due run never happened. Status `TODO`.
 
+## 4a. Constraints from the reviewer, before any design (party [192])
+
+Recorded when they were given, so a later design starts inside them rather than rediscovering them.
+**No status change and no design approval is implied by any of this.**
+
+- The requirement **fits the existing role boundaries** — it does not need new ones.
+- **The scheduler and control plane own the durable expected-run facts.** That is where "a run was
+  due" and "it was never issued" can be known.
+- **`worker` and `agent` stay DB-less executors.** They return **idempotent** claim and terminal
+  events over the existing transport; they do not gain a database. This answers §5's DB-less
+  question: the two facts an executor owns already ride the path a result rides.
+- **Do not overload `heartbeats`.** This rules out the cheap-looking move of persisting
+  `job_issued_at` on the heartbeat row and calling it a ledger: **absence is the case the ledger
+  exists to preserve**, and a heartbeat only exists where something happened. A row that only
+  appears when a run produced a result cannot record a run that produced none.
+- **AMQP claim ordering and crash semantics are the key design risk**, and they must be resolved in
+  the design record before any code.
+
 ## 5. Open questions, stated as open
 
 - **Volume.** One row per due run is heartbeat-order volume. Whether the ledger is a separate
   table, a widened `heartbeats`, or a rollup that keeps only the windows where expectation and
   outcome *disagree*, is the first design question and it is not answered here.
-- **Ownership.** The scheduler decides what is due; the store owns durability; the transport owns
-  claim and delivery. Which role writes which fact, and in which transaction, is undesigned.
-- **Distributed roles.** `worker` and `agent` are DB-less by design. How a claim or a terminal
-  outcome from a broker-less pull agent reaches the ledger without giving those roles a database
-  is undesigned.
+- **Ownership.** Constrained by §4a: the scheduler and control plane own the durable facts. What
+  remains undesigned is which fact is written in which transaction, and how a late-arriving
+  terminal event reconciles with a due window already written.
+- **Distributed roles.** Constrained by §4a: `worker` and `agent` stay DB-less and return
+  idempotent claim and terminal events over the existing transport. What remains undesigned is the
+  idempotency key and, per §4a, **AMQP claim ordering and crash semantics** — named by the reviewer
+  as the key design risk and to be resolved before code.
 - **Scope beyond the line.** A durable record of expected-versus-actual runs plausibly serves more
   than one surface — coverage reporting and the reliability gate come to mind — but this document
   does not claim that, because nothing has been analysed. It is named as a possibility, not a

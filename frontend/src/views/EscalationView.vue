@@ -5,6 +5,7 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
+import { instantRangeLabel } from "@/lib/wallclock";
 
 type Channel = components["schemas"]["NotificationChannel"];
 type Policy = components["schemas"]["EscalationPolicy"];
@@ -85,8 +86,10 @@ async function deleteOverride(oid: string) {
   await api.DELETE("/api/v1/oncall-overrides/{overrideID}", { params: { path: { overrideID: oid } } });
   await loadAll();
 }
-const fmtRange = (a?: string, b?: string) =>
-  `${a ? new Date(a).toLocaleString() : "?"} → ${b ? new Date(b).toLocaleString() : "?"}`;
+// NFR-025b: an override window is two INSTANTS an operator chose, and both used to render with no
+// zone at all. `instantRangeLabel` names the offset once when the ends share it and twice when the
+// window crosses a DST change, because then it genuinely has two.
+const fmtRange = (a?: string, b?: string) => instantRangeLabel(a, b);
 
 // --- Policy composer ---
 type DraftStep = { after_seconds: number; targets: Target[] };

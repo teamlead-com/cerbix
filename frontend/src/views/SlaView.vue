@@ -6,6 +6,7 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
+import { instantLabelShort } from "@/lib/wallclock";
 
 type Monitor = components["schemas"]["Monitor"];
 type WindowSLA = components["schemas"]["WindowSLA"];
@@ -278,8 +279,11 @@ const budgetPanel = computed(() => {
 function pct2(n?: number) {
   return n === undefined ? "—" : `${n.toFixed(2)}%`;
 }
+// NFR-025b: a rendered timestamp names its zone. This used to be a bare `toLocaleString`, so a
+// report time read `03.09.2026, 17:55` with nothing saying whose 17:55 — beside a reliability card
+// that renders UTC dates. Minute precision is kept; the offset is not optional.
 function fmt(ts?: string) {
-  return ts ? new Date(ts).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "—";
+  return instantLabelShort(ts);
 }
 function duration(a?: string, b?: string): string {
   if (!a || !b) return "";

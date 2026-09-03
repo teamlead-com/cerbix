@@ -195,3 +195,45 @@ func TestTheInProcessExecutorAnnouncesItsOwnRegion(t *testing.T) {
 		t.Fatalf("role=all announced %#v, want this binary's own token", got)
 	}
 }
+
+// Reviewer P1 (party [99]/[100]). `pull.regions: [core]` is legal, and role=all announces its
+// in-process runner for core. But a pull-served region is executed by its AGENTS: every job for it
+// goes to `pull_jobs`, so the local runner is not evidence of capability there. The first version
+// announced it anyway — the gate passed, a capability-bound row was enqueued that no legacy agent
+// could claim, and the monitor stayed SILENT until the row's TTL: the indefinite pending the whole
+// invariant exists to forbid. The rule is asserted in BOTH builder orders, because it lives at
+// resolve time and not in construction.
+func TestTheInProcessRunnerDoesNotSpeakForAPullServedRegion(t *testing.T) {
+	for name, build := range map[string]func(*fakeStore) *Scheduler{
+		"local then pull": func(fs *fakeStore) *Scheduler {
+			return New(fs, dispatch.NewInProc(8), testLogger()).WithLocalCanaryRegions("core").WithPullRegions([]string{"core"})
+		},
+		"pull then local": func(fs *fakeStore) *Scheduler {
+			return New(fs, dispatch.NewInProc(8), testLogger()).WithPullRegions([]string{"core"}).WithLocalCanaryRegions("core")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// A core canary, core served by pull, and no agent there announced anything.
+			fs := &fakeStore{leader: true, monitors: []domain.Monitor{canaryScheduleMonitor()}}
+			s := build(fs)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go s.Run(ctx)
+
+			hb := waitForCanaryHeartbeat(t, fs)
+			if hb.Up || !strings.Contains(hb.Msg, "no_capable_runner") {
+				t.Fatalf("heartbeat = %+v, want DOWN with no_capable_runner", hb)
+			}
+			fs.mu.Lock()
+			claims, enqueued := len(fs.canaryClaims), len(fs.pullLeases)
+			fs.mu.Unlock()
+			if claims != 0 {
+				t.Fatalf("the refused run took %d in-flight slot(s)", claims)
+			}
+			if enqueued != 0 {
+				t.Fatalf("%d capability-bound row(s) were enqueued for agents that announced nothing", enqueued)
+			}
+		})
+	}
+}

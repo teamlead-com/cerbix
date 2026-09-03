@@ -6381,3 +6381,21 @@ every ordinary job unclaimable. A mutation proved that false: pgx sends nil as N
 NULL, and a WHERE treats NULL as not-true — the same answer. The helper stays because that agreement
 rests on three-valued logic holding under a clause nobody has negated yet, but the comment now says so.
 Fourth instance in this arc of the defect D-0228 named: **a claim that outruns its test.**
+
+**Addendum — reviewer P1 on the range (party [99]/[100]): role=all announced a pull-served core.**
+`pull.regions: [core]` is legal, and role=all announced its in-process runner for `core` regardless.
+But a pull-served region is executed by its AGENTS — every job for it goes to `pull_jobs`, whatever
+else runs in the process — so the local runner was not evidence of capability there. The consequence
+was the exact failure this decision exists to forbid: the gate passed, a capability-bound row was
+enqueued that no legacy agent could claim, no heartbeat was written, and the monitor stayed silent
+until the row's TTL. Fixed where the reviewer said the invariant belongs: at RESOLVE time in
+`canaryAnnouncements`, which now skips any local region that is pull-served, so neither builder order
+nor configuration can reintroduce it. `TestTheInProcessRunnerDoesNotSpeakForAPullServedRegion`
+asserts both builder orders: a bounded `no_capable_runner`, no in-flight slot taken, no row enqueued.
+Mutation killed by removing the guard.
+
+The same shape exists on the credential side — `localCredentialRegions` raises `carrierGeneration`
+for `core` without excluding pull-served regions — and is deliberately NOT touched in this range: it
+predates the canary, it changes what generation core EMITS rather than whether a monitor reports at
+all, and widening a review-fix range is how a second defect hides behind the first. It is named here
+so it is a known thing and not a discovery.

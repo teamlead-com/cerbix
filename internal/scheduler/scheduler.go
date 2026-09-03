@@ -466,6 +466,16 @@ func (s *Scheduler) canaryAnnouncements(ctx context.Context) map[string][]string
 		}
 	}
 	for region := range s.localCanaryRegions {
+		// A pull-served region is executed by its AGENTS, never by this process — every job for it
+		// goes to `pull_jobs`, whatever else runs here. So the in-process runner is not evidence of
+		// capability there, and announcing it would pass the gate, enqueue a capability-bound row
+		// no legacy agent can claim, and leave the monitor SILENT until the row's TTL: the exact
+		// indefinite pending the invariant forbids. The rule lives here, at resolve time, so no
+		// builder order (`WithLocalCanaryRegions` before or after `WithPullRegions`) and no config
+		// (`pull.regions: [core]` is legal) can reintroduce it. Reviewer P1, party [99]/[100].
+		if s.pullRegions[region] {
+			continue
+		}
 		add(region, domain.CanaryCapabilityOfThisBinary())
 	}
 	return out

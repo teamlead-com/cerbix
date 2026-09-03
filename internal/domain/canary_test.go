@@ -603,3 +603,90 @@ func TestDurationSpellings(t *testing.T) {
 		}
 	}
 }
+
+// D3e says the stored workflow is ONE CANONICAL string. The file provider always produced one,
+// because it goes through `CanaryConfig`; the API path only parsed and validated the document and
+// stored whatever string the caller sent. So the same workflow written through the two surfaces had
+// different stored bytes and different semantic hashes — and a Monitoring-as-Code re-apply over an
+// API-created canary read as CHANGED forever. Found while building the phase-F form, which is an API
+// client and would have produced exactly that.
+//
+// The assertion that matters is not "the string looks canonical" but "the two surfaces AGREE", which
+// is the property the semantic hash rests on.
+func TestBothWriteSurfacesStoreTheSameCanonicalDocument(t *testing.T) {
+	w := validPollWorkflow()
+	viaProvider, err := CanaryConfig(w)
+	if err != nil {
+		t.Fatalf("provider surface: %v", err)
+	}
+
+	// The API surface as a client reaches it: the SAME workflow, re-encoded so only the byte order
+	// differs. Derived from the canonical document rather than hand-written, because a hand-written
+	// document that drifted in CONTENT would make this comparison prove nothing.
+	var generic map[string]any
+	if err := json.Unmarshal([]byte(viaProvider[CanaryWorkflowKey]), &generic); err != nil {
+		t.Fatalf("canonical document does not parse: %v", err)
+	}
+	// Go marshals a map with its keys SORTED, which is a different order from the struct's field
+	// order — that alone makes the bytes non-canonical. Reversing a list makes it non-canonical in
+	// the other way the canonical form fixes.
+	if res, ok := generic["result"].(map[string]any); ok {
+		if fields, ok := res["required_json_fields"].([]any); ok {
+			for a, b := 0, len(fields)-1; a < b; a, b = a+1, b-1 {
+				fields[a], fields[b] = fields[b], fields[a]
+			}
+		}
+	}
+	raw, err := json.Marshal(generic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shuffled := string(raw)
+	if shuffled == viaProvider[CanaryWorkflowKey] {
+		t.Fatal("the fixture is already in the re-encoded order, so this test could not detect a missing canonicalization")
+	}
+
+	// The client sends the document AND the flat ref keys, because `workflow.secrets` is INPUT-ONLY
+	// (D3f): the stored document carries `secret_ref` markers and no project-secret name, so the
+	// names live in flat keys. A client that sent only the document would produce a monitor whose
+	// bindings resolve to nothing — which is what the phase-F form has to get right, and why this
+	// test states the whole config rather than just the workflow string.
+	cfg := map[string]string{CanaryWorkflowKey: shuffled}
+	for binding, secret := range w.Secrets {
+		cfg[CanarySecretRefKey(binding)] = secret
+	}
+	m := Monitor{
+		Type: MonitorAsyncCanary, IntervalSeconds: 300, TimeoutSeconds: 300,
+		Config: cfg,
+	}
+	m.Normalize()
+
+	if m.Config[CanaryWorkflowKey] == shuffled {
+		t.Fatal("Normalize left the caller's byte order in place: the document is not canonical")
+	}
+	if m.Config[CanaryWorkflowKey] != viaProvider[CanaryWorkflowKey] {
+		t.Fatalf("the two write surfaces disagree about the stored document.\n api      = %s\n provider = %s",
+			m.Config[CanaryWorkflowKey], viaProvider[CanaryWorkflowKey])
+	}
+	// And therefore the hash a re-apply compares is the same one.
+	if CanarySemanticHash(m.Config) != CanarySemanticHash(viaProvider) {
+		t.Fatal("same workflow, two surfaces, different semantic hash — a re-apply would read as CHANGED forever")
+	}
+}
+
+// A document that does not parse must survive Normalize untouched, so the refusal is Validate's to
+// make with a message that names the position — not a silent rewrite into something else.
+func TestNormalizeLeavesAnUnparseableWorkflowForValidateToRefuse(t *testing.T) {
+	const broken = `{"kind":"async_transaction_v1","submit":`
+	m := Monitor{
+		Type: MonitorAsyncCanary, IntervalSeconds: 300, TimeoutSeconds: 300,
+		Config: map[string]string{CanaryWorkflowKey: broken},
+	}
+	m.Normalize()
+	if m.Config[CanaryWorkflowKey] != broken {
+		t.Fatalf("Normalize rewrote an unparseable document: %q", m.Config[CanaryWorkflowKey])
+	}
+	if err := m.Validate(); err == nil {
+		t.Fatal("Validate accepted an unparseable workflow")
+	}
+}

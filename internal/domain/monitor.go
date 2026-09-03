@@ -484,6 +484,25 @@ func (m Monitor) WithoutPushToken() Monitor {
 // an HTTP monitor defaults to (and upper-cases) GET; non-HTTP monitors carry no
 // method; grace applies only to push monitors.
 func (m *Monitor) Normalize() {
+	// FR-029 D3e: the stored workflow is ONE CANONICAL string, and canonicalization belongs to the
+	// server on every write surface — not to each client.
+	//
+	// The file provider called `CanaryConfig` and so always stored the canonical form; the API path
+	// only PARSED and VALIDATED the document and stored whatever string the caller sent. Two monitors
+	// with the same workflow but a different key order therefore had different stored documents and
+	// different semantic hashes, so a Monitoring-as-Code re-apply over an API-created canary read as
+	// CHANGED forever, and D3e's "one canonical string" was false of that surface. Found while
+	// building the phase-F form, which is an API client and would have produced exactly that.
+	//
+	// A document that does not parse is left untouched: `Normalize` cannot fail, and the refusal is
+	// `Validate`'s to make with a message that names the position.
+	if m.Type == MonitorAsyncCanary && m.Config[CanaryWorkflowKey] != "" {
+		if w, err := ParseCanaryConfig(m.Config); err == nil {
+			if doc, cerr := CanaryCanonicalJSON(w); cerr == nil {
+				m.Config[CanaryWorkflowKey] = doc
+			}
+		}
+	}
 	if m.Type == MonitorHTTP {
 		m.Method = strings.ToUpper(strings.TrimSpace(m.Method))
 		if m.Method == "" {

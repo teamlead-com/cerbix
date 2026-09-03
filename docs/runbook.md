@@ -492,7 +492,11 @@ cleared by that same write, after which the secret is deletable again.
 
 An `async_canary` runs ONE typed asynchronous transaction end to end — submit, correlate, await a
 terminal result, assert, validate the cleanup boundary — and reports it as an ordinary monitor. It is
-declared in a Monitoring-as-Code bundle as a nested `workflow:` block; there is no UI form yet.
+declared in a Monitoring-as-Code bundle as a nested `workflow:` block, **or through the typed form in
+the SPA** (Monitors → New → Async canary, since 2026-09-03). The form is typed only: there is no JSON
+editor on the create view or the read view, and every refusal appears at the field that caused it
+rather than as a 400 after Create. A saved canary reads back into the same form, with the binding
+halves recombined from the document's `secret_ref` marker and the flat reference key's name.
 
 **Deployment.** No new role. The executor is a capability of the roles that already exist, so a canary
 runs on an ordinary `worker` or `agent` in the monitor's region. Running it on its own host — a VPS in

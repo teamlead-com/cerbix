@@ -404,9 +404,9 @@ address after resolution, re-validated on every redirect hop — and the executo
 binding-backed header on a cross-host redirect, which `net/http` does not do. One run per monitor and
 four per region are decided by the scheduler at dispatch; a refused run is an ordinary DOWN with a
 bounded reason, counted in the SLI like any other. A canary is an ordinary member of a Service: nothing
-here adds a second reliability path. It is **partly built** — capability announcement and the typed UI
-form are named as outstanding in `status.md`, and until the first lands, a region's executors are
-upgraded before a canary is declared there.
+here adds a second reliability path. It is **partly built**: the typed UI form landed on 2026-09-03 (typed only — no JSON editor on either
+view), and capability announcement is still outstanding and named in `status.md`, so until it lands a
+region's executors are upgraded before a canary is declared there.
 
 **Catalog of check types (`prober`):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `postgres`,
 `mysql`, `redis`, `rabbitmq`, `promql`, `websocket`, `ssh`, `composite`, `synthetic`, `async_canary`,

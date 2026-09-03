@@ -16,11 +16,25 @@ import {
   validateScenarioBindings,
   type ScenarioBinding,
 } from "@/lib/scenarioBindings";
+import {
+  buildCanaryConfig,
+  canaryRefusals,
+  emptyCanaryForm,
+  isCredentialHeader,
+  parseCanaryConfig,
+  CANARY_COMPLETION_KINDS,
+  CANARY_CLEANUP_KINDS,
+  CANARY_CORRELATE_SOURCES,
+  CANARY_MAX_BINDINGS,
+  CANARY_CORRELATION_PLACEHOLDER,
+  CANARY_SUBMIT_KINDS,
+  type CanaryForm,
+} from "@/lib/canaryWorkflow";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 
-type MonitorType = "http" | "tcp" | "icmp" | "dns" | "tls" | "grpc" | "composite" | "postgres" | "mysql" | "redis" | "promql" | "rabbitmq" | "websocket" | "ssh" | "synthetic" | "push";
+type MonitorType = "http" | "tcp" | "icmp" | "dns" | "tls" | "grpc" | "composite" | "postgres" | "mysql" | "redis" | "promql" | "rabbitmq" | "websocket" | "ssh" | "synthetic" | "async_canary" | "push";
 type CreateMonitor = components["schemas"]["CreateMonitor"];
 type UpdateMonitor = components["schemas"]["UpdateMonitor"];
 type Channel = components["schemas"]["NotificationChannel"];
@@ -52,6 +66,7 @@ const types: { key: MonitorType; label: string; hint: string }[] = [
   { key: "websocket", label: "WebSocket", hint: "Upgrade handshake" },
   { key: "ssh", label: "SSH", hint: "Banner check" },
   { key: "synthetic", label: "Synthetic", hint: "Multi-step HTTP flow" },
+  { key: "async_canary", label: "Async canary", hint: "One async API journey" },
   { key: "push", label: "Push", hint: "Dead-man's switch" },
 ];
 
@@ -106,6 +121,44 @@ function removeTag(t: string) {
 
 const isComposite = computed(() => form.type === "composite");
 const isSynthetic = computed(() => form.type === "synthetic");
+const isCanary = computed(() => form.type === "async_canary");
+
+// FR-029 phase F. The workflow is a NESTED TYPED document; this is the flat form behind it, and every
+// rule is the server's from `internal/domain/canary.go`, mirrored in `lib/canaryWorkflow.ts` so the
+// operator meets each one AT THE FIELD instead of as a 400 after saving.
+//
+// There is no JSON editor here, and none on the read view either — by contract, on the mock the owner
+// approved (D-0224). A textual view of a canonical document is a view somebody edits as text.
+const canary = reactive<CanaryForm>(emptyCanaryForm());
+const canaryRefusalList = computed(() =>
+  isCanary.value ? canaryRefusals(canary, Number(form.timeout_seconds) || 0, projectSecretNames.value) : [],
+);
+/** The refusal for one field, or "" — so a control can render its own reason beside itself. */
+function canaryRefusal(field: string): string {
+  return canaryRefusalList.value.find((r) => r.field === field)?.message ?? "";
+}
+// A MONITOR-level rule, not a workflow one, so `canaryRefusals` does not cover it: one probe may not
+// overlap the next, because the in-flight lease would refuse the second run and report
+// `already_in_flight` forever. Surfaced at the field that causes it instead of as a 400 after Create.
+const canaryCadenceRefusal = computed(() => {
+  if (!isCanary.value) return "";
+  const iv = Number(form.interval_seconds) || 0;
+  const to = Number(form.timeout_seconds) || 0;
+  if (iv > 0 && to > 0 && iv < to) {
+    return "interval must be at least the timeout — one canary probe may not overlap the next";
+  }
+  return "";
+});
+/** Rows the form adds and removes. Kept here rather than in the library: this is view state. */
+function addCanaryBinding() {
+  if (canary.bindings.length < CANARY_MAX_BINDINGS) canary.bindings.push({ name: "", secret: "" });
+}
+function addCanaryHeader(rows: { name: string; value: string; secretRef: string }[]) {
+  rows.push({ name: "", value: "", secretRef: "" });
+}
+function addCanaryField(rows: { key: string; value: string; secretRef: string }[]) {
+  rows.push({ key: "", value: "", secretRef: "" });
+}
 const isDB = computed(() => form.type === "postgres" || form.type === "mysql"); // same connection form
 
 // Synthetic scenario — visual step builder. Each step is an HTTP request sharing a
@@ -299,6 +352,7 @@ function typeConfig(): Record<string, string> | undefined {
   if (isPromQL.value) return promqlConfig();
   if (isRabbitMQ.value) return rabbitConfig();
   if (isSynthetic.value) return syntheticConfig();
+  if (isCanary.value) return buildCanaryConfig(canary);
   return undefined;
 }
 
@@ -491,8 +545,11 @@ function fixOps(c: Cond) {
   if (!opsFor(c.p).includes(c.o)) c.o = opsFor(c.p)[0];
 }
 
-const showTarget = computed(() => !["push", "composite", "synthetic"].includes(form.type));
-const showConditions = computed(() => !["push", "composite", "postgres", "mysql", "redis", "synthetic"].includes(form.type));
+// A canary has no `target`: its address is the submit URL inside the workflow, and `NeedsTarget()`
+// is false for it server-side. The field is HIDDEN rather than asked for and ignored — the same
+// mistake that left a synthetic monitor uncreatable from this form until iter-0167.
+const showTarget = computed(() => !["push", "composite", "synthetic", "async_canary"].includes(form.type));
+const showConditions = computed(() => !["push", "composite", "postgres", "mysql", "redis", "synthetic", "async_canary"].includes(form.type));
 const targetLabel = computed(() =>
   form.type === "http"
     ? "URL"
@@ -560,6 +617,9 @@ const canSubmit = computed(() => {
   // `NewMonitorScenarioBinding.spec.ts` while proving the binding body; the gap survived
   // because no test and no E2E had ever submitted this type (FR-SYN-3's named coverage gap).
   if (isSynthetic.value) return !scenarioError.value;
+  // Same shape, same reason: a canary has no target, so requiring one would disable Create for it
+  // permanently and without explanation.
+  if (isCanary.value) return !canaryCadenceRefusal.value && canaryRefusalList.value.length === 0;
   if (credentialRequired.value) {
     if (credentialMode.value === "ref" && !secretRef.value) return false;
     if (credentialMode.value === "value" && !pg.password && (!isEdit.value || initialCredentialMode.value !== "value")) return false;
@@ -568,10 +628,12 @@ const canSubmit = computed(() => {
 });
 
 // live preview
-const typeChip = computed<Record<MonitorType, string>>(() => ({ http: "HTTP", tcp: "TCP", icmp: "ICMP", dns: "DNS", tls: "TLS", grpc: "gRPC", composite: "GROUP", postgres: "PG", mysql: "MySQL", redis: "Redis", promql: "PromQL", rabbitmq: "RabbitMQ", websocket: "WS", ssh: "SSH", synthetic: "FLOW", push: "PUSH" }));
+const typeChip = computed<Record<MonitorType, string>>(() => ({ http: "HTTP", tcp: "TCP", icmp: "ICMP", dns: "DNS", tls: "TLS", grpc: "gRPC", composite: "GROUP", postgres: "PG", mysql: "MySQL", redis: "Redis", promql: "PromQL", rabbitmq: "RabbitMQ", websocket: "WS", ssh: "SSH", synthetic: "FLOW", async_canary: "CANARY", push: "PUSH" }));
 const previewTarget = computed(() => {
   if (form.type === "push") return "push endpoint · generated on create";
   if (form.type === "composite") return `${childIds.value.size} member${childIds.value.size === 1 ? "" : "s"} · ${mode.value}`;
+  // A canary has no target: what it probes is the submit URL inside the workflow.
+  if (isCanary.value) return canary.submitURL || "the workflow's submit URL";
   const t = form.target || targetPlaceholder.value;
   return form.type === "http" ? `${form.method} ${t}` : t;
 });
@@ -743,6 +805,13 @@ async function loadForEdit() {
   // The reference keys are NOT secret — they hold a name — so they come back on every read and
   // the panel can be rebuilt exactly. A key that does not parse is kept and named rather than
   // dropped: silently discarding it would delete a declaration the operator made.
+  // A saved canary reads back into the SAME typed form. The document holds `secret_ref` markers and
+  // the flat keys hold the project-secret names; the library recombines the two halves, which is why
+  // the read view is complete without a JSON editor.
+  if (m.type === "async_canary") {
+    const back = parseCanaryConfig((m.config ?? {}) as Record<string, string>);
+    if (back) Object.assign(canary, back);
+  }
   if (m.type === "synthetic") {
     scenarioBindings.value = bindingsFromConfig(m.config as Record<string, string> | undefined);
     scenarioMalformedRefs.value = malformedRefKeys(m.config as Record<string, string> | undefined);
@@ -1206,6 +1275,254 @@ const selectCls =
           </section>
 
           <!-- synthetic scenario builder -->
+          <!-- FR-029 phase F: a TYPED form, five stages plus the bindings that feed them. There is no
+               JSON editor here and none on the read view — by contract, on the mock the owner approved
+               (D-0224). Every refusal below is the server's rule met at the field. -->
+          <section v-if="isCanary" data-testid="canary-workflow" class="rounded border border-border bg-surface shadow-card">
+            <div class="flex flex-wrap items-center gap-[10px] border-b border-border px-4 py-[13px]">
+              <h2 class="text-[13px] font-semibold">Workflow</h2>
+              <span class="rounded-sm border border-border bg-inset px-[7px] py-[2px] font-mono text-[10.5px] text-ink-2">async_transaction_v1</span>
+              <span class="flex-1"></span>
+              <span class="text-[12px] text-ink-3">5 stages</span>
+            </div>
+            <div class="flex flex-col gap-[14px] p-4">
+              <p v-if="canaryCadenceRefusal" data-testid="canary-refusal-cadence" class="rounded-[6px] border border-down bg-down-weak px-3 py-2 text-[13px] text-down">{{ canaryCadenceRefusal }}</p>
+
+              <!-- 0 · bindings, declared once -->
+              <div class="rounded-[7px] border border-border bg-surface-2/50 p-3">
+                <div class="flex items-center gap-[9px]">
+                  <span class="grid h-5 w-5 place-items-center rounded-full bg-accent-weak text-[11px] font-semibold text-accent">0</span>
+                  <b class="text-[13px]">Secrets</b>
+                  <span v-if="canary.bindings.length" data-testid="canary-binding-count" class="rounded-sm border border-accent bg-accent-weak px-[7px] py-[2px] font-mono text-[10.5px] text-accent">{{ canary.bindings.length }} of {{ CANARY_MAX_BINDINGS }}</span>
+                </div>
+                <p class="mt-1 text-[12px] text-ink-3">Declared once. Every position below refers to a binding by name; the project secret is named here and nowhere else, so a rename or a rotation touches one row.</p>
+                <div v-for="(b, i) in canary.bindings" :key="i" data-testid="canary-binding" class="mt-2 flex flex-wrap items-start gap-2">
+                  <input v-model="b.name" type="text" placeholder="upload" :class="[inputCls, 'font-mono w-[170px]']" :aria-label="'binding name ' + i" />
+                  <span class="mt-2 text-[12px] text-ink-3">&rarr;</span>
+                  <select v-model="b.secret" :class="[selectCls, 'h-[38px] w-[220px]']" :aria-label="'project secret ' + i">
+                    <option value="">choose a project secret…</option>
+                    <option v-for="s in projectSecretNames" :key="s" :value="s">{{ s }}</option>
+                  </select>
+                  <button type="button" class="mt-2 text-[12.5px] text-accent hover:underline" @click="canary.bindings.splice(i, 1)">Remove</button>
+                  <p v-if="canaryRefusal('bindings.' + i)" :data-testid="'canary-refusal-bindings.' + i" class="w-full text-[12px] text-down">{{ canaryRefusal("bindings." + i) }}</p>
+                </div>
+                <button type="button" data-testid="canary-add-binding" class="mt-2 h-[26px] rounded-[6px] border border-border px-[10px] text-[12.5px]" @click="addCanaryBinding">+ Declare a binding</button>
+              </div>
+
+              <!-- 1 · submit -->
+              <div class="rounded-[7px] border border-border bg-surface-2/50 p-3">
+                <div class="flex items-center gap-[9px]">
+                  <span class="grid h-5 w-5 place-items-center rounded-full bg-accent-weak text-[11px] font-semibold text-accent">1</span>
+                  <b class="text-[13px]">Submit</b>
+                </div>
+                <div class="mt-2 flex flex-wrap items-start gap-2">
+                  <select v-model="canary.submitKind" data-testid="canary-submit-kind" :class="[selectCls, 'h-[38px] w-[190px]']">
+                    <option v-for="k in CANARY_SUBMIT_KINDS" :key="k" :value="k">{{ k }}</option>
+                  </select>
+                  <span :class="[inputCls, 'font-mono w-[90px] text-center leading-[26px] text-ink-3']">POST</span>
+                  <input v-model="canary.submitURL" type="text" data-testid="canary-submit-url" placeholder="https://files.example.com/files/upload" :class="[inputCls, 'font-mono flex-1 min-w-[220px]']" />
+                </div>
+                <p v-if="canaryRefusal('submitURL')" data-testid="canary-refusal-submitURL" class="mt-1 text-[12px] text-down">{{ canaryRefusal("submitURL") }}</p>
+                <div class="mt-2 flex flex-wrap gap-3">
+                  <label class="flex flex-col gap-[4px]">
+                    <span class="text-[12px] font-semibold text-ink-2">Submit timeout (s)</span>
+                    <input v-model="canary.submitTimeout" type="text" data-testid="canary-submit-timeout" :class="[inputCls, 'font-mono w-[110px]']" />
+                    <span class="text-[11.5px] text-ink-3">1–60, and within the monitor's timeout</span>
+                  </label>
+                  <label class="flex flex-col gap-[4px]">
+                    <span class="text-[12px] font-semibold text-ink-2">Accepted status</span>
+                    <input v-model="canary.acceptedStatus" type="text" data-testid="canary-accepted-status" :class="[inputCls, 'font-mono w-[130px]']" />
+                    <span class="text-11.5 text-[11.5px] text-ink-3">2xx only</span>
+                  </label>
+                  <label v-if="canary.submitKind === 'multipart_fixture'" class="flex flex-col gap-[4px]">
+                    <span class="text-[12px] font-semibold text-ink-2">Fixture</span>
+                    <input v-model="canary.fixtureRef" type="text" data-testid="canary-fixture-ref" placeholder="small_wav_v1" :class="[inputCls, 'font-mono w-[190px]']" />
+                    <span class="text-[11.5px] text-ink-3">a registry key, never an upload</span>
+                  </label>
+                  <label v-if="canary.submitKind === 'multipart_fixture'" class="flex flex-col gap-[4px]">
+                    <span class="text-[12px] font-semibold text-ink-2">File field</span>
+                    <input v-model="canary.fileField" type="text" :class="[inputCls, 'font-mono w-[120px]']" />
+                  </label>
+                </div>
+                <p v-if="canaryRefusal('submitTimeout')" data-testid="canary-refusal-submitTimeout" class="mt-1 text-[12px] text-down">{{ canaryRefusal("submitTimeout") }}</p>
+                <p v-if="canaryRefusal('acceptedStatus')" data-testid="canary-refusal-acceptedStatus" class="mt-1 text-[12px] text-down">{{ canaryRefusal("acceptedStatus") }}</p>
+                <p v-if="canaryRefusal('fixtureRef')" data-testid="canary-refusal-fixtureRef" class="mt-1 text-[12px] text-down">{{ canaryRefusal("fixtureRef") }}</p>
+
+                <div class="mt-3 text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Headers</div>
+                <div v-for="(h, i) in canary.submitHeaders" :key="i" data-testid="canary-submit-header" class="mt-2 flex flex-wrap items-start gap-2">
+                  <input v-model="h.name" type="text" placeholder="authorization" :class="[inputCls, 'font-mono w-[200px]']" :aria-label="'submit header name ' + i" />
+                  <span v-if="isCredentialHeader(h.name)" data-testid="canary-credential-header" class="mt-2 rounded-sm border border-degraded bg-degraded-weak px-[7px] py-[2px] text-[11.5px] text-degraded">credential-bearing</span>
+                  <!-- D7 taught by the CONTROL: a credential-bearing header offers a binding and
+                       nothing else, from the first keystroke of the name. -->
+                  <select v-if="isCredentialHeader(h.name)" v-model="h.secretRef" :class="[selectCls, 'h-[38px] w-[200px]']" :aria-label="'submit header binding ' + i">
+                    <option value="">choose a binding…</option>
+                    <option v-for="b in canary.bindings" :key="b.name" :value="b.name">{{ b.name }}</option>
+                  </select>
+                  <input v-else v-model="h.value" type="text" placeholder="canary" :class="[inputCls, 'font-mono flex-1 min-w-[160px]']" :aria-label="'submit header value ' + i" />
+                  <button type="button" class="mt-2 text-[12.5px] text-accent hover:underline" @click="canary.submitHeaders.splice(i, 1)">Remove</button>
+                  <p v-if="canaryRefusal('submitHeaders.' + i)" :data-testid="'canary-refusal-submitHeaders.' + i" class="w-full text-[12px] text-down">{{ canaryRefusal("submitHeaders." + i) }}</p>
+                </div>
+                <button type="button" data-testid="canary-add-submit-header" class="mt-2 h-[26px] rounded-[6px] border border-border px-[10px] text-[12.5px]" @click="addCanaryHeader(canary.submitHeaders)">+ Header</button>
+
+                <div class="mt-3 text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">{{ canary.submitKind === "multipart_fixture" ? "Multipart fields" : "Body" }}</div>
+                <div v-for="(fRow, i) in (canary.submitKind === 'multipart_fixture' ? canary.multipartFields : canary.bodyFields)" :key="i" data-testid="canary-body-field" class="mt-2 flex flex-wrap items-start gap-2">
+                  <input v-model="fRow.key" type="text" placeholder="tenant" :class="[inputCls, 'font-mono w-[170px]']" :aria-label="'field key ' + i" />
+                  <input v-model="fRow.value" type="text" placeholder="canary" :class="[inputCls, 'font-mono flex-1 min-w-[140px]']" :aria-label="'field value ' + i" />
+                  <select v-model="fRow.secretRef" :class="[selectCls, 'h-[38px] w-[170px]']" :aria-label="'field binding ' + i">
+                    <option value="">no binding</option>
+                    <option v-for="b in canary.bindings" :key="b.name" :value="b.name">{{ b.name }}</option>
+                  </select>
+                  <button type="button" class="mt-2 text-[12.5px] text-accent hover:underline" @click="(canary.submitKind === 'multipart_fixture' ? canary.multipartFields : canary.bodyFields).splice(i, 1)">Remove</button>
+                </div>
+                <button type="button" data-testid="canary-add-body-field" class="mt-2 h-[26px] rounded-[6px] border border-border px-[10px] text-[12.5px]" @click="addCanaryField(canary.submitKind === 'multipart_fixture' ? canary.multipartFields : canary.bodyFields)">+ Field</button>
+                <p v-if="canaryRefusal('bodyFields')" data-testid="canary-refusal-bodyFields" class="mt-1 text-[12px] text-down">{{ canaryRefusal("bodyFields") }}</p>
+                <!-- The D3a residual, stated where it applies rather than implied by silence. -->
+                <p class="mt-2 rounded-[6px] border border-dashed border-border-strong bg-surface-2 px-3 py-2 text-[12px] text-ink-2">A credential pasted into an ordinary field or a header nobody would call a credential header is <b>not detectable</b> and is not refused. Only the finite credential-bearing header set is enforced.</p>
+              </div>
+
+              <!-- 2 · correlate -->
+              <div class="rounded-[7px] border border-border bg-surface-2/50 p-3">
+                <div class="flex items-center gap-[9px]">
+                  <span class="grid h-5 w-5 place-items-center rounded-full bg-accent-weak text-[11px] font-semibold text-accent">2</span>
+                  <b class="text-[13px]">Correlate</b>
+                </div>
+                <div class="mt-2 flex flex-wrap items-start gap-2">
+                  <select v-model="canary.correlateSource" data-testid="canary-correlate-source" :class="[selectCls, 'h-[38px] w-[190px]']">
+                    <option v-for="k in CANARY_CORRELATE_SOURCES" :key="k" :value="k">{{ k }}</option>
+                  </select>
+                  <input v-if="canary.correlateSource === 'response_json'" v-model="canary.correlatePath" type="text" data-testid="canary-correlate-path" placeholder="task_id" :class="[inputCls, 'font-mono flex-1 min-w-[200px]']" />
+                  <input v-else v-model="canary.correlateHeaderName" type="text" data-testid="canary-correlate-header" placeholder="task-id" :class="[inputCls, 'font-mono flex-1 min-w-[200px]']" />
+                </div>
+                <p class="mt-1 text-[12px] text-ink-3">Dotted keys and numeric indices only — no expressions.</p>
+                <p v-if="canaryRefusal('correlatePath')" data-testid="canary-refusal-correlatePath" class="mt-1 text-[12px] text-down">{{ canaryRefusal("correlatePath") }}</p>
+                <p v-if="canaryRefusal('correlateHeaderName')" class="mt-1 text-[12px] text-down">{{ canaryRefusal("correlateHeaderName") }}</p>
+              </div>
+
+              <!-- 3 · completion -->
+              <div class="rounded-[7px] border border-border bg-surface-2/50 p-3">
+                <div class="flex items-center gap-[9px]">
+                  <span class="grid h-5 w-5 place-items-center rounded-full bg-accent-weak text-[11px] font-semibold text-accent">3</span>
+                  <b class="text-[13px]">Completion</b>
+                </div>
+                <div class="mt-2 flex flex-wrap items-start gap-2">
+                  <select v-model="canary.completionKind" data-testid="canary-completion-kind" :class="[selectCls, 'h-[38px] w-[150px]']">
+                    <option v-for="k in CANARY_COMPLETION_KINDS" :key="k" :value="k">{{ k }}</option>
+                  </select>
+                  <input v-model="canary.completionURL" type="text" data-testid="canary-completion-url" :placeholder="'https://files.example.com/tasks/' + CANARY_CORRELATION_PLACEHOLDER + '/events'" :class="[inputCls, 'font-mono flex-1 min-w-[220px]']" />
+                  <label class="flex flex-col gap-[4px]">
+                    <span class="text-[12px] font-semibold text-ink-2">Timeout (s)</span>
+                    <input v-model="canary.completionTimeout" type="text" data-testid="canary-completion-timeout" :class="[inputCls, 'font-mono w-[110px]']" />
+                  </label>
+                </div>
+                <p class="mt-1 text-[12px] text-ink-3"><span class="font-mono">{{ CANARY_CORRELATION_PLACEHOLDER }}</span> is legal here and nowhere else — nothing has produced an id before this stage. The timeout must fit inside the monitor's.</p>
+                <p v-if="canaryRefusal('completionURL')" data-testid="canary-refusal-completionURL" class="mt-1 text-[12px] text-down">{{ canaryRefusal("completionURL") }}</p>
+                <p v-if="canaryRefusal('completionTimeout')" data-testid="canary-refusal-completionTimeout" class="mt-1 text-[12px] text-down">{{ canaryRefusal("completionTimeout") }}</p>
+
+                <div class="mt-3 text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Headers <span class="font-normal normal-case tracking-normal">— completion never inherits submit's</span></div>
+                <div v-for="(h, i) in canary.completionHeaders" :key="i" data-testid="canary-completion-header" class="mt-2 flex flex-wrap items-start gap-2">
+                  <input v-model="h.name" type="text" placeholder="authorization" :class="[inputCls, 'font-mono w-[200px]']" :aria-label="'completion header name ' + i" />
+                  <select v-if="isCredentialHeader(h.name)" v-model="h.secretRef" :class="[selectCls, 'h-[38px] w-[200px]']" :aria-label="'completion header binding ' + i">
+                    <option value="">choose a binding…</option>
+                    <option v-for="b in canary.bindings" :key="b.name" :value="b.name">{{ b.name }}</option>
+                  </select>
+                  <input v-else v-model="h.value" type="text" :class="[inputCls, 'font-mono flex-1 min-w-[160px]']" :aria-label="'completion header value ' + i" />
+                  <button type="button" class="mt-2 text-[12.5px] text-accent hover:underline" @click="canary.completionHeaders.splice(i, 1)">Remove</button>
+                  <p v-if="canaryRefusal('completionHeaders.' + i)" class="w-full text-[12px] text-down">{{ canaryRefusal("completionHeaders." + i) }}</p>
+                </div>
+                <button type="button" data-testid="canary-add-completion-header" class="mt-2 h-[26px] rounded-[6px] border border-border px-[10px] text-[12.5px]" @click="addCanaryHeader(canary.completionHeaders)">+ Header</button>
+                <p v-if="canaryRefusal('completionHeaders')" data-testid="canary-refusal-completionHeaders" class="mt-1 text-[12px] text-down">{{ canaryRefusal("completionHeaders") }}</p>
+
+                <template v-if="canary.completionKind === 'sse'">
+                  <div class="mt-3 flex flex-wrap gap-3">
+                    <label class="flex flex-col gap-[4px]">
+                      <span class="text-[12px] font-semibold text-ink-2">Success event</span>
+                      <input v-model="canary.sseSuccessEvent" type="text" data-testid="canary-sse-success" placeholder="task.completed" :class="[inputCls, 'font-mono w-[180px]']" />
+                    </label>
+                    <label class="flex flex-col gap-[4px]">
+                      <span class="text-[12px] font-semibold text-ink-2">Failure events</span>
+                      <input v-model="canary.sseFailureEvents" type="text" placeholder="task.failed" :class="[inputCls, 'font-mono w-[180px]']" />
+                    </label>
+                    <label class="flex flex-col gap-[4px]">
+                      <span class="text-[12px] font-semibold text-ink-2">Required fields</span>
+                      <input v-model="canary.sseRequiredFields" type="text" placeholder="s3_path, byte_size" :class="[inputCls, 'font-mono w-[220px]']" />
+                    </label>
+                  </div>
+                  <p v-if="canaryRefusal('sseSuccessEvent')" data-testid="canary-refusal-sseSuccessEvent" class="mt-1 text-[12px] text-down">{{ canaryRefusal("sseSuccessEvent") }}</p>
+                </template>
+                <template v-else>
+                  <div class="mt-3 flex flex-wrap gap-3">
+                    <label class="flex flex-col gap-[4px]">
+                      <span class="text-[12px] font-semibold text-ink-2">Interval (s)</span>
+                      <input v-model="canary.pollInterval" type="text" data-testid="canary-poll-interval" :class="[inputCls, 'font-mono w-[100px]']" />
+                    </label>
+                    <label class="flex flex-col gap-[4px]">
+                      <span class="text-[12px] font-semibold text-ink-2">Max attempts</span>
+                      <input v-model="canary.pollMaxAttempts" type="text" data-testid="canary-poll-attempts" :class="[inputCls, 'font-mono w-[120px]']" />
+                    </label>
+                    <label class="flex flex-col gap-[4px]">
+                      <span class="text-[12px] font-semibold text-ink-2">Success path</span>
+                      <input v-model="canary.pollSuccessPath" type="text" :class="[inputCls, 'font-mono w-[150px]']" />
+                    </label>
+                    <label class="flex flex-col gap-[4px]">
+                      <span class="text-[12px] font-semibold text-ink-2">Success value</span>
+                      <input v-model="canary.pollSuccessValue" type="text" :class="[inputCls, 'font-mono w-[150px]']" />
+                    </label>
+                  </div>
+                  <p class="mt-1 text-[12px] text-ink-3">Interval &times; attempts must fit inside the completion timeout.</p>
+                  <p v-if="canaryRefusal('pollMaxAttempts')" data-testid="canary-refusal-pollMaxAttempts" class="mt-1 text-[12px] text-down">{{ canaryRefusal("pollMaxAttempts") }}</p>
+                  <p v-if="canaryRefusal('pollInterval')" class="mt-1 text-[12px] text-down">{{ canaryRefusal("pollInterval") }}</p>
+                </template>
+              </div>
+
+              <!-- 4 · result -->
+              <div class="rounded-[7px] border border-border bg-surface-2/50 p-3">
+                <div class="flex items-center gap-[9px]">
+                  <span class="grid h-5 w-5 place-items-center rounded-full bg-accent-weak text-[11px] font-semibold text-accent">4</span>
+                  <b class="text-[13px]">Result</b>
+                </div>
+                <div class="mt-2 flex flex-wrap gap-3">
+                  <label class="flex flex-col gap-[4px]">
+                    <span class="text-[12px] font-semibold text-ink-2">Max latency (s)</span>
+                    <input v-model="canary.maxLatency" type="text" data-testid="canary-max-latency" :class="[inputCls, 'font-mono w-[120px]']" />
+                    <span class="text-[11.5px] text-ink-3">the promise; the monitor timeout is the limit</span>
+                  </label>
+                  <label class="flex flex-1 flex-col gap-[4px]">
+                    <span class="text-[12px] font-semibold text-ink-2">Required JSON fields</span>
+                    <input v-model="canary.resultRequiredFields" type="text" data-testid="canary-required-fields" placeholder="s3_path, byte_size, media_type" :class="[inputCls, 'font-mono min-w-[220px]']" />
+                  </label>
+                  <label class="flex flex-col gap-[4px]">
+                    <span class="text-[12px] font-semibold text-ink-2">Lifecycle path</span>
+                    <input v-model="canary.lifecyclePath" type="text" data-testid="canary-lifecycle-path" placeholder="s3_path" :class="[inputCls, 'font-mono w-[150px]']" />
+                  </label>
+                </div>
+                <p v-if="canaryRefusal('maxLatency')" data-testid="canary-refusal-maxLatency" class="mt-1 text-[12px] text-down">{{ canaryRefusal("maxLatency") }}</p>
+                <p v-if="canaryRefusal('resultRequiredFields')" data-testid="canary-refusal-resultRequiredFields" class="mt-1 text-[12px] text-down">{{ canaryRefusal("resultRequiredFields") }}</p>
+                <p v-if="canaryRefusal('lifecyclePath')" data-testid="canary-refusal-lifecyclePath" class="mt-1 text-[12px] text-down">{{ canaryRefusal("lifecyclePath") }}</p>
+              </div>
+
+              <!-- 5 · cleanup -->
+              <div class="rounded-[7px] border border-border bg-surface-2/50 p-3">
+                <div class="flex items-center gap-[9px]">
+                  <span class="grid h-5 w-5 place-items-center rounded-full bg-accent-weak text-[11px] font-semibold text-accent">5</span>
+                  <b class="text-[13px]">Cleanup</b>
+                </div>
+                <div class="mt-2 flex flex-wrap items-start gap-2">
+                  <select v-model="canary.cleanupKind" data-testid="canary-cleanup-kind" :class="[selectCls, 'h-[38px] w-[190px]']">
+                    <option v-for="k in CANARY_CLEANUP_KINDS" :key="k" :value="k">{{ k }}</option>
+                  </select>
+                  <input v-if="canary.cleanupKind === 'lifecycle_prefix'" v-model="canary.cleanupPrefix" type="text" data-testid="canary-cleanup-prefix" placeholder="canary/" :class="[inputCls, 'font-mono flex-1 min-w-[160px]']" />
+                  <label v-else class="mt-2 flex items-center gap-2 text-[13px]">
+                    <input v-model="canary.cleanupAcknowledged" type="checkbox" data-testid="canary-cleanup-ack" />
+                    <span>I accept that nothing sweeps what this canary creates</span>
+                  </label>
+                </div>
+                <p class="mt-2 rounded-[6px] border border-dashed border-border-strong bg-surface-2 px-3 py-2 text-[12px] text-ink-2">Validation only. cerbix has no rights on the object store and <b>never deletes what it did not create</b> — this checks that the returned path begins with the prefix. Reaping is the operator's policy on the target side.</p>
+                <p v-if="canaryRefusal('cleanupPrefix')" data-testid="canary-refusal-cleanupPrefix" class="mt-1 text-[12px] text-down">{{ canaryRefusal("cleanupPrefix") }}</p>
+                <p v-if="canaryRefusal('cleanupAcknowledged')" data-testid="canary-refusal-cleanupAcknowledged" class="mt-1 text-[12px] text-down">{{ canaryRefusal("cleanupAcknowledged") }}</p>
+              </div>
+            </div>
+          </section>
+
           <section v-if="isSynthetic && scenarioWithheld" data-testid="scenario-withheld" class="rounded border border-border bg-surface p-4 text-[13px] text-ink-2 shadow-card">
             The scenario is not shown: it can carry credentials, so it is returned only to someone who may edit this
             monitor. Ask for editor rights on this project to view or change it.
@@ -1378,14 +1695,14 @@ const selectCls =
                 <label class="flex flex-col gap-[6px]">
                   <span class="text-[12px] font-semibold text-ink-2">Interval</span>
                   <span class="relative">
-                    <input v-model.number="form.interval_seconds" type="number" min="5" :class="[inputCls, 'pr-[38px] font-mono']" />
+                    <input v-model.number="form.interval_seconds" type="number" min="5" data-testid="monitor-interval" :class="[inputCls, 'pr-[38px] font-mono']" />
                     <span class="pointer-events-none absolute right-[11px] top-1/2 -translate-y-1/2 font-mono text-[12px] text-ink-3">sec</span>
                   </span>
                 </label>
                 <label class="flex flex-col gap-[6px]">
                   <span class="text-[12px] font-semibold text-ink-2">Timeout</span>
                   <span class="relative">
-                    <input v-model.number="form.timeout_seconds" type="number" min="1" :class="[inputCls, 'pr-[38px] font-mono']" />
+                    <input v-model.number="form.timeout_seconds" type="number" min="1" data-testid="monitor-timeout" :class="[inputCls, 'pr-[38px] font-mono']" />
                     <span class="pointer-events-none absolute right-[11px] top-1/2 -translate-y-1/2 font-mono text-[12px] text-ink-3">sec</span>
                   </span>
                 </label>

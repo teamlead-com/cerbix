@@ -6071,3 +6071,53 @@ has not been observed failing, and it sits in the most intricate suite in the tr
 review rounds); a change made on a hypothesis there risks breaking a property that is real and that I
 do not fully hold. If the next annotation names it, the fix is a logical discriminator instead of a
 duration. If it names something else, this paragraph is a wrong guess kept on the record.
+
+## D-0226 — the typed canary form, and two seams it found (2026-09-03)
+
+**Context.** FR-029 phase F, unblocked by the owner's visual approval of the mock (D-0224). "UI as a
+typed form only. No JSON editor." The owner asked for it directly after the release disposition.
+
+**Decision.** The form is built to the approved mock: bindings declared once as stage 0, then the five
+stages, every rule met AT THE FIELD, and no JSON editor on the create view or the read view. The rules
+live in `frontend/src/lib/canaryWorkflow.ts`, mirroring `internal/domain/canary.go` the way
+`scenarioBindings.ts` mirrors `syntheticbindings.go`, and inventing nothing of their own: a client-only
+refusal would be a rule nobody could discover from the API, and a client-only permission would be a lie.
+
+**What the client deliberately does NOT do: canonicalize.** The stored document is one canonical string
+(D3e), and duplicating canonicalization in TypeScript would be a second implementation of a
+hash-relevant function — which is how two write surfaces begin disagreeing about identity. The form
+sends ordinary JSON and the server normalizes it.
+
+**Seam 1 — the API surface never canonicalized, and D3e was false of it.** The file provider called
+`CanaryConfig` and always stored the canonical form; the API path only PARSED and VALIDATED the
+document and stored whatever string the caller sent. Two monitors with the same workflow and a
+different key order therefore had different stored documents and different semantic hashes, so a
+Monitoring-as-Code re-apply over an API-created canary read as CHANGED forever. Canonicalization moved
+into `Monitor.Normalize()`, which both surfaces already call; a document that does not parse is left
+untouched, because `Normalize` cannot fail and the refusal is `Validate`'s to make with a message that
+names the position. `TestBothWriteSurfacesStoreTheSameCanonicalDocument` asserts the two surfaces AGREE
+rather than that one of them "looks canonical", which is the property the hash rests on. Mutation:
+removing the canonicalization — CAUGHT.
+
+**Seam 2 — `async_canary` was never in `openapi.yaml`.** The type shipped API-reachable and
+undocumented, so the generated TypeScript schema did not know it and the form could not compile against
+it. That is the same class FR-028 already paid for ("the feature was API-reachable and undocumented,
+which makes it unusable rather than merely un-designed"). Both monitor type enums and all three
+`config` descriptions now carry the type and its document contract, and `schema.d.ts` is regenerated.
+
+**A third gap, found by a failing test rather than by inspection.** The workflow validator covers
+workflow rules; `interval >= timeout` is a MONITOR rule and it covered nothing. A form that never
+surfaced it would have produced a 400 after Create, so it is surfaced at the cadence field with the
+reason — one canary probe may not overlap the next, because the in-flight lease would refuse the
+second run and report `already_in_flight` forever.
+
+**And one test of mine that was about spelling rather than about the contract.** The first version of
+"has NO JSON editor anywhere" grepped the rendered HTML for `/workflow.*json/` and failed on the
+innocent label "Required JSON fields". It asserts the mechanism now: no `textarea`, no control whose
+value is the document, and every stage present as typed fields.
+
+**Consequences.** 23 library cases, 12 real-component cases, one live-stack spec, four killed
+mutations (a credential header keeping a free-text box, the document carrying a project-secret name,
+the cadence rule dropped, the placeholder allowed in the submit URL). vitest 40 files / 453 tests. FR-029
+and NFR-024 stay `IN_PROGRESS`: capability announcement and the per-kind AMQP queue remain, and phase F
+closing does not close them.

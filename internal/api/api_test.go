@@ -448,7 +448,12 @@ func (f *fakeStore) ListRegions(_ context.Context) ([]string, error) {
 	}
 	return out, nil
 }
-func (f *fakeStore) CreateMonitor(_ context.Context, m domain.Monitor) (domain.Monitor, error) {
+
+// The three monitor doors of FR-026 §10 record their actor exactly as the incident doors do, so a
+// handler test can assert the write carried its principal — a fake that dropped it would pass while
+// the product wrote an anonymous row.
+func (f *fakeStore) CreateMonitorByPrincipal(_ context.Context, m domain.Monitor, actor store.AuditActor) (domain.Monitor, error) {
+	f.auditActors = append(f.auditActors, string(store.MonitorAuditCreate)+"|"+actor.Label)
 	m.ID = "mon-new"
 	f.monitors[m.ID] = m
 	return m, nil
@@ -492,7 +497,8 @@ func (f *fakeStore) GetMonitorByPushToken(_ context.Context, token string) (doma
 	}
 	return domain.Monitor{}, time.Time{}, store.ErrNotFound
 }
-func (f *fakeStore) UpdateMonitor(_ context.Context, m domain.Monitor) (domain.Monitor, error) {
+func (f *fakeStore) UpdateMonitorByPrincipal(_ context.Context, m domain.Monitor, actor store.AuditActor) (domain.Monitor, error) {
+	f.auditActors = append(f.auditActors, string(store.MonitorAuditUpdate)+"|"+actor.Label)
 	if _, ok := f.monitors[m.ID]; !ok {
 		return domain.Monitor{}, store.ErrNotFound
 	}
@@ -502,7 +508,9 @@ func (f *fakeStore) UpdateMonitor(_ context.Context, m domain.Monitor) (domain.M
 	f.monitors[m.ID] = m
 	return m, nil
 }
-func (f *fakeStore) DeleteMonitor(_ context.Context, id string) error {
+func (f *fakeStore) DeleteMonitorByPrincipal(_ context.Context, m domain.Monitor, actor store.AuditActor) error {
+	f.auditActors = append(f.auditActors, string(store.MonitorAuditDelete)+"|"+actor.Label)
+	id := m.ID
 	if _, ok := f.monitors[id]; !ok {
 		return store.ErrNotFound
 	}

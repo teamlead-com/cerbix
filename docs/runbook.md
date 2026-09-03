@@ -1337,7 +1337,9 @@ and the range (`internal/config/config.go`; the example block in `docker/config.
 ## Who wrote this incident? (FR-026 / NFR-021)
 
 Since iter-0168 every incident write made by a PRINCIPAL leaves a row in the organization's audit log,
-written by the same transaction as the change. To answer "who resolved this incident", open
+written by the same transaction as the change. "Who changed this monitor" is answered the same way since
+FR-026 §10: a monitor created, edited or deleted through the API or the SPA leaves a `monitor.*` row;
+one applied from a bundle does not — the bundle is its record. To answer "who resolved this incident", open
 **Organization → Audit** (or `GET /api/v1/organizations/{orgID}/audit`) and read the five incident
 actions:
 
@@ -1347,6 +1349,9 @@ actions:
 | `incident.status` | any update that MOVES the status, the receiver's resolve included | `incident <id> · <from> → <to>` |
 | `incident.note` | a timeline note that changes nothing | `incident <id> · note` |
 | `incident.acknowledge` | the first acknowledgement only | `incident <id> · acknowledged` |
+| `monitor.create` | a monitor created through the API or the SPA (FR-026 §10) | `monitor <id> · <slug> · <type> · region=<r>`, plus `· cleanup=none acknowledged` for a canary that declared it |
+| `monitor.update` | any edit through the API or the SPA, pausing and resuming included | `monitor <id> · <slug> · updated`, plus `· enabled true→false` (or the reverse) when the write flipped it, plus the canary clause above |
+| `monitor.delete` | a delete through the API or the SPA | `monitor <id> · <slug> · <type> · region=<r> · deleted` |
 | `incident.postmortem` | the postmortem upsert | `incident <id> · postmortem created\|updated` |
 
 A row written by an API TOKEN has no `actor_user_id` — a token identity has no user row — so its label

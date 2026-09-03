@@ -51,11 +51,12 @@ type Store interface {
 	ListMonitorsByProjectForWriter(ctx context.Context, projectID string) ([]domain.Monitor, error)
 	GetMonitorForWriter(ctx context.Context, id string) (domain.Monitor, error)
 	ListRegions(ctx context.Context) ([]string, error)
-	CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error)
-	UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error)
+	// FR-026 §10 (D-0233): the three monitor writers take the principal. There is no unaudited form.
+	CreateMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor store.AuditActor) (domain.Monitor, error)
+	UpdateMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor store.AuditActor) (domain.Monitor, error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, time.Time, error)
-	DeleteMonitor(ctx context.Context, id string) error
+	DeleteMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor store.AuditActor) error
 	MonitorProvenance(ctx context.Context, monitorID string) (store.FileManagement, bool, error)
 	MonitorProvenanceBatch(ctx context.Context, monitorIDs []string) (map[string]store.FileManagement, error)
 	FileProviderDiagnostics(ctx context.Context, orgID string) ([]store.FileProviderDiagnostic, error)

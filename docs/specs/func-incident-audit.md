@@ -28,7 +28,8 @@
 > nine writers.
 >
 > FR-026 and NFR-021 have their rows in `docs/status.md`, and the §6 invariants are discharged in the
-> FR-026 map in `docs/traceability.md`.
+> FR-026 map in `docs/traceability.md`. **Amended 2026-09-03 (§10, D-0233):** the three monitor writers
+> the API reaches are audited by the same rules — the gap FR-029's invariant 13 exposed.
 >
 > **Two things the implementation found that the design had wrong, both recorded rather than quietly
 > corrected.** (1) The `internal/api` guard of invariant 4 was first built with `handlers_alertmanager.go`
@@ -326,6 +327,24 @@ answer. A spec that needed a column here would be D9's declined follow-up, not t
     intact, and only deleting the organization removes it (00018's cascade). Deleting the actor user
     leaves the row with a NULL actor and its target text intact.
 
+The five that follow are the §10 amendment (2026-09-03, D-0233) — a monitor write says who wrote it.
+
+17. Every principal monitor write — create, update, delete — produces exactly ONE audit row, committed
+    by the same transaction; a failed insert aborts the write and the caller reads back the unchanged
+    monitor (or its continued existence, for delete).
+18. A monitor write cannot reach the store without an actor: the three principal doors are the only
+    exported writers, the bare writers are unexported, and a zero-valued actor is refused before any
+    statement. The second guard asserts `internal/store` declares no exported `CreateMonitor`,
+    `UpdateMonitor` or `DeleteMonitor` in a non-test file.
+19. The file provider's apply produces NO audit row for the monitors it creates, updates or removes:
+    D1's machine rule, with the bundle as the record.
+20. The action is one of the three words of D12; the target carries the id, slug and type and never a
+    config value, and an `async_canary` with an acknowledged `cleanup.kind: none` carries
+    `cleanup=none acknowledged` on create and on update — the FR-029 invariant 13 clause.
+21. The row is visible where FR-026 put every other one: the organization's audit listing
+    (`GET /api/v1/organizations/{orgID}/audit`), asserted on a live stack for a canary created through
+    the API.
+
 ## 7. Required test matrix (written before the code)
 
 *The doors (P0, and the surface guard of revision 3):* a principal door called with a zero-valued actor
@@ -409,3 +428,42 @@ unbounded today for every action); auditing READS of an incident; a second audit
 format; and refactoring `GateActor` / `SecretActor` into the shared actor (D3 names the possibility and
 declines it here). D8a and D8b are NOT non-goals: they are corrections FR-026 carries, because an
 invariant may not assert a property the code does not have.
+
+## 10. Amendment — a monitor write says who wrote it (2026-09-03, D-0233)
+
+FR-029's invariant 13 promised that `cleanup.kind: none` with `acknowledged: true` is "visible in the
+API, the UI and the audit trail", and its discharge map could cite a test for the first two only: a
+monitor write — create, update, delete — left no `audit_logs` row, for any type. Not a canary defect; a
+gap this requirement's §9 had named ("a project-scoped audit read … D9") without claiming the writes.
+The owner ordered it closed with the rest of the canary residuals (2026-09-03). The amendment applies
+FR-026's own decisions to the monitor writers, unchanged, and says where they do not apply.
+
+**D11 — the same three principals, the same validated actor, the same door split.** The three monitor
+writers the API reaches — `CreateMonitorByPrincipal`, `UpdateMonitorByPrincipal`,
+`DeleteMonitorByPrincipal` — take an `AuditActor` (D3) and write ONE row inside the mutating
+transaction (D2); a failed insert aborts the write (D7). No `…BySystem` door exists for a monitor,
+because no machine writer needs one: the file provider has its own writer (`fileapply.go`) and is
+D1's machine case — its record is the bundle and the `management.source = file` marker, not an audit
+row; the scheduler's status writes and re-encryption touch rows nobody would call "a monitor write".
+The bare writers become unexported, and the tests that use them as fixtures reach them through an
+`export_test.go` hook — so the product has NO exported unaudited monitor writer, and a handler that
+forgets the actor is a compile error rather than a guard finding. A guard still pins what EXISTS
+(invariant 4's second guard, extended): `internal/store` declares no exported `CreateMonitor`,
+`UpdateMonitor` or `DeleteMonitor` outside test files.
+
+**D12 — three words, closed, in the helper.** `monitor.create`, `monitor.update`, `monitor.delete`,
+as a type (`MonitorAuditAction`), beside the incident five. The pre-existing monitor lifecycle words
+(`monitor.retired`, `monitor.reactivated`, `monitor.successor.set` / `.cleared`, written through
+`auditProjectActTx` with a `GraphActor`) are unchanged; unifying the two actor shapes is D3's declined
+refactor and stays declined here.
+
+**D13 — the target names the document, never its contents.** `monitor <id> · <slug> · <type> ·
+region=<region>` for create and delete (delete appends `· deleted`), `monitor <id> · <slug> · updated`
+for update, with `· enabled <from>→<to>` appended when the write flipped `enabled` — pausing and
+resuming are the two updates an operator asks about. For an `async_canary` whose workflow declares
+`cleanup.kind: none, acknowledged: true`, create and update append `· cleanup=none acknowledged`: that
+is FR-029 invariant 13's clause, made true in the trail. No config value, credential reference,
+target URL, scenario or workflow body appears in a target, for any type (invariant 10, applied).
+
+**Invariants added (FR-026, 17–21)** — listed in §6 with the sixteen, so the discharge map's set
+comparison covers them; each names this section.

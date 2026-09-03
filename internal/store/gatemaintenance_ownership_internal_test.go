@@ -136,7 +136,22 @@ func TestGateMaintCrashAfterEveryRemovalStatementConverges(t *testing.T) {
 			cfg.PurgeEvery = 0 // the drop is due at once (inclusive boundary)
 			crashed := false
 			m := &gateMetricsFake{}
-			_, _, err := runGatePass(t, st, ctx, cfg, nil, m, crashAfter(t, st, ctx, stage, &crashed))
+			// The drop gate closes — correctly, per 15.9 — while ANY other backend of this database
+			// holds a transaction older than detached_at, and a closed gate is a deferral, not a
+			// failure: the pass returns nil and the next pass drops. On the CI database that other
+			// backend exists often enough to matter (D-0225: `crashed=false err=<nil>` on the
+			// hypertables job, 942 s of churn on a shared service container — an autovacuum worker
+			// is the plausible holder, and TestGateMaintADropIsDeferredWhileAnOlderTransactionIsOpen
+			// pins the mechanism with a transaction this test opens itself). So the crash is
+			// injected on the first pass that actually REACHES the drop, bounded, instead of
+			// asserting that the first pass must.
+			var err error
+			for attempt := 0; attempt < 20 && !crashed; attempt++ {
+				if attempt > 0 {
+					time.Sleep(250 * time.Millisecond)
+				}
+				_, _, err = runGatePass(t, st, ctx, cfg, nil, m, crashAfter(t, st, ctx, stage, &crashed))
+			}
 			if !crashed || err == nil {
 				t.Fatalf("crashed=%v err=%v", crashed, err)
 			}
@@ -391,4 +406,63 @@ func TestGateMaintUnreconcilableStatesAreRefusedOnce(t *testing.T) {
 	if c := gateLookup(t, st, ctx, gone); c.state != "detached" {
 		t.Fatalf("the gone relation's row was rewritten: %+v", c)
 	}
+}
+
+// D-0225, the mechanism behind the CI red on the hypertables job. The drop gate of D10 asks two
+// questions before DROP TABLE: is the detach old enough, and does NO other backend of this database
+// hold a transaction that started before it (the cached-plan hazard 15.9). The second question is
+// answered by pg_stat_activity, so a session this process did not open — on CI, plausibly autovacuum —
+// closes the gate. That is a DEFERRAL: the pass returns nil, drops nothing, and the next pass converges
+// once the older transaction is gone. Pinned here with a transaction the test opens itself, because the
+// suite's convergence test read that deferral as `crashed=false err=<nil>` and could not say why.
+func TestGateMaintADropIsDeferredWhileAnOlderTransactionIsOpen(t *testing.T) {
+	st, ctx := gateMaintStore(t)
+	today := gateToday(t, st, ctx)
+	old := today.AddDate(0, 0, -9)
+	resetGateLedger(t, st, ctx)
+
+	foreign, err := st.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer foreign.Release()
+	ftx, err := foreign.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ftx.Rollback(context.Background())             //nolint:errcheck // the point is that it stays open
+	if _, err := ftx.Exec(ctx, `SELECT 1`); err != nil { // materializes xact_start
+		t.Fatal(err)
+	}
+
+	plantGateDay(t, st, ctx, old, "detached", nil) // detached_at = now(), AFTER the foreign xact began
+	cfg := gateMaintCfg
+	cfg.PurgeEvery = 0
+	m := &gateMetricsFake{}
+	rep, _, err := runGatePass(t, st, ctx, cfg, nil, m, nil)
+	if err != nil {
+		t.Fatalf("a closed drop gate must be a deferral, not an error: %v", err)
+	}
+	if rep.Dropped != 0 {
+		t.Fatalf("dropped %d day(s) while an older transaction was open", rep.Dropped)
+	}
+	if c := gateLookup(t, st, ctx, old); !c.exists || c.state != "detached" {
+		t.Fatalf("the deferred day changed state: %+v", c)
+	}
+
+	// The older transaction ends; the next pass drops.
+	if err := ftx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rep, _, err = runGatePass(t, st, ctx, cfg, nil, m, nil)
+	if err != nil {
+		t.Fatalf("converging pass: %v", err)
+	}
+	if rep.Dropped != 1 {
+		t.Fatalf("dropped %d day(s) after the older transaction ended, want 1", rep.Dropped)
+	}
+	if c := gateLookup(t, st, ctx, old); c.exists || c.state != "dropped" {
+		t.Fatalf("after convergence: %+v, want dropped", c)
+	}
+	gateRegistryAgreesWithCatalog(t, st, ctx)
 }

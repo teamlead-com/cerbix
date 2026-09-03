@@ -415,7 +415,8 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 	if !h.escalationPolicyInProject(w, r, m.EscalationPolicyID, proj.ID) {
 		return
 	}
-	created, err := h.store.CreateMonitor(r.Context(), m)
+	p, _ := h.principal(r) // projectAccess above already required one
+	created, err := h.store.CreateMonitorByPrincipal(r.Context(), m, auditActor(p))
 	if err != nil {
 		if errors.Is(err, store.ErrSecretsFeatureDisabled) {
 			writeError(w, http.StatusNotFound, "feature_disabled")
@@ -431,8 +432,9 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(body.DependsOn) > 0 {
 		if !h.applyDependencies(w, r, &created, proj.ID, body.DependsOn) {
-			// Keep the create atomic from the client's view: roll the monitor back.
-			_ = h.store.DeleteMonitor(r.Context(), created.ID)
+			// Keep the create atomic from the client's view: roll the monitor back. Audited as the
+			// same principal's delete — the trail shows a create and a delete, which is what happened.
+			_ = h.store.DeleteMonitorByPrincipal(r.Context(), created, auditActor(p))
 			return
 		}
 	}
@@ -656,7 +658,8 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	updated, err := h.store.UpdateMonitor(r.Context(), mon)
+	p, _ := h.principal(r) // monitorAccess above already required one
+	updated, err := h.store.UpdateMonitorByPrincipal(r.Context(), mon, auditActor(p))
 	if err != nil {
 		if errors.Is(err, store.ErrSecretsFeatureDisabled) {
 			writeError(w, http.StatusNotFound, "feature_disabled")
@@ -700,7 +703,8 @@ func (h *Handler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.store.DeleteMonitor(r.Context(), mon.ID); err != nil {
+	p, _ := h.principal(r) // monitorAccess above already required one
+	if err := h.store.DeleteMonitorByPrincipal(r.Context(), mon, auditActor(p)); err != nil {
 		if h.rejectIfManaged(w, r, mon.ID, err) {
 			return
 		}

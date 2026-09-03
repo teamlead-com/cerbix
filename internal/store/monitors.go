@@ -581,7 +581,11 @@ func (s *Store) MonitorStatuses(ctx context.Context, ids []string) (map[string]d
 }
 
 // CreateMonitor inserts a monitor. The caller validates via domain first.
-func (s *Store) CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error) {
+// createMonitor is the unexported writer: it owns the transaction and calls `audit` inside it, just
+// before the commit, when the caller is a principal door. There is deliberately NO exported form of
+// it in the product (FR-026 §10, D11): the tests reach it through export_test.go, and a handler can
+// only reach CreateMonitorByPrincipal, whose signature demands an actor.
+func (s *Store) createMonitor(ctx context.Context, m domain.Monitor, audit monitorAuditHook) (domain.Monitor, error) {
 	if domain.CredentialedType(m.Type) {
 		prepared, err := domain.PrepareCredentialSettings(m.Type, m.Config, domain.SurfaceAPI)
 		if err != nil {
@@ -604,6 +608,11 @@ func (s *Store) CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 	}
 	if err := replaceMonitorSecretRefsTx(ctx, tx, created.ID, m.ProjectID, bindings); err != nil {
 		return domain.Monitor{}, err
+	}
+	if audit != nil {
+		if err := audit(ctx, tx, created, false); err != nil {
+			return domain.Monitor{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: commit create monitor: %w", err)
@@ -702,7 +711,8 @@ func (s *Store) RecordPushResult(ctx context.Context, monitorID string, up bool,
 // transaction as the write (under the monitor's row lock), so a concurrent file apply that
 // claims ownership cannot slip past a stale handler-level check (spec §8/§9.2). Type and
 // push_token are immutable. ErrNotFound if the monitor is gone. Caller validates via domain.
-func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error) {
+// updateMonitor: the unexported writer behind UpdateMonitorByPrincipal — see createMonitor.
+func (s *Store) updateMonitor(ctx context.Context, m domain.Monitor, audit monitorAuditHook) (domain.Monitor, error) {
 	preserveInline := false
 	if domain.CredentialedType(m.Type) {
 		prepared, preserve, err := prepareCredentialUpdate(m.Type, m.Config)
@@ -744,7 +754,8 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 		return domain.Monitor{}, err
 	}
 	var exists int
-	if err := tx.QueryRow(ctx, `SELECT 1 FROM monitors WHERE id = $1 AND project_id = $2 FOR UPDATE`, m.ID, m.ProjectID).Scan(&exists); noRows(err) {
+	var prevEnabled bool
+	if err := tx.QueryRow(ctx, `SELECT 1, enabled FROM monitors WHERE id = $1 AND project_id = $2 FOR UPDATE`, m.ID, m.ProjectID).Scan(&exists, &prevEnabled); noRows(err) {
 		return domain.Monitor{}, ErrNotFound
 	} else if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: lock monitor: %w", err)
@@ -768,6 +779,11 @@ func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 	updated, err := updateMonitorTxPreparedWithRefs(ctx, tx, s, m, preserveInline, bindings)
 	if err != nil {
 		return domain.Monitor{}, err
+	}
+	if audit != nil {
+		if err := audit(ctx, tx, m, prevEnabled); err != nil {
+			return domain.Monitor{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: commit update monitor: %w", err)
@@ -1531,7 +1547,8 @@ func (s *Store) EnqueueRenotifyReminders(ctx context.Context) (int, error) {
 // DeleteMonitor is a USER-managed (API/UI) op: it rejects a file-owned monitor with
 // ErrManagedByFile (checked under the row lock, atomic against a concurrent file apply —
 // spec §8). The file provider never physically deletes; it orphans/disables instead (§10).
-func (s *Store) DeleteMonitor(ctx context.Context, id string) error {
+// deleteMonitor: the unexported writer behind DeleteMonitorByPrincipal — see createMonitor.
+func (s *Store) deleteMonitor(ctx context.Context, id string, audit monitorAuditHook) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin delete monitor: %w", err)
@@ -1575,6 +1592,11 @@ func (s *Store) DeleteMonitor(ctx context.Context, id string) error {
 
 	if _, err := tx.Exec(ctx, `DELETE FROM monitors WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("store: delete monitor: %w", err)
+	}
+	if audit != nil {
+		if err := audit(ctx, tx, domain.Monitor{ID: id, ProjectID: projectID}, false); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("store: commit delete monitor: %w", err)

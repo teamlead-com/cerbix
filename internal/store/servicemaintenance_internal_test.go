@@ -407,6 +407,21 @@ func drainRepair(t *testing.T, st *Store, ctx context.Context) {
 	defer ls.Release()
 	for i := 0; i < 50; i++ {
 		worked, err := ls.RunServiceRepairSlice(ctx, time.Now().Add(2*time.Second))
+		if err != nil && errors.Is(err, context.DeadlineExceeded) {
+			// The slice's closing lifecycle write missed the slice deadline. That is the product's
+			// own contract under a slow database, not a repair defect: the range stays `running`
+			// under its 60 s lease and the NEXT leader to claim it resumes at the durable cursor.
+			// D-0225 saw exactly this on the CI service container (`complete repair range:
+			// timeout: context deadline exceeded`, 942 s for the store suite). The test mirrors the
+			// recovery instead of waiting a minute for it: the lease is expired by hand, and the
+			// loop claims again. A NON-deadline error is still fatal.
+			t.Logf("repair slice missed its deadline (%v); expiring the lease as the clock would", err)
+			if _, uerr := st.pool.Exec(ctx,
+				`UPDATE service_repair_ranges SET lease_expires_at = now() - interval '1 second' WHERE state = 'running'`); uerr != nil {
+				t.Fatalf("expire lease: %v", uerr)
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatalf("repair slice: %v", err)
 		}

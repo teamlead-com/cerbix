@@ -77,6 +77,19 @@ test.describe("async canary", () => {
     for (const leaked of [target, "canary-target", "/files/upload", "tasks/"]) {
       expect(msg, `heartbeat leaked ${leaked}`).not.toContain(leaked);
     }
+
+    // FR-029 invariant 13's last clause, and FR-026 §10 (D-0233): the acknowledged `cleanup.kind: none`
+    // is visible in the AUDIT TRAIL, as a `monitor.create` row on the organization's listing that
+    // names the monitor and the acknowledgement — and nothing of the workflow's contents.
+    const { orgID } = await ensureE2EWorkspace(page);
+    const audit = (await apiGet(page, `/api/v1/organizations/${orgID}/audit?limit=100`)) as any[];
+    const row = audit.find((a) => a.action === "monitor.create" && String(a.target).includes(monitor.id));
+    expect(row, `no monitor.create audit row for ${monitor.id}; actions seen: ${[...new Set(audit.map((a) => a.action))].join(",")}`).toBeTruthy();
+    expect(row.target).toContain("cleanup=none acknowledged");
+    expect(row.via_token, "the SPA session is a user principal, not a token").toBe(false);
+    for (const leaked of [target, "/files/upload", "task_id", "s3_path"]) {
+      expect(row.target, `audit target leaked ${leaked}`).not.toContain(leaked);
+    }
   });
 
   test("a canary cannot be created with a workflow the schema refuses", async ({ page }) => {

@@ -2,7 +2,11 @@ package domain
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -41,16 +45,26 @@ func TestCanaryBoundsArePublishedForTheClient(t *testing.T) {
 		"CANARY_MAX_JSON_PATH_BYTES":     CanaryMaxJSONPathBytes,
 		"CANARY_MAX_CORRELATION_BYTES":   CanaryMaxCorrelationBytes,
 	}
-	// The count is asserted so that adding a bound to `canary.go` and forgetting THIS map fails here
-	// rather than silently reaching no client.
-	//
-	// What this is NOT, stated because an earlier version of this comment claimed it and the reviewer
-	// was right to correct it (party [93]): it is not automatic source-level enumeration. It fires
-	// only when a maintainer updates this map, and a constant added to a different block is invisible
-	// to it. It narrows the window; it does not close it. Closing it would take parsing the const
-	// block — worth doing, and recorded as debt rather than pretended away.
-	if len(bounds) != 21 {
-		t.Fatalf("the published set has %d bounds; the const block in canary.go has 21 — publish the new one", len(bounds))
+	// SOURCE-LEVEL enumeration, both directions. The const block in canary.go is parsed and every
+	// `CanaryMax*` / `CanaryMin*` identifier it declares must be referenced by the map above; every
+	// identifier the map references must exist there. A bound added to the source and not published
+	// fails HERE, without anyone remembering a count — which is what the earlier `len(bounds) == 21`
+	// could not do (reviewer [93]: it fired only when a maintainer updated the map). Published values
+	// are then asserted against the client by canaryBounds.spec.ts.
+	declared := canaryBoundIdentifiersDeclaredIn(t, "canary.go", "canarycanonical.go", "canaryexec.go", "canarycapability.go")
+	published := canaryBoundIdentifiersPublishedBy(t, "canarybounds_test.go")
+	for name := range declared {
+		if !published[name] {
+			t.Errorf("bound %s is declared in the source and NOT published to the client", name)
+		}
+	}
+	for name := range published {
+		if !declared[name] {
+			t.Errorf("the published map references %s, which no canary source file declares", name)
+		}
+	}
+	if len(published) != len(bounds) {
+		t.Fatalf("the map publishes %d values under %d identifiers — one identifier published twice hides a missing bound", len(bounds), len(published))
 	}
 
 	out, err := json.MarshalIndent(map[string]any{
@@ -68,4 +82,87 @@ func TestCanaryBoundsArePublishedForTheClient(t *testing.T) {
 	if err := os.WriteFile("testdata/canary_bounds.json", append(out, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// canaryBoundIdentifiersDeclaredIn parses the named domain files and returns every top-level constant
+// whose name says it is a bound: CanaryMax… or CanaryMin…. The naming rule is the contract: a bound
+// spelled otherwise is invisible to the client gate and must be renamed, which is a review-visible
+// edit rather than a silent omission.
+func canaryBoundIdentifiersDeclaredIn(t *testing.T, files ...string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	fset := token.NewFileSet()
+	for _, name := range files {
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, id := range vs.Names {
+					if strings.HasPrefix(id.Name, "CanaryMax") || strings.HasPrefix(id.Name, "CanaryMin") {
+						out[id.Name] = true
+					}
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no bound constant was found in the canary source — the naming rule or the file list has drifted")
+	}
+	return out
+}
+
+// canaryBoundIdentifiersPublishedBy parses THIS test file and returns the identifiers referenced as
+// values inside the `bounds` composite literal of TestCanaryBoundsArePublishedForTheClient.
+func canaryBoundIdentifiersPublishedBy(t *testing.T, file string) map[string]bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	out := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "TestCanaryBoundsArePublishedForTheClient" {
+			return true
+		}
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
+			as, ok := m.(*ast.AssignStmt)
+			if !ok || len(as.Lhs) != 1 {
+				return true
+			}
+			if id, ok := as.Lhs[0].(*ast.Ident); !ok || id.Name != "bounds" {
+				return true
+			}
+			lit, ok := as.Rhs[0].(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			for _, elt := range lit.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if id, ok := kv.Value.(*ast.Ident); ok {
+					out[id.Name] = true
+				}
+			}
+			return false
+		})
+		return false
+	})
+	if len(out) == 0 {
+		t.Fatal("the bounds map was not found in this file — the enumeration reads nothing")
+	}
+	return out
 }

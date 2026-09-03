@@ -203,7 +203,11 @@ made by a PRINCIPAL — a session user or an API token, both anchors, plus the A
 create and resolve, which arrive with a project-write token — writes exactly one `audit_logs` row in
 the SAME transaction as the mutation, so a committed change without its row cannot exist and a rolled
 back one leaves none. The vocabulary is five words: `incident.create`, `incident.status`,
-`incident.note`, `incident.acknowledge`, `incident.postmortem`; the target carries ids and both ends of
+`incident.note`, `incident.acknowledge`, `incident.postmortem` — and, since FR-026 §10 (D-0233), three
+for the monitor writers the API reaches: `monitor.create`, `monitor.update`, `monitor.delete`, whose
+target names id, slug, type and region (a pause reads `enabled true→false`; an acknowledged
+`cleanup.kind: none` on a canary reads `cleanup=none acknowledged`) and never a config value; a
+bundle-applied monitor is a machine write and leaves no row. The target carries ids and both ends of
 a transition and **never a body** — no note text, postmortem text or alert annotation reaches the trail.
 MACHINE writes are excluded by decision and enumerated (the reconciler's auto-open and auto-resolve, the
 service auto-incident and its resolve, the `⚡ Context:`, both `⏸ Suppressed:` writers, `🚀 Changes:`

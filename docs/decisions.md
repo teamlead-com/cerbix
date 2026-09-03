@@ -6432,3 +6432,89 @@ passed with the defect in place.
 **Not changed.** The `!ready` branch for a pull region with NO live agent keeps its existing behaviour
 (a logged `no_capable_executor`, a metric, a backoff) — that path predates both findings and is the
 same for AMQP regions without workers; making it a per-monitor heartbeat is a separate decision.
+
+## D-0233 — a monitor write says who wrote it: FR-026's rules applied to the three monitor writers (2026-09-03)
+
+**Context.** FR-029 invariant 13 promised that an acknowledged `cleanup.kind: none` is "visible in the
+API, the UI and the audit trail". The discharge map could cite tests for the first two and said so
+about the third: a monitor write — create, update, delete — left no `audit_logs` row, for any type,
+and no requirement claimed it. The reviewer listed it as the fourth FR-029 gap at [79]; after [106]
+it was the one `PARTIAL` left in the map. The owner ordered the residuals closed (2026-09-03).
+
+**Decision.** Not a new requirement: an amendment to FR-026 (§10, D11–D13, invariants 17–21), because
+every rule needed already exists there and inventing a second audit vocabulary for the same table is
+how the two drift. The three writers the API reaches become `CreateMonitorByPrincipal`,
+`UpdateMonitorByPrincipal`, `DeleteMonitorByPrincipal`, taking the validated `AuditActor` and writing
+one row inside the mutating transaction; the bare writers are unexported, reached by the tests through
+an `export_test.go` hook, so the product has no exported unaudited monitor writer and a forgotten actor
+is a compile error. No `…BySystem` door: the file provider is D1's machine writer and has its own
+INSERT, and its record is the bundle. Three closed words — `monitor.create`, `monitor.update`,
+`monitor.delete`. The target names the document and never its contents: id, slug, type, region; an
+`enabled` flip on update; and, for a canary with an acknowledged `cleanup.kind: none`,
+`cleanup=none acknowledged` — the invariant-13 clause, made true.
+
+**What stays as it was, and why.** `monitor.retired` / `monitor.reactivated` / `monitor.successor.*`
+predate FR-026 and write through `auditProjectActTx` with a `GraphActor`; D3 declined to unify the
+actor shapes and this amendment does not reopen that. The scheduler's status and sequence writes, the
+re-encryption sweep and the secret-rename re-point touch monitor rows and are not "a monitor write" in
+the sense an operator asks about; they are named here so their absence from the trail reads as a
+decision.
+
+**Evidence.** Store: one row per door, in the transaction, rolled back with it, with the D13 shapes
+including the canary suffix; a zero-valued actor refused before any statement. API: the second guard
+extended — `internal/store` declares no exported bare monitor writer outside test files, with a fixture
+that violates it. Live: a canary created through the API with an acknowledged `cleanup.kind: none`
+shows in `GET /api/v1/organizations/{orgID}/audit` as `monitor.create … cleanup=none acknowledged`.
+
+## D-0225 — addendum: the log was readable after all, and the candidate was the wrong guess (2026-09-03)
+
+**What changed.** `GET /actions/jobs/{id}/logs` answered **302** to a signed download for the token this
+session holds — not the 403 this decision recorded. The hypertables job on `ee74890` (run 33725637820)
+failed in the `Tests (-race, …)` step with TWO store tests, and `internal/store` took **942.8 s** on the
+runner against ~660 s here:
+
+1. `TestGateMaintCrashAfterEveryRemovalStatementConverges/after_drop.commit` —
+   `crashed=false err=<nil>`.
+2. `TestConfirmedAnnulActuallyRewritesTheSealedFacts` — `repair slice: store: complete repair range:
+   timeout: context deadline exceeded`.
+
+Neither is the candidate this decision named. That paragraph said "if it names something else, this
+paragraph is a wrong guess kept on the record" — it is, and it stays.
+
+**Failure 1, mechanism confirmed by reproduction rather than by reading.** The D10 drop gate asks
+`pg_stat_activity` whether ANY backend of the database holds a transaction older than `detached_at`
+(the cached-plan hazard, 15.9) and defers the drop if one does — correctly, and silently: the pass
+returns nil. The test injected its crash on the statement AFTER `drop.commit`, so a deferred drop reads
+as `crashed=false err=<nil>`. Opening a foreign transaction before the plant reproduces the exact text
+locally on the first try; on the CI service container, 942 s of churn make an autovacuum worker the
+plausible holder — plausible, not proven, and the addendum says which. The test now injects the crash
+on the first pass that actually REACHES the drop (bounded retries; a closed gate is a deferral, not the
+property under test), and `TestGateMaintADropIsDeferredWhileAnOlderTransactionIsOpen` pins the
+mechanism with a transaction the test opens itself: nil, nothing dropped, and the next pass drops once
+the transaction ends. The product is unchanged.
+
+**Failure 2, mechanism read from the code and matched to the message.** The leader's repair slice runs
+its closing lifecycle write INSIDE the slice deadline (`leaderLifecycle`, §10.10). `drainRepair` gave
+each slice 2 s; on a slow database the batch used the budget and the closing `UPDATE … state =
+'complete'` missed it — the exact message. In production the range stays `running` under its 60 s
+lease and the next claim resumes at the durable cursor; the helper failed instead. It now mirrors the
+recovery — expires the lease as the clock would and claims again — and still fails on any other error.
+Product unchanged. Production slices are 250 ms (`maxDispatchDelay`), so the test was not
+under-budgeted relative to the product; the closing write's 40 ms reserve is the design's own trade.
+
+**What this does not claim.** Neither failure reproduced here under a single pinned core with the
+whole suite running alongside (three attempts, all green); the first reproduces only with the foreign
+transaction, the second not at all locally. A re-run of the failed jobs was refused (403: the token has
+no `actions:write`), so "green on re-run" is not evidence this addendum has. The evidence it has: the
+log, the two mechanisms, one reproduction, and tests that no longer read a legitimate deferral or a
+legitimate lease as a failure.
+
+## D-0228 — addendum: the bounds are enumerated from the source, not counted by hand (2026-09-03)
+
+The `len(bounds) == 21` this decision recorded as debt ("fires only when a maintainer updates this
+map") is replaced by source-level enumeration in both directions: `canarybounds_test.go` parses the
+canary source files for every `CanaryMax…` / `CanaryMin…` constant and parses ITSELF for the identifiers
+the published map references, and each set must equal the other. Adding `CanaryMaxPhantomThing = 7` to
+the const block fails the test with its name, without anyone remembering a number. The naming rule is
+the contract — a bound spelled otherwise is invisible to the client gate and must be renamed, a
+review-visible edit rather than a silent omission.

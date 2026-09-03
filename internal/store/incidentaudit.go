@@ -84,13 +84,20 @@ const (
 func insertIncidentAudit(ctx context.Context, tx pgx.Tx, projectID string, actor AuditActor,
 	action IncidentAuditAction, target string) error {
 
+	return insertProjectAudit(ctx, tx, projectID, actor, string(action), target)
+}
+
+// insertProjectAudit is the one statement behind every validated, project-scoped audit row — the
+// incident five and the monitor three (FR-026 §10). The tenant is resolved from the project in the
+// insert itself, and a zero-valued actor is refused before it runs.
+func insertProjectAudit(ctx context.Context, tx pgx.Tx, projectID string, actor AuditActor, action, target string) error {
 	if err := actor.valid(); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
 		SELECT p.org_id, $2, $3, $4, $5 FROM projects p WHERE p.id = $1`,
-		projectID, actor.userID(), actor.ViaToken, string(action), target); err != nil {
+		projectID, actor.userID(), actor.ViaToken, action, target); err != nil {
 		return fmt.Errorf("store: audit %s: %w", action, err)
 	}
 	return nil

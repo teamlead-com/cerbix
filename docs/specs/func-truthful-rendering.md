@@ -413,7 +413,9 @@ viewer starts at 05:00 their time, so the tooltip states the cell's real local e
 form `01.09 05:00 → 02.09 05:00 (UTC+05)` — and never their `01.09`. Labelling a UTC bucket as
 a local calendar day is a boundary lie of exactly this package's kind.
 
-**The mechanism is two named functions, not one formatter**: one for an **instant** (a
+**The mechanism is a NAMED RENDERER PER SUBJECT, never one formatter.** The rule is the naming and
+not a count — it has grown from two renderers to six and the boundary is unchanged: each names what
+it renders, and there is nothing generic to hand a bucket to. Today: an **instant** (a
 heartbeat's timestamp, a change mark) and one for a **UTC cell extent** (start→end plus offset,
 plus the UTC line). There is deliberately no generic "format date" that could be handed a
 bucket and produce a local calendar day. Formatting resolves the zone offset **at the instant**
@@ -442,8 +444,9 @@ this package; it is not created by it, and it is not fixed by it either. It is r
 **The clause that used to follow that sentence was FALSE, and it was false when it was written at
 iter-0174:** "so no rendered timestamp anywhere in the SPA is missing its zone". Substituting the
 `toLocaleString` sites does not achieve that, because a `Date` can be rendered by hand —
-`toISOString().slice(0,10)`, `getUTC*`, `get*` — and **29 such matches exist across 13 product
-files**, several of them user-visible with no zone at all. Reviewer P1 at party [195] found it; the
+`toISOString().slice(0,10)`, `getUTC*`, `get*` — and **46 matches on 26 lines across 13 product files** — the ratchet's unit is MATCHES and a single
+line can hold several; the figure this document first carried, 29, was a LINE count that also included two
+spec files the ratchet excludes — several of them user-visible with no zone at all. Reviewer P1 at party [195] found it; the
 over-claim is this document's, repeated by me when I reported the substitution done. Two
 renderings were added to §8's mechanism for what the legacy sites needed, both instant-specific and
 neither a generic formatter: `instantLabelShort` (minute precision, offset kept — a shorter

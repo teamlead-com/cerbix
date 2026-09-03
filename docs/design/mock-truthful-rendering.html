@@ -534,7 +534,8 @@ function defs(svg) {
   d.appendChild(p); svg.appendChild(d); return id;
 }
 
-/* ── local-time rendering: §8's two named functions, never one generic formatter ── */
+/* ── local-time rendering: §8's rule — a NAMED RENDERER PER SUBJECT, never one generic
+   formatter. True as drawn, when there were two of them, and true now that there are six. ── */
 const winMinToUTC = (m) => new Date(WIN_START_UTC + m * 60000);
 const p2 = (n) => String(n).padStart(2, "0");
 function localInstant(m) {                       // an INSTANT

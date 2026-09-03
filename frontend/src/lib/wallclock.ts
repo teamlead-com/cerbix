@@ -6,7 +6,7 @@
 // different per-cell figures for one published availability. What is local is only what a human
 // reads, and it always names the offset it was rendered in.
 //
-// TWO NAMED FUNCTIONS, NOT ONE FORMATTER (ruled at party [143]). There is deliberately no generic
+// A NAMED RENDERER PER SUBJECT, NEVER ONE FORMATTER (ruled at party [143]). There is deliberately no generic
 // "format a date" here that could be handed a UTC bucket and produce the viewer's calendar day:
 // an instant and a UTC cell's extent are different objects and get different functions. A UTC day
 // shown to a viewer at UTC+05 begins at 05:00 their time, so its extent is rendered as

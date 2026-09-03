@@ -6672,7 +6672,7 @@ such.
    time renders in the browser's zone with its offset named, plus the UTC instant for log
    correlation, and **a UTC cell is never labelled as the viewer's calendar day**: a UTC day
    starts at 05:00 for a UTC+5 viewer, so the tooltip states its true local extent. The
-   mechanism is **two named functions** — one for an instant, one for a UTC cell extent — with no
+   mechanism is a **named renderer per subject** — at that point one for an instant and one for a UTC cell extent — with no
    generic formatter that could be handed a bucket and produce a local calendar day, and offsets
    resolved **at the instant** via `Intl` rather than from a cached current offset, since a 30d
    window in late March or October crosses a DST boundary as the ordinary case. No timezone
@@ -7021,7 +7021,9 @@ setting anywhere to reconcile them. Five hours of difference, unlabelled.
    said so was already false in the specification.** §9's acceptance criterion read "each of the
    five call sites … **so no rendered timestamp anywhere in the SPA is missing its zone**". The
    second clause does not follow from the first and never did: a `Date` can be rendered by hand,
-   and **29 such matches exist across 13 product files** — `toISOString().slice(0,10)`, `getUTC*`,
+   and **46 matches on 26 lines across 13 product files** (the ratchet's unit is MATCHES; the 29 this
+   record first carried was a LINE count including two spec files the ratchet excludes) —
+   `toISOString().slice(0,10)`, `getUTC*`,
    `get*` — with user-visible dates on the agent-token, secret, member, subscriber and monitor
    surfaces carrying no zone at all. The clause was written at iter-0174 and I repeated it when
    reporting the substitution done, which is the part that is mine.
@@ -7043,6 +7045,20 @@ setting anywhere to reconcile them. Five hours of difference, unlabelled.
    call, or a count that shrinks without the list being updated — a stale allow-list is how a
    ratchet rots. Both directions are mutation-verified. NFR-025 is `IN_PROGRESS` with three parts,
    and the row says which evidence belongs to which.
+
+6. **Two documentation corrections at party [197], and the first is the fourth stale count in this
+   arc.** The ratchet's ledger sums to **46**, while the prose said **29 across 13 files** — because
+   `grep` counts LINES and the ratchet counts MATCHES, and a single line here holds several. The 29
+   also included two spec files the ratchet deliberately excludes. Corrected everywhere to
+   **46 matches on 26 lines across 13 product files**, with the unit named, because the executable
+   count is the one that governs. I have now been caught four times quoting a number I did not
+   compute the same way the code does; the figure in this record is machine-computed like the rest.
+
+   Second: §8, `wallclock.ts`'s header and the mock all said the mechanism is **two named
+   functions**, which was true when written and is not now — it exports six. The boundary was never
+   the count. All four places state the RULE instead: **a named renderer per subject, never one
+   generic formatter**, which is true at two renderers and at six, and is what actually stops a
+   caller handing a bucket to something that will call it the viewer's calendar day.
 
 **Gates.** `vue-tsc` clean; **601 tests over 50 files**; `make docs-check` green. No Go change and
 no API change. NFR-025 is `IN_PROGRESS`: (a) and (b) done, (c) open.

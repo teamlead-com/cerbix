@@ -100,6 +100,8 @@ type Registry struct {
 	executorProbeErrors       map[string]uint64            // bounded reason → count
 	secretResolutionFailures  map[string]uint64            // bounded reason → count
 	dispatchTransportFailures map[string]uint64            // bounded reason → count
+	canaryStages              map[string]uint64            // kind\x00stage\x00outcome → count (FR-029)
+	canaryDispatchRefusals    map[string]uint64            // bounded reason → count (FR-029)
 	// File-provider metrics (spec func-monitoring-as-code §16). Keyed by the bounded provider
 	// name only — never by file/project/monitor id.
 	fileProviders map[string]*fileProviderStat
@@ -361,6 +363,31 @@ func (r *Registry) RecordDispatchTransportFailure(reason string) {
 		r.dispatchTransportFailures = map[string]uint64{}
 	}
 	r.dispatchTransportFailures[reason]++
+}
+
+// RecordCanaryStage counts one canary execution by its OUTCOME: the workflow kind, the stage that
+// decided it, and a bounded class. The label set is deliberately low-cardinality — kind, stage,
+// outcome — and carries no monitor id, no region-specific identifier, no URL, no correlation id and
+// no object path (FR-029 NFR-024). A metric label is a place a secret leaks exactly as a log line is.
+func (r *Registry) RecordCanaryStage(kind, stage, outcome string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.canaryStages == nil {
+		r.canaryStages = map[string]uint64{}
+	}
+	r.canaryStages[kind+"\x00"+stage+"\x00"+outcome]++
+}
+
+// RecordCanaryDispatchRefused counts a run cerbix could not dispatch, by its bounded reason
+// (`region_saturated`, `already_in_flight`). It is the ATTRIBUTION half of the decision that those
+// samples still count as unavailable in the SLI: the number stays honest and the cause stays visible.
+func (r *Registry) RecordCanaryDispatchRefused(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.canaryDispatchRefusals == nil {
+		r.canaryDispatchRefusals = map[string]uint64{}
+	}
+	r.canaryDispatchRefusals[reason]++
 }
 
 func (r *Registry) RecordSecretResolutionFailure(reason string) {
@@ -900,6 +927,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	executorProbeErrors := copyCounts(r.executorProbeErrors)
 	secretResolutionFailures := copyCounts(r.secretResolutionFailures)
 	dispatchTransportFailures := copyCounts(r.dispatchTransportFailures)
+	canaryStages := copyCounts(r.canaryStages)
+	canaryDispatchRefusals := copyCounts(r.canaryDispatchRefusals)
 	dispatchSharedTrust := r.dispatchSharedTrust
 	fileProviders := map[string]fileProviderStat{}
 	for name, s := range r.fileProviders {
@@ -957,6 +986,20 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		"Credential materialization or capability rejections before dispatch.", secretResolutionFailures)
 	writeReasonCounter(&out, "cerbix_dispatch_transport_failed_total",
 		"Materialized jobs that could not be handed to their transport (by reason).", dispatchTransportFailures)
+	writeReasonCounter(&out, "cerbix_canary_dispatch_refused_total",
+		"Canary runs not dispatched (by bounded reason).", canaryDispatchRefusals)
+	if len(canaryStages) > 0 {
+		out.println("# HELP cerbix_canary_stage_total Canary executions by workflow kind, deciding stage and outcome class.")
+		out.println("# TYPE cerbix_canary_stage_total counter")
+		for _, k := range sortedKeys(canaryStages) {
+			parts := strings.Split(k, "\x00")
+			if len(parts) != 3 {
+				continue
+			}
+			out.printf("cerbix_canary_stage_total{kind=%q,stage=%q,outcome=%q} %d\n",
+				parts[0], parts[1], parts[2], canaryStages[k])
+		}
+	}
 	if len(clockSkew) > 0 {
 		out.println("# HELP cerbix_result_clock_skew_total Accepted results with an anomalous client clock (by origin, reason).")
 		out.println("# TYPE cerbix_result_clock_skew_total counter")

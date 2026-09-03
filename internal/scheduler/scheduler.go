@@ -181,6 +181,10 @@ type SecretResolutionSink interface {
 	// RecordDispatchTransportFailure is a separate family: a transport that will not take
 	// a publish is a different operator problem from a credential that will not resolve.
 	RecordDispatchTransportFailure(reason string)
+	// FR-029: a run cerbix could not dispatch, by bounded reason. The metric is the attribution
+	// half of counting those samples as unavailable — the number stays honest, the cause stays
+	// visible, and no monitor id, URL or correlation id appears in a label.
+	RecordCanaryDispatchRefused(reason string)
 }
 
 // LiveRegionSource reports which worker-pool regions currently have a live worker
@@ -364,6 +368,12 @@ func (s *Scheduler) reportCanaryShortage(ctx context.Context, m domain.Monitor, 
 		ExecutionRevision: m.ExecutionRevision,
 		Up:                false,
 		Msg:               "dispatch: " + reason,
+	}
+	if s.secretResolution != nil {
+		// Attribution where it belongs: the metric carries the bounded REASON and no monitor id,
+		// which is the half of the "these samples count as unavailable" decision that keeps the
+		// cause visible without making the number lie.
+		s.secretResolution.RecordCanaryDispatchRefused(reason)
 	}
 	if err := s.store.InsertHeartbeat(ctx, hb); err != nil && ctx.Err() == nil {
 		s.logger.Warn("canary_shortage_heartbeat_failed", "monitor_id", m.ID, "reason", reason, "error", err.Error())

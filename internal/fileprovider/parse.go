@@ -59,6 +59,10 @@ type rawMonitor struct {
 	AutoIncident     *bool             `yaml:"auto_incident"`
 	DependsOn        []string          `yaml:"depends_on"`
 	Settings         map[string]string `yaml:"settings"`
+	// Workflow is the NESTED typed block an async_canary declares (FR-029). It is a schema and not
+	// an opaque map: the decoder's KnownFields(true) refuses an unknown field inside it, which is
+	// the whole reason this type can live in a bundle at all where `synthetic` cannot (D9/D12).
+	Workflow *rawCanaryWorkflow `yaml:"workflow"`
 	// Slug is the project-unique, immutable reference key a service names this monitor by.
 	// Format 2 declares it explicitly; omitted, it defaults to the map key, which IS the
 	// provider source uid — so the same Git-tracked bundle resolves to the same slug on
@@ -438,6 +442,19 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 	// naming the key for a type with neither. The branch this replaced read "settings IF AND
 	// ONLY IF credentialed", which was never the rule — §3.1 asks for a strict non-secret
 	// schema, and a credential is one way to have one (D-0145 addendum, 2026-09-01).
+	// An async_canary carries its whole contract in `workflow:`; a flat `settings` map on it would
+	// be a second way to say the same thing, and two ways is how one of them stops being validated.
+	if typ == domain.MonitorAsyncCanary {
+		if len(rm.Settings) > 0 {
+			return DesiredMonitor{}, rejectf(ReasonUnsupportedField, uid,
+				"an async_canary declares `workflow`, not `settings`")
+		}
+		return buildCanaryMonitor(uid, rm)
+	}
+	if rm.Workflow != nil {
+		return DesiredMonitor{}, rejectf(ReasonUnsupportedField, uid,
+			"`workflow` belongs to an async_canary monitor, not to %s", rm.Type)
+	}
 	settings, serr := domain.PrepareTypedSettings(typ, rm.Settings, domain.SurfaceFile)
 	if serr != nil {
 		reason := ReasonDomainInvalid

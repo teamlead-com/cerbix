@@ -488,6 +488,72 @@ Repair is an ordinary edit, not a migration: PATCH the monitor with a `config` t
 key (the editor already sends the full config on save). The stale `monitor_secret_refs` row is
 cleared by that same write, after which the secret is deletable again.
 
+## Async canary monitors (FR-029)
+
+An `async_canary` runs ONE typed asynchronous transaction end to end — submit, correlate, await a
+terminal result, assert, validate the cleanup boundary — and reports it as an ordinary monitor. It is
+declared in a Monitoring-as-Code bundle as a nested `workflow:` block; there is no UI form yet.
+
+**Deployment.** No new role. The executor is a capability of the roles that already exist, so a canary
+runs on an ordinary `worker` or `agent` in the monitor's region. Running it on its own host — a VPS in
+another provider, outbound HTTPS only — is a DEPLOYMENT choice: start another `agent` for that region.
+
+**The URL policy is not configurable.** HTTPS only; loopback, link-local, private ranges and cloud
+metadata are refused after DNS resolution and re-validated on every redirect hop. There is no setting
+that relaxes it, in v1 or as a hidden flag, because a flag reachable in production is the policy's own
+bypass. A canary cannot be pointed at a LAN service.
+
+**Secrets.** A credential is a BINDING declared once under `workflow.secrets` and referenced by name
+at each position. The bundle carries the project secret's NAME; the value is resolved at dispatch,
+delivered in the credential envelope, held in memory for one execution and wiped. A credential-bearing
+header (`authorization`, `cookie`, `x-api-key`, …) accepts a `secret_ref` and nothing else. **What is
+NOT protected, stated plainly:** a credential pasted into an ordinary header or under an innocuous
+body key is not detectable and is not refused — the same residual as FR-028's D7.
+
+**Idempotency, and whose half it is.** Every submit carries an `Idempotency-Key` derived from the
+monitor, its execution revision and the scheduled WINDOW, so a redelivered message, a re-claimed pull
+job and a transport retry carry the same key. **Whether a second submit with that key creates a second
+task is the TARGET's contract.** If the target ignores the header, retries duplicate and no cerbix
+setting prevents it.
+
+**Artifacts accumulate, and nothing here sweeps them.** `cleanup.kind: lifecycle_prefix` only VALIDATES
+that the result path begins with the declared prefix — cerbix has no rights on the object store and
+never deletes what it did not create. The reaping policy is the operator's, on the target side; if
+nothing sweeps them, a canary running every five minutes creates an object every five minutes forever
+and somebody pays for it quietly. `cleanup.kind: none` is legal only with `acknowledged: true`, and
+that acknowledgement is visible in the API and the audit trail.
+
+**Concurrency and shortages.** One execution per monitor and at most four per region, both decided by
+the scheduler at dispatch. A refused run writes ONE ordinary DOWN heartbeat with a bounded reason —
+`region_saturated`, `already_in_flight` — and the monitor's own `failure_threshold` decides whether
+that flips its status. Those samples **count as unavailable in the service SLI**, like any other DOWN;
+the attribution lives in the reason, in `cerbix_canary_dispatch_refused_total` and in the region alert,
+not in a silent exclusion from the number.
+
+**Recovery after an executor crash** is bounded by the in-flight lease: `timeout + 60s`. Until it
+lapses the monitor does not run, and no operator action is needed to free it. On a pull region the
+job's own claim lease is `timeout + 60s` as well, so a journey is never re-claimed while it is still
+running.
+
+**Troubleshooting by stage.** A failure names its stage and a bounded class and NOTHING else — no URL,
+no body, no header, no secret, no correlation id, no object path. That is deliberate, and it means the
+diagnosis path is the stage plus the target's own logs:
+
+| Stage | What it means |
+| --- | --- |
+| `submit` | the transaction was never created: transport class, or a status outside `accepted_status` |
+| `correlate` | the response arrived and carried no usable correlation id (missing, repeated, over-long, malformed) |
+| `await_result` | no terminal outcome: a declared failure state or event, a poll attempt limit, a stream that ended, a timeout |
+| `assert_result` | the result arrived and did not say what the contract requires — a missing field, or a journey slower than `max_latency` |
+| `cleanup_validation` | the result landed outside the declared lifecycle prefix |
+
+**Fixture rotation is a RELEASE.** `fixture_ref` names an entry compiled into the binary with its
+SHA-256 pinned, so an operator cannot point the canary at a file of their choosing — that would be an
+exfiltration primitive. Changing a fixture means changing the pin and shipping a new binary.
+
+**Secret rotation** needs no monitor edit: rotate the value in the project inventory. Renaming a secret
+a FILE-MANAGED canary references is refused, as it is for every file-managed monitor.
+
 ## Project secret inventory and credential dispatch (FR-020)
 
 Secret values are write-only project data. Core materializing roles (`all`, `api`,

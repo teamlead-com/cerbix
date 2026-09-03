@@ -742,6 +742,7 @@ type countingSecretSink struct {
 	mu        sync.Mutex
 	secret    []string
 	transport []string
+	canary    []string
 }
 
 func (s *countingSecretSink) RecordSecretResolutionFailure(reason string) {
@@ -754,6 +755,15 @@ func (s *countingSecretSink) RecordDispatchTransportFailure(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.transport = append(s.transport, reason)
+}
+
+// A canary run that was not dispatched lands in its OWN family: it is neither a credential that
+// would not resolve nor a transport that would not take a publish, and folding it into either would
+// hide whichever is rarer.
+func (s *countingSecretSink) RecordCanaryDispatchRefused(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.canary = append(s.canary, reason)
 }
 
 func (s *countingSecretSink) snapshot() (secret, transport []string) {

@@ -119,6 +119,11 @@ var fileSupportedTypes = map[domain.MonitorType]bool{
 	domain.MonitorRedis:     true,
 	domain.MonitorRabbitMQ:  true,
 	domain.MonitorPromQL:    true,
+	// FR-029: admitted only after the nested typed schema, the secret-ref contract, the semantic
+	// hash and their tests all existed (D12). It is the one type that carries a nested `workflow`
+	// block rather than a flat `settings` map — which is exactly why `synthetic` is still refused:
+	// a JSON string inside a bundle is an unvalidated document inside a validated one.
+	domain.MonitorAsyncCanary: true,
 }
 
 // secretSettingKeys are field/settings keys that carry credentials. Their presence anywhere

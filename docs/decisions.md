@@ -5955,6 +5955,10 @@ review is everything after the APPROVED design commit: `8626125..HEAD`.
 **And the release was cut before this gate closed.** v0.1.9 was tagged, pushed and published while the
 review request sat unanswered; the owner deleted the release by hand. The review is a GATE, not a
 notification, and a green local gate set is not a substitute for it — this P0 is what the gate was for.
+The owner then ruled on the tag as well (2026-09-03): **v0.1.9 is dropped entirely, local and remote,
+and recreated only after the fixes and the review.** It is dropped rather than moved because a tag that
+points at one tree and then silently at another is worse than no tag; nothing consumed it (every asset
+had zero downloads before the release was removed).
 
 ## D-0223 — the canary in-flight slot is keyed by the RUN, and a dispatch that never delivered gives it back (2026-09-03)
 

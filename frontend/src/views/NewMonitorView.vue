@@ -27,6 +27,7 @@ import {
   CANARY_CORRELATE_SOURCES,
   CANARY_MAX_BINDINGS,
   CANARY_CORRELATION_PLACEHOLDER,
+  CANARY_FIXTURES,
   CANARY_SUBMIT_KINDS,
   type CanaryForm,
 } from "@/lib/canaryWorkflow";
@@ -1336,8 +1337,14 @@ const selectCls =
                   </label>
                   <label v-if="canary.submitKind === 'multipart_fixture'" class="flex flex-col gap-[4px]">
                     <span class="text-[12px] font-semibold text-ink-2">Fixture</span>
-                    <input v-model="canary.fixtureRef" type="text" data-testid="canary-fixture-ref" placeholder="small_wav_v1" :class="[inputCls, 'font-mono w-[190px]']" />
-                    <span class="text-[11.5px] text-ink-3">a registry key, never an upload</span>
+                    <!-- A select over the REGISTRY, not a text box: the runner carries the bytes and
+                         verifies a pinned SHA-256, so a key it does not have is not a fixture. A free
+                         text box let `https://evil.example/file.wav` past the form into a 400. -->
+                    <select v-model="canary.fixtureRef" data-testid="canary-fixture-ref" :class="[selectCls, 'h-[38px] w-[190px]']">
+                      <option value="">choose a fixture…</option>
+                      <option v-for="fx in CANARY_FIXTURES" :key="fx" :value="fx">{{ fx }}</option>
+                    </select>
+                    <span class="text-[11.5px] text-ink-3">a registry key the runner carries, never an upload</span>
                   </label>
                   <label v-if="canary.submitKind === 'multipart_fixture'" class="flex flex-col gap-[4px]">
                     <span class="text-[12px] font-semibold text-ink-2">File field</span>
@@ -1373,6 +1380,7 @@ const selectCls =
                     <option v-for="b in canary.bindings" :key="b.name" :value="b.name">{{ b.name }}</option>
                   </select>
                   <button type="button" class="mt-2 text-[12.5px] text-accent hover:underline" @click="(canary.submitKind === 'multipart_fixture' ? canary.multipartFields : canary.bodyFields).splice(i, 1)">Remove</button>
+                  <p v-if="canaryRefusal((canary.submitKind === 'multipart_fixture' ? 'multipartFields.' : 'bodyFields.') + i)" :data-testid="'canary-refusal-field-' + i" class="w-full text-[12px] text-down">{{ canaryRefusal((canary.submitKind === "multipart_fixture" ? "multipartFields." : "bodyFields.") + i) }}</p>
                 </div>
                 <button type="button" data-testid="canary-add-body-field" class="mt-2 h-[26px] rounded-[6px] border border-border px-[10px] text-[12.5px]" @click="addCanaryField(canary.submitKind === 'multipart_fixture' ? canary.multipartFields : canary.bodyFields)">+ Field</button>
                 <p v-if="canaryRefusal('bodyFields')" data-testid="canary-refusal-bodyFields" class="mt-1 text-[12px] text-down">{{ canaryRefusal("bodyFields") }}</p>
@@ -1448,6 +1456,8 @@ const selectCls =
                     </label>
                   </div>
                   <p v-if="canaryRefusal('sseSuccessEvent')" data-testid="canary-refusal-sseSuccessEvent" class="mt-1 text-[12px] text-down">{{ canaryRefusal("sseSuccessEvent") }}</p>
+                  <p v-if="canaryRefusal('sseRequiredFields')" data-testid="canary-refusal-sseRequiredFields" class="mt-1 text-[12px] text-down">{{ canaryRefusal("sseRequiredFields") }}</p>
+                  <p v-if="canaryRefusal('sseFailureEvents')" class="mt-1 text-[12px] text-down">{{ canaryRefusal("sseFailureEvents") }}</p>
                 </template>
                 <template v-else>
                   <div class="mt-3 flex flex-wrap gap-3">
@@ -1471,6 +1481,8 @@ const selectCls =
                   <p class="mt-1 text-[12px] text-ink-3">Interval &times; attempts must fit inside the completion timeout.</p>
                   <p v-if="canaryRefusal('pollMaxAttempts')" data-testid="canary-refusal-pollMaxAttempts" class="mt-1 text-[12px] text-down">{{ canaryRefusal("pollMaxAttempts") }}</p>
                   <p v-if="canaryRefusal('pollInterval')" class="mt-1 text-[12px] text-down">{{ canaryRefusal("pollInterval") }}</p>
+                  <p v-if="canaryRefusal('pollFailurePath')" data-testid="canary-refusal-pollFailurePath" class="mt-1 text-[12px] text-down">{{ canaryRefusal("pollFailurePath") }}</p>
+                  <p v-if="canaryRefusal('pollFailureValues')" data-testid="canary-refusal-pollFailureValues" class="mt-1 text-[12px] text-down">{{ canaryRefusal("pollFailureValues") }}</p>
                 </template>
               </div>
 

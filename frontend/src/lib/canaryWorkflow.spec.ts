@@ -248,3 +248,133 @@ describe("what goes on the wire", () => {
     expect(parseCanaryConfig({ [CANARY_WORKFLOW_KEY]: "{not json" })).toBeNull();
   });
 });
+
+// The five categories the independent reviewer found (party [84]): shapes `canaryRefusals` returned
+// `[]` for while the Go validator rejects them. My parity claim rested on ONE happy vector, which
+// cannot prove that every client-accepted shape is server-valid — the reviewer said so and was right.
+//
+// One case per named branch. Each starts from a form that PASSES, so the refusal it asserts is caused
+// by the single thing it changed.
+describe("client/server parity — the branches the reviewer found", () => {
+  it("1. a fixture is a registry key, not free text", () => {
+    const f = validForm();
+    f.submitKind = "multipart_fixture";
+    f.bodyFields = [];
+    f.fixtureRef = "https://evil.example/file.wav";
+    f.fileField = "file";
+    expect(at(f, "fixtureRef").map((r) => r.message).join()).toMatch(/not a fixture the runner carries/);
+    f.fixtureRef = "small_wav_v1";
+    expect(at(f, "fixtureRef")).toEqual([]);
+  });
+
+  it("2. the correlation marker occupies ONE WHOLE path segment, and appears at most once", () => {
+    const f = validForm();
+    // A fragment of a segment: the client used to substitute and parse, so this passed.
+    f.completionURL = `https://files.example.com/tasks/x${CANARY_CORRELATION_PLACEHOLDER}`;
+    expect(at(f, "completionURL").map((r) => r.message).join()).toMatch(/whole path segment/);
+    // Two markers.
+    f.completionURL = `https://files.example.com/${CANARY_CORRELATION_PLACEHOLDER}/${CANARY_CORRELATION_PLACEHOLDER}`;
+    expect(at(f, "completionURL").map((r) => r.message).join()).toMatch(/at most one/);
+    // In the query rather than the path.
+    f.completionURL = `https://files.example.com/tasks?id=${CANARY_CORRELATION_PLACEHOLDER}`;
+    expect(at(f, "completionURL").map((r) => r.message).join()).toMatch(/whole path segment/);
+    // A completion URL with NO marker is legal: not every API addresses the transaction by path.
+    f.completionURL = "https://files.example.com/tasks/latest";
+    expect(at(f, "completionURL")).toEqual([]);
+  });
+
+  it("3. body keys obey the grammar and the bound, and a blank or duplicate key is refused", () => {
+    const f = validForm();
+    f.bodyFields = [{ key: "not valid", value: "x", secretRef: "" }];
+    expect(at(f, "bodyFields.0").map((r) => r.message).join()).toMatch(/is not a valid key/);
+
+    // Blank and duplicate used to be dropped or overwritten in SILENCE by `fieldMap`, so the typed
+    // controls could change what the operator meant without saying anything.
+    const g = validForm();
+    g.bodyFields = [{ key: "", value: "x", secretRef: "" }];
+    expect(at(g, "bodyFields.0").map((r) => r.message).join()).toMatch(/needs a key/);
+
+    const h = validForm();
+    h.bodyFields = [
+      { key: "tenant", value: "a", secretRef: "" },
+      { key: "tenant", value: "b", secretRef: "" },
+    ];
+    expect(at(h, "bodyFields.1").map((r) => r.message).join()).toMatch(/declared twice/);
+
+    const many = validForm();
+    many.bodyFields = Array.from({ length: 65 }, (_, i) => ({ key: `k${i}`, value: "v", secretRef: "" }));
+    expect(at(many, "bodyFields").map((r) => r.message).join()).toMatch(/at most 64 keys/);
+  });
+
+  it("4a. sse required fields obey the path grammar", () => {
+    const f = validForm();
+    f.completionKind = "sse";
+    f.sseSuccessEvent = "task.completed";
+    f.sseRequiredFields = "a[0]";
+    expect(at(f, "sseRequiredFields").map((r) => r.message).join()).toMatch(/no expressions/);
+  });
+
+  it("4b. poll failure is a PAIR — values without a path, or a path without values", () => {
+    const f = validForm();
+    f.pollFailureValues = "failed";
+    f.pollFailurePath = "";
+    expect(at(f, "pollFailurePath").map((r) => r.message).join()).toMatch(/required/);
+
+    const g = validForm();
+    g.pollFailurePath = "status";
+    g.pollFailureValues = "";
+    expect(at(g, "pollFailureValues").map((r) => r.message).join()).toMatch(/at least one value/);
+
+    // The complete pair passes, which is what makes this a rule about the PAIR.
+    const h = validForm();
+    h.pollFailurePath = "status";
+    h.pollFailureValues = "failed, cancelled";
+    expect(at(h, "pollFailurePath")).toEqual([]);
+    expect(at(h, "pollFailureValues")).toEqual([]);
+  });
+
+  it("4c. lifecycle_path is required ALWAYS, not only for a lifecycle_prefix cleanup", () => {
+    const f = validForm();
+    f.cleanupKind = "none";
+    f.cleanupPrefix = "";
+    f.cleanupAcknowledged = true;
+    f.lifecyclePath = "";
+    // `validateCanaryResult` runs the path grammar over it unconditionally, and "" fails that.
+    expect(at(f, "lifecyclePath").map((r) => r.message).join()).toMatch(/required/);
+  });
+
+  it("4d. a field list refuses a duplicate and an over-long path", () => {
+    const f = validForm();
+    f.resultRequiredFields = "s3_path, s3_path";
+    expect(at(f, "resultRequiredFields").map((r) => r.message).join()).toMatch(/listed twice/);
+
+    const g = validForm();
+    g.resultRequiredFields = "a".repeat(201);
+    expect(at(g, "resultRequiredFields").map((r) => r.message).join()).toMatch(/at most 200 bytes/);
+  });
+
+  it("5. multipart forbids content-type, and an ordinary header needs a value", () => {
+    const f = validForm();
+    f.submitKind = "multipart_fixture";
+    f.bodyFields = [];
+    f.fixtureRef = "small_wav_v1";
+    f.submitHeaders = [{ name: "content-type", value: "multipart/form-data", secretRef: "" }];
+    expect(at(f, "submitHeaders.0").map((r) => r.message).join()).toMatch(/set by the runner/);
+
+    const g = validForm();
+    g.submitHeaders.push({ name: "x-empty", value: "", secretRef: "" });
+    expect(at(g, "submitHeaders.2").map((r) => r.message).join()).toMatch(/has no value/);
+
+    // A value AND a binding together is refused: the position is a union of one or the other.
+    const h = validForm();
+    h.submitHeaders[0] = { name: "authorization", value: "literal", secretRef: "upload" };
+    expect(at(h, "submitHeaders.0").map((r) => r.message).join()).toMatch(/not both/);
+  });
+
+  it("on a NON-multipart submit, content-type is an ordinary header", () => {
+    // The rule is about the multipart encoder owning the boundary, not about the name being magic.
+    const f = validForm();
+    f.submitHeaders.push({ name: "content-type", value: "application/json", secretRef: "" });
+    expect(at(f, "submitHeaders.2")).toEqual([]);
+  });
+});

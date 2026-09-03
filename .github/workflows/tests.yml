@@ -141,6 +141,12 @@ jobs:
       - run: npm ci
       - name: Type-check + build
         run: npm run build
+      - name: Unit tests
+        # These 463 tests used to run only on a developer's machine: this job type-checked and built
+        # and never executed them, so a red suite reached `main` unnoticed. It also runs the
+        # cross-surface SEAM check, which fails when the typed canary form starts producing something
+        # different from the committed Go fixture — the drift `internal/domain` cannot see by itself.
+        run: npm test
       - name: API schema drift (openapi.yaml changed without regenerating schema.d.ts?)
         run: |
           npm run gen:api

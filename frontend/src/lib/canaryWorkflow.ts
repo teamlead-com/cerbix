@@ -77,6 +77,18 @@ export const CANARY_RESERVED_HEADERS: readonly string[] = [
 /** Legal in exactly ONE field — the completion URL — because nothing has produced an id at submit. */
 export const CANARY_CORRELATION_PLACEHOLDER = "{{ correlation_id }}";
 
+/**
+ * The fixture REGISTRY, mirrored from `internal/domain/canarycanonical.go`. A fixture is a registry
+ * key with a pinned SHA-256 and never an upload or a path, so the control is a select over this list
+ * — a free-text box let a reviewer put `https://evil.example/file.wav` past the form and straight
+ * into a 400 (P1, party [84]).
+ */
+export const CANARY_FIXTURES: readonly string[] = ["small_wav_v1"];
+
+/** `^[A-Za-z_][A-Za-z0-9_.-]{0,63}$` — the server's body-key grammar. */
+export const CANARY_BODY_KEY_RE = /^[A-Za-z_][A-Za-z0-9_.\-]{0,63}$/;
+export const CANARY_MAX_BODY_KEYS = 64;
+
 export const CANARY_SECRET_REF_PREFIX = "canary_secret_";
 export const CANARY_SECRET_REF_SUFFIX = "_ref";
 
@@ -183,6 +195,25 @@ export function splitList(raw: string): string[] {
     .filter((s) => s !== "");
 }
 
+/**
+ * `{{ correlation_id }}` must occupy ONE WHOLE PATH SEGMENT — never a fragment of one, never inside
+ * the query, never in the host. Mirrors `canaryPlaceholderIsWholeSegment`.
+ *
+ * The client used to substitute every marker and then parse, which accepted `.../x{{ correlation_id }}`
+ * and two markers in one URL: both are refused by the server (P1, party [84]).
+ */
+function placeholderIsWholeSegment(raw: string): boolean {
+  const idx = raw.indexOf(CANARY_CORRELATION_PLACEHOLDER);
+  if (idx < 0) return false;
+  const q = raw.search(/[?#]/);
+  if (q >= 0 && idx > q) return false;
+  const before = raw.slice(0, idx);
+  const after = raw.slice(idx + CANARY_CORRELATION_PLACEHOLDER.length);
+  if (!before.endsWith("/")) return false;
+  if (before.endsWith("://")) return false; // that would put it in the host
+  return after === "" || after.startsWith("/") || after.startsWith("?") || after.startsWith("#");
+}
+
 function hostOf(url: string): string | null {
   try {
     const u = new URL(url);
@@ -194,7 +225,12 @@ function hostOf(url: string): string | null {
 
 // ── Refusals, positioned ───────────────────────────────────────────────────────────────────────
 
-function headerRefusals(rows: CanaryHeaderRow[], where: string, bindings: CanaryBinding[]): CanaryRefusal[] {
+function headerRefusals(
+  rows: CanaryHeaderRow[],
+  where: string,
+  bindings: CanaryBinding[],
+  multipart = false,
+): CanaryRefusal[] {
   const out: CanaryRefusal[] = [];
   const seen = new Set<string>();
   if (rows.length > CANARY_MAX_HEADERS_PER_REQUEST) {
@@ -219,7 +255,9 @@ function headerRefusals(rows: CanaryHeaderRow[], where: string, bindings: Canary
       out.push({ field: at, message: `${name} is declared twice (header names are case-insensitive)` });
     }
     seen.add(name);
-    if (isReservedHeader(name)) {
+    // `content-type` is the runner's on a multipart submit: its own encoder owns the boundary, so an
+    // author-supplied value produces a body that does not parse.
+    if (isReservedHeader(name) || (multipart && name === "content-type")) {
       out.push({ field: at, message: `${name} is set by the runner and may not be declared` });
     }
     if (isCredentialHeader(name)) {
@@ -232,12 +270,75 @@ function headerRefusals(rows: CanaryHeaderRow[], where: string, bindings: Canary
       if (h.secretRef.trim() === "") {
         out.push({ field: at, message: `${name} needs a binding` });
       }
-    } else if (h.secretRef.trim() === "" && h.value.length > CANARY_MAX_HEADER_VALUE_BYTES) {
-      out.push({ field: at, message: `a header value is at most ${CANARY_MAX_HEADER_VALUE_BYTES} bytes` });
+    } else if (h.secretRef.trim() === "") {
+      // An ordinary header with no value is refused by the server: a header that says nothing is not
+      // a header, and the schema has no place for one.
+      if (h.value === "") {
+        out.push({ field: at, message: `${name} has no value` });
+      }
+      if (h.value.length > CANARY_MAX_HEADER_VALUE_BYTES) {
+        out.push({ field: at, message: `a header value is at most ${CANARY_MAX_HEADER_VALUE_BYTES} bytes` });
+      }
+    }
+    if (h.secretRef.trim() !== "" && h.value !== "") {
+      out.push({ field: at, message: `${name} takes a value or a binding, not both` });
     }
     const ref = h.secretRef.trim();
     if (ref !== "" && !bindings.some((b) => b.name === ref)) {
       out.push({ field: at, message: `no binding named ${ref} is declared` });
+    }
+  });
+  return out;
+}
+
+/** Mirrors `validateCanaryFieldList`: a bound, the path grammar per entry, and no duplicates. */
+function fieldListRefusals(raw: string, field: string, what: string, required: boolean): CanaryRefusal[] {
+  const out: CanaryRefusal[] = [];
+  const list = splitList(raw);
+  if (required && list.length === 0) {
+    out.push({ field, message: `${what} must name at least one field` });
+  }
+  if (list.length > CANARY_MAX_REQUIRED_FIELDS) {
+    out.push({ field, message: `at most ${CANARY_MAX_REQUIRED_FIELDS} paths` });
+  }
+  const seen = new Set<string>();
+  for (const p of list) {
+    if (p.length > CANARY_MAX_JSON_PATH_BYTES) {
+      out.push({ field, message: `a path is at most ${CANARY_MAX_JSON_PATH_BYTES} bytes` });
+    } else if (!CANARY_JSON_PATH_RE.test(p)) {
+      out.push({ field, message: `${p} uses dotted keys and numeric indices only — no expressions` });
+    }
+    if (seen.has(p)) out.push({ field, message: `${p} is listed twice` });
+    seen.add(p);
+  }
+  return out;
+}
+
+/** Mirrors `validateCanaryBody`: the key grammar, the key bound, and no blank or duplicate key. */
+function fieldRowRefusals(rows: CanaryFieldRow[], field: string, bindings: CanaryBinding[]): CanaryRefusal[] {
+  const out: CanaryRefusal[] = [];
+  if (rows.length > CANARY_MAX_BODY_KEYS) {
+    out.push({ field, message: `at most ${CANARY_MAX_BODY_KEYS} keys` });
+  }
+  const seen = new Set<string>();
+  rows.forEach((row, i) => {
+    const k = row.key.trim();
+    const at = `${field}.${i}`;
+    // A blank or duplicate key used to be dropped or overwritten in silence by `fieldMap`, so the
+    // typed controls could change what the operator meant without saying anything (P1, party [84]).
+    if (k === "") {
+      out.push({ field: at, message: "a field needs a key" });
+    } else if (!CANARY_BODY_KEY_RE.test(k)) {
+      out.push({ field: at, message: `${k} is not a valid key` });
+    }
+    if (k !== "" && seen.has(k)) out.push({ field: at, message: `${k} is declared twice` });
+    seen.add(k);
+    const ref = row.secretRef.trim();
+    if (ref !== "" && !bindings.some((b) => b.name === ref)) {
+      out.push({ field: at, message: `no binding named ${ref} is declared` });
+    }
+    if (ref !== "" && row.value.trim() !== "") {
+      out.push({ field: at, message: `${k || "a field"} takes a value or a binding, not both` });
     }
   });
   return out;
@@ -265,7 +366,8 @@ function urlRefusals(raw: string, field: string, allowPlaceholder: boolean): Can
   // The placeholder check comes FIRST: a URL carrying it does not parse as one, so parsing it would
   // report "not a valid URL" for a document whose real problem is the position of the placeholder.
   const withoutPlaceholder = url.split(CANARY_CORRELATION_PLACEHOLDER).join("x");
-  if (url.includes(CANARY_CORRELATION_PLACEHOLDER) && !allowPlaceholder) {
+  const markers = url.split(CANARY_CORRELATION_PLACEHOLDER).length - 1;
+  if (markers > 0 && !allowPlaceholder) {
     out.push({
       field,
       message: `${CANARY_CORRELATION_PLACEHOLDER} is only legal in the completion URL — nothing has produced an id yet here`,
@@ -273,6 +375,15 @@ function urlRefusals(raw: string, field: string, allowPlaceholder: boolean): Can
   }
   if (/\{\{/.test(withoutPlaceholder)) {
     out.push({ field, message: "no other placeholder is legal anywhere in a canary" });
+  }
+  if (allowPlaceholder && markers > 1) {
+    out.push({ field, message: `at most one ${CANARY_CORRELATION_PLACEHOLDER} is allowed` });
+  }
+  if (allowPlaceholder && markers === 1 && !placeholderIsWholeSegment(url)) {
+    out.push({
+      field,
+      message: `${CANARY_CORRELATION_PLACEHOLDER} must occupy one whole path segment`,
+    });
   }
   let parsed: URL | null = null;
   try {
@@ -343,11 +454,16 @@ export function canaryRefusals(f: CanaryForm, monitorTimeout: number, projectSec
   if (new Set(statuses).size !== statuses.length) {
     out.push({ field: "acceptedStatus", message: "a status is listed twice" });
   }
-  out.push(...headerRefusals(f.submitHeaders, "submitHeaders", f.bindings));
+  out.push(...headerRefusals(f.submitHeaders, "submitHeaders", f.bindings, f.submitKind === "multipart_fixture"));
 
   if (f.submitKind === "multipart_fixture") {
-    if (f.fixtureRef.trim() === "") {
+    const fx = f.fixtureRef.trim();
+    if (fx === "") {
       out.push({ field: "fixtureRef", message: "a fixture is required — it is a registry key, never an upload" });
+    } else if (!CANARY_FIXTURES.includes(fx)) {
+      // The registry is the whole contract: the runner carries the bytes and verifies a pinned
+      // SHA-256 before uploading them, so a key it does not have is not a fixture.
+      out.push({ field: "fixtureRef", message: `${fx} is not a fixture the runner carries` });
     }
     if (f.fileField.trim() === "") {
       out.push({ field: "fileField", message: "multipart needs a file field name" });
@@ -355,8 +471,12 @@ export function canaryRefusals(f: CanaryForm, monitorTimeout: number, projectSec
     if (f.multipartFields.length > CANARY_MAX_MULTIPART_FIELDS) {
       out.push({ field: "multipartFields", message: `at most ${CANARY_MAX_MULTIPART_FIELDS} fields` });
     }
-  } else if (f.bodyFields.length === 0) {
-    out.push({ field: "bodyFields", message: "http_json needs a body" });
+    out.push(...fieldRowRefusals(f.multipartFields, "multipartFields", f.bindings));
+  } else {
+    if (f.bodyFields.length === 0) {
+      out.push({ field: "bodyFields", message: "http_json needs a body" });
+    }
+    out.push(...fieldRowRefusals(f.bodyFields, "bodyFields", f.bindings));
   }
 
   // ── correlate: the two grammars are source-specific ──
@@ -394,8 +514,9 @@ export function canaryRefusals(f: CanaryForm, monitorTimeout: number, projectSec
     if (f.sseSuccessEvent.trim() === "") {
       out.push({ field: "sseSuccessEvent", message: "an sse completion needs its success event" });
     }
-    if (splitList(f.sseRequiredFields).length > CANARY_MAX_REQUIRED_FIELDS) {
-      out.push({ field: "sseRequiredFields", message: `at most ${CANARY_MAX_REQUIRED_FIELDS} fields` });
+    out.push(...fieldListRefusals(f.sseRequiredFields, "sseRequiredFields", "sse required_json_fields", false));
+    if (splitList(f.sseFailureEvents).length > CANARY_MAX_FAILURE_VALUES) {
+      out.push({ field: "sseFailureEvents", message: `at most ${CANARY_MAX_FAILURE_VALUES} failure events` });
     }
   } else {
     const pi = Number(f.pollInterval);
@@ -420,7 +541,18 @@ export function canaryRefusals(f: CanaryForm, monitorTimeout: number, projectSec
     if (f.pollSuccessValue.trim() === "") {
       out.push({ field: "pollSuccessValue", message: "a success value is required" });
     }
-    if (splitList(f.pollFailureValues).length > CANARY_MAX_FAILURE_VALUES) {
+    // Poll failure is a PAIR: a path with no values, or values with no path, is refused by the
+    // server — half a failure condition can never match anything.
+    const fVals = splitList(f.pollFailureValues);
+    const fPath = f.pollFailurePath.trim();
+    if (fPath !== "" || fVals.length > 0) {
+      const bad = pathRefusal(f.pollFailurePath, "pollFailurePath", "the failure path");
+      if (bad) out.push(bad);
+      if (fVals.length === 0) {
+        out.push({ field: "pollFailureValues", message: "a failure path needs at least one value" });
+      }
+    }
+    if (fVals.length > CANARY_MAX_FAILURE_VALUES) {
       out.push({ field: "pollFailureValues", message: `at most ${CANARY_MAX_FAILURE_VALUES} values` });
     }
   }
@@ -432,19 +564,11 @@ export function canaryRefusals(f: CanaryForm, monitorTimeout: number, projectSec
   } else if (monitorTimeout > 0 && ml > monitorTimeout) {
     out.push({ field: "maxLatency", message: "the promise must fit inside the monitor's timeout" });
   }
-  const required = splitList(f.resultRequiredFields);
-  if (required.length === 0) {
-    out.push({ field: "resultRequiredFields", message: "name at least one required field" });
-  }
-  if (required.length > CANARY_MAX_REQUIRED_FIELDS) {
-    out.push({ field: "resultRequiredFields", message: `at most ${CANARY_MAX_REQUIRED_FIELDS} fields` });
-  }
-  required.forEach((p) => {
-    if (!CANARY_JSON_PATH_RE.test(p)) {
-      out.push({ field: "resultRequiredFields", message: `${p} is not a valid path` });
-    }
-  });
-  if (f.lifecyclePath.trim() !== "") {
+  out.push(...fieldListRefusals(f.resultRequiredFields, "resultRequiredFields", "required_json_fields", true));
+  // ALWAYS required, not only for a lifecycle_prefix cleanup: `validateCanaryResult` runs the path
+  // grammar over it unconditionally, and an empty path fails that. The client used to treat it as
+  // optional, which made `cleanup.kind: none` with no lifecycle path a client-valid 400.
+  {
     const bad = pathRefusal(f.lifecyclePath, "lifecyclePath", "the lifecycle path");
     if (bad) out.push(bad);
   }
@@ -454,9 +578,7 @@ export function canaryRefusals(f: CanaryForm, monitorTimeout: number, projectSec
     if (f.cleanupPrefix.trim() === "") {
       out.push({ field: "cleanupPrefix", message: "a lifecycle prefix is required" });
     }
-    if (f.lifecyclePath.trim() === "") {
-      out.push({ field: "lifecyclePath", message: "a lifecycle prefix needs a lifecycle path to check" });
-    }
+
   } else if (!f.cleanupAcknowledged) {
     out.push({
       field: "cleanupAcknowledged",
@@ -546,8 +668,15 @@ export function buildCanaryConfig(f: CanaryForm): Record<string, string> {
     headers: headerDocs(f.submitHeaders),
   };
   if (f.submitKind === "multipart_fixture") {
+    // FLAT on `submit`, not nested under `multipart`: that is the shape of the persisted canonical
+    // document (`canonicalSubmit.FileField` / `.Fields`), and the parser refuses unknown fields. The
+    // first version of this nested them, so the ENTIRE multipart arm of the form built a document
+    // the server rejected with `unknown field "multipart"` — and 44 client tests never saw it,
+    // because none of them ran the document through the server. Found by the cross-surface seam the
+    // reviewer's P1 required (party [84]); it is the sixth defect of that P1 and was not on the list.
     submit.fixture_ref = f.fixtureRef.trim();
-    submit.multipart = { file_field: f.fileField.trim(), fields: fieldMap(f.multipartFields) };
+    submit.file_field = f.fileField.trim();
+    submit.fields = fieldMap(f.multipartFields);
   } else {
     submit.body = fieldMap(f.bodyFields);
   }
@@ -652,8 +781,8 @@ export function parseCanaryConfig(config: Record<string, string>): CanaryForm | 
   f.acceptedStatus = Array.isArray(s.accepted_status) ? s.accepted_status.join(", ") : "";
   f.submitHeaders = headerRows(s.headers);
   f.fixtureRef = String(s.fixture_ref ?? "");
-  f.fileField = String(s.multipart?.file_field ?? "file");
-  f.multipartFields = fieldRows(s.multipart?.fields);
+  f.fileField = String(s.file_field ?? "file");
+  f.multipartFields = fieldRows(s.fields);
   f.bodyFields = fieldRows(s.body);
 
   const c = doc.correlate ?? {};

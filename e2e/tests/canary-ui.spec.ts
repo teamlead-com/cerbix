@@ -121,4 +121,63 @@ test.describe("async canary form", () => {
     await expect(page.getByLabel("binding name 0")).toHaveValue("upload");
     await expect(page.getByLabel("project secret 0")).toHaveValue(SECRET);
   });
+
+  // The MULTIPART arm, on a live stack. It is here because it was the arm that was entirely broken:
+  // the form emitted `submit.multipart = {file_field, fields}` nested where the canonical document
+  // has them flat, so every multipart canary the form built was refused by the API with
+  // `unknown field "multipart"` — and 44 client tests never saw it, because none of them ran the
+  // document through the server (reviewer P1, party [84]; D-0227).
+  test("a multipart canary is accepted, and the fixture is a registry choice", async ({ page }) => {
+    await page.goto("/");
+    const { projectID } = await ensureE2EWorkspace(page);
+
+    await page.goto(`/monitors/new?project=${projectID}`);
+    await page.locator("button", { hasText: "Async canary" }).click();
+    await expect(page.getByTestId("canary-workflow")).toBeVisible();
+
+    await page.getByPlaceholder("payments-callback").fill("e2e-canary-multipart");
+    await page.getByTestId("monitor-timeout").fill("300");
+    await page.getByTestId("monitor-interval").fill("300");
+    await page.getByTestId("canary-submit-kind").selectOption("multipart_fixture");
+
+    // A registry CHOICE, not a text box: a free-text field let a non-registry value past the form.
+    const fixture = page.getByTestId("canary-fixture-ref");
+    await expect(fixture).toHaveJSProperty("tagName", "SELECT");
+    await fixture.selectOption("small_wav_v1");
+
+    await page.getByTestId("canary-submit-url").fill("https://files.example.invalid/files/upload");
+    await page.getByTestId("canary-submit-timeout").fill("30");
+    await page.getByTestId("canary-accepted-status").fill("202");
+    await page.getByTestId("canary-correlate-path").fill("task_id");
+    await page.getByTestId("canary-completion-url").fill("https://files.example.invalid/tasks/{{ correlation_id }}");
+    await page.getByTestId("canary-completion-timeout").fill("240");
+    await page.getByTestId("canary-poll-interval").fill("5");
+    await page.getByTestId("canary-poll-attempts").fill("48");
+    await page.getByTestId("canary-max-latency").fill("240");
+    await page.getByTestId("canary-required-fields").fill("s3_path");
+    await page.getByTestId("canary-lifecycle-path").fill("s3_path");
+    await page.getByTestId("canary-cleanup-prefix").fill("canary/");
+
+    await page.locator("button", { hasText: "Create monitor" }).click();
+
+    let monitorID = "";
+    await expect
+      .poll(
+        async () => {
+          const list = (await apiGet(page, `/api/v1/projects/${projectID}/monitors`)) as any[];
+          const found = list.find((m) => m.name === "e2e-canary-multipart");
+          monitorID = found?.id ?? "";
+          return found?.type ?? "";
+        },
+        { timeout: 20_000, message: "the multipart canary the form built was never created" },
+      )
+      .toBe("async_canary");
+
+    // The document the API stored is the canonical one, with the multipart fields FLAT.
+    const saved = (await apiGet(page, `/api/v1/monitors/${monitorID}`)) as any;
+    const doc = JSON.parse(saved.config.workflow);
+    expect(doc.submit.kind).toBe("multipart_fixture");
+    expect(doc.submit.file_field).toBe("file");
+    expect(doc.submit.multipart, "the nested shape is not what the schema has").toBeUndefined();
+  });
 });

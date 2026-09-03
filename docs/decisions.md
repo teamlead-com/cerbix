@@ -6399,3 +6399,36 @@ for `core` without excluding pull-served regions — and is deliberately NOT tou
 predates the canary, it changes what generation core EMITS rather than whether a monitor reports at
 all, and widening a review-fix range is how a second defect hides behind the first. It is named here
 so it is a known thing and not a discovery.
+
+## D-0232 — the in-process executor is no evidence about a pull-served region, on the credential side too (2026-09-03)
+
+**Context.** The reviewer approved the canary capability range (party [102]) and withheld release
+approval on the residual D-0231's addendum had named: `localCredentialRegions` raised
+`carrierGeneration[core]` to 3 and marked core credential-ready on the strength of the in-process
+executor, without asking whether core was pull-served. `pull.regions: [core]` is legal. A pull-served
+region is executed by its AGENTS — every job for it goes to `pull_jobs` — so in role=all with that
+configuration core emitted a generation-3 row that a capability-1 agent cannot claim (it polls the
+generation-2 endpoint, which returns rows at or below 2). The row expired by TTL; the credentialed
+monitor had no outcome at all. Same configuration precondition as the canary P1, same silence, and
+this one reaches ordinary postgres/mysql/redis monitors. It predates the canary; the canary work is
+what made it visible.
+
+**Decision.** The exclusion lives where the canary's does: at resolve time, in the loop that folds the
+in-process announcement into the readiness maps — a pull-served region contributes nothing there.
+Readiness and carrier for such a region then come only from what its agents announced
+(`LiveCredentialReadyAgentRegions` at envelope v1 for readiness, at v2 for the carrier), which is the
+rule the rest of the block already followed for every other source. Neither builder order nor
+configuration can restore the override.
+
+**What the test reaches.** `TestTheInProcessExecutorDoesNotRaiseAPullServedRegionsCarrier`: role=all
+wiring in BOTH builder orders, `pull.regions: [core]`, a credentialed postgres monitor in core, and a
+single live agent that announced envelope v1. Expected: one pull row, at generation 2 — the carrier
+that agent can open. Removing the guard emits generation 3 and the test fails. To make that assertion
+honest the fake store stopped lying in two places: `MaterializeExecutionConfigs` now picks the job's
+carrier from the policy it is handed (floor 2), as the real one does, and `LiveCredentialReadyAgentRegions`
+answers by minimum capability, as the real query does. A fake that ignored the policy would have
+passed with the defect in place.
+
+**Not changed.** The `!ready` branch for a pull region with NO live agent keeps its existing behaviour
+(a logged `no_capable_executor`, a metric, a backoff) — that path predates both findings and is the
+same for AMQP regions without workers; making it a per-monitor heartbeat is a separate decision.

@@ -35,6 +35,17 @@ type fakeStore struct {
 	canaryCapabilityLookups int
 	canaryHeartbeats        []domain.Heartbeat
 	pullLeases              []int
+	// pullGenerations records the carrier generation of every pull row enqueued, which is what a
+	// pull-served region's agents must be able to open — a v3 row in a capability-1 region is a
+	// row nobody claims.
+	pullGenerations []int
+	// agentEnvelopeCapability is, per pull region, the highest envelope generation its live agents
+	// announced (0 = no ready agent). It drives LiveCredentialReadyAgentRegions by MIN capability
+	// exactly as the real query does.
+	agentEnvelopeCapability map[string]int
+	// carrierPolicies records every carrier-generation map the materializer was handed, so a test
+	// can assert what generation core DECIDED a region may receive.
+	carrierPolicies []map[string]int
 
 	serviceSlices int32
 	monitors      []domain.Monitor
@@ -109,7 +120,10 @@ func (f *fakeStore) ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.M
 	return f.ListEnabledMonitors(ctx)
 }
 
-func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string, _ map[string]int) ([]store.MaterializedExecution, error) {
+func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string, carrier map[string]int) ([]store.MaterializedExecution, error) {
+	f.mu.Lock()
+	f.carrierPolicies = append(f.carrierPolicies, carrier)
+	f.mu.Unlock()
 	if f.materialize != nil {
 		return f.materialize(ids)
 	}
@@ -124,7 +138,14 @@ func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string,
 			out = append(out, store.MaterializedExecution{MonitorID: id, Reason: store.MaterializeSkippedCurrentState})
 			continue
 		}
-		out = append(out, store.MaterializedExecution{MonitorID: id, Job: dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV2}})
+		// The real materializer picks the job's carrier from the policy for its AUTHORITATIVE
+		// region, floor 2. A fake that ignored the policy would let a test pass while core emitted
+		// a generation the region cannot open.
+		generation := dispatch.ProtocolV2
+		if g := carrier[m.Region]; g > generation {
+			generation = g
+		}
+		out = append(out, store.MaterializedExecution{MonitorID: id, Job: dispatch.CheckJob{Monitor: m, ProtocolVersion: generation}})
 	}
 	return out, nil
 }
@@ -311,13 +332,30 @@ func (f *fakeStore) EnqueuePullJob(_ context.Context, _ string, _ []byte, _, lea
 }
 
 func (f *fakeStore) EnqueuePullJobV2(context.Context, string, []byte, int, int, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pullGenerations = append(f.pullGenerations, dispatch.ProtocolV2)
 	return nil
 }
 func (f *fakeStore) EnqueuePullJobV3(context.Context, string, []byte, int, int, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pullGenerations = append(f.pullGenerations, dispatch.ProtocolV3)
 	return nil
 }
-func (f *fakeStore) LiveCredentialReadyAgentRegions(context.Context, time.Duration, int) (map[string]bool, error) {
-	return map[string]bool{}, nil
+
+// LiveCredentialReadyAgentRegions mirrors the real predicate: a region is ready at a floor when a live
+// agent announced at least that envelope capability. Nothing announced by default.
+func (f *fakeStore) LiveCredentialReadyAgentRegions(_ context.Context, _ time.Duration, minCapability int) (map[string]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]bool{}
+	for region, capability := range f.agentEnvelopeCapability {
+		if capability >= minCapability {
+			out[region] = true
+		}
+	}
+	return out, nil
 }
 
 // canaryCapabilities is what the region's live agents announced (FR-029 invariant 6). nil means

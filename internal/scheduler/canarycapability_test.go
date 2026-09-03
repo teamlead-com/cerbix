@@ -237,3 +237,56 @@ func TestTheInProcessRunnerDoesNotSpeakForAPullServedRegion(t *testing.T) {
 		})
 	}
 }
+
+// Reviewer [102], the credential-side twin of the canary P1. role=all with `pull.regions: [core]`
+// raised core's carrier to generation 3 on the strength of its in-process runner — a runner that will
+// never see a core job, because a pull-served region is executed by its agents. A capability-1 agent
+// cannot claim a v3 row, so the credentialed monitor had no outcome at all until the row's TTL. The
+// correct answer is the carrier the region's agents can actually open: generation 2, claimable, an
+// ordinary probe. Both builder orders, because the rule lives at resolve time.
+func TestTheInProcessExecutorDoesNotRaiseAPullServedRegionsCarrier(t *testing.T) {
+	credentialed := domain.Monitor{
+		ID: "credentialed-core", Type: domain.MonitorPostgres, Target: "db:5432",
+		Region: "core", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
+	}
+	for name, build := range map[string]func(*fakeStore) *Scheduler{
+		"local then pull": func(fs *fakeStore) *Scheduler {
+			return New(fs, dispatch.NewInProc(2), testLogger()).WithCredentialEnvelopes(true).
+				WithLocalCredentialRegions("core").WithPullRegions([]string{"core"})
+		},
+		"pull then local": func(fs *fakeStore) *Scheduler {
+			return New(fs, dispatch.NewInProc(2), testLogger()).WithCredentialEnvelopes(true).
+				WithPullRegions([]string{"core"}).WithLocalCredentialRegions("core")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := &fakeStore{leader: true, monitors: []domain.Monitor{credentialed}}
+			// The only executor core actually has: a live agent that can open envelope v1 (carrier 2).
+			fs.agentEnvelopeCapability = map[string]int{"core": dispatch.EnvelopeV1}
+			s := build(fs)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go s.Run(ctx)
+
+			deadline := time.After(3 * time.Second)
+			for {
+				fs.mu.Lock()
+				generations := append([]int(nil), fs.pullGenerations...)
+				policies := len(fs.carrierPolicies)
+				fs.mu.Unlock()
+				if len(generations) > 0 {
+					if generations[0] != dispatch.ProtocolV2 {
+						t.Fatalf("core was handed a generation-%d pull row its capability-1 agent cannot claim", generations[0])
+					}
+					return
+				}
+				select {
+				case <-deadline:
+					t.Fatalf("no pull row was enqueued for the credentialed monitor (materializer called %d time(s))", policies)
+				case <-time.After(20 * time.Millisecond):
+				}
+			}
+		})
+	}
+}

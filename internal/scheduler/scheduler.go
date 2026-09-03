@@ -1532,6 +1532,16 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					}
 				}
 				for region := range s.localCredentialRegions {
+					// A pull-served region is executed by its AGENTS, never by this process, so the
+					// in-process executor is no evidence about it. Without this exclusion role=all with
+					// `pull.regions: [core]` raised core's carrier to generation 3 on the strength of a
+					// runner that will never see the job; a capability-1 agent could not claim the v3
+					// row, and the monitor had no outcome at all until the row's TTL. Same shape as
+					// the canary's [99], fixed at the same place: resolve time, so neither builder
+					// order nor configuration can restore it (reviewer [102]).
+					if s.pullRegions[region] {
+						continue
+					}
 					credentialReadyAMQP[region] = true
 					// A same-process executor IS this binary, so its capability is ours by
 					// construction — there is no wire and no version skew to discover. Without

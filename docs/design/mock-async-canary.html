@@ -1,0 +1,572 @@
+<title>Cerbix Async Canary Form</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). FR-028 adds
+   NO new colour. A binding is not a status, so it never borrows --up/--down: it is the accent
+   ("declared here" grammar), the same voice the secret inventory already speaks in. Refusals are
+   --down because they are refusals, and the withheld/unknown surfaces borrow --pending with the
+   dashed ring the earlier mocks gave to "deficient evidence". */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+a{color:var(--accent); text-decoration:none} a:hover{text-decoration:underline}
+
+.top{
+  position:sticky; top:0; z-index:20; height:56px; display:flex; align-items:center; gap:12px;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.brand{display:flex; align-items:center; gap:9px}
+.brand .wm{font-size:15px; font-weight:600; letter-spacing:-.01em}
+.top .spacer{flex:1}
+.tbtn{border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:12.5px; color:var(--ink-2); background:var(--surface)}
+.tbtn.on{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.screens{
+  position:sticky; top:56px; z-index:19; display:flex; gap:2px; overflow-x:auto;
+  padding:0 22px; border-bottom:1px solid var(--border); background:var(--surface);
+}
+.screens button{padding:10px 12px 9px; font-size:13px; color:var(--ink-3); border-bottom:2px solid transparent; white-space:nowrap}
+.screens button.on{color:var(--ink); border-bottom-color:var(--accent); font-weight:550}
+.screens .n{font-size:10.5px; color:var(--ink-3); margin-right:5px}
+
+.wrap{padding:22px; max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+.head h1{font-size:21px; font-weight:650; letter-spacing:-.015em}
+.head .sub{margin-top:3px; font-size:13px; color:var(--ink-3)}
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.card > header{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card > header h2{font-size:14px; font-weight:600}
+.card .body{padding:16px}
+.card .spacer{flex:1}
+.stack{display:flex; flex-direction:column; gap:14px}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:760px){.grid2{grid-template-columns:1fr}}
+
+.chip{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:11.5px; color:var(--ink-2); background:var(--surface)}
+.chip.mono{font-family:ui-monospace,Menlo,monospace; font-size:10.5px}
+.chip.acc{border-color:var(--accent); color:var(--accent); background:var(--accent-weak)}
+.chip.dorm{border-style:dashed; color:var(--ink-3)}
+.chip.downc{border-color:var(--down); color:var(--down); background:var(--down-weak)}
+.chip.warnc{border-color:var(--degraded); color:var(--degraded); background:var(--degraded-weak)}
+.chip.file{background:var(--inset)}
+
+/* A binding chip is the ONE new object this feature puts on screen: a name that stands for a
+   credential nobody in the browser ever holds. Accent, monospace, and always paired with the
+   inventory secret it resolves to — never shown alone, which is the mapping requirement. */
+.bind{display:inline-flex; align-items:center; gap:6px; border:1px solid var(--accent); border-radius:5px;
+  padding:2px 8px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--accent); background:var(--accent-weak)}
+.bind .k{opacity:.7}
+.arrow{color:var(--ink-3); font-size:12px}
+.sec{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border-strong); border-radius:5px;
+  padding:2px 8px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-2); background:var(--inset)}
+.sec svg{opacity:.65}
+
+.step{border:1px solid var(--border); border-radius:7px; background:var(--surface-2); padding:12px}
+.step + .step{margin-top:10px}
+.step .sh{display:flex; align-items:center; gap:9px}
+.step .num{display:grid; place-items:center; width:20px; height:20px; border-radius:50%; background:var(--accent-weak); color:var(--accent); font-size:11px; font-weight:650; flex:none}
+.frow{display:flex; align-items:center; gap:8px; margin-top:8px; flex-wrap:wrap}
+.inp{display:inline-flex; align-items:center; gap:8px; min-height:30px; border:1px solid var(--border); border-radius:6px;
+  padding:4px 10px; font-size:13px; background:var(--surface); color:var(--ink)}
+.inp.mono{font-family:ui-monospace,Menlo,monospace; font-size:12.5px}
+.inp.grow{flex:1; min-width:170px}
+.inp.err{border-color:var(--down); background:var(--down-weak)}
+.inp.ok{border-color:var(--accent)}
+.inp .ph{color:var(--ink-3)}
+.inp.sel::after{content:"⌄"; color:var(--ink-3); margin-left:auto}
+.inp.w38{width:38%; min-width:150px}
+.hint{font-size:12px; color:var(--ink-3)}
+.hint.bad{color:var(--down)}
+.hint.acc{color:var(--accent)}
+
+.btn{display:inline-flex; align-items:center; gap:6px; height:30px; border:1px solid var(--border); border-radius:6px; padding:0 12px; font-size:13px; color:var(--ink); background:var(--surface)}
+.btn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:550}
+.btn.sm{height:26px; font-size:12.5px; padding:0 10px}
+.btn.link{border:0; padding:0; height:auto; color:var(--accent); font-size:12.5px}
+.btn[disabled]{opacity:.5; cursor:not-allowed}
+
+.err{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--down); background:var(--down-weak); color:var(--down); border-radius:6px; padding:9px 12px; font-size:13px}
+.err b{font-weight:650}
+.warnb{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--degraded); background:var(--degraded-weak); color:var(--degraded); border-radius:6px; padding:9px 12px; font-size:13px}
+.info{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--border-strong); background:var(--surface-2); color:var(--ink-2); border-radius:6px; padding:9px 12px; font-size:13px}
+.info.dash{border-style:dashed}
+
+table.tbl{width:100%; border-collapse:collapse; font-size:13px}
+table.tbl th{text-align:left; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3); padding:9px 12px; border-bottom:1px solid var(--border); white-space:nowrap}
+table.tbl td{padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:middle}
+table.tbl tr:last-child td{border-bottom:0}
+.tblwrap{overflow-x:auto}
+
+pre.code{
+  margin:0; padding:12px 14px; border:1px solid var(--border); border-radius:6px; background:var(--inset);
+  font:12.5px/1.55 ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; color:var(--ink); overflow-x:auto;
+}
+pre.code .c{color:var(--ink-3)}
+pre.code .k{color:var(--accent)}
+
+.note{
+  border:1px dashed var(--note-border); border-left:3px solid var(--note);
+  background:var(--note-bg); border-radius:6px; padding:10px 12px; font-size:12.5px; color:var(--ink-2);
+  display:flex; gap:10px; align-items:flex-start;
+}
+.note .ref{flex:none; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--note); border:1px solid var(--note-border); border-radius:4px; padding:1px 6px; margin-top:1px; white-space:nowrap}
+.note b{color:var(--ink); font-weight:600}
+body.hide-notes .note{display:none}
+
+.foot{padding:18px 22px 36px; font-size:12px; color:var(--ink-3); max-width:1080px; margin:0 auto}
+.foot b{color:var(--ink-2)}
+</style>
+
+<header class="top">
+  <div class="brand">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/></svg>
+    <span class="wm mono">cerbix</span>
+  </div>
+  <span class="chip mono">FR-029 · async canary · phase F</span>
+  <div class="spacer"></div>
+  <button class="tbtn on" id="notesBtn" aria-pressed="true">Spec notes</button>
+  <button class="tbtn" id="themeBtn">Theme</button>
+</header>
+
+<nav class="screens" id="screens" aria-label="Mocked screens"></nav>
+<div class="wrap" id="view"></div>
+<footer class="foot">
+  FR-029 <b>phase F</b> · mock for the owner's approval BEFORE any frontend code · tokens verbatim from
+  <span class="mono">frontend/src/style.css</span> · behaviour follows
+  <span class="mono">docs/specs/func-async-canary.md</span> revision 8 (design APPROVED, D-0218) and the phases
+  already built (B–E). <b>A typed form only — there is no JSON editor on any screen, by contract.</b>
+</footer>
+
+<script>
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const note = (ref, html) => `<div class="note"><span class="ref">${esc(ref)}</span><div>${html}</div></div>`;
+const lock = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>`;
+/* Same mapping unit as the FR-028 mock the owner approved: a binding is NEVER shown alone. It is a
+   name standing for a credential the browser never holds, so it always appears beside the project
+   secret that fills it. FR-029 declares its bindings in one place (D3b) and every position below
+   refers to that one place. */
+const map = (b, secret) =>
+  `<span class="bind"><span class="k">binding</span>${esc(b)}</span><span class="arrow">→</span><span class="sec">${lock}${esc(secret)}</span>`;
+const sect = (n, title, sub, body, extra = "") => `
+  <div class="step">
+    <div class="sh"><span class="num">${n}</span><b>${esc(title)}</b>${extra}</div>
+    ${sub ? `<div class="hint" style="margin-top:4px">${sub}</div>` : ""}
+    ${body}
+  </div>`;
+
+/* ── 1. The form ──────────────────────────────────────────────────────────────────── */
+function sForm() {
+  return `
+  <div class="head">
+    <h1>New monitor · Async canary</h1>
+    <p class="sub">Charla · <span class="mono">async_canary</span> · one workflow kind,
+      <span class="mono">async_transaction_v1</span> — the five stages the executor already runs</p>
+  </div>
+
+  ${note("D3 · typed only", `<b>Every field below is typed and closed.</b> There is no <span class="mono">settings</span>
+    map, no JSON string and no free-form field anywhere on this screen — that is the whole point of the type. A key the
+    schema does not name is <span class="mono">unsupported_field</span>, and the form cannot produce one because there is
+    nowhere to type it.`)}
+
+  <div class="card">
+    <header><h2>Monitor</h2><div class="spacer"></div>
+      <span class="chip mono">region eu-probe</span></header>
+    <div class="body stack">
+      <div class="grid2">
+        <div><div class="lbl">Name</div><div class="frow"><div class="inp grow">Charla Files · upload journey</div></div></div>
+        <div><div class="lbl">Region</div><div class="frow"><div class="inp grow sel">eu-probe</div></div></div>
+      </div>
+      <div class="grid2">
+        <div><div class="lbl">Interval</div><div class="frow"><div class="inp mono w38">5m</div>
+          <span class="hint">must be ≥ timeout (D9) — a canary may not overlap itself</span></div></div>
+        <div><div class="lbl">Timeout</div><div class="frow"><div class="inp mono w38">5m</div>
+          <span class="hint">≤ 300s, the product's existing ceiling — no per-type limit (D2a)</span></div></div>
+      </div>
+      <div class="info dash">This type has no <b>target</b> field. A canary's address is the submit URL below, and the
+        form hides the field rather than asking for a value it would ignore.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <header><h2>Workflow · <span class="mono" style="font-weight:500">async_transaction_v1</span></h2>
+      <div class="spacer"></div><span class="chip">5 stages</span></header>
+    <div class="body">
+
+      ${sect(0, "Secrets", `Declared <b>once</b> (D3b). Every position below refers to a binding by name; the project
+        secret is named here and nowhere else, so a rename or a rotation touches one row.`, `
+        <div class="tblwrap"><table class="tbl">
+          <thead><tr><th>Binding</th><th>Project secret</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>${map("upload", "charla-upload-token")}</td>
+                <td class="hint">used by <span class="mono">submit.headers[authorization]</span>,
+                  <span class="mono">completion.headers[authorization]</span></td>
+                <td style="text-align:right"><button class="btn link">Remove</button></td></tr>
+          </tbody>
+        </table></div>
+        <div class="frow"><button class="btn sm">+ Declare a binding</button></div>`)}
+
+      ${sect(1, "Submit", "", `
+        <div class="frow">
+          <div class="inp sel w38">multipart_fixture</div>
+          <div class="inp mono" style="width:90px">POST</div>
+          <div class="inp grow mono">https://files.example.com/files/upload</div>
+        </div>
+        <div class="frow">
+          <div><div class="lbl">Submit timeout</div><div class="inp mono" style="width:110px">30s</div></div>
+          <div><div class="lbl">Accepted status</div><div class="inp mono" style="width:110px">202</div></div>
+          <div><div class="lbl">Fixture</div><div class="inp sel mono" style="width:190px">small_wav_v1</div></div>
+        </div>
+        <div class="hint" style="margin-top:6px">Accepted status is a 2xx set (D3d). The fixture is a registry key with a
+          pinned SHA-256 — never an upload, never a path (D11).</div>
+
+        <div class="lbl" style="margin-top:12px">Headers</div>
+        <div class="tblwrap"><table class="tbl">
+          <thead><tr><th style="width:34%">Name</th><th>Value</th><th></th></tr></thead>
+          <tbody>
+            <tr><td><span class="chip mono">authorization</span>
+                    <span class="chip warnc" style="margin-left:6px">credential-bearing</span></td>
+                <td>${map("upload", "charla-upload-token")}</td>
+                <td style="text-align:right"><button class="btn link">Remove</button></td></tr>
+            <tr><td><span class="chip mono">x-tenant</span></td>
+                <td><div class="inp mono" style="max-width:220px">canary</div></td>
+                <td style="text-align:right"><button class="btn link">Remove</button></td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="lbl" style="margin-top:12px">Multipart</div>
+        <div class="frow">
+          <div><div class="hint">file field</div><div class="inp mono" style="width:120px">file</div></div>
+          <div><div class="hint">only_audio</div><div class="inp sel" style="width:110px">false</div></div>
+          <button class="btn sm">+ Field</button>
+        </div>`)}
+
+      ${sect(2, "Correlate", "", `
+        <div class="frow">
+          <div class="inp sel w38">response_json</div>
+          <div class="inp grow mono">task_id</div>
+        </div>
+        <div class="hint" style="margin-top:6px">The path uses the restricted grammar of D5 — dotted keys and numeric
+          indices, no expressions. <span class="mono">response_header</span> swaps this field for a header name.</div>`)}
+
+      ${sect(3, "Completion", "", `
+        <div class="frow">
+          <div class="inp sel w38">sse</div>
+          <div class="inp grow mono">https://files.example.com/tasks/<span style="color:var(--accent)">{{ correlation_id }}</span>/events</div>
+        </div>
+        <div class="frow">
+          <div><div class="lbl">Timeout</div><div class="inp mono" style="width:110px">5m</div></div>
+          <span class="hint">≤ the monitor's timeout</span>
+        </div>
+        <div class="lbl" style="margin-top:12px">Headers <span style="text-transform:none; font-weight:400; letter-spacing:0">— completion never inherits submit's (D3c)</span></div>
+        <div class="tblwrap"><table class="tbl">
+          <tbody><tr><td style="width:34%"><span class="chip mono">authorization</span></td>
+            <td>${map("upload", "charla-upload-token")}</td>
+            <td style="text-align:right"><button class="btn link">Remove</button></td></tr></tbody>
+        </table></div>
+        <div class="lbl" style="margin-top:12px">SSE</div>
+        <div class="frow">
+          <div><div class="hint">success event</div><div class="inp mono" style="width:160px">task.completed</div></div>
+          <div><div class="hint">failure events</div><div class="inp mono" style="width:160px">task.failed</div></div>
+        </div>
+        <div class="frow">
+          <div style="flex:1"><div class="hint">required JSON fields</div>
+            <div class="frow"><span class="chip mono">s3_path</span><span class="chip mono">byte_size</span>
+              <span class="chip mono">media_type</span><button class="btn sm">+ Field</button></div></div>
+        </div>`)}
+
+      ${sect(4, "Result", "", `
+        <div class="frow">
+          <div><div class="lbl">Max latency</div><div class="inp mono" style="width:110px">4m</div></div>
+          <span class="hint">the <b>promise</b>; the monitor timeout is the limit</span>
+        </div>
+        <div class="frow">
+          <div style="flex:1"><div class="hint">required JSON fields</div>
+            <div class="frow"><span class="chip mono">s3_path</span><span class="chip mono">byte_size</span>
+              <span class="chip mono">media_type</span></div></div>
+          <div><div class="hint">lifecycle path</div><div class="inp mono" style="width:140px">s3_path</div></div>
+        </div>`)}
+
+      ${sect(5, "Cleanup", "", `
+        <div class="frow">
+          <div class="inp sel w38">lifecycle_prefix</div>
+          <div class="inp mono grow">canary/</div>
+        </div>
+        <div class="info dash" style="margin-top:8px">Validation only. cerbix has no rights on the object store and
+          <b>never deletes what it did not create</b> — this checks that the returned path begins with the prefix.
+          Reaping is the operator's policy on the target side.</div>`)}
+
+    </div>
+  </div>
+
+  <div class="card"><div class="body frow" style="justify-content:flex-end">
+    <span class="hint" style="margin-right:auto">Save first — a canary is tested by running it, and it runs from its
+      region.</span>
+    <button class="btn">Cancel</button><button class="btn pri">Create monitor</button>
+  </div></div>`;
+}
+
+/* ── 2. Refusals ──────────────────────────────────────────────────────────────────── */
+function sRefusals() {
+  return `
+  <div class="head">
+    <h1>Refusals, where they belong</h1>
+    <p class="sub">Every rule shown here is the SERVER's rule from <span class="mono">internal/domain/canary.go</span>.
+      The form invents none of its own.</p>
+  </div>
+
+  ${note("D7", `<b>A credential-bearing header offers a binding and nothing else.</b> Ten header names are frozen in
+    <span class="mono">CanaryCredentialHeaders</span>; typing one of them replaces the value input with the binding
+    picker. This is a rule about the header NAME, never about the value — cerbix cannot detect a credential by
+    looking at a string, and pretending otherwise would be the one dishonest thing on this screen.`)}
+
+  <div class="card"><header><h2>A literal in a credential-bearing header</h2></header><div class="body stack">
+    <div class="tblwrap"><table class="tbl">
+      <tbody><tr><td style="width:34%"><span class="chip mono">authorization</span>
+          <span class="chip warnc" style="margin-left:6px">credential-bearing</span></td>
+        <td><div class="inp mono err" style="max-width:280px">Bearer sk-EXAMPLE-not-a-real-token</div></td></tr></tbody>
+    </table></div>
+    <div class="err"><b>Refused.</b> <span>A credential-bearing header carries a binding, never a value. Declare the
+      secret in the project inventory and reference it by binding name — the value never reaches the browser, the
+      bundle, or the stored document.</span></div>
+    <div class="frow"><span class="hint">The control offers the fix, not just the complaint:</span>
+      <div class="inp sel mono" style="width:200px"><span class="ph">choose a binding…</span></div>
+      <button class="btn sm">+ Declare a new binding</button></div>
+  </div></div>
+
+  <div class="card"><header><h2>The correlation id, only where it means something</h2></header><div class="body stack">
+    <div><div class="lbl">Submit URL</div>
+      <div class="frow"><div class="inp grow mono err">https://files.example.com/files/<span style="color:var(--down)">{{ correlation_id }}</span>/upload</div></div></div>
+    <div class="err"><b>Refused.</b> <span><span class="mono">{{ correlation_id }}</span> is only legal in the
+      completion URL. Nothing has produced a correlation id yet at submit time — a placeholder here would substitute
+      an empty string and call an address nobody meant.</span></div>
+    ${note("D4", `The completion URL is the ONE position that accepts it, the id is bounded and percent-encoded into a
+      single path segment, and it never appears in a log, a heartbeat or a metric label.`)}
+  </div></div>
+
+  <div class="card"><header><h2>A binding on a different host</h2></header><div class="body stack">
+    <div><div class="lbl">Completion URL</div>
+      <div class="frow"><div class="inp grow mono">https://events.<b>other</b>.example.com/tasks/{{ correlation_id }}/events</div></div></div>
+    <div class="tblwrap"><table class="tbl"><tbody><tr>
+      <td style="width:34%"><span class="chip mono">authorization</span></td>
+      <td>${map("upload", "charla-upload-token")}</td></tr></tbody></table></div>
+    <div class="err"><b>Refused.</b> <span>A completion header may carry a binding only when the completion host equals
+      the submit host (D3c1). Sending the submit credential to a different origin is the mistake this rule exists to
+      make impossible — and on a cross-host <b>redirect</b> the executor drops every binding-backed header, which
+      <span class="mono">net/http</span> would not do for anything but <span class="mono">Authorization</span>.</span></div>
+  </div></div>
+
+  <div class="card"><header><h2>Bounds, stated at the field</h2></header><div class="body stack">
+    <div class="frow">
+      <div><div class="lbl">Interval</div><div class="inp mono err" style="width:110px">1m</div></div>
+      <div><div class="lbl">Timeout</div><div class="inp mono" style="width:110px">5m</div></div>
+    </div>
+    <div class="err"><b>Interval must be at least the timeout.</b> <span>A canary that starts again before the last one
+      finished would be refused at dispatch by the in-flight lease and report <span class="mono">already_in_flight</span>
+      forever. The form says so where the number is typed, not after the first DOWN.</span></div>
+    <div class="info">Every other bound reads the same way: the completion timeout may not exceed the monitor's,
+      <span class="mono">poll interval × max_attempts</span> may not exceed the completion timeout, and
+      <span class="mono">max_latency</span> is a promise inside the limit. <b>The hint is present before the value is
+      wrong</b> — the bound is written under the field from the moment the form opens.</div>
+  </div></div>
+
+  <div class="card"><header><h2>A private or non-HTTPS address</h2></header><div class="body stack">
+    <div class="frow"><div class="inp grow mono err">http://10.0.0.5/files/upload</div></div>
+    <div class="err"><b>Refused.</b> <span>HTTPS only, and a canary may not address a loopback, link-local, private or
+      metadata endpoint — in v1 there is no setting that relaxes it. The executor enforces the same rule again at run
+      time against the RESOLVED address, so a name that points inward is refused there too.</span></div>
+  </div></div>`;
+}
+
+/* ── 3. What a run reports ────────────────────────────────────────────────────────── */
+function sRun() {
+  return `
+  <div class="head">
+    <h1>Charla Files · upload journey</h1>
+    <p class="sub">Monitor detail · what a canary is allowed to tell you</p>
+  </div>
+
+  ${note("§8 · threat model", `<b>Nothing on this screen carries a URL, a correlation id, a secret or an object path.</b>
+    A failed canary names the STAGE it failed in and a bounded code class, and that is the whole vocabulary. The
+    operator who needs more looks at the target's own logs, where the request actually is.`)}
+
+  <div class="card">
+    <header><h2>Status</h2><div class="spacer"></div>
+      <span class="chip downc">DOWN</span><span class="chip mono">eu-probe</span></header>
+    <div class="body stack">
+      <div class="tblwrap"><table class="tbl">
+        <thead><tr><th>When</th><th>Result</th><th>Stage</th><th>Class</th><th>Latency</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">14:35:02</td><td><span class="chip downc">down</span></td>
+              <td><span class="chip mono">await_result</span></td><td><span class="chip mono">timeout</span></td><td class="mono">5m 00s</td></tr>
+          <tr><td class="mono">14:30:02</td><td><span class="chip downc">down</span></td>
+              <td><span class="chip mono">assert_result</span></td><td><span class="chip mono">missing_field</span></td><td class="mono">42.8s</td></tr>
+          <tr><td class="mono">14:25:02</td><td><span class="chip">up</span></td>
+              <td class="hint">—</td><td class="hint">—</td><td class="mono">38.1s</td></tr>
+          <tr><td class="mono">14:20:02</td><td><span class="chip downc">down</span></td>
+              <td><span class="chip mono">submit</span></td><td><span class="chip mono">status_4xx</span></td><td class="mono">0.9s</td></tr>
+        </tbody>
+      </table></div>
+      <div class="info dash">The five stages are <span class="mono">submit</span> · <span class="mono">correlate</span> ·
+        <span class="mono">await_result</span> · <span class="mono">assert_result</span> ·
+        <span class="mono">cleanup_validation</span>. A refused DISPATCH is an ordinary DOWN with its own bounded
+        reason — <span class="mono">region_saturated</span>, <span class="mono">already_in_flight</span>,
+        <span class="mono">no_capable_runner</span> — and counts as unavailable in the SLI like any other DOWN.</div>
+    </div>
+  </div>
+
+  <div class="card"><header><h2>Workflow</h2><div class="spacer"></div>
+    <button class="btn sm">Edit</button></header><div class="body stack">
+    <div class="grid2">
+      <div><div class="lbl">Kind</div><div class="mono">async_transaction_v1</div></div>
+      <div><div class="lbl">Execution revision</div><div class="mono">7 · hash 4f2a…c19b</div></div>
+    </div>
+    ${note("D3g", `The hash moves when the workflow's MEANING changes and stands still when a project secret is
+      rotated — bindings hash by NAME. An operator who rotates a credential does not get a new revision, and an
+      operator who changes a URL does.`)}
+    <div class="info">The stored document is one canonical string. This panel renders it as the same typed sections the
+      form uses — <b>there is no JSON view to fall back to</b>, because a view that shows the document as text is a
+      view someone will edit as text.</div>
+  </div></div>`;
+}
+
+/* ── 4. File-owned ────────────────────────────────────────────────────────────────── */
+function sFile() {
+  return `
+  <div class="head">
+    <h1>Canaries live in bundles first</h1>
+    <p class="sub">Monitoring-as-Code is FR-029's first surface; the form is the second</p>
+  </div>
+
+  ${note("MaC-first", `The type was admitted to <span class="mono">fileSupportedTypes</span> in phase E, and a bundle is
+    where a canary is expected to live. A file-owned monitor is READ-ONLY in the SPA — the same rule every other type
+    already follows — so this screen shows the workflow rendered, with the editor closed and the reason named.`)}
+
+  <div class="card">
+    <header><h2>Charla Files · upload journey</h2><div class="spacer"></div>
+      <span class="chip file mono">file-owned · charla/canaries.yaml</span></header>
+    <div class="body stack">
+      <div class="warnb"><b>Managed by a file provider.</b> <span>Edit the bundle and let the provider reconcile.
+        Changing it here would be overwritten at the next apply, so the form is not offered.</span></div>
+      <div class="tblwrap"><table class="tbl">
+        <tbody>
+          <tr><th style="width:26%">Submit</th><td class="mono">multipart_fixture · POST · files.example.com</td></tr>
+          <tr><th>Correlate</th><td class="mono">response_json · task_id</td></tr>
+          <tr><th>Completion</th><td class="mono">sse · task.completed</td></tr>
+          <tr><th>Result</th><td class="mono">s3_path, byte_size, media_type · max_latency 4m</td></tr>
+          <tr><th>Cleanup</th><td class="mono">lifecycle_prefix · canary/</td></tr>
+          <tr><th>Bindings</th><td>${map("upload", "charla-upload-token")}</td></tr>
+        </tbody>
+      </table></div>
+      <div class="info dash">Host names appear; full URLs do not. The bundle is the document that holds them, and it is
+        readable by whoever can read the provider — this panel is not the place to widen that.</div>
+    </div>
+  </div>
+
+  <div class="card"><header><h2>What the form writes</h2></header><div class="body stack">
+    <div class="hint">Creating a canary here produces exactly the bundle shape, so a monitor built in the UI can be
+      exported into a file and a monitor in a file reads the same in the UI. The secrets map is INPUT only — the stored
+      document keeps the binding markers and no project-secret name at all.</div>
+    <pre class="code"><span class="c"># the same document, either way in</span>
+workflow:
+  kind: async_transaction_v1
+  <span class="k">secrets:</span>
+    upload: charla-upload-token   <span class="c"># input only — projected to canary_secret_upload_ref</span>
+  submit:
+    kind: multipart_fixture
+    headers:
+      - name: authorization
+        <span class="k">secret_ref: upload</span>   <span class="c"># the binding, never the secret name</span></pre>
+  </div></div>`;
+}
+
+const SCREENS = [
+  ["form", "The typed form", sForm],
+  ["refusals", "Refusals", sRefusals],
+  ["run", "What a run reports", sRun],
+  ["file", "Bundles first", sFile],
+];
+let active = "form";
+const nav = document.getElementById("screens");
+const view = document.getElementById("view");
+nav.innerHTML = SCREENS.map(([k, t], i) =>
+  `<button data-k="${k}" class="${k === active ? "on" : ""}"><span class="n">${i + 1}</span>${esc(t)}</button>`).join("");
+function render() {
+  const [, , fn] = SCREENS.find(([k]) => k === active);
+  view.innerHTML = fn();
+  nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.k === active));
+  window.scrollTo(0, 0);
+}
+nav.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-k]");
+  if (!b) return;
+  active = b.dataset.k;
+  render();
+});
+document.getElementById("themeBtn").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = getComputedStyle(root).getPropertyValue("--bg").trim() === "#0b0b0f";
+  root.setAttribute("data-theme", dark ? "light" : "dark");
+});
+const notesBtn = document.getElementById("notesBtn");
+notesBtn.addEventListener("click", () => {
+  const off = document.body.classList.toggle("hide-notes");
+  notesBtn.classList.toggle("on", !off);
+  notesBtn.setAttribute("aria-pressed", String(!off));
+});
+render();
+</script>

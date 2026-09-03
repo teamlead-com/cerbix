@@ -7,6 +7,48 @@ test.describe("monitors", () => {
     await cleanupMonitors(page, projectID);
   });
 
+  // FR-030 (D-0234): a monitor says what it is for. Created through the API with a description, it shows
+  // under its name on /monitors and in full on its page; one created without shows no description element
+  // anywhere — the compatibility promise, asserted rather than assumed.
+  test("a monitor's description is shown on the list and the detail, and absent when it has none", async ({ page }) => {
+    const { projectID } = await firstProject(page);
+    const described = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+      name: "e2e-described", type: "tcp", target: "localhost:5432", region: "core",
+      interval_seconds: 30, timeout_seconds: 5,
+      description: "Confirms the payment provider can reach our callback URL; a DOWN here means paid orders stay pending.",
+    });
+    expect(described.status(), await described.text()).toBe(201);
+    const withDesc = await described.json();
+    expect(withDesc.description).toContain("Confirms the payment provider");
+    const bare = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+      name: "e2e-undescribed", type: "tcp", target: "localhost:5432", region: "core", interval_seconds: 30, timeout_seconds: 5,
+    });
+    expect(bare.status(), await bare.text()).toBe(201);
+    const withoutDesc = await bare.json();
+    expect(withoutDesc.description, "omitted means empty, not null").toBe("");
+
+    // 201 code points are refused with the field named.
+    const tooLong = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+      name: "e2e-too-long", type: "tcp", target: "localhost:5432", region: "core", interval_seconds: 30, timeout_seconds: 5,
+      description: "я".repeat(201),
+    });
+    expect(tooLong.status()).toBe(400);
+    expect(await tooLong.text()).toContain("description");
+
+    await page.goto("/monitors");
+    const rowWith = page.locator("tr", { hasText: "e2e-described" });
+    await expect(rowWith.locator('[data-testid="monitor-description"]')).toContainText("Confirms the payment provider");
+    const rowWithout = page.locator("tr", { hasText: "e2e-undescribed" });
+    await expect(rowWithout).toBeVisible();
+    await expect(rowWithout.locator('[data-testid="monitor-description"]')).toHaveCount(0);
+
+    await page.goto(`/monitors/${withDesc.id}`);
+    await expect(page.locator('[data-testid="monitor-description"]')).toContainText("paid orders stay pending");
+    await page.goto(`/monitors/${withoutDesc.id}`);
+    await expect(page.locator("h1", { hasText: "e2e-undescribed" })).toBeVisible();
+    await expect(page.locator('[data-testid="monitor-description"]')).toHaveCount(0);
+  });
+
   test("http monitor: create, detail card, pause, delete", async ({ page }) => {
     const { projectID } = await firstProject(page);
     const r = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {

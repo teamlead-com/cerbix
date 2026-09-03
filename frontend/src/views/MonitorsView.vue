@@ -189,6 +189,9 @@ watch(() => ws.projectId, load);
                   file
                 </span>
                 <span v-for="t in m.tags || []" :key="t" class="ml-[6px] rounded-full bg-inset px-[7px] py-px font-mono text-[10.5px] text-ink-3">{{ t }}</span>
+                <!-- FR-030: one line under the name, cut with an ellipsis, the whole text in the tooltip.
+                     Absent for a monitor without one — no empty line, no change in row height. -->
+                <span v-if="m.description" class="mt-[2px] block max-w-[56ch] truncate text-[12.5px] leading-[1.4] text-ink-2" :title="m.description" data-testid="monitor-description">{{ m.description }}</span>
               </td>
               <td class="border-b border-border px-4 py-[11px]">
                 <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ m.type }}</span>

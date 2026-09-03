@@ -6535,3 +6535,37 @@ remembered to extend the list — the hand count in another form, which is exact
 remove. The enumeration now globs every non-test `canary*.go` in the package directory, fails if the glob
 finds none, and `TestTheBoundEnumerationSeesAnUnlistedCanaryFile` proves it against a COPY of the
 directory carrying a `canary_phantom.go` that exists nowhere in the tree.
+
+## D-0234 — a monitor says what it is for: an optional 200-character description (2026-09-03)
+
+**Context.** The owner: "a stranger who comes to look may not understand a monitor's purpose from its
+name alone." One optional field, with a limit, shown wherever monitors are listed, and nothing about
+existing monitors may break. The mock (`docs/design/mock-monitor-description.html`) was approved with
+two answers — the limit is 200, search does not match on it — and this record fixes the rest.
+Specification: `docs/specs/func-monitor-description.md` (FR-030).
+
+**Decisions.**
+
+1. **200 characters, counted as code points on both sides**, asserted against one fixture so the form
+   and the server cannot disagree — the exact drift the canary form paid three review rounds for
+   (D-0227…D-0230). A named constant, `domain.MaxMonitorDescriptionRunes`.
+2. **Empty is the default and means "none".** `NOT NULL DEFAULT ''`; omitted on create is empty, omitted
+   on update is unchanged, `""` on update clears; whitespace is trimmed. Every existing monitor reads
+   back empty and every surface renders as before when it is empty — no placeholder, no empty line, no
+   change in row or card height. That is the whole compatibility promise, and a test per surface holds
+   it.
+3. **Where it appears is decided by how much room there is to read it**: a second line under the name on
+   `/monitors` (one line, ellipsis, full text as tooltip — not a sixth column); the beginning of a line on
+   a dashboard panel, cut by the panel's own width in CSS so the grid keeps its shape; the whole text on
+   the monitor page; a textarea with a live `n / 200` count on the form, with the refusal met at the
+   field and Create/Save disabled while over.
+4. **Where it does not appear is named**: public status pages (internal wording), notifications (their
+   payload is a separate decision), search (the owner's answer), service pages and incident chips (one
+   click away). An absence that is written down is a decision; one that is not is an oversight.
+5. **A bundle owns the field like every other**: `description` is an optional key with the same bound; a
+   bundle without it declares "none"; a change to it alone is a change (the canonical hash covers it);
+   removing the key clears it. The first draft of this point said "re-applying over a UI-set description
+   clears it" — a scenario the product cannot produce, because a file-managed monitor refuses UI and API
+   writes (`ErrManagedByFile`). The test found that; the record says what is true instead.
+6. **A description change is a monitor update** and audits as one (D-0233); its text never reaches the
+   audit target.

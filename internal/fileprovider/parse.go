@@ -41,7 +41,10 @@ type rawBundle struct {
 // Unknown keys (including any server-owned field like id/status/execution_revision) are
 // rejected by the decoder's KnownFields(true) — no field for them exists here.
 type rawMonitor struct {
-	Name             string            `yaml:"name"`
+	Name string `yaml:"name"`
+	// Description is FR-030's optional field, bounded like everywhere else; a bundle without the key
+	// declares "no description", and the bundle owns the field like every other (D-0234 D5).
+	Description      string            `yaml:"description"`
 	Type             string            `yaml:"type"`
 	Target           string            `yaml:"target"`
 	Method           string            `yaml:"method"`
@@ -466,6 +469,7 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 
 	m := domain.Monitor{
 		Name:         strings.TrimSpace(rm.Name),
+		Description:  strings.TrimSpace(rm.Description),
 		Type:         typ,
 		Target:       strings.TrimSpace(rm.Target),
 		Method:       orDefault(rm.Method, fmtDefaultMethod),

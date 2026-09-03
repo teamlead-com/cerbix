@@ -40,6 +40,9 @@ const budgetMeter = () => {
       </span>
       <StatusPill class="ml-auto" :status="statusFor()" />
     </div>
+    <!-- FR-030: the BEGINNING of the description, one line, cut by the panel's own width so the grid
+         keeps its shape; absent for a monitor without one, so the card keeps today's height. -->
+    <div v-if="monitor.description" class="-mt-[6px] truncate text-[12px] leading-[1.35] text-ink-3" :title="monitor.description" data-testid="monitor-description">{{ monitor.description }}</div>
 
     <UptimeBar v-if="segments && segments.length" :segments="segments" :height="26" />
 

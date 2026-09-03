@@ -3,7 +3,9 @@
 Self-hosted, multi-tenant service reliability platform (D-0174): organization → project →
 service, with monitors beside services as the checks that feed them. A Service declares what
 its reliability MEANS in versioned definitions; cerbix measures that from its own checks and
-drives the response. A single Go binary runs in different roles,
+drives the response. A monitor carries an optional `description` — at most 200 characters, shown
+under its name on the monitor list, on its dashboard panel and on its own page — because a name
+alone rarely tells a colleague what the check is FOR (FR-030). A single Go binary runs in different roles,
 scales horizontally via RabbitMQ, stores data in Postgres (+TimescaleDB),
 authenticates via OIDC (Keycloak) and/or local passwords, and serves an SPA (Vue 3).
 

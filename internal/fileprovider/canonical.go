@@ -22,6 +22,7 @@ import (
 type canonicalMonitor struct {
 	UID              string            `json:"uid"`
 	Name             string            `json:"name"`
+	Description      string            `json:"description,omitempty"` // FR-030: a bundle-owned field, so it moves the hash
 	Type             string            `json:"type"`
 	Target           string            `json:"target"`
 	Method           string            `json:"method"`
@@ -51,6 +52,7 @@ func canonicalHash(uid string, m domain.Monitor) string {
 	cm := canonicalMonitor{
 		UID:              uid,
 		Name:             m.Name,
+		Description:      m.Description,
 		Type:             string(m.Type),
 		Target:           m.Target,
 		Method:           m.Method,

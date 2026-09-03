@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // MonitorType is the kind of check a monitor performs.
@@ -93,6 +94,10 @@ type Monitor struct {
 	ID        string `json:"id"`
 	ProjectID string `json:"project_id"`
 	Name      string `json:"name"`
+	// Description is what the monitor is FOR, for the reader who did not create it (FR-030, D-0234).
+	// Optional, plain text, at most MaxMonitorDescriptionRunes code points; empty means none, and every
+	// surface renders exactly as before when it is empty.
+	Description string `json:"description"`
 	// Slug is project-unique and IMMUTABLE: the MaC reference key a service names a monitor
 	// by, and the one identifier that is stable enough to put in a file. Renaming the
 	// display name never changes it — making it renameable would turn it into a guarded
@@ -187,10 +192,18 @@ func (m Monitor) InConfirmPhase() bool {
 		m.ConsecutiveFailures > 0 && m.ConsecutiveFailures < m.FailureThreshold
 }
 
+// MaxMonitorDescriptionRunes bounds Monitor.Description, counted as Unicode code points — the same
+// count the form makes with `[...s].length` — so a Cyrillic sentence is as long as a Latin one to the
+// person writing it. Set by the owner (200) with the approved mock, D-0234.
+const MaxMonitorDescriptionRunes = 200
+
 // Validate enforces monitor invariants (domain-owned).
 func (m Monitor) Validate() error {
 	if strings.TrimSpace(m.Name) == "" {
 		return fmt.Errorf("monitor: name is required")
+	}
+	if n := utf8.RuneCountInString(strings.TrimSpace(m.Description)); n > MaxMonitorDescriptionRunes {
+		return fmt.Errorf("monitor: description is %d characters, the limit is %d", n, MaxMonitorDescriptionRunes)
 	}
 	if m.ProjectID == "" {
 		return fmt.Errorf("monitor: project_id is required")
@@ -484,6 +497,8 @@ func (m Monitor) WithoutPushToken() Monitor {
 // an HTTP monitor defaults to (and upper-cases) GET; non-HTTP monitors carry no
 // method; grace applies only to push monitors.
 func (m *Monitor) Normalize() {
+	// FR-030 D2: whitespace is trimmed and a whitespace-only description is no description.
+	m.Description = strings.TrimSpace(m.Description)
 	// FR-029 D3e: the stored workflow is ONE CANONICAL string, and canonicalization belongs to the
 	// server on every write surface — not to each client.
 	//

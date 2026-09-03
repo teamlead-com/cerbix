@@ -4797,6 +4797,7 @@ components:
         id: { type: string, format: uuid }
         project_id: { type: string, format: uuid }
         name: { type: string }
+        description: { type: string, maxLength: 200, description: 'What the monitor is for, for a reader who did not create it (FR-030). Optional; at most 200 characters counted as Unicode code points; empty means none. Shown on the monitor list, dashboard panels and the monitor page; not on public status pages or in notifications.' }
         slug:
           type: string
           pattern: '^[a-z][a-z0-9-]{0,62}$'
@@ -4892,6 +4893,7 @@ components:
       required: [name, type]
       properties:
         name: { type: string }
+        description: { type: string, maxLength: 200, description: 'Optional, at most 200 characters (code points); omitted means none; whitespace is trimmed.' }
         type: { type: string, enum: [http, tcp, icmp, dns, tls, grpc, composite, postgres, mysql, redis, promql, rabbitmq, websocket, ssh, synthetic, async_canary, push] }
         target: { type: string }
         method: { type: string, enum: [GET, POST, HEAD, PUT, DELETE], description: 'HTTP request method; defaults to GET.' }
@@ -4921,6 +4923,7 @@ components:
       description: Partial update; omitted fields are unchanged. Type is immutable.
       properties:
         name: { type: string }
+        description: { type: string, maxLength: 200, description: 'Optional; omitted leaves it unchanged, "" clears it; at most 200 characters (code points).' }
         target: { type: string }
         method: { type: string, enum: [GET, POST, HEAD, PUT, DELETE] }
         interval_seconds: { type: integer }

@@ -390,6 +390,8 @@ watch(
               superseded by {{ successorName || "a service" }}
             </span>
           </div>
+          <!-- FR-030: the whole description, where there is room to read it. -->
+          <p v-if="monitor.description" class="mt-[6px] max-w-[65ch] text-[13.5px] leading-[1.5] text-ink-2" data-testid="monitor-description">{{ monitor.description }}</p>
           <!-- WHICH signals are delegated and which are not, because they are delegated apart:
                a monitor whose DOWN transitions are covered while its own budget alerts are not is
                the ordinary case, and "delegated" without saying which would be worse than silence. -->

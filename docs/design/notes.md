@@ -560,3 +560,30 @@ of the leak was in fixtures. Verified by planting a file and watching the gate f
 The one thing the owner did not ask to change, left as drawn: the submit stage is the only one long
 enough to want collapsing, and all five stay expanded — a canary is read end to end far more often than
 it is edited, and a collapsed stage is where a wrong bound hides.
+
+## Monitor description (FR-030) — `mock-monitor-description.html`
+
+Mock produced BEFORE any frontend code, per the process gate in CLAUDE.md. The owner's brief was one
+paragraph: a stranger cannot tell a monitor's purpose from its name; add a bounded description and show
+it where monitors are listed, without breaking existing monitors.
+
+- **A second line under the name on `/monitors`, not a sixth column** — the table is five wide and a
+  description belongs to the name it explains. One line, ellipsis, the full text as the cell's tooltip.
+- **The beginning of the description on a dashboard panel**, cut by the panel's own width in CSS, so no
+  card grows taller than its neighbours and the grid keeps its shape; quieter than the name (`--ink-3`).
+- **The whole text on the monitor page**, between the title row and the target line, at a readable
+  measure.
+- **A textarea under Name with a live `n / 200` count**; over the limit the count turns `--down`, the
+  message says what to do, and Create/Save stays disabled. The refusal is met at the field, as every
+  refusal in this form is.
+- **A monitor with no description renders exactly as today on every surface** — no placeholder, no empty
+  line, no height change. That is the compatibility promise, drawn as the third row and third card.
+- **Named as deliberately absent:** public status pages, notifications, search results, service pages
+  and incident chips.
+- No new colour: prose about a monitor speaks in `--ink-2`/`--ink-3` and never borrows a status colour.
+
+### APPROVED by the owner, 2026-09-03
+
+Approved as drawn, with the two open questions answered: **the limit is 200 characters** and **search
+does not match on the description**. Decision record D-0234; specification
+`docs/specs/func-monitor-description.md`.

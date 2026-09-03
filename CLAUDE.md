@@ -32,9 +32,18 @@ Test DB discipline:
 ### Frontend (from `frontend/`) — no local node; use docker
 
 ```bash
-docker run --rm -v "$PWD":/app -w /app node:22-alpine sh -c "npm run build"   # vue-tsc + vite (run-p type-check build-only)
+# `--user` is not optional. Without it the container writes dist/ and node_modules/ as ROOT, and the
+# next `make spa-snapshot` dies with `EACCES ... unlink '/app/dist/assets/...'`, because its own
+# `npm ci` cannot delete what root wrote. `npm_config_cache` goes with it: a non-root uid has no
+# writable HOME in this image, and npm fails on its default cache path.
+docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/.npm -v "$PWD":/app -w /app node:22-alpine sh -c "npm run build"   # vue-tsc + vite (run-p type-check build-only)
 # After ANY openapi.yaml change — regenerate the TS schema:
-docker run --rm -v "$PWD":/app -v "$PWD/../openapi.yaml":/openapi.yaml -w /app node:22-alpine npm run gen:api
+docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/.npm -v "$PWD":/app -v "$PWD/../openapi.yaml":/openapi.yaml -w /app node:22-alpine npm run gen:api
+
+# If a tree was ALREADY built as root, one cleanup is needed before either command (or before
+# `make spa-snapshot`) can work. The ids MUST expand on the host — inside `sh -c '...'` they would
+# expand in the container, where `id -u` is 0, and the chown would hand the tree back to root:
+docker run --rm -v "$PWD":/app alpine chown -R "$(id -u):$(id -g)" /app/dist /app/node_modules
 ```
 
 **After ANY frontend change, from the repo root: `make spa-snapshot`.** The Docker image builds

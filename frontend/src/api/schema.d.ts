@@ -8033,6 +8033,8 @@ export interface components {
             /** Format: uuid */
             project_id?: string;
             name?: string;
+            /** @description What the monitor is for, for a reader who did not create it (FR-030). Optional; at most 200 characters counted as Unicode code points; empty means none. Shown on the monitor list, dashboard panels and the monitor page; not on public status pages or in notifications. */
+            description?: string;
             /** @description Project-unique and immutable. This is the name a bundle and a service declaration reference, so it stays stable while `name` is free to change. */
             slug?: string;
             /** @enum {string} */
@@ -8167,6 +8169,8 @@ export interface components {
         };
         CreateMonitor: {
             name: string;
+            /** @description Optional, at most 200 characters (code points); omitted means none; whitespace is trimmed. */
+            description?: string;
             /** @enum {string} */
             type: "http" | "tcp" | "icmp" | "dns" | "tls" | "grpc" | "composite" | "postgres" | "mysql" | "redis" | "promql" | "rabbitmq" | "websocket" | "ssh" | "synthetic" | "async_canary" | "push";
             target?: string;
@@ -8231,6 +8235,8 @@ export interface components {
         /** @description Partial update; omitted fields are unchanged. Type is immutable. */
         UpdateMonitor: {
             name?: string;
+            /** @description Optional; omitted leaves it unchanged, "" clears it; at most 200 characters (code points). */
+            description?: string;
             target?: string;
             /** @enum {string} */
             method?: "GET" | "POST" | "HEAD" | "PUT" | "DELETE";

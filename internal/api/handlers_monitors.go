@@ -309,6 +309,7 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Name               string            `json:"name"`
+		Description        string            `json:"description"` // FR-030, optional, ≤ 200 code points
 		Type               string            `json:"type"`
 		Target             string            `json:"target"`
 		Method             string            `json:"method"`
@@ -370,6 +371,7 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 	m := domain.Monitor{
 		ProjectID:              proj.ID,
 		Name:                   body.Name,
+		Description:            body.Description,
 		Type:                   domain.MonitorType(body.Type),
 		Target:                 body.Target,
 		Method:                 body.Method,
@@ -543,6 +545,7 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Name               *string            `json:"name"`
+		Description        *string            `json:"description"` // FR-030: omitted = unchanged, "" = cleared
 		Target             *string            `json:"target"`
 		Method             *string            `json:"method"`
 		IntervalSeconds    *int               `json:"interval_seconds"`
@@ -578,6 +581,9 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name != nil {
 		mon.Name = *body.Name
+	}
+	if body.Description != nil {
+		mon.Description = *body.Description
 	}
 	if body.Target != nil {
 		mon.Target = *body.Target

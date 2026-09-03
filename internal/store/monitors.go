@@ -265,7 +265,9 @@ const monitorColumns = "id, project_id, name, type, target, interval_seconds, ti
 	// FR-021 §15.5: the composite lifecycle. `superseded_by_service_id` is the two-ended link a
 	// service's page renders from; `retired_at` is the lifecycle statement, while `enabled`
 	// stays the execution switch. New columns append at the END, here and in scanMonitorMode.
-	"COALESCE(superseded_by_service_id::text,''), retired_at"
+	"COALESCE(superseded_by_service_id::text,''), retired_at, " +
+	// FR-030: appended at the END, here and in the scan below, as every column before it was.
+	"description"
 
 // methodOrGet keeps the NOT NULL method column concrete; the prober ignores it
 // for non-HTTP monitors.
@@ -346,7 +348,7 @@ func (s *Store) scanMonitorAs(row pgx.Row, mode readMode, extra ...any) (domain.
 	dests := []any{&m.ID, &m.ProjectID, &m.Name, &typ, &m.Target,
 		&m.IntervalSeconds, &m.TimeoutSeconds, &m.Retries, &m.Conditions,
 		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.StateSequence, &probeReason, &m.LastProbeErrorAt, &probeJobID, &m.DependsOn, &m.Slug,
-		&m.SupersededByServiceID, &m.RetiredAt}
+		&m.SupersededByServiceID, &m.RetiredAt, &m.Description}
 	dests = append(dests, extra...)
 	err := row.Scan(dests...)
 	if err != nil {
@@ -867,7 +869,7 @@ func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.
 	row := tx.QueryRow(ctx,
 		`UPDATE monitors
 		    SET name = $2, target = $3, interval_seconds = $4, timeout_seconds = $5,
-		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = $11, auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, updated_at = now(),
+		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = $11, auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, description = $19, updated_at = now(),
 		        -- Config generation + freshness watermark, shared verbatim with the rotation
 		        -- fence (see revisionFenceSetSQL): bump on ANY UpdateMonitor, because a missed
 		        -- bump reopens the stale-config vulnerability while an extra one costs a single
@@ -885,7 +887,7 @@ func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.
 		        consecutive_failures = CASE WHEN NOT enabled AND $8 THEN 0 ELSE consecutive_failures END,
 		        state_sequence = CASE WHEN NOT enabled AND $8 THEN state_sequence + 1 ELSE state_sequence END
 		  WHERE id = $1 RETURNING `+monitorColumns,
-		m.ID, m.Name, m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds)
+		m.ID, m.Name, m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds, m.Description)
 	updated, err := s.scanMonitorNoSecrets(row)
 	if noRows(err) {
 		return domain.Monitor{}, ErrNotFound

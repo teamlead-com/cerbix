@@ -31,6 +31,7 @@ import {
   CANARY_SUBMIT_KINDS,
   type CanaryForm,
 } from "@/lib/canaryWorkflow";
+import { MAX_MONITOR_DESCRIPTION, descriptionLength } from "@/lib/monitorBounds";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -73,6 +74,7 @@ const types: { key: MonitorType; label: string; hint: string }[] = [
 
 const form = reactive<{
   name: string;
+  description: string;
   type: MonitorType;
   target: string;
   method: string;
@@ -90,6 +92,7 @@ const form = reactive<{
   escalation_policy_id: string;
 }>({
   name: "",
+  description: "",
   type: "http",
   target: "",
   method: "GET",
@@ -413,6 +416,7 @@ async function createMultiRegionSet(): Promise<void> {
   };
   const base: CreateMonitor = {
     name: form.name.trim(),
+    description: form.description.trim(),
     type: form.type,
     target: form.target.trim(),
     interval_seconds: form.interval_seconds,
@@ -444,6 +448,7 @@ async function createMultiRegionSet(): Promise<void> {
     params: { path: { projectID: ws.projectId } },
     body: {
       name: form.name.trim(),
+      description: form.description.trim(),
       type: "composite",
       interval_seconds: form.interval_seconds,
       timeout_seconds: form.timeout_seconds,
@@ -608,8 +613,12 @@ const error = ref("");
 
 const session = useSession();
 const writeAllowed = computed(() => session.canProjectWrite(ws.orgId, ws.projectId));
+const descriptionCount = computed(() => descriptionLength(form.description.trim()));
+const descriptionOver = computed(() => descriptionCount.value > MAX_MONITOR_DESCRIPTION);
 const canSubmit = computed(() => {
   if (!writeAllowed.value || !form.name.trim() || submitting.value) return false;
+  // FR-030: the refusal is met at the field; Create/Save stays disabled while the description is over.
+  if (descriptionOver.value) return false;
   if (form.type === "push") return true;
   if (form.type === "composite") return childIds.value.size > 0;
   // A synthetic monitor has NO target — the scenario is what it probes, and `showTarget`
@@ -683,6 +692,7 @@ async function submit() {
     if (isEdit.value) {
       const patch: UpdateMonitor = {
         name: form.name.trim(),
+        description: form.description.trim(),
         interval_seconds: form.interval_seconds,
         timeout_seconds: form.timeout_seconds,
         retries: form.retries,
@@ -731,6 +741,7 @@ async function submit() {
     }
     const body: CreateMonitor = {
       name: form.name.trim(),
+      description: form.description.trim(),
       type: form.type,
       interval_seconds: form.interval_seconds,
       timeout_seconds: form.timeout_seconds,
@@ -776,6 +787,7 @@ async function loadForEdit() {
   }
   prefilling.value = true;
   form.name = m.name ?? "";
+  form.description = m.description ?? "";
   form.type = (m.type as MonitorType) ?? "http";
   form.target = m.target ?? "";
   form.method = m.method || "GET";
@@ -1014,6 +1026,24 @@ const selectCls =
               <label class="flex flex-col gap-[6px]">
                 <span class="text-[12px] font-semibold text-ink-2">Name</span>
                 <input v-model="form.name" type="text" placeholder="payments-callback" :class="[inputCls, 'font-mono']" />
+              </label>
+              <!-- FR-030 (D-0234): what the monitor is FOR, for the reader who did not create it. Optional,
+                   200 code points, counted here exactly as the server counts; the refusal is met at the
+                   field and Create/Save stays disabled while it stands. -->
+              <label class="flex flex-col gap-[6px]" data-testid="monitor-description-field">
+                <span class="text-[12px] font-semibold text-ink-2">Description <span class="font-normal text-ink-3">· optional</span></span>
+                <textarea
+                  v-model="form.description"
+                  rows="2"
+                  placeholder="Confirms the payment provider can reach our callback URL; a DOWN here means paid orders stay pending."
+                  :class="[inputCls, descriptionOver ? 'border-down' : '']"
+                  data-testid="monitor-description"
+                ></textarea>
+                <span class="flex items-baseline justify-between gap-3 text-[12px] text-ink-3">
+                  <span v-if="descriptionOver" class="text-down" data-testid="monitor-description-error">Description is longer than {{ MAX_MONITOR_DESCRIPTION }} characters — shorten it to save.</span>
+                  <span v-else>Shown in the monitor list, on dashboard panels and on the monitor page.</span>
+                  <span class="font-mono tnum" :class="descriptionOver ? 'text-down' : ''" data-testid="monitor-description-count">{{ descriptionCount }} / {{ MAX_MONITOR_DESCRIPTION }}</span>
+                </span>
               </label>
               <label class="flex flex-col gap-[6px]">
                 <span class="text-[12px] font-semibold text-ink-2">Tags <span class="font-normal text-ink-3">· for filtering (env:prod, team:x)</span></span>

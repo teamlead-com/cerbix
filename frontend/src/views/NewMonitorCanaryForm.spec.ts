@@ -100,7 +100,10 @@ describe("the typed form exists and nothing else does", () => {
     // Asserted as a MECHANISM, not as a word search: an earlier version of this case grepped the
     // rendered HTML for /workflow.*json/ and failed on the innocent label "Required JSON fields",
     // which is a test about spelling rather than about the contract.
-    expect(w.findAll("textarea").length).toBe(0);
+    // The one textarea the form may carry is the monitor DESCRIPTION (FR-030): prose about the
+    // monitor, never a document. Any other textarea is a JSON editor in disguise and fails here.
+    const textareas = w.findAll("textarea").filter((t) => t.attributes("data-testid") !== "monitor-description");
+    expect(textareas.length).toBe(0);
     // No control anywhere holds the document. If a JSON editor existed, some input's value would be
     // the document — and the document always begins with its kind.
     for (const el of [...w.findAll("input"), ...w.findAll("select")]) {

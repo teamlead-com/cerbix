@@ -35,7 +35,9 @@ test.describe("async canary form", () => {
     await expect(page.getByTestId("canary-workflow")).toBeVisible();
 
     // The contract the mock was approved for, asserted on the real page: no JSON editor anywhere.
-    await expect(page.locator("textarea")).toHaveCount(0);
+    // The monitor DESCRIPTION (FR-030) is prose about the monitor, not a document, and is the one
+    // textarea the form may carry — so it is excluded by test id and every other textarea still fails.
+    await expect(page.locator('textarea:not([data-testid="monitor-description"])')).toHaveCount(0);
 
     await page.getByPlaceholder("payments-callback").fill("e2e-canary-form");
     // Several workflow bounds are expressed against the monitor's own timeout, and a canary's
@@ -110,7 +112,7 @@ test.describe("async canary form", () => {
     // ── it reads back into the same typed form ───────────────────────────────────────────
     await page.goto(`/monitors/${monitorID}/edit`);
     await expect(page.getByTestId("canary-workflow")).toBeVisible();
-    await expect(page.locator("textarea")).toHaveCount(0);
+    await expect(page.locator('textarea:not([data-testid="monitor-description"])')).toHaveCount(0);
     await expect(page.getByTestId("canary-submit-url")).toHaveValue("https://files.example.invalid/files/upload");
     await expect(page.getByTestId("canary-completion-url")).toHaveValue(
       "https://files.example.invalid/tasks/{{ correlation_id }}",

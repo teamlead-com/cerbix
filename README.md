@@ -45,9 +45,10 @@ its own alerts, incidents and pages.
 
 ### Highlights
 
-- **16 check types** — HTTP, TCP, ICMP, DNS, TLS-cert, gRPC, PostgreSQL, MySQL, Redis,
-  PromQL, RabbitMQ, WebSocket, SSH, composite (groups), push (dead-man's-switch), and
-  **synthetic** (scripted multi-step HTTP flows). All behind an SSRF guard.
+- **17 check types** — HTTP, TCP, ICMP, DNS, TLS-cert, gRPC, PostgreSQL, MySQL, Redis,
+  PromQL, RabbitMQ, WebSocket, SSH, composite (groups), push (dead-man's-switch),
+  **synthetic** (scripted multi-step HTTP flows) and **async canary** (a typed
+  submit → poll → verify transaction). All behind an SSRF guard.
 - **Service as the reliability object** — explicit SLI membership (and separately
   declared *context* members that inform without counting), aggregation policies
   (`all`/`any`/quorum, region-aware), **immutable definition revisions** and evaluation
@@ -130,13 +131,12 @@ serves the SPA; put Traefik / your ingress in front for TLS.
 ## Quickstart
 
 Everything app-side is in the binary. The only external dependency is **PostgreSQL 15 or newer**
-(16 is what every image, compose file and CI job here uses). The schema itself needs 15: five
+(16 is what every image, compose file and CI job here uses). The schema itself needs 15: six
 migrations use the column-list `ON DELETE SET NULL (col)` form introduced in that release, and on 14
 they are a syntax error. `cerbix migrate` checks the server version before applying anything and
 refuses with that explanation rather than dying halfway through.
 
-Everything app-side is in the binary. The only external dependency is **PostgreSQL**;
-migrations apply themselves on startup and a bootstrap admin is created from config.
+Migrations apply themselves on startup and a bootstrap admin is created from config.
 Full step-by-step production guides (Docker Compose and bare binary + systemd) live in
 [`INSTALL.md`](INSTALL.md).
 

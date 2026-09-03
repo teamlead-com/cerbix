@@ -55,7 +55,13 @@ def read(path, **kw):
 # was not caught, because the file was never read.
 LIVING = ['docs/status.md', 'docs/traceability.md', 'docs/overview.md', 'docs/runbook.md',
           'docs/project-description.md', 'docs/roadmap.md', 'README.md', 'CLAUDE.md',
-          'CHANGELOG.md'] + sorted(glob.glob('docs/specs/*.md'))
+          'CHANGELOG.md',
+          # The other READMEs joined on 2026-09-04 (owner: "bring the READMEs 1:1 with the code").
+          # Nothing had ever read them, and it showed: `frontend/README.md` described a "planned"
+          # stack with TanStack Query and uPlot/ECharts, neither of which was ever adopted, and
+          # called the SPA unscaffolded years into its life.
+          'frontend/README.md', 'docs/specs/README.md', 'docs/checks/README.md',
+          'docker/monitoring.d/README.md'] + sorted(glob.glob('docs/specs/*.md'))
 
 ALLOWED = {
     'ActionServiceRead':  'a name the spec says must NOT exist (§4 "Service is not a security boundary")',
@@ -66,6 +72,8 @@ ALLOWED = {
     'docs/iterations/iter-XXXX.md': 'a template name, not a file',
     '000NN_project_secrets.sql':    'a placeholder in a spec written before the number was assigned',
     'schema.sql': 'generic filename in prose',
+    '2026-08-01-implementation-review-v1.md': 'an illustration of the docs/checks naming rule, not a file',
+    '2026-08-01-security-review-v1.md':       'an illustration of the docs/checks naming rule, not a file',
 }
 
 PATH_RE = re.compile(r'`([A-Za-z0-9_./{},\-]+\.(?:go|ts|vue|sql|ya?ml|md|json|sh|html))`')
@@ -671,6 +679,118 @@ def check_discharge(src):
     return bad
 
 
+# --- enumerations the TREE can settle --------------------------------------------------------
+#
+# Every guard below exists because the enumeration it checks had ALREADY rotted when it was
+# written (2026-09-04, while reconciling the READMEs with the code): `README.md` said 16 check
+# types against 17 constants; `README.md` and `internal/store/migrate.go` both said FIVE
+# migrations use the column-list `ON DELETE SET NULL` form while six do, because 00093 was added
+# without touching either sentence; `docs/specs/README.md` indexed 35 of 40 specs; and the
+# Monitoring-as-Code bundle README listed 13 supported types and declared `promql` unavailable
+# through files three days after D-0145's addendum admitted it.
+#
+# The shape is the same every time: a number or a list, written by hand, about something the tree
+# already knows. Nothing read it back, so it drifted silently and a reader had no way to tell.
+
+NUMBER_WORDS = {1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven',
+                8: 'eight', 9: 'nine', 10: 'ten', 11: 'eleven', 12: 'twelve'}
+
+
+def flatten(text):
+    """Collapse a Go comment block or a wrapped Markdown sentence onto one line."""
+    return re.sub(r'\s+', ' ', re.sub(r'\n\s*//', '', text))
+
+
+def monitor_type_values(src=None):
+    """{constant: wire value} for every MonitorType, e.g. {'MonitorHTTP': 'http'}."""
+    src = read('internal/domain/monitor.go') if src is None else src
+    return dict(re.findall(r'\b(Monitor[A-Za-z]+)\s+MonitorType\s*=\s*"([a-z_]+)"', src))
+
+
+def setnull_migrations():
+    """Numeric prefixes of migrations using PostgreSQL 15's column-list ON DELETE SET NULL."""
+    return sorted(os.path.basename(p)[:5] for p in glob.glob('internal/store/migrations/*.sql')
+                  if re.search(r'ON DELETE SET NULL \(', read(p)))
+
+
+def mac_supported_types(src=None):
+    """Wire values of fileSupportedTypes — what a Monitoring-as-Code bundle may declare."""
+    src = read('internal/fileprovider/bundle.go') if src is None else src
+    block = re.search(r'var fileSupportedTypes = map\[domain\.MonitorType\]bool\{(.*?)\n\}', src, re.S)
+    if not block:
+        return None
+    vals = monitor_type_values()
+    return sorted(vals[c] for c in re.findall(r'domain\.(Monitor[A-Za-z]+):\s*true', block.group(1))
+                  if c in vals)
+
+
+def check_enumerations():
+    bad = []
+
+    # 1. README's check-type count vs the constants that define the set.
+    doc = read('README.md')
+    n = len(monitor_type_values())
+    m = re.search(r'\*\*(\d+) check types\*\*', doc)
+    if not m:
+        bad.append(('README.md', 1, 'enum',
+                    'the "N check types" highlight is gone; nothing states the count for the guard to check'))
+    elif int(m.group(1)) != n:
+        bad.append(('README.md', doc[:m.start()].count('\n') + 1, 'enum',
+                    f'says {m.group(1)} check types, but internal/domain/monitor.go declares {n}'))
+
+    # 2. the ON DELETE SET NULL enumeration, in BOTH documents that state it.
+    mig = setnull_migrations()
+    word = NUMBER_WORDS.get(len(mig), str(len(mig)))
+    m = re.search(r'(\w+)\s+migrations use the column-list `ON DELETE SET NULL \(col\)` form', flatten(doc))
+    if not m:
+        bad.append(('README.md', 1, 'enum', 'the ON DELETE SET NULL sentence is gone; the guard cannot check it'))
+    elif m.group(1) != word:
+        bad.append(('README.md', 1, 'enum',
+                    f'says "{m.group(1)} migrations" use the column-list ON DELETE SET NULL form; '
+                    f'{len(mig)} do ({", ".join(mig)})'))
+
+    go = flatten(read('internal/store/migrate.go'))
+    m = re.search(r"(\w+) migrations use PostgreSQL 15's column-list "
+                  r"`ON DELETE SET NULL \(col\)` form \(([0-9, ]+)\)", go)
+    if not m:
+        bad.append(('internal/store/migrate.go', 1, 'enum',
+                    'the version-check comment no longer states the count and the file list'))
+    else:
+        listed = sorted(x.strip() for x in m.group(2).split(','))
+        if m.group(1) != word or listed != mig:
+            bad.append(('internal/store/migrate.go', 1, 'enum',
+                        f'comment says "{m.group(1)}" ({", ".join(listed)}); the tree has '
+                        f'{len(mig)} ({", ".join(mig)})'))
+
+    # 3. the spec index against the spec directory, as a SET in both directions.
+    idx = read('docs/specs/README.md')
+    listed = set(re.findall(r'\| `([a-z0-9-]+\.md)`', idx))
+    on_disk = {os.path.basename(p) for p in glob.glob('docs/specs/*.md')} - {'README.md'}
+    for f in sorted(on_disk - listed):
+        bad.append(('docs/specs/README.md', 1, 'enum', f'{f} exists but the index does not list it'))
+    for f in sorted(listed - on_disk):
+        bad.append(('docs/specs/README.md', 1, 'enum', f'the index lists {f}, which is not in docs/specs/'))
+
+    # 4. the Monitoring-as-Code bundle README against fileSupportedTypes.
+    mac = mac_supported_types()
+    mac_doc = 'docker/monitoring.d/README.md'
+    if mac is None:
+        bad.append(('internal/fileprovider/bundle.go', 1, 'enum',
+                    'fileSupportedTypes could not be parsed; the bundle README is unguarded'))
+    else:
+        text = flatten(read(mac_doc))
+        m = re.search(r'\*\*Supported types \((\d+)\):\*\*(.*?)(?:Credentialed|$)', text)
+        if not m:
+            bad.append((mac_doc, 1, 'enum', 'the "Supported types (N)" bullet is gone; the guard cannot check it'))
+        else:
+            named = sorted(set(re.findall(r'`([a-z_]+)`', m.group(2))) & set(monitor_type_values().values()))
+            if int(m.group(1)) != len(mac) or named != mac:
+                bad.append((mac_doc, 1, 'enum',
+                            f'lists {int(m.group(1))} types {named}; fileSupportedTypes admits '
+                            f'{len(mac)} {mac}'))
+    return bad
+
+
 def main():
     src = source_text()
     bad = []
@@ -700,6 +820,7 @@ def main():
     bad += check_gate_stale_spellings()
     bad += check_change_stale_spellings()
     bad += check_customer_names()
+    bad += check_enumerations()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
               'and every acceptance map is complete (FR-021 invariants compared as a SET against '
@@ -707,7 +828,10 @@ def main():
               'scenario groups, its retired spellings refused; FR-026 and FR-029: §6 as a SET); '
               'no real customer name appears in example data; '
               'every requirement row states one of the three statuses, and no spec calls itself '
-              'unbuilt while its requirement is DONE')
+              'unbuilt while its requirement is DONE; and every hand-written enumeration about the '
+              'tree agrees with it — the check-type count, the column-list ON DELETE SET NULL '
+              'migrations in both places that name them, the spec index as a SET, and the '
+              'Monitoring-as-Code supported types)')
         return 0
     print(f'docs references: {len(bad)} unresolved citation(s) in living documents\n')
     for doc, n, kind, tok in bad:

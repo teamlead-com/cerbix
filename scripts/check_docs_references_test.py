@@ -324,3 +324,46 @@ class ResolutionAndTestTokens(unittest.TestCase):
         # pre-rewrite implementation before this test was written: it passed there, and a citation
         # that only ever passed that way is exactly the stale evidence this checker exists to catch.
         self.assertNotIn("TestScenarioBinding", cdr.test_tokens(cdr.source_text()))
+
+
+class EnumerationParsers(unittest.TestCase):
+    """The parsers behind check_enumerations().
+
+    Each is a regex over source it does not own. The failure that matters is not a wrong answer
+    but an EMPTY one: a shape change upstream makes the pattern match nothing, and a guard that
+    compares two empty sets passes while checking nothing. These pin the shapes.
+    """
+
+    def test_monitor_type_values_reads_constant_and_wire_value(self):
+        src = '''const (
+\tMonitorHTTP MonitorType = "http"
+\tMonitorAsyncCanary MonitorType = "async_canary"
+)'''
+        self.assertEqual(cdr.monitor_type_values(src),
+                         {"MonitorHTTP": "http", "MonitorAsyncCanary": "async_canary"})
+
+    def test_monitor_type_values_finds_the_real_constants(self):
+        vals = cdr.monitor_type_values()
+        self.assertIn("http", vals.values())
+        self.assertGreater(len(vals), 10, "an empty or tiny parse means the constant shape moved")
+
+    def test_setnull_migrations_are_found_and_numbered(self):
+        mig = cdr.setnull_migrations()
+        self.assertTrue(mig, "no migration matched — the guard would compare nothing")
+        self.assertTrue(all(m.isdigit() and len(m) == 5 for m in mig), mig)
+
+    def test_mac_supported_types_are_wire_values_not_constants(self):
+        types = cdr.mac_supported_types()
+        self.assertTrue(types)
+        self.assertIn("http", types)
+        self.assertNotIn("MonitorHTTP", types)
+
+    def test_mac_supported_types_returns_none_when_the_map_is_gone(self):
+        self.assertIsNone(cdr.mac_supported_types("package fileprovider\n"))
+
+    def test_flatten_joins_a_wrapped_go_comment(self):
+        self.assertEqual(cdr.flatten("// six migrations use\n\t// the form (00070, 00093)"),
+                         "// six migrations use the form (00070, 00093)")
+
+    def test_the_repository_itself_satisfies_every_enumeration(self):
+        self.assertEqual(cdr.check_enumerations(), [])

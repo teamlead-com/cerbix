@@ -1,6 +1,6 @@
 # sec-synthetic-secrets — a credential inside a scenario is a secret everywhere (FR-028 / NFR-023)
 
-> **Lifecycle: ALL THREE STAGES IMPLEMENTED AND APPROVED (2026-09-02); stage 2 has no editor yet.** Design approved
+> **Lifecycle: ALL THREE STAGES IMPLEMENTED AND APPROVED (2026-09-02); the stage-2 binding editor landed at iter-0167 (2026-09-03).** Design approved
 > by the reviewer at revision 3 and amended by the owner's §10 ruling; the implementation notes below
 > record what the code actually does, so a reader never has to infer it from the design. Opened 2026-09-02 after an operator asked whether a
 > synthetic monitor could carry a bearer token, and the answer turned out to be "yes, in cleartext, to

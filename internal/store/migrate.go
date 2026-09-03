@@ -41,8 +41,9 @@ func Migrate(ctx context.Context, dsn string) error {
 	}
 	defer func() { _ = conn.Close() }()
 	// The server VERSION is checked before the lock is even taken, and the reason is a
-	// production failure rather than a precaution: five migrations use PostgreSQL 15's
-	// column-list `ON DELETE SET NULL (col)` form (00070, 00080, 00081, 00082, 00084), which is
+	// production failure rather than a precaution: six migrations use PostgreSQL 15's
+	// column-list `ON DELETE SET NULL (col)` form (00070, 00080, 00081, 00082, 00084, 00093),
+	// which is
 	// a SYNTAX error on 14 and below. Without this check the upgrade dies mid-run on 00070 with
 	// a parser error naming a file, leaving an operator to work out from a truncated log that
 	// the problem is their server and not their data. The requirement is not new — every

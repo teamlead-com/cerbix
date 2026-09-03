@@ -102,10 +102,13 @@ explicit admin action.
 - **`type` is immutable** for a UID (push-token/identity semantics). To change type, use a new UID.
 - **No inline secrets** — any password/token/key field rejects the whole bundle. Create the
   secret in the project's Secrets inventory, then use `password_ref` in typed `settings`.
-- **Supported types:** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `websocket`, `ssh`, `push`,
-  `postgres`, `mysql`, `redis`, `rabbitmq`. Credentialed settings and encrypted-by-default TLS
-  rules are defined in `docs/specs/func-secret-inventory.md`; composite/synthetic/promql remain
-  unavailable through files.
+- **Supported types (15):** `http`, `tcp`, `icmp`, `dns`, `tls`, `grpc`, `websocket`, `ssh`, `push`,
+  `postgres`, `mysql`, `redis`, `rabbitmq`, `promql` (one non-secret field, `query` — D-0145
+  addendum) and `async_canary` (the one type carrying a nested `workflow` block instead of a flat
+  `settings` map). Credentialed settings and encrypted-by-default TLS rules are defined in
+  `docs/specs/func-secret-inventory.md`. **`composite` and `synthetic` stay refused** — children-by-UID
+  and a JSON scenario string inside a validated bundle are schema problems, not missing fields. The
+  authority is `fileSupportedTypes` in `internal/fileprovider/bundle.go`.
 - **Durations are whole seconds:** `30s`, `1m`, `2m`, `1h` — not `500ms`, not `1.5s`.
 - **`region:`** routes a monitor to a prober pool (default `core`). A non-core region needs a
   **live** worker/agent or its jobs TTL-expire (nothing probes them). Composite monitors are

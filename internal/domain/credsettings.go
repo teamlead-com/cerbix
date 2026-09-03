@@ -347,6 +347,11 @@ func ExpectedCredentialFields(typ MonitorType, settings map[string]string) ([]st
 	// gate compares against this, so the set the materializer builds and the set the gate
 	// expects come from one function.
 	scenario := scenarioExpectedFields(typ, settings)
+	// A canary's bindings are envelope fields too, by the same rule and for the same reason
+	// (FR-029 D3b): the SET is per monitor, so it is derived from the config's ref keys rather
+	// than from a static schema, and the executor's structural gate compares against this.
+	scenario = append(scenario, canaryExpectedFields(typ, settings)...)
+	sort.Strings(scenario)
 	if !CredentialedType(typ) {
 		if len(scenario) > 0 {
 			return scenario, nil
@@ -389,6 +394,47 @@ func scenarioExpectedFields(typ MonitorType, settings map[string]string) []strin
 	return out
 }
 
+// canaryExpectedFields names one envelope field per declared canary binding — for an async_canary
+// monitor and no other type. The type gate is not decoration: without it a `canary_secret_*` key on
+// an http monitor would demand a field nothing would ever substitute, which is the FR-028 D6b defect
+// repeated in a second place.
+func canaryExpectedFields(typ MonitorType, settings map[string]string) []string {
+	if typ != MonitorAsyncCanary {
+		return nil
+	}
+	var out []string
+	for _, key := range CanarySecretRefKeys(settings) {
+		if strings.TrimSpace(settings[key]) == "" {
+			continue
+		}
+		binding, _ := CanaryBindingFromRefKey(key)
+		out = append(out, CanaryBindingField(binding))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// canaryExecutionKeys is the canonical workflow document plus its ref keys, when the monitor declares
+// any binding. The DOCUMENT is what makes relocation fail: it names every position a binding is used
+// in, so moving one from a header to a body is a different document and the body digest no longer
+// opens. FR-028 had to add this after a test proved the digest did not cover the scenario; here it is
+// a requirement from the first line.
+func canaryExecutionKeys(typ MonitorType, settings map[string]string) []string {
+	if typ != MonitorAsyncCanary {
+		return nil
+	}
+	refs := CanarySecretRefKeys(settings)
+	if len(refs) == 0 {
+		return nil
+	}
+	// The RUN key joins the digest: an attacker who could flip it would change the idempotency key
+	// and so create a SECOND external task with a valid envelope — a lesser side effect than a
+	// redirected credential, and still a side effect this product causes at someone else's expense.
+	out := append([]string{CanaryWorkflowKey, CanaryRunKey}, refs...)
+	sort.Strings(out)
+	return out
+}
+
 func credentialExpectedFields(typ MonitorType, settings map[string]string) ([]string, error) {
 	variant, err := resolveVariant(typ, settings)
 	if err != nil {
@@ -419,6 +465,7 @@ func ExecutionBindingKeys(typ MonitorType, settings map[string]string) ([]string
 	// exactly that relocation, and it failed before this line existed. The ref keys join too,
 	// so renaming which inventory secret fills a binding is a different execution.
 	scenarioKeys := scenarioExecutionKeys(typ, settings)
+	scenarioKeys = append(scenarioKeys, canaryExecutionKeys(typ, settings)...)
 	if !CredentialedType(typ) {
 		if len(scenarioKeys) > 0 {
 			return scenarioKeys, nil

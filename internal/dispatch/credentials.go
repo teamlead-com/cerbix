@@ -331,6 +331,17 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 		scenarioBindings = refs
 		requirement = domain.CredentialRequired
 	}
+	// FR-029: a canary binding is a credential requirement by exactly the same rule, and refused on
+	// any other type by exactly the same reasoning — carrier integrity, permanently, not "no release
+	// carries it yet".
+	var canaryBindings []string
+	if refs := domain.CanarySecretRefKeys(job.Monitor.Config); len(refs) > 0 {
+		if job.Monitor.Type != domain.MonitorAsyncCanary {
+			return Materialized{}, fmt.Errorf("dispatch: %s monitor carries a canary secret binding", job.Monitor.Type)
+		}
+		canaryBindings = refs
+		requirement = domain.CredentialRequired
+	}
 	if requirement != domain.CredentialRequired {
 		if envelope != nil {
 			return Materialized{}, errors.New("dispatch: credential envelope on a schema that forbids one")
@@ -353,6 +364,9 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 		if len(scenarioBindings) > 0 {
 			return Materialized{}, errors.New("dispatch: a scenario secret binding requires a generation-2 carrier")
 		}
+		if len(canaryBindings) > 0 {
+			return Materialized{}, errors.New("dispatch: a canary secret binding requires a generation-2 carrier")
+		}
 		if err := checkInlineCredential(job.Monitor); err != nil {
 			return Materialized{}, err
 		}
@@ -369,6 +383,11 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 	// this refusal existed (FR-028 D8a).
 	if len(scenarioBindings) > 0 && envelope.V < EnvelopeV2 {
 		return Materialized{}, errors.New("dispatch: a scenario secret binding requires a body-bound envelope")
+	}
+	// Same floor, same reason: without a body-bound envelope nothing pins the credential to the
+	// document that says WHERE it may be sent, so a relocated binding would open cleanly.
+	if len(canaryBindings) > 0 && envelope.V < EnvelopeV2 {
+		return Materialized{}, errors.New("dispatch: a canary secret binding requires a body-bound envelope")
 	}
 	if ring == nil {
 		return Materialized{}, errNoDispatchKey
@@ -455,6 +474,13 @@ func (r *CredentialKeyring) materialize(job CheckJob) (domain.Monitor, func(), e
 	// injected as before, under the field name the schema expects (FR-028 stage 2 D8).
 	substituted := 0
 	for field, value := range fields {
+		if job.Monitor.Type == domain.MonitorAsyncCanary {
+			// A canary binding is injected as its own key and read by the executor when it builds
+			// the request — the stored document holds a MARKER, so there is nothing to substitute
+			// into and no second copy to leave behind. Cleanup deletes these keys.
+			cfg[field] = string(value)
+			continue
+		}
 		if binding, ok := domain.ScenarioBindingFromField(field); ok {
 			next, n := replaceScenarioBinding(cfg[domain.SyntheticScenarioKey], binding, string(value))
 			if n == 0 {

@@ -77,6 +77,16 @@ func monitorRefSettings(m domain.Monitor) map[string]string {
 			}
 		}
 	}
+	// FR-029, and type-scoped for the same reason: a `canary_secret_*` key means nothing on any
+	// other type, and contributing it there would write a ref row for a monitor that can never
+	// consume it.
+	if m.Type == domain.MonitorAsyncCanary {
+		for _, key := range domain.CanarySecretRefKeys(m.Config) {
+			if name := strings.TrimSpace(m.Config[key]); name != "" {
+				refs[key] = name
+			}
+		}
+	}
 	return refs
 }
 
@@ -1262,6 +1272,16 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 		return ResultOutcome{}, fmt.Errorf("store: begin record result: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	// FR-029 D9: a RESULT frees the canary in-flight slot, inside the same transaction that records
+	// it, so the monitor's next scheduled run is not blocked by its own finished journey. Expiry
+	// stays the fallback for an executor that never answers; without this release, a canary whose
+	// interval equals its timeout would skip every other run waiting for its own lease to lapse.
+	// The statement is unconditional because it is keyed by monitor and costs nothing for a type
+	// that never claims one.
+	if _, err := tx.Exec(ctx, `DELETE FROM canary_inflight WHERE monitor_id = $1`, hb.MonitorID); err != nil {
+		return ResultOutcome{}, fmt.Errorf("store: release canary in-flight: %w", err)
+	}
 
 	// Step 2 — lock the monitor (existence + serialise vs config writes), read the DB clock,
 	// the freshness watermark and the current config generation in one statement.

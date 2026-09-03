@@ -21,6 +21,11 @@ import (
 )
 
 type fakeStore struct {
+	mu               sync.Mutex
+	canaryClaims     []string
+	canaryClaimErr   error
+	canaryHeartbeats []domain.Heartbeat
+
 	serviceSlices int32
 	monitors      []domain.Monitor
 	stalePush     []domain.Monitor
@@ -191,6 +196,24 @@ func (f *fakeStore) RollupDailyAvailability(_ context.Context, _, _ time.Time) e
 
 func (f *fakeStore) EnsureHeartbeatPartitions(_ context.Context, _ int) error {
 	atomic.AddInt32(&f.ensured, 1)
+	return nil
+}
+
+// FR-029 D9: the canary in-flight lease. `canaryClaimErr` lets a test make the claim refuse, which
+// is how the saturation path is exercised without a database; `canaryHeartbeats` records what the
+// scheduler wrote instead of dispatching, because "it reported DOWN with a reason" is the actual
+// contract and not "it skipped".
+func (f *fakeStore) ClaimCanaryInflight(_ context.Context, monitorID, region, runKey string, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.canaryClaims = append(f.canaryClaims, monitorID+"|"+region+"|"+runKey)
+	return f.canaryClaimErr
+}
+
+func (f *fakeStore) InsertHeartbeat(_ context.Context, hb domain.Heartbeat) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.canaryHeartbeats = append(f.canaryHeartbeats, hb)
 	return nil
 }
 func (f *fakeStore) EnsureServiceFactPartitions(ctx context.Context, aheadMonths int) error {

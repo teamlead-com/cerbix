@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -139,14 +140,32 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 		// key; `TestAPreFixNonSyntheticBindingRowBehavesAsDocumented` seeds one anyway and
 		// states each of those outcomes, because the review was right that "inert" was not
 		// what this gate delivers.
+		// FR-029 D8: the RUN key, set before the job is sealed so the execution digest covers it.
+		// It is the scheduled WINDOW — floor(now / interval) — and not the job id, so a redelivered
+		// AMQP message, a re-claimed pull job after a lease expiry and a transport retry all carry
+		// the same idempotency key while the next scheduled run carries a different one. A job that
+		// straddles a window boundary on retry gets the next window's key, which is the honest
+		// reading: it IS the next run.
+		if m.Type == domain.MonitorAsyncCanary && m.IntervalSeconds > 0 {
+			stored[domain.CanaryRunKey] = strconv.FormatInt(time.Now().Unix()/int64(m.IntervalSeconds), 10)
+			m.Config = stored
+			job.Monitor = m
+		}
 		var scenarioRefKeys []string
 		if m.Type == domain.MonitorSynthetic {
 			scenarioRefKeys = domain.ScenarioSecretRefKeys(stored)
 		}
+		// FR-029: a canary's bindings ride the same path — one envelope field per binding, and the
+		// same body-bound carrier floor, because the document that says WHERE a credential may be
+		// sent is what the digest has to cover.
+		var canaryRefKeys []string
+		if m.Type == domain.MonitorAsyncCanary {
+			canaryRefKeys = domain.CanarySecretRefKeys(stored)
+		}
 		// A monitor with neither a credential schema nor a scenario binding carries no
 		// envelope at all, exactly as before (FR-028 stage 2 adds the second half of this
 		// condition and nothing else to the ordinary path).
-		if !domain.CredentialedType(m.Type) && len(scenarioRefKeys) == 0 {
+		if !domain.CredentialedType(m.Type) && len(scenarioRefKeys) == 0 && len(canaryRefKeys) == 0 {
 			entry.Job = job
 			byID[m.ID] = entry
 			continue
@@ -165,7 +184,7 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 		// A binding cannot ride a carrier whose envelope does not bind the body: the
 		// anti-relocation property depends on it, so a region still on an older carrier gets
 		// a per-monitor reason rather than a job that looks protected and is not.
-		if len(scenarioRefKeys) > 0 {
+		if len(scenarioRefKeys)+len(canaryRefKeys) > 0 {
 			generation := dispatch.ProtocolV2
 			if g, ok := carrierByRegion[m.Region]; ok && g > 0 {
 				generation = g
@@ -176,6 +195,21 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 				byID[m.ID] = entry
 				continue
 			}
+		}
+		for _, key := range canaryRefKeys {
+			binding, _ := domain.CanaryBindingFromRefKey(key)
+			refName := strings.TrimSpace(stored[key])
+			ref, ok := bound[key]
+			if !ok || ref.Name != refName || ref.SecretID == "" || ref.Ciphertext == "" || s.cipher == nil {
+				scenarioFailure = MaterializeMissingReference
+				break
+			}
+			plain, err := s.cipher.DecryptBytes(ref.Ciphertext, secret.CanonicalAAD(m.ProjectID, ref.SecretID))
+			if err != nil {
+				scenarioFailure = MaterializeDecryptFailed
+				break
+			}
+			fields[domain.CanaryBindingField(binding)] = plain
 		}
 		for _, key := range scenarioRefKeys {
 			binding, _ := domain.ScenarioBindingFromRefKey(key)

@@ -6,6 +6,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -76,6 +77,15 @@ type Store interface {
 	TryBecomeLeaderSession(ctx context.Context, key int64) (LeaderSession, bool, error)
 	RollupDailyAvailability(ctx context.Context, from, to time.Time) error
 	EnsureHeartbeatPartitions(ctx context.Context, ahead int) error
+	// FR-029 D9 / D9a: the canary in-flight lease. One execution per monitor and at most
+	// `store.CanaryRegionLimit` per region, both decided HERE — the scheduler is leader-elected and
+	// is the only writer, so the check is a count inside the inserting transaction rather than a
+	// distributed semaphore.
+	ClaimCanaryInflight(ctx context.Context, monitorID, region, runKey string, ttl time.Duration) error
+	// InsertHeartbeat is how a shortage becomes an ORDINARY monitor outcome rather than an
+	// indefinite pending: a run that could not be dispatched writes one DOWN heartbeat with a
+	// bounded reason, and the monitor's own failure_threshold decides whether that flips its status.
+	InsertHeartbeat(ctx context.Context, hb domain.Heartbeat) error
 	EnsureServiceFactPartitions(ctx context.Context, aheadMonths int) error
 	PurgeOldHeartbeats(ctx context.Context, cutoff time.Time) (int, error)
 	EnqueueRenotifyReminders(ctx context.Context) (int, error)
@@ -290,6 +300,58 @@ const (
 )
 
 // Scheduler publishes due check jobs while it holds leadership.
+// canaryInflightSlack is the margin over a canary's own timeout that its in-flight lease carries
+// (FR-029 §4b). It is what bounds recovery after an executor crash: the slot returns on its own after
+// timeout + this, and the runbook states that number rather than leaving it to arithmetic.
+const canaryInflightSlack = 60 * time.Second
+
+// claimCanarySlot takes the in-flight slot for a canary and reports true when the job may be
+// dispatched. A monitor of any other type always may. Both dispatch paths call it, because a canary
+// without bindings never reaches the credential path and would otherwise keep no guarantee at all.
+func (s *Scheduler) claimCanarySlot(ctx context.Context, m domain.Monitor) bool {
+	if m.Type != domain.MonitorAsyncCanary {
+		return true
+	}
+	err := s.store.ClaimCanaryInflight(ctx, m.ID, m.Region, m.Config[domain.CanaryRunKey], m.Timeout()+canaryInflightSlack)
+	if err == nil {
+		return true
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	// Not a queue that grows: the run is refused and reported as ONE ordinary DOWN with a bounded
+	// reason, and the monitor's own failure_threshold decides whether that becomes a status flip.
+	reason := "region_saturated"
+	switch {
+	case errors.Is(err, store.ErrCanaryMonitorInFlight):
+		reason = "already_in_flight"
+	case errors.Is(err, store.ErrCanaryRegionSaturated):
+	default:
+		reason = "in_flight_claim_failed"
+	}
+	s.reportCanaryShortage(ctx, m, reason)
+	return false
+}
+
+// reportCanaryShortage turns a run cerbix could not dispatch into an ORDINARY monitor outcome: one
+// DOWN heartbeat with a bounded reason. Not an indefinite pending, not a readiness flip, and not a
+// silent exclusion from the service's number — the owner's brief settled that, and the attribution
+// an operator needs lives in the reason, the region alert and the metrics instead.
+func (s *Scheduler) reportCanaryShortage(ctx context.Context, m domain.Monitor, reason string) {
+	hb := domain.Heartbeat{
+		MonitorID:         m.ID,
+		Ts:                time.Now().UTC(),
+		ExecutionRevision: m.ExecutionRevision,
+		Up:                false,
+		Msg:               "dispatch: " + reason,
+	}
+	if err := s.store.InsertHeartbeat(ctx, hb); err != nil && ctx.Err() == nil {
+		s.logger.Warn("canary_shortage_heartbeat_failed", "monitor_id", m.ID, "reason", reason, "error", err.Error())
+		return
+	}
+	s.logger.Info("canary_dispatch_refused", "monitor_id", m.ID, "region", m.Region, "reason", reason)
+}
+
 type Scheduler struct {
 	store                  Store
 	dispatcher             dispatch.Dispatcher
@@ -1156,6 +1218,13 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						iv = m.ConfirmInterval()
 					}
 				}
+				// FR-029 D9/D9a. BOTH dispatch paths take the lease: a canary with no binding never
+				// reaches the credential branch below, and the first version of this change put the
+				// claim only there — so a canary without secrets kept every guarantee off.
+				if !s.claimCanarySlot(ctx, m) {
+					nextRun[m.ID] = now.Add(iv)
+					continue
+				}
 				if s.pullRegions[m.Region] {
 					// Pull-served region: enqueue for HTTP claim with a TTL (~interval) so
 					// a job for a region with no live agent expires rather than piling up.
@@ -1329,6 +1398,14 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						iv := m.Interval()
 						if exp, ok := confirmFast[m.ID]; ok && now.Before(exp) && m.InConfirmPhase() {
 							iv = m.ConfirmInterval()
+						}
+						// FR-029 D9/D9a. A canary holds its delivery for the whole journey, so a
+						// second dispatch of the same monitor would submit a SECOND external
+						// transaction, and a region with several executors has no worker-local way
+						// to bound how many long journeys run at once. Both are decided here.
+						if !s.claimCanarySlot(ctx, m) {
+							nextRun[m.ID] = now.Add(iv)
+							continue
 						}
 						if err := s.publishScheduledJob(ctx, item.Job, iv); err != nil {
 							if ctx.Err() != nil {

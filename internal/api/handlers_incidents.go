@@ -94,7 +94,7 @@ func (h *Handler) createIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	created, err := h.store.CreateIncident(r.Context(), inc, body.Body, p.UserID)
+	created, err := h.store.CreateIncidentByPrincipal(r.Context(), inc, body.Body, p.UserID, auditActor(p))
 	if err != nil {
 		h.serverError(w, "create_incident", err)
 		return
@@ -224,7 +224,7 @@ func (h *Handler) addIncidentUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	created, err := h.store.AddIncidentUpdate(r.Context(), upd)
+	created, err := h.store.AddIncidentUpdateByPrincipal(r.Context(), upd, auditActor(p))
 	// The pre-check above is a fast, friendly answer; THIS is the one that holds. It reads the
 	// incident outside the store's transaction, so a concurrent resolve between the two lands
 	// here, and the store refuses rather than reopening a closed incident.
@@ -286,7 +286,7 @@ func (h *Handler) putPostmortem(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	pm, err := h.store.UpsertPostmortem(r.Context(), inc.ID, body.Body, p.UserID)
+	pm, err := h.store.UpsertPostmortemByPrincipal(r.Context(), inc.ID, body.Body, p.UserID, auditActor(p))
 	if err != nil {
 		h.serverError(w, "upsert_postmortem", err)
 		return

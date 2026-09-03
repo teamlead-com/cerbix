@@ -141,7 +141,7 @@ func (f *fakeStore) FindOpenAutoIncidentByMonitor(_ context.Context, monitorID s
 	return domain.Incident{}, store.ErrNotFound
 }
 
-func (f *fakeStore) CreateIncident(_ context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error) {
+func (f *fakeStore) CreateIncidentBySystem(_ context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createCalls++
@@ -159,7 +159,7 @@ func (f *fakeStore) CreateIncident(_ context.Context, inc domain.Incident, openi
 	return inc, nil
 }
 
-func (f *fakeStore) AddIncidentUpdate(_ context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error) {
+func (f *fakeStore) AddIncidentUpdateBySystem(_ context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updates[upd.IncidentID] = append(f.updates[upd.IncidentID], upd)
@@ -574,7 +574,7 @@ func TestReconcilerClosesIncidentOnPendingToUp(t *testing.T) {
 	}
 
 	// Seed an open auto-incident (as if opened before a disable), then recover as pending→up.
-	if _, err := fs.CreateIncident(ctx, domain.Incident{
+	if _, err := fs.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: "p1", MonitorID: "m1", Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "auto opened", "system"); err != nil {

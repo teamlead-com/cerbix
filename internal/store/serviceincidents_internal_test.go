@@ -52,7 +52,7 @@ func TestDeletingAServiceClearsTheAnchorAndKeepsTheIncident(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := armedService(t, st, ctx)
 
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "checkout degraded",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opened", "tester")
@@ -177,7 +177,7 @@ func TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers(t *testing.T)
 	}
 
 	// A monitor or project-level incident has NO snapshot, and that is a different answer from an empty one.
-	other, err := st.CreateIncident(ctx, domain.Incident{
+	other, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
 	}, "", "tester")
@@ -200,7 +200,7 @@ func TestTheMachineLeavesAHumanIncidentAlone(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := armedService(t, st, ctx)
 
-	human, err := st.CreateIncident(ctx, domain.Incident{
+	human, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "checkout — investigating by hand",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opened by a person", "ada@example.com")
@@ -291,14 +291,14 @@ func TestTheSuppressionNoteKeepsOneHomeWhenBothIncidentsAreOpen(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := armedService(t, st, ctx)
 
-	monitorInc, err := st.CreateIncident(ctx, domain.Incident{
+	monitorInc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, MonitorID: f.monitorID, Title: "checkout-http is down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "monitor reported down", "system")
 	if err != nil {
 		t.Fatalf("monitor incident: %v", err)
 	}
-	serviceInc, err := st.CreateIncident(ctx, domain.Incident{
+	serviceInc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "Checkout — service down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "opened automatically", "system")
@@ -359,7 +359,7 @@ func TestAnOpenServiceIncidentMovesNoComponentStatus(t *testing.T) {
 		t.Fatalf("the fixture produced no projection at all: %+v", b)
 	}
 
-	if _, err := st.CreateIncident(ctx, domain.Incident{
+	if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "Checkout — service down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactCritical, Source: domain.SourceAuto,
 	}, "opened automatically", "system"); err != nil {

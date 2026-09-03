@@ -14,7 +14,7 @@ func TestSearch(t *testing.T) {
 		ProjectID: proj.ID, Name: "api-gateway", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
-	inc, _ := st.CreateIncident(ctx, domain.Incident{
+	inc, _ := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "gateway latency spike", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")

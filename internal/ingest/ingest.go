@@ -26,8 +26,10 @@ type Store interface {
 	RecordProbeError(ctx context.Context, monitorID string, revision int64, probeErr domain.ProbeError) (store.ProbeErrorOutcome, error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	FindOpenAutoIncidentByMonitor(ctx context.Context, monitorID string) (domain.Incident, error)
-	CreateIncident(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
-	AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error)
+	CreateIncidentBySystem(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
+	// The SYSTEM door: the reconciler is a machine writer, so it takes no actor and writes no
+	// audit row. The name says which door it is, which is the point of the split (FR-026 D3).
+	AddIncidentUpdateBySystem(ctx context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error)
 }
 
 // Recorder records per-check metrics.

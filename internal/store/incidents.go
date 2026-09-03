@@ -15,6 +15,44 @@ import (
 
 const incidentColumns = "id, project_id, monitor_id, service_id, title, status, impact, source, external_key, started_at, resolved_at, acknowledged_at, acknowledged_by, escalation_step, last_escalated_at, created_at, updated_at"
 
+// scanIncidentWithFlag scans the incident columns plus ONE trailing boolean. It exists because
+// FR-026 needs to know whether a statement actually changed anything — an audit row means a change
+// happened, and a retry must not manufacture history (D8).
+func scanIncidentWithFlag(row pgx.Row) (domain.Incident, bool, error) {
+	var (
+		inc         domain.Incident
+		monitorID   *string
+		serviceID   *string
+		externalKey *string
+		resolved    *time.Time
+		ackedAt     *time.Time
+		ackedBy     *string
+		lastEsc     *time.Time
+		flag        *bool
+	)
+	if err := row.Scan(&inc.ID, &inc.ProjectID, &monitorID, &serviceID, &inc.Title, &inc.Status, &inc.Impact,
+		&inc.Source, &externalKey, &inc.StartedAt, &resolved, &ackedAt, &ackedBy,
+		&inc.EscalationStep, &lastEsc, &inc.CreatedAt, &inc.UpdatedAt, &flag); err != nil {
+		return domain.Incident{}, false, err
+	}
+	inc.LastEscalatedAt = lastEsc
+	if monitorID != nil {
+		inc.MonitorID = *monitorID
+	}
+	if serviceID != nil {
+		inc.ServiceID = *serviceID
+	}
+	if externalKey != nil {
+		inc.ExternalKey = *externalKey
+	}
+	inc.ResolvedAt = resolved
+	inc.AcknowledgedAt = ackedAt
+	if ackedBy != nil {
+		inc.AcknowledgedBy = *ackedBy
+	}
+	return inc, flag != nil && *flag, nil
+}
+
 func scanIncident(row pgx.Row) (domain.Incident, error) {
 	var (
 		inc         domain.Incident
@@ -52,7 +90,14 @@ func scanIncident(row pgx.Row) (domain.Incident, error) {
 // AcknowledgeIncident marks an open incident as acknowledged (stopping escalation),
 // idempotently: acknowledging an already-acked incident keeps the first ack. Returns
 // the updated incident, or ErrNotFound if it is gone / already resolved.
-func (s *Store) AcknowledgeIncident(ctx context.Context, id, by string) (domain.Incident, error) {
+// AcknowledgeIncidentByPrincipal is the ONLY door: nothing machine-driven acknowledges an incident,
+// and a system door here would widen the unaudited surface for a caller that does not exist (D3). A
+// future machine acknowledgement adds its door in the change that adds the caller.
+func (s *Store) AcknowledgeIncidentByPrincipal(ctx context.Context, id, by string, actor AuditActor) (domain.Incident, error) {
+	return s.acknowledgeIncident(ctx, id, by, &actor)
+}
+
+func (s *Store) acknowledgeIncident(ctx context.Context, id, by string, actor *AuditActor) (domain.Incident, error) {
 	// Same row, same rule as `AddIncidentUpdate`: lock, then read the clock, then write. A single
 	// UPDATE looks atomic and is — but its `now()` is fixed when the statement's transaction began,
 	// so an acknowledgement that waited behind a timeline update stamps `updated_at` BEFORE the
@@ -80,32 +125,55 @@ func (s *Store) AcknowledgeIncident(ctx context.Context, id, by string) (domain.
 	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&asOf); err != nil {
 		return domain.Incident{}, fmt.Errorf("store: read acknowledge instant: %w", err)
 	}
+	// D8a: a repeated acknowledgement is a genuine NO-OP. It used to rewrite `updated_at` on every
+	// retry, so an audit row would have recorded a change that did not happen — and FR-026 may not
+	// claim "an idempotent no-op audits nothing" while the write underneath is not idempotent. The
+	// guard is in the statement rather than in Go, so a concurrent second acknowledgement loses the
+	// same way under the row lock.
 	row := tx.QueryRow(ctx,
 		`UPDATE incidents
 		    SET acknowledged_at = COALESCE(acknowledged_at, $3),
 		        acknowledged_by = COALESCE(acknowledged_by, $2),
-		        updated_at = $3
+		        updated_at = CASE WHEN acknowledged_at IS NULL THEN $3 ELSE updated_at END
 		  WHERE id = $1 AND status <> 'resolved'
-		  RETURNING `+incidentColumns,
+		  RETURNING `+incidentColumns+", (acknowledged_at = $3) AS first_ack",
 		id, by, asOf)
-	inc, err := scanIncident(row)
+	inc, firstAck, err := scanIncidentWithFlag(row)
 	if noRows(err) {
 		return domain.Incident{}, ErrNotFound
 	}
-	if err == nil {
-		if cerr := tx.Commit(ctx); cerr != nil {
-			return domain.Incident{}, fmt.Errorf("store: commit acknowledge: %w", cerr)
-		}
-	}
 	if err != nil {
 		return domain.Incident{}, fmt.Errorf("store: acknowledge incident: %w", err)
+	}
+	// An audit row means a change HAPPENED (D8): a retry must not manufacture history.
+	if actor != nil && firstAck {
+		if err := insertIncidentAudit(ctx, tx, inc.ProjectID, *actor,
+			IncidentAuditAcknowledge, IncidentAcknowledgeTarget(*actor, inc.ID)); err != nil {
+			return domain.Incident{}, err
+		}
+	}
+	if cerr := tx.Commit(ctx); cerr != nil {
+		return domain.Incident{}, fmt.Errorf("store: commit acknowledge: %w", cerr)
 	}
 	return inc, nil
 }
 
 // CreateIncident inserts an incident together with its opening timeline update in
 // one transaction, so every incident has a timeline from the start.
-func (s *Store) CreateIncident(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error) {
+// CreateIncidentByPrincipal is the door a person or a token comes through: the actor is a REQUIRED
+// parameter, so forgetting it is a compile error rather than an unaudited write (D3).
+func (s *Store) CreateIncidentByPrincipal(ctx context.Context, inc domain.Incident, openingBody, author string, actor AuditActor) (domain.Incident, error) {
+	return s.createIncident(ctx, inc, openingBody, author, &actor)
+}
+
+// CreateIncidentBySystem is the door the reconciler comes through. It takes no actor and writes no
+// audit row — a machine incident's record is its own timeline, and auditing a flapping service would
+// bury the log under its own heartbeat (D1, owner 2026-09-01).
+func (s *Store) CreateIncidentBySystem(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error) {
+	return s.createIncident(ctx, inc, openingBody, author, nil)
+}
+
+func (s *Store) createIncident(ctx context.Context, inc domain.Incident, openingBody, author string, actor *AuditActor) (domain.Incident, error) {
 	if err := inc.Validate(); err != nil {
 		return domain.Incident{}, fmt.Errorf("store: invalid incident: %w", err)
 	}
@@ -142,10 +210,17 @@ func (s *Store) CreateIncident(ctx context.Context, inc domain.Incident, opening
 		inc.ProjectID, monitorID, serviceID, inc.Title, inc.Status, inc.Impact, inc.Source, externalKey)
 	created, err := scanIncident(row)
 	if err != nil {
-		// The partial unique index rejects a second open auto-incident for the same
-		// monitor — a concurrent down transition raced us. Benign: one is open.
+		// A partial unique index rejected a second OPEN incident for the same subject — a concurrent
+		// down transition, or a duplicate Alertmanager delivery of one fingerprint, raced us. Benign
+		// in both cases: exactly one is open, which is what the caller wanted.
+		//
+		// D8b: only `incidents_one_open_auto` was mapped here, so the external-key race reached the
+		// generic error path and the receiver answered 500 — where the SEQUENTIAL duplicate, one
+		// millisecond apart, answers 200 and "ignored". The winner of a race and the loser of a retry
+		// are the same event, and the receiver now reports them the same way.
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "incidents_one_open_auto" {
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+			(pgErr.ConstraintName == "incidents_one_open_auto" || pgErr.ConstraintName == "incidents_external_key_open_idx") {
 			return domain.Incident{}, ErrAlreadyOpen
 		}
 		return domain.Incident{}, fmt.Errorf("store: create incident: %w", err)
@@ -192,6 +267,15 @@ func (s *Store) CreateIncident(ctx context.Context, inc domain.Incident, opening
 			return domain.Incident{}, fmt.Errorf("store: marshal incident correlation: %w", err)
 		}
 		if err := enqueueOutboxTx(ctx, tx, domain.TopicIncidentCorrelation, corr); err != nil {
+			return domain.Incident{}, err
+		}
+	}
+	// FR-026 D2: the audit row is written INSIDE the mutating transaction, so a create that cannot
+	// be attributed does not happen (D7). The principal door always writes one; the system door
+	// passes nil and writes none.
+	if actor != nil {
+		if err := insertIncidentAudit(ctx, tx, created.ProjectID, *actor,
+			IncidentAuditCreate, IncidentCreateTarget(*actor, created)); err != nil {
 			return domain.Incident{}, err
 		}
 	}
@@ -285,7 +369,18 @@ func scanIncidentUpdate(row pgx.Row) (domain.IncidentUpdate, error) {
 // AddIncidentUpdate appends a timeline update and syncs the incident's status to
 // it, stamping resolved_at when the incident first reaches Resolved — all in one
 // transaction.
-func (s *Store) AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error) {
+// AddIncidentUpdateByPrincipal and …BySystem split the writer the API and the reconciler share. At
+// the call site they looked identical, which is exactly why an actor ARGUMENT was the wrong shape:
+// review cannot reliably catch a forgotten one, and a compiler can (D3).
+func (s *Store) AddIncidentUpdateByPrincipal(ctx context.Context, upd domain.IncidentUpdate, actor AuditActor) (domain.IncidentUpdate, error) {
+	return s.addIncidentUpdate(ctx, upd, &actor)
+}
+
+func (s *Store) AddIncidentUpdateBySystem(ctx context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error) {
+	return s.addIncidentUpdate(ctx, upd, nil)
+}
+
+func (s *Store) addIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate, actor *AuditActor) (domain.IncidentUpdate, error) {
 	if err := upd.Validate(); err != nil {
 		return domain.IncidentUpdate{}, fmt.Errorf("store: invalid incident update: %w", err)
 	}
@@ -382,6 +477,24 @@ func (s *Store) AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate
 	if err := enqueueOutboxAtTx(ctx, tx, domain.TopicIncidentEvent, payload, asOf); err != nil {
 		return domain.IncidentUpdate{}, err
 	}
+	// FR-026 D4: a resolve is NOT its own action — it is a status change whose TARGET names the
+	// transition, so the vocabulary does not grow a word per state. A timeline note that changes
+	// nothing is `incident.note`, and both ends of a transition are read from the row that was
+	// LOCKED rather than from the request body (D5).
+	if actor != nil {
+		// `next` is the status the row will HOLD: an update that omits one means "keep the current",
+		// and a transition to the empty string is not a thing that can be audited. `upd.Status` was
+		// normalized to `next` above and reads the same today — this names the value it means, so a
+		// future edit that moves that assignment cannot quietly turn every plain note into one.
+		action, target := IncidentAuditNote, IncidentNoteTarget(*actor, upd.IncidentID)
+		if next != current {
+			action = IncidentAuditStatus
+			target = IncidentStatusTarget(*actor, upd.IncidentID, current, next)
+		}
+		if err := insertIncidentAudit(ctx, tx, evInc.ProjectID, *actor, action, target); err != nil {
+			return domain.IncidentUpdate{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.IncidentUpdate{}, fmt.Errorf("store: commit add update: %w", err)
 	}
@@ -420,17 +533,52 @@ func scanPostmortem(row pgx.Row) (domain.Postmortem, error) {
 	return p, nil
 }
 
-// UpsertPostmortem creates or replaces the postmortem attached to an incident.
-func (s *Store) UpsertPostmortem(ctx context.Context, incidentID, body, author string) (domain.Postmortem, error) {
-	row := s.pool.QueryRow(ctx,
+// UpsertPostmortemByPrincipal creates or replaces the postmortem attached to an incident. Like the
+// acknowledgement it is PRINCIPAL-ONLY: nothing machine-driven writes a postmortem, and a system door
+// here would widen the unaudited surface for a caller that does not exist (D3).
+//
+// It also gains a TRANSACTION it did not have (D2a). The audit row must be written in the mutating
+// transaction, and a writer with no transaction cannot honour that — the requirement had to give it
+// one rather than settle for a best-effort audit beside it.
+func (s *Store) UpsertPostmortemByPrincipal(ctx context.Context, incidentID, body, author string, actor AuditActor) (domain.Postmortem, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Postmortem{}, fmt.Errorf("store: begin upsert postmortem: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	// D2a: lock the INCIDENT first, exactly as `addIncidentUpdate` does. The postmortem writer used
+	// to own no transaction at all, and the version that gained one still took no lock: it upserted,
+	// then read the tenant, so an unknown incident surfaced as a foreign-key error rather than
+	// `ErrNotFound`, and the `created` flag was decided by whichever way the unique index happened
+	// to serialize rather than by a read the writer holds. One lock answers all three.
+	var projectID string
+	if err := tx.QueryRow(ctx,
+		`SELECT project_id FROM incidents WHERE id = $1 FOR UPDATE`, incidentID).Scan(&projectID); err != nil {
+		if noRows(err) {
+			return domain.Postmortem{}, ErrNotFound
+		}
+		return domain.Postmortem{}, fmt.Errorf("store: lock incident for postmortem: %w", err)
+	}
+	// `created` distinguishes the two target shapes of D5, read from the row rather than guessed:
+	// xmax = 0 identifies a fresh INSERT inside an upsert.
+	row := tx.QueryRow(ctx,
 		`INSERT INTO postmortems (incident_id, body, author) VALUES ($1,$2,$3)
 		 ON CONFLICT (incident_id)
 		 DO UPDATE SET body = EXCLUDED.body, author = EXCLUDED.author, updated_at = now()
-		 RETURNING `+postmortemColumns,
+		 RETURNING `+postmortemColumns+", (xmax = 0) AS created",
 		incidentID, body, author)
-	p, err := scanPostmortem(row)
-	if err != nil {
+	var p domain.Postmortem
+	var created bool
+	if err := row.Scan(&p.ID, &p.IncidentID, &p.Body, &p.Author, &p.PublishedAt, &p.CreatedAt, &p.UpdatedAt, &created); err != nil {
 		return domain.Postmortem{}, fmt.Errorf("store: upsert postmortem: %w", err)
+	}
+	if err := insertIncidentAudit(ctx, tx, projectID, actor,
+		IncidentAuditPostmortem, IncidentPostmortemTarget(actor, incidentID, created)); err != nil {
+		return domain.Postmortem{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Postmortem{}, fmt.Errorf("store: commit postmortem: %w", err)
 	}
 	return p, nil
 }

@@ -85,9 +85,16 @@ type Store interface {
 	AnnulMaintenanceWindow(ctx context.Context, projectID, id, previewID string, rawRetention time.Duration) error
 	ListMaintenanceWindowsByProject(ctx context.Context, projectID string) ([]domain.MaintenanceWindow, error)
 	GetMaintenanceWindow(ctx context.Context, id string) (domain.MaintenanceWindow, error)
-	CreateIncident(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
+	// FR-026 D3: two doors, and the API may only ever call the PRINCIPAL one. A forgotten actor is
+	// then a compile error rather than an unaudited write — which is the whole reason this is a
+	// split and not an extra argument. `TestAPIneverCallsASystemDoor` pins it over the syntax tree.
+	CreateIncidentByPrincipal(ctx context.Context, inc domain.Incident, openingBody, author string, actor store.AuditActor) (domain.Incident, error)
+	// The Alertmanager receiver is a MACHINE writer with an HTTP door: it is the one place in
+	// `internal/api` that legitimately writes without a principal, and it is exempted by name in
+	// that test rather than by a rule that would also excuse a handler.
+	CreateIncidentBySystem(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
 	GetIncident(ctx context.Context, id string) (domain.Incident, error)
-	AcknowledgeIncident(ctx context.Context, id, by string) (domain.Incident, error)
+	AcknowledgeIncidentByPrincipal(ctx context.Context, id, by string, actor store.AuditActor) (domain.Incident, error)
 	CreateEscalationPolicy(ctx context.Context, p domain.EscalationPolicy) (domain.EscalationPolicy, error)
 	GetEscalationPolicy(ctx context.Context, id string) (domain.EscalationPolicy, error)
 	ListEscalationPolicies(ctx context.Context, projectID string) ([]domain.EscalationPolicy, error)
@@ -120,9 +127,10 @@ type Store interface {
 	DeleteOnCallOverride(ctx context.Context, id string) error
 	FindOpenIncidentByExternalKey(ctx context.Context, projectID, key string) (domain.Incident, error)
 	ListIncidentsByProject(ctx context.Context, projectID string) ([]domain.Incident, error)
-	AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error)
+	AddIncidentUpdateByPrincipal(ctx context.Context, upd domain.IncidentUpdate, actor store.AuditActor) (domain.IncidentUpdate, error)
+	AddIncidentUpdateBySystem(ctx context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error)
 	ListIncidentUpdates(ctx context.Context, incidentID string) ([]domain.IncidentUpdate, error)
-	UpsertPostmortem(ctx context.Context, incidentID, body, author string) (domain.Postmortem, error)
+	UpsertPostmortemByPrincipal(ctx context.Context, incidentID, body, author string, actor store.AuditActor) (domain.Postmortem, error)
 	GetPostmortem(ctx context.Context, incidentID string) (domain.Postmortem, error)
 	CreateStatusPage(ctx context.Context, sp domain.StatusPage) (domain.StatusPage, error)
 	UpdateStatusPage(ctx context.Context, sp domain.StatusPage) (domain.StatusPage, error)

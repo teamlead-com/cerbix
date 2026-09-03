@@ -51,7 +51,7 @@ func TestIncidentEnqueuesOutboxInTx(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
@@ -69,7 +69,7 @@ func TestIncidentEnqueuesOutboxInTx(t *testing.T) {
 			"them and bypass the ordering the fence exists for", got)
 	}
 
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "author",
 	}); err != nil {
 		t.Fatalf("add update: %v", err)
@@ -198,14 +198,14 @@ func TestAWriteThatRacedAResolveIsRefusedWithoutATrace(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
 	if err != nil {
 		t.Fatalf("create incident: %v", err)
 	}
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "first",
 	}); err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -215,7 +215,7 @@ func TestAWriteThatRacedAResolveIsRefusedWithoutATrace(t *testing.T) {
 	timeline := incidentUpdateCount(t, st, ctx, inc.ID)
 
 	// The loser of the race: it read `investigating` before the resolve committed.
-	_, err = st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	_, err = st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentInvestigating, Body: "still looking", Author: "second",
 	})
 	if !errors.Is(err, ErrIncidentTerminal) {
@@ -243,7 +243,7 @@ func TestAWriteThatRacedAResolveIsRefusedWithoutATrace(t *testing.T) {
 	}
 
 	// And a write to an incident that never existed is a different answer, not the same one.
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: "00000000-0000-0000-0000-000000000000",
 		Status:     domain.IncidentInvestigating, Body: "ghost", Author: "second",
 	}); !errors.Is(err, ErrNotFound) {
@@ -282,7 +282,7 @@ func TestAnIncidentCannotWalkBackwardsThroughItsLifecycle(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
@@ -290,7 +290,7 @@ func TestAnIncidentCannotWalkBackwardsThroughItsLifecycle(t *testing.T) {
 		t.Fatalf("create incident: %v", err)
 	}
 	post := func(status domain.IncidentStatus, body string) error {
-		_, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		_, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 			IncidentID: inc.ID, Status: status, Body: body, Author: "author",
 		})
 		return err
@@ -338,7 +338,7 @@ func TestAPlainCommentTakesTheStatusItLandsOnNotTheOneItRead(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
@@ -350,13 +350,13 @@ func TestAPlainCommentTakesTheStatusItLandsOnNotTheOneItRead(t *testing.T) {
 	// handler would have sent that value back.
 	seen := domain.IncidentInvestigating
 	// Somebody else moves the incident on, and commits.
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentIdentified, Body: "cause found", Author: "other",
 	}); err != nil {
 		t.Fatalf("concurrent transition: %v", err)
 	}
 	// Now the comment lands, carrying no status.
-	created, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	created, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Body: "adding a note", Author: "commenter",
 	})
 	if err != nil {
@@ -387,7 +387,7 @@ func TestAWaitingWriterStampsItsUpdateAfterTheWait(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
@@ -408,7 +408,7 @@ func TestAWaitingWriterStampsItsUpdateAfterTheWait(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		_, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 			IncidentID: inc.ID, Status: domain.IncidentIdentified, Body: "cause found", Author: "waiter",
 		})
 		done <- err
@@ -470,7 +470,7 @@ func TestAnIncidentCreatedResolvedIsStampedAndStaysVisible(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "yesterday's outage", Status: domain.IncidentResolved,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
 	}, "recorded after the fact", "author")
@@ -483,7 +483,7 @@ func TestAnIncidentCreatedResolvedIsStampedAndStaysVisible(t *testing.T) {
 	}
 	// And an ordinary open incident is NOT stamped — the stamp means "reached Resolved", not
 	// "was written".
-	open, err := st.CreateIncident(ctx, domain.Incident{
+	open, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "live", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
@@ -502,7 +502,7 @@ func TestAWaitingAcknowledgementStampsAfterItsWait(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "opening", "system")
@@ -520,7 +520,7 @@ func TestAWaitingAcknowledgementStampsAfterItsWait(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := st.AcknowledgeIncident(ctx, inc.ID, "u1")
+		_, err := st.AcknowledgeIncidentByPrincipal(ctx, inc.ID, "u1", AuditActor{ViaToken: true, Label: "token:test"})
 		done <- err
 	}()
 	waitForLockWait(t, st, ctx)
@@ -554,14 +554,14 @@ func TestAnIncidentsEventsAreClaimedInOrder(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
 	if err != nil {
 		t.Fatalf("create incident: %v", err)
 	}
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "author",
 	}); err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -636,14 +636,14 @@ func TestADeadPredecessorHoldsTheIncidentStream(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
 	if err != nil {
 		t.Fatalf("create incident: %v", err)
 	}
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "author",
 	}); err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -678,14 +678,14 @@ func TestAClaimIsOrderedByWhenTheEventWasDueNotByItsNewLease(t *testing.T) {
 
 	// Two unrelated events so the causal predicate does not order them for us: the OLDER one has
 	// already been attempted, which is exactly what earns it the longer next lease.
-	older, err := st.CreateIncident(ctx, domain.Incident{
+	older, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "older", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
 	if err != nil {
 		t.Fatalf("older incident: %v", err)
 	}
-	newer, err := st.CreateIncident(ctx, domain.Incident{
+	newer, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "newer", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
@@ -784,7 +784,7 @@ func TestEveryLifecycleEventCarriesAUniqueMonotonicSequence(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "author")
@@ -792,7 +792,7 @@ func TestEveryLifecycleEventCarriesAUniqueMonotonicSequence(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	for _, st2 := range []domain.IncidentStatus{domain.IncidentIdentified, domain.IncidentMonitoring, domain.IncidentResolved} {
-		if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+		if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 			IncidentID: inc.ID, Status: st2, Body: string(st2), Author: "author",
 		}); err != nil {
 			t.Fatalf("update to %s: %v", st2, err)

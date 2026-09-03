@@ -178,7 +178,7 @@ func TestMonitorAnchoredOpenEnqueuesFencedCorrelation(t *testing.T) {
 		t.Fatalf("correlation enqueued as status=%s fenced=%v — the producer was demoted", status, fenced)
 	}
 
-	if _, err := st.CreateIncident(ctx, domain.Incident{
+	if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
 	}, "body", "t"); err != nil {

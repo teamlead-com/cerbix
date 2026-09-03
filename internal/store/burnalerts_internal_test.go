@@ -293,7 +293,7 @@ func TestFindOpenIncidentByExternalKey(t *testing.T) {
 	if _, err := st.FindOpenIncidentByExternalKey(ctx, proj.ID, "fp-1"); err != ErrNotFound {
 		t.Fatalf("no incident yet → ErrNotFound, got %v", err)
 	}
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "latency", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceAPI, ExternalKey: "fp-1",
 	}, "opened", "alertmanager")
@@ -305,7 +305,7 @@ func TestFindOpenIncidentByExternalKey(t *testing.T) {
 		t.Fatalf("find open: %v %+v", err, got)
 	}
 	// Resolving it removes it from the open lookup.
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "done", Author: "alertmanager",
 	}); err != nil {
 		t.Fatalf("resolve: %v", err)

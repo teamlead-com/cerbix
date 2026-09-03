@@ -68,7 +68,7 @@ func (f impactFixture) edge(t *testing.T, st *Store, ctx context.Context, child,
 
 func (f impactFixture) open(t *testing.T, st *Store, ctx context.Context, name string) domain.Incident {
 	t.Helper()
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, MonitorID: f.mon[name], Title: name + " is down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, name+" failed", "auto")
@@ -219,7 +219,7 @@ func TestCorrelateResolveBarrier(t *testing.T) {
 	child := f.open(t, st, ctx, "checkout")
 
 	// (a) anchor resolved before any attempt → the whole attempt is void.
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: child.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "t",
 	}); err != nil {
 		t.Fatalf("resolve child: %v", err)
@@ -430,7 +430,7 @@ func waitForAdvisoryWaiter(t *testing.T, st *Store) {
 // witness source the [278] bound exists for.
 func (f impactFixture) openManual(t *testing.T, st *Store, ctx context.Context, name, title string) domain.Incident {
 	t.Helper()
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, MonitorID: f.mon[name], Title: title,
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMinor, Source: domain.SourceManual,
 	}, title, "t")
@@ -805,7 +805,7 @@ func TestNeighbourHealthMatchesSingleServiceOwner(t *testing.T) {
 // treats a monitor's membership.
 func (f impactFixture) openService(t *testing.T, st *Store, ctx context.Context, name string) domain.Incident {
 	t.Helper()
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, ServiceID: f.svc[name], Title: name + " is down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "service "+name+" is down", "auto")

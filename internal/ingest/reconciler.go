@@ -14,8 +14,10 @@ import (
 type ReconcileStore interface {
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	FindOpenAutoIncidentByMonitor(ctx context.Context, monitorID string) (domain.Incident, error)
-	CreateIncident(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
-	AddIncidentUpdate(ctx context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error)
+	CreateIncidentBySystem(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
+	// The SYSTEM door: the reconciler is a machine writer, so it takes no actor and writes no
+	// audit row. The name says which door it is, which is the point of the split (FR-026 D3).
+	AddIncidentUpdateBySystem(ctx context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error)
 }
 
 // Reconciler runs the shared post-commit flow for an APPLIED status transition, from ANY
@@ -99,7 +101,7 @@ func (rc *Reconciler) openAutoIncident(ctx context.Context, mon domain.Monitor, 
 	var created domain.Incident
 	var err error
 	for attempt := 1; ; attempt++ {
-		created, err = rc.store.CreateIncident(ctx, inc, body, autoIncidentAuthor)
+		created, err = rc.store.CreateIncidentBySystem(ctx, inc, body, autoIncidentAuthor)
 		if errors.Is(err, store.ErrAlreadyOpen) {
 			return // a concurrent down transition opened it first (unique index) — benign
 		}
@@ -130,7 +132,7 @@ func (rc *Reconciler) resolveAutoIncident(ctx context.Context, hb domain.Heartbe
 		rc.logger.Error("find_open_auto_incident_failed", "monitor_id", hb.MonitorID, "error", err.Error())
 		return
 	}
-	if _, err := rc.store.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := rc.store.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID,
 		Status:     domain.IncidentResolved,
 		Body:       "Monitor recovered — automatically resolved.",

@@ -401,7 +401,7 @@ func TestRecordSuppressionIsIdempotent(t *testing.T) {
 	f := armedService(t, st, ctx)
 
 	// An open auto-incident to annotate.
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, MonitorID: f.monitorID, Title: "checkout-http is down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "monitor reported down", "system")

@@ -54,7 +54,7 @@ func (h *Handler) alertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		switch strings.ToLower(a.Status) {
 		case "resolved":
-			did, err := h.resolveExternalIncident(r, proj.ID, key, p.UserID)
+			did, err := h.resolveExternalIncident(r, proj.ID, key, p.UserID, auditActor(p))
 			if err != nil {
 				h.serverError(w, "alertmanager_resolve", err)
 				return
@@ -65,7 +65,7 @@ func (h *Handler) alertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
 				ignored++
 			}
 		case "firing", "":
-			did, err := h.openExternalIncident(r, proj.ID, key, a, p.UserID)
+			did, err := h.openExternalIncident(r, proj.ID, key, a, p.UserID, auditActor(p))
 			if err != nil {
 				h.serverError(w, "alertmanager_open", err)
 				return
@@ -84,7 +84,8 @@ func (h *Handler) alertmanagerWebhook(w http.ResponseWriter, r *http.Request) {
 
 // openExternalIncident opens an incident for a firing alert unless one is already
 // open for the same fingerprint. Returns whether it opened a new incident.
-func (h *Handler) openExternalIncident(r *http.Request, projectID, key string, a alertmanagerAlert, author string) (bool, error) {
+func (h *Handler) openExternalIncident(r *http.Request, projectID, key string, a alertmanagerAlert,
+	author string, actor store.AuditActor) (bool, error) {
 	if _, err := h.store.FindOpenIncidentByExternalKey(r.Context(), projectID, key); err == nil {
 		return false, nil // already open — idempotent
 	} else if !errors.Is(err, store.ErrNotFound) {
@@ -98,7 +99,15 @@ func (h *Handler) openExternalIncident(r *http.Request, projectID, key string, a
 		Source:      domain.SourceAPI,
 		ExternalKey: key,
 	}
-	if _, err := h.store.CreateIncident(r.Context(), inc, alertBody(a), author); err != nil {
+	// The receiver is a PRINCIPAL write (D1): Alertmanager posts with a project-write token, and that
+	// token is who opened the incident. It comes through the principal door like the manual create.
+	if _, err := h.store.CreateIncidentByPrincipal(r.Context(), inc, alertBody(a), author, actor); err != nil {
+		// D8b: a duplicate delivery that arrives CONCURRENTLY loses the partial unique index rather
+		// than the read above. It is the same event as the sequential duplicate and gets the same
+		// answer — ignored, 200, no incident of its own — instead of the 500 it used to get.
+		if errors.Is(err, store.ErrAlreadyOpen) {
+			return false, nil
+		}
 		return false, err
 	}
 	if h.metrics != nil {
@@ -108,7 +117,8 @@ func (h *Handler) openExternalIncident(r *http.Request, projectID, key string, a
 }
 
 // resolveExternalIncident closes the open incident for a fingerprint, if any.
-func (h *Handler) resolveExternalIncident(r *http.Request, projectID, key, author string) (bool, error) {
+func (h *Handler) resolveExternalIncident(r *http.Request, projectID, key, author string,
+	actor store.AuditActor) (bool, error) {
 	inc, err := h.store.FindOpenIncidentByExternalKey(r.Context(), projectID, key)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil // nothing open for this fingerprint — ignore
@@ -122,7 +132,13 @@ func (h *Handler) resolveExternalIncident(r *http.Request, projectID, key, autho
 		Body:       "Resolved by Alertmanager.",
 		Author:     author,
 	}
-	if _, err := h.store.AddIncidentUpdate(r.Context(), upd); err != nil {
+	if _, err := h.store.AddIncidentUpdateByPrincipal(r.Context(), upd, actor); err != nil {
+		// D8b, the resolve half: both requests found the incident open, the winner resolved it, and
+		// the loser's update is refused as terminal. That mapping is scoped to THIS path — the human
+		// route keeps telling an operator that the incident is already resolved.
+		if errors.Is(err, store.ErrIncidentTerminal) {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil

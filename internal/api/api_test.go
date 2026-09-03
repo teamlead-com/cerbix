@@ -39,9 +39,20 @@ type fakePullTest struct {
 }
 
 type fakeStore struct {
+	// auditActors records "<action>|<label>" for every PRINCIPAL door the handlers called. A fake
+	// that silently dropped the actor would let a test assert an audited write that never carried
+	// its principal, which is the property FR-026 exists for.
+	auditActors []string
+
 	rep *fakeReporting
 	// deleteServiceErr injects a store-level delete failure (e.g. the §14.2 file pin).
 	deleteServiceErr error
+	// createIncidentErr and addIncidentUpdateErr inject the two errors D8b's contract turns on:
+	// the loser of a concurrent duplicate delivery loses the partial unique index (ErrAlreadyOpen)
+	// or the status guard (ErrIncidentTerminal). The RACE itself is proven against the real database
+	// in internal/store; what is proven here is what the receiver ANSWERS when it loses one.
+	createIncidentErr    error
+	addIncidentUpdateErr error
 	// FR-021 phase-5 fakes: which monitors a service is covering, and an injected lookup failure.
 	delegatedMonitors map[string][]store.DelegationOwner
 	delegationErr     error
@@ -717,7 +728,15 @@ func (f *fakeStore) GetMaintenanceWindow(_ context.Context, id string) (domain.M
 	return mw, nil
 }
 
-func (f *fakeStore) CreateIncident(_ context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error) {
+func (f *fakeStore) CreateIncidentByPrincipal(ctx context.Context, inc domain.Incident, openingBody, author string, actor store.AuditActor) (domain.Incident, error) {
+	f.auditActors = append(f.auditActors, string(store.IncidentAuditCreate)+"|"+actor.Label)
+	if f.createIncidentErr != nil {
+		return domain.Incident{}, f.createIncidentErr
+	}
+	return f.CreateIncidentBySystem(ctx, inc, openingBody, author)
+}
+
+func (f *fakeStore) CreateIncidentBySystem(_ context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error) {
 	inc.ID = "inc-new"
 	inc.StartedAt = time.Now()
 	f.incidents[inc.ID] = inc
@@ -733,7 +752,12 @@ func (f *fakeStore) GetIncident(_ context.Context, id string) (domain.Incident, 
 	}
 	return inc, nil
 }
-func (f *fakeStore) AcknowledgeIncident(_ context.Context, id, by string) (domain.Incident, error) {
+func (f *fakeStore) AcknowledgeIncidentByPrincipal(_ context.Context, id, by string, actor store.AuditActor) (domain.Incident, error) {
+	f.auditActors = append(f.auditActors, string(store.IncidentAuditAcknowledge)+"|"+actor.Label)
+	return f.acknowledgeIncident(id, by)
+}
+
+func (f *fakeStore) acknowledgeIncident(id, by string) (domain.Incident, error) {
 	inc, ok := f.incidents[id]
 	if !ok || inc.Status == domain.IncidentResolved {
 		return domain.Incident{}, store.ErrNotFound
@@ -1019,7 +1043,22 @@ func (f *fakeStore) ListIncidentsByProject(_ context.Context, projectID string) 
 	}
 	return out, nil
 }
-func (f *fakeStore) AddIncidentUpdate(_ context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error) {
+func (f *fakeStore) AddIncidentUpdateByPrincipal(ctx context.Context, upd domain.IncidentUpdate, actor store.AuditActor) (domain.IncidentUpdate, error) {
+	// The fake mirrors the store's OWN branch (FR-026 D4): a resolve is not its own action — it is a
+	// status change — and an update that keeps the current status is a note. Recording one word for
+	// both would let an API test assert an action the product never writes.
+	action := store.IncidentAuditNote
+	if inc, ok := f.incidents[upd.IncidentID]; ok && upd.Status != "" && upd.Status != inc.Status {
+		action = store.IncidentAuditStatus
+	}
+	f.auditActors = append(f.auditActors, string(action)+"|"+actor.Label)
+	if f.addIncidentUpdateErr != nil {
+		return domain.IncidentUpdate{}, f.addIncidentUpdateErr
+	}
+	return f.AddIncidentUpdateBySystem(ctx, upd)
+}
+
+func (f *fakeStore) AddIncidentUpdateBySystem(_ context.Context, upd domain.IncidentUpdate) (domain.IncidentUpdate, error) {
 	upd.ID = "iu-new"
 	// The fake records what the HANDLER sent, before resolving anything, because that is what the
 	// handler's regression is about: an empty status is the keep-current INTENT, and materializing
@@ -1044,7 +1083,12 @@ func (f *fakeStore) AddIncidentUpdate(_ context.Context, upd domain.IncidentUpda
 func (f *fakeStore) ListIncidentUpdates(_ context.Context, incidentID string) ([]domain.IncidentUpdate, error) {
 	return f.incUpdates[incidentID], nil
 }
-func (f *fakeStore) UpsertPostmortem(_ context.Context, incidentID, body, author string) (domain.Postmortem, error) {
+func (f *fakeStore) UpsertPostmortemByPrincipal(_ context.Context, incidentID, body, author string, actor store.AuditActor) (domain.Postmortem, error) {
+	f.auditActors = append(f.auditActors, string(store.IncidentAuditPostmortem)+"|"+actor.Label)
+	return f.upsertPostmortem(incidentID, body, author)
+}
+
+func (f *fakeStore) upsertPostmortem(incidentID, body, author string) (domain.Postmortem, error) {
 	pm := domain.Postmortem{ID: "pm", IncidentID: incidentID, Body: body, Author: author}
 	f.postmortems[incidentID] = pm
 	return pm, nil

@@ -314,7 +314,7 @@ func (h *Handler) acknowledgeIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, _ := h.principal(r)
-	acked, err := h.store.AcknowledgeIncident(r.Context(), inc.ID, p.UserID)
+	acked, err := h.store.AcknowledgeIncidentByPrincipal(r.Context(), inc.ID, p.UserID, auditActor(p))
 	if err == nil {
 		h.logEvent(r, "incident_acknowledged", "incident_id", inc.ID)
 	}

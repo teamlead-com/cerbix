@@ -699,7 +699,7 @@ func TestIncidentLifecyclePersistence(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "api down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "we are investigating", "author1")
@@ -717,12 +717,12 @@ func TestIncidentLifecyclePersistence(t *testing.T) {
 	}
 
 	// Advancing status is reflected on the incident; resolving stamps resolved_at.
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentIdentified, Body: "found it", Author: "author1",
 	}); err != nil {
 		t.Fatalf("add update: %v", err)
 	}
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "author1",
 	}); err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -742,10 +742,10 @@ func TestIncidentLifecyclePersistence(t *testing.T) {
 	}
 
 	// Postmortem upsert then read back.
-	if _, err := st.UpsertPostmortem(ctx, inc.ID, "root cause", "author1"); err != nil {
+	if _, err := st.UpsertPostmortemByPrincipal(ctx, inc.ID, "root cause", "author1", store.AuditActor{ViaToken: true, Label: "token:test"}); err != nil {
 		t.Fatalf("upsert postmortem: %v", err)
 	}
-	pm, err := st.UpsertPostmortem(ctx, inc.ID, "root cause v2", "author2")
+	pm, err := st.UpsertPostmortemByPrincipal(ctx, inc.ID, "root cause v2", "author2", store.AuditActor{ViaToken: true, Label: "token:test"})
 	if err != nil {
 		t.Fatalf("re-upsert postmortem: %v", err)
 	}
@@ -818,11 +818,11 @@ func TestStatusPageAndComponentPersistence(t *testing.T) {
 	}
 
 	// Open-incident query excludes resolved ones.
-	openInc, _ := st.CreateIncident(ctx, domain.Incident{
+	openInc, _ := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opening", "a")
-	_, _ = st.CreateIncident(ctx, domain.Incident{
+	_, _ = st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "old", Status: domain.IncidentResolved,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
 	}, "opening", "a")
@@ -952,7 +952,7 @@ func TestMonitorStatusTransitionAndAutoIncident(t *testing.T) {
 	}
 
 	// An auto-incident links to the monitor and is found while open.
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "api-health is down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "auto-opened", "auto")
@@ -965,7 +965,7 @@ func TestMonitorStatusTransitionAndAutoIncident(t *testing.T) {
 	}
 
 	// Resolving it clears the open lookup.
-	if _, err := st.AddIncidentUpdate(ctx, domain.IncidentUpdate{
+	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Author: "auto",
 	}); err != nil {
 		t.Fatalf("resolve: %v", err)

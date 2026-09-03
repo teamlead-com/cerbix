@@ -80,7 +80,7 @@ func TestMonitorDependencies(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `UPDATE monitors SET status='up' WHERE id=$1`, pg.ID); err != nil {
 		t.Fatal(err)
 	}
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: pg.ID, Title: "postgres-main is down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "auto", "system")
@@ -92,7 +92,7 @@ func TestMonitorDependencies(t *testing.T) {
 	}
 
 	// Suppression note on the child's open auto-incident — once.
-	childInc, err := st.CreateIncident(ctx, domain.Incident{
+	childInc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: apiSvc.ID, Title: "api-svc is down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "auto", "system")

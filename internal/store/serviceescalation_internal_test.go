@@ -52,7 +52,7 @@ func escalatingService(t *testing.T, st *Store, ctx context.Context) (ladderFixt
 		`UPDATE services SET escalation_policy_id = $2 WHERE id = $1`, f.serviceID, policy.ID); err != nil {
 		t.Fatalf("attach policy: %v", err)
 	}
-	inc, err := st.CreateIncident(ctx, domain.Incident{
+	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "Checkout — service down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "opened automatically", "system")
@@ -157,7 +157,7 @@ func TestAServiceLadderFiresNamesTheServiceAndStopsOnAck(t *testing.T) {
 
 	// Acknowledgement ends it: the incident leaves the candidate set through the same predicate a
 	// monitor's does.
-	if _, err := st.AcknowledgeIncident(ctx, inc.ID, "u1"); err != nil {
+	if _, err := st.AcknowledgeIncidentByPrincipal(ctx, inc.ID, "u1", AuditActor{ViaToken: true, Label: "token:test"}); err != nil {
 		t.Fatalf("acknowledge: %v", err)
 	}
 	if _, err := st.pool.Exec(ctx, `UPDATE incidents SET escalation_step = 0 WHERE id = $1`, inc.ID); err != nil {
@@ -389,7 +389,7 @@ func TestTheServiceGraphDoesNotPauseAServiceLadder(t *testing.T) {
 		[]string{upstream.ID}, 0, GraphActor{Label: "t"}); err != nil {
 		t.Fatalf("edge: %v", err)
 	}
-	if _, err := st.CreateIncident(ctx, domain.Incident{
+	if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, ServiceID: upstream.ID, Title: "Payments — service down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "opened automatically", "system"); err != nil {

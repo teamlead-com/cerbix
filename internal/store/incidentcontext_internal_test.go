@@ -63,7 +63,7 @@ func TestIncidentContextAndAppend(t *testing.T) {
 	}
 
 	// Append is idempotent per incident.
-	created, err := st.CreateIncident(ctx, domain.Incident{
+	created, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: parent.ID, Title: "postgres-main is down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
 	}, "auto-opened", "system")

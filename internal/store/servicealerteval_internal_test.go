@@ -359,7 +359,7 @@ func TestAServiceAlertOpensAndResolvesOnlyItsOwnIncident(t *testing.T) {
 	f := alertingService(t, st, ctx)
 
 	// A MONITOR's incident, opened before anything else happens. Nothing the evaluator does may touch it.
-	monitorIncident, err := st.CreateIncident(ctx, domain.Incident{
+	monitorIncident, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, MonitorID: f.monitorID, Title: "checkout-http down",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceManual,
 	}, "opened by hand", "tester")

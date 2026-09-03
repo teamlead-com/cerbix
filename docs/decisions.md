@@ -7097,3 +7097,13 @@ setting anywhere to reconcile them. Five hours of difference, unlabelled.
 
 **Gates.** `vue-tsc` clean; **601 tests over 50 files**; `make docs-check` green. No Go change and
 no API change. NFR-025 is `IN_PROGRESS`: (a) and (b) done, (c) open.
+
+**Reviewed and APPROVED** at party [203] for the range `7cfb2ec..1ccf6d4`, after four findings —
+[195], [197], [199], [201] — every one of them about the EVIDENCE rather than the behaviour: a
+requirement reported done on a guard that covered only what had just been fixed; a count quoted in
+the wrong unit; a boundary stated as an obsolete function count; two exports left unguarded; and a
+fix for that last one which was a dead regex guarding nothing. This time the reviewer ran frontend
+tests himself through Docker — `wallclock` + `SlaView`, 35/35 — alongside his own `git diff --check`
+and `make docs-check`; the remaining gates stay attributed to this session. The approval covers the
+correction and its truthful status only: **NFR-025c remains open**, and it is not a release, push or
+tag approval.

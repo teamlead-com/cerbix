@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 3, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 4, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -13,7 +13,10 @@
 > monitor, and never wrote the truncation fence its own prose promised, so an unanswerable span
 > became invisible to `ledger_from` and a later query could over-claim it — §7. Revision 3 is dense
 > per-window rows with a deterministic per-monitor cap and the fence written in the same statement as
-> the advance. §5.4 records the constraints from party [222].
+> the advance. **Revision 4** answers three P1s from [227]: the five-rule advance audit and the
+> policy-skip/backoff statement (§7.1, §7.2), the terminal upsert's SQL and validity rules (§8.3),
+> and the transition equation for a configuration write, which must leave `next_due_at` untouched
+> (§10). §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -183,8 +186,13 @@ CREATE TABLE expected_runs (
     region             text        NOT NULL,
     issued_at          timestamptz,            -- core: dispatch returned success
     claimed_at         timestamptz,            -- executor: off the transport, about to probe
-    terminal_at        timestamptz,            -- executor/ingest: an outcome exists
+    terminal_at        timestamptz,            -- an ADMISSIBLE outcome exists; coverage iff NOT NULL
     outcome            text CHECK (outcome IN ('result', 'probe_error')),
+    refused_at         timestamptz,            -- a result arrived and the revision/skew gate refused it
+    refused_reason     text,                   -- ResultOutcome.Reason, verbatim
+    skip_reason        text CHECK (skip_reason IN ('no_capable_runner', 'no_inflight_slot',
+                                                   'credential_unresolved', 'no_capable_executor',
+                                                   'transport_backoff')),
     PRIMARY KEY (monitor_id, due_at),
     FOREIGN KEY (monitor_id, project_id) REFERENCES monitors (id, project_id) ON DELETE CASCADE
 ) PARTITION BY RANGE (due_at) WITH (fillfactor = 70);
@@ -369,6 +377,80 @@ a requirement whose purpose is to let a surface refuse to draw. It is also why d
 move onto the transactional outbox: that would put outbox latency in front of every probe to fix an
 error that already fails safe.
 
+### 7.1 Every advance, audited — there are FIVE rules, not three
+
+Revisions 1 to 3 asserted a "three-rule contract". The audit the reviewer required at [227] found
+**five**, and the two I had missed are the two that do not advance by the interval. Every write to
+`nextRun` in `internal/scheduler/scheduler.go`, classified:
+
+| # | Cause | In-memory advance | Sites | Ledger obligation |
+| --- | --- | --- | --- | --- |
+| 1 | **Dispatch succeeded** | `now + iv` | `:1473` pull, `:1487` AMQP, `:1680` credentialed | §7's statement — the issued row |
+| 2 | **Dispatch failed** | *none* — retried next tick | `:1466-1471`, `:1480-1486` | Nothing. The window stays outstanding, which is true |
+| 3 | **Policy skip** — no capable canary runner, or no in-flight slot | `now + iv` | `:1442`, `:1449` plain; `:1644`, `:1648` credentialed | §7.2's statement — the window with **no job** and a `skip_reason` |
+| 4 | **Backoff** — credential unresolved, no capable executor, publish failure | `now + credentialFailureRetry(...)` | `:1576`, `:1604`, `:1631`, `:1674` | §7.2, with the **backoff** instant and its own `skip_reason` |
+| 5 | **Confirm acceleration** — moves the due instant EARLIER | `fast` | `:1757` (`enterConfirm`) | §7.3 — retards, never advances, so no window can have been missed |
+
+A sixth path, `checkStalePush` at `:1805`, writes `nextRun` for **push** monitors, which §15 excludes
+from the ledger entirely. It is named here so it is a stated exclusion rather than an unhandled path.
+
+### 7.2 The policy-skip and backoff statement
+
+Rules 3 and 4 advance the expectation **without a dispatch**, so §7's statement cannot serve them —
+it requires a `job_id`. Without a variant of their own they would advance `next_due_at` while writing
+nothing, which is invariant 24 violated on a live path, and it is why the reviewer called this a P1
+rather than a nicety.
+
+```sql
+WITH picked AS (
+    SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at, s.interval_in_force,
+           s.execution_revision, v.reason, v.next_due
+      FROM monitor_schedule s
+      JOIN unnest($1::uuid[], $2::text[], $3::timestamptz[]) AS v(monitor_id, reason, next_due)
+        ON v.monitor_id = s.monitor_id
+     ORDER BY s.monitor_id
+       FOR UPDATE OF s
+),
+skipped AS (
+    INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id,
+                               execution_revision, region, skip_reason)
+    SELECT p.project_id, p.monitor_id, p.due_at, NULL,
+           p.execution_revision, m.region, p.reason
+      FROM picked p JOIN monitors m ON m.id = p.monitor_id
+    ON CONFLICT (monitor_id, due_at) DO NOTHING
+)
+UPDATE monitor_schedule s
+   SET next_due_at = p.next_due,       -- now + iv for rule 3; now + backoff for rule 4
+       updated_at  = statement_timestamp()
+  FROM picked p
+ WHERE s.monitor_id = p.monitor_id;
+```
+
+Two things it deliberately does **not** do:
+
+- **`last_issued_at` is not touched.** Nothing was issued.
+- **`interval_in_force` is not set to the backoff.** The backoff moves only `next_due_at`; the
+  interval stays the monitor's real one. Writing the backoff there would space every later gap
+  window at a retry delay, and the error would be invisible and permanent — the same shape as the
+  §10 defect.
+
+Gap materialization is deliberately absent: rules 3 and 4 fire on a **live** leader that has just
+evaluated this monitor, so there is no gap to close. A leader that was absent closes its gap through
+§7 on the first successful dispatch, or through §7.2 if the first thing it does is skip.
+
+Used on **both** branches — plain (`:1442`, `:1449`) and credentialed (`:1644`, `:1648`, plus the
+four backoff sites) — because revision 1 of FR-029 shipped a claim on only one branch and the
+reviewer's D9/D9a finding there is the same mistake waiting to be repeated.
+
+### 7.3 Confirm acceleration retards, it does not advance
+
+Rule 5 moves `next_due_at` **earlier**, so no window can have been missed and no row is written.
+What must change is `interval_in_force = ConfirmInterval()` and `confirm_phase = true`, so that later
+windows are spaced by the accelerated interval; and both must be restored when the acceleration
+expires (`scheduler.go:1428-1434` deletes the entry). An acceleration that left
+`interval_in_force` at the base interval would misdate every window probed under confirm — which is
+exactly the misdating §6.2 puts those two columns on the row to prevent.
+
 ## 8. Idempotency, ordering and crash semantics
 
 §4a named **AMQP claim ordering and crash semantics** as the key design risk to resolve before code.
@@ -399,12 +481,71 @@ A terminal event that overtakes its own claim loses nothing: the claim fills its
 it lands. There is no state machine, so no reordering can violate one. A duplicate of either changes
 nothing.
 
-### 8.3 A terminal event can create its own row
+### 8.3 The terminal upsert, and why it cannot manufacture coverage
 
-If the issue statement never ran (§7's crash-after-publish), the terminal event **upserts** the row
-using the `due_at`, `job_id` and `issued_at` it carries on the wire, rather than being dropped as an
-orphan. This removes the "who wrote first" dependency instead of patching it, and it is why
-`due_at` must ride the job and the result.
+Revision 3 called this load-bearing and gave neither SQL nor validity rules — the reviewer's P1-2 at
+[227]. Both are here, because the guard is one `WHERE` clause and every property below is a
+consequence of it rather than a separate check.
+
+**Where it runs is the first rule.** The fill lives in the SAME transaction as the heartbeat insert
+and **behind the same gate**. `internal/store/monitors.go:1337-1344` rejects a result whose
+`execution_revision` is missing (outside `observe` mode) or mismatched, and the comment is explicit:
+*"A reject inserts nothing."* Steps 4 and 4b then reject a future timestamp, one outside retention,
+and one that precedes its job's issue beyond `allowed_skew`. A refused result must therefore fill
+**nothing** — otherwise a result refused as evidence for a heartbeat would become evidence for a
+stroke. Making it structural rather than a remembered condition is the point: the statement is
+unreachable for a refused result.
+
+A refusal is still recorded, because "a result arrived and was inadmissible" is a different fact
+from silence — in `refused_at` and `refused_reason`, which are **not** `terminal_at`. That keeps
+coverage a single unambiguous test (`terminal_at IS NOT NULL`) instead of a compound condition a
+later reader could get wrong.
+
+```sql
+INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
+                           region, issued_at, claimed_at, terminal_at, outcome)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (monitor_id, due_at) DO UPDATE
+   SET job_id      = COALESCE(expected_runs.job_id, $4),
+       issued_at   = LEAST(COALESCE(expected_runs.issued_at,  $7), $7),
+       claimed_at  = LEAST(COALESCE(expected_runs.claimed_at, $8), $8),
+       terminal_at = LEAST(COALESCE(expected_runs.terminal_at, $9), $9),
+       outcome     = COALESCE(expected_runs.outcome, $10)
+ WHERE (expected_runs.job_id = $4
+        OR (expected_runs.job_id IS NULL AND expected_runs.skip_reason IS NULL))
+   AND expected_runs.execution_revision = $5;
+```
+
+What the guard proves, item by item against P1-2's list:
+
+1. **`due_at` + `job_id` must match an issued row.** `expected_runs.job_id = $4` is the match. A
+   terminal for run X reaching run Y's window updates nothing.
+2. **An orphan terminal creates exactly its own row.** No conflict means the `INSERT` stands, with
+   the `job_id`, `issued_at` and `due_at` the CORE minted at materialization and the executor copied
+   (`dispatch.StampResult`) — never values the executor invented.
+3. **A no-job window cannot be turned into coverage by another run's terminal.** For a window
+   materialized by the gap logic, `job_id IS NULL`, so `job_id = $4` is NULL — not true — and the
+   second disjunct admits it ONLY when `skip_reason IS NULL`. A **deliberately skipped** window
+   (§7.2) can therefore never be adopted, which is the case that would otherwise convert "we chose
+   not to run this" into "this ran".
+   The remaining adoption is deliberate and narrow: a window the gap logic recorded as never-issued,
+   for which a terminal later proves a run DID happen — §7's crash-after-publish. Adoption is the
+   reconciliation, and it moves the verdict from `expected_never_issued` to `covered`, which is the
+   truth.
+4. **Duplicates and reordering converge.** `LEAST(COALESCE(...))` is idempotent, commutative and
+   monotone downward, so a replay cannot redate an event and arrival order cannot change the result.
+5. **A stale-revision result cannot become terminal evidence.** Twice: it never reaches the
+   statement (the gate above), and `expected_runs.execution_revision = $5` would refuse it anyway if
+   it did. The second condition is not redundant — it is what stops a result that was admissible for
+   the monitor's *current* revision from filling a window materialized under a different one.
+
+**The trust boundary, stated rather than assumed.** Adoption trusts that `due_at`, `job_id` and
+`issued_at` came from the core. They did: all three are minted by the database at materialization
+(`internal/store/materialize.go:84`) and copied verbatim by the executor. A forged triple is bounded
+by the same revision fence and skew checks that already gate every heartbeat, and by the boundary in
+§13 that refuses a non-UUID id. This is the same trust the product already extends to an executor
+for the heartbeat itself; it is not new surface, and pretending the ledger could verify more than
+the heartbeat path does would be a false assurance.
 
 ### 8.4 The claim event, and what it costs
 
@@ -495,8 +636,39 @@ change, §7's `generate_series` would space the whole gap at the pre-change inte
 1. materializes the windows from `next_due_at` up to the change instant, at the OLD
    `interval_in_force` (identical logic to §7's `missed` CTE, same cap);
 2. writes the new `monitor_execution_revisions` row;
-3. sets `monitor_schedule.interval_in_force`, `execution_revision`, `confirm_phase` and
-   `next_due_at` from the new configuration.
+3. sets `monitor_schedule.interval_in_force`, `execution_revision` and `confirm_phase` from the new
+   configuration — and **leaves `next_due_at` untouched.**
+
+**`next_due_at` is not a function of the config write, and that is required, not incidental.**
+Revision 3 said "and `next_due_at` from the new configuration" without defining the value, which the
+reviewer flagged at [227] as P1-3: `now`, `now + new interval`, and an old due rescaled to the new
+interval each move the probe instant differently, and **invariant 1 promises that no monitor's probe
+instant changes.** The transition equation is therefore:
+
+```
+next_due_at_after_config_write = next_due_at_before_config_write        -- unchanged, always
+interval_in_force_after        = new IntervalSeconds (or ConfirmInterval while confirm_phase)
+```
+
+This is also what the code does today: a config write does not touch the leader's in-memory
+`nextRun`, so the pending probe fires when it was already going to, and the new interval governs from
+the FOLLOWING advance. Any other equation would be a behaviour change smuggled in by a bookkeeping
+requirement.
+
+The window standing at `next_due_at` is stamped with the NEW revision, and that is correct rather
+than a compromise: `next_due_at` is in the future, so that window occurs after the change and the new
+configuration is the one in force for it.
+
+**The race with the scheduler is settled by the lock, not by ordering.** Both this transaction and
+§7's take `FOR UPDATE` on the same `monitor_schedule` row, so they serialize. If §7 commits first,
+the config write's segment close sees the already-advanced `next_due_at` and materializes nothing.
+If the config write commits first, §7 reads the new `interval_in_force`. Both orders leave the same
+invariants true, which is why no ordering is prescribed.
+
+**Test at each side of a due instant** (required by [227]): an interval change and a confirm-interval
+change committed (a) just before and (b) just after a due instant, asserting in all four cases that
+the pending probe fires at its original instant and that the first window spaced by the new interval
+is the one after it.
 
 The config write therefore CLOSES the open window segment, and every segment is spaced by exactly
 the interval that was in force for it. This costs one more statement on a path taken once per
@@ -679,8 +851,15 @@ and this document still does not claim that benefit, because nothing has been an
 Discharged as a SET in `docs/traceability.md`.
 
 1. No monitor's probe instant changes as a result of this requirement.
-2. The scheduler's three advance rules are preserved exactly: advance on successful dispatch, no
-   advance on dispatch failure, advance on a deliberate policy skip.
+2. The scheduler's advance rules are preserved exactly — **all five of them, enumerated in §7.1**.
+   Revision 3 and earlier claimed there were three; the audit the reviewer demanded at [227] found
+   five, and a rule discovered later must be added to §7.1 and to this invariant together.
+2a. Rules 3 and 4 of §7.1 write their window row in the SAME statement as the advance. Of the five
+    rules only rule 2 leaves the expectation alone and only rule 5 moves it earlier; every rule that
+    moves it forward writes a row first.
+2b. A backoff delay never becomes `interval_in_force`. It moves `next_due_at` and nothing else.
+2c. Confirm acceleration sets `interval_in_force` and `confirm_phase`, and restores both when the
+    acceleration expires, so no window probed under confirm is misdated.
 3. `next_due_at` survives leader loss, and a leader returning after a gap finds it in the past.
 4. A window is `covered` only if a terminal outcome exists for it; a terminal outcome is never
    inferred from a heartbeat's presence at a nearby instant.
@@ -691,11 +870,20 @@ Discharged as a SET in `docs/traceability.md`.
 8. A terminal event that arrives before its claim event loses nothing.
 9. A duplicate claim or terminal event changes nothing.
 10. A terminal outcome outranks a missing claim and a missing `issued_at`.
+10a. A result the revision or timestamp gate REFUSES fills nothing: the terminal statement is
+    unreachable for it. The refusal is recorded in `refused_at` and `refused_reason`, never in
+    `terminal_at`, so coverage stays the single test `terminal_at IS NOT NULL`.
+10b. A window carrying a `skip_reason` is never adopted by any terminal event: a run cerbix chose
+    not to make can never be reported as one that happened.
 11. `worker` and `agent` hold no database handle and no ack concept after this change.
-12. `heartbeats` gains no column, and `claimed_at`, `terminal_at` and `outcome` appear in no index.
+12. `heartbeats` gains no column, and `claimed_at`, `terminal_at`, `outcome`, `refused_at`,
+    `refused_reason` and `skip_reason` appear in no index.
 13. The interval, timeout and retry count attributed to a window are those in force for THAT window,
     read from the revision timeline, never from the monitor's current fields.
 14. No gap spans a revision change: the configuration write closes the open segment (§10).
+14a. A configuration write leaves `next_due_at` UNCHANGED. The pending probe fires at the instant it
+    would have fired anyway, and the new interval governs from the following advance — the only
+    equation compatible with invariant 1.
 15. Before `ledger_from` no verdict is emitted — neither `covered` nor `expected_never_issued`.
 16. Dropping a partition never converts unproven time into proven time, and never invents a missed
     run.

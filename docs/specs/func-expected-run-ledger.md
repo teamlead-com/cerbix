@@ -1389,7 +1389,7 @@ and this document still does not claim that benefit, because nothing has been an
 
 | Phase | Content | Gate |
 | --- | --- | --- |
-| **A** | `monitor_execution_revisions`; written in the revision-bump transaction; §10's segment close; backfill one row per monitor | `-race`; a revision bump with no timeline row fails a test |
+| **A** | `monitor_execution_revisions`, written in the revision-bump transaction; backfill one row per monitor. **§10's segment close is NOT here** — it materializes windows and `expected_runs` does not exist until B2, which now owns it (§17.2) | `-race`; invariant 13a: a revision bump with no timeline row fails, the backfill writes exactly one row per monitor, and each row carries that revision's four cadence fields |
 | **B1** | **The `ProtocolV4` carrier, INERT** (§13.0): the fourth AMQP prefix, the widened pull CHECK, `ClaimPullJobsV4`, `agentJobsV4`, capability announcement, and `carrierGeneration`'s ability to reach 4 — with `ledger.carrier_enabled` **false**, so selection never happens and **no V4 job is ever published**. Independently deployable, trivially revertible, and writes no ledger rows | `-race` + a live distributed stack. A V3 consumer must be PHYSICALLY unable to receive a V4 job; `ClaimPullJobsV3` must never return a generation-4 row; and with the gate off, **no V4 job is published even when a region announces V4** |
 | **B2** | Payload and ledger, together and only together: `DueAt`/`JobID` minting on **every** dispatch path (created on the two that mint none, converted on the three that do — §13), `monitor_schedule`, `expected_runs`, §7.1's primitive, **§10's segment close**, and the gate **on** | `-race`; a leader restart leaves a past `next_due_at` with its gap rows; and the §16.1 mixed-version matrix |
 | **C** | The claim event: `Dispatcher` grows a typed claim message; `worker` and `agent` emit it; §8.1's merge | `-race` + a live distributed stack; the fakes in `internal/api`, `internal/outbox` and `internal/scheduler` break on interface growth, which is intended |
@@ -1476,6 +1476,12 @@ Discharged as a SET in `docs/traceability.md`.
     `refused_reason` and `skip_reason` appear in no index.
 13. The interval, timeout and retry count attributed to a window are those in force for THAT window,
     read from the revision timeline, never from the monitor's current fields.
+13a. The revision timeline is COMPLETE and self-describing: `UpdateMonitor` cannot bump
+    `monitors.execution_revision` without writing the matching `monitor_execution_revisions` row in
+    the SAME transaction; the migration's backfill writes exactly one row per monitor; and every row
+    carries that revision's `interval_seconds`, `confirm_interval_seconds`, `timeout_seconds` and
+    `retries`. Nothing else in this list states the integrity of the table everything else reads —
+    which is why phase A had a gate in §16 and no invariant of its own until revision 23.
 14. No gap spans a revision change: the configuration write closes the open segment (§10).
 14a. A configuration write leaves `next_due_at` UNCHANGED. The pending probe fires at the instant it
     would have fired anyway, and the new interval governs from the following advance — the only
@@ -1693,14 +1699,14 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
-### 17.2 The discharge audit — 34 covered, 30 to specify
+### 17.2 The discharge audit — 34 covered, 31 to specify
 
 The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
 sized as its own scope rather than folded into the design approval. It asks one question of each
 invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
 the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
 
-**Result: 34 covered, 30 to specify.** And the shape of the gap is the finding, not the
+**Result: 34 covered, 31 to specify** (65 invariants, after 13a was added by this audit). And the shape of the gap is the finding, not the
 number: every test in §17.1 was added in response to one of the eight P0 rejections, so coverage
 tracked **the design's defects** rather than **the requirement's purpose**. The four invariants that
 say what FR-032 is FOR had nothing testing them —
@@ -1771,7 +1777,8 @@ built**.
 | 10i | B1 | behavioural | TO SPECIFY | a V4 delivery missing `JobID`/`IssuedAt`/`DueAt` must be dead-lettered, not probed |
 | 11 | B1 | source scan | TO SPECIFY | a source scan: `internal/worker` and `internal/agent` import no store package and expose no ack |
 | 12 | B2 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
-| 13 | A | behavioural | **covered** | the confirm-acceleration threshold case |
+| 13 | B2 | behavioural | **covered** | the confirm-acceleration threshold case — it says "attributed to a WINDOW", and there are no windows before B2 |
+| 13a | A | behavioural + schema | TO SPECIFY | the invariant phase A actually owns. Added at revision 23: assigning phases showed 13 needs windows and belongs to B2, leaving A with an entry gate of ZERO rows and its correctness stated only in §16's gate column |
 | 14 | B2 | behavioural | **covered** | the config-boundary cases |
 | 14a | B2 | behavioural | **covered** | the four-case each-side-of-a-due-instant test |
 | 14b | B2 | behavioural | **covered** | the `next_due_at`-already-past case |

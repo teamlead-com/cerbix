@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 12, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 13, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -40,7 +40,10 @@
 > closes the last P1 ([241]): an event's attributes now travel with its timestamp, so a reversed
 > arrival cannot leave one delivery's instant beside another's reason — fixed in the terminal
 > statement too, which had the same defect unreported. **Revision 12** records the owner's scope
-> ruling (§5.3). §5.4 records the constraints from party [222].
+> ruling (§5.3). **Revision 13** answers the last two P1s ([244]): the `ProtocolV4` carrier rollout
+> is specified operationally and phase B splits so it is an independently deployable gate (§13.0,
+> §16), and the read API's pagination is written to this repository's published keyset convention
+> (§13a). §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -1024,6 +1027,48 @@ rather than hidden behind "convert every producer":
   `DueAt` on every dispatch path"**, and `LedgerMinCarrier = dispatch.ProtocolV4`. One generation per
   capability is this project's own pattern and the reason the generations are legible at all.
 
+### 13.0 The `ProtocolV4` carrier rollout
+
+Revision 11 named `ProtocolV4` and specified nothing operational about it — reviewer P1-1 at [244].
+The code physically supports **1..3 only**, and every one of those surfaces has to grow:
+
+| Surface | Today | V4 |
+| --- | --- | --- |
+| AMQP queues | three prefixes: `checks.jobs.`, `checks.jobs.v2.`, `checks.jobs.v3.` (`amqp.go:29-35`), mapped by `jobsQueueForGeneration` (`:127`) | a fourth prefix `checks.jobs.v4.<region>` and its mapping entry |
+| Pull rows | `pull_jobs_protocol_version_check CHECK (protocol_version IN (1,2,3))`, and the same on `pull_tests` (00062, widened by 00063) | a migration **widening** both to `IN (1,2,3,4)` — 00063's own comment says why: *"CHECK is widened rather than dropped: an unknown generation must still be rejected at the boundary"* |
+| Pull claim | `ClaimPullJobs`, `…V2`, `…V3`, each leasing "every generation at or below" its own (`pulljobs.go:77-97`) | `ClaimPullJobsV4`, and an `agentJobsV4` endpoint beside `agentJobsV3` (`handlers_agent.go:119`) |
+| Scheduler admission | `carrierGeneration[region]` raised to 3 only for regions that ANNOUNCE the capability (`scheduler.go:1514`, `:1529`, `:1552`) | the same shape for 4, over a `LiveLedgerV4JobRegions`-style source |
+| Enqueue | `EnqueuePullJob`/`V2`/`V3` | `EnqueuePullJobV4` |
+
+**Isolation is physical, not a filter, and that distinction is the acceptance test.** An old worker
+subscribes only to the prefixes it was compiled to know, so it **cannot receive** a V4 delivery — it
+is not subscribed, rather than subscribed-and-filtered. An old agent calls the V3 claim endpoint,
+whose query leases generations ≤ 3, so a generation-4 row is **outside its result set** rather than
+excluded after the fact. Invariant 10g requires the test to prove unreachability on both transports:
+publish V4 with only a V3 consumer attached and assert the job is never delivered; claim through
+`ClaimPullJobsV3` against a generation-4 row and assert it is never returned.
+
+**Why V4 cannot reuse the credential capability**, which [244] named and is worth writing down: V3
+means "carries envelope v2" and is asked only of monitors that have secrets. Job identity applies to
+**every** monitor, so gating it on a credential capability would make an ordinary HTTP monitor's
+ledger eligibility depend on a capability its dispatch never needs.
+
+**Upgrade order**, and it is one-way for a reason:
+
+1. **Core first.** It can publish 1..3 exactly as before and additionally understands 4. Nothing
+   changes for any executor yet, because the scheduler does not select 4 for a region until that
+   region announces it.
+2. **Executors next**, region by region. Each announces V4 on start; `carrierGeneration[region]`
+   rises to 4 only then. A job is therefore never published to a queue nobody consumes.
+3. **Ledger materialization is not part of this**, per the phase split in §16: B1 is the transport
+   rollout and writes no ledger rows at all.
+
+**Rollback and drain.** On rollback the scheduler stops selecting 4 and immediately resumes
+publishing at the region's previous generation. In-flight V4 work drains by mechanisms that already
+exist: AMQP jobs carry a TTL and `pull_jobs` rows TTL-expire, so no V4 job is left addressed to an
+executor that no longer exists. Windows dispatched below `LedgerMinCarrier` read `unknown` — the
+honest verdict, and the reason a rollback costs truth rather than correctness.
+
 ### 13.1 `DueAt` on the wire — the field revision 7 promised and never defined
 
 `ProtocolV4` was declared to carry `DueAt` while no such field existed on `CheckJob`, `Heartbeat` or
@@ -1123,7 +1168,7 @@ integrity**: it stops a row outliving its tenant. It says nothing about who may 
 
 ```
 GET /api/v1/projects/{projectID}/monitors/{monitorID}/expected-runs
-      ?from=<RFC3339>&to=<RFC3339>&limit=<1..1000>&cursor=<opaque>
+      ?from=<RFC3339>&to=<RFC3339>&limit=<1..200>&cursor=<opaque>
 ```
 
 **Authorization.** Mounted behind the session-auth middleware like every project route — never on
@@ -1144,8 +1189,28 @@ the two facts that bound what the answer means: `ledger_from` and `gap_truncated
 extending before `ledger_from` returns its windows as `unknown` and says so in the payload rather
 than silently starting later, so a caller cannot mistake a clipped range for a covered one.
 
-**Pagination** is cursor-based with a bounded `limit`. `from`/`to` are required, and a range wider
-than the retention window is rejected rather than silently clipped.
+**Pagination**, specified to the convention this repository already publishes for the gate decision
+ledger (`openapi.yaml:1470-1495`) rather than left as "opaque cursor" — reviewer P1-2 at [244], and
+it caught that my `limit=<1..1000>` contradicted the established bound:
+
+| Element | Contract |
+| --- | --- |
+| Range | half-open `[from, to)`, both **REQUIRED**, `from < to`, at most the retention window (14 days) |
+| Order | `due_at DESC`. **No tiebreak is needed and the reason is structural**: the route is monitor-scoped and the primary key is `(monitor_id, due_at)`, so `due_at` is unique within one monitor. If this route is ever widened to project scope a `monitor_id` tiebreak becomes mandatory — noted here because that change would otherwise silently start dropping rows |
+| Cursor | opaque to the client, `base64url("v1:" + due_at as RFC3339Nano)`. The version prefix exists so a later change is DETECTABLE rather than misread |
+| Comparison | the keyset of the LAST RETURNED item; the next page is bound **strictly below** it, so a key returned once is never returned again |
+| `next_cursor` | **null on the last page** |
+| Invalid cursor | 400 `cursor_invalid` — strict decode, no tolerance: a bad version prefix, bad base64 or an unparseable instant all fail the same way |
+| Cursor outside the range | 400 `cursor_invalid`. A cursor whose `due_at` falls outside the requested `[from, to)` cannot belong to this traversal, and ignoring it would return a page from a different query than the caller asked for |
+| `limit` | minimum 1, **maximum 200, default 50** — the same bounds as every other paged endpoint here; 400 `limit_invalid` for 0, negative, non-integer or above 200 |
+| Empty page | `[]` with a null `next_cursor`. Never 404: an empty answer is a fact about the range, not a missing resource |
+| Other errors | 400 `range_required` \| `range_invalid` \| `range_too_wide`; 404 for a project or monitor not visible (§13a's 404-hidden rule) |
+| Traversal | LIVE, as the gate ledger's is: rows committed or dropped during a traversal may or may not appear, and each item's presence follows the single-window response |
+
+One deliberate divergence from that precedent, stated so it does not read as an oversight: the gate
+ledger is **project-scoped and never service-nested** because it *outlives* services. This ledger
+does **not** outlive its monitor — `expected_runs` cascades on monitor deletion (§6.1) — so
+monitor-nesting is correct here, and the two conventions differ for a reason.
 
 ## 14. What this unlocks, and the gate it must pass
 
@@ -1176,7 +1241,8 @@ and this document still does not claim that benefit, because nothing has been an
 | Phase | Content | Gate |
 | --- | --- | --- |
 | **A** | `monitor_execution_revisions`; written in the revision-bump transaction; §10's segment close; backfill one row per monitor | `-race`; a revision bump with no timeline row fails a test |
-| **B** | `monitor_schedule`; §7's statement; **job identity created on the two dispatch paths that mint none** and converted on the three that do (§13) | `-race`; a leader restart leaves a past `next_due_at`, and the gap rows exist |
+| **B1** | **The `ProtocolV4` carrier rollout ONLY** (§13.0): the fourth AMQP prefix, the widened pull CHECK, `ClaimPullJobsV4` and `agentJobsV4`, capability announcement and scheduler admission. **Writes no ledger rows.** Independently deployable and independently revertible | `-race` + a live distributed stack; a V3 consumer must be PHYSICALLY unable to receive a V4 job, and `ClaimPullJobsV3` must never return a generation-4 row |
+| **B2** | `monitor_schedule`; §7.1's statement; **job identity created on the two dispatch paths that mint none** and converted on the three that do (§13); `DueAt` on the wire (§13.1) | `-race`; a leader restart leaves a past `next_due_at`, and the gap rows exist |
 | **C** | The claim event: `Dispatcher` grows a typed claim message; `worker` and `agent` emit it; §8.1's merge | `-race` + a live distributed stack; the fakes in `internal/api`, `internal/outbox` and `internal/scheduler` break on interface growth, which is intended |
 | **D** | Partitions, DEFAULT partition, retention, `ledger_from`, `gap_truncated_before`, the read API returning computed verdicts, and the HOT-ratio gauge | `-race`; BOTH storage modes; E2E; the capacity measurement of invariant 22 |
 | **E** | The FR-031 stroke, behind §14's gate — only if §17 is discharged | E2E on a live stack |
@@ -1224,6 +1290,10 @@ Discharged as a SET in `docs/traceability.md`.
     not to make can never be reported as one that happened.
 10c. A window dispatched on a carrier below `LedgerMinCarrier` reads `unknown`, never
     `issued_never_claimed`.
+10g. Carrier isolation is PHYSICAL: an executor of an older generation cannot receive a V4 AMQP
+    delivery because it is not subscribed to that queue, and cannot claim a generation-4 pull row
+    because its endpoint's query does not select one. Proven by unreachability on both transports,
+    not by a capability lookup returning false.
 10d. `carrier_generation` is written at INSERT time from a server-owned source and never left to a
     column default: the PUBLISHER's routing decision on the issue path, the transport ADAPTER's
     observation on the orphan path. A forged payload `ProtocolVersion` cannot promote a row on any

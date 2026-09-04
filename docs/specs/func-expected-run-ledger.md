@@ -1476,9 +1476,9 @@ Discharged as a SET in `docs/traceability.md`.
     `refused_reason` and `skip_reason` appear in no index.
 13. The interval, timeout and retry count attributed to a window are those in force for THAT window,
     read from the revision timeline, never from the monitor's current fields.
-13a. The revision timeline is COMPLETE and self-describing: `UpdateMonitor` cannot bump
+13a. The revision timeline is COMPLETE and self-describing: **no site** can bump
     `monitors.execution_revision` without writing the matching `monitor_execution_revisions` row in
-    the SAME transaction; the migration's backfill writes exactly one row per monitor; and every row
+    the SAME transaction — and there are FOUR such sites, not one (§17.3); the migration's backfill writes exactly one row per monitor; and every row
     carries that revision's `interval_seconds`, `confirm_interval_seconds`, `timeout_seconds` and
     `retries`. Nothing else in this list states the integrity of the table everything else reads —
     which is why phase A had a gate in §16 and no invariant of its own until revision 23.
@@ -1699,14 +1699,14 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
-### 17.2 The discharge audit — 34 covered, 31 to specify
+### 17.2 The discharge audit — 34 covered, 1 specified, 30 to specify
 
 The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
 sized as its own scope rather than folded into the design approval. It asks one question of each
 invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
 the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
 
-**Result: 34 covered, 31 to specify** (65 invariants, after 13a was added by this audit). And the shape of the gap is the finding, not the
+**Result: 34 covered, 1 specified, 30 to specify** — 65 invariants, after 13a was added by this audit. And the shape of the gap is the finding, not the
 number: every test in §17.1 was added in response to one of the eight P0 rejections, so coverage
 tracked **the design's defects** rather than **the requirement's purpose**. The four invariants that
 say what FR-032 is FOR had nothing testing them —
@@ -1778,7 +1778,7 @@ built**.
 | 11 | B1 | source scan | TO SPECIFY | a source scan: `internal/worker` and `internal/agent` import no store package and expose no ack |
 | 12 | B2 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
 | 13 | B2 | behavioural | **covered** | the confirm-acceleration threshold case — it says "attributed to a WINDOW", and there are no windows before B2 |
-| 13a | A | behavioural + schema | TO SPECIFY | the invariant phase A actually owns. Added at revision 23: assigning phases showed 13 needs windows and belongs to B2, leaving A with an entry gate of ZERO rows and its correctness stated only in §16's gate column |
+| 13a | A | behavioural + **source scan** | **SPECIFIED (§17.3)** | four tests and a `go/ast` scan; specifying it found that FOUR sites bump the revision, not one, so phase A owns all four |
 | 14 | B2 | behavioural | **covered** | the config-boundary cases |
 | 14a | B2 | behavioural | **covered** | the four-case each-side-of-a-due-instant test |
 | 14b | B2 | behavioural | **covered** | the `next_due_at`-already-past case |
@@ -1814,6 +1814,37 @@ built**.
 | 26 | B2 | schema assertion | TO SPECIFY | assert the FK is composite, and that a single-column FK fails the assertion |
 | 26a | D | behavioural | TO SPECIFY | a cross-project negative at the STORE layer, not through the handler |
 | 26b | D | behavioural | TO SPECIFY | every response carries `ledger_from` and `gap_truncated_before` |
+
+### 17.3 Phase A's entry gate — invariant 13a specified
+
+The entry gate of §17.2 requires this before phase A's code begins. Writing it found something the
+invariant as first drafted got wrong.
+
+**There are FOUR revision-bump sites, not one.** `revisionFenceSetSQL` — the D-0142 fence — appears
+at `internal/store/monitors.go:878` (inside `updateMonitorTx`), `internal/store/monitorretire.go:153`
+(retire: `retired_at`, `enabled = false`), `:219` (restore: `retired_at` cleared, `enabled = true`)
+and `internal/store/secrets.go:434` (a secret rotation changes what the monitor executes). All four
+are legitimate generation changes.
+
+`updateMonitorTx`'s comment calls itself "the shared config-write contract (D-0142)", and revision 23
+of this spec read that as "the only one". It is the shared contract for the USER and FILE paths; it
+is not the only place a generation is created. **A generation with no timeline row is a window whose
+configuration cannot be described, which is invariant 13 broken from underneath** — so phase A owns
+all four, not one.
+
+| Claim of 13a | Check kind | Test | The mutation that must kill it |
+| --- | --- | --- | --- |
+| Every bump writes its row in the SAME transaction | behavioural, per site | Four store tests, one per site: bump, then assert a `monitor_execution_revisions` row exists for the NEW revision. Then force the row-write to fail and assert the BUMP rolled back — no generation without a row | Move the timeline insert after the transaction commits, at any one of the four sites. The forced-failure half must then leave a bumped revision with no row and fail BY NAME, naming the site |
+| No FUTURE site can bump without one | **source scan** | A `go/parser`/`go/ast` test over `internal/store`'s non-test files, in the shape of `internal/api/monitordoors_test.go`: every occurrence of `revisionFenceSetSQL` must be inside a function that also references the timeline insert. Placed in `internal/store` beside the code it guards, per [286] | Add a fifth `revisionFenceSetSQL` use in a function with no timeline insert. The scan must fail and name the function |
+| The backfill writes exactly one row per monitor | behavioural | Seed monitors including a DISABLED one and a RETIRED one, migrate, assert `count(monitor_execution_revisions) == count(monitors)` and `effective_from = monitors.updated_at` | Restrict the backfill to `WHERE enabled` — the disabled monitor then has no row and the count assertion fails |
+| Every row carries that revision's four cadence fields | behavioural | Assert `interval_seconds`, `confirm_interval_seconds`, `timeout_seconds` and `retries` each equal the monitor's value | Drop `confirm_interval_seconds` from the backfill's projection. A test asserting only `interval_seconds` would survive this, which is why all four are asserted individually |
+
+**On naming the Go tests.** They are described by their assertions rather than cited as
+`` `TestXxx` `` because `make docs-check` validates every backticked `Test*` name in a living document
+against the tree, and these do not exist yet — citing them now would either break the gate or force
+an `ALLOWED` entry that hides a real absence. The implementing commit adds the names here in
+backticks, at which point the gate starts checking them. Stated so this reads as a sequencing
+constraint rather than as vagueness.
 
 ## 18. Open items
 

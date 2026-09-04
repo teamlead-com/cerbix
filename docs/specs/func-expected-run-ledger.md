@@ -1748,15 +1748,15 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
-### 17.2 The discharge audit — 69 invariants: 34 covered, 3 specified, 1 discharged, 1 withdrawn, 30 to specify
+### 17.2 The discharge audit — 69 invariants: 34 covered, 2 specified, 2 discharged, 1 withdrawn, 30 to specify
 
 The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
 sized as its own scope rather than folded into the design approval. It asks one question of each
 invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
 the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
 
-**Result: 69 invariants — 34 covered, 3 SPECIFIED by §17.4, 1 DISCHARGED by phase A, 1 withdrawn,
-30 to specify (19 in B2, 9 in D, 2 in C).** Every number in this paragraph and in the heading above
+**Result: 69 invariants — 34 covered, 2 SPECIFIED by §17.4, 2 DISCHARGED (13a by phase A, 10j by
+B1-M), 1 withdrawn, 30 to specify (19 in B2, 9 in D, 2 in C).** Every number in this paragraph and in the heading above
 it is now DERIVED from the table below, by `check_fr032_audit_totals`, because they were typed there
 instead and drifted: they read "65 invariants ... 30 to specify" while the table already held 66 rows
 and 28, through 13a's addition and §17.4's specifications. A total written beside its own table is
@@ -1836,7 +1836,7 @@ to correct.
 | 10g | B1 | behavioural | **covered** | physical unreachability on AMQP and pull |
 | 10h | B1 | behavioural | **covered** | §16.1's mixed-version matrix |
 | 10i | B2 | behavioural (live broker) | **TO SPECIFY** | reassigned from B1 by reviewer P0 at [342]: a V4 delivery is DEFINED by `DueAt`, which the wire does not carry until B2, so B1 has no absence to detect. §17.4 keeps both mutations named for B2's gate |
-| 10j | B1 | migration | **SPECIFIED (§17.4)** | goose-down against pending generation-4 pull rows: the DOWN must refuse, the rows must survive, and the error must name the count and the drain step |
+| 10j | B1 | migration | **DISCHARGED** | 5 tests, 8 mutations killed (§17.5) — the shipped goose Down, refusal plus row survival plus atomic still-widened constraints |
 | 10k | B1 | behavioural | **SPECIFIED (§17.4)** | while `ledger.carrier_enabled` is false `lead()`'s resolved map stamps nothing above 3, asserted on that map's OUTPUT across its three branches rather than once per transport |
 | 10l | B2 | behavioural | **TO SPECIFY** | when the flag is true `role=all` reaches 4 and pull regions do NOT — the two V3 failures §13.0 quotes, one inert deployment and one unclaimable row |
 | 11 | B1 | source scan | **SPECIFIED (§17.4)** | an import-boundary scan over both packages plus an interface-shape assertion on `Dispatcher`; specifying it found the invariant's "no ack concept" clause FALSE about the tree (§17.4) |
@@ -2065,6 +2065,57 @@ belongs to the phase that flips it. B1 can prove only the false-default inert ou
 **Not specified here, deliberately:** B1 writes no ledger rows, so nothing in this gate touches
 `expected_runs`. The carrier's *eligibility* consequences are 10c and 10d, which belong to B2 where
 rows exist.
+
+### 17.5 Phase B1-M's discharge — invariant 10j
+
+Landed at `2fcf2b9`, reviewed at party [369]. B1 was sequenced with the migration FIRST because 10j
+is the only row in the phase with an irreversible failure mode: a rollback that discards pending work
+cannot be undone by fixing the rollback afterwards.
+
+**Every test runs the SHIPPED Down** through `goose.DownToContext` against a throwaway probe database
+migrated to 101, using the existing `probeDatabaseAt` helper. Not a copy of the SQL, and that is the
+whole point: 00063's own comment records that its first draft "said 'drain first' and then
+unconditionally DELETEd them, which is a destructive write-off wearing the words of a safe rollback"
+— a test that re-stated the intended SQL would have passed for that draft too. The 00094 tests next
+door put it as "a Down nobody runs is a Down nobody knows works".
+
+- `TestTheGenerationFourDownRefusesWhilePullRowsArePending` — rows in BOTH tables. The Down errors,
+  both rows survive, the message carries the total, the per-table counts and the drain procedure, and
+  the widened `CHECK` is INTACT: the refusal is atomic, not a partial rollback that leaves rows
+  violating their own table's constraint.
+- `TestTheRefusalTellsTheOperatorWhichTableHoldsTheRows` — only `pull_tests` holds a row; the message
+  must still name both, the zero included: the split LOCATES the pending rows, telling an operator
+  which of the two surfaces holds them. How either drains is the runbook's subject, not this one's.
+- `TestTheGenerationFourDownSucceedsWhenNothingIsPending` — the converse, without which the guard is
+  indistinguishable from one that always refuses: the Down runs, the narrowed `CHECK` rejects 4 again,
+  rows at generations 1 and 3 are untouched, and the Up converges.
+- `TestTheWidenedCheckStillRejectsAnUnknownGeneration` — generation 5 refused by both tables, which is
+  00063's stated reason for widening rather than dropping.
+- `TestTheGenerationFourDownContainsNoDestructiveStatement` — a source scan over the Down's
+  executable lines, because "no destructive delete" is a property of the FILE that a future edit can
+  break while every behavioural test above still passes.
+
+**Mutations planted and killed: 8.** Enumerated as a list so §17.2's row count is checked against the
+ARTEFACT rather than against another sentence.
+
+1. The guarded `DO`-block **deleted entirely** — the Down still fails closed, because `ADD CONSTRAINT` validates existing rows, so only the message assertions catch it.
+2. **Drain first**: `DELETE … WHERE protocol_version = 4`, then narrow. The Down now succeeds and the work is gone.
+3. The guard counting **generation 3** instead of 4.
+4. The Down **DROPping** the `CHECK` instead of narrowing it — caught by the drained converse, which then accepts a generation-4 row.
+5. The **Up** admitting generation 5 as well.
+6. The refusal reporting **only the total**, dropping the per-table split.
+7. The **drain procedure** dropped from the message, leaving a refusal an operator cannot act on.
+8. **`-- +goose NO TRANSACTION` plus a `DELETE` before the guard** — the Down still refuses, and the rows are already gone.
+
+**Why the eighth exists, and why row survival is asserted separately from the error.** Mutation 2 was
+killed by the *"the Down succeeded"* assertion, which means the row-survival assertion had proved
+nothing yet — it was never reached. So the shape where only it can catch was built and run: the Down
+refuses, and the rows are gone anyway. It reports `pull_jobs holds 0 generation-4 row(s) after the
+refusal, want 1: the Down discarded work`. An assertion earns its place by killing something no other
+assertion in the test kills.
+
+**Not discharged by this slice:** 10g, 10h, 10k and 11 remain `SPECIFIED`. B1-M contains no transport
+code, no config, no `ProtocolV4` selection and no ledger row, so nothing here touches them.
 
 ## 18. Open items
 

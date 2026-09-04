@@ -834,8 +834,13 @@ def check_type_list_findings(stated_count, listed, wire, labels=None):
 
 
 def check_fr032_discharge(body, test_source, spec='docs/specs/func-expected-run-ledger.md',
-                          testfile='internal/store/revisiontimeline_internal_test.go'):
-    """FR-032 §17.3's discharge citation and BOTH of §17.2's counts, against their artefacts.
+                          testfile='internal/store/revisiontimeline_internal_test.go',
+                          section='### 17.3', ends='### 17.4', row='13a'):
+    """An FR-032 discharge section's citation and BOTH of its §17.2 row counts, against artefacts.
+
+    Parameterized over (section, test file, row) so a second discharged invariant reuses the ONE
+    mechanism instead of copying it: 10j's discharge in §17.5 is checked by this same function.
+    A guard that gets copied per case is a guard that drifts per case.
 
     PURE: takes the spec text and the test file's source, returns findings. Extracted so the
     fixture tests can call THIS rather than re-implement it — reviewer [321] pointed out that my
@@ -849,30 +854,40 @@ def check_fr032_discharge(body, test_source, spec='docs/specs/func-expected-run-
     beside it free — a guard over one of two adjacent claims invites trust in the other.
     """
     out = []
-    if '### 17.3' not in body:
+    label = section.replace('### ', '§')
+    # The row's claim is read FIRST, because the section's absence is only innocent while nothing
+    # claims to be discharged by it. Returning silently on a missing section let the whole section
+    # be deleted with the row still advertising "N tests, M mutations killed" — the citation then
+    # guards nothing and says so to nobody.
+    claim = re.search(r'\| ' + re.escape(row) + r' \|[^|]*\|[^|]*\|[^|]*\| (\d+) tests, (\d+) mutations',
+                      body)
+    if section not in body:
+        if claim:
+            out.append(f"§17.2's {row} row claims {claim.group(1)} tests and {claim.group(2)} "
+                       f'mutations discharged by {label}, which is not in the document')
         return out
-    sec = body.split('### 17.3', 1)[1].split('### 17.4', 1)[0]
+    sec = body.split(section, 1)[1].split(ends, 1)[0]
     cited = set(re.findall(r'`(Test[A-Za-z0-9_]+)`', sec))
     declared = set(re.findall(r'^func (Test[A-Za-z0-9_]+)', test_source, re.M))
     for name in sorted(declared - cited):
-        out.append(f'{testfile} declares {name}, which §17.3 does not cite — a test that '
+        out.append(f'{testfile} declares {name}, which {label} does not cite — a test that '
                    f'discharges nothing, or a discharge map that undercounts itself')
     for name in sorted(cited - declared):
-        out.append(f'§17.3 cites {name}, which is not declared in {testfile}')
+        out.append(f'{label} cites {name}, which is not declared in {testfile}')
     muts = len(re.findall(r'^\d+\. ', sec, re.M))
-    m = re.search(r'\| 13a \|[^|]*\|[^|]*\|[^|]*\| (\d+) tests, (\d+) mutations', body)
+    m = claim
     if not m:
-        out.append("§17.2's 13a row no longer states its test and mutation counts in the form the "
-                   'guard reads')
+        out.append(f"§17.2's {row} row no longer states its test and mutation counts in the form "
+                   'the guard reads')
     else:
         if int(m.group(1)) != len(declared):
-            out.append(f"§17.2's 13a row says {m.group(1)} tests; {testfile} declares "
+            out.append(f"§17.2's {row} row says {m.group(1)} tests; {testfile} declares "
                        f'{len(declared)}')
         if int(m.group(2)) != muts:
-            out.append(f"§17.2's 13a row says {m.group(2)} mutations; §17.3 enumerates {muts}")
+            out.append(f"§17.2's {row} row says {m.group(2)} mutations; {label} enumerates {muts}")
     if muts == 0:
-        out.append("§17.3 enumerates no mutations as a numbered list, so the row's mutation count "
-                   'is checked against nothing')
+        out.append(f'{label} enumerates no mutations as a numbered list, so the row\'s mutation '
+                   'count is checked against nothing')
     return out
 
 
@@ -1007,9 +1022,12 @@ def check_enumerations():
     # Both live in named functions so the fixture tests invoke the guards instead of modelling them.
     spec = 'docs/specs/func-expected-run-ledger.md'
     testfile = 'internal/store/revisiontimeline_internal_test.go'
-    if os.path.exists(spec) and os.path.exists(testfile):
-        for msg in check_fr032_discharge(read(spec), read(testfile), spec, testfile):
-            bad.append((spec, 1, 'enum', msg))
+    for tf, section, ends, row in (
+            (testfile, '### 17.3', '### 17.4', '13a'),
+            ('internal/store/pullcarrier4_internal_test.go', '### 17.5', '## 18', '10j')):
+        if os.path.exists(spec) and os.path.exists(tf):
+            for msg in check_fr032_discharge(read(spec), read(tf), spec, tf, section, ends, row):
+                bad.append((spec, 1, 'enum', msg))
     if os.path.exists(spec):
         for msg in check_fr032_audit_totals(read(spec), spec):
             bad.append((spec, 1, 'enum', msg))

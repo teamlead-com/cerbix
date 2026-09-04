@@ -517,6 +517,24 @@ class FR032DischargeCitation(unittest.TestCase):
 
     # Proof that these cases reach the production guard rather than a copy of it: with the guard
     # neutralised, the cases above cannot fail, so at least one must notice.
+    # A missing section used to return silently, so deleting §17.3 or §17.5 wholesale left the row
+    # still advertising "N tests, M mutations killed" and the guard reporting nothing. The absence
+    # is innocent only while nothing claims to be discharged by it.
+    def test_a_row_claiming_counts_for_a_section_that_does_not_exist_is_reported(self):
+        got = cdr.check_fr032_discharge(self.ROW.format(t=5, m=8), self.source(["TestA"]))
+        self.assertTrue(any("which is not in the document" in m for m in got), got)
+
+    def test_a_missing_section_with_no_row_claiming_it_stays_silent(self):
+        self.assertEqual(cdr.check_fr032_discharge("nothing here", self.source(["TestA"])), [])
+
+    def test_the_guard_reads_a_second_section_and_row_when_asked(self):
+        """10j's discharge reuses this one mechanism rather than a copy of it."""
+        body = ("### 17.5 fixture\n`TestOnly`\n\n1. one\n2. two\n\n## 18 next\n"
+                + "| 10j | B1 | migration | **DISCHARGED** | 1 tests, 9 mutations killed |\n")
+        got = cdr.check_fr032_discharge(body, self.source(["TestOnly"]),
+                                        section="### 17.5", ends="## 18", row="10j")
+        self.assertTrue(any("10j row says 9 mutations; \u00a717.5 enumerates 2" in m for m in got), got)
+
     def test_breaking_the_guard_breaks_these_tests(self):
         real = cdr.check_fr032_discharge
         try:

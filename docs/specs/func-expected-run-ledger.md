@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 19, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 20, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -921,6 +921,7 @@ disputed instead of trusted:
 | `region` | 8 | short varlena (`core` is 4 chars) |
 | `outcome` | 8 | short varlena, nullable |
 | `interval_seconds` | 8 | `int` plus alignment; carried so lateness needs no join (§14.1) |
+| `interval_assumed` | 0 | `boolean` is 1 byte and is absorbed by the alignment padding already counted above, so the total does not move. Stated rather than omitted, because §12.1 claims to be checkable term by term and a silently dropped term is how a model stops being that |
 | **heap tuple** | **~136** | aligned |
 | PK `(monitor_id, due_at)` entry | ~40 | 24-byte key + index tuple and line-pointer overhead |
 | partial `(monitor_id, job_id)` entry | ~44 | only rows with a job |
@@ -1233,7 +1234,12 @@ bypassed, and a query that is safe only because of its caller is not safe. Invar
 nothing back.
 
 **Response.** Windows in `due_at` order with computed verdicts (never stored — invariant 19), plus
-the two facts that bound what the answer means: `ledger_from` and `gap_truncated_before`. A range
+the two facts that bound what the answer means: `ledger_from` and `gap_truncated_before`. **Each
+window also carries `interval_assumed`**, because a `covered_late` produced by §14.2's conservative
+threshold may be an artefact of the assumption rather than real lateness, and a caller that cannot
+tell the two apart has been handed a verdict without its confidence. This was missing until revision
+20: the flag existed in the table and appeared in no response, which is a fact stored and never
+read — the mirror image of the defects in §5.2. A range
 extending before `ledger_from` returns its windows as `unknown` and says so in the payload rather
 than silently starting later, so a caller cannot mistake a clipped range for a covered one.
 
@@ -1469,6 +1475,9 @@ Discharged as a SET in `docs/traceability.md`.
 20d. The effective interval has ONE owner — a single helper called by both the plain
     (`scheduler.go:1427`) and credentialed (`:1635`) paths, and passed into
     `materialize.go` rather than recomputed there.
+20f. `interval_assumed` is returned with every window the read API emits. A `covered_late` whose
+    threshold was assumed is distinguishable from one measured against the interval that actually
+    spaced the window.
 20e. The lateness threshold is NEVER taken from a result. A window the core recorded uses its own
     `interval_seconds`; an orphan row uses `MIN(interval, confirm_interval)` for its revision and
     sets `interval_assumed`. No executor-supplied value can move a window from `covered_late` to

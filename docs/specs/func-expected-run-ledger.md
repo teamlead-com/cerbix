@@ -1,6 +1,9 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 21, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGN APPROVED at revision 20 (`3a3e104`), 2026-09-04 — range `9f46f40..3a3e104`.**
+> **Revision 21 is NOT in the approved range** and awaits its own disposition; it only tightens
+> (§13a's typed-surface and cursor consequences, and invariant 20g). NOT IMPLEMENTED: implementation,
+> push, tag and release await explicit owner authorization and the iteration gates.
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the

@@ -1826,6 +1826,20 @@ at `internal/store/monitors.go:878` (inside `updateMonitorTx`), `internal/store/
 and `internal/store/secrets.go:434` (a secret rotation changes what the monitor executes). All four
 are legitimate generation changes.
 
+**The fourth is a BULK bump, which the other three are not.** `secrets.go:434` is the rotation fence:
+`UPDATE monitors SET <fence> WHERE id = ANY($1::uuid[]) AND project_id = $2` — it bumps every monitor
+that references the rotated secret, in one statement. Its timeline write must therefore insert **one
+row per affected monitor**, not one row. A test that rotates a secret referenced by a single monitor
+would pass against an implementation that writes exactly one row regardless, so the test rotates a
+secret referenced by **three**.
+
+**Seven occurrences of the identifier, four of them real uses**, and the difference is why the guard
+must parse rather than grep: `monitors.go:45` is the doc comment, `:51` is the `const` definition,
+and **`:874` is the identifier appearing inside a raw SQL string as an SQL comment**
+(`-- fence (see revisionFenceSetSQL)`). A text scan counts that as a fifth use; a `go/ast` scan sees
+a `BasicLit` and does not. The guard counts identifier REFERENCES in expressions, which is exactly
+four today.
+
 `updateMonitorTx`'s comment calls itself "the shared config-write contract (D-0142)", and revision 23
 of this spec read that as "the only one". It is the shared contract for the USER and FILE paths; it
 is not the only place a generation is created. **A generation with no timeline row is a window whose
@@ -1834,8 +1848,8 @@ all four, not one.
 
 | Claim of 13a | Check kind | Test | The mutation that must kill it |
 | --- | --- | --- | --- |
-| Every bump writes its row in the SAME transaction | behavioural, per site | Four store tests, one per site: bump, then assert a `monitor_execution_revisions` row exists for the NEW revision. Then force the row-write to fail and assert the BUMP rolled back — no generation without a row | Move the timeline insert after the transaction commits, at any one of the four sites. The forced-failure half must then leave a bumped revision with no row and fail BY NAME, naming the site |
-| No FUTURE site can bump without one | **source scan** | A `go/parser`/`go/ast` test over `internal/store`'s non-test files, in the shape of `internal/api/monitordoors_test.go`: every occurrence of `revisionFenceSetSQL` must be inside a function that also references the timeline insert. Placed in `internal/store` beside the code it guards, per [286] | Add a fifth `revisionFenceSetSQL` use in a function with no timeline insert. The scan must fail and name the function |
+| Every bump writes its row in the SAME transaction | behavioural, per site | Four store tests, one per site — update, retire, restore, and a secret rotation touching THREE monitors: bump, then assert a `monitor_execution_revisions` row exists for the NEW revision of every affected monitor. Then force the row-write to fail and assert the BUMP rolled back: no generation without a row | Move the timeline insert after the transaction commits, at any one of the four sites — the forced-failure half must then leave a bumped revision with no row and fail BY NAME, naming the site. And for the rotation site specifically, write ONE row instead of one per monitor: the three-monitor test must fail where a one-monitor test would pass |
+| No FUTURE site can bump without one | **source scan** | A `go/parser`/`go/ast` test over `internal/store`'s non-test files, in the shape of `internal/api/monitordoors_test.go`: every identifier REFERENCE to `revisionFenceSetSQL` — not every textual occurrence, see above — must be inside a function that also references the timeline insert. Asserts the count is exactly four and enumerates them, so a new site is a failure rather than a silent pass. Placed in `internal/store` beside the code it guards, per [286] | TWO mutations: add a fifth use in a function with no timeline insert (the scan must fail and NAME the function); and change the scan to a text match, which then counts `monitors.go:874`'s SQL comment as a use and reports five — a guard that miscounts its own subject is worse than none |
 | The backfill writes exactly one row per monitor | behavioural | Seed monitors including a DISABLED one and a RETIRED one, migrate, assert `count(monitor_execution_revisions) == count(monitors)` and `effective_from = monitors.updated_at` | Restrict the backfill to `WHERE enabled` — the disabled monitor then has no row and the count assertion fails |
 | Every row carries that revision's four cadence fields | behavioural | Assert `interval_seconds`, `confirm_interval_seconds`, `timeout_seconds` and `retries` each equal the monitor's value | Drop `confirm_interval_seconds` from the backfill's projection. A test asserting only `interval_seconds` would survive this, which is why all four are asserted individually |
 

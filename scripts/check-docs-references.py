@@ -1087,6 +1087,106 @@ def check_fr032_drain_surfaces(spec_body, migration_sources, store_sources,
     return out
 
 
+def check_fr032_transport_matrix(body, spec='docs/specs/func-expected-run-ledger.md'):
+    """§16.1's half-deployment rows must say WHICH transports they apply to, and why.
+
+    The matrix presented "core at B1, executor at B2" and its reverse as transport-general. A
+    half-deployed cluster needs a WIRE between core and executor, so those rows cannot arise for a
+    pure in-process `role=all` — where the safety proof is the FLAG (invariant 10k), not a withheld
+    announcement there is nobody to withhold. Stating it generally promises a protection that does
+    not exist in the most common deployment, which is exactly how §13.0's drain sentence went wrong
+    (reviewer [415], confirming [413]).
+
+    Parses the applicability TABLE rather than grepping prose: the four contexts as a SET, each with
+    a verdict, and the in-process row obliged to name both the flag and 10k.
+    """
+    out = []
+    if '### 16.1' not in body:
+        return out
+    sec = body.split('### 16.1', 1)[1].split('## 17', 1)[0]
+
+    rows, seen_header, duplicates = {}, False, []
+    for line in sec.split('\n'):
+        if not line.startswith('|'):
+            continue
+        cells = [c.strip() for c in line.strip('|').split('|')]
+        if len(cells) < 3:
+            continue
+        first = cells[0].lower()
+        if first == 'transport':
+            seen_header = True
+            continue
+        if not seen_header or set(cells[0]) <= set('- '):
+            continue
+        if 'pull.regions' in first:
+            key = 'role=all with pull regions'
+        elif 'in-process' in first:
+            key = 'in-process'
+        elif 'amqp' in first:
+            key = 'AMQP'
+        elif 'pull' in first:
+            key = 'pull'
+        else:
+            continue
+        if key in rows:
+            duplicates.append(key)
+        rows[key] = (cells[1], cells[2])
+
+    if not seen_header:
+        out.append(f'{spec} §16.1 has no transport-applicability table (a `| Transport | … |` '
+                   f'header), so its half-deployment rows read as transport-general — the defect '
+                   f'§13.0 already had')
+        return out
+
+    for key in sorted(set(duplicates)):
+        out.append(f'{spec} §16.1\'s transport table lists "{key}" more than once; the last row '
+                   f'silently wins, so one of them is unread')
+
+    want = {'AMQP', 'pull', 'in-process', 'role=all with pull regions'}
+    for missing in sorted(want - set(rows)):
+        out.append(f'{spec} §16.1\'s transport table does not cover "{missing}"; every execution '
+                   f'context must state whether a half-deployed cluster can arise in it')
+    for extra in sorted(set(rows) - want):
+        out.append(f'{spec} §16.1\'s transport table has an unrecognised context "{extra}"')
+
+    for key, (verdict, why) in sorted(rows.items()):
+        if not verdict.strip('* '):
+            out.append(f'{spec} §16.1: context "{key}" states no applicability verdict')
+        if not why.strip('* '):
+            out.append(f'{spec} §16.1: context "{key}" names no safety mechanism')
+
+    if 'in-process' in rows:
+        verdict, why = rows['in-process']
+        if 'impossible' not in verdict.lower():
+            out.append(f'{spec} §16.1 says the half-deploy rows are "{verdict}" in-process. They '
+                       f'require a wire between core and executor, and in-process there is none')
+        for token, plain in (('ledger.carrier_enabled', 'the flag'), ('10k', 'invariant 10k')):
+            if token not in why:
+                out.append(f'{spec} §16.1\'s in-process row does not cite {plain} ({token}); with '
+                           f'no announcement to withhold, that is the whole safety proof there')
+    # Every WIRE context carries the same mechanism — announcement AND the gate — and a nonempty
+    # cell is not that claim. `role=all` with pull regions is a wire context too: it may explain
+    # why the local executor is excluded, but only after stating the mechanism (reviewer [417]).
+    for wire in ('AMQP', 'pull', 'role=all with pull regions'):
+        if wire not in rows:
+            continue
+        verdict, why = rows[wire]
+        if 'appl' not in verdict.lower():
+            out.append(f'{spec} §16.1 says the half-deploy rows are "{verdict}" for {wire}; '
+                       f'that transport has a wire, so they apply')
+        # The ACT, not the label. Checking for the word "announcement" passed on the lead-in
+        # phrase "announcement plus the gate:" while the mechanism beside it said something else —
+        # a label standing in for a mechanism, inside the guard that exists to stop exactly that.
+        if not re.search(r'announce[sd]?\s+V4', why, re.I):
+            out.append(f'{spec} §16.1: the {wire} row does not say WHO announces V4. On a wire '
+                       f'context a region is promoted only when its executors announce the '
+                       f'generation, and the phrase "announcement" in a label is not that claim')
+        if 'ledger.carrier_enabled' not in why:
+            out.append(f'{spec} §16.1: the {wire} row does not name `ledger.carrier_enabled`. '
+                       f'Announcement alone cannot promote a region while the gate is off')
+    return out
+
+
 def check_enumerations():
     bad = []
 
@@ -1153,6 +1253,8 @@ def check_enumerations():
         stores = {p: read(p) for p in sorted(glob.glob('internal/store/*.go'))
                   if not p.endswith('_test.go')}
         for msg in check_fr032_drain_surfaces(read(spec), migs, stores, spec):
+            bad.append((spec, 1, 'enum', msg))
+        for msg in check_fr032_transport_matrix(read(spec), spec):
             bad.append((spec, 1, 'enum', msg))
 
     # 5. the Monitoring-as-Code bundle README against fileSupportedTypes.
@@ -1227,7 +1329,8 @@ def main():
               'the test file it discharges from, BOTH of its counts against the artefacts they '
               'summarise, §17.2\'s own totals DERIVED from its discharge table in both '
               'places that state them, and §13.0\'s rollback-and-drain rule against every '
-              'V4-capable pull surface and every store function that removes one of its rows '
+              'V4-capable pull surface and every store function that removes one of its rows, and '
+              '§16.1\'s half-deployment rows against the transports they can actually arise in '
               '— the check types and the bundle types as SETS '
               'through an asserted label map, not by count alone; and no document announces a '
               '`PARTIAL` residual its own discharge map does not have)')

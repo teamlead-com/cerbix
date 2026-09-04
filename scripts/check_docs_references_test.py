@@ -872,5 +872,117 @@ class FR032DrainSurfaces(unittest.TestCase):
             cdr.read("docs/specs/func-expected-run-ledger.md"), migs, stores), [])
 
 
+class FR032TransportMatrix(unittest.TestCase):
+    """§16.1's half-deployment rows must say WHICH transports they apply to.
+
+    They need a WIRE between core and executor, so they cannot arise for a pure in-process
+    `role=all` — where the safety proof is the FLAG (invariant 10k), not a withheld announcement
+    there is nobody to make. Stated generally the matrix promised a protection absent from the most
+    common deployment, the same defect §13.0 had (reviewer [415], confirming [413]).
+    """
+
+    ROWS = ("| Transport | Half-deploy rows 2 and 3 | What makes V4 safe there |\n"
+            "| --- | --- | --- |\n"
+            "| AMQP | apply | its workers announce V4 and `ledger.carrier_enabled` is on |\n"
+            "| pull | apply | its agents announce V4 and `ledger.carrier_enabled` is on |\n"
+            "| in-process (pure `role=all`) | **impossible** | the FLAG alone: with "
+            "`ledger.carrier_enabled` false, invariant **10k** proves the resolved map stamps "
+            "nothing above 3 |\n"
+            "| `role=all` with `pull.regions` | apply, for those regions only | its agents "
+            "announce V4 and `ledger.carrier_enabled` is on; the local executor is excluded |\n")
+
+    def find(self, rows=None):
+        body = "### 16.1 fixture\n\nprose\n\n" + (self.ROWS if rows is None else rows) + "\n## 17 next\n"
+        return cdr.check_fr032_transport_matrix(body, "fixture.md")
+
+    def test_a_fully_scoped_matrix_is_silent(self):
+        self.assertEqual(self.find(), [])
+
+    def test_no_applicability_table_at_all_is_reported(self):
+        self.assertEqual(len(self.find("prose only, no table\n")), 1)
+        self.assertIn("no transport-applicability table", self.find("prose only, no table\n")[0])
+
+    def test_a_missing_context_is_reported_by_name(self):
+        got = self.find(self.ROWS.replace("| in-process (pure `role=all`) | **impossible** | the FLAG alone: with "
+                                          "`ledger.carrier_enabled` false, invariant **10k** proves the resolved map "
+                                          "stamps nothing above 3 |\n", ""))
+        self.assertTrue(any('does not cover "in-process"' in m for m in got), got)
+
+    def test_the_role_all_pull_context_is_required_too(self):
+        rows = "\n".join(l for l in self.ROWS.split("\n") if "pull.regions" not in l)
+        got = self.find(rows)
+        self.assertTrue(any('does not cover "role=all with pull regions"' in m for m in got), got)
+
+    # The finding itself: in-process cannot host a half-deployed cluster.
+    def test_in_process_claiming_the_rows_apply_is_reported(self):
+        got = self.find(self.ROWS.replace("| **impossible** |", "| apply |"))
+        self.assertTrue(any("require a wire" in m for m in got), got)
+
+    def test_the_in_process_row_must_cite_the_flag(self):
+        got = self.find(self.ROWS.replace("`ledger.carrier_enabled` false", "the setting false"))
+        self.assertTrue(any("does not cite the flag" in m for m in got), got)
+
+    def test_the_in_process_row_must_cite_10k(self):
+        got = self.find(self.ROWS.replace("invariant **10k** proves", "it is proven"))
+        self.assertTrue(any("does not cite invariant 10k" in m for m in got), got)
+
+    def test_a_wire_transport_marked_impossible_is_reported(self):
+        got = self.find(self.ROWS.replace("| AMQP | apply |", "| AMQP | impossible |"))
+        self.assertTrue(any("that transport has a wire" in m for m in got), got)
+
+    def test_a_context_with_no_safety_mechanism_is_reported(self):
+        got = self.find(self.ROWS.replace(
+            "| pull | apply | its agents announce V4 and `ledger.carrier_enabled` is on |",
+            "| pull | apply |  |"))
+        self.assertTrue(any('context "pull" names no safety mechanism' in m for m in got), got)
+
+    # Reviewer [417]: role=all with pull.regions is itself a WIRE context. It may explain the local
+    # exclusion, but only after stating announcement AND gate — a nonempty cell is not that claim.
+    def test_a_wire_row_losing_its_announcement_is_reported(self):
+        got = self.find(self.ROWS.replace(
+            "| `role=all` with `pull.regions` | apply, for those regions only | its agents "
+            "announce V4 and `ledger.carrier_enabled` is on; the local executor is excluded |",
+            "| `role=all` with `pull.regions` | apply, for those regions only | the pull rule, "
+            "not the local one; `ledger.carrier_enabled` gates it |"))
+        self.assertTrue(any("does not say WHO announces V4" in m for m in got), got)
+
+    def test_a_wire_row_losing_its_gate_is_reported(self):
+        got = self.find(self.ROWS.replace(
+            "| `role=all` with `pull.regions` | apply, for those regions only | its agents "
+            "announce V4 and `ledger.carrier_enabled` is on; the local executor is excluded |",
+            "| `role=all` with `pull.regions` | apply, for those regions only | its agents "
+            "announce V4; the local executor is excluded |"))
+        self.assertTrue(any("does not name `ledger.carrier_enabled`" in m for m in got), got)
+
+    # The label is not the mechanism: this is the shape my first version passed on.
+    def test_the_word_announcement_in_a_label_does_not_satisfy_the_check(self):
+        got = self.find(self.ROWS.replace(
+            "| AMQP | apply | its workers announce V4 and `ledger.carrier_enabled` is on |",
+            "| AMQP | apply | announcement plus the gate: `ledger.carrier_enabled` and a queue "
+            "prefix its workers have |"))
+        self.assertTrue(any("does not say WHO announces V4" in m for m in got), got)
+
+    # Found by probing rather than asked for: `rows[key] = …` let a second row for the same context
+    # overwrite the first, so a duplicate that AGREED would be absorbed unseen.
+    def test_a_duplicated_context_is_reported(self):
+        got = self.find(self.ROWS + "| AMQP | apply | announcement plus the gate |\n")
+        self.assertTrue(any('lists "AMQP" more than once' in m for m in got), got)
+
+    def test_breaking_the_guard_breaks_these_tests(self):
+        real = cdr.check_fr032_transport_matrix
+        try:
+            cdr.check_fr032_transport_matrix = lambda *a, **k: []
+            self.assertEqual(self.find("prose only, no table\n"), [],
+                             "a neutralised guard must report nothing — this documents the shape")
+        finally:
+            cdr.check_fr032_transport_matrix = real
+        self.assertTrue(self.find("prose only, no table\n"),
+                        "with the real guard restored the same input must be reported")
+
+    def test_the_repository_itself_agrees(self):
+        self.assertEqual(cdr.check_fr032_transport_matrix(
+            cdr.read("docs/specs/func-expected-run-ledger.md")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

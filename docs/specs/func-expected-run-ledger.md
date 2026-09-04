@@ -1,26 +1,23 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGN APPROVED AT REVISION 22 — approved range `9f46f40..9e114a4`, D-0237, 2026-09-04.**
-> **Document revision 25: AMENDMENT UNDER REVIEW, not covered by that range.**
-> The independent reviewer approved revision 20 at party [267] and revisions 21-22 at [274], with no
-> remaining P0 or P1, rerunning `make docs-check` and `git diff --check` himself for both. This line
-> was written AFTER the approval and records it, so the commit carrying it is bookkeeping rather than
-> design content — the approved design is the range named above, and **later revisions do not extend
-> it**. Revision 23 changes §17.2's totals and §17.4's entry gate only, carries no design content, and
-> was approved as a docs/process artefact at [350] (commit `6b47bad`). **Revision 24 has no
-> disposition yet:** it adds the THIRD transport to §13.0 — `role=all` is in-process and a PRODUCTION
-> topology, and revision 23 omitted it — with invariants 10k and 10l, and it is under review at [361].
-> The revision number in this banner tracks the DOCUMENT, never the approval; the approval is the
-> range. **Revision 25 differs from 23 and 24 in kind:** those carried no design content, while 25
-> amends an APPROVED design paragraph — §13.0's rollback and drain rule, which named one of the two
-> V4-capable pull surfaces and generalized a job-shaped sentence to all V4 work (reviewer [387]). It
-> therefore needs a design disposition, not a docs/process one.
+> **Lifecycle: DESIGN APPROVED AT REVISION 22 — approved range `9f46f40..9e114a4`, D-0237.**
+> **Document revision 26: AMENDMENT UNDER REVIEW.** The approval is the RANGE; the revision number
+> tracks the DOCUMENT, and later revisions never extend the range. Each amendment gets its own
+> disposition, and this line states the CURRENT one only — it accumulated four superseded clauses
+> before revision 26 rewrote it whole, which is the same defect `6b47bad` fixed in the status cell.
 >
-> **PHASE A IMPLEMENTED (`aa46db8`); B1 ONWARD NOT IMPLEMENTED.** The owner authorized implementation
-> by phases, and the reviewer admits each phase separately against §17.2's entry gate: phase A was
-> approved at party [324] for a local commit, and B1's first entry submission was REJECTED at [342].
-> Push, tag and release remain unauthorized. `docs/status.md` carries the live state; this line records
-> only that the design is approved and the requirement is no longer wholly unbuilt.
+> | Revision | Kind | Disposition |
+> | --- | --- | --- |
+> | 20, 21-22 | design | APPROVED, parties [267] and [274] — the range above, `D-0237` |
+> | 23 | docs/process — §17.2 totals, §17.4 entry gate | APPROVED [350], `6b47bad` |
+> | 24 | docs/process — §13.0's third transport, invariants 10k and 10l | APPROVED [364], `7e86d15` |
+> | 25 | **design** — §13.0's rollback-and-drain rule | APPROVED [410], `6f698d5` |
+> | 26 | **design** — §16.1's transport applicability, 10h's evidence | UNDER REVIEW, scoped at [415] |
+>
+> **PHASE A and B1-M IMPLEMENTED (`aa46db8`, `2fcf2b9`); THE REST NOT IMPLEMENTED.** The owner
+> authorized implementation by phases, and the reviewer admits each phase separately against §17.2's
+> entry gate. B1 was sequenced migration-first; its transport and config slice is specified and NOT
+> admitted. Push, tag and release remain unauthorized. `docs/status.md` carries the live state.
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -1484,6 +1481,26 @@ crossed in the wrong order by someone.
 The second and third rows are the ones that matter: each is a half-deployed cluster, which is the
 normal state during a rollout rather than an exceptional one.
 
+**Those two rows are not transport-general, and every revision through 25 left that unsaid** — the
+same defect §13.0 had one section earlier (reviewer [415], confirming a finding raised at [413]). A
+half-deployed cluster requires a WIRE between core and executor. Where there is none the state
+cannot arise at all, and the safety argument is a different one:
+
+| Transport | Half-deploy rows 2 and 3 | What makes V4 safe there |
+| --- | --- | --- |
+| AMQP | apply | announcement plus the gate: a region is promoted only when its workers announce V4 AND `ledger.carrier_enabled` is on, and an old worker is not subscribed to the v4 prefix |
+| pull | apply | announcement plus the gate: the region is promoted only when its agents announce V4 and `ledger.carrier_enabled` is on. An agent then claims through its own generation's endpoint, whose predicate is `protocol_version <= its own`, so a generation-4 row is outside its result set |
+| in-process (pure `role=all`) | **impossible** | the FLAG alone. Core and executor are one binary, so there is no version skew to discover and no announcement to withhold — `scheduler.go:1546-1552` raises the generation because "a same-process executor IS this binary". Invariant **10k** is the proof: with `ledger.carrier_enabled` false, `lead()`'s resolved map stamps nothing above 3 |
+| `role=all` with `pull.regions` | apply, for those regions only | announcement plus the gate, exactly as pull: the region is promoted only when its AGENTS announce V4 and `ledger.carrier_enabled` is on. The local executor does not count toward it — `scheduler.go:1542` skips pull-served regions in that branch (`if s.pullRegions[region] { continue }`) because an in-process runner "is no evidence" about the agent that will claim the row |
+
+**Reading row 3 in-process would be a category error.** It says the executor withholds its V4
+announcement, so `carrierGeneration` stays ≤3 — but an in-process executor makes no announcement to
+withhold. Stated generally, that row promises a protection which does not exist in the deployment
+shape that is most common, which is exactly how §13.0's drain sentence went wrong.
+
+`check_fr032_transport_matrix` guards the table above: the four contexts as a SET, each with an
+explicit applicability verdict, and the in-process row obliged to cite both the flag and 10k.
+
 ## 17. Acceptance invariants (FR-032)
 
 Discharged as a SET in `docs/traceability.md`.
@@ -1529,7 +1546,11 @@ Discharged as a SET in `docs/traceability.md`.
     `issued_never_claimed`.
 10h. No V4 job is ever published before its defining payload exists: `ledger.carrier_enabled` gates
     selection and B2 turns it on in the same change that mints `JobID`/`IssuedAt`/`DueAt`. A region
-    announcing V4 cannot promote itself while the gate is off.
+    announcing V4 cannot promote itself while the gate is off. **Each safety claim cites the
+    mechanism that carries it**: on AMQP and pull, announcement AND the gate, with a half-deployed
+    cluster possible and covered by §16.1's rows 2 and 3; in-process, the gate ALONE, because there
+    is no announcement to withhold and no version skew to discover — proven by 10k, not by §16.1's
+    half-deploy rows, which cannot occur there.
 10i. A V4 delivery missing `JobID`, `IssuedAt` or `DueAt` is a protocol violation and is
     dead-lettered, not probed. The same absence on an older carrier is ordinary and merely makes the
     window ledger-ineligible.
@@ -1870,7 +1891,7 @@ to correct.
 | 10e | B2 | schema assertion | TO SPECIFY | assert the CHECK REJECTS a job with no carrier and a carrier with no job |
 | 10f | C | behavioural | **covered** | both arrival orders of the stale result |
 | 10g | B1 | behavioural | **covered** | physical unreachability on AMQP and pull |
-| 10h | B1 | behavioural | **covered** | §16.1's mixed-version matrix |
+| 10h | B1 | behavioural | **covered** | §16.1's mixed-version matrix read through its transport-applicability table: announcement plus gate on the wire transports, the false flag (10k) in-process |
 | 10i | B2 | behavioural (live broker) | **TO SPECIFY** | reassigned from B1 by reviewer P0 at [342]: a V4 delivery is DEFINED by `DueAt`, which the wire does not carry until B2, so B1 has no absence to detect. §17.4 keeps both mutations named for B2's gate |
 | 10j | B1 | migration | **DISCHARGED** | 5 tests, 8 mutations killed (§17.5) — the shipped goose Down, refusal plus row survival plus atomic still-widened constraints |
 | 10k | B1 | behavioural | **SPECIFIED (§17.4)** | while `ledger.carrier_enabled` is false `lead()`'s resolved map stamps nothing above 3, asserted on that map's OUTPUT across its three branches rather than once per transport |

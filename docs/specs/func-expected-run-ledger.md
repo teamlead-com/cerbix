@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 17, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 18, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -1112,7 +1112,9 @@ from `issued_at` would invent a window or collide with a real one. So the field 
 | --- | --- |
 | Job field | `dispatch.CheckJob.DueAt time.Time`, `json:"due_at,omitempty"`, beside `JobID` and `IssuedAt` |
 | Result field | `domain.Heartbeat.DueAt time.Time`, `json:"due_at,omitempty"`, copied by `dispatch.StampResult` alongside `JobID` and `JobIssuedAt` — the ONE owner of that copy, as its comment requires |
-| Spacing field | `CheckJob.EffectiveIntervalSeconds int` and its result twin, carried for the SAME reason `DueAt` is: the orphan insert (§8.3) creates a row and `interval_seconds` is `NOT NULL`. The monitor snapshot's `IntervalSeconds` will NOT do — the scheduler substitutes `ConfirmInterval()` in its local `iv` (`scheduler.go:1428-1434`) and never writes it back onto the monitor, so the effective interval exists only in the leader and must be told. This is also §3.3's "the interval in force for THAT run" arriving on the wire rather than being inferred. **Its owner and its ingress constraint are §13.3** |
+| Spacing job field | `CheckJob.EffectiveIntervalSeconds int`, `json:"effective_interval_seconds,omitempty"`. Carried for the SAME reason `DueAt` is: the orphan insert (§8.3) creates a row and `interval_seconds` is `NOT NULL`. The monitor snapshot's `IntervalSeconds` will NOT do — the scheduler substitutes `ConfirmInterval()` into its local `iv` (`scheduler.go:1428-1434`) and never writes it back onto the monitor, so the effective interval exists only in the leader and must be told. This is also §3.3's "the interval in force for THAT run" arriving on the wire rather than being inferred |
+| Spacing result field | `domain.Heartbeat.EffectiveIntervalSeconds int`, `json:"effective_interval_seconds,omitempty"`, copied by **`dispatch.StampResult`** alongside `JobID`, `JobIssuedAt` and `DueAt`. Pinned explicitly (reviewer [255]) because revision 17 said only "and its result twin": *"all three transports carry `CheckJob` verbatim"* covers **scheduler → executor**, and says nothing about **executor → heartbeat**, which is a different hop with a different owner. Without this the orphan statement's `$8` has no provenance |
+| Spacing mint source | **`monitor_schedule.interval_in_force`** — NOT `next_due_at`, which is `DueAt`'s source. Two companion fields with two different sources, and revision 17 named only one of them. Its single computing owner and its ingress constraint are §13.3 |
 | Not a table column | Like `JobID`, `JobIssuedAt` and `ExecutionRevision` (`internal/domain/monitor.go:618-629`), it is wire-only. §4a forbids overloading the `heartbeats` TABLE, which this does not touch |
 | Mint owner | The **core**, from `monitor_schedule.next_due_at`, read by the leader's own batched read in the same tick — NOT from the 15-second snapshot (`refreshEvery`, `scheduler.go:236`), which would be stale by design |
 | Validation | `due_at <= issued_at` (an expectation cannot postdate its own dispatch), and `due_at` inside the retention window. A violation refuses CORRELATION — the result is still recorded as a heartbeat — exactly as a non-UUID `job_id` is treated (§13) |
@@ -1497,6 +1499,10 @@ Discharged as a SET in `docs/traceability.md`.
 25a. `DueAt` is minted by the CORE from `monitor_schedule.next_due_at` in the dispatching tick, never
     from the leader's 15-second snapshot, and is copied onto the result by `dispatch.StampResult`
     alone.
+25f. `EffectiveIntervalSeconds` is minted from `monitor_schedule.interval_in_force` — a different
+    source from `DueAt`'s — and is copied onto the result by `dispatch.StampResult` alone. Every
+    field the ledger correlates on names its type, its JSON tag, its mint source and its single
+    copier; "and its result twin" is not a specification.
 25b. A crossed pair — one run's `job_id` with another window's `due_at` — updates nothing.
 25c. Every write to `expected_runs` names `carrier_generation` in its column list, so §6.1's CHECK
     cannot be violated by omission on any path.

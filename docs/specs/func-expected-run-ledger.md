@@ -1,8 +1,8 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
 > **Lifecycle: DESIGN APPROVED at revision 20 (`3a3e104`), 2026-09-04 — range `9f46f40..3a3e104`.**
-> **Revision 21 is NOT in the approved range** and awaits its own disposition; it only tightens
-> (§13a's typed-surface and cursor consequences, and invariant 20g). NOT IMPLEMENTED: implementation,
+> **Revisions 21-22 are NOT in the approved range** and await their own disposition: §13a's
+> typed-surface and cursor consequences, invariant 20g, and the test that discharges it. NOT IMPLEMENTED: implementation,
 > push, tag and release await explicit owner authorization and the iteration gates.
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
@@ -1498,7 +1498,9 @@ Discharged as a SET in `docs/traceability.md`.
 20g. `interval_assumed` is EXPLANATORY ONLY. No verdict, gate, numerator or surface may use it to
     treat a `covered_late` window as `covered`. A stroke drawn because a window's lateness was
     "assumed rather than measured" is the truthful-rendering gate widened by accident, and this
-    invariant exists so that requires deleting a rule rather than reinterpreting one.
+    invariant exists so that requires deleting a rule rather than reinterpreting one — **discharged
+    by §17.1's assumed-`covered_late` case and its two promotion mutations, without which the rule
+    could be ignored rather than deleted** (reviewer [270]).
 20f. `interval_assumed` is returned with every window the read API emits. A `covered_late` whose
     threshold was assumed is distinguishable from one measured against the interval that actually
     spaced the window.
@@ -1640,6 +1642,21 @@ the same defect unreported.
 
 **The mutation that must fail it:** revert either attribute to `COALESCE(existing, new)`. That is the
 shape both statements shipped with through revision 10.
+
+**`interval_assumed` cannot promote a verdict, from [270] — the test invariant 20g lacked.** A window
+whose row has `interval_assumed = true` and reads `covered_late`, fetched through §13a so the flag is
+actually on the response a consumer sees. Assert: the FR-031 stroke gate refuses the span, and the
+coverage numerator excludes the window while the denominator keeps it.
+
+**Two mutations must fail it, and they are the two a consumer would plausibly write:**
+
+1. In the FR-031 gate — treat `interval_assumed && covered_late` as `covered` and allow the stroke.
+2. In the coverage numerator — the same promotion, counting the window as covered.
+
+Both are the "the lateness was only assumed, so it probably was not real" argument expressed in
+code, which is exactly how §13a says the gate would widen without anyone deciding to widen it.
+Revision 21 stated the prohibition and shipped no test for it, so the rule could have been **ignored**
+rather than deleted — weaker than either of the outcomes I claimed for it.
 
 **The orphan threshold, from [260].** A monitor whose confirm interval is 10s and base interval 60s,
 a window spaced at the confirm interval, and an orphan terminal 40s late. Assert the row is created

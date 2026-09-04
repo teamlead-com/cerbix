@@ -1,9 +1,13 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGN APPROVED at revision 20 (`3a3e104`), 2026-09-04 — range `9f46f40..3a3e104`.**
-> **Revisions 21-22 are NOT in the approved range** and await their own disposition: §13a's
-> typed-surface and cursor consequences, invariant 20g, and the test that discharges it. NOT IMPLEMENTED: implementation,
-> push, tag and release await explicit owner authorization and the iteration gates.
+> **Lifecycle: DESIGN APPROVED — revision 22, 2026-09-04. Approved range `9f46f40..9e114a4`, D-0237.**
+> The independent reviewer approved revision 20 at party [267] and revisions 21-22 at [274], with no
+> remaining P0 or P1, rerunning `make docs-check` and `git diff --check` himself for both. This line
+> was written AFTER the approval and records it, so the commit carrying it is bookkeeping rather than
+> design content — the approved design is the range named above.
+>
+> **NOT IMPLEMENTED.** Implementation, push, tag and release await the owner's explicit authorization
+> and the normal iteration gates.
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the

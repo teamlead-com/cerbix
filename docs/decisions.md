@@ -6980,6 +6980,58 @@ different weight:
 Whether to release, push or tag remains the owner's decision and none of those has been done.
 
 
+## D-0237 — FR-032 expected-run ledger: design approved at revision 22; the owner's four rulings (2026-09-04)
+
+**Decision.** `docs/specs/func-expected-run-ledger.md` is the approved design of FR-032. The independent
+reviewer approved revision 20 at party [267] and revisions 21–22 at [274]; the approved effective range is
+`9f46f40..9e114a4`, with no remaining P0 or P1, and the reviewer reran `make docs-check` and
+`git diff --check` themselves for both dispositions. **Design only: implementation, push, tag and release
+await the owner's explicit authorization and the normal iteration gates.**
+
+**The owner's four rulings, all 2026-09-04.** (1) The expectation model — the scheduler leader **persists
+the `next_due_at` it already computes in memory**, so no monitor's probe instant changes; an absolute
+`floor(unix/interval)` grid (the mechanics `domain.CanaryRunKeyAt` already runs for FR-029) and pure gap
+inference were both rejected in writing, the grid because it would move every monitor's probe instant in
+every installation. (2) Scope — **all monitors, 14-day ledger retention**, so no participation flag exists
+anywhere. (3) **Push monitors are excluded**, because "a push that did not arrive" is already detected and
+already recorded: `scheduler.go:1415` never dispatches them and `checkStalePush` synthesises a DOWN that
+lands as a heartbeat — a ledger window would be a second mechanism for one obligation. (4) A run late by
+more than the window's own interval reads **`covered_late`**, licensing no stroke and excluded from the
+coverage numerator.
+
+**The design in one paragraph.** One immutable row per due window keyed `(monitor_id, due_at)`, so two
+concurrently outstanding runs are separate rows and a never-issued window is a stored fact rather than a
+derivation. Exactly ONE statement moves an expectation forward, writing the run row, the missed windows and
+the truncation fence with it — required because the advance overwrites the only record of the old
+expectation. Ordering is made IRRELEVANT rather than guaranteed, through one shared admissibility predicate
+and per-event merges where an event's attributes travel with its timestamp. Every run fact comes from the
+PUBLISHED job, so a crossed generation is impossible rather than detected. Job identity rides a new
+`ProtocolV4` carrier deployed INERT in phase B1 behind `ledger.carrier_enabled` and enabled atomically with
+its payload in B2. The residual error always points at WITHHOLDING. 64 acceptance invariants, five phases,
+migrations from `00100`.
+
+**Eight P0 rejections, and six were one class.** Revision 1 ([218]) could not hold two outstanding runs —
+and overlap is a SUPPORTED configuration, `monitor.go:288` scoping `interval >= timeout` to `async_canary`
+alone with a comment calling a 30 s interval and 60 s timeout "legal today and common". Revision 2 ([225])
+capped gap materialization with a batch-wide `LIMIT` while advancing every monitor, and never wrote the
+fence its own prose promised. Revision 4 ([229]) reintroduced that defect through the fix for [227], having
+argued a skip needs no gap materialization "because rules 3 and 4 fire on a live leader" — false for the one
+case the requirement exists for. Revision 6 ([233]) sourced carrier eligibility from a CONSUMER-side datum
+that does not exist at publication time. Revision 7 ([235]) omitted `carrier_generation` from the orphan
+INSERT its own CHECK required, and promised a `DueAt` that existed in no wire type. Revision 8 ([237])
+fenced the one field a config write is guaranteed NOT to change. Revision 9 ([239]) claimed a refusal
+representation the schema could not express. **Six of the eight were prose promising what the mechanism
+beside it did not do**, and the spec keeps every rejection (§5.2, §7, §13.0–13.3, §14.2) because each killed
+a design the next reader would otherwise propose again.
+
+**Two findings that removed work rather than adding it.** The reviewer's question about the
+base-versus-confirm residual ([260]) deleted three revisions of mine — a wire field, its two-value ingress
+validation and an executor trust residual — because the defence "bounded in magnitude" was wrong on this
+design's own terms: every other trade here points the residual error at withholding, and that one pointed
+at over-claiming. And [270] found that invariant 20g had no killing mutation, so a rule written to make
+widening the gate require *deleting* a rule could instead have been ignored.
+
+
 ## D-0236 — NFR-025b: every rendered timestamp names its zone, and a guard keeps it that way (2026-09-04)
 
 **Context.** NFR-025 was split at iter-0174 because the specification's first revision asserted an

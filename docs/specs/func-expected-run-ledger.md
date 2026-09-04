@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 15, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 16, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -369,7 +369,7 @@ WITH picked AS (
 -- keeps the most recent and the choice is deterministic.
 candidate AS (
     SELECT p.monitor_id, p.project_id, p.schedule_revision, p.monitor_region,
-           p.first_expected, w.due_at,
+           p.interval_in_force, p.first_expected, w.due_at,
            row_number() OVER (PARTITION BY p.monitor_id ORDER BY w.due_at DESC) AS rn
       FROM picked p
       CROSS JOIN LATERAL generate_series(
@@ -381,24 +381,29 @@ candidate AS (
 -- issued_at, skipped rows carry a reason and neither.
 current_window AS (
     INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
-                               region, issued_at, skip_reason, carrier_generation)
+                               region, issued_at, skip_reason, carrier_generation,
+                               interval_seconds)
     -- Every RUN fact comes from the PUBLISHED job (§13.2): revision, region, carrier. Only the
     -- WINDOW facts come from the schedule. That is what makes a crossed generation impossible
     -- rather than merely detected.
     SELECT p.project_id, p.monitor_id, p.due_at, p.job_id, p.job_revision, p.job_region,
            CASE WHEN p.job_id IS NOT NULL THEN $6 END,
            p.skip_reason,
-           p.carrier                      -- NULL for a skip, by the CHECK in §6.1
+           p.carrier,                     -- NULL for a skip, by the CHECK in §6.1
+           -- The interval that SPACED this window is the one in force BEFORE this advance,
+           -- never `new_interval`: that one spaces the NEXT window (§14.1).
+           p.interval_in_force
       FROM picked p
     ON CONFLICT (monitor_id, due_at) DO NOTHING
 ),
 missed AS (
     INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id,
-                               execution_revision, region)
+                               execution_revision, region, interval_seconds)
     -- A never-issued window has no published job, so its revision and region come from the
     -- schedule and the monitor. That is correct: it is attributed to the configuration that was
     -- in force while nothing ran, not to a run that never happened.
-    SELECT c.project_id, c.monitor_id, c.due_at, NULL, c.schedule_revision, c.monitor_region
+    SELECT c.project_id, c.monitor_id, c.due_at, NULL, c.schedule_revision, c.monitor_region,
+           c.interval_in_force        -- the step `generate_series` used, so spacing is self-describing
       FROM candidate c
      WHERE c.rn <= $7
     ON CONFLICT (monitor_id, due_at) DO NOTHING
@@ -608,25 +613,27 @@ admissible run.
 
 ```sql
 INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
-                           region, carrier_generation, issued_at, claimed_at,
-                           terminal_at, outcome)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                           region, carrier_generation, interval_seconds, issued_at,
+                           claimed_at, terminal_at, outcome)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (monitor_id, due_at) DO UPDATE
    SET job_id             = COALESCE(expected_runs.job_id, $4),
        carrier_generation = COALESCE(expected_runs.carrier_generation, $7),
-       issued_at          = LEAST(COALESCE(expected_runs.issued_at,  $8), $8),
-       claimed_at         = LEAST(COALESCE(expected_runs.claimed_at, $9), $9),
+       issued_at          = LEAST(COALESCE(expected_runs.issued_at,  $9), $9),
+       claimed_at         = LEAST(COALESCE(expected_runs.claimed_at, $10), $10),
        outcome            = CASE WHEN expected_runs.terminal_at IS NULL
-                                       OR $10 < expected_runs.terminal_at THEN $11
+                                       OR $11 < expected_runs.terminal_at THEN $12
                                   ELSE expected_runs.outcome END,
-       terminal_at        = LEAST(COALESCE(expected_runs.terminal_at, $10), $10)
+       terminal_at        = LEAST(COALESCE(expected_runs.terminal_at, $11), $11)
  WHERE (expected_runs.job_id = $4
         OR (expected_runs.job_id IS NULL AND expected_runs.skip_reason IS NULL))
    AND expected_runs.execution_revision = $5;
 ```
 
-`$7` is `carrier_generation`, and it is in the column list rather than only in the prose because
-revision 7 put it only in the prose — reviewer P0-1 at [235]. §6.1's CHECK requires the column
+`$7` is `carrier_generation` and `$8` is `interval_seconds`; both are in the column list rather than
+only in the prose because revision 7 put the carrier only in the prose (reviewer P0-1 at [235]) and
+revision 15 did the same to the interval — found by grepping every `INSERT INTO expected_runs` against
+its column list rather than by a third rejection. §6.1's CHECK requires the column
 non-NULL whenever `job_id` is non-NULL, so an orphan insert omitting it **fails the constraint**: the
 reconciliation path would have errored on exactly the case it exists to serve. The `DO UPDATE` uses
 `COALESCE(existing, new)` so **adoption fills the carrier on a no-job window** while a row that
@@ -1105,6 +1112,7 @@ from `issued_at` would invent a window or collide with a real one. So the field 
 | --- | --- |
 | Job field | `dispatch.CheckJob.DueAt time.Time`, `json:"due_at,omitempty"`, beside `JobID` and `IssuedAt` |
 | Result field | `domain.Heartbeat.DueAt time.Time`, `json:"due_at,omitempty"`, copied by `dispatch.StampResult` alongside `JobID` and `JobIssuedAt` — the ONE owner of that copy, as its comment requires |
+| Spacing field | `CheckJob.EffectiveIntervalSeconds int` and its result twin, carried for the SAME reason `DueAt` is: the orphan insert (§8.3) creates a row and `interval_seconds` is `NOT NULL`. The monitor snapshot's `IntervalSeconds` will NOT do — the scheduler substitutes `ConfirmInterval()` in its local `iv` (`scheduler.go:1428-1434`) and never writes it back onto the monitor, so the effective interval exists only in the leader and must be told. This is also §3.3's "the interval in force for THAT run" arriving on the wire rather than being inferred |
 | Not a table column | Like `JobID`, `JobIssuedAt` and `ExecutionRevision` (`internal/domain/monitor.go:618-629`), it is wire-only. §4a forbids overloading the `heartbeats` TABLE, which this does not touch |
 | Mint owner | The **core**, from `monitor_schedule.next_due_at`, read by the leader's own batched read in the same tick — NOT from the 15-second snapshot (`refreshEvery`, `scheduler.go:236`), which would be stale by design |
 | Validation | `due_at <= issued_at` (an expectation cannot postdate its own dispatch), and `due_at` inside the retention window. A violation refuses CORRELATION — the result is still recorded as a heartbeat — exactly as a non-UUID `job_id` is treated (§13) |
@@ -1407,6 +1415,10 @@ Discharged as a SET in `docs/traceability.md`.
 19. No verdict is stored; every verdict is computed from the timestamps present.
 20. A stroke on the Response time panel is permitted only for a span entirely plain `covered` and
     entirely at or after `ledger_from`. A single `covered_late` window forbids it.
+20c. Every `INSERT INTO expected_runs` names `interval_seconds`, and the value is the interval that
+    SPACED that window — the one in force BEFORE the advance for the current window, the
+    `generate_series` step for a gap window, and the job's `EffectiveIntervalSeconds` for an orphan.
+    Never the caller's `new_interval`, which spaces the NEXT window.
 20a. A window whose run was late by MORE than `expected_runs.interval_seconds` reads `covered_late`,
     licenses no stroke, and is excluded from the coverage numerator. The threshold is read from the
     ROW, never from the monitor's current interval and never from a revision's base interval, so a

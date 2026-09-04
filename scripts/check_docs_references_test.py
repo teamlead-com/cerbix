@@ -367,3 +367,52 @@ class EnumerationParsers(unittest.TestCase):
 
     def test_the_repository_itself_satisfies_every_enumeration(self):
         self.assertEqual(cdr.check_enumerations(), [])
+
+
+class CheckTypeLabelMap(unittest.TestCase):
+    """The bridge between the README's display names and the MonitorType values (reviewer [206])."""
+
+    def test_the_map_covers_exactly_the_monitor_types(self):
+        self.assertEqual(set(cdr.CHECK_TYPE_LABELS), set(cdr.monitor_type_values().values()))
+
+    def test_every_label_is_non_empty_and_distinct(self):
+        labels = list(cdr.CHECK_TYPE_LABELS.values())
+        self.assertTrue(all(labels))
+        self.assertEqual(len(labels), len(set(labels)),
+                         "two types sharing a label make an exactly-once count meaningless")
+
+
+class PartialResidualClaims(unittest.TestCase):
+    """A document may not announce a residual its discharge map does not have (reviewer [206]).
+
+    The sentence that shipped twice contains the word "no" about something else, so these cases
+    pin that the guard enumerates POSITIVE phrasings rather than looking for a missing negation.
+    """
+
+    def claimed(self, line):
+        return any(r.search(line) for r in cdr.PARTIAL_CLAIM_RES)
+
+    def test_the_two_phrasings_that_actually_shipped_are_claims(self):
+        self.assertTrue(self.claimed("where **one row is `PARTIAL` and names what is missing**."))
+        self.assertTrue(self.claimed("one traceability row is `PARTIAL` and names what it lacks"))
+        self.assertTrue(self.claimed("The remaining `PARTIAL` is invariant 13's AUDIT-TRAIL clause"))
+
+    def test_a_negation_is_not_a_claim(self):
+        self.assertFalse(self.claimed("where **no row is `PARTIAL` any more**."))
+        self.assertFalse(self.claimed("Nothing in the FR-029 map is `PARTIAL` now."))
+        self.assertFalse(self.claimed("both former residuals closed, so no FR-029 row is `PARTIAL`"))
+
+    def test_a_sentence_negating_something_else_is_still_a_claim(self):
+        self.assertTrue(
+            self.claimed("The remaining `PARTIAL` is the audit clause: a write leaves no row today"),
+            "a negation about an unrelated noun must not excuse the claim")
+
+    def test_partial_rows_counts_rows_and_not_prose(self):
+        rows = cdr.traceability_partial_rows()
+        self.assertIn("FR-029", rows)
+        self.assertEqual(rows["FR-029"][0], 0,
+                         "the FR-029 preamble denies a PARTIAL row; counting the word would invert it")
+        self.assertIn("func-async-canary.md", rows["FR-029"][1])
+
+    def test_the_repository_announces_no_phantom_residual(self):
+        self.assertEqual(cdr.check_partial_claims(), [])

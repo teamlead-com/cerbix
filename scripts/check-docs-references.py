@@ -692,6 +692,30 @@ def check_discharge(src):
 # The shape is the same every time: a number or a list, written by hand, about something the tree
 # already knows. Nothing read it back, so it drifted silently and a reader had no way to tell.
 
+# The README shows DISPLAY names, so this map is the asserted bridge between them and the wire
+# values. Reviewer P1 at party [206]: the first version of the guard checked only the COUNT, so a
+# same-count substitution — `gRPC` swapped for `GraphQL` — passed while the 1:1 property the README
+# states was false. Keys must be exactly the MonitorType values, which means a NEW monitor type
+# fails here until someone writes its label. That is the intent, not an inconvenience.
+CHECK_TYPE_LABELS = {
+    'http': 'HTTP', 'tcp': 'TCP', 'icmp': 'ICMP', 'dns': 'DNS', 'tls': 'TLS-cert',
+    'grpc': 'gRPC', 'postgres': 'PostgreSQL', 'mysql': 'MySQL', 'redis': 'Redis',
+    'promql': 'PromQL', 'rabbitmq': 'RabbitMQ', 'websocket': 'WebSocket', 'ssh': 'SSH',
+    'composite': 'composite', 'push': 'push', 'synthetic': 'synthetic',
+    'async_canary': 'async canary',
+}
+
+# Phrasings that ASSERT a residual exists. A negation ("no row is `PARTIAL` any more") must stay
+# legal — it is the true sentence a fully discharged map deserves — so the guard enumerates the
+# positive forms instead of trying to detect absence of negation. The sentence that shipped twice
+# contained the word "no" about something else entirely, which is why a negation heuristic fails
+# here and an enumeration does not.
+PARTIAL_CLAIM_RES = [
+    re.compile(r'\b(?:one|a|the)\b(?:\s+\S+){0,3}\s+row\s+is\s+`PARTIAL`'),
+    re.compile(r'\bremaining\s+`PARTIAL`'),
+    re.compile(r'`PARTIAL`\s+and\s+names'),
+]
+
 NUMBER_WORDS = {1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven',
                 8: 'eight', 9: 'nine', 10: 'ten', 11: 'eleven', 12: 'twelve'}
 
@@ -724,19 +748,93 @@ def mac_supported_types(src=None):
                   if c in vals)
 
 
+def traceability_partial_rows():
+    """{requirement: (PARTIAL row count, [spec files named in the heading])}.
+
+    Counts table ROWS, not the word. The FR-029 preamble says "No row is `PARTIAL —` any more",
+    and counting mentions would read that sentence as evidence of the thing it denies.
+    """
+    out = {}
+    for part in re.split(r'\n## ', read('docs/traceability.md')):
+        head = part.split('\n', 1)[0]
+        m = re.match(r'((?:FR|NFR)-\d+)', head)
+        if not m:
+            continue
+        rows = [l for l in part.splitlines() if l.startswith('|') and 'PARTIAL' in l]
+        specs = re.findall(r'`((?:func|sec|ops)-[a-z0-9-]+\.md)`', head)
+        out[m.group(1)] = (len(rows), specs)
+    return out
+
+
+def check_partial_claims():
+    """A document may not announce a residual its own discharge map does not have.
+
+    Reviewer P1 at party [206]. `func-async-canary.md` still said "one row is `PARTIAL` and names
+    what is missing" after BOTH residuals closed — invariant 6 at iter-0171 (D-0231) and invariant
+    13's audit-trail clause at iter-0172 (D-0233) — and the README synchronization pass copied that
+    sentence into `docs/specs/README.md`. A false residual introduced by the commit whose whole
+    purpose was removing false claims, which is the strongest argument for checking it here: the
+    map is the fact, and a banner is only a claim about it.
+    """
+    bad = []
+    by_spec = {s: (n, req)
+               for req, (n, specs) in traceability_partial_rows().items() for s in specs}
+    for path in sorted(glob.glob('docs/specs/*.md')):
+        base = os.path.basename(path)
+        if base not in by_spec or by_spec[base][0]:
+            continue
+        req = by_spec[base][1]
+        for n, line in enumerate(read(path).splitlines(), 1):
+            if any(r.search(line) for r in PARTIAL_CLAIM_RES):
+                bad.append((path, n, 'partial',
+                            f'claims a `PARTIAL` row; the {req} map in docs/traceability.md has none'))
+    # The index repeats these banners, which is exactly how the false residual spread.
+    idx = 'docs/specs/README.md'
+    for n, line in enumerate(read(idx).splitlines(), 1):
+        m = re.match(r'\| `((?:func|sec|ops)-[a-z0-9-]+\.md)`', line)
+        if not m or m.group(1) not in by_spec or by_spec[m.group(1)][0]:
+            continue
+        if any(r.search(line) for r in PARTIAL_CLAIM_RES):
+            bad.append((idx, n, 'partial',
+                        f'the {m.group(1)} row claims a `PARTIAL`; the '
+                        f'{by_spec[m.group(1)][1]} map has none'))
+    return bad
+
+
 def check_enumerations():
     bad = []
 
-    # 1. README's check-type count vs the constants that define the set.
+    # 1. README's check-type highlight vs the constants — the COUNT and the SET.
     doc = read('README.md')
-    n = len(monitor_type_values())
-    m = re.search(r'\*\*(\d+) check types\*\*', doc)
+    wire = set(monitor_type_values().values())
+    for t in sorted(wire - set(CHECK_TYPE_LABELS)):
+        bad.append(('scripts/check-docs-references.py', 1, 'enum',
+                    f'MonitorType `{t}` has no entry in CHECK_TYPE_LABELS, so nothing checks that '
+                    f'README.md lists it'))
+    for t in sorted(set(CHECK_TYPE_LABELS) - wire):
+        bad.append(('scripts/check-docs-references.py', 1, 'enum',
+                    f'CHECK_TYPE_LABELS names `{t}`, which is not a MonitorType'))
+    m = re.search(r'\*\*(\d+) check types\*\*(.*?)All behind an SSRF guard', flatten(doc))
     if not m:
         bad.append(('README.md', 1, 'enum',
-                    'the "N check types" highlight is gone; nothing states the count for the guard to check'))
-    elif int(m.group(1)) != n:
-        bad.append(('README.md', doc[:m.start()].count('\n') + 1, 'enum',
-                    f'says {m.group(1)} check types, but internal/domain/monitor.go declares {n}'))
+                    'the "N check types ... All behind an SSRF guard" highlight is gone; the guard '
+                    'cannot find the list to check'))
+    else:
+        line = doc[:doc.find('check types')].count('\n') + 1
+        if int(m.group(1)) != len(wire):
+            bad.append(('README.md', line, 'enum',
+                        f'says {m.group(1)} check types, but internal/domain/monitor.go declares '
+                        f'{len(wire)}'))
+        # Parentheticals are prose ABOUT a type and mention other types by name ("scripted
+        # multi-step HTTP flows"), so they are removed before counting occurrences.
+        listed = re.sub(r'\([^)]*\)', ' ', m.group(2))
+        for t in sorted(wire & set(CHECK_TYPE_LABELS)):
+            label = CHECK_TYPE_LABELS[t]
+            hits = len(re.findall(r'(?<![\w-])' + re.escape(label) + r'(?![\w-])', listed))
+            if hits != 1:
+                bad.append(('README.md', line, 'enum',
+                            f'MonitorType `{t}` should appear in the highlight exactly once as '
+                            f'"{label}"; found {hits}'))
 
     # 2. the ON DELETE SET NULL enumeration, in BOTH documents that state it.
     mig = setnull_migrations()
@@ -784,10 +882,17 @@ def check_enumerations():
             bad.append((mac_doc, 1, 'enum', 'the "Supported types (N)" bullet is gone; the guard cannot check it'))
         else:
             named = sorted(set(re.findall(r'`([a-z_]+)`', m.group(2))) & set(monitor_type_values().values()))
-            if int(m.group(1)) != len(mac) or named != mac:
+            # Reported separately: a wrong COUNT beside an intact list, printed as one line, reads
+            # as a contradiction and sends the reader looking for a missing entry that is present.
+            if int(m.group(1)) != len(mac):
                 bad.append((mac_doc, 1, 'enum',
-                            f'lists {int(m.group(1))} types {named}; fileSupportedTypes admits '
-                            f'{len(mac)} {mac}'))
+                            f'the bullet says {int(m.group(1))} supported types; '
+                            f'fileSupportedTypes admits {len(mac)}'))
+            if named != mac:
+                bad.append((mac_doc, 1, 'enum',
+                            f'the bullet names {named}; fileSupportedTypes admits {mac} '
+                            f'(missing: {sorted(set(mac) - set(named)) or "none"}, '
+                            f'extra: {sorted(set(named) - set(mac)) or "none"})'))
     return bad
 
 
@@ -821,6 +926,7 @@ def main():
     bad += check_change_stale_spellings()
     bad += check_customer_names()
     bad += check_enumerations()
+    bad += check_partial_claims()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
               'and every acceptance map is complete (FR-021 invariants compared as a SET against '
@@ -831,7 +937,9 @@ def main():
               'unbuilt while its requirement is DONE; and every hand-written enumeration about the '
               'tree agrees with it — the check-type count, the column-list ON DELETE SET NULL '
               'migrations in both places that name them, the spec index as a SET, and the '
-              'Monitoring-as-Code supported types)')
+              'Monitoring-as-Code supported types — the check types and the bundle types as SETS '
+              'through an asserted label map, not by count alone; and no document announces a '
+              '`PARTIAL` residual its own discharge map does not have)')
         return 0
     print(f'docs references: {len(bad)} unresolved citation(s) in living documents\n')
     for doc, n, kind, tok in bad:

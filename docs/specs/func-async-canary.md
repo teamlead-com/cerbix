@@ -3,17 +3,16 @@
 > **Lifecycle: IMPLEMENTED — revision 8, phases A–F built (iter-0169, iter-0171, 2026-09-03).** The design
 > was approved by the independent reviewer at party [66] after six review rounds and seventeen P0s, with
 > the owner's sign-off on §11.4. The fourteen invariants of §6 are discharged in the FR-029 map in
-> `docs/traceability.md`, where **one row is `PARTIAL` and names what is missing**.
+> `docs/traceability.md`, where **no row is `PARTIAL` any more**.
 >
 > **What is built and what is not, stated here so the document cannot read as more finished than it is:**
 > phases A–E at iter-0169 (the typed contract, the executor, the in-flight lease, SSE and bundles);
 > **phase F**, the typed UI form, built to the mock the owner approved (D-0224/D-0226); and **capability
 > announcement with its dispatch filter, `no_capable_runner` and `capability_mismatch`** at iter-0171
 > (D-0231), which also adds the per-workflow-kind AMQP queue this banner used to list as missing and the
-> pull transport's claim-level filter. The remaining `PARTIAL` is invariant 13's AUDIT-TRAIL clause: a
-> monitor write leaves no audit row today, for any type — FR-026 audits INCIDENT writes, and a
-> monitor-write trail belongs to no requirement yet. The traceability row says so rather than citing a
-> test that does not reach it.
+> pull transport's claim-level filter. The last residual — invariant 13's AUDIT-TRAIL clause, which had
+> nothing to attach to because a monitor write left no audit row for ANY type — closed at **iter-0172
+> (D-0233)**, which gave a monitor write an audit row. Nothing in the FR-029 map is `PARTIAL` now.
 >
 > **Revision 2 — the owner's three answers (§11).** The transaction ceiling went DOWN far enough to
 > delete the mechanism: the type inherits `maxTimeoutSeconds = 300` and there is no per-type bound.

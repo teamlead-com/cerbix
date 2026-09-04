@@ -74,14 +74,26 @@ and `npm_config_cache` are not optional there: without them the container writes
 `node_modules/` as **root**, and the next run fails with `EACCES` because its own `npm ci` cannot
 delete what root wrote.
 
+**`npm test` must see the whole repository, not just this directory.** Four specs are
+cross-language parity tests that read Go fixtures three levels up —
+`canaryEncoding.spec.ts`, `canaryBounds.spec.ts`, `canaryWorkflow.seam.spec.ts` and
+`monitorBounds.spec.ts` all resolve
+`../../../internal/domain/testdata/*.json`. Mount only `frontend/` and that path lands outside the
+container: one file dies at collection with `ENOENT`, three tests fail, and the run still reports
+hundreds of passes — so the tests that exist to catch TypeScript drifting from the Go validator are
+the exact ones silently removed. Mount the repo ROOT and set the workdir inside it:
+
 ```bash
+# from frontend/ — build and codegen need only this directory
 docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/.npm \
   -v "$PWD":/app -w /app node:22-alpine sh -c "npm ci && npm run build"
 docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/.npm \
-  -v "$PWD":/app -w /app node:22-alpine sh -c "npm ci && npm test"
-docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/.npm \
   -v "$PWD":/app -v "$PWD/../openapi.yaml":/openapi.yaml -w /app \
   node:22-alpine npm run gen:api
+
+# tests need the repo root, for the Go fixtures above
+docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/.npm \
+  -v "$PWD/..":/repo -w /repo/frontend node:22-alpine sh -c "npm ci && npm test"
 ```
 
 If a tree was already built as root, hand it back before either path works — the ids must expand

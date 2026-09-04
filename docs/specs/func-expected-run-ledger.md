@@ -1391,7 +1391,7 @@ and this document still does not claim that benefit, because nothing has been an
 | --- | --- | --- |
 | **A** | `monitor_execution_revisions`; written in the revision-bump transaction; §10's segment close; backfill one row per monitor | `-race`; a revision bump with no timeline row fails a test |
 | **B1** | **The `ProtocolV4` carrier, INERT** (§13.0): the fourth AMQP prefix, the widened pull CHECK, `ClaimPullJobsV4`, `agentJobsV4`, capability announcement, and `carrierGeneration`'s ability to reach 4 — with `ledger.carrier_enabled` **false**, so selection never happens and **no V4 job is ever published**. Independently deployable, trivially revertible, and writes no ledger rows | `-race` + a live distributed stack. A V3 consumer must be PHYSICALLY unable to receive a V4 job; `ClaimPullJobsV3` must never return a generation-4 row; and with the gate off, **no V4 job is published even when a region announces V4** |
-| **B2** | Payload and ledger, together and only together: `DueAt`/`JobID` minting on **every** dispatch path (created on the two that mint none, converted on the three that do — §13), `monitor_schedule`, `expected_runs`, §7.1's primitive, and the gate **on** | `-race`; a leader restart leaves a past `next_due_at` with its gap rows; and the §16.1 mixed-version matrix |
+| **B2** | Payload and ledger, together and only together: `DueAt`/`JobID` minting on **every** dispatch path (created on the two that mint none, converted on the three that do — §13), `monitor_schedule`, `expected_runs`, §7.1's primitive, **§10's segment close**, and the gate **on** | `-race`; a leader restart leaves a past `next_due_at` with its gap rows; and the §16.1 mixed-version matrix |
 | **C** | The claim event: `Dispatcher` grows a typed claim message; `worker` and `agent` emit it; §8.1's merge | `-race` + a live distributed stack; the fakes in `internal/api`, `internal/outbox` and `internal/scheduler` break on interface growth, which is intended |
 | **D** | Partitions, DEFAULT partition, retention, `ledger_from`, `gap_truncated_before`, the read API returning computed verdicts, and the HOT-ratio gauge | `-race`; BOTH storage modes; E2E; the capacity measurement of invariant 22 |
 | **E** | The FR-031 stroke, behind §14's gate — only if §17 is discharged | E2E on a live stack |
@@ -1720,74 +1720,93 @@ file against an enumerated list.
 Six need a **schema assertion** (a CHECK that must REJECT, an absent column, `pg_class.reloptions` on
 a newly created partition), two a **measurement**, and one is a **document check**.
 
-No phase may close while an invariant it implements is still `TO SPECIFY`.
+**It is an ENTRY gate, not a close gate** (reviewer [286]): before phase N's code begins, every row
+owned by N must be upgraded from `TO SPECIFY` to a named test, a killed mutation and a check kind. A
+close gate would let the code be written first and the test shaped to fit it, which is how the gap in
+this table was produced in the first place. The whole 64-row map stays here now so omissions stay
+visible, and later phases' test MECHANICS are deliberately not invented yet.
 
-| # | Check kind | Status | Where, or what is missing |
-| --- | --- | --- | --- |
-| 1 | behavioural | TO SPECIFY | the OWNER's headline property, and nothing tests it: probe instants before and after the change, per dispatch path |
-| 2 | behavioural | **covered** | §17.1 (b) and (c) exercise rules 1, 3, 4; rules 2 and 5 are not |
-| 2a | source scan | TO SPECIFY | a source scan: exactly one statement advances `next_due_at`. A second one is the [229] defect |
-| 2b | behavioural | **covered** | §17.1 (c) asserts `interval_in_force` still 60 under backoff |
-| 2c | behavioural | TO SPECIFY | the RESTORE half is untested: acceleration expiring must put `interval_in_force` back |
-| 2d | source scan | TO SPECIFY | rule 5's statement must be structurally incapable of moving `next_due_at` forward |
-| 3 | behavioural | **covered** | §17.1 (b) and (c) both start from a persisted past `next_due_at` |
-| 4 | behavioural | TO SPECIFY | core truthfulness and untested: a heartbeat at a nearby instant must NOT make a window `covered` |
-| 5 | behavioural | TO SPECIFY | issued-never-claimed vs never-issued, asserted as two distinct verdicts |
-| 6 | behavioural | TO SPECIFY | claimed-never-finished, distinct from both of the above |
-| 7 | behavioural | **covered** | the reversed-arrival case from [241] |
-| 7a | source scan | TO SPECIFY | a source scan over event statements for the ONE admissibility predicate, in the shape of NFR-025's idiom ratchet |
-| 7b | behavioural | **covered** | §8.1's two negatives — but they live in §8.1's prose, not §17.1's matrix; move them |
-| 7c | behavioural | **covered** | the reversed-arrival case from [241], both pairs |
-| 8 | behavioural | **covered** | terminal-before-claim, in the ordering cases |
-| 9 | behavioural | **covered** | duplicate delivery, in the reversed-arrival case |
-| 10 | behavioural | TO SPECIFY | a terminal with no claim and no `issued_at` must still yield `covered` |
-| 10a | behavioural | **covered** | the config interleaving asserts a refused result fills nothing |
-| 10b | behavioural | **covered** | §8.3 proof 3, exercised by the skip cases |
-| 10c | behavioural | **covered** | carrier eligibility, all three transports |
-| 10d | behavioural | **covered** | the same case, plus the forged-payload mutation |
-| 10e | schema assertion | TO SPECIFY | assert the CHECK REJECTS a job with no carrier and a carrier with no job |
-| 10f | behavioural | **covered** | both arrival orders of the stale result |
-| 10g | behavioural | **covered** | physical unreachability on AMQP and pull |
-| 10h | behavioural | **covered** | §16.1's mixed-version matrix |
-| 10i | behavioural | TO SPECIFY | a V4 delivery missing `JobID`/`IssuedAt`/`DueAt` must be dead-lettered, not probed |
-| 11 | source scan | TO SPECIFY | a source scan: `internal/worker` and `internal/agent` import no store package and expose no ack |
-| 12 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
-| 13 | behavioural | **covered** | the confirm-acceleration threshold case |
-| 14 | behavioural | **covered** | the config-boundary cases |
-| 14a | behavioural | **covered** | the four-case each-side-of-a-due-instant test |
-| 14b | behavioural | **covered** | the `next_due_at`-already-past case |
-| 15 | behavioural | TO SPECIFY | a range before `ledger_from` must yield `unknown`, never `covered` and never `expected_never_issued` |
-| 16 | behavioural | TO SPECIFY | drop a partition, then assert no window in the dropped span reads `covered` or `expected_never_issued` |
-| 16a | schema assertion | TO SPECIFY | insert a row with no matching partition and assert the DEFAULT takes it; then that retention purges the default |
-| 17 | behavioural | **covered** | the late-and-overlapping case |
-| 18 | behavioural | TO SPECIFY | a flushed unfinished window plus a late terminal must read completed-late, not be deleted |
-| 19 | schema assertion | TO SPECIFY | a schema assertion: no verdict column exists on `expected_runs` |
-| 20 | behavioural | **covered** | 20g's gate case, extended to `expected_never_issued` and pre-`ledger_from` spans |
-| 20a | behavioural | **covered** | lateness above and below the threshold |
-| 20b | behavioural | **covered** | push exclusion by every path |
-| 20c | behavioural | **covered** | the per-path interval value, with the `new_interval` mutation |
-| 20d | source scan | TO SPECIFY | a source scan: one helper computes the effective interval; `:1427` and `:1635` both call it |
-| 20e | behavioural | **covered** | the orphan-threshold case |
-| 20f | behavioural | **covered** | the §13a round trip in 20g's case |
-| 20g | behavioural | **covered** | added at [270], with its two promotion mutations |
-| 21 | source scan | TO SPECIFY | a source scan: no scheduler or prober path reads `expected_runs` |
-| 22 | measurement | TO SPECIFY | a measurement against a populated table, plus bounds enforcement on the config value |
-| 23 | measurement | TO SPECIFY | the gauge's presence, its threshold, and that it is UNPUBLISHED on a zero denominator |
-| 23a | schema assertion | TO SPECIFY | read `pg_class.reloptions` on a NEWLY created partition |
-| 24 | behavioural | **covered** | §17.1 (a), (b), (c) |
-| 24a | behavioural | **covered** | the same, asserting the fence |
-| 24b | behavioural | **covered** | §17.1 (a) — two monitors, one cap |
-| 24c | behavioural | TO SPECIFY | drop a partition and assert `ledger_from` moves with it, having been computed not stored |
-| 25 | behavioural | TO SPECIFY | five bad-result shapes, each correlating to no window while the heartbeat still lands |
-| 25a | source scan | TO SPECIFY | a source scan: `DueAt` minted from the schedule read, and `StampResult` the only copier |
-| 25b | behavioural | **covered** | the crossed-pair case |
-| 25c | source scan | **covered** | the grep over every `INSERT INTO expected_runs`, which found the revision-15 defect |
-| 25d | behavioural | **covered** | the config interleaving proves the row takes the published job's facts |
-| 25e | behavioural | **covered** | the same case; its mutation is revision 8's single-predicate fence |
-| 25f | document check | TO SPECIFY | a document check: every correlated field names type, tag, mint source and copier |
-| 26 | schema assertion | TO SPECIFY | assert the FK is composite, and that a single-column FK fails the assertion |
-| 26a | behavioural | TO SPECIFY | a cross-project negative at the STORE layer, not through the handler |
-| 26b | behavioural | TO SPECIFY | every response carries `ledger_from` and `gap_truncated_before` |
+**Assigning a phase to each row surfaced a defect in §16's own plan.** Phase A was written as
+"`monitor_execution_revisions` + write it in the revision-bump transaction + §10's segment close +
+backfill" — but §10's segment close MATERIALIZES WINDOWS, and `expected_runs` does not exist until
+B2. A cannot do it. The segment close belongs to B2, and §16 is corrected accordingly. Each row is
+assigned the EARLIEST phase in which it becomes testable, which is what makes an entry gate
+meaningful.
+
+**The seven source scans have Go precedent here and I was wrong to say otherwise** ([286]).
+`internal/api/monitordoors_test.go` (FR-026 — a requirement I cited repeatedly in this arc),
+`internal/api/incidentdoors_test.go` and `internal/domain/canarybounds_test.go` all use
+`go/parser`/`go/ast` over real files, and the last kills source-shape mutations. So each structural
+guard goes **next to its owning package** — the advance-statement guard in `internal/scheduler`, the
+`worker`/`agent` import boundary as a narrow architecture test — and **no second global mechanism is
+built**.
+
+| # | Phase | Check kind | Status | Where, or what is missing |
+| --- | --- | --- | --- | --- |
+| 1 | B2 | behavioural | TO SPECIFY | the OWNER's headline property, and nothing tests it: probe instants before and after the change, per dispatch path |
+| 2 | B2 | behavioural | **covered** | §17.1 (b) and (c) exercise rules 1, 3, 4; rules 2 and 5 are not |
+| 2a | B2 | source scan | TO SPECIFY | a source scan: exactly one statement advances `next_due_at`. A second one is the [229] defect |
+| 2b | B2 | behavioural | **covered** | §17.1 (c) asserts `interval_in_force` still 60 under backoff |
+| 2c | B2 | behavioural | TO SPECIFY | the RESTORE half is untested: acceleration expiring must put `interval_in_force` back |
+| 2d | B2 | source scan | TO SPECIFY | rule 5's statement must be structurally incapable of moving `next_due_at` forward |
+| 3 | B2 | behavioural | **covered** | §17.1 (b) and (c) both start from a persisted past `next_due_at` |
+| 4 | B2 | behavioural | TO SPECIFY | core truthfulness and untested: a heartbeat at a nearby instant must NOT make a window `covered` |
+| 5 | B2 | behavioural | TO SPECIFY | issued-never-claimed vs never-issued, asserted as two distinct verdicts |
+| 6 | B2 | behavioural | TO SPECIFY | claimed-never-finished, distinct from both of the above |
+| 7 | C | behavioural | **covered** | the reversed-arrival case from [241] |
+| 7a | C | source scan | TO SPECIFY | a source scan over event statements for the ONE admissibility predicate, in the shape of NFR-025's idiom ratchet |
+| 7b | C | behavioural | **covered** | §8.1's two negatives — but they live in §8.1's prose, not §17.1's matrix; move them |
+| 7c | C | behavioural | **covered** | the reversed-arrival case from [241], both pairs |
+| 8 | C | behavioural | **covered** | terminal-before-claim, in the ordering cases |
+| 9 | C | behavioural | **covered** | duplicate delivery, in the reversed-arrival case |
+| 10 | B2 | behavioural | TO SPECIFY | a terminal with no claim and no `issued_at` must still yield `covered` |
+| 10a | C | behavioural | **covered** | the config interleaving asserts a refused result fills nothing |
+| 10b | C | behavioural | **covered** | §8.3 proof 3, exercised by the skip cases |
+| 10c | B2 | behavioural | **covered** | carrier eligibility, all three transports |
+| 10d | B2 | behavioural | **covered** | the same case, plus the forged-payload mutation |
+| 10e | B2 | schema assertion | TO SPECIFY | assert the CHECK REJECTS a job with no carrier and a carrier with no job |
+| 10f | C | behavioural | **covered** | both arrival orders of the stale result |
+| 10g | B1 | behavioural | **covered** | physical unreachability on AMQP and pull |
+| 10h | B1 | behavioural | **covered** | §16.1's mixed-version matrix |
+| 10i | B1 | behavioural | TO SPECIFY | a V4 delivery missing `JobID`/`IssuedAt`/`DueAt` must be dead-lettered, not probed |
+| 11 | B1 | source scan | TO SPECIFY | a source scan: `internal/worker` and `internal/agent` import no store package and expose no ack |
+| 12 | B2 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
+| 13 | A | behavioural | **covered** | the confirm-acceleration threshold case |
+| 14 | B2 | behavioural | **covered** | the config-boundary cases |
+| 14a | B2 | behavioural | **covered** | the four-case each-side-of-a-due-instant test |
+| 14b | B2 | behavioural | **covered** | the `next_due_at`-already-past case |
+| 15 | D | behavioural | TO SPECIFY | a range before `ledger_from` must yield `unknown`, never `covered` and never `expected_never_issued` |
+| 16 | D | behavioural | TO SPECIFY | drop a partition, then assert no window in the dropped span reads `covered` or `expected_never_issued` |
+| 16a | D | schema assertion | TO SPECIFY | insert a row with no matching partition and assert the DEFAULT takes it; then that retention purges the default |
+| 17 | B2 | behavioural | **covered** | the late-and-overlapping case |
+| 18 | C | behavioural | TO SPECIFY | a flushed unfinished window plus a late terminal must read completed-late, not be deleted |
+| 19 | B2 | schema assertion | TO SPECIFY | a schema assertion: no verdict column exists on `expected_runs` |
+| 20 | E | behavioural | **covered** | 20g's gate case, extended to `expected_never_issued` and pre-`ledger_from` spans |
+| 20a | E | behavioural | **covered** | lateness above and below the threshold |
+| 20b | E | behavioural | **covered** | push exclusion by every path |
+| 20c | B2 | behavioural | **covered** | the per-path interval value, with the `new_interval` mutation |
+| 20d | B2 | source scan | TO SPECIFY | a source scan: one helper computes the effective interval; `:1427` and `:1635` both call it |
+| 20e | D | behavioural | **covered** | the orphan-threshold case |
+| 20f | D | behavioural | **covered** | the §13a round trip in 20g's case |
+| 20g | E | behavioural | **covered** | added at [270], with its two promotion mutations |
+| 21 | B2 | source scan | TO SPECIFY | a source scan: no scheduler or prober path reads `expected_runs` |
+| 22 | D | measurement | TO SPECIFY | a measurement against a populated table, plus bounds enforcement on the config value |
+| 23 | D | measurement | TO SPECIFY | the gauge's presence, its threshold, and that it is UNPUBLISHED on a zero denominator |
+| 23a | D | schema assertion | TO SPECIFY | read `pg_class.reloptions` on a NEWLY created partition |
+| 24 | B2 | behavioural | **covered** | §17.1 (a), (b), (c) |
+| 24a | B2 | behavioural | **covered** | the same, asserting the fence |
+| 24b | B2 | behavioural | **covered** | §17.1 (a) — two monitors, one cap |
+| 24c | D | behavioural | TO SPECIFY | drop a partition and assert `ledger_from` moves with it, having been computed not stored |
+| 25 | B2 | behavioural | TO SPECIFY | five bad-result shapes, each correlating to no window while the heartbeat still lands |
+| 25a | B2 | source scan | TO SPECIFY | a source scan: `DueAt` minted from the schedule read, and `StampResult` the only copier |
+| 25b | C | behavioural | **covered** | the crossed-pair case |
+| 25c | B2 | source scan | **covered** | the grep over every `INSERT INTO expected_runs`, which found the revision-15 defect |
+| 25d | B2 | behavioural | **covered** | the config interleaving proves the row takes the published job's facts |
+| 25e | B2 | behavioural | **covered** | the same case; its mutation is revision 8's single-predicate fence |
+| 25f | B2 | document check | TO SPECIFY | a document check: every correlated field names type, tag, mint source and copier |
+| 26 | B2 | schema assertion | TO SPECIFY | assert the FK is composite, and that a single-column FK fails the assertion |
+| 26a | D | behavioural | TO SPECIFY | a cross-project negative at the STORE layer, not through the handler |
+| 26b | D | behavioural | TO SPECIFY | every response carries `ledger_from` and `gap_truncated_before` |
 
 ## 18. Open items
 

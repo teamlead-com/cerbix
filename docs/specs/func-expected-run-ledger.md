@@ -1,13 +1,18 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGN APPROVED — revision 22, 2026-09-04. Approved range `9f46f40..9e114a4`, D-0237.**
+> **Lifecycle: DESIGN APPROVED — revision 23, 2026-09-04. Approved range `9f46f40..9e114a4`, D-0237.**
 > The independent reviewer approved revision 20 at party [267] and revisions 21-22 at [274], with no
 > remaining P0 or P1, rerunning `make docs-check` and `git diff --check` himself for both. This line
 > was written AFTER the approval and records it, so the commit carrying it is bookkeeping rather than
-> design content — the approved design is the range named above.
+> design content — the approved design is the range named above. Revision 23 changes §17.2's totals
+> and §17.4's entry gate only, carries no design content, and is under review after the B1 entry
+> rejection at [342].
 >
-> **NOT IMPLEMENTED.** Implementation, push, tag and release await the owner's explicit authorization
-> and the normal iteration gates.
+> **PHASE A IMPLEMENTED (`aa46db8`); B1 ONWARD NOT IMPLEMENTED.** The owner authorized implementation
+> by phases, and the reviewer admits each phase separately against §17.2's entry gate: phase A was
+> approved at party [324] for a local commit, and B1's first entry submission was REJECTED at [342].
+> Push, tag and release remain unauthorized. `docs/status.md` carries the live state; this line records
+> only that the design is approved and the requirement is no longer wholly unbuilt.
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -1711,14 +1716,19 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
-### 17.2 The discharge audit — 34 covered, 1 discharged, 30 to specify
+### 17.2 The discharge audit — 67 invariants: 34 covered, 2 specified, 1 discharged, 1 withdrawn, 29 to specify
 
 The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
 sized as its own scope rather than folded into the design approval. It asks one question of each
 invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
 the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
 
-**Result: 34 covered, 1 DISCHARGED by phase A, 30 to specify** — 65 invariants, after 13a was added by this audit. And the shape of the gap is the finding, not the
+**Result: 67 invariants — 34 covered, 2 SPECIFIED by §17.4, 1 DISCHARGED by phase A, 1 withdrawn,
+29 to specify (18 in B2, 9 in D, 2 in C).** Every number in this paragraph and in the heading above
+it is now DERIVED from the table below, by `check_fr032_audit_totals`, because they were typed there
+instead and drifted: they read "65 invariants ... 30 to specify" while the table already held 66 rows
+and 28, through 13a's addition and §17.4's specifications. A total written beside its own table is
+the one number nobody re-derives. And the shape of the gap is the finding, not the
 number: every test in §17.1 was added in response to one of the eight P0 rejections, so coverage
 tracked **the design's defects** rather than **the requirement's purpose**. The four invariants that
 say what FR-032 is FOR had nothing testing them —
@@ -1741,7 +1751,7 @@ a newly created partition), two a **measurement**, and one is a **document check
 **It is an ENTRY gate, not a close gate** (reviewer [286]): before phase N's code begins, every row
 owned by N must be upgraded from `TO SPECIFY` to a named test, a killed mutation and a check kind. A
 close gate would let the code be written first and the test shaped to fit it, which is how the gap in
-this table was produced in the first place. The whole 64-row map stays here now so omissions stay
+this table was produced in the first place. The whole map stays here now so omissions stay
 visible, and later phases' test MECHANICS are deliberately not invented yet.
 
 **Assigning a phase to each row surfaced a defect in §16's own plan.** Phase A was written as
@@ -1793,7 +1803,8 @@ to correct.
 | 10f | C | behavioural | **covered** | both arrival orders of the stale result |
 | 10g | B1 | behavioural | **covered** | physical unreachability on AMQP and pull |
 | 10h | B1 | behavioural | **covered** | §16.1's mixed-version matrix |
-| 10i | B1 | behavioural (live broker) | **SPECIFIED (§17.4)** | dead-letter assertion plus a no-probe assertion, with the tolerant-branch mutation named |
+| 10i | B2 | behavioural (live broker) | **TO SPECIFY** | reassigned from B1 by reviewer P0 at [342]: a V4 delivery is DEFINED by `DueAt`, which the wire does not carry until B2, so B1 has no absence to detect. §17.4 keeps both mutations named for B2's gate |
+| 10j | B1 | migration | **SPECIFIED (§17.4)** | goose-down against pending generation-4 pull rows: the DOWN must refuse, the rows must survive, and the error must name the count and the drain step |
 | 11 | B1 | source scan | **SPECIFIED (§17.4)** | an import-boundary scan over both packages plus an interface-shape assertion on `Dispatcher`; specifying it found the invariant's "no ack concept" clause FALSE about the tree (§17.4) |
 | 11a | B1 | — | **n/a, a withdrawal** | records that the pull agent's lease-ack predates this requirement and is out of scope |
 | 12 | B2 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
@@ -1938,11 +1949,12 @@ HTTP monitor and was refused by name.
 backfill.** The rotation fence sets *only* the two fence columns and never touches `updated_at`, so
 reading it back would date a brand-new generation to the previous write — potentially days early.
 
-### 17.4 Phase B1's entry gate — invariants 10i and 11 specified
+### 17.4 Phase B1's entry gate — invariants 11 and 10j specified, 10i reassigned to B2
 
-B1's other two rows (10g, 10h) already have §17.1 cases. These two did not, and specifying them
-found invariant 11 asserting something the tree contradicts — the second time this gate has caught
-that, after 13a's four bump sites.
+B1 owns four rows. 10g and 10h already have §17.1 cases; 11 is specified below; 10i turned out not
+to be B1's to prove at all; and 10j did not exist until the rejection that found that out. Specifying
+this one gate has now caught three invariants contradicting the tree — 13a's four bump sites, 11's
+ack clause, and 10i's phase — which is the whole argument for gating at ENTRY.
 
 **Invariant 11, corrected before it could be implemented.** The import half is true today and needs
 pinning: `internal/worker` and `internal/agent` import only `dispatch` and `domain`, no store
@@ -1959,18 +1971,33 @@ no ack, and it has exactly five methods today: `PublishJob`, `Jobs`, `PublishRes
 | The `Dispatcher` interface exposes no ack | source scan | Parse `internal/dispatch/dispatch.go`, collect the interface's method names, assert the set is exactly the five above | Add `Ack(ctx, id) error` to the interface. The test must fail naming `Ack` — and an enumerated SET is required rather than "contains no method called Ack", because `Nack`, `Settle` or `Confirm` would all slip past a name check |
 | **B1 adds neither** | source scan | The same two scans, run against B1's tree — B1 touches queues, claim endpoints and capability announcement, none of which needs a store handle in an executor | If B1's carrier work reaches for the store from `worker`/`agent`, the import scan fails on the change that introduces it, which is the point of placing the gate at ENTRY |
 
-**Invariant 10i needs a live broker, and its shape is fixed by what already exists.** A V4 delivery
-missing `JobID`, `IssuedAt` or `DueAt` is a protocol violation, not a rolling-upgrade case, so it is
-dead-lettered rather than probed. `AMQP.deadLetter` (`internal/dispatch/amqp.go:499`) already
-forwards a poison body to the durable dead-letter queue "so it survives for inspection instead of
-vanishing", and `amqp_test.go` already skips unless `CERBIX_TEST_RABBITMQ_URL` is set. The test
-follows both: publish a V4 job with one defining field absent, assert **(a)** it appears on the
-dead-letter queue tagged with its source, and **(b)** no probe ran for it.
+**Invariant 10i is not B1's to prove, and this gate asserting it WAS the defect** (reviewer P0 at
+[342]). A V4 delivery is *defined* by `DueAt`, and `dispatch.CheckJob` carries `JobID` and `IssuedAt`
+today but gains no `DueAt` until B2 (§13.1). So in B1 there is no field whose absence could be
+detected, nothing publishes V4 at all while `ledger.carrier_enabled` is false, and the test would
+have to hand-craft a publish that production cannot make — a gate naming a proof its own phase cannot
+produce. Expanding B1 to meet it would mean smuggling B2's payload into a deliberately inert carrier
+phase, and §16 already gives B2 the payload and the ledger atomically, so 10i moves to B2 instead.
+**Both mutations stay named here**, so B2's gate inherits the analysis rather than re-deriving it:
 
-| Mutation | Why it is the one that matters |
+| Mutation B2's gate must carry | Why it is the one that matters |
 | --- | --- |
-| Treat the missing field as a rolling-upgrade case and probe anyway | This is the plausible mistake: the code already tolerates absent identity on OLDER carriers, and the tolerant branch is one `if` away from covering V4 too. The test must distinguish carrier from payload |
-| Drop the delivery silently instead of dead-lettering | Passes any assertion that only checks "no probe ran", which is why (a) is asserted separately |
+| Treat the missing field as a rolling-upgrade case and probe anyway | The plausible mistake: the code already tolerates absent identity on OLDER carriers, and the tolerant branch is one `if` away from covering V4 too. The test must distinguish carrier from payload |
+| Drop the delivery silently instead of dead-lettering | Passes any assertion that only checks "no probe ran", which is why the dead-letter arrival is asserted separately. `AMQP.deadLetter` (`internal/dispatch/amqp.go:499`) already forwards a poison body to the durable queue "so it survives for inspection instead of vanishing", and `amqp_test.go` already skips unless `CERBIX_TEST_RABBITMQ_URL` is set |
+
+**Invariant 10j, added by that same rejection: the migration must fail closed on ROLLBACK.** None of
+the previous 66 invariants said anything about rolling back, which is how a migration that widens a
+constraint acquires a DOWN that nobody specified. B1 widens `pull_jobs_protocol_version_check` and
+its `pull_tests` twin to `IN (1, 2, 3, 4)`, so the DOWN narrows them again while generation-4 rows
+may still be pending — and 00063 already wrote down what goes wrong there, in its own words: its
+first draft "said 'drain first' and then unconditionally DELETEd them, which is a destructive
+write-off wearing the words of a safe rollback". D-0160 makes draining an explicit OPERATOR step, so
+the migration refuses rather than performing it silently.
+
+| Claim | Check kind | Test | The mutation that must kill it |
+| --- | --- | --- | --- |
+| The DOWN refuses while generation-4 pull rows are pending | migration | Insert a generation-4 row into `pull_jobs` and another into `pull_tests`, run the migration's DOWN, and assert both that it errors AND that both rows are still there | Drain first — `DELETE ... WHERE protocol_version = 4`, then narrow. The DOWN now "succeeds" and the pending jobs are gone; only the row-survival assertion catches it, which is why it is asserted separately from the error |
+| The refusal tells the operator what to DO | migration | Assert the error text names the pending COUNT and points at the drain procedure | Delete the guarded DO-block and let `ADD CONSTRAINT` fail on its own. It still fails closed, so an assertion of "the DOWN errored" passes — but the operator is left with `check constraint ... is violated by some row` and no procedure. The same lesson as the interface SET above: the weaker assertion admits the weaker code |
 
 **Not specified here, deliberately:** B1 writes no ledger rows, so nothing in this gate touches
 `expected_runs`. The carrier's *eligibility* consequences are 10c and 10d, which belong to B2 where

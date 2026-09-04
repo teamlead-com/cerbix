@@ -7159,3 +7159,52 @@ tests himself through Docker — `wallclock` + `SlaView`, 35/35 — alongside hi
 and `make docs-check`; the remaining gates stay attributed to this session. The approval covers the
 correction and its truthful status only: **NFR-025c remains open**, and it is not a release, push or
 tag approval.
+
+
+## D-0238 — FR-032: phase A lands under a named iteration, and B1's entry gate is corrected twice before its code (2026-09-04)
+
+**Context.** `D-0237` approved FR-032's design at revision 22 and the owner authorized implementation
+by phases. Phase A — `monitor_execution_revisions` and its write at every generation-creating path —
+was reviewed and approved at party [324] and committed at `aa46db8`. Two things then went wrong that
+are worth recording, because neither was a coding error.
+
+**Decision 1: work lives in a named iteration, and a closed one cannot host it.** Phase A landed with
+`iter-0174` already CLOSED. I had read the methodology as one report per requirement arc, written at
+its close; the reviewer read `AGENTS.md` as requiring a named `iter-XXXX` around any work, with its
+plan, role outputs, checks and atomic `status.md` / `traceability.md` / decision updates, and refused
+B1's re-entry until one existed ([344]). That reading is the repository's, so `iter-0175` is opened as
+an explicit FR-032 continuation and phase A's evidence is recorded under it. Closed reports are never
+edited, so the correction is forward. **Consequence:** later phases do not land against a closed
+iteration, and this is not deferred to FR-032's final close.
+
+**Decision 2: invariant 10i moves from B1 to B2.** 10i requires that a `ProtocolV4` delivery missing
+its defining payload is dead-lettered rather than probed. A V4 delivery is *defined* by `DueAt`, which
+`dispatch.CheckJob` does not carry until B2, and B1 publishes no V4 job at all while
+`ledger.carrier_enabled` is false. B1 therefore has no absence to detect, and a test would have to
+hand-craft a publish production cannot make — the gate named a proof its own phase cannot produce
+([342]). Expanding B1 to meet it would smuggle B2's payload into a deliberately inert carrier phase,
+and §16 already gives B2 the payload and the ledger atomically. Both of 10i's mutations stay named in
+§17.4 so B2's gate inherits the analysis rather than re-deriving it.
+
+**Decision 3: invariant 10j — a constraint-widening migration owns its rollback.** B1 widens
+`pull_jobs_protocol_version_check` and its `pull_tests` twin to `IN (1, 2, 3, 4)`, so its DOWN narrows
+them again while generation-4 rows may still be pending, and none of the previous 66 invariants said
+anything about rolling back. 00063 had already recorded the failure in its own comment — its first
+draft "said 'drain first' and then unconditionally DELETEd them, which is a destructive write-off
+wearing the words of a safe rollback" — and `D-0160` makes draining an explicit OPERATOR step. 10j
+requires the DOWN to refuse while such rows exist, that the rows SURVIVE the refusal, and that the
+error names the pending count and points at the drain procedure. The last part is the substance:
+deleting the guarded `DO`-block still fails closed, so an assertion of "the DOWN errored" passes while
+the operator gets `check constraint ... is violated by some row` and no procedure.
+
+**Decision 4: a section's totals are derived from its table, not typed beside it.** §17.2's heading and
+`**Result:**` line read "65 invariants … 30 to specify" beside a table holding 66 rows and 28. The
+audit that exists to keep omissions visible had one in its own summary. `check_fr032_audit_totals`
+derives all six tallies and the per-phase breakdown from the rows and checks the heading and the
+`Result` span SEPARATELY — requiring a tally merely "somewhere in §17.2" let one region lose a number
+while the other satisfied the guard. The guard reads only those two regions as claims, because this
+spec keeps every rejection and its prose quotes superseded numbers on purpose.
+
+**Status.** FR-032 is `IN_PROGRESS`. Phase A is implemented and approved for a LOCAL commit only. B1
+is specified, corrected, and NOT admitted. B2 carries 18 `TO SPECIFY` rows, C two, D nine, E the
+FR-031 stroke. **Push, tag and release remain unauthorized.**

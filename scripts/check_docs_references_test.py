@@ -289,9 +289,6 @@ class DecisionsAreVocabularyGuarded(unittest.TestCase):
         self.assertEqual(bad, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ResolutionAndTestTokens(unittest.TestCase):
     """The two lookups that carried the checker's whole runtime (79 s → 0.3 s, 2026-09-03).
@@ -535,3 +532,124 @@ class FR032DischargeCitation(unittest.TestCase):
         self.assertEqual(cdr.check_fr032_discharge(
             cdr.read("docs/specs/func-expected-run-ledger.md"),
             cdr.read("internal/store/revisiontimeline_internal_test.go")), [])
+
+
+class FR032AuditTotals(unittest.TestCase):
+    """§17.2's stated totals against the rows they summarise.
+
+    The section read "65 invariants ... 30 to specify" beside a table already holding 66 rows and
+    28, through 13a's addition and §17.4's specifications: a total typed next to its own table is
+    the one number nobody re-derives. Every case here calls the production
+    `cdr.check_fr032_audit_totals`, and `test_breaking_the_guard_breaks_these_tests` proves it.
+    """
+
+    # 7 invariants — 1 covered, 1 specified, 1 discharged, 1 withdrawn, 3 to specify (2 in B2, 1 in C).
+    ROWS = ("| 1 | B2 | behavioural | **TO SPECIFY** | note |\n"
+            "| 2 | B2 | behavioural | **TO SPECIFY** | note |\n"
+            "| 3 | C | schema | **TO SPECIFY** | note |\n"
+            "| 4 | A | behavioural | **covered** | note |\n"
+            "| 5 | A | source scan | **SPECIFIED (§17.4)** | note |\n"
+            "| 6 | A | behavioural | **DISCHARGED** | note |\n"
+            "| 7 | B1 | — | **n/a, a withdrawal** | note |\n")
+
+    HEADING = ("The discharge audit — 7 invariants: 1 covered, 1 specified, 1 discharged, "
+               "1 withdrawn, 3 to specify")
+    RESULT = ("7 invariants — 1 covered, 1 SPECIFIED by §17.4, 1 DISCHARGED by phase A, "
+              "1 withdrawn, 3 to specify (2 in B2, 1 in C).")
+
+    def find(self, heading=None, result=None, rows=None, prose="", bold=True):
+        """A minimal §17.2 in the shape the guard reads — then the guard itself, not a model of it."""
+        span = ("**Result: %s**" if bold else "Result: %s") % (self.RESULT if result is None else result)
+        body = ("### 17.2 " + (self.HEADING if heading is None else heading) + "\n\n"
+                + "it asks one question of each invariant.\n\n" + span + "\n" + prose + "\n\n"
+                + "| # | Phase | Kind | Status | Note |\n| --- | --- | --- | --- | --- |\n"
+                + (self.ROWS if rows is None else rows) + "\n### 17.3 next\n")
+        return cdr.check_fr032_audit_totals(body, "fixture.md")
+
+    def test_totals_that_match_their_table_are_silent(self):
+        self.assertEqual(self.find(), [])
+
+    def test_a_stale_total_in_the_result_span_is_reported(self):
+        got = self.find(result=self.RESULT.replace("7 invariants", "6 invariants"))
+        self.assertTrue(any("**Result:** span says 6 invariants; its table holds 7" in m for m in got), got)
+
+    def test_a_stale_total_in_the_heading_is_reported(self):
+        got = self.find(heading=self.HEADING.replace("7 invariants", "6 invariants"))
+        self.assertTrue(any("heading says 6 invariants; its table holds 7" in m for m in got), got)
+
+    # The heading and the Result span are checked SEPARATELY. Requiring each tally merely
+    # "somewhere in §17.2" let one region lose a number while the other still satisfied the guard.
+    def test_a_tally_dropped_from_only_one_region_is_reported(self):
+        got = self.find(result=self.RESULT.replace(", 1 withdrawn", ""))
+        self.assertTrue(any('**Result:** span no longer states' in m and 'withdrawn' in m for m in got), got)
+        self.assertFalse(any('heading no longer states' in m and 'withdrawn' in m for m in got), got)
+
+    def test_the_two_regions_disagreeing_with_each_other_is_reported(self):
+        got = self.find(heading=self.HEADING.replace("1 covered", "2 covered"))
+        self.assertTrue(any("heading says 2 covered; its table holds 1" in m for m in got), got)
+
+    def test_a_wrong_phase_breakdown_is_reported(self):
+        got = self.find(result=self.RESULT.replace("(2 in B2, 1 in C)", "(1 in B2, 1 in C)"))
+        self.assertTrue(any('breaks "to specify" down as' in m for m in got), got)
+
+    def test_a_phase_missing_from_the_breakdown_is_reported(self):
+        got = self.find(result=self.RESULT.replace("(2 in B2, 1 in C)", "(2 in B2)"))
+        self.assertTrue(any('breaks "to specify" down as' in m for m in got), got)
+
+    def test_a_row_whose_status_is_unreadable_is_reported_by_id(self):
+        got = self.find(rows=self.ROWS.replace("| 5 | A | source scan | **SPECIFIED (§17.4)** |",
+                                               "| 5 | A | source scan | **SPECIFED (§17.4)** |"))
+        self.assertTrue(any("row(s) 5 carry no status" in m for m in got), got)
+
+    def test_removing_the_result_span_is_reported(self):
+        got = self.find(bold=False)
+        self.assertTrue(any("no bold **Result: ...** span" in m for m in got), got)
+
+    # The case that made the guard scan a DECLARED region instead of all of §17.2. This spec keeps
+    # every rejection, so its prose quotes the superseded totals on purpose; a guard reading all the
+    # prose reported the very drift the paragraph was explaining.
+    def test_prose_quoting_the_superseded_totals_does_not_trip_the_guard(self):
+        self.assertEqual(self.find(prose='\nthey read "65 invariants ... 30 to specify" while the '
+                                         'table already held 66 rows and 28.\n'), [])
+
+    def test_breaking_the_guard_breaks_these_tests(self):
+        real = cdr.check_fr032_audit_totals
+        try:
+            cdr.check_fr032_audit_totals = lambda *a, **k: []
+            self.assertEqual(self.find(bold=False), [],
+                             "a neutralised guard must report nothing — this documents the shape")
+        finally:
+            cdr.check_fr032_audit_totals = real
+        self.assertTrue(self.find(bold=False),
+                        "with the real guard restored the same input must be reported")
+
+    def test_the_repository_itself_agrees(self):
+        self.assertEqual(cdr.check_fr032_audit_totals(
+            cdr.read("docs/specs/func-expected-run-ledger.md")), [])
+
+
+class TheSuiteRunsWhollyHoweverItIsInvoked(unittest.TestCase):
+    """`unittest.main()` sat in the MIDDLE of this file, with seven classes defined after it.
+
+    `python3 -m unittest scripts/check_docs_references_test.py` imports the module and collected
+    all 74; `python3 scripts/check_docs_references_test.py` executed the guard first, exited before
+    those classes were even defined, and reported `Ran 26 tests ... OK`. A third of the suite,
+    including BOTH FR-032 guard classes, and green either way. Moving the block is not the fix —
+    appending a class after it is the natural next edit, so the shape is asserted instead.
+    """
+
+    def test_nothing_is_defined_after_the_main_guard(self):
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        guards = [n for n in tree.body
+                  if isinstance(n, ast.If) and "__main__" in ast.dump(n.test)]
+        self.assertEqual(len(guards), 1, "exactly one __main__ guard is expected")
+        after = [n for n in tree.body
+                 if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.lineno > guards[0].lineno]
+        self.assertEqual([n.name for n in after], [],
+                         "these are defined after `unittest.main()`, so running this file as a "
+                         "script exits before they exist and reports a green partial suite")
+
+
+if __name__ == "__main__":
+    unittest.main()

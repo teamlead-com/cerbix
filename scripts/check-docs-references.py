@@ -876,6 +876,84 @@ def check_fr032_discharge(body, test_source, spec='docs/specs/func-expected-run-
     return out
 
 
+def check_fr032_audit_totals(body, spec='docs/specs/func-expected-run-ledger.md'):
+    """FR-032 §17.2's own totals, DERIVED from its discharge table instead of read beside it.
+
+    The section stated "65 invariants ... 30 to specify" while the table under it already held 66
+    rows and 28, through 13a's addition and §17.4's two specifications. A total written beside its
+    own table is the one number nobody re-derives, so every number the section claims about itself
+    is checked against the rows — including the per-phase breakdown of what is still to specify,
+    and including rows whose status is unreadable, which would otherwise leave the audit silently.
+    """
+    out = []
+    if '### 17.2' not in body:
+        return out
+    sec = body.split('### 17.2', 1)[1].split('### 17.3', 1)[0]
+    rows = re.findall(r'^\| ([0-9]+[a-z]*) \|([^|]*)\|[^|]*\|([^|]*)\|', sec, re.M)
+    if not rows:
+        out.append(f'{spec} §17.2 states totals but has no discharge rows to derive them from')
+        return out
+
+    # Only the heading line and the bold **Result: ...** span are read as CLAIMS. The prose around
+    # them quotes the superseded numbers on purpose — this spec keeps every rejection, so a guard
+    # that scanned all of §17.2 would report the drift it documents. Scanning a declared region
+    # instead makes the guard stricter: the totals must live where a reader looks for them.
+    claim = re.search(r'\*\*Result:(.+?)\*\*', sec, re.S)
+    if not claim:
+        out.append(f'{spec} §17.2 has no bold **Result: ...** span, which is the one place its '
+                   f'totals are checked; without it the table below summarises itself to nobody')
+        return out
+    regions = (('its heading', sec.split('\n', 1)[0]), ('its **Result:** span', claim.group(1)))
+
+    def bucket(cell):
+        text = cell.strip().strip('*')
+        for key in ('TO SPECIFY', 'SPECIFIED', 'DISCHARGED', 'covered', 'n/a'):
+            if key in text:
+                return key
+        return None
+
+    tally, phases, unreadable = {}, {}, []
+    for num, phase, status in rows:
+        key = bucket(status)
+        if key is None:
+            unreadable.append(num)
+            continue
+        tally[key] = tally.get(key, 0) + 1
+        if key == 'TO SPECIFY':
+            phases[phase.strip()] = phases.get(phase.strip(), 0) + 1
+    if unreadable:
+        out.append(f"§17.2 row(s) {', '.join(unreadable)} carry no status this guard recognises, so "
+                   f"they count toward no total and would drop out of the audit unnoticed")
+
+    # Both regions are checked SEPARATELY and both must carry every tally. Requiring it merely
+    # "somewhere in §17.2" let a tally be deleted from one place while the other still satisfied
+    # the guard — and the two drifting apart from each other is the same failure as either one
+    # drifting from the table.
+    for where, region in regions:
+        for label, pattern, derived in (
+                ('invariants', r'(\d+) invariants', len(rows)),
+                ('covered', r'(\d+) covered', tally.get('covered', 0)),
+                ('specified', r'(\d+) specified', tally.get('SPECIFIED', 0)),
+                ('discharged', r'(\d+) discharged', tally.get('DISCHARGED', 0)),
+                ('withdrawn', r'(\d+) withdrawn', tally.get('n/a', 0)),
+                ('to specify', r'(\d+) (?:still )?to specify', tally.get('TO SPECIFY', 0))):
+            stated = re.findall(pattern, region, re.I)
+            if not stated:
+                out.append(f'§17.2 {where} no longer states how many rows are "{label}"; the total '
+                           f'it dropped is {derived}, and a total nobody states is one nobody checks')
+                continue
+            for value in stated:
+                if int(value) != derived:
+                    out.append(f'§17.2 {where} says {value} {label}; its table holds {derived}')
+
+    named = {p: int(n) for n, p in re.findall(r'(\d+) in ([A-E][0-9]?)\b', claim.group(1))}
+    if named != phases:
+        out.append(f'§17.2 breaks "to specify" down as {named or "nothing"}; its table holds '
+                   f'{phases} (a phase whose rows are unspecified must appear, with its own count, '
+                   f'because the breakdown is what tells the next phase whether it may start)')
+    return out
+
+
 def check_enumerations():
     bad = []
 
@@ -925,12 +1003,15 @@ def check_enumerations():
     for f in sorted(listed - on_disk):
         bad.append(('docs/specs/README.md', 1, 'enum', f'the index lists {f}, which is not in docs/specs/'))
 
-    # 4. FR-032 §17.3's discharge citation and counts — the logic lives in
-    # check_fr032_discharge so the fixture tests invoke the guard instead of modelling it.
+    # 4. FR-032 §17.3's discharge citation and counts, and §17.2's own totals against its table.
+    # Both live in named functions so the fixture tests invoke the guards instead of modelling them.
     spec = 'docs/specs/func-expected-run-ledger.md'
     testfile = 'internal/store/revisiontimeline_internal_test.go'
     if os.path.exists(spec) and os.path.exists(testfile):
         for msg in check_fr032_discharge(read(spec), read(testfile), spec, testfile):
+            bad.append((spec, 1, 'enum', msg))
+    if os.path.exists(spec):
+        for msg in check_fr032_audit_totals(read(spec), spec):
             bad.append((spec, 1, 'enum', msg))
 
     # 5. the Monitoring-as-Code bundle README against fileSupportedTypes.
@@ -1002,7 +1083,9 @@ def main():
               'tree agrees with it — the check-type count, the column-list ON DELETE SET NULL '
               'migrations in both places that name them, the spec index as a SET, and the '
               'Monitoring-as-Code supported types, and FR-032 §17.3\'s discharge citation against '
-              'the test file it discharges from, BOTH of its counts against the artefacts they summarise — the check types and the bundle types as SETS '
+              'the test file it discharges from, BOTH of its counts against the artefacts they '
+              'summarise, and §17.2\'s own totals DERIVED from its discharge table in both '
+              'places that state them — the check types and the bundle types as SETS '
               'through an asserted label map, not by count alone; and no document announces a '
               '`PARTIAL` residual its own discharge map does not have)')
         return 0

@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 9, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 10, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -32,8 +32,12 @@
 > required, and `ProtocolV4` promised a `DueAt` that existed in no wire type. **Revision 8** fixes the
 > INSERT and defines `DueAt` end to end (§13.1) — but its optimistic fence checked only
 > `next_due_at`, the ONE datum §10 guarantees does not change, so a config write passed it while
-> crossing the generation ([237]). **Revision 9** sources every run fact from the published job and
-> fences on the revision too (§13.2). §5.4 records the constraints from party [222].
+> crossing the generation ([237]). **Revision 9** sourced every run fact from the published job and
+> fenced on the revision too, but claimed the fenced-out job's result would show as `refused_at` —
+> which no single-row-per-window schema can represent, rejected at [239]. **Revision 10** withdraws
+> that claim, writes the refusal statement revision 6 had only invented columns for, and states the
+> boundary: a refusal annotates only the row recording its OWN job, and never inserts.
+> §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -545,10 +549,35 @@ and one that precedes its job's issue beyond `allowed_skew`. A refused result mu
 stroke. Making it structural rather than a remembered condition is the point: the statement is
 unreachable for a refused result.
 
-A refusal is still recorded, because "a result arrived and was inadmissible" is a different fact
-from silence — in `refused_at` and `refused_reason`, which are **not** `terminal_at`. That keeps
-coverage a single unambiguous test (`terminal_at IS NOT NULL`) instead of a compound condition a
-later reader could get wrong.
+A refusal is still recorded when it belongs to a run the ledger records, because "a result arrived
+and was inadmissible" is a different fact from silence — in `refused_at` and `refused_reason`, which
+are **not** `terminal_at`. That keeps coverage a single unambiguous test (`terminal_at IS NOT NULL`)
+instead of a compound condition a later reader could get wrong.
+
+**The refusal statement, which revision 6 invented the columns for and never wrote** (reviewer P0 at
+[239]). It runs on the REJECT path, inside the transaction `commitOutcome`
+(`internal/store/monitors.go:1482`) is about to commit:
+
+```sql
+UPDATE expected_runs
+   SET refused_at     = LEAST(COALESCE(refused_at, $3), $3),
+       refused_reason = COALESCE(refused_reason, $6)
+ WHERE monitor_id = $1 AND due_at = $2
+   AND job_id = $4                        -- ONLY the row that records THIS job
+   AND execution_revision = $5;
+```
+
+**It is an UPDATE and never an INSERT, and the asymmetry with §8.3 is deliberate.** A terminal proves
+both that the run happened and that it produced an admissible outcome, so it may create its own row.
+A refusal proves only that something was delivered; creating a row from it would invent an issued run
+whose sole evidence is inadmissible, AND it would occupy the window's primary key against a
+legitimate re-dispatch — the second horn of [239]'s trilemma. Zero rows affected is the normal
+outcome for a refusal whose job the ledger never entered, and the caller treats it as such rather
+than as an error.
+
+Note the guard is `job_id = $4` alone, without §8.1's no-job disjunct: a refusal must never adopt a
+window, because adoption asserts that a run happened there and a refusal is not evidence of an
+admissible run.
 
 ```sql
 INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
@@ -1020,9 +1049,34 @@ The column compared is `monitors.execution_revision`, deliberately the same one 
 at `monitors.go:1342`, so the ledger's fence and the result-rejection rule cannot drift apart.
 
 **On mismatch nothing happens at all**: no advance, no window, no fence write. The monitor stays due
-and the next tick republishes at the current revision. The already-published job becomes an orphan
-whose result is refused by the ingest gate anyway — recorded as `refused_at` on whichever window it
-correlates to, which is honest and needs no special case.
+and the next tick republishes at the current revision.
+
+**What becomes of the already-published job — and revision 9 claimed something impossible here.** It
+said the old result "shows as `refused_at` on whichever window it correlates to". Reviewer P0 at
+[239] showed that cannot be represented: the next tick materializes the rev6 job at the SAME
+`(monitor_id, D)` primary key, so writing the rev5 refusal onto that row would attribute a rev5
+rejection to the rev6 run, while inserting a rev5 row first would block the rev6 `current_window` by
+primary key. One row cannot carry both, and I had promised a test that the schema makes impossible.
+
+**The premise was wrong, not the schema.** A dispatch the ledger never entered has nothing in the
+ledger to update, and it should not: the window's coverage story is about the run that ANSWERED it,
+which is the rev6 run. The rev5 dispatch is a discarded attempt, and it is already observable where
+discarded results are counted — `cerbix_result_ignored_total`,
+`cerbix_result_missing_revision_total`, `cerbix_result_clock_skew_total`,
+`cerbix_result_observed_before_issue_total`. The ledger adds nothing by duplicating that, and adding
+it would require exactly the misattribution [239] identified.
+
+So the rule is a boundary, not a mechanism: **a refusal can only ever annotate the row that records
+its own job.** §8.1's admissibility predicate already enforces it — a rev5 refusal cannot match a
+rev6 row, because the predicate compares `execution_revision`. The mechanism was right and the prose
+was wrong, which is the sixth time in this design and the reason I now read the SQL against the
+prose before sending rather than after.
+
+**A stale-revision job can also never create a blocking orphan**, and that is worth stating because
+it is the horn of [239]'s trilemma that looks most dangerous. The terminal path (§8.3) is reachable
+only for an ADMISSIBLE result, and `monitors.go:1337-1344` refuses a stale revision before any
+insert. So a fenced-out rev5 job cannot insert a row at `(monitor_id, D)` and cannot stand in the way
+of the rev6 materialization.
 
 I am doing (a) as well as the (b) you asked for, because a fence that detects a crossing is weaker
 than a structure that cannot produce one, and (b) alone would have left the row's own facts sourced
@@ -1132,9 +1186,12 @@ Discharged as a SET in `docs/traceability.md`.
 8. A terminal event that arrives before its claim event loses nothing.
 9. A duplicate claim or terminal event changes nothing.
 10. A terminal outcome outranks a missing claim and a missing `issued_at`.
-10a. A result the revision or timestamp gate REFUSES fills nothing: the terminal statement is
-    unreachable for it. The refusal is recorded in `refused_at` and `refused_reason`, never in
-    `terminal_at`, so coverage stays the single test `terminal_at IS NOT NULL`.
+10a. A result the revision or timestamp gate REFUSES fills no terminal column: the terminal
+    statement is unreachable for it. A refusal is recorded in `refused_at`/`refused_reason`, never
+    in `terminal_at`, so coverage stays the single test `terminal_at IS NOT NULL`.
+10f. The refusal statement is an UPDATE and never an INSERT, and matches only on `job_id` — never
+    on the no-job disjunct. A refusal for a job the ledger did not enter changes nothing, and a
+    stale-revision refusal can never annotate a newer run's row.
 10b. A window carrying a `skip_reason` is never adopted by any terminal event: a run cerbix chose
     not to make can never be reported as one that happened.
 10c. A window dispatched on a carrier below `LedgerMinCarrier` reads `unknown`, never
@@ -1266,13 +1323,22 @@ wire, and that it satisfies §6.1's CHECK. **The mutation that must fail it is r
 drop `carrier_generation` from the INSERT's column list — which errors on the constraint rather than
 silently misbehaving, and would have taken the reconciliation path down on the one case it exists for.
 
-**The config interleaving, required at [237].** The leader reads and publishes at revision 5; a
-config write commits **without changing `next_due_at`**, bumping the revision to 6; §7.1 then runs
-for the old item. Assert: nothing is materialized, nothing advances, no fence is written; the monitor
-is still due; and only a job published at revision 6 creates an eligible row. Then assert the old
-job's result is refused by the ingest gate and shows as `refused_at`, never as a `covered` window and
-never as `issued_never_claimed` for revision 6. **The mutation that must fail it is revision 8's
-single-predicate fence.**
+**The config interleaving, required at [237], with the outcome corrected at [239].** The leader reads
+and publishes at revision 5; a config write commits **without changing `next_due_at`**, bumping the
+revision to 6; §7.1 then runs for the old item. Assert: nothing is materialized, nothing advances, no
+fence is written, and the monitor is still due. Then a job published at revision 6 materializes the
+window at `(monitor_id, D)` and is the only eligible row.
+
+**Both arrival orders of the stale rev5 result must be tested** — before and after the rev6
+materialization — and in both the assertion is that the ledger is **untouched**: no
+`refused_at` on the rev6 row, no rev5 row created, no window blocked, and the rev6 window's verdict
+determined solely by the rev6 run. The rev5 refusal is counted in the existing result-outcome
+metrics and nowhere in the ledger. Revision 9 asserted the opposite and the schema could not have
+satisfied it.
+
+**Two mutations must fail this.** Revision 8's single-predicate fence, and dropping
+`execution_revision` from the refusal statement's guard — the latter would write a rev5 refusal onto
+the rev6 row, which is the misattribution [239] named.
 
 **Late and overlapping runs, required at [235].** Two runs outstanding with different `due_at`: the
 terminal for the older must fill the older row and must be incapable of touching the newer, and vice

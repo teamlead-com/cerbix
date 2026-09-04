@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 14, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 15, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -50,10 +50,10 @@
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
 >
-> **The owner has now made TWO rulings** — the expectation model (§5.1) and participation scope with
-> its retention (§5.3, 2026-09-04: **all monitors, 14 days**). **Two decisions remain theirs and are
-> NOT settled**: push-monitor inclusion (§15, §18) and `due_at` semantics for a late run (§18).
-> Nothing in this document may be read as though those two were decided.
+> **All FOUR owner decisions are now made** (all 2026-09-04): the expectation model (§5.1); scope and
+> retention — **all monitors, 14 days** (§5.3); **push monitors excluded** (§15); and a run late by
+> more than one interval reads **`covered_late`**, licensing no stroke and excluded from the coverage
+> numerator (§14.1). No product semantics remain open.
 
 ## 1. The problem, in one sentence
 
@@ -216,6 +216,7 @@ CREATE TABLE expected_runs (
     execution_revision bigint      NOT NULL,
     region             text        NOT NULL,
     carrier_generation int,                 -- the carrier the PUBLISHER selected; NULL when no job
+    interval_seconds   int         NOT NULL,   -- the interval that SPACED this window (§14.1)
     issued_at          timestamptz,            -- core: dispatch returned success
     claimed_at         timestamptz,            -- executor: off the transport, about to probe
     terminal_at        timestamptz,            -- an ADMISSIBLE outcome exists; coverage iff NOT NULL
@@ -909,11 +910,12 @@ disputed instead of trusted:
 | `execution_revision` | 8 | |
 | `region` | 8 | short varlena (`core` is 4 chars) |
 | `outcome` | 8 | short varlena, nullable |
-| **heap tuple** | **~128** | aligned |
+| `interval_seconds` | 8 | `int` plus alignment; carried so lateness needs no join (§14.1) |
+| **heap tuple** | **~136** | aligned |
 | PK `(monitor_id, due_at)` entry | ~40 | 24-byte key + index tuple and line-pointer overhead |
 | partial `(monitor_id, job_id)` entry | ~44 | only rows with a job |
-| **total per window** | **~212** | at `fillfactor = 100` |
-| **total per window at `fillfactor = 70`** | **~267** | heap portion inflated by 1/0.7 |
+| **total per window** | **~220** | at `fillfactor = 100` |
+| **total per window at `fillfactor = 70`** | **~278** | heap portion inflated by 1/0.7 |
 
 ### 12.2 Capacity
 
@@ -921,8 +923,8 @@ Runs per day is exact arithmetic; bytes carry the model's uncertainty.
 
 | | windows/day | at 14 days | at 30 days |
 | --- | --- | --- | --- |
-| 50 monitors @ 60s (the owner's installation) | 72,000 | ~269 MB | ~577 MB |
-| 1000 monitors @ 60s | 1,440,000 | ~5.4 GB | ~11.5 GB |
+| 50 monitors @ 60s (the owner's installation) | 72,000 | ~280 MB | ~600 MB |
+| 1000 monitors @ 60s | 1,440,000 | ~5.6 GB | ~12.0 GB |
 | `heartbeats` today at 1000 monitors, for comparison | same | ~2.5 GB | ~5.4 GB |
 
 ### 12.3 Retention bounds and what a dropped span may claim
@@ -1235,10 +1237,42 @@ monitor-nesting is correct here, and the two conventions differ for a reason.
 
 ## 14. What this unlocks, and the gate it must pass
 
+### 14.1 `covered_late` — the owner's ruling of 2026-09-04
+
+`due_at` is the expectation a run ANSWERS, not the instant it was picked, so `issued_at - due_at` is
+**lateness**. The alternative — `due_at` as the pick instant — was not put to the owner as an equal
+option because it cannot represent the requirement at all: a window nothing picked would have no
+`due_at` to be keyed by, which collapses the very distinction FR-032 exists for.
+
+**But `covered` alone would have overstated the facts, and this is a defect I found in my own design
+while recommending it.** A leader absent from 10:01 to 10:42 leaves the 10:01 expectation answered by
+a probe that observed the target at **10:42**. Calling that window `covered` lets a coverage number
+count 10:01 as proven by an observation forty-one minutes away — precisely the over-claim FR-031
+exists to prevent.
+
+So the verdict is split, and the owner ruled for the split:
+
+| Condition | Verdict |
+| --- | --- |
+| `terminal_at IS NOT NULL` and `issued_at - due_at <= interval_seconds` | `covered` |
+| `terminal_at IS NOT NULL` and `issued_at - due_at > interval_seconds` | **`covered_late`** |
+
+`covered_late` **licenses no stroke** (§14's gate demands `covered`) and is **excluded from the
+coverage numerator**. It is not a failure — a run happened and produced an admissible outcome — it is
+a statement that the observation is too far from the window to prove it.
+
+**The threshold uses `expected_runs.interval_seconds`, which is why §6.1 carries that column.** The
+monitor's current interval is forbidden by invariant 13, and the revision timeline gives a revision's
+base and confirm intervals without saying which was in force for THIS window — a window probed under
+confirm acceleration would be judged against the wrong one. The interval that spaced the window is a
+property of the window, so the row states it and lateness needs no join.
+
+
 FR-031 §6.2 draws points with no stroke because nothing could defend a line. A stroke between two
-adjacent points becomes permissible only when **every** window between them is `covered` and the
-whole span is at or after `ledger_from`. Any `unknown`, any `expected_never_issued`, any part of the
-span before `ledger_from` — no stroke.
+adjacent points becomes permissible only when **every** window between them is `covered` — plain
+`covered`, never `covered_late` (§14.1) — and the whole span is at or after `ledger_from`. Any
+`unknown`, any `expected_never_issued`, any `covered_late`, any part of the span before
+`ledger_from` — no stroke.
 
 Nothing else is claimed. Coverage reporting and the reliability gate plausibly want these facts too,
 and this document still does not claim that benefit, because nothing has been analysed.
@@ -1253,9 +1287,14 @@ and this document still does not claim that benefit, because nothing has been an
   for. An implementation that drifts a probe instant has failed the design, not deviated from it.
 - **No stored verdicts.**
 - **No retroactive backfill.** History before the migration is `unknown` (§6.3).
-- **Push monitors are out of revision 2.** They are never dispatched (`scheduler.go:1415`) and
-  `checkStalePush` already owns their staleness — but "a push that did not arrive" is an expected run
-  in a different sense, and §18 keeps that exclusion open to challenge rather than closing it.
+- **Push monitors are excluded — the owner's ruling of 2026-09-04**, and the reason is the lesson
+  this design learned seven times: *"a push that did not arrive"* is already **detected** and already
+  **recorded as a fact**. `scheduler.go:1415` never dispatches them and `checkStalePush`
+  (`:1780-1805`) owns their staleness, synthesising a DOWN that lands as a heartbeat. A ledger window
+  for push would be a **second mechanism for one obligation**, and two mechanisms sharing an
+  obligation diverge on it — [225], [229] and [241] are all that defect. If push coverage is wanted
+  later it should be a requirement that **REPLACES** `checkStalePush`'s synthesis, not one that sits
+  beside it.
 
 ## 16. Phases
 
@@ -1366,8 +1405,14 @@ Discharged as a SET in `docs/traceability.md`.
 18. A window written as unfinished is not deleted by a late terminal event; it reads as completed
     late.
 19. No verdict is stored; every verdict is computed from the timestamps present.
-20. A stroke on the Response time panel is permitted only for a span entirely `covered` and entirely
-    at or after `ledger_from`.
+20. A stroke on the Response time panel is permitted only for a span entirely plain `covered` and
+    entirely at or after `ledger_from`. A single `covered_late` window forbids it.
+20a. A window whose run was late by MORE than `expected_runs.interval_seconds` reads `covered_late`,
+    licenses no stroke, and is excluded from the coverage numerator. The threshold is read from the
+    ROW, never from the monitor's current interval and never from a revision's base interval, so a
+    window probed under confirm acceleration is judged against the interval that actually spaced it.
+20b. Push monitors have no ledger windows at all (§15). `checkStalePush` remains the single mechanism
+    that detects a push which did not arrive.
 21. Nothing in the ledger is read to decide what to probe.
 22. The capacity model of §12.1 is verified by measurement against a populated table before phase D
     closes, and the retention default, minimum and maximum are configuration with enforced bounds.
@@ -1490,6 +1535,18 @@ the same defect unreported.
 **The mutation that must fail it:** revert either attribute to `COALESCE(existing, new)`. That is the
 shape both statements shipped with through revision 10.
 
+**Lateness, from the owner's ruling of 2026-09-04.** A leader gap of ten intervals, then a run that
+answers the standing 10:01 expectation at 10:42. Assert the window reads **`covered_late`**, not
+`covered`; that it licenses **no stroke**; and that it is **absent from the coverage numerator** while
+still counting in the denominator. Then a run late by LESS than one interval: assert plain `covered`.
+Then the same monitor under confirm acceleration, asserting the threshold is taken from
+`expected_runs.interval_seconds` and not from the monitor's base interval — **the mutation that must
+fail it is reading the interval from `monitors` or from the revision timeline's base value.**
+
+**Push exclusion, from the same ruling.** A push monitor produces **no** ledger window at any point:
+not on its schedule, not through `checkStalePush`, not through a late arrival. Assert
+`checkStalePush` still synthesises its DOWN exactly as before, so the existing detector is untouched.
+
 **Late and overlapping runs, required at [235].** Two runs outstanding with different `due_at`: the
 terminal for the older must fill the older row and must be incapable of touching the newer, and vice
 versa. Assert with the `job_id` of one and the `due_at` of the other that NOTHING is updated — a
@@ -1511,8 +1568,9 @@ be caught by a test rather than by another review round.
 - Whether a window should record the region's live-executor state at `due_at`, so a missed run in a
   region with no worker reads differently from one in a healthy region. Attractive, unanalysed,
   deliberately out of revision 2.
-- Whether push monitors participate (§15). Excluding them is a decision worth challenging, not a
-  fact.
+- ~~Whether push monitors participate~~ — **RULED by the owner on 2026-09-04: excluded** (§15).
+- ~~`due_at` semantics for a late run~~ — **RULED by the owner on 2026-09-04**: the window keeps its
+  expectation as `due_at`, and a run late by more than one interval reads `covered_late` (§14.1).
 - ~~The `generate_series` cap value has no analysis behind it~~ — **closed in revision 6**: the
   retention clip is now the rule and the cap is a bounded configuration valve (§9.3).
 

@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 13, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 14, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -43,7 +43,9 @@
 > ruling (§5.3). **Revision 13** answers the last two P1s ([244]): the `ProtocolV4` carrier rollout
 > is specified operationally and phase B splits so it is an independently deployable gate (§13.0,
 > §16), and the read API's pagination is written to this repository's published keyset convention
-> (§13a). §5.4 records the constraints from party [222].
+> (§13a). **Revision 14** closes the phase-boundary gap revision 13's own split created ([246]): a
+> gate defaulting off means no V4 job is ever published before the payload that defines V4 exists,
+> and §16.1 adds the mixed-version matrix. §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -1053,15 +1055,34 @@ means "carries envelope v2" and is asked only of monitors that have secrets. Job
 **every** monitor, so gating it on a credential capability would make an ordinary HTTP monitor's
 ledger eligibility depend on a capability its dispatch never needs.
 
-**Upgrade order**, and it is one-way for a reason:
+**Upgrade order, and the gate that makes it deploy-safe.** Revision 13 said the scheduler may select
+V4 once a region announces it, while §16 put `JobID`/`IssuedAt`/`DueAt` in the NEXT phase — so a
+B1-only deployment could have emitted V4 jobs before the payload that DEFINES V4 existed, or a V4
+consumer could not have insisted on its defining fields. Reviewer P1 at [246], and it is a
+contradiction my own phase split created.
 
-1. **Core first.** It can publish 1..3 exactly as before and additionally understands 4. Nothing
-   changes for any executor yet, because the scheduler does not select 4 for a region until that
-   region announces it.
-2. **Executors next**, region by region. Each announces V4 on start; `carrierGeneration[region]`
-   rises to 4 only then. A job is therefore never published to a queue nobody consumes.
-3. **Ledger materialization is not part of this**, per the phase split in §16: B1 is the transport
-   rollout and writes no ledger rows at all.
+The resolution is the conservative one of the two offered: **nothing is ever published on V4 until
+its payload exists.** That is a stronger guarantee than deploying the payload alongside, which would
+depend on a deploy order being respected.
+
+`ledger.carrier_enabled` gates selection, defaulting **false** — the same shape as
+`WithCredentialEnvelopes` (`scheduler.go:570`, `:603`) and `resultRevisionMode`
+(`internal/store/store.go:197`), which is how the credential carrier was staged.
+
+1. **B1 — the transport, inert.** Queues, the widened CHECK, `ClaimPullJobsV4`, `agentJobsV4`,
+   capability announcement, and `carrierGeneration`'s ability to reach 4 — all deployed, with the
+   gate **off**, so selection never happens. Executors may announce V4 and sit on an empty queue.
+   Provable end to end by direct tests against a live stack **without a single V4 job existing**.
+2. **B2 — payload and ledger, atomically.** `DueAt`/`JobID` minting, `monitor_schedule`,
+   `expected_runs`, §7.1's primitive, and the gate **on**. From the first V4 job ever published, V4
+   means exactly what §13.0 says it means.
+3. **Executors before selection, always.** Even with the gate on, `carrierGeneration[region]` rises
+   to 4 only for a region that announces it, so a job is never published to a queue nobody consumes.
+
+**A V4 consumer may therefore insist on its defining fields**, which it could not have done under
+revision 13's order: a V4 delivery missing `JobID`, `IssuedAt` or `DueAt` is a protocol violation,
+not a rolling-upgrade case, and is dead-lettered rather than probed. An older carrier missing them is
+the ordinary case and is simply not ledger-eligible (§13, invariant 10c).
 
 **Rollback and drain.** On rollback the scheduler stops selecting 4 and immediately resumes
 publishing at the region's previous generation. In-flight V4 work drains by mechanisms that already
@@ -1241,11 +1262,26 @@ and this document still does not claim that benefit, because nothing has been an
 | Phase | Content | Gate |
 | --- | --- | --- |
 | **A** | `monitor_execution_revisions`; written in the revision-bump transaction; §10's segment close; backfill one row per monitor | `-race`; a revision bump with no timeline row fails a test |
-| **B1** | **The `ProtocolV4` carrier rollout ONLY** (§13.0): the fourth AMQP prefix, the widened pull CHECK, `ClaimPullJobsV4` and `agentJobsV4`, capability announcement and scheduler admission. **Writes no ledger rows.** Independently deployable and independently revertible | `-race` + a live distributed stack; a V3 consumer must be PHYSICALLY unable to receive a V4 job, and `ClaimPullJobsV3` must never return a generation-4 row |
-| **B2** | `monitor_schedule`; §7.1's statement; **job identity created on the two dispatch paths that mint none** and converted on the three that do (§13); `DueAt` on the wire (§13.1) | `-race`; a leader restart leaves a past `next_due_at`, and the gap rows exist |
+| **B1** | **The `ProtocolV4` carrier, INERT** (§13.0): the fourth AMQP prefix, the widened pull CHECK, `ClaimPullJobsV4`, `agentJobsV4`, capability announcement, and `carrierGeneration`'s ability to reach 4 — with `ledger.carrier_enabled` **false**, so selection never happens and **no V4 job is ever published**. Independently deployable, trivially revertible, and writes no ledger rows | `-race` + a live distributed stack. A V3 consumer must be PHYSICALLY unable to receive a V4 job; `ClaimPullJobsV3` must never return a generation-4 row; and with the gate off, **no V4 job is published even when a region announces V4** |
+| **B2** | Payload and ledger, together and only together: `DueAt`/`JobID` minting on **every** dispatch path (created on the two that mint none, converted on the three that do — §13), `monitor_schedule`, `expected_runs`, §7.1's primitive, and the gate **on** | `-race`; a leader restart leaves a past `next_due_at` with its gap rows; and the §16.1 mixed-version matrix |
 | **C** | The claim event: `Dispatcher` grows a typed claim message; `worker` and `agent` emit it; §8.1's merge | `-race` + a live distributed stack; the fakes in `internal/api`, `internal/outbox` and `internal/scheduler` break on interface growth, which is intended |
 | **D** | Partitions, DEFAULT partition, retention, `ledger_from`, `gap_truncated_before`, the read API returning computed verdicts, and the HOT-ratio gauge | `-race`; BOTH storage modes; E2E; the capacity measurement of invariant 22 |
 | **E** | The FR-031 stroke, behind §14's gate — only if §17 is discharged | E2E on a live stack |
+
+### 16.1 The mixed-version matrix
+
+Required at [246], because a phase boundary that is only described is a phase boundary that will be
+crossed in the wrong order by someone.
+
+| Core | Executor | Must hold |
+| --- | --- | --- |
+| B1 | B1 | Gate off. Every job on carrier ≤3, no V4 published, no ledger tables read or written, nothing degraded |
+| **B1** | **B2** | The executor announces V4 and sits on an empty queue. **The gate still forbids selection**, so no V4 job is published — announcement alone cannot promote a region |
+| **B2** | **B1** | The executor does not announce V4, so `carrierGeneration` stays ≤3. Jobs still flow; their windows read `unknown` rather than being lost. The ledger degrades in truth, never in delivery |
+| B2 | B2 | V4 selected, identity rides every path, windows materialize and become eligible |
+
+The second and third rows are the ones that matter: each is a half-deployed cluster, which is the
+normal state during a rollout rather than an exceptional one.
 
 ## 17. Acceptance invariants (FR-032)
 
@@ -1290,6 +1326,12 @@ Discharged as a SET in `docs/traceability.md`.
     not to make can never be reported as one that happened.
 10c. A window dispatched on a carrier below `LedgerMinCarrier` reads `unknown`, never
     `issued_never_claimed`.
+10h. No V4 job is ever published before its defining payload exists: `ledger.carrier_enabled` gates
+    selection and B2 turns it on in the same change that mints `JobID`/`IssuedAt`/`DueAt`. A region
+    announcing V4 cannot promote itself while the gate is off.
+10i. A V4 delivery missing `JobID`, `IssuedAt` or `DueAt` is a protocol violation and is
+    dead-lettered, not probed. The same absence on an older carrier is ordinary and merely makes the
+    window ledger-ineligible.
 10g. Carrier isolation is PHYSICAL: an executor of an older generation cannot receive a V4 AMQP
     delivery because it is not subscribed to that queue, and cannot claim a generation-4 pull row
     because its endpoint's query does not select one. Proven by unreachability on both transports,

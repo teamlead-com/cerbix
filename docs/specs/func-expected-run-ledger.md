@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 10, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 11, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -36,8 +36,10 @@
 > fenced on the revision too, but claimed the fenced-out job's result would show as `refused_at` —
 > which no single-row-per-window schema can represent, rejected at [239]. **Revision 10** withdraws
 > that claim, writes the refusal statement revision 6 had only invented columns for, and states the
-> boundary: a refusal annotates only the row recording its OWN job, and never inserts.
-> §5.4 records the constraints from party [222].
+> boundary: a refusal annotates only the row recording its OWN job, and never inserts. **Revision 11**
+> closes the last P1 ([241]): an event's attributes now travel with its timestamp, so a reversed
+> arrival cannot leave one delivery's instant beside another's reason — fixed in the terminal
+> statement too, which had the same defect unreported. §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -489,7 +491,22 @@ a set value with an earlier timestamp — the reviewer's second P0 at [218]. Bot
 different directions, so revision 2 states one rule and shows the SQL that implements it:
 
 > **A repeated event resolves to the EARLIEST observation of that event, deterministically. No event
-> reads or writes another event's column.**
+> reads or writes another event's column. And when an event contributes MORE THAN ONE column, every
+> one of its columns is chosen by the SAME comparison, so a row never mixes two deliveries'
+> attributes.**
+
+The second sentence was added in revision 11, after reviewer P1 at [241]: the refusal statement took
+`refused_at = LEAST(...)` but `refused_reason = COALESCE(...)`, so a later refusal arriving first
+followed by an earlier one left the EARLIER timestamp beside the LATER reason. The pair stopped
+describing one event. The identical shape was in the terminal statement's `terminal_at`/`outcome` —
+which [241] did not name and which is fixed here too, because fixing only the reported instance
+would leave its twin.
+
+The pattern to write is therefore: **the attribute is selected by a CASE over the OLD timestamp, and
+the timestamp is minimised**. Both `SET` expressions in an `UPDATE` see the pre-update row in
+PostgreSQL, so the CASE reads the old timestamp regardless of clause order — a property worth naming,
+because a reader who assumed sequential assignment would think the order matters and "fix" it into a
+bug. On an exact tie the existing attribute is kept, so replay is stable.
 
 #### The admissibility predicate — written once, used by every event
 
@@ -560,8 +577,9 @@ instead of a compound condition a later reader could get wrong.
 
 ```sql
 UPDATE expected_runs
-   SET refused_at     = LEAST(COALESCE(refused_at, $3), $3),
-       refused_reason = COALESCE(refused_reason, $6)
+   SET refused_reason = CASE WHEN refused_at IS NULL OR $3 < refused_at THEN $6
+                             ELSE refused_reason END,
+       refused_at     = LEAST(COALESCE(refused_at, $3), $3)
  WHERE monitor_id = $1 AND due_at = $2
    AND job_id = $4                        -- ONLY the row that records THIS job
    AND execution_revision = $5;
@@ -589,8 +607,10 @@ ON CONFLICT (monitor_id, due_at) DO UPDATE
        carrier_generation = COALESCE(expected_runs.carrier_generation, $7),
        issued_at          = LEAST(COALESCE(expected_runs.issued_at,  $8), $8),
        claimed_at         = LEAST(COALESCE(expected_runs.claimed_at, $9), $9),
-       terminal_at        = LEAST(COALESCE(expected_runs.terminal_at, $10), $10),
-       outcome            = COALESCE(expected_runs.outcome, $11)
+       outcome            = CASE WHEN expected_runs.terminal_at IS NULL
+                                       OR $10 < expected_runs.terminal_at THEN $11
+                                  ELSE expected_runs.outcome END,
+       terminal_at        = LEAST(COALESCE(expected_runs.terminal_at, $10), $10)
  WHERE (expected_runs.job_id = $4
         OR (expected_runs.job_id IS NULL AND expected_runs.skip_reason IS NULL))
    AND expected_runs.execution_revision = $5;
@@ -626,8 +646,10 @@ What the guard proves, item by item against P1-2's list:
    for which a terminal later proves a run DID happen — §7's crash-after-publish. Adoption is the
    reconciliation, and it moves the verdict from `expected_never_issued` to `covered`, which is the
    truth.
-4. **Duplicates and reordering converge.** `LEAST(COALESCE(...))` is idempotent, commutative and
-   monotone downward, so a replay cannot redate an event and arrival order cannot change the result.
+4. **Duplicates and reordering converge, attributes included.** The timestamp is minimised and
+   `outcome` is chosen by a CASE over the OLD `terminal_at`, so the pair always describes the same
+   delivery whichever order they arrive in (§8.1). A replay cannot redate an event, and arrival
+   order cannot change either column.
 5. **A stale-revision result cannot become terminal evidence.** Twice: it never reaches the
    statement (the gate above), and `expected_runs.execution_revision = $5` would refuse it anyway if
    it did. The second condition is not redundant — it is what stops a result that was admissible for
@@ -1178,6 +1200,9 @@ Discharged as a SET in `docs/traceability.md`.
 6. A run claimed and never finished is distinguishable from both.
 7. A repeated event resolves to the earliest observation of that event, and no event reads or writes
    another event's column.
+7c. When an event contributes more than one column, all of them are chosen by the same comparison:
+    the timestamp is minimised and each attribute is selected by a CASE over the OLD timestamp. A row
+    never carries one delivery's timestamp beside another's attribute, in either arrival order.
 7a. **Every** event statement uses the ONE admissibility predicate of §8.1 verbatim: the same run,
     or a window with no run AND no `skip_reason`, and the same `execution_revision`. A statement
     with its own variant of the boundary is the [231] P1-1 defect by construction.
@@ -1339,6 +1364,16 @@ satisfied it.
 **Two mutations must fail this.** Revision 8's single-predicate fence, and dropping
 `execution_revision` from the refusal statement's guard — the latter would write a rev5 refusal onto
 the rev6 row, which is the misattribution [239] named.
+
+**Reversed arrival of two refusals, and of two terminals, required at [241].** Deliver refusal B
+(later instant, reason `future_timestamp`) first, then refusal A (earlier instant, reason
+`stale_revision`) for the same job. Assert `refused_at = A` **and** `refused_reason = A's reason` —
+never A's timestamp beside B's reason. Repeat both orders and assert the same final row. Then the
+identical pair for `terminal_at`/`outcome` with two terminal deliveries, because that statement had
+the same defect unreported.
+
+**The mutation that must fail it:** revert either attribute to `COALESCE(existing, new)`. That is the
+shape both statements shipped with through revision 10.
 
 **Late and overlapping runs, required at [235].** Two runs outstanding with different `due_at`: the
 terminal for the older must fill the older row and must be incapable of touching the newer, and vice

@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 11, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 12, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -39,15 +39,16 @@
 > boundary: a refusal annotates only the row recording its OWN job, and never inserts. **Revision 11**
 > closes the last P1 ([241]): an event's attributes now travel with its timestamp, so a reversed
 > arrival cannot leave one delivery's instant beside another's reason — fixed in the terminal
-> statement too, which had the same defect unreported. §5.4 records the constraints from party [222].
+> statement too, which had the same defect unreported. **Revision 12** records the owner's scope
+> ruling (§5.3). §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
 >
-> **The participation scope in §5.3 is MY recommendation and is NOT an owner decision.** The owner
-> has made exactly one ruling here — the expectation model, §5.1 — and the reviewer declined to rule
-> on scope at [222] because it is a product and operating-cost decision. Nothing in this document
-> may be read as though scope were settled.
+> **The owner has now made TWO rulings** — the expectation model (§5.1) and participation scope with
+> its retention (§5.3, 2026-09-04: **all monitors, 14 days**). **Two decisions remain theirs and are
+> NOT settled**: push-monitor inclusion (§15, §18) and `due_at` semantics for a late run (§18).
+> Nothing in this document may be read as though those two were decided.
 
 ## 1. The problem, in one sentence
 
@@ -163,20 +164,22 @@ run unfinished. That was rejected as a P0 at party [218], and the reasoning is w
 - **Therefore §3.1 is NOT satisfied** by one `next_due` plus configuration history. That was the
   reviewer's explicit ruling on the question revision 1 asked.
 
-### 5.3 Participation scope — MY RECOMMENDATION, NOT A DECISION
+### 5.3 Participation scope — the owner's ruling, 2026-09-04
 
-Dense rows make the cost explicit, so who participates became a real question. **I recommend
-universal participation with retention as its own configuration value** (§12.3). The reviewer
-declined to rule, correctly, because it is a product and operating-cost decision. The owner has not
-ruled. Until they do, this document specifies universal participation because a design has to
-specify something, and every place it matters says so.
+**Every monitor participates, and the ledger's retention is 14 days.** Ruled by the owner on
+2026-09-04 after being shown the cost at their own scale and at a stress point (§12.2): ~0.5 GB and
+under two statements per second at ~50 monitors, ~5.4 GB at 1000. The reviewer declined to rule at
+[222], correctly, because it is a product and operating-cost decision rather than reviewer
+authority.
 
-The two alternatives, so the decision has something to compare against: a per-monitor opt-in
-(default off — zero cost, but two different semantics in one product and a field, a migration, a UI,
-a MaC key and an openapi change), or automatic participation for SLI members of a service only
-(nothing to configure, but a monitor's ledger appears and disappears as someone else edits service
-membership). At the owner's ~50 monitors neither buys anything; at 10,000 the opt-in earns its
-place (§12.4).
+There is therefore **no participation flag**: no column, no migration for one, no UI, no MaC key and
+no openapi change. Two alternatives were rejected in the process and are recorded so the decision
+is not silently revisited — a per-monitor opt-in (zero default cost, but two different semantics in
+one product), and automatic participation for SLI members of a service only (nothing to configure,
+but a monitor's ledger would appear and disappear as someone else edited service membership).
+
+The bound where this ruling would need revisiting is stated in §12.4 rather than left to be
+rediscovered: around 10,000 monitors on 60-second intervals.
 
 ### 5.4 Constraints from the reviewer at party [222], and where each is discharged
 
@@ -919,9 +922,9 @@ Runs per day is exact arithmetic; bytes carry the model's uncertainty.
 
 ### 12.3 Retention bounds and what a dropped span may claim
 
-`expected_run_retention_days`: **default 14, minimum 2, maximum 90.** Fourteen days covers a
-fortnight of incident review, is where the stroke is actually wanted, and bounds 1000 monitors to
-~5.4 GB. The `heartbeats` default is 30 (`internal/config/config.go:516`) and the gate ledger's is 90
+`expected_run_retention_days`: **14 by the owner's ruling of 2026-09-04** (§5.3), with minimum 2 and
+maximum 90 as the enforced bounds the reviewer required at [222]. Fourteen days covers a fortnight
+of incident review, is where the stroke is actually wanted, and bounds 1000 monitors to ~5.4 GB. The `heartbeats` default is 30 (`internal/config/config.go:516`) and the gate ledger's is 90
 with bounds 7–365 (`:529`, `:691`); this sits below both deliberately, because a window's evidentiary
 value decays faster than a heartbeat's.
 
@@ -1389,8 +1392,8 @@ be caught by a test rather than by another review round.
 
 ## 18. Open items
 
-- **Participation scope (§5.3) is unresolved** and is the owner's decision. Nothing else in this
-  document depends on the answer except §12.2's totals.
+- ~~Participation scope is unresolved~~ — **RULED by the owner on 2026-09-04: all monitors, 14-day
+  retention** (§5.3). No participation flag exists as a result.
 - The exact claim-message shape on the wire, and whether it travels the results queue or its own.
   §4a fixes that it uses the existing transport; which queue is a phase-C detail.
 - Whether a window should record the region's live-executor state at `due_at`, so a missed run in a

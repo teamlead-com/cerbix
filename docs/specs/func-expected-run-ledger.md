@@ -1,12 +1,17 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGN APPROVED — revision 23, 2026-09-04. Approved range `9f46f40..9e114a4`, D-0237.**
+> **Lifecycle: DESIGN APPROVED AT REVISION 22 — approved range `9f46f40..9e114a4`, D-0237, 2026-09-04.**
+> **Document revision 24: AMENDMENT UNDER REVIEW, not covered by that range.**
 > The independent reviewer approved revision 20 at party [267] and revisions 21-22 at [274], with no
 > remaining P0 or P1, rerunning `make docs-check` and `git diff --check` himself for both. This line
 > was written AFTER the approval and records it, so the commit carrying it is bookkeeping rather than
-> design content — the approved design is the range named above. Revision 23 changes §17.2's totals
-> and §17.4's entry gate only, carries no design content, and is under review after the B1 entry
-> rejection at [342].
+> design content — the approved design is the range named above, and **later revisions do not extend
+> it**. Revision 23 changes §17.2's totals and §17.4's entry gate only, carries no design content, and
+> was approved as a docs/process artefact at [350] (commit `6b47bad`). **Revision 24 has no
+> disposition yet:** it adds the THIRD transport to §13.0 — `role=all` is in-process and a PRODUCTION
+> topology, and revision 23 omitted it — with invariants 10k and 10l, and it is under review at [361].
+> The revision number in this banner tracks the DOCUMENT, never the approval; the approval is the
+> range.
 >
 > **PHASE A IMPLEMENTED (`aa46db8`); B1 ONWARD NOT IMPLEMENTED.** The owner authorized implementation
 > by phases, and the reviewer admits each phase separately against §17.2's entry gate: phase A was
@@ -1061,13 +1066,40 @@ The code physically supports **1..3 only**, and every one of those surfaces has 
 
 | Surface | Today | V4 |
 | --- | --- | --- |
-| AMQP queues | three prefixes: `checks.jobs.`, `checks.jobs.v2.`, `checks.jobs.v3.` (`amqp.go:29-35`), mapped by `jobsQueueForGeneration` (`:127`) | a fourth prefix `checks.jobs.v4.<region>` and its mapping entry |
+| AMQP queues | three prefixes: `checks.jobs.`, `checks.jobs.v2.`, `checks.jobs.v3.` (`amqp.go:29-35`), mapped by `jobsQueueForGeneration` (`:152`) | a fourth prefix `checks.jobs.v4.<region>` and its mapping entry |
 | Pull rows | `pull_jobs_protocol_version_check CHECK (protocol_version IN (1,2,3))`, and the same on `pull_tests` (00062, widened by 00063) | a migration **widening** both to `IN (1,2,3,4)` — 00063's own comment says why: *"CHECK is widened rather than dropped: an unknown generation must still be rejected at the boundary"* |
 | Pull claim | `ClaimPullJobs`, `…V2`, `…V3`, each leasing "every generation at or below" its own (`pulljobs.go:77-97`) | `ClaimPullJobsV4`, and an `agentJobsV4` endpoint beside `agentJobsV3` (`handlers_agent.go:119`) |
 | Scheduler admission | `carrierGeneration[region]` raised to 3 only for regions that ANNOUNCE the capability (`scheduler.go:1514`, `:1529`, `:1552`) | the same shape for 4, over a `LiveLedgerV4JobRegions`-style source |
 | Enqueue | `EnqueuePullJob`/`V2`/`V3` | `EnqueuePullJobV4` |
+| **In-process (`role=all`)** | no queue and no row: `CarrierGeneration` **is** the job's own `ProtocolVersion` (`inproc.go:34`, and `cli.go:255`, whose comment says "no wire between the materializer and this runner") | nothing to grow, and that is the hazard — the generation is whatever the producer stamped, so this transport's inertness is the FLAG, never isolation |
 
-**Isolation is physical, not a filter, and that distinction is the acceptance test.** An old worker
+**`role=all` is a PRODUCTION topology** (`docker/docker-compose.prod.yml` line 1: "single-process
+(--role all)"), not a development convenience, and revision 23 omitted it from this table entirely.
+That omission has already cost this project twice on V3, and `scheduler.go` records both in its own
+comments at the resolve-time admission site:
+
+- **Raised when it should not have been.** `role=all` with `pull.regions: [core]` raised core to
+  generation 3 "on the strength of a runner that will never see the job"; a capability-1 agent could
+  not claim the v3 row, "and the monitor had no outcome at all until the row's TTL". The fix is the
+  `if s.pullRegions[region] { continue }` exclusion — an in-process executor is **no evidence** about
+  the agent that will actually claim.
+- **Not raised when it should have been.** Without the converse rule — "a same-process executor IS
+  this binary, so its capability is ours by construction" — "the default single-binary `role=all`
+  never moved past generation 2, which meant the execution binding and field-set rules — the whole
+  point of the amendment — were inert in the most common deployment while the worker inside the same
+  process could open them perfectly well."
+
+V4 needs both rules, at the same place: **resolve time**, "so neither builder order nor configuration
+can restore it" (reviewer [102]). A ledger that is inert under `role=all` would be inert for most
+installations, which is the V3 failure repeated against a requirement whose whole subject is knowing
+that a run was expected.
+
+**Isolation is physical, not a filter, and that distinction is the acceptance test — on the two
+transports that HAVE a wire.** In-process has none: producer and consumer are the same binary, so
+there is no version skew to discover and no queue to be unsubscribed from. Its guarantee is real but
+different in kind, and it must not be borrowed to weaken the other two: "the generation is a field in
+the payload" is true of `inproc` alone, and reasoning from it to AMQP or pull is how a filter gets
+substituted for isolation. An old worker
 subscribes only to the prefixes it was compiled to know, so it **cannot receive** a V4 delivery — it
 is not subscribed, rather than subscribed-and-filtered. An old agent calls the V3 claim endpoint,
 whose query leases generations ≤ 3, so a generation-4 row is **outside its result set** rather than
@@ -1716,15 +1748,15 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
-### 17.2 The discharge audit — 67 invariants: 34 covered, 2 specified, 1 discharged, 1 withdrawn, 29 to specify
+### 17.2 The discharge audit — 69 invariants: 34 covered, 3 specified, 1 discharged, 1 withdrawn, 30 to specify
 
 The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
 sized as its own scope rather than folded into the design approval. It asks one question of each
 invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
 the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
 
-**Result: 67 invariants — 34 covered, 2 SPECIFIED by §17.4, 1 DISCHARGED by phase A, 1 withdrawn,
-29 to specify (18 in B2, 9 in D, 2 in C).** Every number in this paragraph and in the heading above
+**Result: 69 invariants — 34 covered, 3 SPECIFIED by §17.4, 1 DISCHARGED by phase A, 1 withdrawn,
+30 to specify (19 in B2, 9 in D, 2 in C).** Every number in this paragraph and in the heading above
 it is now DERIVED from the table below, by `check_fr032_audit_totals`, because they were typed there
 instead and drifted: they read "65 invariants ... 30 to specify" while the table already held 66 rows
 and 28, through 13a's addition and §17.4's specifications. A total written beside its own table is
@@ -1805,6 +1837,8 @@ to correct.
 | 10h | B1 | behavioural | **covered** | §16.1's mixed-version matrix |
 | 10i | B2 | behavioural (live broker) | **TO SPECIFY** | reassigned from B1 by reviewer P0 at [342]: a V4 delivery is DEFINED by `DueAt`, which the wire does not carry until B2, so B1 has no absence to detect. §17.4 keeps both mutations named for B2's gate |
 | 10j | B1 | migration | **SPECIFIED (§17.4)** | goose-down against pending generation-4 pull rows: the DOWN must refuse, the rows must survive, and the error must name the count and the drain step |
+| 10k | B1 | behavioural | **SPECIFIED (§17.4)** | while `ledger.carrier_enabled` is false `lead()`'s resolved map stamps nothing above 3, asserted on that map's OUTPUT across its three branches rather than once per transport |
+| 10l | B2 | behavioural | **TO SPECIFY** | when the flag is true `role=all` reaches 4 and pull regions do NOT — the two V3 failures §13.0 quotes, one inert deployment and one unclaimable row |
 | 11 | B1 | source scan | **SPECIFIED (§17.4)** | an import-boundary scan over both packages plus an interface-shape assertion on `Dispatcher`; specifying it found the invariant's "no ack concept" clause FALSE about the tree (§17.4) |
 | 11a | B1 | — | **n/a, a withdrawal** | records that the pull agent's lease-ack predates this requirement and is out of scope |
 | 12 | B2 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
@@ -1949,12 +1983,18 @@ HTTP monitor and was refused by name.
 backfill.** The rotation fence sets *only* the two fence columns and never touches `updated_at`, so
 reading it back would date a brand-new generation to the previous write — potentially days early.
 
-### 17.4 Phase B1's entry gate — invariants 11 and 10j specified, 10i reassigned to B2
+### 17.4 Phase B1's entry gate — invariants 11, 10j and 10k specified; 10i reassigned to B2
 
-B1 owns four rows. 10g and 10h already have §17.1 cases; 11 is specified below; 10i turned out not
-to be B1's to prove at all; and 10j did not exist until the rejection that found that out. Specifying
-this one gate has now caught three invariants contradicting the tree — 13a's four bump sites, 11's
-ack clause, and 10i's phase — which is the whole argument for gating at ENTRY.
+B1 owns **six** rows — 10g, 10h, 10j, 10k, 11, 11a — and none is `TO SPECIFY`. 10g and 10h already
+have §17.1 cases; 11, 10j and 10k are specified below; 11a is a recorded withdrawal; 10i turned out
+not to be B1's to prove at all and is now B2's. Only two of these existed when this section was
+written: 10j and 10k were both added by rejections of it.
+
+Specifying this one gate has now caught **four** invariants contradicting the tree, or contradicting
+the phase they were assigned to — 13a's four bump sites, 11's ack clause, 10i's phase, and 10k's own
+second claim, struck below for exactly the reason 10i moved. Four in one section is not a sign the
+gate is noisy; it is the argument for gating at ENTRY, where a wrong invariant costs a paragraph
+instead of a test shaped to fit finished code.
 
 **Invariant 11, corrected before it could be implemented.** The import half is true today and needs
 pinning: `internal/worker` and `internal/agent` import only `dispatch` and `domain`, no store
@@ -1998,6 +2038,29 @@ the migration refuses rather than performing it silently.
 | --- | --- | --- | --- |
 | The DOWN refuses while generation-4 pull rows are pending | migration | Insert a generation-4 row into `pull_jobs` and another into `pull_tests`, run the migration's DOWN, and assert both that it errors AND that both rows are still there | Drain first — `DELETE ... WHERE protocol_version = 4`, then narrow. The DOWN now "succeeds" and the pending jobs are gone; only the row-survival assertion catches it, which is why it is asserted separately from the error |
 | The refusal tells the operator what to DO | migration | Assert the error text names the pending COUNT and points at the drain procedure | Delete the guarded DO-block and let `ADD CONSTRAINT` fail on its own. It still fails closed, so an assertion of "the DOWN errored" passes — but the operator is left with `check constraint ... is violated by some row` and no procedure. The same lesson as the interface SET above: the weaker assertion admits the weaker code |
+
+**Invariant 10k: the flag's inertness is asserted at the SOURCE, not at three sinks.** All three
+transports read the generation the producer stamped — AMQP from the queue it published to, pull from
+the row's column, in-process from the job's own field — so one assertion covers all three, and three
+consumer-side assertions would still miss the producer. The assertion sits on **`lead()`'s resolved
+map**: the three `carrierGeneration[region] = …` branches at `scheduler.go:1514`, `:1529` and `:1552`
+all write one map built at `:1500` inside that function, so the gate reads its OUTPUT rather than any
+branch. A branch-level assertion is precisely what lets one branch drift.
+
+| Claim | Check kind | Test | The mutation that must kill it |
+| --- | --- | --- | --- |
+| While `ledger.carrier_enabled` is false, `lead()`'s resolved map stamps nothing above 3 | behavioural | Resolve admission for an AMQP region, a pull region and `role=all` with the flag false, and assert every value in the resolved map is ≤ 3 | Raise the generation in ONE branch only — the same-process branch is the tempting one, since "its capability is ours by construction" reads like a licence. Asserting the map's output catches it wherever it is introduced; a per-transport consumer test passes on the other two and reports green |
+
+**Struck from 10k before implementation: "the flag is read at resolve time, not at build time."**
+Reviewer P0-2 at [361], and he is right. That claim needs flag=true to be observable — flipping it
+between two resolves and watching the second change — and B1 promises selection never happens, has no
+`DueAt` and no V4 payload. It is B2 behaviour and belongs with 10l.
+
+This is **the same defect as 10i**, which I had diagnosed two revisions earlier and then reproduced:
+a gate naming a proof its own phase cannot produce. Worth recording rather than editing away, because
+the pattern is now legible — when a phase is defined by a capability being OFF, every assertion about
+that phase must be provable with it off, and any claim of the form "flipping it changes something"
+belongs to the phase that flips it. B1 can prove only the false-default inert output.
 
 **Not specified here, deliberately:** B1 writes no ledger rows, so nothing in this gate touches
 `expected_runs`. The carrier's *eligibility* consequences are 10c and 10d, which belong to B2 where

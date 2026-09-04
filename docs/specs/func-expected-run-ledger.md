@@ -1,14 +1,19 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 2, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 3, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
 > design.**
 >
-> **Revision 1 was REJECTED at party [218] on a P0**, and the rejection is kept in §5.2 rather than
-> deleted, because the model it killed is the one a reader would otherwise propose again. Revision 2
-> is dense per-window rows. §5.4 records the three further constraints from party [222].
+> **Two revisions were REJECTED on P0s, and both rejections are kept rather than deleted**, because
+> each killed a design a reader would otherwise propose again. **Revision 1** ([218]) held in-flight
+> state in one mutable row per monitor and could not represent two outstanding runs — §5.2.
+> **Revision 2** ([225]) capped gap materialization with a batch-wide `LIMIT` while advancing every
+> monitor, and never wrote the truncation fence its own prose promised, so an unanswerable span
+> became invisible to `ledger_from` and a later query could over-claim it — §7. Revision 3 is dense
+> per-window rows with a deterministic per-monitor cap and the fence written in the same statement as
+> the advance. §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -213,7 +218,7 @@ CREATE TABLE monitor_schedule (
     confirm_phase         boolean     NOT NULL DEFAULT false,
     execution_revision    bigint      NOT NULL,
     last_issued_at        timestamptz,
-    ledger_from           timestamptz NOT NULL,   -- earliest instant this monitor can be answered for
+    schedule_created_at   timestamptz NOT NULL DEFAULT statement_timestamp(),
     gap_truncated_before  timestamptz,            -- windows before this were NOT materialized (§9.3)
     updated_at            timestamptz NOT NULL DEFAULT statement_timestamp(),
     FOREIGN KEY (monitor_id, project_id) REFERENCES monitors (id, project_id) ON DELETE CASCADE
@@ -263,17 +268,39 @@ the old expectation**, so if the gap rows are not written in the same statement,
 which windows were missed is destroyed by the very write that ends the gap. It can never be
 recovered afterwards.
 
-One statement per tick, for that tick's whole due set:
+One statement per tick, for that tick's whole due set. **Revision 2's first form was rejected at
+party [225] and the defect is recorded here, because the shape of it is instructive:** the cap was a
+bare `LIMIT` after a `CROSS JOIN LATERAL`, so it bounded the whole BATCH rather than each monitor,
+with no ordering to say which rows survived — while the final `UPDATE` advanced every picked
+monitor regardless. One monitor's gap could consume the cap, another's windows were silently
+dropped, and its expectation was overwritten anyway. Worse, `gap_truncated_before` was described in
+§9.3 and **never written by the SQL at all**, so the unanswerable span was invisible to
+`ledger_from` and a later query could over-claim it — the one direction this design says must never
+happen.
 
 ```sql
 WITH picked AS (
     SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at,
-           s.interval_in_force, s.execution_revision, v.job_id, v.region
+           s.interval_in_force, s.execution_revision, v.job_id, v.region,
+           s.next_due_at + make_interval(secs => s.interval_in_force) AS first_expected
       FROM monitor_schedule s
       JOIN unnest($1::uuid[], $2::uuid[], $3::text[]) AS v(monitor_id, job_id, region)
         ON v.monitor_id = s.monitor_id
      ORDER BY s.monitor_id
        FOR UPDATE OF s
+),
+-- Every window strictly between the old expectation and now, clipped at the retention floor
+-- ($6) because a window older than that would be dropped unread. Numbered PER MONITOR, newest
+-- first, so the cap keeps the most recent windows and the choice is deterministic.
+candidate AS (
+    SELECT p.monitor_id, p.project_id, p.execution_revision, p.region,
+           p.first_expected, w.due_at,
+           row_number() OVER (PARTITION BY p.monitor_id ORDER BY w.due_at DESC) AS rn
+      FROM picked p
+      CROSS JOIN LATERAL generate_series(
+              GREATEST(p.first_expected, $6),
+              $4 - interval '1 microsecond',
+              make_interval(secs => p.interval_in_force)) AS w(due_at)
 ),
 issued AS (
     INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id,
@@ -286,22 +313,40 @@ issued AS (
 missed AS (
     INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id,
                                execution_revision, region)
-    SELECT p.project_id, p.monitor_id, w, NULL, p.execution_revision, p.region
-      FROM picked p
-      CROSS JOIN LATERAL generate_series(
-              p.due_at + make_interval(secs => p.interval_in_force),
-              $4 - interval '1 microsecond',
-              make_interval(secs => p.interval_in_force)) AS w
-     LIMIT $5                                  -- §9.3 cap
+    SELECT c.project_id, c.monitor_id, c.due_at, NULL, c.execution_revision, c.region
+      FROM candidate c
+     WHERE c.rn <= $5                          -- per-monitor cap
     ON CONFLICT (monitor_id, due_at) DO NOTHING
+),
+-- ONE rule covers BOTH truncation causes. If the oldest window actually materialized is later
+-- than the first window that was expected, then something older was skipped — by the cap, or by
+-- the retention clip, it does not matter which — and that instant is the fence.
+fence AS (
+    SELECT c.monitor_id, min(c.due_at) AS truncated_before
+      FROM candidate c
+     WHERE c.rn <= $5
+     GROUP BY c.monitor_id
+    HAVING min(c.due_at) > min(c.first_expected)
 )
 UPDATE monitor_schedule s
-   SET next_due_at    = $4 + make_interval(secs => s.interval_in_force),
-       last_issued_at = $4,
-       updated_at     = statement_timestamp()
+   SET next_due_at          = $4 + make_interval(secs => s.interval_in_force),
+       last_issued_at       = $4,
+       gap_truncated_before = GREATEST(s.gap_truncated_before, f.truncated_before),
+       updated_at           = statement_timestamp()
   FROM picked p
+  LEFT JOIN fence f ON f.monitor_id = p.monitor_id
  WHERE s.monitor_id = p.monitor_id;
 ```
+
+**The fence and the advance commit together or not at all**, which is the whole point: an advance
+that outruns its evidence must be impossible, not merely discouraged.
+
+`GREATEST` is doing load-bearing work and relies on a PostgreSQL-specific semantic worth naming: it
+**ignores NULL arguments** and returns NULL only when all of them are NULL. So a monitor with no
+truncation this tick (`f.truncated_before IS NULL`) keeps whatever fence it already had, a first
+truncation sets it, and a later one can only move it **forward**. In standard SQL — and in other
+engines — NULL would propagate and silently erase the fence, which is exactly the failure this
+statement exists to prevent, so the dependency is stated rather than assumed.
 
 `$4` is the core's `statement_timestamp()` passed in for consistency across all three writes.
 `ORDER BY s.monitor_id` before `FOR UPDATE` is deadlock avoidance: every writer takes the row locks
@@ -414,17 +459,29 @@ leader is a Postgres advisory lock and a partitioned process may believe it stil
 A zombie leader can therefore issue a duplicate probe — which it can today, and which is not this
 requirement's problem — but it cannot corrupt or duplicate a window.
 
-### 9.3 The bound, and what happens past it
+### 9.3 The bound, and the fence that must accompany it
 
 A leader absent for a month against a 30-second monitor implies ~86,400 windows for that monitor
-alone. Materializing them is neither useful nor free, so the statement takes a cap (`$5`), and
-windows older than the retention horizon are not materialized at all — they would be dropped
-unread.
+alone. Materializing them is neither useful nor free, so §7's statement bounds the work two ways:
 
-When the cap truncates, `monitor_schedule.gap_truncated_before` is set to the oldest window that WAS
-materialized, and everything before it is treated exactly as pre-`ledger_from`: **not stored**,
-claimable as nothing. This is not a rollup and it is not inference — no verdict is derived for the
-truncated span, and the span is explicitly marked unanswerable.
+- **A per-monitor cap** (`$5`), applied through `row_number() OVER (PARTITION BY monitor_id ORDER BY
+  due_at DESC)`, so the most recent windows are kept and the choice is deterministic. It is per
+  monitor, not per batch — the [225] P0 was precisely a batch-wide `LIMIT`.
+- **A retention clip** (`$6`): the series never starts before the retention floor, because a window
+  older than that would be dropped unread.
+
+**Either bound obliges a fence, and the SQL — not the prose — sets it.** The rule is one condition:
+if the oldest window actually materialized is later than the first window that was expected, then
+something older was skipped, and that instant becomes `gap_truncated_before`. It does not matter
+which bound caused it.
+
+Before the fence, the span is treated exactly as pre-`ledger_from`: **not stored**, claimable as
+nothing. No verdict is derived for it, so this is neither a rollup nor inference — it is an explicit
+statement that the ledger cannot answer, which is the only honest thing to record about time whose
+windows were never written.
+
+The cap's value still has no analysis behind it (§18), and it is the last constant in this design
+chosen by feel rather than by argument.
 
 ## 10. The configuration boundary
 
@@ -530,14 +587,21 @@ complete, and an insert lost to a missing partition would erase exactly the fact
 keep — silently, and toward over-claiming. Retention must therefore also purge rows out of the
 DEFAULT partition, which the gate's mechanism never has to do.
 
-`monitor_schedule.ledger_from` is the earliest instant a monitor can be answered for:
+`ledger_from` is the earliest instant a monitor can be answered for. It is **computed, never
+stored** — a second defect found while fixing the P0 at [225]: revision 2 had it as a stored NOT NULL
+column *and* as a formula, and nothing in the design updated the column when a partition was
+dropped, so the two would have drifted apart in the direction of over-claiming. Storing it would
+also have contradicted invariant 19.
 
 ```
-ledger_from = max(oldest retained partition lower bound,
-                  earliest effective_from in the revision timeline,
-                  the instant this monitor's schedule row was created,
-                  gap_truncated_before)
+ledger_from(monitor) = max(oldest retained expected_runs partition lower bound,
+                           earliest effective_from in that monitor's revision timeline,
+                           monitor_schedule.schedule_created_at,
+                           monitor_schedule.gap_truncated_before)   -- NULLs ignored
 ```
+
+The fence is therefore an INPUT to `ledger_from`, persisted by the same statement that advanced past
+the windows it fences off, which is what makes the unanswerable span visible to every reader.
 
 Before it, a surface may claim **nothing** — not `covered`, and not `expected_never_issued`. It
 renders as **not stored**, an encoding FR-031 already has and already draws.
@@ -651,10 +715,44 @@ Discharged as a SET in `docs/traceability.md`.
     selects §11's append-only variant rather than being absorbed silently.
 24. A `next_due_at` advance never commits without the run row and the missed-window rows for the
     span it closes.
+24a. When ANY window in that span is not materialized — by the per-monitor cap or by the retention
+    clip — `gap_truncated_before` is written **in the same statement** as the advance, and it moves
+    only forward. An advance that leaves an unfenced, unmaterialized span is the [225] P0 and must
+    fail a test by name.
+24b. The cap and the clip are deterministic PER MONITOR: a batch containing several monitors with
+    gaps fences each one independently, and no monitor's windows are lost to another's volume.
+24c. `ledger_from` is computed from persisted inputs, never stored, so dropping a partition cannot
+    leave it stale in the over-claiming direction.
 25. A result whose `job_id` is absent or not a UUID correlates to no window, is still recorded as a
     heartbeat, and never produces a false `issued_never_claimed`.
 26. Every ledger row is reachable only within its tenant: the composite `(monitor_id, project_id)`
     foreign key, not a single-column one.
+
+### 17.1 The test case invariants 24a and 24b are discharged by
+
+Required by the reviewer at [225] before resubmission, so it is specified here rather than left to
+implementation taste.
+
+**Setup.** Two monitors in the same project, `interval_seconds = 60`, cap `$5 = 3`. Both
+`monitor_schedule` rows carry `next_due_at` ten intervals in the past. One tick picks both.
+
+**Assertions.**
+
+1. Each monitor has exactly **3** missed rows, and they are ITS OWN most recent three — not three
+   rows shared between them, and not monitor A's three plus none for B.
+2. Each monitor's `gap_truncated_before` equals **its own** oldest materialized window.
+3. Both `next_due_at` values advanced to `now + 60s`.
+4. `ledger_from` for each monitor now sits at its own fence, so a query over the truncated span
+   returns `unknown` and NOT `covered`.
+5. The advance and the fence are in **one** transaction: killing the connection mid-statement
+   leaves neither.
+
+**The mutation that must fail it.** Replace the per-monitor `row_number() … PARTITION BY monitor_id`
+cap with a batch-wide `LIMIT $5`, exactly as revision 2 had it. The test must fail **by name**,
+identifying the monitor whose windows vanished and the fence that was never written. A test that
+passes against that mutation has not reached the mechanism and is worthless here — this is the
+defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
+be caught by a test rather than by another review round.
 
 ## 18. Open items
 

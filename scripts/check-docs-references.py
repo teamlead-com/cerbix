@@ -801,19 +801,44 @@ def check_partial_claims():
     return bad
 
 
+def check_type_list_findings(stated_count, listed, wire, labels=None):
+    """Compare README's check-type highlight against the MonitorType set. Returns messages.
+
+    PURE on purpose (reviewer P2 at party [208]): the mutations that matter here — a same-count
+    substitution, a same-count duplication — were demonstrated by a harness that edited the real
+    README and put it back, which is manual evidence and not a test. With the comparison separated
+    from the file reading, they are fixtures.
+
+    `listed` is the enumeration text. Parentheticals are stripped first because they are prose
+    ABOUT one type that names others ("scripted multi-step HTTP flows" would make `HTTP` occur
+    twice), which is the difference between a real second entry and a mention.
+    """
+    labels = CHECK_TYPE_LABELS if labels is None else labels
+    out = []
+    for t in sorted(wire - set(labels)):
+        out.append(f'MonitorType `{t}` has no entry in CHECK_TYPE_LABELS, so nothing checks that '
+                   f'README.md lists it')
+    for t in sorted(set(labels) - wire):
+        out.append(f'CHECK_TYPE_LABELS names `{t}`, which is not a MonitorType')
+    if stated_count != len(wire):
+        out.append(f'says {stated_count} check types, but internal/domain/monitor.go declares '
+                   f'{len(wire)}')
+    stripped = re.sub(r'\([^)]*\)', ' ', listed)
+    for t in sorted(wire & set(labels)):
+        label = labels[t]
+        hits = len(re.findall(r'(?<![\w-])' + re.escape(label) + r'(?![\w-])', stripped))
+        if hits != 1:
+            out.append(f'MonitorType `{t}` should appear in the highlight exactly once as '
+                       f'"{label}"; found {hits}')
+    return out
+
+
 def check_enumerations():
     bad = []
 
     # 1. README's check-type highlight vs the constants — the COUNT and the SET.
     doc = read('README.md')
     wire = set(monitor_type_values().values())
-    for t in sorted(wire - set(CHECK_TYPE_LABELS)):
-        bad.append(('scripts/check-docs-references.py', 1, 'enum',
-                    f'MonitorType `{t}` has no entry in CHECK_TYPE_LABELS, so nothing checks that '
-                    f'README.md lists it'))
-    for t in sorted(set(CHECK_TYPE_LABELS) - wire):
-        bad.append(('scripts/check-docs-references.py', 1, 'enum',
-                    f'CHECK_TYPE_LABELS names `{t}`, which is not a MonitorType'))
     m = re.search(r'\*\*(\d+) check types\*\*(.*?)All behind an SSRF guard', flatten(doc))
     if not m:
         bad.append(('README.md', 1, 'enum',
@@ -821,20 +846,8 @@ def check_enumerations():
                     'cannot find the list to check'))
     else:
         line = doc[:doc.find('check types')].count('\n') + 1
-        if int(m.group(1)) != len(wire):
-            bad.append(('README.md', line, 'enum',
-                        f'says {m.group(1)} check types, but internal/domain/monitor.go declares '
-                        f'{len(wire)}'))
-        # Parentheticals are prose ABOUT a type and mention other types by name ("scripted
-        # multi-step HTTP flows"), so they are removed before counting occurrences.
-        listed = re.sub(r'\([^)]*\)', ' ', m.group(2))
-        for t in sorted(wire & set(CHECK_TYPE_LABELS)):
-            label = CHECK_TYPE_LABELS[t]
-            hits = len(re.findall(r'(?<![\w-])' + re.escape(label) + r'(?![\w-])', listed))
-            if hits != 1:
-                bad.append(('README.md', line, 'enum',
-                            f'MonitorType `{t}` should appear in the highlight exactly once as '
-                            f'"{label}"; found {hits}'))
+        for msg in check_type_list_findings(int(m.group(1)), m.group(2), wire):
+            bad.append(('README.md', line, 'enum', msg))
 
     # 2. the ON DELETE SET NULL enumeration, in BOTH documents that state it.
     mig = setnull_migrations()

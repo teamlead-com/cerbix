@@ -1,10 +1,16 @@
 # cerbix frontend
 
-The Vue 3 + TypeScript SPA. It is not deployed on its own: `npm run build` produces `dist/`,
-which is committed to `internal/web/dist` and embedded into the Go binary with
-`//go:embed all:dist` (`internal/web/web.go`). One binary serves the SPA, the REST API and
-`/auth` from a single origin — **there is no nginx** in any image or compose file here; put
-Traefik or your own ingress in front for TLS.
+The Vue 3 + TypeScript SPA. It is not deployed on its own — it ships inside the Go binary, in
+two distinct steps that are easy to conflate:
+
+1. `npm run build` writes **`frontend/dist/`**, which is **gitignored**. Nothing embeds it.
+2. `make spa-snapshot` (repo root) builds, then replaces the **tracked** snapshot at
+   **`internal/web/dist`** — `rm -rf` + `cp`, `Makefile:136-141`. That directory is what
+   `//go:embed all:dist` compiles in (`internal/web/web.go`).
+
+So a build alone never changes what a binary serves; only the snapshot step does. One binary then
+serves the SPA, the REST API and `/auth` from a single origin — **there is no nginx** in any image
+or compose file here; put Traefik or your own ingress in front for TLS.
 
 ## Stack
 
@@ -52,19 +58,37 @@ checking — a type assertion written inside a spec is never evaluated at all.
 
 ## Commands
 
-There is no local node in this environment; everything runs through Docker. `--user` and
-`npm_config_cache` are both required — without them the container writes `dist/` and
-`node_modules/` as root and the next build fails with `EACCES`.
+With node installed these are ordinary npm scripts, and that is the path CI takes — node 22 via
+`actions/setup-node`, then `npm ci && npm run build && npm test` (`.github/workflows/tests.yml`):
 
 ```bash
 # from frontend/
+npm ci
+npm run build      # vue-tsc + vite; a type error fails it
+npm test           # vitest + jsdom
+npm run gen:api    # after any openapi.yaml change
+```
+
+On a machine without node, the same commands run in Docker against the version CI uses. `--user`
+and `npm_config_cache` are not optional there: without them the container writes `dist/` and
+`node_modules/` as **root**, and the next run fails with `EACCES` because its own `npm ci` cannot
+delete what root wrote.
+
+```bash
 docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/.npm \
-  -v "$PWD":/app -w /app node:22-alpine sh -c "npm run build"        # vue-tsc + vite
+  -v "$PWD":/app -w /app node:22-alpine sh -c "npm ci && npm run build"
 docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/.npm \
-  -v "$PWD":/app -w /app node:22-alpine sh -c "npm ci && npm run test"   # vitest
+  -v "$PWD":/app -w /app node:22-alpine sh -c "npm ci && npm test"
 docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/.npm \
   -v "$PWD":/app -v "$PWD/../openapi.yaml":/openapi.yaml -w /app \
-  node:22-alpine npm run gen:api                                     # after any openapi.yaml change
+  node:22-alpine npm run gen:api
+```
+
+If a tree was already built as root, hand it back before either path works — the ids must expand
+on the HOST, not inside `sh -c`, where `id -u` is 0:
+
+```bash
+docker run --rm -v "$PWD":/app alpine chown -R "$(id -u):$(id -g)" /app/dist /app/node_modules
 ```
 
 **After ANY frontend change, from the repo root: `make spa-snapshot`.** It rebuilds the SPA and

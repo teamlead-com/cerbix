@@ -416,3 +416,49 @@ class PartialResidualClaims(unittest.TestCase):
 
     def test_the_repository_announces_no_phantom_residual(self):
         self.assertEqual(cdr.check_partial_claims(), [])
+
+
+class CheckTypeListComparison(unittest.TestCase):
+    """The same-count mutations as FIXTURES, not edits to the working tree (reviewer P2 at [208]).
+
+    The earlier evidence for these was a harness that rewrote README.md and restored it. That
+    proves the guard works on one tree at one moment; it is not a test, and describing it as one
+    was the gap. A tiny fixture set stands in for the real 17 types so the cases stay readable.
+    """
+
+    WIRE = {"http", "grpc", "ssh", "tcp"}
+    LABELS = {"http": "HTTP", "grpc": "gRPC", "ssh": "SSH", "tcp": "TCP"}
+    GOOD = "HTTP, TCP, gRPC and SSH"
+
+    def find(self, count, listed, labels=None):
+        return cdr.check_type_list_findings(count, listed, self.WIRE, labels or self.LABELS)
+
+    def test_a_correct_list_is_silent(self):
+        self.assertEqual(self.find(4, self.GOOD), [])
+
+    def test_same_count_substitution_is_rejected(self):
+        out = self.find(4, "HTTP, TCP, GraphQL and SSH")
+        self.assertTrue(any("`grpc`" in m and "found 0" in m for m in out), out)
+
+    def test_same_count_duplication_is_rejected(self):
+        out = self.find(4, "HTTP, TCP, gRPC and TCP")
+        self.assertTrue(any("`ssh`" in m and "found 0" in m for m in out), out)
+        self.assertTrue(any("`tcp`" in m and "found 2" in m for m in out), out)
+
+    def test_a_mention_inside_a_parenthetical_is_not_a_second_entry(self):
+        self.assertEqual(self.find(4, "HTTP, TCP, gRPC and SSH (tunnels HTTP too)"), [],
+                         "prose about one type names others; that is not an entry")
+
+    def test_a_wrong_count_beside_a_correct_list_is_rejected(self):
+        self.assertTrue(any("says 3 check types" in m for m in self.find(3, self.GOOD)))
+
+    def test_a_type_with_no_label_is_rejected(self):
+        out = self.find(4, self.GOOD, {"http": "HTTP", "grpc": "gRPC", "ssh": "SSH"})
+        self.assertTrue(any("`tcp`" in m and "no entry in CHECK_TYPE_LABELS" in m for m in out), out)
+
+    def test_a_label_for_a_type_that_does_not_exist_is_rejected(self):
+        out = self.find(4, self.GOOD + " and Gopher", dict(self.LABELS, gopher="Gopher"))
+        self.assertTrue(any("`gopher`" in m and "not a MonitorType" in m for m in out), out)
+
+    def test_the_real_readme_and_the_real_constants_agree(self):
+        self.assertEqual([m for (_, _, k, m) in cdr.check_enumerations() if k == "enum"], [])

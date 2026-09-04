@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 6, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 7, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -23,8 +23,11 @@
 > new P0 outstanding: one shared admissibility predicate for every event (§8.1), a half-open config
 > range (§10), carrier-generation eligibility replacing an unimplementable activation instant (§13),
 > the read API's authorization contract (§13a), a testable HOT threshold with per-partition
-> `fillfactor` (§11), and a retention-derived gap bound (§9.3). §5.4 records the constraints from
-> party [222].
+> `fillfactor` (§11), and a retention-derived gap bound (§9.3) — and was **REJECTED at [233] on a
+> P0**: its carrier-generation eligibility named a CONSUMER-side datum as the source, so at
+> publication time there was nothing to write and every row would have taken a column default.
+> **Revision 7** sources the carrier from the PUBLISHER's routing decision, which already exists on
+> all three transports, and threads it through §7.1. §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -192,7 +195,7 @@ CREATE TABLE expected_runs (
     job_id             uuid,                   -- NULL: no job was ever issued for this window
     execution_revision bigint      NOT NULL,
     region             text        NOT NULL,
-    carrier_generation int         NOT NULL DEFAULT 0,  -- transport-stamped; 0 = pre-ledger carrier
+    carrier_generation int,                 -- the carrier the PUBLISHER selected; NULL when no job
     issued_at          timestamptz,            -- core: dispatch returned success
     claimed_at         timestamptz,            -- executor: off the transport, about to probe
     terminal_at        timestamptz,            -- an ADMISSIBLE outcome exists; coverage iff NOT NULL
@@ -203,6 +206,11 @@ CREATE TABLE expected_runs (
                                                    'credential_unresolved', 'no_capable_executor',
                                                    'transport_backoff')),
     PRIMARY KEY (monitor_id, due_at),
+    -- A window with no job has no carrier. `DEFAULT 0` was wrong twice over (reviewer P0 at [233]):
+    -- it manufactured a value nobody set, and it made "never dispatched" indistinguishable from
+    -- "dispatched on an old carrier". The two are different facts and the schema now says so.
+    CONSTRAINT expected_runs_carrier_iff_job
+        CHECK ((job_id IS NULL) = (carrier_generation IS NULL)),
     FOREIGN KEY (monitor_id, project_id) REFERENCES monitors (id, project_id) ON DELETE CASCADE
 ) PARTITION BY RANGE (due_at) WITH (fillfactor = 70);
 
@@ -306,15 +314,15 @@ deliberately**: for a backoff they differ, and deriving one from the other is in
 
 ```sql
 -- $1 monitor_id[]  $2 job_id[]  $3 skip_reason[]  $4 next_due[]  $5 interval_in_force[]
--- $6 now  $7 cap  $8 retention_floor
+-- $6 now  $7 cap  $8 retention_floor  $9 carrier_generation[]  (NULL where job_id is NULL)
 WITH picked AS (
     SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at, s.interval_in_force,
            s.execution_revision, m.region,
-           v.job_id, v.skip_reason, v.next_due, v.new_interval,
+           v.job_id, v.skip_reason, v.next_due, v.new_interval, v.carrier,
            s.next_due_at + make_interval(secs => s.interval_in_force) AS first_expected
       FROM monitor_schedule s
-      JOIN unnest($1::uuid[], $2::uuid[], $3::text[], $4::timestamptz[], $5::int[])
-             AS v(monitor_id, job_id, skip_reason, next_due, new_interval)
+      JOIN unnest($1::uuid[], $2::uuid[], $3::text[], $4::timestamptz[], $5::int[], $9::int[])
+             AS v(monitor_id, job_id, skip_reason, next_due, new_interval, carrier)
         ON v.monitor_id = s.monitor_id
       JOIN monitors m ON m.id = s.monitor_id
      ORDER BY s.monitor_id
@@ -337,10 +345,11 @@ candidate AS (
 -- issued_at, skipped rows carry a reason and neither.
 current_window AS (
     INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
-                               region, issued_at, skip_reason)
+                               region, issued_at, skip_reason, carrier_generation)
     SELECT p.project_id, p.monitor_id, p.due_at, p.job_id, p.execution_revision, p.region,
            CASE WHEN p.job_id IS NOT NULL THEN $6 END,
-           p.skip_reason
+           p.skip_reason,
+           p.carrier                      -- NULL for a skip, by the CHECK in §6.1
       FROM picked p
     ON CONFLICT (monitor_id, due_at) DO NOTHING
 ),
@@ -552,6 +561,13 @@ What the guard proves, item by item against P1-2's list:
    statement (the gate above), and `expected_runs.execution_revision = $5` would refuse it anyway if
    it did. The second condition is not redundant — it is what stops a result that was admissible for
    the monitor's *current* revision from filling a window materialized under a different one.
+
+**The orphan insert supplies `carrier_generation` too**, and from the one source trustworthy on that
+side: `dispatch.DeliveredJob.CarrierGeneration`, which the **transport adapter** sets from the queue
+or claimed row the job actually came from, and which `dispatch.go:41-47` keeps deliberately separate
+from the payload's `ProtocolVersion`. So the issue path takes the publisher's selection and the
+orphan path the adapter's observation — two server-owned sources for one fact, and the payload is
+authoritative for neither. No row is ever left at a column default (reviewer P0 at [233]).
 
 **The trust boundary, stated rather than assumed.** Adoption trusts that `due_at`, `job_id` and
 `issued_at` came from the core. They did: all three are minted by the database at materialization
@@ -882,16 +898,40 @@ rather than hidden behind "convert every producer":
 
   **So the ledger does not census executors. It uses the isolation this project already uses for
   exactly this problem:** a new protocol gets its own carrier, and only capable executors consume it
-  (FR-020 / D-0160, `carrierGeneration[region]` at `scheduler.go:1514`). `expected_runs` therefore
-  carries `carrier_generation int NOT NULL`, stamped from `dispatch.DeliveredJob.CarrierGeneration`
-  — which the **transport adapter** sets and which is "never read from the payload's own
-  `ProtocolVersion`, which is body content an attacker can edit" (`dispatch.go:41-47`).
+  (FR-020 / D-0160, `carrierGeneration[region]` at `scheduler.go:1514`). Eligibility becomes a
+  property of the ROW rather than a global instant, so no census, no activation timestamp and no
+  `ledger_from` involvement is required.
 
-  Eligibility becomes a property of the ROW rather than a global instant: a window dispatched on a
-  carrier below the ledger's minimum is `unknown`, never `issued_never_claimed`, and no census, no
-  activation timestamp and no `ledger_from` involvement is required. A region still running old
-  executors simply produces `unknown` windows until its carrier moves, which is the honest reading
-  and needs no new liveness mechanism.
+  **Revision 6 then named the wrong source, which was a P0 at [233].** It said the row is stamped
+  from `dispatch.DeliveredJob.CarrierGeneration`. That value exists on the **consumer** side: at
+  publication time — which is when §7.1 runs — no `DeliveredJob` exists yet, and `worker`/`agent`
+  hold no database handle and cannot fill it in later. Every row would have taken the column's
+  `DEFAULT 0` and read `unknown` forever, or something would have had to trust the payload and break
+  the boundary the design leans on. Invariant 10c had no implementation path.
+
+  **The authoritative datum is the PUBLISHER's routing decision, and it already exists on all three
+  transports:**
+
+  | Transport | What selects the carrier | Server-owned? |
+  | --- | --- | --- |
+  | **pull** | which of `EnqueuePullJob` / `V2` / `V3` the leader called; the row's `protocol_version` is, in that file's words, "the row's carrier generation, **stamped by the server**" (`internal/store/pulljobs.go:67`, and `handlers_agent.go:219` calls it "the SERVER's stamp") | yes, and already persisted |
+  | **AMQP** | which queue the leader published to, decided by `carrierGeneration[region]` (`scheduler.go:1514`, `:1529`, `:1552`) before the publish | yes |
+  | **inproc** | the `ProtocolVersion` the core itself put on the job (`inproc.go:34`) | yes — see the caveat below |
+
+  So `PublishJob` and the pull enqueue **return the carrier they used**, and the leader passes it into
+  §7.1 as `$9` for every issued row. It is never recovered from a payload and never inferred.
+
+  **The ledger minimum is its own generation, not a reused one.** `ProtocolV3` means "carries
+  envelope v2" (`internal/dispatch/credentials.go:16-21`) — a credential capability. Reusing it
+  would make a non-credentialed monitor's ledger eligibility depend on a credential carrier, which
+  is a different question. Phase B introduces **`ProtocolV4` = "carries `JobID`, `IssuedAt` and
+  `DueAt` on every dispatch path"**, and `LedgerMinCarrier = dispatch.ProtocolV4`. One generation per
+  capability is this project's own pattern and the reason the generations are legible at all.
+
+  **The one honest caveat.** For `inproc` the carrier comes from `job.ProtocolVersion`, which IS the
+  payload — but publisher and consumer are the same process and the payload is the core's own, so
+  there is no boundary to cross and nothing to forge. Writing "never read from the payload" without
+  this exception would be false for one of three adapters, and a reader would find it.
 
 ## 13a. The read API — authorization is not the foreign key's job
 
@@ -997,9 +1037,15 @@ Discharged as a SET in `docs/traceability.md`.
     `terminal_at`, so coverage stays the single test `terminal_at IS NOT NULL`.
 10b. A window carrying a `skip_reason` is never adopted by any terminal event: a run cerbix chose
     not to make can never be reported as one that happened.
-10c. A window dispatched on a carrier generation below the ledger's minimum reads `unknown`, never
-    `issued_never_claimed`. `carrier_generation` is stamped by the TRANSPORT ADAPTER and never read
-    from the payload's `ProtocolVersion`, so no executor can promote its own window's eligibility.
+10c. A window dispatched on a carrier below `LedgerMinCarrier` reads `unknown`, never
+    `issued_never_claimed`.
+10d. `carrier_generation` is written at INSERT time from a server-owned source and never left to a
+    column default: the PUBLISHER's routing decision on the issue path, the transport ADAPTER's
+    observation on the orphan path. A forged payload `ProtocolVersion` cannot promote a row on any
+    transport except `inproc`, where publisher and consumer are one process and there is no boundary
+    to cross.
+10e. `carrier_generation IS NULL` exactly when `job_id IS NULL`, enforced by a CHECK: a window never
+    dispatched has no carrier, which is a different fact from an old one.
 11. `worker` and `agent` hold no database handle and no ack concept after this change.
 12. `heartbeats` gains no column, and `claimed_at`, `terminal_at`, `outcome`, `refused_at`,
     `refused_reason` and `skip_reason` appear in no index.
@@ -1072,6 +1118,14 @@ implementation taste.
    returns `unknown` and NOT `covered`.
 5. The advance and the fence are in **one** transaction: killing the connection mid-statement
    leaves neither.
+
+**Carrier eligibility, required at [233], on every transport.** For AMQP, pull and inproc in turn: a
+dispatch on a carrier below `LedgerMinCarrier` produces a row whose window reads `unknown` and never
+`issued_never_claimed`; a dispatch at or above it produces an eligible row; and a result whose
+**payload** `ProtocolVersion` claims a higher generation than the carrier it arrived on does **not**
+promote the row. Plus the rolling-upgrade case: a region whose executors are still on the old carrier
+yields `unknown` windows until its carrier moves, and no window silently becomes `covered`. A row
+left at a column default fails all of these by construction, which is the [233] P0.
 
 **Two further cases, required at [229], and they are the ones revision 4 failed.**
 

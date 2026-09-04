@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 4, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 5, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -13,10 +13,13 @@
 > monitor, and never wrote the truncation fence its own prose promised, so an unanswerable span
 > became invisible to `ledger_from` and a later query could over-claim it — §7. Revision 3 is dense
 > per-window rows with a deterministic per-monitor cap and the fence written in the same statement as
-> the advance. **Revision 4** answers three P1s from [227]: the five-rule advance audit and the
-> policy-skip/backoff statement (§7.1, §7.2), the terminal upsert's SQL and validity rules (§8.3),
-> and the transition equation for a configuration write, which must leave `next_due_at` untouched
-> (§10). §5.4 records the constraints from party [222].
+> the advance. **Revision 4** answered three P1s from [227] — the five-rule advance audit (§7.2), the
+> terminal upsert's SQL and validity rules (§8.3), and the configuration write that must leave
+> `next_due_at` untouched (§10) — and was itself **REJECTED at [229] on a P0**: it had TWO
+> forward-moving statements, and the policy-skip one argued its way out of gap materialization, so a
+> leader whose first post-failover action was a skip lost the gap exactly as [225] had. **Revision 5
+> has ONE forward-moving primitive** (§7.1) with every caller passing parameters, because two
+> statements sharing an obligation diverge on it. §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -276,45 +279,62 @@ the old expectation**, so if the gap rows are not written in the same statement,
 which windows were missed is destroyed by the very write that ends the gap. It can never be
 recovered afterwards.
 
-One statement per tick, for that tick's whole due set. **Revision 2's first form was rejected at
-party [225] and the defect is recorded here, because the shape of it is instructive:** the cap was a
-bare `LIMIT` after a `CROSS JOIN LATERAL`, so it bounded the whole BATCH rather than each monitor,
-with no ordering to say which rows survived — while the final `UPDATE` advanced every picked
-monitor regardless. One monitor's gap could consume the cap, another's windows were silently
-dropped, and its expectation was overwritten anyway. Worse, `gap_truncated_before` was described in
-§9.3 and **never written by the SQL at all**, so the unanswerable span was invisible to
-`ledger_from` and a later query could over-claim it — the one direction this design says must never
-happen.
+**There is exactly ONE statement that moves an expectation forward.** Revision 4 had two — the issue
+path and the policy-skip path — and was rejected at party [229] because they diverged: §7.2 argued
+that a skip needs no gap materialization "because rules 3 and 4 fire on a live leader", which is
+false for precisely the case this requirement exists for. After a leader absence `next_due_at` is
+already in the past, and if the returning leader's FIRST action for a monitor is a skip or a
+backoff, revision 4 advanced past every intervening window while writing neither the windows nor
+the fence. The gap became invisible to `ledger_from` again — the [225] defect, reintroduced by the
+fix for [227], violating invariant 24a which revision 3 had itself added.
+
+The lesson is structural, not local: **two statements sharing one obligation will diverge on it.**
+So the gap-and-fence logic exists once, and every forward-moving caller passes parameters rather
+than repeating the reasoning.
+
+### 7.1 The primitive
+
+Callers differ only in their arguments. `job_id` set means a dispatch succeeded; `skip_reason` set
+means it did not happen and why. `next_due` and `interval_in_force` are passed **separately and
+deliberately**: for a backoff they differ, and deriving one from the other is invariant 2b's defect.
 
 ```sql
+-- $1 monitor_id[]  $2 job_id[]  $3 skip_reason[]  $4 next_due[]  $5 interval_in_force[]
+-- $6 now  $7 cap  $8 retention_floor
 WITH picked AS (
-    SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at,
-           s.interval_in_force, s.execution_revision, v.job_id, v.region,
+    SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at, s.interval_in_force,
+           s.execution_revision, m.region,
+           v.job_id, v.skip_reason, v.next_due, v.new_interval,
            s.next_due_at + make_interval(secs => s.interval_in_force) AS first_expected
       FROM monitor_schedule s
-      JOIN unnest($1::uuid[], $2::uuid[], $3::text[]) AS v(monitor_id, job_id, region)
+      JOIN unnest($1::uuid[], $2::uuid[], $3::text[], $4::timestamptz[], $5::int[])
+             AS v(monitor_id, job_id, skip_reason, next_due, new_interval)
         ON v.monitor_id = s.monitor_id
+      JOIN monitors m ON m.id = s.monitor_id
      ORDER BY s.monitor_id
        FOR UPDATE OF s
 ),
--- Every window strictly between the old expectation and now, clipped at the retention floor
--- ($6) because a window older than that would be dropped unread. Numbered PER MONITOR, newest
--- first, so the cap keeps the most recent windows and the choice is deterministic.
+-- Windows strictly between the old expectation and now, clipped at the retention floor because a
+-- window older than that would be dropped unread. Numbered PER MONITOR, newest first, so the cap
+-- keeps the most recent and the choice is deterministic.
 candidate AS (
     SELECT p.monitor_id, p.project_id, p.execution_revision, p.region,
            p.first_expected, w.due_at,
            row_number() OVER (PARTITION BY p.monitor_id ORDER BY w.due_at DESC) AS rn
       FROM picked p
       CROSS JOIN LATERAL generate_series(
-              GREATEST(p.first_expected, $6),
-              $4 - interval '1 microsecond',
+              GREATEST(p.first_expected, $8),
+              $6 - interval '1 microsecond',
               make_interval(secs => p.interval_in_force)) AS w(due_at)
 ),
-issued AS (
-    INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id,
-                               execution_revision, region, issued_at)
-    SELECT p.project_id, p.monitor_id, p.due_at, p.job_id,
-           p.execution_revision, p.region, $4
+-- The window this action answers. ONE shape for both callers: issued rows carry a job and an
+-- issued_at, skipped rows carry a reason and neither.
+current_window AS (
+    INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
+                               region, issued_at, skip_reason)
+    SELECT p.project_id, p.monitor_id, p.due_at, p.job_id, p.execution_revision, p.region,
+           CASE WHEN p.job_id IS NOT NULL THEN $6 END,
+           p.skip_reason
       FROM picked p
     ON CONFLICT (monitor_id, due_at) DO NOTHING
 ),
@@ -323,22 +343,22 @@ missed AS (
                                execution_revision, region)
     SELECT c.project_id, c.monitor_id, c.due_at, NULL, c.execution_revision, c.region
       FROM candidate c
-     WHERE c.rn <= $5                          -- per-monitor cap
+     WHERE c.rn <= $7
     ON CONFLICT (monitor_id, due_at) DO NOTHING
 ),
--- ONE rule covers BOTH truncation causes. If the oldest window actually materialized is later
--- than the first window that was expected, then something older was skipped — by the cap, or by
--- the retention clip, it does not matter which — and that instant is the fence.
+-- ONE rule covers BOTH truncation causes: if the oldest window materialized is later than the
+-- first window expected, something older was skipped — cap or clip, it does not matter which.
 fence AS (
     SELECT c.monitor_id, min(c.due_at) AS truncated_before
       FROM candidate c
-     WHERE c.rn <= $5
+     WHERE c.rn <= $7
      GROUP BY c.monitor_id
     HAVING min(c.due_at) > min(c.first_expected)
 )
 UPDATE monitor_schedule s
-   SET next_due_at          = $4 + make_interval(secs => s.interval_in_force),
-       last_issued_at       = $4,
+   SET next_due_at          = p.next_due,
+       interval_in_force    = p.new_interval,
+       last_issued_at       = CASE WHEN p.job_id IS NOT NULL THEN $6 ELSE s.last_issued_at END,
        gap_truncated_before = GREATEST(s.gap_truncated_before, f.truncated_before),
        updated_at           = statement_timestamp()
   FROM picked p
@@ -346,110 +366,71 @@ UPDATE monitor_schedule s
  WHERE s.monitor_id = p.monitor_id;
 ```
 
-**The fence and the advance commit together or not at all**, which is the whole point: an advance
-that outruns its evidence must be impossible, not merely discouraged.
+**Windows, fence and advance commit together or not at all.** An advance that outruns its evidence
+is impossible, not discouraged — and it is impossible for every caller, because there is only one
+place it could happen.
 
-`GREATEST` is doing load-bearing work and relies on a PostgreSQL-specific semantic worth naming: it
-**ignores NULL arguments** and returns NULL only when all of them are NULL. So a monitor with no
-truncation this tick (`f.truncated_before IS NULL`) keeps whatever fence it already had, a first
-truncation sets it, and a later one can only move it **forward**. In standard SQL — and in other
-engines — NULL would propagate and silently erase the fence, which is exactly the failure this
-statement exists to prevent, so the dependency is stated rather than assumed.
+Two things the primitive deliberately does not do. **`last_issued_at` is untouched by a skip**:
+nothing was issued. And **`interval_in_force` never receives a backoff delay** — the caller passes
+the monitor's real interval alongside a delayed `next_due`, so later gap windows stay spaced by the
+interval rather than by a retry timer, an error that would otherwise be invisible and permanent.
 
-`$4` is the core's `statement_timestamp()` passed in for consistency across all three writes.
-`ORDER BY s.monitor_id` before `FOR UPDATE` is deadlock avoidance: every writer takes the row locks
-in the same order.
+`GREATEST` carries the fence's monotonicity and relies on a PostgreSQL-specific semantic worth
+naming: it **ignores NULL arguments**, returning NULL only when all are NULL. A monitor with no
+truncation this tick keeps the fence it had, a first truncation sets it, and a later one can only
+move it forward. In standard SQL the NULL would propagate and erase the fence — exactly the failure
+the statement exists to prevent — so the dependency is stated rather than assumed.
 
-**The honest statement count**, since the reviewer asked for the number rather than the word
-"batched": **one** statement per tick for the advance and both row sets, plus **one** per tick for
-the credentialed materialization that already exists. The advance does **not** scale with monitor
-count — `scheduler.go:637` sets `tick: time.Second`, so 1000 monitors means ~17 rows inside the one
-statement, not 17 statements. What does scale per run is the claim event (§8.4) and the terminal
-fill, and the terminal costs no round trip because it joins the transaction that already inserts the
+**The honest statement count**, since "batched" was rejected as an answer: **one** statement per tick
+for the advance, the current window, the gap windows and the fence, whatever mix of issues and skips
+that tick contains, plus the one credentialed materialization that already exists. It does not scale
+with monitor count — `scheduler.go:637` sets `tick: time.Second`, so 1000 monitors means ~17 array
+elements, not 17 statements. What scales per run is the claim event (§8.4) and the terminal fill,
+and the terminal costs no round trip because it joins the transaction that already inserts the
 heartbeat (`internal/store/monitors.go:1376`).
 
-**Ordering against the publish.** The statement runs **after** a successful dispatch, matching
-today's in-memory rule. A crash after the publish and before the statement leaves a run that
-happened unrecorded; the arriving terminal event is proof of issue and reconciles it (§8.3). A crash
-before the publish records nothing, which is true. The residual error is therefore always toward
-**withholding**, never toward claiming a run that did not happen — the only acceptable direction for
-a requirement whose purpose is to let a surface refuse to draw. It is also why dispatch does not
-move onto the transactional outbox: that would put outbox latency in front of every probe to fix an
-error that already fails safe.
+**Ordering against the publish.** For an issuing caller the statement runs **after** a successful
+dispatch, matching today's in-memory rule. A crash after the publish and before the statement leaves
+a run that happened unrecorded, and the arriving terminal event reconciles it (§8.3). A crash before
+the publish records nothing, which is true. The residual error is therefore always toward
+**withholding**, never toward claiming a run that did not happen — the only acceptable direction
+here, and why dispatch does not move onto the transactional outbox to fix an error that already fails
+safe.
 
-### 7.1 Every advance, audited — there are FIVE rules, not three
+### 7.2 Every advance, audited — FIVE rules, and which are callers
 
-Revisions 1 to 3 asserted a "three-rule contract". The audit the reviewer required at [227] found
-**five**, and the two I had missed are the two that do not advance by the interval. Every write to
-`nextRun` in `internal/scheduler/scheduler.go`, classified:
+Revisions 1 to 3 asserted a "three-rule contract". The audit required at [227] found **five**. Every
+write to `nextRun` in `internal/scheduler/scheduler.go`, classified, with what each does about the
+ledger:
 
-| # | Cause | In-memory advance | Sites | Ledger obligation |
+| # | Cause | In-memory advance | Sites | Ledger |
 | --- | --- | --- | --- | --- |
-| 1 | **Dispatch succeeded** | `now + iv` | `:1473` pull, `:1487` AMQP, `:1680` credentialed | §7's statement — the issued row |
-| 2 | **Dispatch failed** | *none* — retried next tick | `:1466-1471`, `:1480-1486` | Nothing. The window stays outstanding, which is true |
-| 3 | **Policy skip** — no capable canary runner, or no in-flight slot | `now + iv` | `:1442`, `:1449` plain; `:1644`, `:1648` credentialed | §7.2's statement — the window with **no job** and a `skip_reason` |
-| 4 | **Backoff** — credential unresolved, no capable executor, publish failure | `now + credentialFailureRetry(...)` | `:1576`, `:1604`, `:1631`, `:1674` | §7.2, with the **backoff** instant and its own `skip_reason` |
-| 5 | **Confirm acceleration** — moves the due instant EARLIER | `fast` | `:1757` (`enterConfirm`) | §7.3 — retards, never advances, so no window can have been missed |
+| 1 | **Dispatch succeeded** | `now + iv` | `:1473` pull, `:1487` AMQP, `:1680` credentialed | §7.1 with `job_id` |
+| 2 | **Dispatch failed** | *none* — retried next tick | `:1466-1471`, `:1480-1486` | Nothing: the expectation is unchanged, so there is nothing to preserve |
+| 3 | **Policy skip** — no capable canary runner, no in-flight slot | `now + iv` | `:1442`, `:1449` plain; `:1644`, `:1648` credentialed | §7.1 with `skip_reason` |
+| 4 | **Backoff** — credential unresolved, no capable executor, publish failure | `now + credentialFailureRetry(...)` | `:1576`, `:1604`, `:1631`, `:1674` | §7.1 with `skip_reason`, a delayed `next_due` and the UNCHANGED interval |
+| 5 | **Confirm acceleration** — moves the due instant EARLIER | `fast` | `:1757` (`enterConfirm`) | §7.3 — never a caller |
+
+Rules 1, 3 and 4 are the forward-moving callers and all three go through §7.1, on **both** the plain
+and credentialed branches. FR-029 shipped an in-flight claim on one branch only, and that finding is
+the same mistake this structure is arranged to make unrepeatable.
 
 A sixth path, `checkStalePush` at `:1805`, writes `nextRun` for **push** monitors, which §15 excludes
-from the ledger entirely. It is named here so it is a stated exclusion rather than an unhandled path.
+from the ledger. Named so it is a stated exclusion rather than an unhandled path.
 
-### 7.2 The policy-skip and backoff statement
+### 7.3 Confirm acceleration cannot lose a gap
 
-Rules 3 and 4 advance the expectation **without a dispatch**, so §7's statement cannot serve them —
-it requires a `job_id`. Without a variant of their own they would advance `next_due_at` while writing
-nothing, which is invariant 24 violated on a live path, and it is why the reviewer called this a P1
-rather than a nicety.
+Rule 5 is not a caller, and the reason is in the code rather than in an argument.
+`enterConfirm` (`scheduler.go:1756-1757`) writes `nextRun[m.ID] = fast` only
+`if due, ok := nextRun[m.ID]; !ok || due.After(fast)` — that is, only when the standing expectation
+is **later** than the accelerated one. An expectation already in the past is therefore never moved,
+so no intervening window can be skipped and there is nothing to materialize or fence.
 
-```sql
-WITH picked AS (
-    SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at, s.interval_in_force,
-           s.execution_revision, v.reason, v.next_due
-      FROM monitor_schedule s
-      JOIN unnest($1::uuid[], $2::text[], $3::timestamptz[]) AS v(monitor_id, reason, next_due)
-        ON v.monitor_id = s.monitor_id
-     ORDER BY s.monitor_id
-       FOR UPDATE OF s
-),
-skipped AS (
-    INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id,
-                               execution_revision, region, skip_reason)
-    SELECT p.project_id, p.monitor_id, p.due_at, NULL,
-           p.execution_revision, m.region, p.reason
-      FROM picked p JOIN monitors m ON m.id = p.monitor_id
-    ON CONFLICT (monitor_id, due_at) DO NOTHING
-)
-UPDATE monitor_schedule s
-   SET next_due_at = p.next_due,       -- now + iv for rule 3; now + backoff for rule 4
-       updated_at  = statement_timestamp()
-  FROM picked p
- WHERE s.monitor_id = p.monitor_id;
-```
-
-Two things it deliberately does **not** do:
-
-- **`last_issued_at` is not touched.** Nothing was issued.
-- **`interval_in_force` is not set to the backoff.** The backoff moves only `next_due_at`; the
-  interval stays the monitor's real one. Writing the backoff there would space every later gap
-  window at a retry delay, and the error would be invisible and permanent — the same shape as the
-  §10 defect.
-
-Gap materialization is deliberately absent: rules 3 and 4 fire on a **live** leader that has just
-evaluated this monitor, so there is no gap to close. A leader that was absent closes its gap through
-§7 on the first successful dispatch, or through §7.2 if the first thing it does is skip.
-
-Used on **both** branches — plain (`:1442`, `:1449`) and credentialed (`:1644`, `:1648`, plus the
-four backoff sites) — because revision 1 of FR-029 shipped a claim on only one branch and the
-reviewer's D9/D9a finding there is the same mistake waiting to be repeated.
-
-### 7.3 Confirm acceleration retards, it does not advance
-
-Rule 5 moves `next_due_at` **earlier**, so no window can have been missed and no row is written.
-What must change is `interval_in_force = ConfirmInterval()` and `confirm_phase = true`, so that later
-windows are spaced by the accelerated interval; and both must be restored when the acceleration
-expires (`scheduler.go:1428-1434` deletes the entry). An acceleration that left
-`interval_in_force` at the base interval would misdate every window probed under confirm — which is
-exactly the misdating §6.2 puts those two columns on the row to prevent.
+What rule 5 must still do is set `interval_in_force = ConfirmInterval()` and `confirm_phase = true`,
+and restore both when the acceleration expires (`:1428-1434` deletes the entry). An acceleration
+that left `interval_in_force` at the base interval would misdate every window probed under
+confirm — the exact misdating §6.2 puts that column on the row to prevent. This is a separate,
+non-advancing statement, and invariant 2d requires that it never move `next_due_at` forward.
 
 ## 8. Idempotency, ordering and crash semantics
 
@@ -526,7 +507,8 @@ What the guard proves, item by item against P1-2's list:
 3. **A no-job window cannot be turned into coverage by another run's terminal.** For a window
    materialized by the gap logic, `job_id IS NULL`, so `job_id = $4` is NULL — not true — and the
    second disjunct admits it ONLY when `skip_reason IS NULL`. A **deliberately skipped** window
-   (§7.2) can therefore never be adopted, which is the case that would otherwise convert "we chose
+   (§7.1, a `skip_reason` row) can therefore never be adopted, which is the case that would
+   otherwise convert "we chose
    not to run this" into "this ran".
    The remaining adoption is deliberate and narrow: a window the gap logic recorded as never-issued,
    for which a terminal later proves a run DID happen — §7's crash-after-publish. Adoption is the
@@ -851,12 +833,13 @@ and this document still does not claim that benefit, because nothing has been an
 Discharged as a SET in `docs/traceability.md`.
 
 1. No monitor's probe instant changes as a result of this requirement.
-2. The scheduler's advance rules are preserved exactly — **all five of them, enumerated in §7.1**.
+2. The scheduler's advance rules are preserved exactly — **all five of them, enumerated in §7.2**.
    Revision 3 and earlier claimed there were three; the audit the reviewer demanded at [227] found
-   five, and a rule discovered later must be added to §7.1 and to this invariant together.
-2a. Rules 3 and 4 of §7.1 write their window row in the SAME statement as the advance. Of the five
-    rules only rule 2 leaves the expectation alone and only rule 5 moves it earlier; every rule that
-    moves it forward writes a row first.
+   five, and a rule discovered later must be added to §7.2 and to this invariant together.
+2a. **There is exactly ONE statement that moves an expectation forward** (§7.1), and rules 1, 3 and
+    4 are all callers of it. A second forward-moving path is the [229] defect by construction: two
+    statements sharing the gap obligation will diverge on it, and did.
+2d. Rule 5 never moves `next_due_at` forward, and its statement is incapable of doing so.
 2b. A backoff delay never becomes `interval_in_force`. It moves `next_due_at` and nothing else.
 2c. Confirm acceleration sets `interval_in_force` and `confirm_phase`, and restores both when the
     acceleration expires, so no window probed under confirm is misdated.
@@ -935,7 +918,27 @@ implementation taste.
 5. The advance and the fence are in **one** transaction: killing the connection mid-statement
    leaves neither.
 
-**The mutation that must fail it.** Replace the per-monitor `row_number() … PARTITION BY monitor_id`
+**Two further cases, required at [229], and they are the ones revision 4 failed.**
+
+**(b) Leader gap, first action a POLICY SKIP.** One monitor, `interval 60s`, `next_due_at` ten
+intervals in the past. The returning leader's first tick finds no capable canary runner. Assert: the
+nine intervening windows exist with `job_id IS NULL` and no `skip_reason`; the tenth — the standing
+expectation — exists with `skip_reason = 'no_capable_runner'` and no `job_id`; `next_due_at` is
+`now + 60s`; and a query over the gap returns `expected_never_issued`, never `covered`.
+
+**(c) Leader gap, first action a BACKOFF.** Same setup, but the first tick fails credential
+resolution. Assert everything from (b) with `skip_reason = 'credential_unresolved'`, plus:
+`next_due_at` is `now + credentialFailureRetry(...)` while **`interval_in_force` is still 60** — the
+backoff must not become the interval, or every later gap window is misspaced.
+
+In both, assert `last_issued_at` is unchanged: nothing was issued.
+
+**The mutation that must fail (b) and (c)** is revision 4's structure itself: give the skip path its
+own statement without the gap and fence CTEs. If the tests survive that, they have not reached the
+mechanism — and this defect has now been introduced twice, once as [225] and once as [229], so a
+test that cannot catch it is worth nothing here.
+
+**The mutation that must fail (a).** Replace the per-monitor `row_number() … PARTITION BY monitor_id`
 cap with a batch-wide `LIMIT $5`, exactly as revision 2 had it. The test must fail **by name**,
 identifying the monitor whose windows vanished and the fence that was never written. A test that
 passes against that mutation has not reached the mechanism and is worthless here — this is the

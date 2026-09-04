@@ -1693,6 +1693,102 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
+### 17.2 The discharge audit — 34 covered, 30 to specify
+
+The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
+sized as its own scope rather than folded into the design approval. It asks one question of each
+invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
+the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
+
+**Result: 34 covered, 30 to specify.** And the shape of the gap is the finding, not the
+number: every test in §17.1 was added in response to one of the eight P0 rejections, so coverage
+tracked **the design's defects** rather than **the requirement's purpose**. The four invariants that
+say what FR-032 is FOR had nothing testing them —
+
+- **1** — no monitor's probe instant changes. The property the owner selected the model for.
+- **4** — a window is `covered` only if a terminal exists, never inferred from a nearby heartbeat.
+- **5** and **6** — issued-never-claimed, claimed-never-finished, and never-issued as three
+  distinguishable states. This is the requirement's entire subject.
+
+**Seven need a SOURCE SCAN rather than a behavioural test**, and that distinction would otherwise
+have been discovered by writing the wrong test: "exactly one statement advances `next_due_at`",
+"`worker` imports no store package", "one helper computes the effective interval", "no prober path
+reads `expected_runs`". These are properties of the code's SHAPE, and a behavioural test cannot see
+them — the pattern is NFR-025's idiom ratchet in `wallclock.spec.ts`, which counts occurrences per
+file against an enumerated list.
+
+Six need a **schema assertion** (a CHECK that must REJECT, an absent column, `pg_class.reloptions` on
+a newly created partition), two a **measurement**, and one is a **document check**.
+
+No phase may close while an invariant it implements is still `TO SPECIFY`.
+
+| # | Check kind | Status | Where, or what is missing |
+| --- | --- | --- | --- |
+| 1 | behavioural | TO SPECIFY | the OWNER's headline property, and nothing tests it: probe instants before and after the change, per dispatch path |
+| 2 | behavioural | **covered** | §17.1 (b) and (c) exercise rules 1, 3, 4; rules 2 and 5 are not |
+| 2a | source scan | TO SPECIFY | a source scan: exactly one statement advances `next_due_at`. A second one is the [229] defect |
+| 2b | behavioural | **covered** | §17.1 (c) asserts `interval_in_force` still 60 under backoff |
+| 2c | behavioural | TO SPECIFY | the RESTORE half is untested: acceleration expiring must put `interval_in_force` back |
+| 2d | source scan | TO SPECIFY | rule 5's statement must be structurally incapable of moving `next_due_at` forward |
+| 3 | behavioural | **covered** | §17.1 (b) and (c) both start from a persisted past `next_due_at` |
+| 4 | behavioural | TO SPECIFY | core truthfulness and untested: a heartbeat at a nearby instant must NOT make a window `covered` |
+| 5 | behavioural | TO SPECIFY | issued-never-claimed vs never-issued, asserted as two distinct verdicts |
+| 6 | behavioural | TO SPECIFY | claimed-never-finished, distinct from both of the above |
+| 7 | behavioural | **covered** | the reversed-arrival case from [241] |
+| 7a | source scan | TO SPECIFY | a source scan over event statements for the ONE admissibility predicate, in the shape of NFR-025's idiom ratchet |
+| 7b | behavioural | **covered** | §8.1's two negatives — but they live in §8.1's prose, not §17.1's matrix; move them |
+| 7c | behavioural | **covered** | the reversed-arrival case from [241], both pairs |
+| 8 | behavioural | **covered** | terminal-before-claim, in the ordering cases |
+| 9 | behavioural | **covered** | duplicate delivery, in the reversed-arrival case |
+| 10 | behavioural | TO SPECIFY | a terminal with no claim and no `issued_at` must still yield `covered` |
+| 10a | behavioural | **covered** | the config interleaving asserts a refused result fills nothing |
+| 10b | behavioural | **covered** | §8.3 proof 3, exercised by the skip cases |
+| 10c | behavioural | **covered** | carrier eligibility, all three transports |
+| 10d | behavioural | **covered** | the same case, plus the forged-payload mutation |
+| 10e | schema assertion | TO SPECIFY | assert the CHECK REJECTS a job with no carrier and a carrier with no job |
+| 10f | behavioural | **covered** | both arrival orders of the stale result |
+| 10g | behavioural | **covered** | physical unreachability on AMQP and pull |
+| 10h | behavioural | **covered** | §16.1's mixed-version matrix |
+| 10i | behavioural | TO SPECIFY | a V4 delivery missing `JobID`/`IssuedAt`/`DueAt` must be dead-lettered, not probed |
+| 11 | source scan | TO SPECIFY | a source scan: `internal/worker` and `internal/agent` import no store package and expose no ack |
+| 12 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
+| 13 | behavioural | **covered** | the confirm-acceleration threshold case |
+| 14 | behavioural | **covered** | the config-boundary cases |
+| 14a | behavioural | **covered** | the four-case each-side-of-a-due-instant test |
+| 14b | behavioural | **covered** | the `next_due_at`-already-past case |
+| 15 | behavioural | TO SPECIFY | a range before `ledger_from` must yield `unknown`, never `covered` and never `expected_never_issued` |
+| 16 | behavioural | TO SPECIFY | drop a partition, then assert no window in the dropped span reads `covered` or `expected_never_issued` |
+| 16a | schema assertion | TO SPECIFY | insert a row with no matching partition and assert the DEFAULT takes it; then that retention purges the default |
+| 17 | behavioural | **covered** | the late-and-overlapping case |
+| 18 | behavioural | TO SPECIFY | a flushed unfinished window plus a late terminal must read completed-late, not be deleted |
+| 19 | schema assertion | TO SPECIFY | a schema assertion: no verdict column exists on `expected_runs` |
+| 20 | behavioural | **covered** | 20g's gate case, extended to `expected_never_issued` and pre-`ledger_from` spans |
+| 20a | behavioural | **covered** | lateness above and below the threshold |
+| 20b | behavioural | **covered** | push exclusion by every path |
+| 20c | behavioural | **covered** | the per-path interval value, with the `new_interval` mutation |
+| 20d | source scan | TO SPECIFY | a source scan: one helper computes the effective interval; `:1427` and `:1635` both call it |
+| 20e | behavioural | **covered** | the orphan-threshold case |
+| 20f | behavioural | **covered** | the §13a round trip in 20g's case |
+| 20g | behavioural | **covered** | added at [270], with its two promotion mutations |
+| 21 | source scan | TO SPECIFY | a source scan: no scheduler or prober path reads `expected_runs` |
+| 22 | measurement | TO SPECIFY | a measurement against a populated table, plus bounds enforcement on the config value |
+| 23 | measurement | TO SPECIFY | the gauge's presence, its threshold, and that it is UNPUBLISHED on a zero denominator |
+| 23a | schema assertion | TO SPECIFY | read `pg_class.reloptions` on a NEWLY created partition |
+| 24 | behavioural | **covered** | §17.1 (a), (b), (c) |
+| 24a | behavioural | **covered** | the same, asserting the fence |
+| 24b | behavioural | **covered** | §17.1 (a) — two monitors, one cap |
+| 24c | behavioural | TO SPECIFY | drop a partition and assert `ledger_from` moves with it, having been computed not stored |
+| 25 | behavioural | TO SPECIFY | five bad-result shapes, each correlating to no window while the heartbeat still lands |
+| 25a | source scan | TO SPECIFY | a source scan: `DueAt` minted from the schedule read, and `StampResult` the only copier |
+| 25b | behavioural | **covered** | the crossed-pair case |
+| 25c | source scan | **covered** | the grep over every `INSERT INTO expected_runs`, which found the revision-15 defect |
+| 25d | behavioural | **covered** | the config interleaving proves the row takes the published job's facts |
+| 25e | behavioural | **covered** | the same case; its mutation is revision 8's single-predicate fence |
+| 25f | document check | TO SPECIFY | a document check: every correlated field names type, tag, mint source and copier |
+| 26 | schema assertion | TO SPECIFY | assert the FK is composite, and that a single-column FK fails the assertion |
+| 26a | behavioural | TO SPECIFY | a cross-project negative at the STORE layer, not through the handler |
+| 26b | behavioural | TO SPECIFY | every response carries `ledger_from` and `gap_truncated_before` |
+
 ## 18. Open items
 
 - ~~Participation scope is unresolved~~ — **RULED by the owner on 2026-09-04: all monitors, 14-day

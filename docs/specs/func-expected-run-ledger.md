@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 18, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 19, 2026-09-04. AWAITING FINAL DESIGN APPROVAL; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -216,7 +216,8 @@ CREATE TABLE expected_runs (
     execution_revision bigint      NOT NULL,
     region             text        NOT NULL,
     carrier_generation int,                 -- the carrier the PUBLISHER selected; NULL when no job
-    interval_seconds   int         NOT NULL,   -- the interval that SPACED this window (§14.1)
+    interval_seconds   int         NOT NULL,   -- the interval this window's lateness is judged against
+    interval_assumed   boolean     NOT NULL DEFAULT false,  -- true only on an orphan row (§14.2)
     issued_at          timestamptz,            -- core: dispatch returned success
     claimed_at         timestamptz,            -- executor: off the transport, about to probe
     terminal_at        timestamptz,            -- an ADMISSIBLE outcome exists; coverage iff NOT NULL
@@ -613,9 +614,11 @@ admissible run.
 
 ```sql
 INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
-                           region, carrier_generation, interval_seconds, issued_at,
-                           claimed_at, terminal_at, outcome)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                           region, carrier_generation, interval_seconds, interval_assumed,
+                           issued_at, claimed_at, terminal_at, outcome)
+-- $8 is NOT a wire value: it is MIN(interval_seconds, confirm_interval_seconds) for $5's revision,
+-- read from §6.3's timeline by the core, and $9 is TRUE. See §14.2.
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10, $11, $12)
 ON CONFLICT (monitor_id, due_at) DO UPDATE
    SET job_id             = COALESCE(expected_runs.job_id, $4),
        carrier_generation = COALESCE(expected_runs.carrier_generation, $7),
@@ -630,10 +633,10 @@ ON CONFLICT (monitor_id, due_at) DO UPDATE
    AND expected_runs.execution_revision = $5;
 ```
 
-`$7` is `carrier_generation` and `$8` is `interval_seconds`; both are in the column list rather than
-only in the prose because revision 7 put the carrier only in the prose (reviewer P0-1 at [235]) and
-revision 15 did the same to the interval — found by grepping every `INSERT INTO expected_runs` against
-its column list rather than by a third rejection. §6.1's CHECK requires the column
+`$7` is `carrier_generation` and `$8` is the CONSERVATIVE threshold of §14.2; both are in the column
+list rather than only in the prose because revision 7 put the carrier only in the prose (reviewer
+P0-1 at [235]) and revision 15 did the same to the interval — found by grepping every
+`INSERT INTO expected_runs` against its column list rather than by a third rejection. §6.1's CHECK requires the column
 non-NULL whenever `job_id` is non-NULL, so an orphan insert omitting it **fails the constraint**: the
 reconciliation path would have errored on exactly the case it exists to serve. The `DO UPDATE` uses
 `COALESCE(existing, new)` so **adoption fills the carrier on a no-job window** while a row that
@@ -1112,55 +1115,26 @@ from `issued_at` would invent a window or collide with a real one. So the field 
 | --- | --- |
 | Job field | `dispatch.CheckJob.DueAt time.Time`, `json:"due_at,omitempty"`, beside `JobID` and `IssuedAt` |
 | Result field | `domain.Heartbeat.DueAt time.Time`, `json:"due_at,omitempty"`, copied by `dispatch.StampResult` alongside `JobID` and `JobIssuedAt` — the ONE owner of that copy, as its comment requires |
-| Spacing job field | `CheckJob.EffectiveIntervalSeconds int`, `json:"effective_interval_seconds,omitempty"`. Carried for the SAME reason `DueAt` is: the orphan insert (§8.3) creates a row and `interval_seconds` is `NOT NULL`. The monitor snapshot's `IntervalSeconds` will NOT do — the scheduler substitutes `ConfirmInterval()` into its local `iv` (`scheduler.go:1428-1434`) and never writes it back onto the monitor, so the effective interval exists only in the leader and must be told. This is also §3.3's "the interval in force for THAT run" arriving on the wire rather than being inferred |
-| Spacing result field | `domain.Heartbeat.EffectiveIntervalSeconds int`, `json:"effective_interval_seconds,omitempty"`, copied by **`dispatch.StampResult`** alongside `JobID`, `JobIssuedAt` and `DueAt`. Pinned explicitly (reviewer [255]) because revision 17 said only "and its result twin": *"all three transports carry `CheckJob` verbatim"* covers **scheduler → executor**, and says nothing about **executor → heartbeat**, which is a different hop with a different owner. Without this the orphan statement's `$8` has no provenance |
-| Spacing mint source | **`monitor_schedule.interval_in_force`** — NOT `next_due_at`, which is `DueAt`'s source. Two companion fields with two different sources, and revision 17 named only one of them. Its single computing owner and its ingress constraint are §13.3 |
+| ~~Spacing fields~~ | **REMOVED in revision 19.** Revisions 16–18 carried `EffectiveIntervalSeconds` on the job and the result so the orphan insert could fill `interval_seconds`. The reviewer's question at [258]/[260] — whether the base-versus-confirm residual is compatible with a truthful coverage claim — is answered NO, so the field, its ingress validation and the residual are all gone. §14.2 has the replacement, which needs no wire value at all |
 | Not a table column | Like `JobID`, `JobIssuedAt` and `ExecutionRevision` (`internal/domain/monitor.go:618-629`), it is wire-only. §4a forbids overloading the `heartbeats` TABLE, which this does not touch |
 | Mint owner | The **core**, from `monitor_schedule.next_due_at`, read by the leader's own batched read in the same tick — NOT from the 15-second snapshot (`refreshEvery`, `scheduler.go:236`), which would be stale by design |
 | Validation | `due_at <= issued_at` (an expectation cannot postdate its own dispatch), and `due_at` inside the retention window. A violation refuses CORRELATION — the result is still recorded as a heartbeat — exactly as a non-UUID `job_id` is treated (§13) |
 | Propagation | All three transports carry `CheckJob` verbatim: AMQP as the JSON body, pull as the JSON payload of a `pull_jobs` row, inproc as the struct itself. A new field therefore propagates by construction, and this is stated rather than assumed because it is the reason no per-transport work is needed |
 | Rolling upgrade | An old executor drops the unknown field, so the result returns with `DueAt` zero. That is treated as **no correlation** — never as `due_at = epoch` — and the window stays `unknown`, which is precisely what `LedgerMinCarrier` gates |
 
-### 13.3 Who owns the effective interval, and what constrains it on the way in
+### 13.3 Who owns the effective interval
 
-Two questions the reviewer named at [253] before verifying, and both have real answers that were
-missing.
-
-**Ownership: ONE function, because it is currently computed twice.** `iv := m.Interval()` followed by
-a possible `iv = m.ConfirmInterval()` appears at `scheduler.go:1427` (plain path) and again at
-`:1635` (credentialed path). Two sites computing one fact is the divergence this design has been
-bitten by three times, so the effective interval gets a single owner — one helper both call, in the
-shape `dispatch.StampResult` already uses for job identity ("one owner, because three executors
-publish results and a stamp each applied separately would drift the first time one was edited").
-The credentialed path builds its job inside `internal/store/materialize.go`, so the value is **passed
+**ONE function, because it is currently computed twice.** `iv := m.Interval()` followed by a possible
+`iv = m.ConfirmInterval()` appears at `scheduler.go:1427` (plain path) and again at `:1635`
+(credentialed path). Two sites computing one fact is the divergence this design has been bitten by
+three times, so the effective interval gets a single owner — one helper both call, in the shape
+`dispatch.StampResult` already uses for job identity ("one owner, because three executors publish
+results and a stamp each applied separately would drift the first time one was edited"). The
+credentialed path builds its job inside `internal/store/materialize.go`, so the value is **passed
 in** rather than recomputed there; the store never guesses it.
 
-**Ingress: the wire value is CONSTRAINED, not trusted.** This matters more than the ownership,
-because `interval_seconds` decides a `covered_late` verdict and on the orphan path it arrives from an
-executor. An unconstrained number would let an executor suppress lateness by claiming a large
-interval, or manufacture it by claiming a small one — an executor-supplied value deciding a
-truthfulness verdict, which is exactly what `carrier_generation` and the non-UUID `job_id` rule exist
-to prevent elsewhere.
-
-The constraint is tight because the legitimate set is tiny: for a given `execution_revision`,
-`monitor_execution_revisions` publishes exactly **two** values — `interval_seconds` and
-`confirm_interval_seconds` (§6.3). So:
-
-> On the result path, `EffectiveIntervalSeconds` must **equal one of those two values** for the
-> result's revision. Anything else **refuses correlation** — the heartbeat is still recorded, exactly
-> as a non-UUID `job_id` is handled (§13) — and the window stays `unknown` rather than taking an
-> invented threshold.
-
-**Two things this does NOT claim.** First, the ISSUE path never reads the wire value at all: §7.1
-takes the interval from the leader's own state, so only the ORPHAN path is exposed, and that path
-exists for a crash between publish and materialize. Second, the residual freedom is real and is
-stated rather than papered over: an executor may still choose **between the two legitimate values**,
-and picking the base interval where the confirm interval was in force could make a late run read
-on-time. That is bounded to one binary choice between two values the server itself published, and it
-is strictly less trust than the heartbeat's own `up` and `latency_ms` already receive. Removing even
-that would require the core to record which phase was in force at `due_at`, which
-`monitor_schedule.confirm_phase` holds only for the present — a cost I am not paying for a bounded
-residual, and I am naming it so the choice is reviewable rather than invisible.
+It reaches `expected_runs` only through §7.1, from the leader's own state. **It is never carried on
+the wire and never read from a result** — see §14.2 for why that changed in revision 19.
 
 ### 13.2 The fence, and why one predicate was the wrong one
 
@@ -1287,6 +1261,40 @@ does **not** outlive its monitor — `expected_runs` cascades on monitor deletio
 monitor-nesting is correct here, and the two conventions differ for a reason.
 
 ## 14. What this unlocks, and the gate it must pass
+
+### 14.2 The threshold for a window the core did not record
+
+The orphan path (§8.3) creates a row for a run the ledger never entered at issue, so the core does
+not know which interval spaced that window. Revisions 16–18 solved this by carrying the value on the
+wire and validating it against the revision's two legitimate values.
+
+**The reviewer asked whether the base-versus-confirm residual is compatible with a truthful coverage
+claim ([258], [260]). It is not, and my own defence of it was wrong on this design's own terms.** I
+had argued the residual was bounded in magnitude. But every other trade here is chosen so the
+residual error points at **withholding** (§7.5), and this one points the other way: a window spaced
+at a 10-second confirm interval and answered 40 seconds late is `covered_late` in truth, while an
+executor claiming the 60-second base interval turns it into `covered` — which **licenses a stroke**
+and **counts in the coverage numerator**. That is over-claiming decided by an executor's choice. A
+direction violation is not excused by a small magnitude.
+
+**So the wire field is removed and the threshold is computed by the core, conservatively:**
+
+```
+interval_assumed = false  →  threshold is interval_seconds (the interval that SPACED the window)
+interval_assumed = true   →  threshold is MIN(interval_seconds, confirm_interval_seconds)
+                             for that row's execution_revision, from §6.3's timeline
+```
+
+`expected_runs` gains `interval_assumed boolean NOT NULL DEFAULT false`, set true **only** by the
+orphan insert. The tightest of the two legitimate thresholds means an unrecorded window can be
+judged `covered_late` when the truth might have been `covered` — an error toward withholding, which
+is the only direction this design accepts.
+
+What this buys beyond correctness: a wire field, its JSON tags, its `StampResult` clause, its
+two-value ingress validation and an executor trust residual all **disappear**, in exchange for one
+boolean. `interval_seconds` also keeps ONE meaning — the interval this window's lateness is judged
+against — with `interval_assumed` saying whether it was observed or assumed, rather than the column
+quietly meaning two different things on two paths.
 
 ### 14.1 `covered_late` — the owner's ruling of 2026-09-04
 
@@ -1461,12 +1469,13 @@ Discharged as a SET in `docs/traceability.md`.
 20d. The effective interval has ONE owner — a single helper called by both the plain
     (`scheduler.go:1427`) and credentialed (`:1635`) paths, and passed into
     `materialize.go` rather than recomputed there.
-20e. On the result path `EffectiveIntervalSeconds` must EQUAL the revision's `interval_seconds` or
-    its `confirm_interval_seconds`; any other value refuses correlation, records the heartbeat, and
-    leaves the window `unknown`. The issue path never reads the wire value.
+20e. The lateness threshold is NEVER taken from a result. A window the core recorded uses its own
+    `interval_seconds`; an orphan row uses `MIN(interval, confirm_interval)` for its revision and
+    sets `interval_assumed`. No executor-supplied value can move a window from `covered_late` to
+    `covered`.
 20c. Every `INSERT INTO expected_runs` names `interval_seconds`, and the value is the interval that
     SPACED that window — the one in force BEFORE the advance for the current window, the
-    `generate_series` step for a gap window, and the job's `EffectiveIntervalSeconds` for an orphan.
+    `generate_series` step for a gap window, and the conservative timeline minimum for an orphan.
     Never the caller's `new_interval`, which spaces the NEXT window.
 20a. A window whose run was late by MORE than `expected_runs.interval_seconds` reads `covered_late`,
     licenses no stroke, and is excluded from the coverage numerator. The threshold is read from the
@@ -1499,10 +1508,9 @@ Discharged as a SET in `docs/traceability.md`.
 25a. `DueAt` is minted by the CORE from `monitor_schedule.next_due_at` in the dispatching tick, never
     from the leader's 15-second snapshot, and is copied onto the result by `dispatch.StampResult`
     alone.
-25f. `EffectiveIntervalSeconds` is minted from `monitor_schedule.interval_in_force` — a different
-    source from `DueAt`'s — and is copied onto the result by `dispatch.StampResult` alone. Every
-    field the ledger correlates on names its type, its JSON tag, its mint source and its single
-    copier; "and its result twin" is not a specification.
+25f. Every field the ledger correlates on names its type, its JSON tag, its mint source and its
+    single copier. "And its result twin" is not a specification — the finding at [255] that removed
+    the field this invariant was written for, and the rule outlives it.
 25b. A crossed pair — one run's `job_id` with another window's `due_at` — updates nothing.
 25c. Every write to `expected_runs` names `carrier_generation` in its column list, so §6.1's CHECK
     cannot be violated by omission on any path.
@@ -1600,11 +1608,12 @@ the same defect unreported.
 **The mutation that must fail it:** revert either attribute to `COALESCE(existing, new)`. That is the
 shape both statements shipped with through revision 10.
 
-**The effective interval's ingress, from [253].** A result whose `EffectiveIntervalSeconds` matches
-neither the revision's base nor its confirm interval must refuse correlation: assert the heartbeat is
-still recorded, no `expected_runs` row is created or updated, and the window reads `unknown`. Then
-the two legitimate values each accepted. **The mutation that must fail it is accepting the wire value
-unchecked** — which is what revision 16 specified.
+**The orphan threshold, from [260].** A monitor whose confirm interval is 10s and base interval 60s,
+a window spaced at the confirm interval, and an orphan terminal 40s late. Assert the row is created
+with `interval_assumed = true` and `interval_seconds = 10`, and that the window reads
+**`covered_late`**. **Two mutations must fail it**: using the base interval (60s) for the threshold,
+which would read `covered`; and taking the value from the result at all, which is what revisions
+16–18 specified.
 
 **Lateness, from the owner's ruling of 2026-09-04.** A leader gap of ten intervals, then a run that
 answers the standing 10:01 expectation at 10:42. Assert the window reads **`covered_late`**, not

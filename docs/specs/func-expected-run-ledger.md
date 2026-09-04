@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 8, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 9, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -30,8 +30,10 @@
 > all three transports, and threads it through §7.1 — but left TWO contradictions the schema had just
 > created, rejected at [235]: the orphan INSERT omitted the carrier column its own CHECK now
 > required, and `ProtocolV4` promised a `DueAt` that existed in no wire type. **Revision 8** fixes the
-> INSERT and defines `DueAt` end to end (§13.1), including the optimistic check that reading the
-> expectation before publishing forces. §5.4 records the constraints from party [222].
+> INSERT and defines `DueAt` end to end (§13.1) — but its optimistic fence checked only
+> `next_due_at`, the ONE datum §10 guarantees does not change, so a config write passed it while
+> crossing the generation ([237]). **Revision 9** sources every run fact from the published job and
+> fences on the revision too (§13.2). §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -319,22 +321,31 @@ deliberately**: for a backoff they differ, and deriving one from the other is in
 ```sql
 -- $1 monitor_id[]  $2 job_id[]  $3 skip_reason[]  $4 next_due[]  $5 interval_in_force[]
 -- $6 now  $7 cap  $8 retention_floor  $9 carrier_generation[]  (NULL where job_id is NULL)
--- $10 expected_due[]  — the next_due_at the job was published with; see the optimistic check below
+-- $10 expected_due[]  $11 expected_revision[]  $12 region[]  — what the job was PUBLISHED with
 WITH picked AS (
     SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at, s.interval_in_force,
-           s.execution_revision, m.region,
+           -- The two sources are projected under DISTINCT names on purpose: a single `region` or
+           -- `execution_revision` in scope is how a "comes from the job" rule silently becomes
+           -- "comes from whatever the planner resolved".
+           s.execution_revision AS schedule_revision, m.region AS monitor_region,
+           v.expected_revision  AS job_revision,      v.region AS job_region,
            v.job_id, v.skip_reason, v.next_due, v.new_interval, v.carrier,
            s.next_due_at + make_interval(secs => s.interval_in_force) AS first_expected
       FROM monitor_schedule s
       JOIN unnest($1::uuid[], $2::uuid[], $3::text[], $4::timestamptz[], $5::int[], $9::int[],
-                  $10::timestamptz[])
-             AS v(monitor_id, job_id, skip_reason, next_due, new_interval, carrier, expected_due)
+                  $10::timestamptz[], $11::bigint[], $12::text[])
+             AS v(monitor_id, job_id, skip_reason, next_due, new_interval, carrier,
+                  expected_due, expected_revision, region)
         ON v.monitor_id = s.monitor_id
       JOIN monitors m ON m.id = s.monitor_id
-     -- Optimistic check (§13.1): the leader had to read next_due_at BEFORE publishing, because the
-     -- job carries it as `DueAt`. If anything moved it since — §10's config write is the realistic
-     -- one — this monitor drops out of the ENTIRE statement: no advance, no row, no fence.
+     -- The optimistic fence (§13.2). TWO predicates, because the first one alone fenced the only
+     -- datum that provably does NOT change: §10 leaves next_due_at untouched on purpose, so a
+     -- config write between publish and here PASSED the old check while having changed the
+     -- revision, the interval and possibly the region (reviewer P0 at [237]).
+     -- `m.execution_revision` is deliberately the column the ingest gate reads at
+     -- `internal/store/monitors.go:1342`, so this fence and the result-rejection rule cannot drift.
      WHERE s.next_due_at = v.expected_due
+       AND m.execution_revision = v.expected_revision
      ORDER BY s.monitor_id
        FOR UPDATE OF s
 ),
@@ -342,7 +353,7 @@ WITH picked AS (
 -- window older than that would be dropped unread. Numbered PER MONITOR, newest first, so the cap
 -- keeps the most recent and the choice is deterministic.
 candidate AS (
-    SELECT p.monitor_id, p.project_id, p.execution_revision, p.region,
+    SELECT p.monitor_id, p.project_id, p.schedule_revision, p.monitor_region,
            p.first_expected, w.due_at,
            row_number() OVER (PARTITION BY p.monitor_id ORDER BY w.due_at DESC) AS rn
       FROM picked p
@@ -356,7 +367,10 @@ candidate AS (
 current_window AS (
     INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
                                region, issued_at, skip_reason, carrier_generation)
-    SELECT p.project_id, p.monitor_id, p.due_at, p.job_id, p.execution_revision, p.region,
+    -- Every RUN fact comes from the PUBLISHED job (§13.2): revision, region, carrier. Only the
+    -- WINDOW facts come from the schedule. That is what makes a crossed generation impossible
+    -- rather than merely detected.
+    SELECT p.project_id, p.monitor_id, p.due_at, p.job_id, p.job_revision, p.job_region,
            CASE WHEN p.job_id IS NOT NULL THEN $6 END,
            p.skip_reason,
            p.carrier                      -- NULL for a skip, by the CHECK in §6.1
@@ -366,7 +380,10 @@ current_window AS (
 missed AS (
     INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id,
                                execution_revision, region)
-    SELECT c.project_id, c.monitor_id, c.due_at, NULL, c.execution_revision, c.region
+    -- A never-issued window has no published job, so its revision and region come from the
+    -- schedule and the monitor. That is correct: it is attributed to the configuration that was
+    -- in force while nothing ran, not to a run that never happened.
+    SELECT c.project_id, c.monitor_id, c.due_at, NULL, c.schedule_revision, c.monitor_region
       FROM candidate c
      WHERE c.rn <= $7
     ON CONFLICT (monitor_id, due_at) DO NOTHING
@@ -972,20 +989,44 @@ from `issued_at` would invent a window or collide with a real one. So the field 
 | Propagation | All three transports carry `CheckJob` verbatim: AMQP as the JSON body, pull as the JSON payload of a `pull_jobs` row, inproc as the struct itself. A new field therefore propagates by construction, and this is stated rather than assumed because it is the reason no per-transport work is needed |
 | Rolling upgrade | An old executor drops the unknown field, so the result returns with `DueAt` zero. That is treated as **no correlation** — never as `due_at = epoch` — and the window stays `unknown`, which is precisely what `LedgerMinCarrier` gates |
 
-**The optimistic check this forces, and it is a real consequence rather than a detail.** The leader
-must know `due_at` **before** publishing, while §7.1 writes **after**. Between the read and the
-write, §10's configuration transaction could have moved the row. So `picked` takes the expectation
-the job actually carried and compares it:
+### 13.2 The fence, and why one predicate was the wrong one
 
-```sql
-  JOIN unnest(..., $10::timestamptz[]) AS v(..., expected_due)
-    ON v.monitor_id = s.monitor_id
- WHERE s.next_due_at = v.expected_due      -- optimistic: someone else moved it => skip this monitor
-```
+The leader must know `due_at` **before** publishing, while §7.1 writes **after**, so something can
+change in between. Revision 8 fenced on `s.next_due_at = expected_due` alone — and that is the one
+datum §10 and invariant 14a **guarantee does not change**, because leaving it alone is what keeps
+invariant 1 true. A configuration write between publish and write therefore PASSED the fence while
+having changed `execution_revision`, `interval_in_force`, `confirm_phase` and possibly the monitor's
+region. §7.1 then wrote the old job with the NEW revision; the result, carrying the old one, is
+rejected at `internal/store/monitors.go:1342`; and the ledger claimed an issued run of a generation
+that never ran. That was reviewer P0 at [237], and it is the exact crossing the fence existed to
+prevent.
 
-A mismatch excludes that monitor from the whole statement: **no advance, no row, no fence**, and the
-next tick re-reads. The published job becomes an orphan whose terminal creates its own row through
-§8.3 — which is exactly why the orphan path had to work before this check could be safe.
+**Two answers, because there are two problems.**
+
+**(a) Source every run fact from the published job.** The row's `execution_revision`, `region` and
+`carrier_generation` now come from the job's own parameters, never re-read from the schedule. A
+crossed generation becomes impossible by construction rather than detected after the fact. A
+never-issued window has no job, so its revision and region come from the schedule — correct, because
+it is attributed to the configuration in force while nothing ran.
+
+**(b) Fence on the revision as well.** Sourcing from the job fixes what the row SAYS, but the
+**advance** is still computed by the caller from the interval it read, so a stale interval would set
+a wrong `next_due_at`. The fence therefore adds `m.execution_revision = v.expected_revision`, and
+one predicate covers every monitor datum because `UpdateMonitor` bumps the revision on **any** write
+— the deliberately coarse fence documented in `internal/domain/execsemantics.go`. Region and carrier
+selection are covered transitively by it.
+
+The column compared is `monitors.execution_revision`, deliberately the same one the ingest gate reads
+at `monitors.go:1342`, so the ledger's fence and the result-rejection rule cannot drift apart.
+
+**On mismatch nothing happens at all**: no advance, no window, no fence write. The monitor stays due
+and the next tick republishes at the current revision. The already-published job becomes an orphan
+whose result is refused by the ingest gate anyway — recorded as `refused_at` on whichever window it
+correlates to, which is honest and needs no special case.
+
+I am doing (a) as well as the (b) you asked for, because a fence that detects a crossing is weaker
+than a structure that cannot produce one, and (b) alone would have left the row's own facts sourced
+from a place that can disagree with the job.
 
   **The one honest caveat.** For `inproc` the carrier comes from `job.ProtocolVersion`, which IS the
   payload — but publisher and consumer are the same process and the payload is the core's own, so
@@ -1158,6 +1199,12 @@ Discharged as a SET in `docs/traceability.md`.
 25b. A crossed pair — one run's `job_id` with another window's `due_at` — updates nothing.
 25c. Every write to `expected_runs` names `carrier_generation` in its column list, so §6.1's CHECK
     cannot be violated by omission on any path.
+25d. Every RUN fact on a row — `execution_revision`, `region`, `carrier_generation` — comes from the
+    PUBLISHED job, never re-read from the schedule at write time. A never-issued window, having no
+    job, takes them from the configuration in force.
+25e. The fence compares BOTH `next_due_at` and `monitors.execution_revision`, the latter being the
+    same column the ingest gate reads, so a config write cannot pass the fence by leaving
+    `next_due_at` alone. On mismatch nothing is written and nothing advances.
 26. Every ledger row is reachable only within its tenant: the composite `(monitor_id, project_id)`
     foreign key, not a single-column one.
 26a. Every ledger query carries its own `project_id` predicate in SQL, proven by a cross-project
@@ -1218,6 +1265,14 @@ CREATED with `job_id`, `carrier_generation`, `issued_at`, `due_at` and `terminal
 wire, and that it satisfies §6.1's CHECK. **The mutation that must fail it is revision 7's own SQL** —
 drop `carrier_generation` from the INSERT's column list — which errors on the constraint rather than
 silently misbehaving, and would have taken the reconciliation path down on the one case it exists for.
+
+**The config interleaving, required at [237].** The leader reads and publishes at revision 5; a
+config write commits **without changing `next_due_at`**, bumping the revision to 6; §7.1 then runs
+for the old item. Assert: nothing is materialized, nothing advances, no fence is written; the monitor
+is still due; and only a job published at revision 6 creates an eligible row. Then assert the old
+job's result is refused by the ingest gate and shows as `refused_at`, never as a `covered` window and
+never as `issued_never_claimed` for revision 6. **The mutation that must fail it is revision 8's
+single-predicate fence.**
 
 **Late and overlapping runs, required at [235].** Two runs outstanding with different `due_at`: the
 terminal for the older must fill the older row and must be incapable of touching the newer, and vice

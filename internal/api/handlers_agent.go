@@ -39,6 +39,7 @@ func (h *Handler) AgentRouter() http.Handler {
 	mux.HandleFunc("GET /api/v1/agent/jobs", h.agentAuth(h.agentJobs))
 	mux.HandleFunc("GET /api/v1/agent/v2/jobs", h.agentAuth(h.agentJobsV2))
 	mux.HandleFunc("GET /api/v1/agent/v3/jobs", h.agentAuth(h.agentJobsV3))
+	mux.HandleFunc("GET /api/v1/agent/v4/jobs", h.agentAuth(h.agentJobsV4))
 	mux.HandleFunc("POST /api/v1/agent/results", h.agentAuth(h.agentResults))
 	mux.HandleFunc("POST /api/v1/agent/backfill", h.agentAuth(h.agentBackfill))
 	mux.HandleFunc("GET /api/v1/agent/tests", h.agentAuth(h.agentTests))
@@ -126,6 +127,43 @@ func (h *Handler) agentJobsV3(w http.ResponseWriter, r *http.Request) {
 	h.agentJobsProtocol(w, r, 3)
 }
 
+// agentJobsV4 serves the carrier generation that carries JOB IDENTITY (FR-032). It requires the
+// LEDGER capability, not the credential one: identity applies to every monitor, so gating this
+// endpoint on an envelope generation would make an ordinary HTTP monitor's ledger eligibility
+// depend on a capability its dispatch never needs (§13.0). Nothing enqueues generation 4 while
+// `ledger.carrier_enabled` is false, which a B1 binary refuses to have set true at all.
+func (h *Handler) agentJobsV4(w http.ResponseWriter, r *http.Request) {
+	if !requireLedgerCapability(w, r) {
+		return
+	}
+	// A generation-4 claim also returns every OLDER generation, envelope-bearing ones included, so
+	// the envelope floor still applies here. This is not the ledger capability being derived from
+	// the credential one — an agent announces them independently — it is the claim's cumulative
+	// range needing the capability its widest older generation requires.
+	if !requireEnvelopeCapability(w, r, dispatch.EnvelopeV2) {
+		return
+	}
+	h.agentJobsProtocol(w, r, 4)
+}
+
+// requireLedgerCapability enforces the per-claim ledger declaration, on every claim rather than
+// from a heartbeat, for the reason requireEnvelopeCapability gives below: the heartbeat says what
+// an agent was a moment ago, the header says what it is for THIS request.
+// The domain is EXACT, not a floor. The envelope capability is generational — declaring more than
+// an endpoint needs is legitimate during a rollout — but the ledger capability has exactly one
+// value in this generation, and the heartbeat that announces it is already closed to 0|1. A floor
+// here would make `X-Cerbix-Ledger: 2` a silent yes for a capability nobody has defined, which is
+// the open half of a contract §17.6 calls closed (reviewer [455]).
+func requireLedgerCapability(w http.ResponseWriter, r *http.Request) bool {
+	declared, err := strconv.Atoi(r.Header.Get("X-Cerbix-Ledger"))
+	if err != nil || declared != 1 {
+		writeError(w, http.StatusBadRequest,
+			"ledger capability 1 is required on every claim to this endpoint")
+		return false
+	}
+	return true
+}
+
 // requireEnvelopeCapability enforces the per-claim capability declaration. A claim may
 // declare MORE than the endpoint needs (a capability-2 agent polling the older endpoint
 // during a rollout is legitimate), never less.
@@ -191,6 +229,8 @@ func (h *Handler) agentJobsProtocol(w http.ResponseWriter, r *http.Request, prot
 		claim = h.store.ClaimPullJobsV2
 	case 3:
 		claim = h.store.ClaimPullJobsV3
+	case 4:
+		claim = h.store.ClaimPullJobsV4
 	}
 	// FR-029 invariant 6: what this CLAIM says it can run, re-asserted per request exactly as the
 	// envelope capability is — a heartbeat says what an agent was a moment ago, the header says what
@@ -432,6 +472,10 @@ func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 			// agent older than this release, which is exactly right — it announces no canary
 			// capability and the scheduler never sends it one.
 			WorkflowKinds []string `json:"workflow_kinds"`
+			// FR-032: whether this agent reads job identity. Absent from an older agent, which
+			// announces nothing and is therefore never raised to generation 4 — the absence is a
+			// correct answer, not a missing one.
+			Ledger int `json:"ledger"`
 		} `json:"capabilities"`
 		CredentialReady bool `json:"credential_ready"`
 	}
@@ -447,6 +491,14 @@ func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	// unit test — the ceiling and the generation live in different packages.
 	if body.Capabilities.CredentialEnvelope < 0 || body.Capabilities.CredentialEnvelope > dispatch.EnvelopeV2 {
 		writeError(w, http.StatusBadRequest, "unsupported credential_envelope capability")
+		return
+	}
+	// FR-032: the ledger capability is a CLOSED domain, 0 or 1. It is persisted into an existential
+	// query — `capabilities->>'ledger' >= 1` decides whether core may raise a region to generation
+	// 4 — so an out-of-range value would either be a silent yes or a number nobody defined. Same
+	// shape as the envelope capability above, for the same reason.
+	if body.Capabilities.Ledger < 0 || body.Capabilities.Ledger > 1 {
+		writeError(w, http.StatusBadRequest, "unsupported ledger capability")
 		return
 	}
 	if body.CredentialReady && body.Capabilities.CredentialEnvelope < dispatch.EnvelopeV1 {
@@ -466,7 +518,8 @@ func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := h.store.RecordAgentCapabilities(r.Context(), region, agentID,
-		body.Capabilities.CredentialEnvelope, body.CredentialReady, body.Capabilities.WorkflowKinds); err != nil {
+		body.Capabilities.CredentialEnvelope, body.CredentialReady, body.Capabilities.WorkflowKinds,
+		body.Capabilities.Ledger); err != nil {
 		h.serverError(w, "agent_heartbeat", err)
 		return
 	}

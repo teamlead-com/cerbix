@@ -19,6 +19,12 @@ const (
 	// are numbered separately on purpose: generation 2 already means envelope v1 to every
 	// deployed executor, so binding the execution body had to arrive on a new carrier.
 	ProtocolV3 = 3
+	// ProtocolV4 carries JOB IDENTITY — the fact that a run was expected (FR-032, D-0237).
+	// Separate from generation 3 for the reason 00063 gives: a capability check does not stop
+	// a consumer from consuming, so an executor that cannot read the identity fields must be
+	// unable to RECEIVE such a job, not merely discouraged. Nothing selects it while
+	// `ledger.carrier_enabled` is false, which a B1 binary refuses to have set true at all.
+	ProtocolV4 = 4
 	EnvelopeV1 = 1
 	// EnvelopeV2 binds the execution body and the field set in addition to identity (r7).
 	// It is a NEW generation rather than a redefinition of v1: silently changing what v1

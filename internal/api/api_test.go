@@ -803,6 +803,10 @@ func (f *fakeStore) ClaimPullJobsV3(ctx context.Context, region string, max, lea
 	return f.claimPullJobsUpTo(ctx, region, 3, kinds)
 }
 
+func (f *fakeStore) ClaimPullJobsV4(ctx context.Context, region string, max, lease int, kinds []string) ([]store.PullJob, error) {
+	return f.claimPullJobsUpTo(ctx, region, 4, kinds)
+}
+
 func (f *fakeStore) ClaimPullTestV3(ctx context.Context, region string) (string, []byte, int, bool, error) {
 	return f.claimPullTestUpTo(ctx, region, 3)
 }
@@ -892,7 +896,7 @@ func (f *fakeStore) RecordAgentHeartbeat(_ context.Context, region, agentID stri
 	f.agentHeartbeats[region] = agentID
 	return nil
 }
-func (f *fakeStore) RecordAgentCapabilities(ctx context.Context, region, agentID string, _ int, _ bool, kinds []string) error {
+func (f *fakeStore) RecordAgentCapabilities(ctx context.Context, region, agentID string, _ int, _ bool, kinds []string, _ int) error {
 	f.announcedWorkflowKinds = append(f.announcedWorkflowKinds, kinds...)
 	return f.RecordAgentHeartbeat(ctx, region, agentID)
 }

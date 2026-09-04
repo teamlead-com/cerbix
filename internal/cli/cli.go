@@ -66,6 +66,26 @@ type roleServices struct {
 	materializing bool
 }
 
+// executorLedgerCapability decides whether this process announces that it CONSUMES the
+// generation-4 carrier (FR-032). Consuming the queue IS the announcement core reads through
+// `LiveLedgerJobRegions`.
+//
+// It follows the ROLE and nothing else. Deriving it from the envelope capability — which the first
+// version did — left an envelope-disabled deployment with no ledger-capable worker at all, so
+// `LiveLedgerJobRegions` stayed false and FR-032 could never schedule the ordinary secretless
+// monitor it exists for. That is the coupling §13.0 forbids, removed from the publisher and then
+// reintroduced in the wiring (reviewer [450]).
+//
+// The pull agent's rule is deliberately different and not an inconsistency: a v4 CLAIM returns
+// every generation at or below 4, envelope-bearing ones included, so an agent that cannot open one
+// must not claim. An AMQP v4 QUEUE carries generation-4 deliveries only.
+func executorLedgerCapability(role string) int {
+	if role == "worker" {
+		return 1
+	}
+	return 0
+}
+
 func servicesForRole(role string) roleServices {
 	switch role {
 	case "all", "api":
@@ -956,7 +976,8 @@ func runServe(args []string) int {
 		if *role == "worker" && cfg.Secrets.EnvelopeEnforced() {
 			capability = dispatch.EnvelopeV2
 		}
-		amqpd.WithJobRegion(*region).WithCredentialCapability(capability)
+		amqpd.WithJobRegion(*region).WithCredentialCapability(capability).
+			WithLedgerCapability(executorLedgerCapability(*role))
 		amqpd.WithBrokerState(registry.SetBrokerUp) // cerbix_broker_up gauge
 		disp = amqpd
 	}
@@ -1064,7 +1085,7 @@ func runServe(args []string) int {
 		}
 		switch *role {
 		case "all":
-			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithLedgerCarrier(cfg.Ledger.CarrierEnabled).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithChangeRetention(cfg.Change.RetentionDays, cfg.Change.RetentionGroupsPerBatch). // FR-025 D9: change groups removed whole by age, daily
 				WithChangeRetentionMetrics(registry).                                              // FR-025 D15: cerbix_changes_retained, sampled by the pass
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
@@ -1097,7 +1118,7 @@ func runServe(args []string) int {
 				logging.Critical(logger, "scheduler_requires_database", "hint", "set database.dsn")
 				return 1
 			}
-			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithRetentionDays(cfg.Heartbeats.RetentionDays).
+			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithLedgerCarrier(cfg.Ledger.CarrierEnabled).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithChangeRetention(cfg.Change.RetentionDays, cfg.Change.RetentionGroupsPerBatch). // FR-025 D9: change groups removed whole by age, daily
 				WithChangeRetentionMetrics(registry).                                              // FR-025 D15: cerbix_changes_retained, sampled by the pass
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).

@@ -40,6 +40,19 @@ type Config struct {
 	Providers          ProvidersConfig          `yaml:"providers"`
 	Gate               GateConfig               `yaml:"gate"`
 	Change             ChangeConfig             `yaml:"change"`
+	Ledger             LedgerConfig             `yaml:"ledger"`
+}
+
+// LedgerConfig gates the expected-run ledger's carrier (FR-032, D-0237).
+//
+// A default is not a contract. `carrier_enabled` defaults false, but a default only describes
+// ABSENCE — it says nothing about an operator supplying true, and both silent readings are wrong.
+// Accepting it in a binary that has no V4 payload would publish generation-4 jobs carrying no
+// `DueAt`, which invariant 10h forbids; coercing it to false would be the self-healing runtime
+// AGENTS.md rules out. So a binary of this generation REFUSES it in Validate, and the phase that
+// mints the payload is the one that changes this rule.
+type LedgerConfig struct {
+	CarrierEnabled bool `yaml:"carrier_enabled"`
 }
 
 // PullConfig configures the HTTP-pull transport (an alternative to RabbitMQ for a geo
@@ -549,7 +562,22 @@ func defaults() *Config {
 
 // Validate enforces the config contract. Each rule has a single owner here at
 // the infra/bootstrap boundary; business rules live in their own layers.
+// ledgerCarrierPayloadPhase names the phase whose change makes `ledger.carrier_enabled: true`
+// admissible. It is a constant rather than a comment so the refusal below cannot drift from the
+// reason it gives.
+const ledgerCarrierPayloadPhase = "B2"
+
 func (c *Config) Validate() error {
+	// FR-032 phase B1: the generation-4 carrier is deployed INERT. Refuse the key rather than
+	// coercing it — an operator who set it must learn that it did nothing, not discover later
+	// that a gate they believed on was silently off.
+	if c.Ledger.CarrierEnabled {
+		return fmt.Errorf(
+			"ledger.carrier_enabled must not be true in this build: the generation-4 carrier is "+
+				"deployed but inert, and the job identity it carries (DueAt and its issue "+
+				"timestamps) is added in phase %s. Remove the key or set it to false",
+			ledgerCarrierPayloadPhase)
+	}
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return fmt.Errorf("server.listen must not be empty")
 	}

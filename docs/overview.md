@@ -526,7 +526,10 @@ flowchart TB
 - **Postgres 16 (TimescaleDB image)** — primary + streaming replica; time series on regular
   RANGE partitions + the `heartbeats_daily` rollup, retention drops old partitions (leader).
 - **RabbitMQ 4.3** — preferred cluster after the staged upgrade; durable regional
-  `checks.jobs.<region>` / `checks.jobs.v2.<region>` / `checks.jobs.v3.<region>` queues, the
+  `checks.jobs.<region>` / `checks.jobs.v2.<region>` / `checks.jobs.v3.<region>` /
+  `checks.jobs.v4.<region>` queues — generation 4 carries job identity (FR-032) and is deployed
+  INERT: nothing publishes into it while `ledger.carrier_enabled` is off, which a binary of this
+  generation refuses to have set on — the
   per-capability `checks.canary.[v3.]<kind>@<version>.<region>` (FR-029) plus shared
   `checks.results` / `checks.dead` and auto-delete regional test queues. A queue per carrier and per
   capability is deliberate: an executor that cannot open or cannot run a payload must be unable to

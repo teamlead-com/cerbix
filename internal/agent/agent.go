@@ -51,6 +51,20 @@ type CredentialHealth interface {
 
 // Agent polls the central API for its region's jobs and posts back results.
 type Agent struct {
+	// mu guards ledgerAbsentUntil, the BOUNDED downgrade taken when a core predating the
+	// generation-4 claim endpoint answers 404. Bounded rather than permanent: a core upgraded
+	// underneath a running agent must be found again, and `now` is injectable so a test can
+	// observe the recovery without waiting for it.
+	// mu guards the generation-4 endpoint state, which is THREE positions and not two.
+	// `ledgerProven` is the only thing that permits an ANNOUNCEMENT: it is set by a v4 claim that
+	// actually returned 200. `ledgerAbsentUntil` bounds when the next ATTEMPT may be made. Being
+	// allowed to try is not being allowed to announce — collapsing the two made the false
+	// announcement periodic instead of permanent (reviewer [436]).
+	mu                sync.Mutex
+	ledgerProven      bool
+	ledgerAbsentUntil time.Time
+	now               func() time.Time
+
 	serverURL      string
 	token          string
 	region         string
@@ -367,15 +381,59 @@ func (a *Agent) flushBuffer(ctx context.Context) {
 }
 
 func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []string, protocolVersions []int, err error) {
-	path := a.claimPath("jobs")
+	path := a.jobClaimPath()
+	resp, err := a.sendClaim(ctx, path)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// An agent may be newer than its core — §16.1's "core at B1, executor at B2" is a NORMAL
+	// rollout state. A core predating `agentJobsV4` answers 404, and without this the agent would
+	// simply stop claiming: newer executor, dead region. The downgrade is remembered so the 404 is
+	// paid once, is retried IMMEDIATELY so no poll is lost, and moves one way only — widening what
+	// an executor claims is the safe direction, narrowing it silently is not.
+	if resp.StatusCode == http.StatusNotFound && path != a.claimPath("jobs") {
+		_ = resp.Body.Close()
+		if a.noteLedgerEndpointAbsent() {
+			a.logger.Info("ledger_claim_endpoint_absent", "path", path,
+				"falling_back_to", a.claimPath("jobs"), "reprobe_after", ledgerReprobeAfter.String(),
+				"reason", "core predates the generation-4 claim endpoint")
+		}
+		path = a.claimPath("jobs")
+		if resp, err = a.sendClaim(ctx, path); err != nil {
+			return nil, nil, nil, err
+		}
+	} else if resp.StatusCode == http.StatusOK && path != a.claimPath("jobs") {
+		// The endpoint answered, so the downgrade — if any — is over and the announcement may
+		// resume in the same breath as the consumption it describes.
+		a.noteLedgerEndpointLive()
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, nil, nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
+	}
+	return a.decodeClaim(resp)
+}
+
+// sendClaim issues one claim request against the given path, carrying every capability this agent
+// declares. Split out so the generation-4 downgrade can retry the SAME request against the older
+// path without duplicating the header set — a second copy is how one of them would drift.
+func (a *Agent) sendClaim(ctx context.Context, path string) (*http.Response, error) {
 	url := fmt.Sprintf("%s%s?region=%s&max=%d", a.serverURL, path, a.region, claimBatch)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	a.auth(req)
 	if capability := a.envelopeCapability(); capability > 0 {
 		req.Header.Set("X-Cerbix-Credential-Envelope", strconv.Itoa(capability))
+	}
+	// FR-032: the declaration follows the ATTEMPTED endpoint, not the published capability. A
+	// recovery probe is sent while this agent still announces 0 — it has not proven the endpoint
+	// yet — and that probe must still carry the header, or the endpoint it is probing refuses it
+	// and the agent concludes the endpoint is absent when it is merely undeclared.
+	if path == a.claimPathAt(dispatch.ProtocolV4, "jobs") {
+		req.Header.Set("X-Cerbix-Ledger", "1")
 	}
 	// FR-029 invariant 6: what this agent can run, declared on the claim itself. Without it the
 	// server hands out only jobs that require nothing, so an agent that stopped announcing (or was
@@ -383,15 +441,11 @@ func (a *Agent) claim(ctx context.Context) (jobs []json.RawMessage, tokens []str
 	if kinds := a.announcedWorkflowKinds(); len(kinds) > 0 {
 		req.Header.Set("X-Cerbix-Workflow-Kinds", strings.Join(kinds, ","))
 	}
-	resp, err := a.http.Do(req)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, nil, nil, fmt.Errorf("claim status %d: %s", resp.StatusCode, string(body))
-	}
+	return a.http.Do(req)
+}
+
+// decodeClaim reads the claim response body.
+func (a *Agent) decodeClaim(resp *http.Response) (jobs []json.RawMessage, tokens []string, protocolVersions []int, err error) {
 	var out struct {
 		Jobs   []json.RawMessage `json:"jobs"`
 		Tokens []string          `json:"tokens"`
@@ -484,6 +538,86 @@ func (a *Agent) envelopeCapability() int {
 	return dispatch.EnvelopeV2
 }
 
+// ledgerReprobeAfter bounds the generation-4 downgrade. A core is upgraded underneath a running
+// agent all the time, so a permanent fallback would leave that agent claiming v3 for the rest of
+// its life while core, seeing the announcement, selected v4 for its region.
+const ledgerReprobeAfter = 5 * time.Minute
+
+// ledgerCapability is the PUBLISHED capability: what the heartbeat announces, and therefore what
+// core may act on when it decides whether to raise a region to generation 4. It is 1 only on
+// PROOF — a v4 claim that actually returned 200 — never on eligibility to try.
+//
+// It is deliberately NOT the predicate that chooses the claim path; `mayTryLedgerEndpoint` does
+// that, and it is weaker. Collapsing the two is the defect this went through three times:
+// announcing what the agent does not consume authorizes core to select a row nobody will claim
+// ([428]); keeping the announcement while downgraded does it one rollout step later ([432]); and
+// announcing the moment a cooldown expires, before any probe, makes it periodic rather than
+// permanent ([436]). An attempt costs one 404. An announcement costs an unclaimable row.
+//
+// The envelope floor applies to both, because a v4 claim returns every OLDER generation too and an
+// agent that cannot open envelope v2 must not receive one.
+func (a *Agent) ledgerCapability() int {
+	if a.envelopeCapability() < dispatch.EnvelopeV2 {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.ledgerProven {
+		return 1
+	}
+	return 0
+}
+
+// mayTryLedgerEndpoint says whether a v4 claim may be ATTEMPTED now. Deliberately weaker than
+// ledgerCapability: an attempt costs one 404, while an announcement costs an unclaimable row.
+func (a *Agent) mayTryLedgerEndpoint() bool {
+	if a.envelopeCapability() < dispatch.EnvelopeV2 {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ledgerAbsentUntil.IsZero() || !a.clock().Before(a.ledgerAbsentUntil)
+}
+
+func (a *Agent) clock() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
+}
+
+// noteLedgerEndpointAbsent starts or extends the bounded downgrade. Returns true the first time,
+// so the log line is written once per outage rather than once per poll.
+func (a *Agent) noteLedgerEndpointAbsent() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	first := a.ledgerAbsentUntil.IsZero()
+	// The announcement is withdrawn in the same statement that starts the cooldown: a core that
+	// has stopped serving v4 must stop being told this agent consumes it.
+	a.ledgerProven = false
+	a.ledgerAbsentUntil = a.clock().Add(ledgerReprobeAfter)
+	return first
+}
+
+// noteLedgerEndpointLive clears the downgrade after a claim the v4 endpoint actually served.
+func (a *Agent) noteLedgerEndpointLive() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.ledgerProven = true
+	a.ledgerAbsentUntil = time.Time{}
+}
+
+// jobClaimGeneration is the carrier generation of the JOB claim endpoint. It is deliberately
+// separate from claimGeneration: B1 ships `agentJobsV4` and no v4 TEST endpoint, so test RPC must
+// keep following the envelope-derived generation rather than being redirected to a path that does
+// not exist.
+func (a *Agent) jobClaimGeneration() int {
+	if a.mayTryLedgerEndpoint() {
+		return dispatch.ProtocolV4
+	}
+	return a.claimGeneration()
+}
+
 // claimGeneration is the carrier generation of the claim endpoint this agent polls, which
 // follows from its own capability — not from anything a server or a payload asserts. A
 // capability-2 agent polls the generation-3 endpoint, whose claim also returns every older
@@ -504,7 +638,18 @@ func (a *Agent) claimGeneration() int {
 // they are derived from the same capability, so a future generation cannot update one and
 // forget the other.
 func (a *Agent) claimPath(kind string) string {
-	switch a.claimGeneration() {
+	return a.claimPathAt(a.claimGeneration(), kind)
+}
+
+// jobClaimPath is the job endpoint, which may be one generation ahead of the test one.
+func (a *Agent) jobClaimPath() string {
+	return a.claimPathAt(a.jobClaimGeneration(), "jobs")
+}
+
+func (a *Agent) claimPathAt(generation int, kind string) string {
+	switch generation {
+	case dispatch.ProtocolV4:
+		return "/api/v1/agent/v4/" + kind
 	case dispatch.ProtocolV3:
 		return "/api/v1/agent/v3/" + kind
 	case dispatch.ProtocolV2:
@@ -578,6 +723,12 @@ func (a *Agent) heartbeat(ctx context.Context) {
 			// never sent one — the announcement is the whole barrier, and its absence is a
 			// correct answer rather than a missing one.
 			domain.CanaryCapabilityKey: a.announcedWorkflowKinds(),
+			// FR-032: announced ONLY when this agent can actually CLAIM generation 4. An
+			// announcement without the matching consumer is worse than none: it authorizes core
+			// to select a v4 row into a region that will never claim it, and the monitor has no
+			// outcome until the row's TTL — the generation-3 failure `scheduler.go` records,
+			// repeated one generation later.
+			"ledger": a.ledgerCapability(),
 		},
 		"credential_ready": capability > 0 && a.credentialReady.Load(),
 	})

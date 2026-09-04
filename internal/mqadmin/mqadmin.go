@@ -19,6 +19,7 @@ const (
 	jobsQueuePrefix   = "checks.jobs."
 	jobsV2QueuePrefix = "checks.jobs.v2."
 	jobsV3QueuePrefix = "checks.jobs.v3."
+	jobsV4QueuePrefix = "checks.jobs.v4."
 	// FR-029: the per-workflow-kind queue. Additive by construction — a new queue and a new
 	// binding, with every existing queue and consumer untouched, so an executor that does not
 	// announce the capability simply never sees a canary job.
@@ -113,6 +114,23 @@ func (c *Client) LiveCredentialJobRegions(ctx context.Context) (map[string]bool,
 // region qualifies only when something is consuming the generation-3 carrier. A consumer
 // on the older envelope queue is not evidence of readiness for the newer one — that is the
 // whole reason capability is generational rather than boolean (§4.7, D-0160).
+// LiveLedgerJobRegions is the AMQP half of FR-032's capability question: a region qualifies only
+// when something is CONSUMING the generation-4 queue. Consuming it is the announcement, exactly as
+// for generation 3 — a worker that cannot read job identity is not subscribed here at all.
+func (c *Client) LiveLedgerJobRegions(ctx context.Context) (map[string]bool, error) {
+	queues, err := c.liveQueues(ctx)
+	if err != nil {
+		return nil, err
+	}
+	live := map[string]bool{}
+	for _, q := range queues {
+		if q.Consumers > 0 && strings.HasPrefix(q.Name, jobsV4QueuePrefix) {
+			live[strings.TrimPrefix(q.Name, jobsV4QueuePrefix)] = true
+		}
+	}
+	return live, nil
+}
+
 func (c *Client) LiveCredentialV3JobRegions(ctx context.Context) (map[string]bool, error) {
 	queues, err := c.liveQueues(ctx)
 	if err != nil {

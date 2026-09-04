@@ -236,3 +236,13 @@ pull:
 #         max_total_bytes: 16777216
 #         max_monitors_per_bundle: 1000
 #         max_managed_monitors: 5000
+
+# FR-032 — the expected-run ledger's carrier.
+#
+# A default is not a contract, so this key is stated rather than left absent. `false` and absent are
+# identical; `true` is REFUSED at startup by a binary of this generation, naming the key, because the
+# job identity that generation-4 jobs carry is added in a later phase. Accepting it would publish
+# jobs carrying no identity; coercing it to false silently would leave an operator believing a gate
+# is on that is off.
+ledger:
+  carrier_enabled: false

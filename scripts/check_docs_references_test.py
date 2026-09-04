@@ -984,5 +984,72 @@ class FR032TransportMatrix(unittest.TestCase):
             cdr.read("docs/specs/func-expected-run-ledger.md")), [])
 
 
+class FR032CarrierGateContract(unittest.TestCase):
+    """"Defaults false" describes ABSENCE. It says nothing about an operator supplying `true`.
+
+    Accepting it lets a B1 binary publish V4 before `DueAt` exists (10h); coercing it to false
+    silently is the self-healing AGENTS.md forbids. So the contract states both phases explicitly,
+    names the validating owner and the construction path, and this guard requires all of it
+    (reviewer [423]).
+    """
+
+    TABLE = ("| Phase | `ledger.carrier_enabled` absent or `false` | `ledger.carrier_enabled: true` |\n"
+             "| --- | --- | --- |\n"
+             "| **B1** | accepted, inert | **REFUSED at startup.** `(*Config).Validate` "
+             "(`internal/config/config.go:552`) errors, naming the key |\n"
+             "| **B2** | accepted | accepted; the same snapshot reaches selection in the atomic "
+             "payload change |\n"
+             "\nowned through `internal/cli/cli.go:1067`\n")
+
+    def find(self, body=None):
+        return cdr.check_fr032_carrier_gate_contract(self.TABLE if body is None else body, "fixture.md")
+
+    def test_a_complete_contract_is_silent(self):
+        self.assertEqual(self.find(), [])
+
+    def test_no_contract_table_is_reported(self):
+        got = self.find("`ledger.carrier_enabled` defaults to false.\n")
+        self.assertTrue(any("no `ledger.carrier_enabled` phase contract table" in m for m in got), got)
+
+    def test_b1_accepting_true_is_reported(self):
+        got = self.find(self.TABLE.replace("**REFUSED at startup.**", "Accepted."))
+        self.assertTrue(any("does not say B1 REFUSES" in m for m in got), got)
+
+    def test_a_refusal_with_no_owner_is_reported(self):
+        got = self.find(self.TABLE.replace("`(*Config).Validate` (`internal/config/config.go:552`) errors, naming the key",
+                                           "the process errors"))
+        self.assertTrue(any("names no validating owner" in m for m in got), got)
+
+    def test_b2_untied_from_the_atomic_change_is_reported(self):
+        got = self.find(self.TABLE.replace("in the atomic payload change", "when convenient"))
+        self.assertTrue(any("does not tie the gate to the ATOMIC" in m for m in got), got)
+
+    def test_a_missing_phase_row_is_reported(self):
+        rows = "\n".join(l for l in self.TABLE.split("\n") if not l.startswith("| **B2**"))
+        got = self.find(rows)
+        self.assertTrue(any("has no B2 row" in m for m in got), got)
+
+    # Citations are checked in the contract's OWN section: scanning the whole document let an
+    # unrelated mention of the same path satisfy the check.
+    def test_an_uncited_scheduler_path_is_reported(self):
+        got = self.find(self.TABLE.replace("owned through `internal/cli/cli.go:1067`", "owned somewhere"))
+        self.assertTrue(any("scheduler construction path" in m for m in got), got)
+
+    def test_breaking_the_guard_breaks_these_tests(self):
+        real = cdr.check_fr032_carrier_gate_contract
+        try:
+            cdr.check_fr032_carrier_gate_contract = lambda *a, **k: []
+            self.assertEqual(self.find("nothing\n"), [],
+                             "a neutralised guard must report nothing — this documents the shape")
+        finally:
+            cdr.check_fr032_carrier_gate_contract = real
+        self.assertTrue(self.find("nothing\n"),
+                        "with the real guard restored the same input must be reported")
+
+    def test_the_repository_itself_agrees(self):
+        self.assertEqual(cdr.check_fr032_carrier_gate_contract(
+            cdr.read("docs/specs/func-expected-run-ledger.md")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

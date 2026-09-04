@@ -125,19 +125,19 @@ func TestPullProtocolClaimsArePhysicallySeparated(t *testing.T) {
 
 func TestCredentialReadyAgentRegionIsExistential(t *testing.T) {
 	st, ctx := outboxTestStore(t)
-	if err := st.RecordAgentCapabilities(ctx, "secure", "legacy", 0, false, nil); err != nil {
+	if err := st.RecordAgentCapabilities(ctx, "secure", "legacy", 0, false, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute, 1); err != nil || ready["secure"] {
 		t.Fatalf("legacy-only region reported ready: %#v err=%v", ready, err)
 	}
-	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-degraded", 1, false, nil); err != nil {
+	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-degraded", 1, false, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	if ready, _ := st.LiveCredentialReadyAgentRegions(ctx, time.Minute, 1); ready["secure"] {
 		t.Fatalf("degraded v2 agent reported ready: %#v", ready)
 	}
-	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-ready", 1, true, nil); err != nil {
+	if err := st.RecordAgentCapabilities(ctx, "secure", "v2-ready", 1, true, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	if ready, err := st.LiveCredentialReadyAgentRegions(ctx, time.Minute, 1); err != nil || !ready["secure"] {
@@ -297,13 +297,13 @@ func TestLiveCanaryAgentCapabilitiesUnionsOnlyLiveAgents(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	token := domain.CanaryCapabilityOfThisBinary()
 
-	if err := st.RecordAgentCapabilities(ctx, "geo1", "old", 2, true, nil); err != nil {
+	if err := st.RecordAgentCapabilities(ctx, "geo1", "old", 2, true, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RecordAgentCapabilities(ctx, "geo1", "new", 2, true, []string{token}); err != nil {
+	if err := st.RecordAgentCapabilities(ctx, "geo1", "new", 2, true, []string{token}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RecordAgentCapabilities(ctx, "geo2", "skewed", 2, true, []string{"async_transaction_v1@2"}); err != nil {
+	if err := st.RecordAgentCapabilities(ctx, "geo2", "skewed", 2, true, []string{"async_transaction_v1@2"}, 0); err != nil {
 		t.Fatal(err)
 	}
 	byRegion, err := st.LiveCanaryAgentCapabilities(ctx, time.Minute)

@@ -101,6 +101,9 @@ type Store interface {
 	EnqueuePullJobV2(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int, workflowKind string) error
 	EnqueuePullJobV3(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int, workflowKind string) error
 	LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error)
+	// FR-032's PULL half of the same capability question: an agent that declares it reads job
+	// identity. Asked only when `ledger.carrier_enabled` is on.
+	LiveLedgerReadyAgentRegions(ctx context.Context, within time.Duration) (map[string]bool, error)
 	LiveCanaryAgentCapabilities(ctx context.Context, within time.Duration) (map[string][]string, error)
 	PurgeExpiredPullJobs(ctx context.Context) (int, error)
 	PurgeExpiredPullTests(ctx context.Context) (int, error)
@@ -201,6 +204,10 @@ type LiveRegionSource interface {
 type CredentialLiveRegionSource interface {
 	LiveCredentialJobRegions(ctx context.Context) (map[string]bool, error)
 	LiveCredentialV3JobRegions(ctx context.Context) (map[string]bool, error)
+	// LiveLedgerJobRegions is FR-032's AMQP capability question: something must be CONSUMING the
+	// generation-4 queue. Asked only when `ledger.carrier_enabled` is on, which a B1 binary
+	// refuses to have set at all.
+	LiveLedgerJobRegions(ctx context.Context) (map[string]bool, error)
 	// LiveCanaryJobRegions is the AMQP half of the FR-029 capability question: a region qualifies
 	// only when something is consuming the per-workflow-kind queue. A consumer on the ordinary job
 	// queue is not evidence that anything there can run a canary.
@@ -568,6 +575,7 @@ type Scheduler struct {
 	configCh            <-chan struct{}    // execution-config changes (LISTEN monitor_config_changed) → force a snapshot reload
 	reconciler          *ingest.Reconciler // shared post-commit flow for dead-man transitions (SSE + incident)
 	credentialEnvelopes bool
+	ledgerCarrier       bool
 	secretResolution    SecretResolutionSink
 	// gateCfg / gateMetrics drive the decision-ledger maintenance loop (gatemaintenance.go);
 	// a zero PurgeEvery means the loop is not started.
@@ -599,6 +607,16 @@ func (s *Scheduler) WithChangeRetentionMetrics(sink ChangeRetentionSink) *Schedu
 // WithCredentialEnvelopes switches the scheduler to the decrypt-free snapshot plus
 // authoritative materialization path. Config validation guarantees this is enabled before
 // any *_ref write surface is exposed.
+// WithLedgerCarrier gates FR-032's generation-4 selection. It is the ONE place the decision
+// enters the leader: a config field validated in `(*Config).Validate` and handed in at
+// construction, never read from the environment, never decided inside `lead()`, and never
+// answered differently per role — a gate each role decides for itself is a gate a mixed
+// deployment disagrees about (§16.1).
+func (s *Scheduler) WithLedgerCarrier(enabled bool) *Scheduler {
+	s.ledgerCarrier = enabled
+	return s
+}
+
 func (s *Scheduler) WithCredentialEnvelopes(enabled bool) *Scheduler {
 	s.credentialEnvelopes = enabled
 	return s
@@ -1552,6 +1570,40 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					carrierGeneration[region] = dispatch.ProtocolV3
 				}
 			}
+			// FR-032 invariant 10k. Generation 4 is raised ONLY when the ledger carrier is enabled
+			// AND the region announces it — on AMQP by consuming the v4 queue, on pull by an agent
+			// declaring the ledger capability. With the flag off this block does not run, so
+			// nothing anywhere stamps 4: that is the whole safety proof in-process, where there is
+			// no announcement to withhold (§16.1), and it is asserted on this resolved map rather
+			// than once per transport, because all three transports read what the producer stamped.
+			if s.ledgerCarrier {
+				// AMQP: something must be CONSUMING the v4 queue. Pull regions are excluded here
+				// for the reason the generation-3 branch gives — an in-process or AMQP runner is
+				// no evidence about the agent that will claim the row.
+				if s.credentialLiveRegions != nil {
+					if ready, err := s.credentialLiveRegions.LiveLedgerJobRegions(ctx); err != nil {
+						s.logger.Warn("ledger_carrier_capability_lookup_failed", "error", err.Error())
+					} else {
+						for region := range ready {
+							if !s.pullRegions[region] {
+								carrierGeneration[region] = dispatch.ProtocolV4
+							}
+						}
+					}
+				}
+				// Pull: an AGENT must have declared it, which is a different question with a
+				// different source. Announced on the heartbeat as `capabilities->>'ledger'`.
+				if ready, err := s.store.LiveLedgerReadyAgentRegions(ctx, 45*time.Second); err != nil {
+					s.logger.Warn("ledger_agent_capability_lookup_failed", "error", err.Error())
+				} else {
+					for region := range ready {
+						if s.pullRegions[region] {
+							carrierGeneration[region] = dispatch.ProtocolV4
+						}
+					}
+				}
+			}
+
 			for _, snapshotRegion := range regions {
 				ids := credentialByRegion[snapshotRegion]
 				for start := 0; start < len(ids); start += 64 {

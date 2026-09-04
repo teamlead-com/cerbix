@@ -1187,6 +1187,70 @@ def check_fr032_transport_matrix(body, spec='docs/specs/func-expected-run-ledger
     return out
 
 
+def check_fr032_carrier_gate_contract(body, spec='docs/specs/func-expected-run-ledger.md'):
+    """The `ledger.carrier_enabled` contract must say what a B1 binary does with `true`.
+
+    "Defaults false" describes only ABSENCE. An operator can supply the key, and both plausible
+    readings of silence are wrong: accepting it lets B1 publish V4 before `DueAt` exists (10h), and
+    coercing it to false silently is the self-healing AGENTS.md forbids (reviewer [423]). So the
+    guard requires the refusal clause, the B2 ownership clause, and NAMED owners — the validating
+    function and the scheduler construction path — rather than the word "default".
+    """
+    out = []
+    # The scan STOPS at the end of the contract table. Letting `seen` stay true ran on to §16.1's
+    # mixed-version matrix, whose rows also begin `| B1 |` and `| **B1** |`, and those silently
+    # overwrote the contract's — the guard then reported the real spec as contractless. Caught by
+    # running it against the tree rather than against fixtures.
+    # Citations are checked in the contract's OWN section, not the whole document: scanning the
+    # body let `internal/config/config.go` satisfy the check from an unrelated mention elsewhere.
+    anchor = body.find('| Phase | `ledger.carrier_enabled`')
+    section = body[anchor:anchor + 2500] if anchor >= 0 else ''
+    rows, seen = {}, False
+    for line in body.split('\n'):
+        if seen and not line.startswith('|'):
+            break
+        if not line.startswith('|'):
+            continue
+        cells = [c.strip() for c in line.strip('|').split('|')]
+        if len(cells) < 3:
+            continue
+        if cells[0].lower() == 'phase' and 'carrier_enabled' in line:
+            seen = True
+            continue
+        if not seen:
+            continue
+        key = cells[0].strip('*` ')
+        if key in ('B1', 'B2'):
+            rows[key] = cells[2]
+    if not seen:
+        out.append(f'{spec} has no `ledger.carrier_enabled` phase contract table (a `| Phase | … |` '
+                   f'header naming the key), so "defaults false" is the whole specification and it '
+                   f'says nothing about an operator supplying true')
+        return out
+    for phase in ('B1', 'B2'):
+        if phase not in rows:
+            out.append(f'{spec}: the carrier-gate contract has no {phase} row; each phase must say '
+                       f'what it does when the key is supplied as true')
+    if 'B1' in rows:
+        cell = rows['B1']
+        if not re.search(r'refus|reject', cell, re.I):
+            out.append(f'{spec}: the carrier-gate contract does not say B1 REFUSES '
+                       f'`ledger.carrier_enabled: true`. Accepting it publishes V4 before its '
+                       f'payload exists; coercing it to false silently is a self-healing runtime')
+        if '(*Config).Validate' not in cell and 'Validate' not in cell:
+            out.append(f'{spec}: the B1 refusal names no validating owner. A refusal nobody owns is '
+                       f'a sentence, not a startup failure')
+    if 'B2' in rows and 'atomic' not in rows['B2'].lower():
+        out.append(f'{spec}: the B2 row does not tie the gate to the ATOMIC payload change; '
+                   f'enabling selection apart from it is the ordering 10h forbids')
+    for cited, why in (('internal/config/config.go', 'the config owner'),
+                       ('internal/cli/cli.go', 'the scheduler construction path')):
+        if cited not in section:
+            out.append(f'{spec}: the carrier-gate contract cites no path for {why} ({cited}); '
+                       f'unowned, it drifts into a role-local branch or an environment read')
+    return out
+
+
 def check_enumerations():
     bad = []
 
@@ -1242,7 +1306,7 @@ def check_enumerations():
     testfile = 'internal/store/revisiontimeline_internal_test.go'
     for tf, section, ends, row in (
             (testfile, '### 17.3', '### 17.4', '13a'),
-            ('internal/store/pullcarrier4_internal_test.go', '### 17.5', '## 18', '10j')):
+            ('internal/store/pullcarrier4_internal_test.go', '### 17.5', '### 17.6', '10j')):
         if os.path.exists(spec) and os.path.exists(tf):
             for msg in check_fr032_discharge(read(spec), read(tf), spec, tf, section, ends, row):
                 bad.append((spec, 1, 'enum', msg))
@@ -1255,6 +1319,8 @@ def check_enumerations():
         for msg in check_fr032_drain_surfaces(read(spec), migs, stores, spec):
             bad.append((spec, 1, 'enum', msg))
         for msg in check_fr032_transport_matrix(read(spec), spec):
+            bad.append((spec, 1, 'enum', msg))
+        for msg in check_fr032_carrier_gate_contract(read(spec), spec):
             bad.append((spec, 1, 'enum', msg))
 
     # 5. the Monitoring-as-Code bundle README against fileSupportedTypes.
@@ -1330,7 +1396,8 @@ def main():
               'summarise, §17.2\'s own totals DERIVED from its discharge table in both '
               'places that state them, and §13.0\'s rollback-and-drain rule against every '
               'V4-capable pull surface and every store function that removes one of its rows, and '
-              '§16.1\'s half-deployment rows against the transports they can actually arise in '
+              '§16.1\'s half-deployment rows against the transports they can actually arise in, and the '
+              '`ledger.carrier_enabled` phase contract naming what B1 does with `true` '
               '— the check types and the bundle types as SETS '
               'through an asserted label map, not by count alone; and no document announces a '
               '`PARTIAL` residual its own discharge map does not have)')

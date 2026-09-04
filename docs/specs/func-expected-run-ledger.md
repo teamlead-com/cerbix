@@ -1126,7 +1126,26 @@ depend on a deploy order being respected.
 `WithCredentialEnvelopes` (`scheduler.go:570`, `:603`) and `resultRevisionMode`
 (`internal/store/store.go:197`), which is how the credential carrier was staged.
 
-1. **B1 — the transport, inert.** Queues, the widened CHECK, `ClaimPullJobsV4`, `agentJobsV4`,
+**A default is not a contract, and the difference is what a B1 binary does when an operator supplies
+`true`** (reviewer P0 at [423]). Defaulting false says nothing about that input, and both plausible
+readings are wrong: accepting it lets B1 select and publish V4 before `DueAt` exists, violating 10h;
+coercing it to false silently is the self-healing that `AGENTS.md` forbids — "config is strictly
+validated before business logic starts" and "runtime paths contain no self-healing or fallback for
+invalid configuration". So the contract is versioned and explicit:
+
+| Phase | `ledger.carrier_enabled` absent or `false` | `ledger.carrier_enabled: true` |
+| --- | --- | --- |
+| **B1** | accepted; the carrier is deployed and inert | **REFUSED at startup.** `(*Config).Validate` (`internal/config/config.go:552`) returns an error naming the key and saying that the V4 payload — `DueAt` and the identity it carries — arrives only in B2, so the carrier cannot be selected yet. The process exits before any business logic, exactly as an empty `server.listen` does today |
+| **B2** | accepted; selection stays off | accepted; the SAME validated snapshot reaches selection, wired in the atomic change that adds the payload and the ledger together |
+
+**Ownership is named so it cannot drift into a role-local branch or an environment read.** The value
+is a field of the config struct, validated by `(*Config).Validate`, and reaches the leader through
+the scheduler construction path — `scheduler.New(...)` at `internal/cli/cli.go:1067` (`case "all"`)
+and `:1100` (`case "scheduler"`), the only two roles that build one. Not `os.Getenv`, not a check
+inside `lead()`, and not a different answer per role: a gate that each role decides for itself is a
+gate that a mixed deployment disagrees about, which is the failure §16.1 exists to describe.
+
+1. **B1 — the transport, inert. IMPLEMENTED.** Queues, the widened CHECK, `ClaimPullJobsV4`, `agentJobsV4`,
    capability announcement, and `carrierGeneration`'s ability to reach 4 — all deployed, with the
    gate **off**, so selection never happens. Executors may announce V4 and sit on an empty queue.
    Provable end to end by direct tests against a live stack **without a single V4 job existing**.
@@ -1805,15 +1824,16 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
-### 17.2 The discharge audit — 69 invariants: 34 covered, 2 specified, 2 discharged, 1 withdrawn, 30 to specify
+### 17.2 The discharge audit — 69 invariants: 32 covered, 0 specified, 6 discharged, 1 withdrawn, 30 to specify
 
 The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
 sized as its own scope rather than folded into the design approval. It asks one question of each
 invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
 the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
 
-**Result: 69 invariants — 34 covered, 2 SPECIFIED by §17.4, 2 DISCHARGED (13a by phase A, 10j by
-B1-M), 1 withdrawn, 30 to specify (19 in B2, 9 in D, 2 in C).** Every number in this paragraph and in the heading above
+**Result: 69 invariants — 32 covered, 0 SPECIFIED, 6 DISCHARGED (13a by phase A, 10j by B1-M, and
+10g, 10h, 10k and 11 by B1's transport slice), 1 withdrawn,
+30 to specify (19 in B2, 9 in D, 2 in C).** Phase B1 now owns no undischarged row. Every number in this paragraph and in the heading above
 it is now DERIVED from the table below, by `check_fr032_audit_totals`, because they were typed there
 instead and drifted: they read "65 invariants ... 30 to specify" while the table already held 66 rows
 and 28, through 13a's addition and §17.4's specifications. A total written beside its own table is
@@ -1890,13 +1910,13 @@ to correct.
 | 10d | B2 | behavioural | **covered** | the same case, plus the forged-payload mutation |
 | 10e | B2 | schema assertion | TO SPECIFY | assert the CHECK REJECTS a job with no carrier and a carrier with no job |
 | 10f | C | behavioural | **covered** | both arrival orders of the stale result |
-| 10g | B1 | behavioural | **covered** | physical unreachability on AMQP and pull |
-| 10h | B1 | behavioural | **covered** | §16.1's mixed-version matrix read through its transport-applicability table: announcement plus gate on the wire transports, the false flag (10k) in-process |
+| 10g | B1 | behavioural | **DISCHARGED** | 5 tests, 4 mutations killed (§17.6) — separate queues per generation, an unmapped generation routed nowhere, and a v3 claim leaving a generation-4 row outside its result set on a real database |
+| 10h | B1 | behavioural | **DISCHARGED** | 4 tests, 3 mutations killed (§17.6) — the config refuses `true` without coercing it, and the v4 endpoint requires its own ledger declaration rather than the credential one |
 | 10i | B2 | behavioural (live broker) | **TO SPECIFY** | reassigned from B1 by reviewer P0 at [342]: a V4 delivery is DEFINED by `DueAt`, which the wire does not carry until B2, so B1 has no absence to detect. §17.4 keeps both mutations named for B2's gate |
 | 10j | B1 | migration | **DISCHARGED** | 5 tests, 8 mutations killed (§17.5) — the shipped goose Down, refusal plus row survival plus atomic still-widened constraints |
-| 10k | B1 | behavioural | **SPECIFIED (§17.4)** | while `ledger.carrier_enabled` is false `lead()`'s resolved map stamps nothing above 3, asserted on that map's OUTPUT across its three branches rather than once per transport |
+| 10k | B1 | behavioural | **DISCHARGED** | 4 tests, 1 mutation killed (§17.6) — `lead()`'s resolved map stays ≤ 3 on all three transports with an ANNOUNCING executor and the flag off |
 | 10l | B2 | behavioural | **TO SPECIFY** | when the flag is true `role=all` reaches 4 and pull regions do NOT — the two V3 failures §13.0 quotes, one inert deployment and one unclaimable row |
-| 11 | B1 | source scan | **SPECIFIED (§17.4)** | an import-boundary scan over both packages plus an interface-shape assertion on `Dispatcher`; specifying it found the invariant's "no ack concept" clause FALSE about the tree (§17.4) |
+| 11 | B1 | source scan | **DISCHARGED** | 3 tests, 1 mutation killed (§17.6) — one import scan beside each executor package, plus the exact five-method `Dispatcher` set |
 | 11a | B1 | — | **n/a, a withdrawal** | records that the pull agent's lease-ack predates this requirement and is out of scope |
 | 12 | B2 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
 | 13 | B2 | behavioural | **covered** | the confirm-acceleration threshold case — it says "attributed to a WINDOW", and there are no windows before B2 |
@@ -2119,6 +2139,15 @@ the pattern is now legible — when a phase is defined by a capability being OFF
 that phase must be provable with it off, and any claim of the form "flipping it changes something"
 belongs to the phase that flips it. B1 can prove only the false-default inert output.
 
+**Invariant 10h's B1 half: the gate must REFUSE `true`, not absorb it.** A default only describes
+absence. B1's proof is about the input an operator can actually supply.
+
+| Claim | Check kind | Test | The mutation that must kill it |
+| --- | --- | --- | --- |
+| A B1 binary refuses `ledger.carrier_enabled: true` at startup | behavioural | Load a config with the key true and assert `(*Config).Validate` returns an error naming the key; assert no scheduler is constructed | Accept it. B1 would then select and publish V4 before `DueAt` exists, which is 10h's violation in one line of config |
+| It refuses rather than coercing | behavioural | Assert the error mentions B2 and the missing payload, and that the loaded value is NOT rewritten to false | Coerce silently — `if !b2 { cfg.Ledger.CarrierEnabled = false }`. Every "is it inert?" assertion still passes, and the operator believes a gate is on that is off. This is the mutation the inertness tests CANNOT catch, which is why the refusal is asserted on the error and on the unmodified value |
+| Absent or false stays inert on all three transports | behavioural | Resolve admission for an AMQP region, a pull region and `role=all` with the key absent, then again with it false; every value in `lead()`'s resolved map is ≤ 3 | Raise one branch — the same mutation 10k names, here run for both spellings of "off", because absent and false must be indistinguishable downstream |
+
 **Not specified here, deliberately:** B1 writes no ledger rows, so nothing in this gate touches
 `expected_runs`. The carrier's *eligibility* consequences are 10c and 10d, which belong to B2 where
 rows exist.
@@ -2173,6 +2202,146 @@ assertion in the test kills.
 
 **Not discharged by this slice:** 10g, 10h, 10k and 11 remain `SPECIFIED`. B1-M contains no transport
 code, no config, no `ProtocolV4` selection and no ledger row, so nothing here touches them.
+
+### 17.6 Phase B1's discharge — invariants 10g, 10h, 10k and 11
+
+Landed with the transport slice. Each row's proof lives beside the code it guards rather than in one
+cross-cutting file, which is why this section cites six files.
+
+- **10g, the LIVE AMQP half.** `TestAV3ConsumerCannotReceiveAGenerationFourDelivery`
+  (`internal/dispatch/amqpledger_test.go`), opt-in on `CERBIX_TEST_RABBITMQ_URL` as `amqp_test.go`
+  is: a real v3 consumer bound, a generation-4 job published, and nothing delivered inside a
+  bounded wait — then a ledger-capable consumer added, which DOES receive the next one while the v3
+  consumer still receives nothing with both bound at once. The mapping test below proves the queue
+  NAMES differ; a name is a fact about a function, and 10g is a fact about a wire.
+
+  **It found two defects the mapping test could not see** (reviewer P0 at [448]). The publisher
+  refused a generation-4 job with no credential envelope, because the guard read `generation >=
+  ProtocolV2` — so a V4 job was unpublishable for any monitor without secrets, which is every
+  ordinary HTTP monitor and the exact coupling §13.0 forbids. And no AMQP worker ever declared the
+  ledger capability, so `LiveLedgerJobRegions` looked for a consumer that could never exist: the
+  announcement was dead on that transport while looking implemented.
+
+  **And the first fix for that reintroduced the coupling in the WIRING** (reviewer [450]): the
+  worker's declaration was derived from the envelope capability, so an envelope-disabled deployment
+  — the default, since `secrets.enabled: false` is meant to change nothing else — had no
+  ledger-capable worker, `LiveLedgerJobRegions` stayed false, and the ordinary secretless monitor
+  FR-032 exists for could never reach the carrier. It now follows the ROLE, in
+  `executorLedgerCapability`, which takes no envelope argument at all so the coupling cannot be
+  threaded back in. The pull agent's rule stays different on purpose and is not an inconsistency: a
+  v4 CLAIM returns every generation at or below 4, envelope-bearing ones included; an AMQP v4 QUEUE
+  carries generation-4 deliveries only.
+- **10g, mapping.** `TestEveryCarrierGenerationHasItsOwnQueue` and
+  `TestAnUnknownCarrierGenerationRoutesNowhere` (`internal/dispatch/ledgercarrier_test.go`) —
+  distinct queues per generation, and an unmapped generation routed NOWHERE rather than falling back
+  to an older queue. `TestAV3ClaimLeavesAGenerationFourRowUnclaimed`
+  (`internal/store/pullcarrier4claim_internal_test.go`) is the pull half on a real database: the
+  predicate leaves the generation-4 row outside a v3 claim's result set, and the converse v4 claim
+  reaches it. `TestAV3ClaimCannotReachAGenerationFourRow` (`internal/api/api_agent_ledger_test.go`)
+  is the same property through the endpoint.
+- **10h, no V4 before its payload.** `TestABinaryOfThisGenerationRefusesLedgerCarrierEnabled`,
+  `TestTheRefusalDoesNotRewriteTheValue` and `TestAbsentAndFalseAreBothAcceptedIdentically`
+  (`internal/config/ledgercarrier_test.go`), plus
+  `TestTheGenerationFourEndpointRequiresTheLedgerCapability`,
+  `TestADeclaredGenerationFourClaimReachesTheRow` and
+  `TestTheAnnouncedLedgerCapabilityIsAClosedDomain` (`internal/api/api_agent_ledger_test.go`) — the
+  announced value is 0 or 1, refused at the boundary rather than stored and interpreted later — and
+  the CLAIM header is closed the same way, by exact equality rather than a floor. The envelope
+  capability is generational, so declaring more than an endpoint needs is legitimate there; the
+  ledger capability has exactly one value in this generation, and a floor would have made
+  `X-Cerbix-Ledger: 2` a silent yes for something nobody has defined. Half a closed domain is not
+  a closed domain (reviewer [455]).
+- **10k, the false flag stamps nothing above 3.**
+  `TestTheFalseLedgerFlagStampsNothingAboveThreeOnAnyTransport`,
+  `TestTheLedgerFlagOnRaisesTheAnnouncedRegion`,
+  `TestAPullRegionIsRaisedOnlyByItsAgentsAndOnlyWithTheFlagOn` and
+  `TestAPullRegionIsNotRaisedByTheLocalExecutor` (`internal/scheduler/ledgercarrier_test.go`),
+  asserted on `lead()`'s resolved map as captured by the materializer. The announcement is asked as
+  TWO questions with two sources, matching the transports: AMQP by a consumer on the v4 queue
+  (`mqadmin`), pull by an agent declaring `capabilities->>'ledger'` on its heartbeat.
+- **The pull chain end to end.** `TestACapableAgentClaimsGenerationFourAndExecutesTheRow`,
+  `TestAnAgentNewerThanItsCoreFallsBackWithoutLosingThePoll`,
+  `TestACoreUpgradedUnderARunningAgentIsFoundAgain`,
+  `TestACoreRolledBackUnderAProvenAgentWithdrawsTheAnnouncement`,
+  `TestAnAgentAnnouncesNothingBeforeItsFirstServedV4Claim`,
+  `TestAnAgentThatCannotOpenEnvelopesAnnouncesNoLedgerCapability` and
+  `TestTheTestEndpointIsNotDraggedToGenerationFour` (`internal/agent/ledgerclaim_test.go`) — the
+  agent's own request path, its per-claim declaration, and the row it executes.
+- **The construction path.** `TestTheLedgerAnnouncementFollowsTheRoleAndNotTheEnvelopeCapability`
+  and `TestAnEnvelopeDisabledDeploymentStillAnnouncesTheLedgerCarrier`
+  (`internal/cli/ledgercapability_test.go`) — the broker isolation test above proves the wire, and
+  neither it nor any unit test exercised the wiring that decides what is declared on it.
+- **11, the executor boundary.** `TestThisExecutorImportsNoStorePackage` in BOTH
+  `internal/worker/storeboundary_test.go` and `internal/agent/storeboundary_test.go`, plus
+  `TestTheDispatcherInterfaceExposesNoAck` and
+  `TestTheLedgerCapabilityIsSeparateFromTheCredentialOne`
+  (`internal/dispatch/ledgercarrier_test.go`).
+
+**Announcement and consumption are ONE condition.** An agent announces `capabilities.ledger` only
+when it can actually claim generation 4, and claiming it is what the announcement authorizes core to
+select for. The reverse — announcing without claiming — is worse than announcing nothing: core is
+authorized to place a v4 row in a region that will never claim it, and the monitor has no outcome
+until the row's TTL. That is the generation-3 failure `scheduler.go` records, one generation later,
+and B1's first draft contained it (reviewer P0 at [428]).
+
+Three consequences the fix had to carry. **The envelope floor still applies to a v4 claim**, because
+that claim returns every OLDER generation too, envelope-bearing ones included — not the ledger
+capability being derived from the credential one, but a cumulative range needing what its widest
+member needs. **An agent newer than its core must not die, and must not stay deaf either**: §16.1 calls "core at
+B1, executor at B2" a normal rollout state, so a 404 from `agentJobsV4` downgrades, retries
+immediately so no poll is lost, and **re-probes after a bounded window**. A PERMANENT downgrade
+recreates the same defect one rollout step later — core upgraded underneath a running agent, the
+agent still announcing while claiming v3 forever, the row unclaimable again (reviewer [432]).
+The state has **three** positions, not two, because eligibility to TRY is not eligibility to
+ANNOUNCE (reviewer [436]). An attempt costs one 404; an announcement costs an unclaimable row.
+
+| Predicate | Meaning | Read by |
+| --- | --- | --- |
+| envelope floor | this agent can open what a v4 claim also returns | both |
+| `ledgerAbsentUntil` | when the next v4 ATTEMPT may be made | the claim path |
+| `ledgerProven` | a v4 claim actually returned 200 | the ANNOUNCEMENT, and nothing else |
+
+Collapsing the last two made the false announcement **periodic instead of permanent**: the cooldown
+would expire, the agent would advertise generation 4 before probing, core could select a row, and
+the next claim would 404 back to v3. So the announcement follows PROOF — a fresh agent advertises
+nothing until its first served v4 claim, a 404 withdraws the advertisement in the same statement
+that starts the cooldown, and the recovery probe carries `X-Cerbix-Ledger` because the header
+follows the ATTEMPTED endpoint rather than the published readiness. And **test RPC stays on the envelope-derived generation**, because
+B1 ships no v4 test endpoint — the job and test paths are now derived separately so a future
+generation cannot drag one along with the other.
+
+**Mutations planted and killed: 25.**
+
+1. Remove the `s.ledgerCarrier` guard from the admission block — the announcing region is promoted to 4 with the flag off, and all three transport cases fail.
+2. Plant `_ "internal/store"` in `internal/worker` — the import scan names the file and the path.
+3. Coerce the config value to false instead of refusing — every inertness assertion still passes, and only the unmodified-value assertion catches it.
+4. Accept `ledger.carrier_enabled: true` — the refusal test fails on the first claim.
+5. Map generation 4 to the v3 queue — the distinct-queue assertion fails, because a shared queue is a filter, not isolation.
+6. Let an unmapped generation fall back to the v1 queue — the closed-boundary assertion fails.
+7. Gate `agentJobsV4` on the credential capability instead of the ledger one — the "credential-envelope-is-not-a-ledger-declaration" case is accepted.
+8. Give `ClaimPullJobsV4` the v3 ceiling — the converse claim returns nothing, so exclusion can no longer be distinguished from an empty table.
+9. Add `Ack` to `Dispatcher` — the enumerated method SET fails and names it.
+10. Announce the ledger capability but keep claiming v3 — the claim path assertion fails; this is the P0 as it was submitted.
+11. Drop `X-Cerbix-Ledger` from the claim — the per-request declaration is gone and the header assertion fails.
+12. Remove the 404 downgrade — an agent newer than its core stops claiming entirely.
+13. Announce the ledger capability from an agent that cannot open envelope v2 — it would claim rows it cannot read.
+14. Derive the TEST path from the job generation — test RPC is redirected to `/v4/tests`, which does not exist.
+15. Make the downgrade permanent — a core upgraded underneath the agent is never found again.
+16. Announce as soon as the cooldown expires, before any successful probe — the periodic false announcement.
+17. Leave the announcement standing after a 404 — core rolled back under a proven agent keeps selecting rows it will not claim. This one SURVIVED at first: every test had 404'd an agent that never proved the endpoint, so clearing the proof was untested until the rollback case was written.
+18. Stop declaring `X-Cerbix-Ledger` on the recovery probe — the endpoint refuses it and the agent concludes it is absent when it is merely undeclared.
+19. Let the announcement ignore the downgrade state — the agent advertises a carrier it is not currently claiming, which is [428] restated.
+20. Drop the envelope floor from `agentJobsV4` — a claim returning generation-3 rows is served to an agent that declared no envelope capability.
+21. Route generation 4 to the v3 queue on a LIVE broker — the v3 consumer receives it, which the mapping test alone could not show.
+22. Bind the v4 queue unconditionally — the same delivery reaches a consumer that declared nothing.
+23. Stop the worker announcing the ledger carrier — `LiveLedgerJobRegions` can never be true and the region is never eligible.
+24. Make the CLAIM header a floor rather than exact — `X-Cerbix-Ledger: 2` is accepted for a capability that does not exist.
+25. Accept any integer as `capabilities.ledger` — it is persisted into an existential query, so a value nobody defined becomes a silent yes for a whole region.
+
+**Why each proof pairs with its converse.** Every inertness assertion here has a partner that shows
+the mechanism can fire: the flag ON raises the announced region, the v4 claim reaches the row a v3
+claim cannot, and a declared ledger capability is accepted. Without them, deleting the feature
+entirely would leave every "it does not happen" test green.
 
 ## 18. Open items
 

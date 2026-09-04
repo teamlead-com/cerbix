@@ -94,6 +94,13 @@ func (s *Store) ClaimPullJobsV2(ctx context.Context, region string, max, leaseSe
 }
 
 // ClaimPullJobsV3 serves the capability-2 endpoint: every generation up to 3.
+func (s *Store) ClaimPullJobsV4(ctx context.Context, region string, max, leaseSeconds int, workflowKinds []string) ([]PullJob, error) {
+	return s.claimPullJobs(ctx, region, max, leaseSeconds, 4, workflowKinds)
+}
+
+// ClaimPullJobsV3 leases generations 1..3. A generation-4 row is OUTSIDE its result set — the
+// predicate is `protocol_version <= $4` — rather than being filtered after selection, which is
+// what makes carrier isolation physical on this transport too (FR-032 invariant 10g).
 func (s *Store) ClaimPullJobsV3(ctx context.Context, region string, max, leaseSeconds int, workflowKinds []string) ([]PullJob, error) {
 	return s.claimPullJobs(ctx, region, max, leaseSeconds, 3, workflowKinds)
 }
@@ -212,15 +219,19 @@ func (s *Store) PullQueueStats(ctx context.Context) ([]metrics.PullStat, error) 
 
 // RecordAgentHeartbeat upserts a pull agent's last-seen time for its region.
 func (s *Store) RecordAgentHeartbeat(ctx context.Context, region, agentID string) error {
-	return s.RecordAgentCapabilities(ctx, region, agentID, 0, false, nil)
+	return s.RecordAgentCapabilities(ctx, region, agentID, 0, false, nil, 0)
 }
 
 // RecordAgentCapabilities upserts what an agent says it can do. `workflowKinds` is the FR-029
 // announcement: the `<kind>@<version>` tokens this agent's binary executes, alongside the envelope
 // generation it can open. Both live in one JSONB document because they answer one question — what
 // may core send here — and splitting them would make a reader check two places to answer it.
+// FR-032 adds `ledger`: whether this agent reads job identity, which is what lets core raise the
+// region to generation 4. It is a separate key from the envelope generation on purpose — identity
+// applies to every monitor, so an agent with no secrets must be able to announce one without the
+// other (§13.0) — and it needs no migration, `capabilities` being JSONB.
 func (s *Store) RecordAgentCapabilities(ctx context.Context, region, agentID string,
-	credentialEnvelope int, credentialReady bool, workflowKinds []string) error {
+	credentialEnvelope int, credentialReady bool, workflowKinds []string, ledger int) error {
 
 	if workflowKinds == nil {
 		workflowKinds = []string{}
@@ -228,6 +239,7 @@ func (s *Store) RecordAgentCapabilities(ctx context.Context, region, agentID str
 	capabilities, err := json.Marshal(map[string]any{
 		"credential_envelope":      credentialEnvelope,
 		domain.CanaryCapabilityKey: workflowKinds,
+		"ledger":                   ledger,
 	})
 	if err != nil {
 		return fmt.Errorf("store: encode agent capabilities: %w", err)
@@ -250,6 +262,34 @@ func (s *Store) RecordAgentCapabilities(ctx context.Context, region, agentID str
 // capability of at least minCapability. The floor is a parameter because capability is
 // GENERATIONAL: an executor that can only open envelope v1 is not evidence of readiness
 // for a region core is about to emit envelope v2 into (§4.7, D-0160).
+// LiveLedgerReadyAgentRegions returns the regions whose agents have announced that they read job
+// identity (FR-032). It reads its OWN capability key rather than the credential one: identity
+// applies to every monitor, so an agent with no secrets must still be able to announce it (§13.0).
+// No migration is needed — `capabilities` is JSONB and this is an additive key.
+func (s *Store) LiveLedgerReadyAgentRegions(ctx context.Context, within time.Duration) (map[string]bool, error) {
+	secs := int(within.Seconds())
+	if secs <= 0 {
+		secs = 60
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT region FROM agent_heartbeats
+		  WHERE seen_at > now() - make_interval(secs => $1)
+		    AND COALESCE((capabilities->>'ledger')::int, 0) >= 1`, secs)
+	if err != nil {
+		return nil, fmt.Errorf("store: live ledger-ready agent regions: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var region string
+		if err := rows.Scan(&region); err != nil {
+			return nil, fmt.Errorf("store: scan ledger-ready agent region: %w", err)
+		}
+		out[region] = true
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error) {
 	secs := int(within.Seconds())
 	if secs <= 0 {

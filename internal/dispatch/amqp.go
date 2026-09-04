@@ -33,6 +33,10 @@ const (
 	// on a shared queue would take a message it cannot open, and a capability check does
 	// not stop a consumer from consuming (func-secret-inventory §4.7, D-0160).
 	jobsV3QueuePrefix = "checks.jobs.v3."
+	// Carrier generation 4 carries job identity (FR-032). Physically separate for the same
+	// reason generation 3 is: a v3 worker is not subscribed here, so it CANNOT receive a v4
+	// delivery rather than being filtered out of one.
+	jobsV4QueuePrefix = "checks.jobs.v4."
 	// FR-029 invariant 6. A canary rides its OWN queue, named for the capability token the
 	// executor announces: `checks.canary.<kind>@<version>.<region>`. Physically separate for the
 	// same reason generation 3 is separate from generation 2 (D-0160) — a capability CHECK does
@@ -110,6 +114,10 @@ func testsV2QueueForRegion(region string) string {
 	return testsV2QueuePrefix + region
 }
 
+func jobsV4QueueForRegion(region string) string {
+	return jobsV4QueuePrefix + region
+}
+
 func jobsV3QueueForRegion(region string) string {
 	if region == "" {
 		region = domain.DefaultRegion
@@ -157,6 +165,8 @@ func jobsQueueForGeneration(region string, generation int) (string, bool) {
 		return jobsV2QueueForRegion(region), true
 	case ProtocolV3:
 		return jobsV3QueueForRegion(region), true
+	case ProtocolV4:
+		return jobsV4QueueForRegion(region), true
 	default:
 		return "", false
 	}
@@ -213,6 +223,7 @@ type AMQP struct {
 
 	jobRegion            string          // region this dispatcher's Jobs() consumes (worker); default core
 	credentialCapability int             // highest envelope generation this worker can open (0 = none)
+	ledgerCapability     int             // 1 = this worker can read job identity, so it may consume v4 (0 = none)
 	canaryCapability     string          // the `<kind>@<version>` this worker announces ("" = no canary runner)
 	declaredMu           sync.Mutex      // guards declared
 	declared             map[string]bool // idempotent-declare cache for per-region job queues
@@ -416,6 +427,16 @@ func (d *AMQP) WithCredentialCapability(capability int) *AMQP {
 	return d
 }
 
+// WithLedgerCapability declares that this executor understands job identity (FR-032), which is
+// what binds it to the generation-4 queue. It is deliberately NOT the credential capability:
+// identity applies to every monitor, so reusing the envelope number would tie an ordinary HTTP
+// monitor's ledger eligibility to a capability its dispatch never needs (§13.0). Consuming the
+// queue IS the announcement, the same rule the canary carrier follows.
+func (d *AMQP) WithLedgerCapability(capability int) *AMQP {
+	d.ledgerCapability = capability
+	return d
+}
+
 // WithCanaryCapability declares the workflow token this executor can run, which decides whether it
 // consumes the region's canary queues at all. Empty (the default, and every binary that predates
 // FR-029) means the executor never sees a canary — it does not merely decline one it was handed.
@@ -531,7 +552,12 @@ func (d *AMQP) PublishJob(_ context.Context, job CheckJob) error {
 	if !ok {
 		return fmt.Errorf("dispatch: no jobs carrier for generation %d", generation)
 	}
-	if generation >= ProtocolV2 && job.CredentialEnvelope == nil {
+	// Generations 2 and 3 EXIST to carry an envelope, so one is required. Generation 4 does not:
+	// it carries job identity, which applies to every monitor including those with no secrets
+	// (§13.0). Requiring an envelope there would make an ordinary HTTP monitor's ledger
+	// eligibility depend on a capability its dispatch never needs — and it would be unpublishable.
+	// A v4 job MAY still carry an envelope, for a monitor that has one.
+	if generation >= ProtocolV2 && generation < ProtocolV4 && job.CredentialEnvelope == nil {
 		return fmt.Errorf("dispatch: generation %d job is missing credential envelope", generation)
 	}
 	if generation == ProtocolV1 && job.CredentialEnvelope != nil {
@@ -629,6 +655,12 @@ func (d *AMQP) Jobs() <-chan DeliveredJob {
 		}
 		if d.credentialCapability >= EnvelopeV2 {
 			consumeQueue(jobsV3QueueForRegion(d.jobRegion), "jobs.v3", ProtocolV3)
+		}
+		// Generation 4 is bound on its OWN capability, never on the credential one: job identity
+		// applies to every monitor, so gating it on an envelope capability would make an ordinary
+		// HTTP monitor's eligibility depend on something its dispatch never needs (§13.0).
+		if d.ledgerCapability >= 1 {
+			consumeQueue(jobsV4QueueForRegion(d.jobRegion), "jobs.v4", ProtocolV4)
 		}
 		// FR-029 invariant 6: consuming the canary queue IS this executor's announcement, so it is
 		// bound only when the runner in this process actually has the workflow. The envelope-bearing

@@ -46,6 +46,8 @@ type fakeStore struct {
 	// carrierPolicies records every carrier-generation map the materializer was handed, so a test
 	// can assert what generation core DECIDED a region may receive.
 	carrierPolicies []map[string]int
+	// ledgerReadyPullRegions is what the PULL half of FR-032's capability question answers.
+	ledgerReadyPullRegions map[string]bool
 
 	serviceSlices int32
 	monitors      []domain.Monitor
@@ -105,6 +107,13 @@ func (s staticCredentialRegions) LiveCredentialJobRegions(context.Context) (map[
 	return s, nil
 }
 
+// No generation-4 consumer by default, for the same reason as generation 3: a region is capable
+// only when something there announced it. A fake that announced by default would let a test pass
+// while the real capability check did nothing (FR-032).
+func (s staticCredentialRegions) LiveLedgerJobRegions(context.Context) (map[string]bool, error) {
+	return map[string]bool{}, nil
+}
+
 // No canary consumer by default, for the same reason: a region is capable only when something there
 // announced it, and a fake that announced by default would hide the check entirely.
 func (s staticCredentialRegions) LiveCanaryJobRegions(context.Context) (map[string][]string, error) {
@@ -118,6 +127,15 @@ func (f *fakeStore) ListEnabledMonitors(context.Context) ([]domain.Monitor, erro
 
 func (f *fakeStore) ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error) {
 	return f.ListEnabledMonitors(ctx)
+}
+
+// FR-032: no ledger-ready agent by default. A fake that announced by default would let a test
+// pass while the real capability check did nothing — the same reason the canary and generation-3
+// sources return empty here.
+func (f *fakeStore) LiveLedgerReadyAgentRegions(context.Context, time.Duration) (map[string]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ledgerReadyPullRegions, nil
 }
 
 func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string, carrier map[string]int) ([]store.MaterializedExecution, error) {

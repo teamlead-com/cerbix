@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 7, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 8, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -27,7 +27,11 @@
 > P0**: its carrier-generation eligibility named a CONSUMER-side datum as the source, so at
 > publication time there was nothing to write and every row would have taken a column default.
 > **Revision 7** sources the carrier from the PUBLISHER's routing decision, which already exists on
-> all three transports, and threads it through §7.1. §5.4 records the constraints from party [222].
+> all three transports, and threads it through §7.1 — but left TWO contradictions the schema had just
+> created, rejected at [235]: the orphan INSERT omitted the carrier column its own CHECK now
+> required, and `ProtocolV4` promised a `DueAt` that existed in no wire type. **Revision 8** fixes the
+> INSERT and defines `DueAt` end to end (§13.1), including the optimistic check that reading the
+> expectation before publishing forces. §5.4 records the constraints from party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -315,16 +319,22 @@ deliberately**: for a backoff they differ, and deriving one from the other is in
 ```sql
 -- $1 monitor_id[]  $2 job_id[]  $3 skip_reason[]  $4 next_due[]  $5 interval_in_force[]
 -- $6 now  $7 cap  $8 retention_floor  $9 carrier_generation[]  (NULL where job_id is NULL)
+-- $10 expected_due[]  — the next_due_at the job was published with; see the optimistic check below
 WITH picked AS (
     SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at, s.interval_in_force,
            s.execution_revision, m.region,
            v.job_id, v.skip_reason, v.next_due, v.new_interval, v.carrier,
            s.next_due_at + make_interval(secs => s.interval_in_force) AS first_expected
       FROM monitor_schedule s
-      JOIN unnest($1::uuid[], $2::uuid[], $3::text[], $4::timestamptz[], $5::int[], $9::int[])
-             AS v(monitor_id, job_id, skip_reason, next_due, new_interval, carrier)
+      JOIN unnest($1::uuid[], $2::uuid[], $3::text[], $4::timestamptz[], $5::int[], $9::int[],
+                  $10::timestamptz[])
+             AS v(monitor_id, job_id, skip_reason, next_due, new_interval, carrier, expected_due)
         ON v.monitor_id = s.monitor_id
       JOIN monitors m ON m.id = s.monitor_id
+     -- Optimistic check (§13.1): the leader had to read next_due_at BEFORE publishing, because the
+     -- job carries it as `DueAt`. If anything moved it since — §10's config write is the realistic
+     -- one — this monitor drops out of the ENTIRE statement: no advance, no row, no fence.
+     WHERE s.next_due_at = v.expected_due
      ORDER BY s.monitor_id
        FOR UPDATE OF s
 ),
@@ -525,18 +535,33 @@ later reader could get wrong.
 
 ```sql
 INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
-                           region, issued_at, claimed_at, terminal_at, outcome)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                           region, carrier_generation, issued_at, claimed_at,
+                           terminal_at, outcome)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (monitor_id, due_at) DO UPDATE
-   SET job_id      = COALESCE(expected_runs.job_id, $4),
-       issued_at   = LEAST(COALESCE(expected_runs.issued_at,  $7), $7),
-       claimed_at  = LEAST(COALESCE(expected_runs.claimed_at, $8), $8),
-       terminal_at = LEAST(COALESCE(expected_runs.terminal_at, $9), $9),
-       outcome     = COALESCE(expected_runs.outcome, $10)
+   SET job_id             = COALESCE(expected_runs.job_id, $4),
+       carrier_generation = COALESCE(expected_runs.carrier_generation, $7),
+       issued_at          = LEAST(COALESCE(expected_runs.issued_at,  $8), $8),
+       claimed_at         = LEAST(COALESCE(expected_runs.claimed_at, $9), $9),
+       terminal_at        = LEAST(COALESCE(expected_runs.terminal_at, $10), $10),
+       outcome            = COALESCE(expected_runs.outcome, $11)
  WHERE (expected_runs.job_id = $4
         OR (expected_runs.job_id IS NULL AND expected_runs.skip_reason IS NULL))
    AND expected_runs.execution_revision = $5;
 ```
+
+`$7` is `carrier_generation`, and it is in the column list rather than only in the prose because
+revision 7 put it only in the prose — reviewer P0-1 at [235]. §6.1's CHECK requires the column
+non-NULL whenever `job_id` is non-NULL, so an orphan insert omitting it **fails the constraint**: the
+reconciliation path would have errored on exactly the case it exists to serve. The `DO UPDATE` uses
+`COALESCE(existing, new)` so **adoption fills the carrier on a no-job window** while a row that
+already has one keeps it — the same first-writer-wins shape as `job_id`, since neither is an
+observation that can arrive twice with different values.
+
+**Conflict behaviour, stated because "upsert" is not a specification:** a conflict on a row that
+fails the `WHERE` leaves the row untouched and reports **zero rows affected**, which the caller
+treats as *not correlated* and never as an error. A conflict on a row that passes fills only the
+columns above. A missing conflict inserts. All three outcomes are normal.
 
 What the guard proves, item by item against P1-2's list:
 
@@ -928,6 +953,40 @@ rather than hidden behind "convert every producer":
   `DueAt` on every dispatch path"**, and `LedgerMinCarrier = dispatch.ProtocolV4`. One generation per
   capability is this project's own pattern and the reason the generations are legible at all.
 
+### 13.1 `DueAt` on the wire — the field revision 7 promised and never defined
+
+`ProtocolV4` was declared to carry `DueAt` while no such field existed on `CheckJob`, `Heartbeat` or
+`StampResult`, and nothing in the spec added one. §8.3 needs it for its primary-key hit, so the
+generation had no wire path for the value that identifies the window — reviewer P0-2 at [235]. The
+alternative the reviewer offered, a pure job-id lookup, does not close it: the **orphan** case has no
+row to look up and must CREATE one, and creating it needs the window's identity. Guessing `due_at`
+from `issued_at` would invent a window or collide with a real one. So the field is defined.
+
+| Concern | Specification |
+| --- | --- |
+| Job field | `dispatch.CheckJob.DueAt time.Time`, `json:"due_at,omitempty"`, beside `JobID` and `IssuedAt` |
+| Result field | `domain.Heartbeat.DueAt time.Time`, `json:"due_at,omitempty"`, copied by `dispatch.StampResult` alongside `JobID` and `JobIssuedAt` — the ONE owner of that copy, as its comment requires |
+| Not a table column | Like `JobID`, `JobIssuedAt` and `ExecutionRevision` (`internal/domain/monitor.go:618-629`), it is wire-only. §4a forbids overloading the `heartbeats` TABLE, which this does not touch |
+| Mint owner | The **core**, from `monitor_schedule.next_due_at`, read by the leader's own batched read in the same tick — NOT from the 15-second snapshot (`refreshEvery`, `scheduler.go:236`), which would be stale by design |
+| Validation | `due_at <= issued_at` (an expectation cannot postdate its own dispatch), and `due_at` inside the retention window. A violation refuses CORRELATION — the result is still recorded as a heartbeat — exactly as a non-UUID `job_id` is treated (§13) |
+| Propagation | All three transports carry `CheckJob` verbatim: AMQP as the JSON body, pull as the JSON payload of a `pull_jobs` row, inproc as the struct itself. A new field therefore propagates by construction, and this is stated rather than assumed because it is the reason no per-transport work is needed |
+| Rolling upgrade | An old executor drops the unknown field, so the result returns with `DueAt` zero. That is treated as **no correlation** — never as `due_at = epoch` — and the window stays `unknown`, which is precisely what `LedgerMinCarrier` gates |
+
+**The optimistic check this forces, and it is a real consequence rather than a detail.** The leader
+must know `due_at` **before** publishing, while §7.1 writes **after**. Between the read and the
+write, §10's configuration transaction could have moved the row. So `picked` takes the expectation
+the job actually carried and compares it:
+
+```sql
+  JOIN unnest(..., $10::timestamptz[]) AS v(..., expected_due)
+    ON v.monitor_id = s.monitor_id
+ WHERE s.next_due_at = v.expected_due      -- optimistic: someone else moved it => skip this monitor
+```
+
+A mismatch excludes that monitor from the whole statement: **no advance, no row, no fence**, and the
+next tick re-reads. The published job becomes an orphan whose terminal creates its own row through
+§8.3 — which is exactly why the orphan path had to work before this check could be safe.
+
   **The one honest caveat.** For `inproc` the carrier comes from `job.ProtocolVersion`, which IS the
   payload — but publisher and consumer are the same process and the payload is the core's own, so
   there is no boundary to cross and nothing to forge. Writing "never read from the payload" without
@@ -1090,8 +1149,15 @@ Discharged as a SET in `docs/traceability.md`.
     gaps fences each one independently, and no monitor's windows are lost to another's volume.
 24c. `ledger_from` is computed from persisted inputs, never stored, so dropping a partition cannot
     leave it stale in the over-claiming direction.
-25. A result whose `job_id` is absent or not a UUID correlates to no window, is still recorded as a
+25. A result whose `job_id` is absent or not a UUID, or whose `due_at` is absent, postdates its own
+    `issued_at` or falls outside retention, correlates to NO window, is still recorded as a
     heartbeat, and never produces a false `issued_never_claimed`.
+25a. `DueAt` is minted by the CORE from `monitor_schedule.next_due_at` in the dispatching tick, never
+    from the leader's 15-second snapshot, and is copied onto the result by `dispatch.StampResult`
+    alone.
+25b. A crossed pair — one run's `job_id` with another window's `due_at` — updates nothing.
+25c. Every write to `expected_runs` names `carrier_generation` in its column list, so §6.1's CHECK
+    cannot be violated by omission on any path.
 26. Every ledger row is reachable only within its tenant: the composite `(monitor_id, project_id)`
     foreign key, not a single-column one.
 26a. Every ledger query carries its own `project_id` predicate in SQL, proven by a cross-project
@@ -1146,6 +1212,17 @@ In both, assert `last_issued_at` is unchanged: nothing was issued.
 own statement without the gap and fence CTEs. If the tests survive that, they have not reached the
 mechanism — and this defect has now been introduced twice, once as [225] and once as [229], so a
 test that cannot catch it is worth nothing here.
+
+**Orphan terminal, required at [235].** A result arrives for a window with no row: assert the row is
+CREATED with `job_id`, `carrier_generation`, `issued_at`, `due_at` and `terminal_at` all set from the
+wire, and that it satisfies §6.1's CHECK. **The mutation that must fail it is revision 7's own SQL** —
+drop `carrier_generation` from the INSERT's column list — which errors on the constraint rather than
+silently misbehaving, and would have taken the reconciliation path down on the one case it exists for.
+
+**Late and overlapping runs, required at [235].** Two runs outstanding with different `due_at`: the
+terminal for the older must fill the older row and must be incapable of touching the newer, and vice
+versa. Assert with the `job_id` of one and the `due_at` of the other that NOTHING is updated — a
+crossed pair must correlate to no window rather than to the wrong one.
 
 **The mutation that must fail (a).** Replace the per-monitor `row_number() … PARTITION BY monitor_id`
 cap with a batch-wide `LIMIT $5`, exactly as revision 2 had it. The test must fail **by name**,

@@ -1,6 +1,6 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
-> **Lifecycle: DESIGNED — revision 5, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
+> **Lifecycle: DESIGNED — revision 6, 2026-09-04. AWAITING DESIGN REVIEW; NOT IMPLEMENTED.**
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -19,7 +19,12 @@
 > forward-moving statements, and the policy-skip one argued its way out of gap materialization, so a
 > leader whose first post-failover action was a skip lost the gap exactly as [225] had. **Revision 5
 > has ONE forward-moving primitive** (§7.1) with every caller passing parameters, because two
-> statements sharing an obligation diverge on it. §5.4 records the constraints from party [222].
+> statements sharing an obligation diverge on it. **Revision 6** answers six P1s from [231] with no
+> new P0 outstanding: one shared admissibility predicate for every event (§8.1), a half-open config
+> range (§10), carrier-generation eligibility replacing an unimplementable activation instant (§13),
+> the read API's authorization contract (§13a), a testable HOT threshold with per-partition
+> `fillfactor` (§11), and a retention-derived gap bound (§9.3). §5.4 records the constraints from
+> party [222].
 >
 > Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
 > drawing points with no stroke until §14's gate is met by working code.
@@ -187,6 +192,7 @@ CREATE TABLE expected_runs (
     job_id             uuid,                   -- NULL: no job was ever issued for this window
     execution_revision bigint      NOT NULL,
     region             text        NOT NULL,
+    carrier_generation int         NOT NULL DEFAULT 0,  -- transport-stamped; 0 = pre-ledger carrier
     issued_at          timestamptz,            -- core: dispatch returned success
     claimed_at         timestamptz,            -- executor: off the transport, about to probe
     terminal_at        timestamptz,            -- an ADMISSIBLE outcome exists; coverage iff NOT NULL
@@ -445,16 +451,42 @@ different directions, so revision 2 states one rule and shows the SQL that imple
 > **A repeated event resolves to the EARLIEST observation of that event, deterministically. No event
 > reads or writes another event's column.**
 
+#### The admissibility predicate — written once, used by every event
+
+Revision 5 had two event statements with two different guards, and the claim one was wrong: it
+admitted `job_id IS NULL`, which is **also true of a deliberately skipped window**, and it carried no
+revision predicate at all. So a late or stale claim could mark a window cerbix chose not to run as
+claimed — invariants 7 and 10b, broken by the SQL that was supposed to uphold them (reviewer P1-1 at
+[231]).
+
+That is the [229] lesson in a second place: **two statements sharing an obligation diverge on it.**
+So the boundary is defined once, here, and both event statements use it verbatim:
+
+```sql
+-- ADMISSIBLE(due_at, job_id, revision) — an event may touch a row only if:
+      (expected_runs.job_id = :job_id                                  -- the same run, or
+       OR (expected_runs.job_id IS NULL                                -- a window with no run,
+           AND expected_runs.skip_reason IS NULL))                     -- but NOT a deliberate skip
+  AND expected_runs.execution_revision = :revision                     -- and the same generation
+```
+
+The claim merge is then that predicate plus one column:
+
 ```sql
 UPDATE expected_runs
    SET claimed_at = LEAST(COALESCE(claimed_at, $3), $3)
  WHERE monitor_id = $1 AND due_at = $2
-   AND (job_id IS NULL OR job_id = $4);
+   AND (job_id = $4 OR (job_id IS NULL AND skip_reason IS NULL))
+   AND execution_revision = $5;
 ```
 
 `LEAST(COALESCE(...))` is the whole merge: idempotent, commutative, and monotone downward, so
 replays and reorderings converge on the same value. "Earliest wins" rather than "first writer wins"
 because the first *claim* is the real one; a duplicate delivery arriving later must not redate it.
+
+**Two negatives this must fail** (invariants 7a, 7b): a claim whose `execution_revision` does not
+match the row changes nothing; and a claim naming the `due_at` of a window that carries a
+`skip_reason` changes nothing, however late it arrives.
 
 ### 8.2 Ordering is made irrelevant, not guaranteed
 
@@ -587,11 +619,21 @@ requirement's problem — but it cannot corrupt or duplicate a window.
 A leader absent for a month against a 30-second monitor implies ~86,400 windows for that monitor
 alone. Materializing them is neither useful nor free, so §7's statement bounds the work two ways:
 
-- **A per-monitor cap** (`$5`), applied through `row_number() OVER (PARTITION BY monitor_id ORDER BY
-  due_at DESC)`, so the most recent windows are kept and the choice is deterministic. It is per
-  monitor, not per batch — the [225] P0 was precisely a batch-wide `LIMIT`.
-- **A retention clip** (`$6`): the series never starts before the retention floor, because a window
-  older than that would be dropped unread.
+- **A retention clip**, which is the PRIMARY bound and is derived rather than chosen: the series
+  never starts before the retention floor, because a window older than that would be dropped
+  unread. The implied worst case is therefore computable —
+  `expected_run_retention_days x 86400 / interval_seconds` windows per monitor, which at the
+  14-day default and a 30-second monitor is 40,320 rows for a monitor that was unprobed for the
+  entire retention window.
+- **A per-monitor safety cap**, `expected_run_gap_windows_max`: **default 10,000, minimum 100,
+  maximum 100,000**, applied through `row_number() OVER (PARTITION BY monitor_id ORDER BY due_at
+  DESC)` so the most recent windows are kept and the choice is deterministic. It is per monitor, not
+  per batch — the [225] P0 was precisely a batch-wide `LIMIT`. It exists to bound one statement's
+  work, not to express a policy, which is why the retention clip is the rule and this is a valve.
+
+Revisions 2 through 5 carried this as a bare constant with, in my own words, "no analysis behind it".
+[231] refused that, correctly: a bound with no rule behind it is a number someone will change without
+knowing what it protects.
 
 **Either bound obliges a fence, and the SQL — not the prose — sets it.** The rule is one condition:
 if the oldest window actually materialized is later than the first window that was expected, then
@@ -615,8 +657,15 @@ change, §7's `generate_series` would space the whole gap at the pre-change inte
 **So no gap is allowed to span a revision change.** The transaction that bumps
 `monitors.execution_revision` also, for that monitor:
 
-1. materializes the windows from `next_due_at` up to the change instant, at the OLD
-   `interval_in_force` (identical logic to §7's `missed` CTE, same cap);
+1. materializes the windows in the **half-open range `(next_due_at, change_instant)`** at the OLD
+   `interval_in_force` — that is, `generate_series(next_due_at + interval, change_instant -
+   1 microsecond, interval)`, the same lower bound §7.1 calls `first_expected`. **The standing
+   `next_due_at` row is EXCLUDED**, and that exclusion is load-bearing: revision 5 said "from
+   `next_due_at`" inclusively while also saying the standing window takes the new revision, and
+   when `next_due_at` is already past during a leader absence the config write would have created
+   that row itself and §7.1's `current_window` insert would then collide with it (reviewer P1-2 at
+   [231]). The standing expectation is written by §7.1 when it is finally acted on, by exactly one
+   writer.
 2. writes the new `monitor_execution_revisions` row;
 3. sets `monitor_schedule.interval_in_force`, `execution_revision` and `confirm_phase` from the new
    configuration — and **leaves `next_due_at` untouched.**
@@ -637,9 +686,20 @@ This is also what the code does today: a config write does not touch the leader'
 the FOLLOWING advance. Any other equation would be a behaviour change smuggled in by a bookkeeping
 requirement.
 
-The window standing at `next_due_at` is stamped with the NEW revision, and that is correct rather
-than a compromise: `next_due_at` is in the future, so that window occurs after the change and the new
-configuration is the one in force for it.
+**What `execution_revision` on a row MEANS, stated because the apparent contradiction at [231] came
+from leaving it implicit:** it is the configuration the run **executed under**, not the one that
+computed the window's due instant. Those differ for a window whose due instant was computed under
+the old interval but which is acted on after a change — including every window standing in the past
+during a leader absence. The run genuinely executes under the new configuration, so recording the new
+revision is correct, and it is not in tension with step 1 recording the old interval for **spacing**:
+
+| Question | Answered by |
+| --- | --- |
+| How were these windows spaced? | `interval_in_force` at materialization — the old interval for a segment closed by a config write |
+| Under what configuration did the run happen? | `execution_revision` on the row — the generation live when it was acted on |
+
+Invariant 13 is about the second and §10 about the first; conflating them is what made revision 5
+read as self-contradictory.
 
 **The race with the scheduler is settled by the lock, not by ordering.** Both this transaction and
 §7's take `FOR UPDATE` on the same `monitor_schedule` row, so they serialize. If §7 commits first,
@@ -651,6 +711,12 @@ invariants true, which is why no ordering is prescribed.
 change committed (a) just before and (b) just after a due instant, asserting in all four cases that
 the pending probe fires at its original instant and that the first window spaced by the new interval
 is the one after it.
+
+**Test with `next_due_at` ALREADY PAST** (required by [231]): a config write committed while the
+monitor's expectation sits ten intervals in the past. Assert that the config write materializes the
+nine windows **after** `next_due_at` and not the one **at** it; that §7.1's later
+`current_window` insert for that instant succeeds rather than conflicting; and that exactly one row
+exists for it, carrying the new `execution_revision`.
 
 The config write therefore CLOSES the open window segment, and every segment is spaced by exactly
 the interval that was in force for it. This costs one more statement on a path taken once per
@@ -679,11 +745,28 @@ access without vacuum, so the requirement is not two spare versions per row simu
 enough headroom for the versions live at one moment — which depends on arrival spread and access
 rate, and cannot be computed from the schema.
 
-**So it is measured, not assumed.** Invariant 23 makes the HOT ratio an acceptance gate:
-`n_tup_hot_upd / n_tup_upd` from `pg_stat_user_tables`, per partition, exposed as a cerbix gauge.
+**So it is measured, not assumed — and "poor" is not a threshold, which [231] was right to refuse.**
+
+| Datum | Value |
+| --- | --- |
+| Metric | `cerbix_expected_runs_hot_update_ratio`, a single gauge **aggregated over the current retention window**, with NO partition label — partition names are unbounded over time and would be exactly the high-cardinality mistake |
+| Supporting counters | `cerbix_expected_runs_updates_total`, `cerbix_expected_runs_hot_updates_total` — monotonic, unlabelled |
+| Source | `pg_stat_user_tables`, summed across the retained partitions |
+| Sample window | The gate is evaluated only once at least **1,000** updates have accumulated; below that the sample says nothing |
+| Threshold | ratio **>= 0.90** passes; below it, §11's append-only variant is selected rather than absorbed |
+| Zero denominator | `n_tup_upd = 0` means the ratio is UNDEFINED: the gauge is **not published** and the gate neither passes nor fails. A gauge reporting 0 or 1 for "no data" is a lie in whichever direction happens to be convenient |
+
 No `pg_stat_user_tables` metric exists in this repository today — `pg_stat_activity` is read once,
-in `internal/store/gatemaintenance.go:1153` — so this is new work and is named as such in phase D
-rather than presented as following a precedent.
+in `internal/store/gatemaintenance.go:1153` — so this is new work, named as such in phase D rather
+than presented as following a precedent.
+
+**`fillfactor` must be set on every PARTITION, not on the parent.** In PostgreSQL, storage
+parameters are per-relation and `CREATE TABLE … PARTITION OF` does **not** inherit them, so the
+`WITH (fillfactor = 70)` in §6.1's parent DDL would have applied to nothing that ever holds a row —
+a defect [231] caught in the DDL itself. Every partition is therefore created
+`WITH (fillfactor = 70)` by the partition-maintenance code, alongside `EnsureHeartbeatPartitions`,
+and invariant 23a requires a test that reads `pg_class.reloptions` for a **newly created** partition
+rather than trusting the parent.
 
 **The named alternative, specified so the decision is reversible.** If the measured ratio is poor,
 the drop-in replacement is an append-only event table — `(monitor_id, due_at, kind, at, …)` with
@@ -787,12 +870,63 @@ rather than hidden behind "convert every producer":
   validates: a `job_id` that is absent or not a UUID means **this result correlates to no window**,
   and it is recorded as a heartbeat exactly as today and contributes nothing to the ledger. It is
   never coerced, never defaulted, and never silently dropped.
-- **Rolling-upgrade policy.** During an upgrade, old executors return results with no `job_id`; those
-  windows keep `terminal_at` NULL and read as `issued_never_claimed`, which would be a false
-  accusation. So a window whose `execution_revision` predates the ledger's own activation instant —
-  recorded per monitor as `ledger_from` — is `unknown`, not missing. The ledger begins claiming
-  coverage only for windows issued after every executor in the region reports the new protocol
-  version, which the region-worker liveness data already tracks.
+- **Rolling-upgrade policy — rebuilt, because revision 5's was not implementable.** It said a window
+  whose `execution_revision` "predates the ledger's activation instant, recorded per monitor as
+  `ledger_from`" is `unknown`. Three things wrong, all correctly named at [231]: `ledger_from` is
+  computed from partitions, revisions, schedule and fence and is **not** an activation instant; an
+  integer revision cannot predate an instant at all; and the existing liveness sources answer
+  whether **some** capable consumer exists, never whether **every** regional executor is job-id
+  aware — `LiveCredentialV3JobRegions` and `LiveCanaryJobRegions` are queue-consumption questions by
+  design, and their own comment says a consumer on the ordinary queue is no evidence about the
+  special one.
+
+  **So the ledger does not census executors. It uses the isolation this project already uses for
+  exactly this problem:** a new protocol gets its own carrier, and only capable executors consume it
+  (FR-020 / D-0160, `carrierGeneration[region]` at `scheduler.go:1514`). `expected_runs` therefore
+  carries `carrier_generation int NOT NULL`, stamped from `dispatch.DeliveredJob.CarrierGeneration`
+  — which the **transport adapter** sets and which is "never read from the payload's own
+  `ProtocolVersion`, which is body content an attacker can edit" (`dispatch.go:41-47`).
+
+  Eligibility becomes a property of the ROW rather than a global instant: a window dispatched on a
+  carrier below the ledger's minimum is `unknown`, never `issued_never_claimed`, and no census, no
+  activation timestamp and no `ledger_from` involvement is required. A region still running old
+  executors simply produces `unknown` windows until its carrier moves, which is the honest reading
+  and needs no new liveness mechanism.
+
+## 13a. The read API — authorization is not the foreign key's job
+
+Phase D promised a read API and gave no contract. The composite foreign key of §6 protects **storage
+integrity**: it stops a row outliving its tenant. It says nothing about who may READ a row, and
+[231] was right to separate the two.
+
+**Route**, following the convention already in `openapi.yaml`
+(`/api/v1/projects/{projectID}/monitors`):
+
+```
+GET /api/v1/projects/{projectID}/monitors/{monitorID}/expected-runs
+      ?from=<RFC3339>&to=<RFC3339>&limit=<1..1000>&cursor=<opaque>
+```
+
+**Authorization.** Mounted behind the session-auth middleware like every project route — never on
+`PublicRouter`, never on `AgentRouter`. Project membership is checked exactly as
+`internal/api/handlers_monitors.go` does it, and a monitor outside the caller's tenancy is **404
+hidden**, not 403, matching that file's stated contract at `:15` ("writes 404 (hidden) or 403"). A
+`projectID`/`monitorID` pair that does not belong together is also 404: the pair is validated, not
+just each half.
+
+**The project predicate is mandatory in the repository, not only in the handler.** Every ledger query
+carries `AND project_id = $n` in its own SQL. A handler check alone is one refactor away from being
+bypassed, and a query that is safe only because of its caller is not safe. Invariant 26a requires a
+**cross-project negative test** that calls the store layer directly with a mismatched pair and gets
+nothing back.
+
+**Response.** Windows in `due_at` order with computed verdicts (never stored — invariant 19), plus
+the two facts that bound what the answer means: `ledger_from` and `gap_truncated_before`. A range
+extending before `ledger_from` returns its windows as `unknown` and says so in the payload rather
+than silently starting later, so a caller cannot mistake a clipped range for a covered one.
+
+**Pagination** is cursor-based with a bounded `limit`. `from`/`to` are required, and a range wider
+than the retention window is rejected rather than silently clipped.
 
 ## 14. What this unlocks, and the gate it must pass
 
@@ -850,6 +984,11 @@ Discharged as a SET in `docs/traceability.md`.
 6. A run claimed and never finished is distinguishable from both.
 7. A repeated event resolves to the earliest observation of that event, and no event reads or writes
    another event's column.
+7a. **Every** event statement uses the ONE admissibility predicate of §8.1 verbatim: the same run,
+    or a window with no run AND no `skip_reason`, and the same `execution_revision`. A statement
+    with its own variant of the boundary is the [231] P1-1 defect by construction.
+7b. A claim naming the `due_at` of a window that carries a `skip_reason` changes nothing, however
+    late it arrives; and a claim whose `execution_revision` does not match the row changes nothing.
 8. A terminal event that arrives before its claim event loses nothing.
 9. A duplicate claim or terminal event changes nothing.
 10. A terminal outcome outranks a missing claim and a missing `issued_at`.
@@ -858,6 +997,9 @@ Discharged as a SET in `docs/traceability.md`.
     `terminal_at`, so coverage stays the single test `terminal_at IS NOT NULL`.
 10b. A window carrying a `skip_reason` is never adopted by any terminal event: a run cerbix chose
     not to make can never be reported as one that happened.
+10c. A window dispatched on a carrier generation below the ledger's minimum reads `unknown`, never
+    `issued_never_claimed`. `carrier_generation` is stamped by the TRANSPORT ADAPTER and never read
+    from the payload's `ProtocolVersion`, so no executor can promote its own window's eligibility.
 11. `worker` and `agent` hold no database handle and no ack concept after this change.
 12. `heartbeats` gains no column, and `claimed_at`, `terminal_at`, `outcome`, `refused_at`,
     `refused_reason` and `skip_reason` appear in no index.
@@ -867,6 +1009,10 @@ Discharged as a SET in `docs/traceability.md`.
 14a. A configuration write leaves `next_due_at` UNCHANGED. The pending probe fires at the instant it
     would have fired anyway, and the new interval governs from the following advance — the only
     equation compatible with invariant 1.
+14b. The configuration write's materialization range is HALF-OPEN, `(next_due_at,
+    change_instant)`, excluding the standing `next_due_at` window. That row has exactly one
+    writer — §7.1, when the expectation is finally acted on — so a config write committed while
+    `next_due_at` is already past cannot collide with it.
 15. Before `ledger_from` no verdict is emitted — neither `covered` nor `expected_never_issued`.
 16. Dropping a partition never converts unproven time into proven time, and never invents a missed
     run.
@@ -882,8 +1028,12 @@ Discharged as a SET in `docs/traceability.md`.
 21. Nothing in the ledger is read to decide what to probe.
 22. The capacity model of §12.1 is verified by measurement against a populated table before phase D
     closes, and the retention default, minimum and maximum are configuration with enforced bounds.
-23. The HOT ratio `n_tup_hot_upd / n_tup_upd` is exposed per partition and measured; a poor ratio
-    selects §11's append-only variant rather than being absorbed silently.
+23. The HOT ratio is exposed as ONE unlabelled gauge over the current retention window, gated at
+    `>= 0.90` after at least 1,000 updates, and left UNPUBLISHED when the denominator is zero. A
+    ratio below the threshold selects §11's append-only variant rather than being absorbed silently.
+23a. Every `expected_runs` PARTITION is created with `fillfactor = 70`, asserted by reading
+    `pg_class.reloptions` on a newly created partition — storage parameters are not inherited from a
+    partitioned parent, so parent DDL proves nothing.
 24. A `next_due_at` advance never commits without the run row and the missed-window rows for the
     span it closes.
 24a. When ANY window in that span is not materialized — by the per-monitor cap or by the retention
@@ -898,6 +1048,11 @@ Discharged as a SET in `docs/traceability.md`.
     heartbeat, and never produces a false `issued_never_claimed`.
 26. Every ledger row is reachable only within its tenant: the composite `(monitor_id, project_id)`
     foreign key, not a single-column one.
+26a. Every ledger query carries its own `project_id` predicate in SQL, proven by a cross-project
+    negative test against the STORE layer, not only through the handler. A monitor outside the
+    caller's tenancy is 404 hidden, and a mismatched `projectID`/`monitorID` pair is 404 too.
+26b. The read API returns `ledger_from` and `gap_truncated_before` with every answer, and a range
+    reaching before `ledger_from` returns `unknown` windows rather than silently starting later.
 
 ### 17.1 The test case invariants 24a and 24b are discharged by
 
@@ -956,8 +1111,8 @@ be caught by a test rather than by another review round.
   deliberately out of revision 2.
 - Whether push monitors participate (§15). Excluding them is a decision worth challenging, not a
   fact.
-- The `generate_series` cap value of §9.3 has no analysis behind it yet; it needs one, or a rule tied
-  to retention rather than a constant.
+- ~~The `generate_series` cap value has no analysis behind it~~ — **closed in revision 6**: the
+  retention clip is now the rule and the cap is a bounded configuration valve (§9.3).
 
 ## 19. Process
 

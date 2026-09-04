@@ -4,6 +4,7 @@ A guard that is not itself tested is a sentence about a guard. Each case below i
 round actually found, or the hole the guard's own first draft had.
 """
 import ast
+import glob
 import importlib.util
 import os
 import pathlib
@@ -667,6 +668,208 @@ class TheSuiteRunsWhollyHoweverItIsInvoked(unittest.TestCase):
         self.assertEqual([n.name for n in after], [],
                          "these are defined after `unittest.main()`, so running this file as a "
                          "script exits before they exist and reports a green partial suite")
+
+
+class FR032DrainSurfaces(unittest.TestCase):
+    """§13.0's rollback-and-drain rule against the surfaces and terminal paths in the tree.
+
+    The approved paragraph named `pull_jobs` TTL expiry as "the" drain and generalized a job-shaped
+    sentence to all "in-flight V4 work", while V4-capable `pull_tests` rows exist too and each
+    surface has TWO terminal paths (reviewer [387]). Every case calls the production
+    `cdr.check_fr032_drain_surfaces`; the last one proves they reach it.
+    """
+
+    MIGS = {"00101.sql": (
+        "ALTER TABLE pull_jobs ADD CONSTRAINT pull_jobs_protocol_version_check "
+        "CHECK (protocol_version IN (1, 2, 3, 4));\n"
+        "ALTER TABLE pull_tests ADD CONSTRAINT pull_tests_protocol_version_check "
+        "CHECK (protocol_version IN (1, 2, 3, 4));\n"
+        "-- +goose Down\n"
+        "ALTER TABLE pull_jobs ADD CONSTRAINT pull_jobs_protocol_version_check "
+        "CHECK (protocol_version IN (1, 2, 3));\n"
+        "ALTER TABLE pull_tests ADD CONSTRAINT pull_tests_protocol_version_check "
+        "CHECK (protocol_version IN (1, 2, 3));\n")}
+
+    STORES = {"pull.go": (
+        "func (s *Store) AckPullJobs() {\n_ = `DELETE FROM pull_jobs WHERE claim_token = x`\n}\n"
+        "func (s *Store) PurgeExpiredPullJobs() {\n_ = `DELETE FROM pull_jobs WHERE expires_at`\n}\n"
+        "func (s *Store) GetPullTestResult() {\n_ = `DELETE FROM pull_tests WHERE result`\n}\n"
+        "func (s *Store) PurgeExpiredPullTests() {\n_ = `DELETE FROM pull_tests WHERE expires_at`\n}\n")}
+
+    GOOD = ("**Rollback and drain.** `pull_jobs` terminates by `AckPullJobs` or "
+            "`PurgeExpiredPullJobs`; `pull_tests` by `GetPullTestResult` or "
+            "`PurgeExpiredPullTests`.\n\n### 13.1 next\n")
+
+    def find(self, para=None, migs=None, stores=None):
+        return cdr.check_fr032_drain_surfaces(para if para is not None else self.GOOD,
+                                              migs or self.MIGS, stores or self.STORES, "fixture.md")
+
+    def test_a_rule_naming_every_surface_and_path_is_silent(self):
+        self.assertEqual(self.find(), [])
+
+    def test_a_surface_left_out_entirely_is_reported(self):
+        got = self.find(self.GOOD.replace("`pull_tests` by `GetPullTestResult` or "
+                                          "`PurgeExpiredPullTests`.", "."))
+        self.assertTrue(any("never names `pull_tests`" in m for m in got), got)
+
+    # The defect [387] found: expiry standing in for the whole drain.
+    def test_expiry_as_the_only_route_is_reported(self):
+        got = self.find(self.GOOD.replace("`AckPullJobs` or ", ""))
+        self.assertTrue(any("does not cite `AckPullJobs`" in m for m in got), got)
+
+    def test_a_consuming_read_left_uncited_is_reported(self):
+        got = self.find(self.GOOD.replace("`GetPullTestResult`", "the caller"))
+        self.assertTrue(any("does not cite `GetPullTestResult`" in m for m in got), got)
+
+    def test_deleting_the_paragraph_is_reported(self):
+        got = self.find("### 13.1 nothing here\n")
+        self.assertTrue(any("no longer carries" in m for m in got), got)
+
+    def _with_probe_surface(self, versions):
+        migs = dict(self.MIGS)
+        migs["00102.sql"] = ("ALTER TABLE pull_probes ADD CONSTRAINT "
+                             f"pull_probes_protocol_version_check CHECK (protocol_version IN ({versions}));")
+        stores = dict(self.STORES)
+        stores["probe.go"] = "func (s *Store) PurgePullProbes() {\n_ = `DELETE FROM pull_probes WHERE x`\n}\n"
+        return migs, stores
+
+    # The set is DERIVED, not hardcoded: a third surface that can hold a V4 row must be demanded.
+    def test_a_new_surface_admitting_generation_4_is_reported_until_the_rule_names_it(self):
+        migs, stores = self._with_probe_surface("1, 4")
+        got = self.find(migs=migs, stores=stores)
+        self.assertTrue(any("never names `pull_probes`" in m for m in got), got)
+
+    # The pair the reviewer required at [390]. Carrying a protocol_version CHECK is NOT the same as
+    # being V4-capable, and this guard's first version conflated them — its own "third surface"
+    # mutation added `IN (1)` and called it V4-capable, so the evidence rested on a false premise.
+    def test_a_new_surface_capped_below_4_is_NOT_required(self):
+        migs, stores = self._with_probe_surface("1, 2, 3")
+        self.assertEqual(self.find(migs=migs, stores=stores), [])
+
+    # Reviewer [402]: order by PARSED NUMERIC version, not path. With 9 and 10 the two disagree —
+    # lexically "10" sorts before "9", so a lexical scan would let version 9's definition win.
+    def test_the_later_numeric_version_wins_even_unpadded(self):
+        migs = dict(self.MIGS)
+        migs["9_widen.sql"] = ("ALTER TABLE pull_probes ADD CONSTRAINT "
+                               "pull_probes_protocol_version_check CHECK (protocol_version IN (1, 4));")
+        migs["10_narrow.sql"] = ("ALTER TABLE pull_probes ADD CONSTRAINT "
+                                 "pull_probes_protocol_version_check CHECK (protocol_version IN (1, 2, 3));")
+        stores = {**self.STORES,
+                  "probe.go": "func (s *Store) PurgePullProbes() {\n_ = `DELETE FROM pull_probes WHERE x`\n}\n"}
+        # Version 10 narrows below 4, so pull_probes is NOT a V4 surface and §13.0 must not be
+        # required to name it. Lexical order would read version 9 last and demand it.
+        self.assertEqual(self.find(migs=migs, stores=stores), [])
+
+    def test_the_later_numeric_version_wins_when_it_widens(self):
+        """The same ordering in the other direction, so the fixture cannot pass by always-silence."""
+        migs = dict(self.MIGS)
+        migs["9_narrow.sql"] = ("ALTER TABLE pull_probes ADD CONSTRAINT "
+                                "pull_probes_protocol_version_check CHECK (protocol_version IN (1, 2, 3));")
+        migs["10_widen.sql"] = ("ALTER TABLE pull_probes ADD CONSTRAINT "
+                                "pull_probes_protocol_version_check CHECK (protocol_version IN (1, 4));")
+        stores = {**self.STORES,
+                  "probe.go": "func (s *Store) PurgePullProbes() {\n_ = `DELETE FROM pull_probes WHERE x`\n}\n"}
+        got = self.find(migs=migs, stores=stores)
+        self.assertTrue(any("never names `pull_probes`" in m for m in got), got)
+
+    # 00101's own Down narrows both CHECKs back to 3. Reading Down halves empties the derived set,
+    # and an empty set would pass on ANY wording — so the emptiness must itself be reported.
+    def test_reading_the_down_half_empties_the_set_and_is_reported(self):
+        migs = {p: t.replace("-- +goose Down", "-- (not a down marker)")
+                for p, t in self.MIGS.items()}
+        got = self.find(migs=migs)
+        self.assertTrue(any("checked against an empty set" in m for m in got), got)
+
+    def test_a_surface_whose_column_is_later_dropped_leaves_the_set(self):
+        migs, stores = self._with_probe_surface("1, 4")
+        migs["00103.sql"] = "ALTER TABLE pull_probes DROP COLUMN IF EXISTS protocol_version;"
+        self.assertEqual(self.find(migs=migs, stores=stores), [])
+
+    def test_a_surface_no_function_deletes_from_is_reported(self):
+        """Otherwise the guard would pass on any wording for that surface."""
+        got = self.find(self.GOOD, stores={"empty.go": "package store\n"})
+        self.assertTrue(any("no store function deletes from" in m for m in got), got)
+
+    def test_no_generation_4_constraint_in_the_migrations_is_reported(self):
+        got = self.find(migs={"none.sql": "SELECT 1;"})
+        self.assertTrue(any("checked against an empty set" in m for m in got), got)
+
+    # TRUNCATE is scanned too, with ONE allowlisted exclusion: the exact (*Store).TruncateAll in
+    # internal/store/store.go. "The scan pattern happens not to match it" is not a decision
+    # (reviewer [392]).
+    ALLOWED = {"internal/store/store.go":
+               "package store\nfunc (s *Store) TruncateAll() {\n_ = `TRUNCATE pull_jobs, pull_tests`\n}\n"}
+
+    def test_the_allowlisted_test_helper_is_not_a_terminal_path(self):
+        self.assertEqual(self.find(stores={**self.STORES, **self.ALLOWED}), [])
+
+    def test_an_operational_truncate_elsewhere_is_reported(self):
+        got = self.find(stores={**self.STORES, **self.ALLOWED,
+                                "internal/store/reaper.go":
+                                "package store\nfunc (s *Store) ReapRegion() {\n_ = `TRUNCATE pull_jobs`\n}\n"})
+        self.assertTrue(any("ReapRegion TRUNCATEs `pull_jobs`" in m for m in got), got)
+
+    # The allowlist is the exact receiver AND function, not the file.
+    def test_another_function_in_the_same_file_truncating_a_surface_is_reported(self):
+        allowed = dict(self.ALLOWED)
+        allowed["internal/store/store.go"] += ("func (s *Store) WipePull() {\n"
+                                               "_ = `TRUNCATE pull_tests`\n}\n")
+        got = self.find(stores={**self.STORES, **allowed})
+        self.assertTrue(any("WipePull TRUNCATEs `pull_tests`" in m for m in got), got)
+
+    def test_the_same_helper_name_on_another_receiver_is_reported(self):
+        got = self.find(stores={**self.STORES, **self.ALLOWED,
+                                "internal/store/other.go":
+                                "package store\nfunc (h *Helper) TruncateAll() {\n_ = `TRUNCATE pull_jobs`\n}\n"})
+        self.assertTrue(any("(*Helper).TruncateAll" in m for m in got), got)
+
+    # Reviewer [401]: `endswith` allowlisted any prefix carrying that tail. Only the literal
+    # repo-relative path is silent; a suffix collision is reported.
+    def test_a_suffix_colliding_path_is_not_allowlisted(self):
+        got = self.find(stores={**self.STORES, **self.ALLOWED,
+                                "other/internal/store/store.go":
+                                "package store\nfunc (s *Store) TruncateAll() {\n_ = `TRUNCATE pull_jobs`\n}\n"})
+        self.assertTrue(any("other/internal/store/store.go" in m for m in got), got)
+        self.assertFalse(any(m.startswith("internal/store/store.go") for m in got),
+                         f"the literal allowlisted path must stay silent: {got}")
+
+    # Reviewer [407]: `.lstrip("./")` strips a character SET, not a prefix, so a traversal path
+    # collapsed to the allowlisted literal and walked past the check.
+    def test_a_traversal_path_is_not_allowlisted(self):
+        got = self.find(stores={**self.STORES, **self.ALLOWED,
+                                "../internal/store/store.go":
+                                "package store\nfunc (s *Store) TruncateAll() {\n_ = `TRUNCATE pull_jobs`\n}\n"})
+        self.assertTrue(any("../internal/store/store.go" in m for m in got), got)
+        self.assertFalse(any(m.startswith("internal/store/store.go") for m in got),
+                         f"the literal allowlisted path must stay silent: {got}")
+
+    def test_the_allowlisted_path_is_recognised_when_written_with_a_dot_prefix(self):
+        """Normalized comparison: `./internal/store/store.go` is the same file."""
+        self.assertEqual(self.find(stores={**self.STORES,
+                                           "./internal/store/store.go": self.ALLOWED["internal/store/store.go"]}), [])
+
+    def test_a_truncate_of_a_table_that_cannot_hold_v4_is_ignored(self):
+        self.assertEqual(self.find(stores={**self.STORES, **self.ALLOWED,
+                                           "internal/store/x.go":
+                                           "package store\nfunc (s *Store) Wipe() {\n_ = `TRUNCATE sessions, users`\n}\n"}), [])
+
+    def test_breaking_the_guard_breaks_these_tests(self):
+        real = cdr.check_fr032_drain_surfaces
+        try:
+            cdr.check_fr032_drain_surfaces = lambda *a, **k: []
+            self.assertEqual(self.find("### 13.1 nothing here\n"), [],
+                             "a neutralised guard must report nothing — this documents the shape")
+        finally:
+            cdr.check_fr032_drain_surfaces = real
+        self.assertTrue(self.find("### 13.1 nothing here\n"),
+                        "with the real guard restored the same input must be reported")
+
+    def test_the_repository_itself_agrees(self):
+        migs = {p: cdr.read(p) for p in sorted(glob.glob("internal/store/migrations/*.sql"))}
+        stores = {p: cdr.read(p) for p in sorted(glob.glob("internal/store/*.go"))
+                  if not p.endswith("_test.go")}
+        self.assertEqual(cdr.check_fr032_drain_surfaces(
+            cdr.read("docs/specs/func-expected-run-ledger.md"), migs, stores), [])
 
 
 if __name__ == "__main__":

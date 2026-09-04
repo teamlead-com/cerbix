@@ -1,7 +1,7 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
 > **Lifecycle: DESIGN APPROVED AT REVISION 22 — approved range `9f46f40..9e114a4`, D-0237, 2026-09-04.**
-> **Document revision 24: AMENDMENT UNDER REVIEW, not covered by that range.**
+> **Document revision 25: AMENDMENT UNDER REVIEW, not covered by that range.**
 > The independent reviewer approved revision 20 at party [267] and revisions 21-22 at [274], with no
 > remaining P0 or P1, rerunning `make docs-check` and `git diff --check` himself for both. This line
 > was written AFTER the approval and records it, so the commit carrying it is bookkeeping rather than
@@ -11,7 +11,10 @@
 > disposition yet:** it adds the THIRD transport to §13.0 — `role=all` is in-process and a PRODUCTION
 > topology, and revision 23 omitted it — with invariants 10k and 10l, and it is under review at [361].
 > The revision number in this banner tracks the DOCUMENT, never the approval; the approval is the
-> range.
+> range. **Revision 25 differs from 23 and 24 in kind:** those carried no design content, while 25
+> amends an APPROVED design paragraph — §13.0's rollback and drain rule, which named one of the two
+> V4-capable pull surfaces and generalized a job-shaped sentence to all V4 work (reviewer [387]). It
+> therefore needs a design disposition, not a docs/process one.
 >
 > **PHASE A IMPLEMENTED (`aa46db8`); B1 ONWARD NOT IMPLEMENTED.** The owner authorized implementation
 > by phases, and the reviewer admits each phase separately against §17.2's entry gate: phase A was
@@ -1142,10 +1145,43 @@ not a rolling-upgrade case, and is dead-lettered rather than probed. An older ca
 the ordinary case and is simply not ledger-eligible (§13, invariant 10c).
 
 **Rollback and drain.** On rollback the scheduler stops selecting 4 and immediately resumes
-publishing at the region's previous generation. In-flight V4 work drains by mechanisms that already
-exist: AMQP jobs carry a TTL and `pull_jobs` rows TTL-expire, so no V4 job is left addressed to an
-executor that no longer exists. Windows dispatched below `LedgerMinCarrier` read `unknown` — the
-honest verdict, and the reason a rollback costs truth rather than correctness.
+publishing at the region's previous generation. In-flight V4 work then reaches a terminal state
+through paths that already exist — and there are **two V4-capable pull surfaces with two paths
+each**, which every revision through 24 collapsed into one job-shaped sentence (reviewer [387]):
+
+| Surface | Terminal paths |
+| --- | --- |
+| `pull_jobs` | `AckPullJobs` deletes the row once the agent has reported; `PurgeExpiredPullJobs` removes it past its TTL |
+| `pull_tests` | `GetPullTestResult` deletes the row as its caller CONSUMES the result; `PurgeExpiredPullTests` removes it past its TTL |
+
+**TTL is the bounded fallback for unconsumed work, not the drain.** The earlier wording said "`pull_jobs`
+rows TTL-expire" as though expiry were the mechanism, then generalized it to all "in-flight V4 work"
+while naming only one surface. Both halves mislead: the ordinary path for a job is the agent
+reporting and the row being acked, and for a test it is the caller consuming a result that has
+already been written — expiry is what BOUNDS the wait when neither happens. On `pull_tests` that
+distinction has teeth, because a row whose probe has finished holds an answer nobody has read yet, so
+treating expiry as the drain describes discarding it as routine.
+
+**Phase boundary.** This rule becomes live in **B2**, the first phase that can produce a V4 row at
+all: B1 selects nothing, so a B1-era rollback drains nothing and this paragraph is vacuous there.
+What protects B1 is a different property — invariant 10j's migration guard refuses to narrow the
+`CHECK` while a generation-4 row exists, which is boundary safety rather than drain. Conflating the
+two is how a rollback story gets written for a phase that cannot exercise it.
+
+The paragraph's SET of surfaces and terminal paths is guarded: `check_fr032_drain_surfaces` derives
+both from the tree — every table whose **effective CHECK admits generation 4**, read from each
+migration's Up half, and every store function that DELETEs from one — and fails if this paragraph
+omits any of them. `TRUNCATE` is scanned as well, with a single allowlisted exclusion: the exact
+`(*Store).TruncateAll` test helper in `internal/store/store.go`. Any other truncate of an effective
+V4 surface is reported, because it is either a terminal path this paragraph must describe or
+operational code discarding V4 work — and "the scan pattern happens not to match it" is not a
+decision (reviewer [392]). Carrying a `protocol_version` constraint is not the same as being able to hold a
+V4 row: a surface capped at 1..3 is deliberately NOT demanded of this paragraph, and a pair of
+fixtures pins the distinction in both directions (reviewer [390]). A drain rule that names one
+surface is the defect this guard exists to prevent recurring.
+
+Windows dispatched below `LedgerMinCarrier` read `unknown` — the honest verdict, and the reason a
+rollback costs truth rather than correctness.
 
 ### 13.1 `DueAt` on the wire — the field revision 7 promised and never defined
 

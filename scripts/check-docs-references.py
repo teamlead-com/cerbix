@@ -969,6 +969,124 @@ def check_fr032_audit_totals(body, spec='docs/specs/func-expected-run-ledger.md'
     return out
 
 
+def check_fr032_drain_surfaces(spec_body, migration_sources, store_sources,
+                               spec='docs/specs/func-expected-run-ledger.md'):
+    """§13.0's rollback-and-drain rule against the surfaces and terminal paths in the TREE.
+
+    The approved paragraph called `pull_jobs` TTL expiry "the" drain mechanism and then generalized
+    a job-shaped sentence to all "in-flight V4 work" — while V4-capable `pull_tests` rows exist too,
+    and each surface has TWO terminal paths, not one (reviewer [387]). A prose rule about a SET is
+    worth nothing unless the set is derived: the surfaces come from the migrations, and the terminal
+    paths from every store function that DELETEs from one of them.
+
+    A surface qualifies only if its EFFECTIVE CHECK admits generation 4 — reviewer P0 at [390].
+    Carrying a `protocol_version` constraint is not the same as being able to hold a V4 row, and the
+    first version of this guard conflated them: a future pull table capped at 1..3 would have forced
+    irrelevant §13.0 text. My own "third surface" mutation added `IN (1)` and called it V4-capable,
+    so that evidence rested on the same false premise it was meant to disprove.
+
+    Three details decide correctness. Migrations are ordered by their **parsed numeric version**,
+    not by path: five-digit padding makes lexical and numeric order agree today, and the guard's
+    correctness must not rest on a future filename keeping that formatting (reviewer [402]) — with
+    versions 9 and 10, lexical order puts 10 first and the older definition would win. Only each
+    migration's **Up half** counts: `00101`'s own Down narrows both CHECKs back to `IN (1, 2, 3)`,
+    so reading Downs empties the set and the guard would then pass on any wording at all. And a later Up that drops the column removes the surface, while
+    one that drops the constraint without replacing it does NOT — an unconstrained column accepts 4,
+    so staying in the set is the conservative reading.
+
+    `TRUNCATE` is scanned too, with ONE allowlisted exclusion: `(*Store).TruncateAll` in
+    `internal/store/store.go` — compared as a NORMALIZED repo-relative path, not by suffix — the
+    test helper that empties every table. It removes V4 rows and
+    belongs in no operational drain rule. Anything else truncating an effective V4 surface is
+    REPORTED — reviewer [392] — because "the scan pattern happens not to match it" is not a
+    decision, and a truncate on an operational path is either a terminal path §13.0 must describe
+    or a bug. The allowlist is the exact receiver and function, not the file: another function in
+    `store.go` truncating a surface is still reported.
+
+    PURE: takes the spec text, the migration SQL and the store sources as {path: text}.
+    """
+    out = []
+    admits = {}
+
+    def version(path):
+        m = re.match(r'(\d+)', os.path.basename(path))
+        return (int(m.group(1)) if m else -1, path)
+
+    for path in sorted(migration_sources, key=version):
+        up = migration_sources[path].split('-- +goose Down', 1)[0]
+        for table, listed in re.findall(
+                r'ADD CONSTRAINT ([a-z_]+)_protocol_version_check\s+CHECK \(protocol_version IN \(([^)]*)\)\)', up):
+            admits[table] = {v.strip() for v in listed.split(',')}
+        for table in re.findall(r'ALTER TABLE ([a-z_]+)[^;]*DROP COLUMN (?:IF EXISTS )?protocol_version', up):
+            admits.pop(table, None)
+    surfaces = {t for t, versions in admits.items() if '4' in versions}
+    if not surfaces:
+        out.append(f'{spec} §13.0: no migration leaves a `protocol_version` CHECK admitting '
+                   f'generation 4, so the drain rule is checked against an empty set. Reading a '
+                   f"migration's Down half does this — 00101's Down narrows both CHECKs back to 3")
+        return out
+
+    # Every function that can remove a row from one of those surfaces, found where it lives.
+    ALLOWED_TRUNCATE = ('internal/store/store.go', '*Store', 'TruncateAll')
+    named = '|'.join(sorted(surfaces))
+    paths, truncates = {}, []
+    for path, text in sorted(store_sources.items()):
+        recv, fn = '', None
+        for lineno, line in enumerate(text.split('\n'), 1):
+            m = re.match(r'func (?:\((?:\w+ )?([\w*]+)\) )?(\w+)', line)
+            if m:
+                recv, fn = m.group(1) or '', m.group(2)
+            if not fn:
+                continue
+            hit = re.search(r'DELETE FROM (' + named + r')\b', line)
+            if hit:
+                paths.setdefault(hit.group(1), set()).add(fn)
+            if re.search(r'\bTRUNCATE\b', line):
+                for surface in re.findall(r'\b(' + named + r')\b', line):
+                    # Repo-relative path equality, NORMALIZED — not endswith. A suffix test
+                    # allowlists `other/internal/store/store.go` carrying the same receiver and
+                    # function, which is the collision reviewer [401] required closed.
+                    # No lstrip: it strips a CHARACTER SET, not a prefix, so `../internal/store/
+                    # store.go` became the allowlisted literal and traversed straight past the
+                    # check (reviewer [407]). normpath alone already folds `./` away.
+                    here = os.path.normpath(path).replace(os.sep, '/')
+                    if (here == ALLOWED_TRUNCATE[0] and recv == ALLOWED_TRUNCATE[1]
+                            and fn == ALLOWED_TRUNCATE[2]):
+                        continue
+                    truncates.append((path, lineno, recv, fn, surface))
+
+    for path, lineno, recv, fn, surface in truncates:
+        shown = f'({recv}).{fn}' if recv else fn
+        out.append(f'{path}:{lineno} — {shown} TRUNCATEs `{surface}`, an effective generation-4 '
+                   f'surface, and is not the one allowlisted test helper '
+                   f'(*{ALLOWED_TRUNCATE[1].lstrip("*")}).{ALLOWED_TRUNCATE[2]} in '
+                   f'{ALLOWED_TRUNCATE[0]}. Either it is a terminal path §13.0 must describe, or it '
+                   f'is operational code discarding V4 work')
+
+    if '**Rollback and drain.**' not in spec_body:
+        out.append(f'{spec} §13.0 no longer carries a "Rollback and drain." paragraph, so the rule '
+                   f'this guard checks has no place to be wrong in')
+        return out
+    sec = spec_body.split('**Rollback and drain.**', 1)[1].split('### 13.1', 1)[0]
+
+    for surface in sorted(surfaces):
+        if f'`{surface}`' not in sec:
+            out.append(f"{spec} §13.0's drain rule never names `{surface}`, whose effective CHECK "
+                       f'ADMITS generation 4 ({", ".join(sorted(admits[surface]))}) and which can '
+                       f'therefore hold a V4 row — a rule that names one surface is how the '
+                       f'job-shaped sentence stood for all V4 work')
+            continue
+        for fn in sorted(paths.get(surface, ())):
+            if f'`{fn}`' not in sec:
+                out.append(f"{spec} §13.0's drain rule does not cite `{fn}`, a terminal path for "
+                           f'`{surface}` — leaving expiry to read as the only route')
+    for surface in sorted(surfaces):
+        if not paths.get(surface):
+            out.append(f'{spec} §13.0: no store function deletes from `{surface}`, so its terminal '
+                       f'paths cannot be checked; the guard would pass on any wording')
+    return out
+
+
 def check_enumerations():
     bad = []
 
@@ -1030,6 +1148,11 @@ def check_enumerations():
                 bad.append((spec, 1, 'enum', msg))
     if os.path.exists(spec):
         for msg in check_fr032_audit_totals(read(spec), spec):
+            bad.append((spec, 1, 'enum', msg))
+        migs = {p: read(p) for p in sorted(glob.glob('internal/store/migrations/*.sql'))}
+        stores = {p: read(p) for p in sorted(glob.glob('internal/store/*.go'))
+                  if not p.endswith('_test.go')}
+        for msg in check_fr032_drain_surfaces(read(spec), migs, stores, spec):
             bad.append((spec, 1, 'enum', msg))
 
     # 5. the Monitoring-as-Code bundle README against fileSupportedTypes.
@@ -1102,8 +1225,10 @@ def main():
               'migrations in both places that name them, the spec index as a SET, and the '
               'Monitoring-as-Code supported types, and FR-032 §17.3\'s discharge citation against '
               'the test file it discharges from, BOTH of its counts against the artefacts they '
-              'summarise, and §17.2\'s own totals DERIVED from its discharge table in both '
-              'places that state them — the check types and the bundle types as SETS '
+              'summarise, §17.2\'s own totals DERIVED from its discharge table in both '
+              'places that state them, and §13.0\'s rollback-and-drain rule against every '
+              'V4-capable pull surface and every store function that removes one of its rows '
+              '— the check types and the bundle types as SETS '
               'through an asserted label map, not by count alone; and no document announces a '
               '`PARTIAL` residual its own discharge map does not have)')
         return 0

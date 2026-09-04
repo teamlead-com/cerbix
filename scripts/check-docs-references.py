@@ -833,6 +833,49 @@ def check_type_list_findings(stated_count, listed, wire, labels=None):
     return out
 
 
+def check_fr032_discharge(body, test_source, spec='docs/specs/func-expected-run-ledger.md',
+                          testfile='internal/store/revisiontimeline_internal_test.go'):
+    """FR-032 §17.3's discharge citation and BOTH of §17.2's counts, against their artefacts.
+
+    PURE: takes the spec text and the test file's source, returns findings. Extracted so the
+    fixture tests can call THIS rather than re-implement it — reviewer [321] pointed out that my
+    first fixtures reproduced the regexes, so deleting the guard would have left six of seven
+    tests passing. A test that models a mechanism instead of invoking it is evidence of nothing,
+    which is the defect this whole requirement keeps teaching me.
+
+    A discharge map that claims "these tests prove it" must name the tests that exist, in both
+    directions, and its counts must be checked against the ARTEFACTS rather than against another
+    sentence. The count guard covered only the test number at first, leaving the mutation number
+    beside it free — a guard over one of two adjacent claims invites trust in the other.
+    """
+    out = []
+    if '### 17.3' not in body:
+        return out
+    sec = body.split('### 17.3', 1)[1].split('### 17.4', 1)[0]
+    cited = set(re.findall(r'`(Test[A-Za-z0-9_]+)`', sec))
+    declared = set(re.findall(r'^func (Test[A-Za-z0-9_]+)', test_source, re.M))
+    for name in sorted(declared - cited):
+        out.append(f'{testfile} declares {name}, which §17.3 does not cite — a test that '
+                   f'discharges nothing, or a discharge map that undercounts itself')
+    for name in sorted(cited - declared):
+        out.append(f'§17.3 cites {name}, which is not declared in {testfile}')
+    muts = len(re.findall(r'^\d+\. ', sec, re.M))
+    m = re.search(r'\| 13a \|[^|]*\|[^|]*\|[^|]*\| (\d+) tests, (\d+) mutations', body)
+    if not m:
+        out.append("§17.2's 13a row no longer states its test and mutation counts in the form the "
+                   'guard reads')
+    else:
+        if int(m.group(1)) != len(declared):
+            out.append(f"§17.2's 13a row says {m.group(1)} tests; {testfile} declares "
+                       f'{len(declared)}')
+        if int(m.group(2)) != muts:
+            out.append(f"§17.2's 13a row says {m.group(2)} mutations; §17.3 enumerates {muts}")
+    if muts == 0:
+        out.append("§17.3 enumerates no mutations as a numbered list, so the row's mutation count "
+                   'is checked against nothing')
+    return out
+
+
 def check_enumerations():
     bad = []
 
@@ -882,7 +925,15 @@ def check_enumerations():
     for f in sorted(listed - on_disk):
         bad.append(('docs/specs/README.md', 1, 'enum', f'the index lists {f}, which is not in docs/specs/'))
 
-    # 4. the Monitoring-as-Code bundle README against fileSupportedTypes.
+    # 4. FR-032 §17.3's discharge citation and counts — the logic lives in
+    # check_fr032_discharge so the fixture tests invoke the guard instead of modelling it.
+    spec = 'docs/specs/func-expected-run-ledger.md'
+    testfile = 'internal/store/revisiontimeline_internal_test.go'
+    if os.path.exists(spec) and os.path.exists(testfile):
+        for msg in check_fr032_discharge(read(spec), read(testfile), spec, testfile):
+            bad.append((spec, 1, 'enum', msg))
+
+    # 5. the Monitoring-as-Code bundle README against fileSupportedTypes.
     mac = mac_supported_types()
     mac_doc = 'docker/monitoring.d/README.md'
     if mac is None:
@@ -950,7 +1001,8 @@ def main():
               'unbuilt while its requirement is DONE; and every hand-written enumeration about the '
               'tree agrees with it — the check-type count, the column-list ON DELETE SET NULL '
               'migrations in both places that name them, the spec index as a SET, and the '
-              'Monitoring-as-Code supported types — the check types and the bundle types as SETS '
+              'Monitoring-as-Code supported types, and FR-032 §17.3\'s discharge citation against '
+              'the test file it discharges from, BOTH of its counts against the artefacts they summarise — the check types and the bundle types as SETS '
               'through an asserted label map, not by count alone; and no document announces a '
               '`PARTIAL` residual its own discharge map does not have)')
         return 0

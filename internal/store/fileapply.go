@@ -774,6 +774,15 @@ func insertMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor)
 	if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: insert monitor: %w", err)
 	}
+	// A monitor is CREATED at generation 1, and that generation needs its row exactly as a bumped
+	// one does (FR-032 invariant 13a). Creation is not a bump, so `revisionFenceSetSQL` never
+	// appears here and the fence-keyed half of the guard cannot see this path — which is precisely
+	// how the reviewer found it missing: the invariant said "every bump" when the property is
+	// "every generation". Both create paths (`monitors.go` CreateMonitor and `fileapply.go`'s
+	// apply loop) call THIS function, so one write covers both and they cannot diverge.
+	if err := writeRevisionTimeline(ctx, tx, created.ProjectID, created.ID); err != nil {
+		return domain.Monitor{}, err
+	}
 	return created, nil
 }
 

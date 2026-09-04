@@ -157,6 +157,11 @@ func (s *Store) RetireMonitor(ctx context.Context, projectID, monitorID string, 
 	if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: retire monitor: %w", err)
 	}
+	// Retiring is a configuration change — `enabled` goes false — so it creates a generation, and
+	// FR-032 invariant 13a requires its timeline row in THIS transaction.
+	if err := writeRevisionTimeline(ctx, tx, projectID, monitorID); err != nil {
+		return domain.Monitor{}, err
+	}
 	// §6.2 fan-out, the half `retired_at` alone would miss: a service whose SLI names this
 	// monitor now executes under different semantics — its input stopped producing observations —
 	// so every referencing service opens a new evaluation epoch in THIS transaction. Without it,
@@ -222,6 +227,11 @@ func (s *Store) ReactivateMonitor(ctx context.Context, projectID, monitorID stri
 	m, err := s.scanMonitorNoSecrets(row)
 	if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: reactivate monitor: %w", err)
+	}
+	// Restoring is a configuration change too, and its generation needs its row for the same
+	// reason retiring's does (FR-032 invariant 13a).
+	if err := writeRevisionTimeline(ctx, tx, projectID, monitorID); err != nil {
+		return domain.Monitor{}, err
 	}
 	// §6.2 fan-out, the half `retired_at` alone would miss: a service whose SLI names this
 	// monitor now executes under different semantics — its input stopped producing observations —

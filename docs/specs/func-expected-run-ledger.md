@@ -1471,14 +1471,26 @@ Discharged as a SET in `docs/traceability.md`.
     to cross.
 10e. `carrier_generation IS NULL` exactly when `job_id IS NULL`, enforced by a CHECK: a window never
     dispatched has no carrier, which is a different fact from an old one.
-11. `worker` and `agent` hold no database handle and no ack concept after this change.
+11. `worker` and `agent` hold no database handle: neither package imports a store package, before
+    or after this change. **And the `dispatch.Dispatcher` INTERFACE gains no ack method** — which is
+    what §4a and `amqp.go:191-194` actually require ("this keeps the transport seam free of an ack
+    concept the Dispatcher interface does not expose").
+11a. The unqualified claim "no ack concept" was FALSE about the tree and is withdrawn. The pull
+    agent has had a lease-ack since it existed: `internal/agent/agent.go:290` acks only the jobs it
+    processed, and `:329` buffers without acking so the leases lapse server-side and the jobs are
+    re-delivered. That mechanism is pre-existing, load-bearing for the pull transport, and out of
+    this requirement's scope. Found by trying to specify invariant 11's test — the second time
+    §17.2's ENTRY gate caught an invariant asserting something the tree contradicts.
 12. `heartbeats` gains no column, and `claimed_at`, `terminal_at`, `outcome`, `refused_at`,
     `refused_reason` and `skip_reason` appear in no index.
 13. The interval, timeout and retry count attributed to a window are those in force for THAT window,
     read from the revision timeline, never from the monitor's current fields.
-13a. The revision timeline is COMPLETE and self-describing: **no site** can bump
-    `monitors.execution_revision` without writing the matching `monitor_execution_revisions` row in
-    the SAME transaction — and there are FOUR such sites, not one (§17.3); the migration's backfill writes exactly one row per monitor; and every row
+13a. The revision timeline is COMPLETE and self-describing: **no site can create a GENERATION**
+    without writing the matching `monitor_execution_revisions` row in the SAME transaction. A
+    generation is created by bumping the fence — four sites, not one — **and by CREATING a monitor**,
+    which initializes generation 1 and never touches the fence. The first draft said "bump", and
+    creation is not a bump: reviewer P0 at [304] found a freshly created monitor's initial
+    generation indescribable until its first update (§17.3); the migration's backfill writes exactly one row per monitor; and every row
     carries that revision's `interval_seconds`, `confirm_interval_seconds`, `timeout_seconds` and
     `retries`. Nothing else in this list states the integrity of the table everything else reads —
     which is why phase A had a gate in §16 and no invariant of its own until revision 23.
@@ -1699,14 +1711,14 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
-### 17.2 The discharge audit — 34 covered, 1 specified, 30 to specify
+### 17.2 The discharge audit — 34 covered, 1 discharged, 30 to specify
 
 The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
 sized as its own scope rather than folded into the design approval. It asks one question of each
 invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
 the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
 
-**Result: 34 covered, 1 specified, 30 to specify** — 65 invariants, after 13a was added by this audit. And the shape of the gap is the finding, not the
+**Result: 34 covered, 1 DISCHARGED by phase A, 30 to specify** — 65 invariants, after 13a was added by this audit. And the shape of the gap is the finding, not the
 number: every test in §17.1 was added in response to one of the eight P0 rejections, so coverage
 tracked **the design's defects** rather than **the requirement's purpose**. The four invariants that
 say what FR-032 is FOR had nothing testing them —
@@ -1747,6 +1759,13 @@ guard goes **next to its owning package** — the advance-statement guard in `in
 `worker`/`agent` import boundary as a narrow architecture test — and **no second global mechanism is
 built**.
 
+**Reading the Status column.** `covered` means **a §17.1 case specifies a test for it** — not that
+the test exists, because outside phase A no code does. `DISCHARGED` means the tests exist, run and
+kill their mutations. `TO SPECIFY` means nothing yet describes how it would be proven. The
+distinction matters: 34 `covered` rows are 34 specifications, and reading them as 34 tested
+invariants is the same error as reading an invariant count as coverage — the error this audit exists
+to correct.
+
 | # | Phase | Check kind | Status | Where, or what is missing |
 | --- | --- | --- | --- | --- |
 | 1 | B2 | behavioural | TO SPECIFY | the OWNER's headline property, and nothing tests it: probe instants before and after the change, per dispatch path |
@@ -1774,11 +1793,12 @@ built**.
 | 10f | C | behavioural | **covered** | both arrival orders of the stale result |
 | 10g | B1 | behavioural | **covered** | physical unreachability on AMQP and pull |
 | 10h | B1 | behavioural | **covered** | §16.1's mixed-version matrix |
-| 10i | B1 | behavioural | TO SPECIFY | a V4 delivery missing `JobID`/`IssuedAt`/`DueAt` must be dead-lettered, not probed |
-| 11 | B1 | source scan | TO SPECIFY | a source scan: `internal/worker` and `internal/agent` import no store package and expose no ack |
+| 10i | B1 | behavioural (live broker) | **SPECIFIED (§17.4)** | dead-letter assertion plus a no-probe assertion, with the tolerant-branch mutation named |
+| 11 | B1 | source scan | **SPECIFIED (§17.4)** | an import-boundary scan over both packages plus an interface-shape assertion on `Dispatcher`; specifying it found the invariant's "no ack concept" clause FALSE about the tree (§17.4) |
+| 11a | B1 | — | **n/a, a withdrawal** | records that the pull agent's lease-ack predates this requirement and is out of scope |
 | 12 | B2 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
 | 13 | B2 | behavioural | **covered** | the confirm-acceleration threshold case — it says "attributed to a WINDOW", and there are no windows before B2 |
-| 13a | A | behavioural + **source scan** | **SPECIFIED (§17.3)** | four tests and a `go/ast` scan; specifying it found that FOUR sites bump the revision, not one, so phase A owns all four |
+| 13a | A | behavioural + **source scan** | **DISCHARGED** | 13 tests, 7 mutations killed (§17.3). Specifying it found FOUR bump sites, not one; implementing it found that retire and reactivate are COMPOSITE-only, that the fence lives in `updateMonitorTxPrepared`, and — via the reviewer — that CREATION makes a generation too |
 | 14 | B2 | behavioural | **covered** | the config-boundary cases |
 | 14a | B2 | behavioural | **covered** | the four-case each-side-of-a-due-instant test |
 | 14b | B2 | behavioural | **covered** | the `next_due_at`-already-past case |
@@ -1820,6 +1840,22 @@ built**.
 The entry gate of §17.2 requires this before phase A's code begins. Writing it found something the
 invariant as first drafted got wrong.
 
+**And a FIFTH way to create a generation that is not a bump at all: creating the monitor.** A new
+monitor starts at `execution_revision = 1`, and until revision 24 nothing wrote that generation's
+row — so its configuration was indescribable until someone updated it. The reviewer found this at
+[304] because the invariant said "every bump" while the property is "every generation", and a
+fence-keyed guard is blind to initialization by construction.
+
+Both create paths — `CreateMonitor` at `internal/store/monitors.go:650` and the file-apply loop at
+`internal/store/fileapply.go:262` — call the SAME `insertMonitorTx`, so ONE write covers both and
+they cannot diverge. That is a stronger fix than patching two sites, and it is why the guard's
+creation half keys on `INSERT INTO monitors` rather than on either caller.
+
+**The guard's two halves detect OPPOSITELY, deliberately.** The fence check ignores string literals,
+because the identifier appears inside one as an SQL comment. The creation check inspects them,
+because the `INSERT` lives inside one. Two properties, two detections, and neither is a variant of
+the other.
+
 **There are FOUR revision-bump sites, not one.** `revisionFenceSetSQL` — the D-0142 fence — appears
 at `internal/store/monitors.go:878` (inside `updateMonitorTx`), `internal/store/monitorretire.go:153`
 (retire: `retired_at`, `enabled = false`), `:219` (restore: `retired_at` cleared, `enabled = true`)
@@ -1853,12 +1889,92 @@ all four, not one.
 | The backfill writes exactly one row per monitor | behavioural | Seed monitors including a DISABLED one and a RETIRED one, migrate, assert `count(monitor_execution_revisions) == count(monitors)` and `effective_from = monitors.updated_at` | Restrict the backfill to `WHERE enabled` — the disabled monitor then has no row and the count assertion fails |
 | Every row carries that revision's four cadence fields | behavioural | Assert `interval_seconds`, `confirm_interval_seconds`, `timeout_seconds` and `retries` each equal the monitor's value | Drop `confirm_interval_seconds` from the backfill's projection. A test asserting only `interval_seconds` would survive this, which is why all four are asserted individually |
 
-**On naming the Go tests.** They are described by their assertions rather than cited as
-`` `TestXxx` `` because `make docs-check` validates every backticked `Test*` name in a living document
-against the tree, and these do not exist yet — citing them now would either break the gate or force
-an `ALLOWED` entry that hides a real absence. The implementing commit adds the names here in
-backticks, at which point the gate starts checking them. Stated so this reads as a sequencing
-constraint rather than as vagueness.
+**The tests now exist and are named here, so `make docs-check` validates them against the tree**
+(they were described by their assertions until the implementing commit, because citing a
+non-existent `Test*` name would either break that gate or force an `ALLOWED` entry that hides a real
+absence):
+
+| Claim | Tests |
+| --- | --- |
+| Same transaction, per site | `TestUpdateMonitorRecordsItsGenerationWithAllFourCadenceFields`, `TestRetireAndReactivateEachRecordTheirGeneration`, `TestASecretRotationRecordsAGenerationForEveryAffectedMonitor`, `TestTheTimelineRowAndTheBumpShareOneTransaction` |
+| **Creation records generation 1**, on both paths | `TestCreatingAMonitorRecordsItsFirstGeneration`, `TestTheFileApplyCreatePathRecordsItsFirstGenerationToo` |
+| **The write is project-scoped and REFUSES** a cross-project pair | `TestTheTimelineWriteRefusesAMonitorFromAnotherProject` |
+| No future site | `TestEveryRevisionFenceWritesItsTimelineRow`, `TestTheRevisionFenceSitesAreTheFourWeKnowAbout`, `TestTheRevisionFenceGuardFailsOnAFixtureThatViolatesIt`, `TestTheRevisionFenceGuardCountsReferencesNotTextOccurrences`, `TestTheGuardFailsOnACreationThatWritesNoTimelineRow` |
+| Backfill covers every monitor | `TestTheBackfillCoversEveryMonitorIncludingDisabledOnes` |
+| Four cadence fields | `TestUpdateMonitorRecordsItsGenerationWithAllFourCadenceFields`, which asserts each field separately |
+
+**`writeRevisionTimeline` takes an explicit `projectID` and its SQL carries
+`AND m.project_id = $2`.** I first argued the predicate was unnecessary: the ids all come from
+project-scoped queries, and a stray id could only ever record a generation that genuinely is in
+force, with `ON CONFLICT DO NOTHING` absorbing a duplicate. The reviewer's counter is the one I had
+myself named as decisive — **the AST guard protects against a fifth SITE, not against a future
+CALLER handing the helper a list it did not scope.** The guard cannot see that, so the SQL does. And
+a predicate with no test is a predicate that can be deleted with nothing failing, so the negative
+test asserts BOTH halves: a cross-project pair writes nothing, and the same call with the right
+project writes exactly one — otherwise the test would pass against a write that is broken for every
+input.
+
+**Mutations planted and killed: 7.** Enumerated as a list rather than restated as a word, so the
+count in §17.2's row is checked against the ARTEFACT and not against another sentence — the drift
+this list exists to prevent happened twice already, once for the test count and once because the
+first guard checked only that number and left this one free (reviewer [318]).
+
+1. Removing the **project predicate** — `a cross-project pair wrote 1 rows; the project predicate refuses nothing`.
+2. Removing the **creation write** — the P0 exactly as it went to review. Dies THREE times: the guard names `insertMonitorTx`, and both behavioural tests name the missing generation-1 row.
+3. Dropping **`confirm_interval_seconds`** from the write — `confirm_interval_seconds = 120, want 30`.
+4. Writing **one row instead of one per monitor** on the rotation fence — which is why that test rotates a secret referenced by THREE monitors.
+5. Deleting the **restore site's** write entirely. Dies TWICE: the AST guard names `ReactivateMonitor`, the behavioural test names the missing row.
+6. Restricting the **backfill** to `WHERE m.enabled` — `backfill wrote 1 rows for 2 monitors`.
+7. Turning the **AST scan into a text scan**, which then counts `monitors.go`'s SQL comment and reports five sites.
+
+**Two facts phase A learned from the tree rather than from this document.** The four fence-bearing
+functions are `updateMonitorTxPrepared` (the prepared variant, not `updateMonitorTx`),
+`RetireMonitor`, `ReactivateMonitor` and `fenceSecretMonitors` — the guard caught its author guessing
+all four names wrong on its first run. And **retire and reactivate apply to COMPOSITE monitors
+only**, so those two generations exist only for composites; the first version of their test used an
+HTTP monitor and was refused by name.
+
+**`effective_from` is `statement_timestamp()` for a live bump and `monitors.updated_at` only in the
+backfill.** The rotation fence sets *only* the two fence columns and never touches `updated_at`, so
+reading it back would date a brand-new generation to the previous write — potentially days early.
+
+### 17.4 Phase B1's entry gate — invariants 10i and 11 specified
+
+B1's other two rows (10g, 10h) already have §17.1 cases. These two did not, and specifying them
+found invariant 11 asserting something the tree contradicts — the second time this gate has caught
+that, after 13a's four bump sites.
+
+**Invariant 11, corrected before it could be implemented.** The import half is true today and needs
+pinning: `internal/worker` and `internal/agent` import only `dispatch` and `domain`, no store
+package. The "no ack concept" half was **false** — `internal/agent/agent.go:290` acks only the jobs
+it processed and `:329` deliberately does not ack so leases lapse and jobs are re-delivered. That
+lease-ack is the pull transport's delivery guarantee, predates this requirement, and is out of
+scope. What §4a and `amqp.go:191-194` actually require is that the **`Dispatcher` interface** expose
+no ack, and it has exactly five methods today: `PublishJob`, `Jobs`, `PublishResult`, `Results`,
+`Close`.
+
+| Claim | Check kind | Test | The mutation that must kill it |
+| --- | --- | --- | --- |
+| Neither executor package imports a store package | source scan, one per package | A `go/ast` import scan in `internal/worker` and again in `internal/agent` — beside each owning package, per [286], rather than one cross-cutting test that neither team owns | Add `internal/store` to that package's imports. The scan must fail and NAME the offending import path, not merely the package |
+| The `Dispatcher` interface exposes no ack | source scan | Parse `internal/dispatch/dispatch.go`, collect the interface's method names, assert the set is exactly the five above | Add `Ack(ctx, id) error` to the interface. The test must fail naming `Ack` — and an enumerated SET is required rather than "contains no method called Ack", because `Nack`, `Settle` or `Confirm` would all slip past a name check |
+| **B1 adds neither** | source scan | The same two scans, run against B1's tree — B1 touches queues, claim endpoints and capability announcement, none of which needs a store handle in an executor | If B1's carrier work reaches for the store from `worker`/`agent`, the import scan fails on the change that introduces it, which is the point of placing the gate at ENTRY |
+
+**Invariant 10i needs a live broker, and its shape is fixed by what already exists.** A V4 delivery
+missing `JobID`, `IssuedAt` or `DueAt` is a protocol violation, not a rolling-upgrade case, so it is
+dead-lettered rather than probed. `AMQP.deadLetter` (`internal/dispatch/amqp.go:499`) already
+forwards a poison body to the durable dead-letter queue "so it survives for inspection instead of
+vanishing", and `amqp_test.go` already skips unless `CERBIX_TEST_RABBITMQ_URL` is set. The test
+follows both: publish a V4 job with one defining field absent, assert **(a)** it appears on the
+dead-letter queue tagged with its source, and **(b)** no probe ran for it.
+
+| Mutation | Why it is the one that matters |
+| --- | --- |
+| Treat the missing field as a rolling-upgrade case and probe anyway | This is the plausible mistake: the code already tolerates absent identity on OLDER carriers, and the tolerant branch is one `if` away from covering V4 too. The test must distinguish carrier from payload |
+| Drop the delivery silently instead of dead-lettering | Passes any assertion that only checks "no probe ran", which is why (a) is asserted separately |
+
+**Not specified here, deliberately:** B1 writes no ledger rows, so nothing in this gate touches
+`expected_runs`. The carrier's *eligibility* consequences are 10c and 10d, which belong to B2 where
+rows exist.
 
 ## 18. Open items
 

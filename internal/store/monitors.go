@@ -51,6 +51,55 @@ var ErrMonitorSlugImmutable = errors.New("store: monitor slug is immutable")
 const revisionFenceSetSQL = `execution_revision = execution_revision + 1,
 		        last_result_ts = CASE WHEN type = 'push' THEN last_result_ts ELSE NULL END`
 
+// writeRevisionTimeline records what a monitor's CURRENT configuration generation IS, in the
+// transaction that created it (FR-032 phase A, D-0237).
+//
+// `monitors.execution_revision` is a bare counter: it says a monitor is on generation 7 and nothing
+// records what generation 7 WAS. The expected-run ledger must attribute a window's interval, timeout
+// and retry count to the configuration in force for THAT window rather than to the monitor's current
+// fields, so every bump of the D-0142 fence has to leave a row behind. A generation with no row is a
+// window whose configuration cannot be described.
+//
+// EVERY caller of `revisionFenceSetSQL` must call this in the same transaction — there are four of
+// them, not one, and three are outside `updateMonitorTx`: retire, restore and the secret-rotation
+// fence. `TestEveryRevisionFenceWritesItsTimelineRow` parses this package and fails when a fifth
+// appears without it.
+//
+// Variadic and set-based because the rotation fence is a BULK bump: one statement raises the
+// generation of every monitor referencing a rotated secret, and each of them needs its own row.
+//
+// `projectID` is required rather than derived, so this statement's SCOPE matches the bump's. I first
+// argued the predicate was unnecessary — the ids all come from project-scoped queries, and a stray
+// id could only ever record a generation that genuinely is in force — and a reviewer pointed out
+// that the AST guard protects against a fifth SITE, not against a future CALLER handing this helper
+// a list it did not scope. The guard cannot see that, so the SQL does.
+//
+// `effective_from` is `statement_timestamp()` rather than `monitors.updated_at`, and the difference
+// matters: the rotation fence does NOT touch `updated_at` (it sets only the two fence columns), so
+// reading it back would date a brand-new generation to the previous write — potentially days early.
+// The generation becomes effective when the bump commits. The MIGRATION's backfill uses `updated_at`
+// instead, because for a generation that already existed that is the only instant it can honestly
+// claim.
+func writeRevisionTimeline(ctx context.Context, tx pgx.Tx, projectID string, monitorIDs ...string) error {
+	if len(monitorIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO monitor_execution_revisions
+		     (project_id, monitor_id, execution_revision,
+		      interval_seconds, confirm_interval_seconds, timeout_seconds, retries, effective_from)
+		 SELECT m.project_id, m.id, m.execution_revision,
+		        m.interval_seconds, m.confirm_interval_seconds, m.timeout_seconds, m.retries,
+		        statement_timestamp()
+		   FROM monitors m
+		  WHERE m.id = ANY($1::uuid[]) AND m.project_id = $2
+		 ON CONFLICT (monitor_id, execution_revision) DO NOTHING`,
+		monitorIDs, projectID); err != nil {
+		return fmt.Errorf("store: write revision timeline: %w", err)
+	}
+	return nil
+}
+
 // monitorRefSettings is the ONE place that decides which config keys are inventory
 // references. A credentialed type contributes `password_ref` as it always has; a synthetic
 // monitor contributes one `scenario_secret_<binding>_ref` per binding (FR-028 stage 2).
@@ -894,6 +943,10 @@ func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.
 	}
 	if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: update monitor: %w", err)
+	}
+	// The generation this write just created, recorded before the caller's transaction commits.
+	if err := writeRevisionTimeline(ctx, tx, updated.ProjectID, updated.ID); err != nil {
+		return domain.Monitor{}, err
 	}
 	return updated, nil
 }

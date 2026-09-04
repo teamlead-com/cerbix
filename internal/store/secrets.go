@@ -437,6 +437,12 @@ func (s *Store) fenceSecretMonitors(ctx context.Context, tx pgx.Tx, projectID, s
 	if err != nil {
 		return 0, fmt.Errorf("store: rotation fence: bump revisions: %w", err)
 	}
+	// The BULK case of FR-032 invariant 13a: this one statement raised the generation of every
+	// monitor referencing the rotated secret, so each of them owes its own timeline row — not one
+	// row for the rotation. `writeRevisionTimeline` is set-based for exactly this call.
+	if err := writeRevisionTimeline(ctx, tx, projectID, ids...); err != nil {
+		return 0, err
+	}
 	// A rotation changes the referenced secret's generation, and the generation is IN the
 	// epoch snapshot (`CredentialGenerations`) — so it changes evaluation semantics and owes
 	// an epoch, in this same transaction. The shipped code advanced execution_revision here

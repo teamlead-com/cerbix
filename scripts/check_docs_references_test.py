@@ -462,3 +462,76 @@ class CheckTypeListComparison(unittest.TestCase):
 
     def test_the_real_readme_and_the_real_constants_agree(self):
         self.assertEqual([m for (_, _, k, m) in cdr.check_enumerations() if k == "enum"], [])
+
+
+class FR032DischargeCitation(unittest.TestCase):
+    """§17.3's citation and BOTH of §17.2's counts, against the artefacts they summarise.
+
+    Every case below calls the PRODUCTION function `cdr.check_fr032_discharge`. My first version
+    re-implemented its regexes in the test, so deleting the guard would have left six of seven cases
+    passing — reviewer [321]. A test that models a mechanism instead of invoking it is evidence of
+    nothing, and `TestBreakingTheGuardBreaksTheseTests` now proves these reach it.
+    """
+
+    ROW = ("| 13a | A | behavioural + **source scan** | **DISCHARGED** | "
+           "{t} tests, {m} mutations killed (§17.3) |")
+
+    def body(self, cited, row_tests, row_muts, mutation_items):
+        """A minimal spec body in the shape the guard reads."""
+        return ("### 17.3 fixture\n"
+                + "\n".join(f"`{c}`" for c in cited) + "\n\n"
+                + "\n".join(f"{i + 1}. mutation {i + 1}" for i in range(mutation_items)) + "\n\n"
+                + "### 17.4 next\n" + self.ROW.format(t=row_tests, m=row_muts) + "\n")
+
+    def source(self, declared):
+        return "package store\n" + "\n".join(f"func {d}(t *testing.T) {{}}" for d in declared)
+
+    def find(self, cited, declared, row_tests, row_muts, mutation_items):
+        return cdr.check_fr032_discharge(self.body(cited, row_tests, row_muts, mutation_items),
+                                        self.source(declared))
+
+    def test_an_agreeing_map_is_silent(self):
+        self.assertEqual(self.find(["TestA", "TestB"], ["TestA", "TestB"], 2, 3, 3), [])
+
+    def test_an_uncited_declaration_is_reported(self):
+        got = self.find(["TestA"], ["TestA", "TestB"], 2, 3, 3)
+        self.assertTrue(any("declares TestB" in m for m in got), got)
+
+    def test_a_citation_with_no_declaration_is_reported(self):
+        got = self.find(["TestA", "TestGhost"], ["TestA"], 1, 3, 3)
+        self.assertTrue(any("cites TestGhost" in m for m in got), got)
+
+    def test_a_stale_test_count_is_reported(self):
+        got = self.find(["TestA", "TestB"], ["TestA", "TestB"], 9, 3, 3)
+        self.assertTrue(any("says 9 tests" in m for m in got), got)
+
+    # The case [318] found: the first guard checked the test count and left this one free.
+    def test_a_stale_mutation_count_is_reported(self):
+        got = self.find(["TestA"], ["TestA"], 1, 8, 3)
+        self.assertTrue(any("says 8 mutations" in m for m in got), got)
+
+    def test_both_counts_can_be_wrong_at_once(self):
+        self.assertEqual(len(self.find(["TestA"], ["TestA"], 5, 8, 3)), 2)
+
+    # The degenerate case: no list at all means the row's count is compared against nothing.
+    def test_a_missing_mutation_list_is_reported(self):
+        got = self.find(["TestA"], ["TestA"], 1, 7, 0)
+        self.assertTrue(any("checked against nothing" in m for m in got), got)
+
+    # Proof that these cases reach the production guard rather than a copy of it: with the guard
+    # neutralised, the cases above cannot fail, so at least one must notice.
+    def test_breaking_the_guard_breaks_these_tests(self):
+        real = cdr.check_fr032_discharge
+        try:
+            cdr.check_fr032_discharge = lambda *a, **k: []
+            self.assertEqual(self.find(["TestA"], ["TestA"], 9, 9, 3), [],
+                             "a neutralised guard must report nothing — this documents the shape")
+        finally:
+            cdr.check_fr032_discharge = real
+        self.assertTrue(self.find(["TestA"], ["TestA"], 9, 9, 3),
+                        "with the real guard restored the same input must be reported")
+
+    def test_the_repository_itself_agrees(self):
+        self.assertEqual(cdr.check_fr032_discharge(
+            cdr.read("docs/specs/func-expected-run-ledger.md"),
+            cdr.read("internal/store/revisiontimeline_internal_test.go")), [])

@@ -326,10 +326,14 @@ export function utcCompactInstantLabel(
  * "Starts" tells them nothing about which clock it is read against.
  *
  * `func-truthful-rendering.md` §9 recorded that exemption with the justification "the surface that
- * owns the input says which zone it is typing in". **No surface did.** Six controls across five
- * views carried nothing but "Starts", "Ends", "Until", "from" — including the one the
- * specification named as the documented case — and the only mention of the zone anywhere near them
- * was a source comment an operator never sees. Reviewer P1 on the NFR-025 contract audit.
+ * owns the input says which zone it is typing in". **No surface did.** Every one of these controls
+ * carried nothing but "Starts", "Ends", "Until" or "from" — including the one the specification
+ * named as the documented case — and the only mention of the zone anywhere near them was a source
+ * comment an operator never sees. Reviewer P1 on the NFR-025 contract audit.
+ *
+ * No count is written here on purpose. The first version of this comment said "six controls across
+ * five views" and there were eight; the SET is held by the guard in `wallclock.spec.ts`, which
+ * derives it from the tree, and a number repeated in prose is a number that goes stale.
  *
  * THE OFFSET IS RESOLVED AT THE TYPED INSTANT, not at `now`, which is the same rule the rest of
  * this module obeys: a maintenance window entered for a date on the far side of a DST change is
@@ -364,4 +368,35 @@ export function localInputZoneHint(value: string | null | undefined, zone?: stri
  */
 export function utcDayInputHint(): string {
   return "UTC days";
+}
+
+/**
+ * The zone a RANGE of two `datetime-local` controls is read in — `starts → ends` as one subject.
+ *
+ * One label when both ends share an offset, and BOTH when they do not, which is the rule
+ * `instantRangeLabel` above already follows for the same reason: a window that crosses a DST change
+ * genuinely has two offsets, and one label taken from the START would tell an operator the End is
+ * in a zone it is not.
+ *
+ * This exists because the first repair used a single `localInputZoneHint(starts_at)` beside both
+ * inputs and declared `data-covers="2"` — and the reviewer refused it, correctly: a declaration
+ * that one hint covers two controls is not evidence that it says the right thing about the second.
+ * `data-covers` was a permission slip. A range hint reads BOTH values, so covering two controls is
+ * a property of the call rather than a claim beside it.
+ *
+ *   same offset:  "local time (UTC+01:00)"
+ *   across DST:   "local time (UTC+01:00 → UTC+02:00)"
+ */
+export function localInputRangeZoneHint(
+  start: string | null | undefined,
+  end: string | null | undefined,
+  zone?: string,
+): string {
+  const at = (value: string | null | undefined): Date => {
+    const typed = value ? new Date(value) : null;
+    return typed && !Number.isNaN(typed.getTime()) ? typed : new Date();
+  };
+  const a = offsetAt(at(start), zone);
+  const b = offsetAt(at(end), zone);
+  return a === b ? `local time (${a})` : `local time (${a} → ${b})`;
 }

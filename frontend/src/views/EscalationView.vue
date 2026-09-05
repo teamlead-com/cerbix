@@ -5,7 +5,7 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
-import { instantRangeLabel, localInputZoneHint } from "@/lib/wallclock";
+import { instantRangeLabel, localInputRangeZoneHint, localInputZoneHint } from "@/lib/wallclock";
 import { isoInstant } from "@/lib/datekeys";
 
 type Channel = components["schemas"]["NotificationChannel"];
@@ -424,7 +424,7 @@ const selectCls =
                   <input v-model="ovDraft(s.id ?? '').starts_at" type="datetime-local" class="h-[32px] rounded-sm border border-border bg-surface-2 px-2 text-[12.5px]" />
                   <span class="text-ink-3">→</span>
                   <input v-model="ovDraft(s.id ?? '').ends_at" type="datetime-local" class="h-[32px] rounded-sm border border-border bg-surface-2 px-2 text-[12.5px]" />
-                  <span class="text-[12px] text-ink-3" data-testid="vacation-zone" data-covers="2">{{ localInputZoneHint(ovDraft(s.id ?? '').starts_at) }}</span>
+                  <span class="text-[12px] text-ink-3" data-testid="vacation-zone">{{ localInputRangeZoneHint(ovDraft(s.id ?? '').starts_at, ovDraft(s.id ?? '').ends_at) }}</span>
                   <button type="button" class="h-[32px] rounded-sm bg-accent px-3 text-[12.5px] font-medium text-accent-ink hover:bg-accent-2" @click="addOverride(s.id ?? '')">Add</button>
                 </div>
               </details>

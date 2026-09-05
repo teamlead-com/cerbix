@@ -7921,11 +7921,12 @@ the tree passes all three now that they run.
 asked for a review of the requirement rather than of the release slice — a different question,
 since (a) and (b) had been in no audit at all and (c) only as a diff. `func-truthful-rendering.md`
 §9 exempted the zone-free HTML controls because "the surface that owns the input says which zone it
-is typing in". **No surface did.** Six `datetime-local` controls across five views carried only
-"Starts", "Ends", "Until" and "from" — including `SettingsView.vue`, the site §9 NAMED — and the
-only mention of a zone near them was a source comment. Four `date` controls in two further views
-are read by `gateLedger.ts` as UTC calendar days, the ledger's partition unit, and said "From" and
-"To".
+is typing in". **No surface did.** Every `datetime-local` control carried only "Starts", "Ends",
+"Until" or "from" — including `SettingsView.vue`, the site §9 NAMED — and the only mention of a
+zone near them was a source comment. The `date` controls are read by `gateLedger.ts` as UTC calendar
+days, the ledger's partition unit, and said "From" and "To". No count is stated here: the first
+version of this paragraph carried one and it was wrong; §9's table enumerates them and the guard
+derives the set.
 
 **P1 on operational grounds, not on tidiness:** these controls choose a maintenance window, a gate
 override and a backfill. Entered against the wrong clock, each is wrong by hours — alerting
@@ -7938,9 +7939,15 @@ class. Third time in this iteration.
 **Decision: the exemption becomes a CHECK.** `localInputZoneHint` resolves the offset AT the typed
 instant — a window entered across a DST change is genuinely in the other offset, and a hint taken
 from `now` would mislabel the case an operator is most likely to get wrong — and `utcDayInputHint`
-answers for the UTC-day controls. All ten carry one. `wallclock.spec.ts` fails a `.vue` file that
-renders such a control without the matching hint; a hint covering a RANGE declares `data-covers`,
-so a seventh control needs its own or a visible decision. Surface assertions read what an operator
+answers for the UTC-day controls; `localInputRangeZoneHint` serves two controls that are one
+subject, naming ONE offset when both ends share it and BOTH when they do not — the rule
+`instantRangeLabel` already followed. `wallclock.spec.ts` fails a `.vue` file that renders such a
+control without the matching hint, and a range hint counts for two because it READS both ends. The
+first repair let a single-instant hint cover two by declaring `data-covers="2"`; the reviewer
+refused it as a declaration rather than evidence about the second control, and he was right — the
+end of a DST-crossing range was being labelled with the start's offset. A source scan now requires
+two DISTINCT ends at every call site, which is the only check that works in a zone with no DST in
+the window. Surface assertions read what an operator
 sees, because the source guard can only see that a hint exists somewhere in the file. Four
 mutations killed.
 

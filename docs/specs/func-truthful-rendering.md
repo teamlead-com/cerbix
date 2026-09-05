@@ -495,15 +495,14 @@ decision, not a rename. The decisions, as taken:
 | a compact clock, UTC, mostly unlabelled | `lib/changes.ts`, `lib/changesTimeline.ts` | `utcClockLabel`, `utcClockRangeLabel`, `utcDayClockLabel`, `utcCompactInstantLabel` — all suffixed ` UTC` |
 | the canonical instant a seal or a snapshot is quoted at | `lib/services.ts` `sealedLabel`, `lib/gate.ts` `preciseLabel` | `utcSecondsLabel`, `utcMillisLabel` — the `Z` was already there and is kept |
 | a KEY, a comparison, a wire value or an HTML control value | the three 90-day strips, `lib/gateLedger.ts`, `lib/gate.ts`, every `datetime-local` and `date` input, and ~20 request bodies | `lib/datekeys.ts` — `utcDayKey`, `utcDayBefore`, `utcDayStart`, `isoInstant`, `localDatetimeInputValue`; none of them a rendering, and the module says so |
-| **the SURFACE around a zone-free control** | six `datetime-local` inputs — `SlaView.vue` (Starts, Ends), `ServiceGate.vue` (override Until), `ServiceDeclarationView.vue` (Backfill from), `EscalationView.vue` (vacation Starts/Ends, schedule anchor), `SettingsView.vue` (silence Until) — and four `date` inputs whose value is a UTC calendar day: `ServiceChangesView.vue` and `GateDecisionsView.vue` (From, To) | `localInputZoneHint`, resolving the offset AT the typed instant; `utcDayInputHint` for the UTC-day controls |
+| **the SURFACE around a zone-free control** | every `datetime-local` input — `SlaView.vue` (Starts, Ends), `ServiceGate.vue` (override Until), `ServiceDeclarationView.vue` (Backfill from), `EscalationView.vue` (vacation Starts/Ends, schedule anchor), `SettingsView.vue` (silence Until) — and every `date` input whose value is a UTC calendar day: `ServiceChangesView.vue` and `GateDecisionsView.vue` (From, To). The SET is held by the guard, which derives it from the tree; no count is written here, because the first version of this row carried one and it was wrong | `localInputZoneHint`, resolving the offset AT the typed instant; `localInputRangeZoneHint` where two controls are one subject; `utcDayInputHint` for the UTC-day controls |
 
 **AC-NFR-025c — the control-surface half was FALSE and is now a check.** This section recorded the
 zone-free HTML controls as a documented exemption, with the justification that "the surface that
-owns the input says which zone it is typing in". **No surface did.** Six `datetime-local` controls
-across five views carried nothing but "Starts", "Ends", "Until" and "from" — including
+owns the input says which zone it is typing in". **No surface did.** Every `datetime-local`
+control in the SPA carried nothing but "Starts", "Ends", "Until" or "from" — including
 `SettingsView.vue`, the one this section named — and the only mention of a zone anywhere near them
-was a source comment an operator never sees. Four `date` controls in two more views were worse than
-unlabelled: their values are read as UTC CALENDAR DAYS (`lib/gateLedger.ts`, the ledger's partition
+was a source comment an operator never sees. The `date` controls were worse than unlabelled: their values are read as UTC CALENDAR DAYS (`lib/gateLedger.ts`, the ledger's partition
 unit), so an operator at UTC+05 picking a day is not asking for their own.
 
 The operational cost is why it is rated P1 rather than cosmetic: a maintenance window, a gate
@@ -511,9 +510,13 @@ override or a backfill entered against the wrong clock suppresses alerting, lift
 adopts history over the wrong hours. Reviewer P1 on the NFR-025 contract audit, 2026-09-06.
 
 **The exemption is a CHECK now.** `wallclock.spec.ts` fails any `.vue` file that renders such a
-control without the matching hint, counting controls against hints; a hint that honestly covers a
-RANGE — `starts → ends` is one subject — declares `data-covers="N"`, so a seventh input still
-needs its own hint or a visible decision. Surface assertions in `SlaView.spec.ts` and
+control without the matching hint, counting controls against hints; two controls that are one
+subject — `starts → ends` — are served by `localInputRangeZoneHint`, which counts for two because
+it READS both ends and names both offsets when they differ. An earlier version let a single-instant
+hint cover two controls by declaring `data-covers="N"` beside it; the reviewer refused that,
+correctly, as a declaration rather than evidence about the second control — a range crossing a DST
+change genuinely has two offsets. Every call site is held to two DISTINCT ends by a source scan,
+because no surface test can see that difference in a zone with no DST in the window under test. Surface assertions in `SlaView.spec.ts` and
 `GateDecisionsView.spec.ts` read what an operator actually sees, because a source guard can only
 see that a hint exists somewhere in the file. Four mutations killed: a surface losing its hint (by
 the guard AND by the surface test, independently), a date surface losing its UTC label, a seventh

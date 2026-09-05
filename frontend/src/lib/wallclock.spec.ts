@@ -6,7 +6,7 @@ import {
   instantLabel, instantLabelShort, instantRangeLabel,
   utcCellExtentLabel, utcClockLabel, utcClockRangeLabel,
   utcCompactInstantLabel, utcDayClockLabel, utcDayLabel, utcDayRangeLabel,
-  localInputZoneHint, utcDayInputHint,
+  localInputRangeZoneHint, localInputZoneHint, utcDayInputHint,
   utcExtentLabel, utcInstantLabel, utcMillisLabel, utcSecondsLabel,
 } from "./wallclock";
 
@@ -173,7 +173,8 @@ describe("the mechanism's shape", () => {
     const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
     const exported = [...src.matchAll(/export function (\w+)/g)].map((m) => m[1]).sort();
     expect(exported).toEqual([
-      "instantLabel", "instantLabelShort", "instantRangeLabel", "localInputZoneHint",
+      "instantLabel", "instantLabelShort", "instantRangeLabel",
+      "localInputRangeZoneHint", "localInputZoneHint",
       "utcCellExtentLabel", "utcClockLabel", "utcClockRangeLabel",
       "utcCompactInstantLabel", "utcDayClockLabel", "utcDayInputHint", "utcDayLabel",
       "utcDayRangeLabel", "utcExtentLabel", "utcInstantLabel", "utcMillisLabel",
@@ -350,17 +351,17 @@ describe("the mechanism's shape", () => {
   // An `<input type="datetime-local">` value is local and offset-free, and an `<input type="date">`
   // value is read by `lib/gateLedger.ts` as a UTC calendar day. Neither can carry a suffix. §9
   // recorded that as a documented exemption with the justification "the surface that owns the input
-  // says which zone it is typing in" — and SIX datetime-local controls across five views, plus FOUR
-  // date controls across two, carried nothing but "Starts", "Ends", "Until", "from", "From", "To".
-  // Including the one the specification named. The only mention of a zone anywhere near them was a
-  // source comment. Reviewer P1 on the NFR-025 contract audit.
+  // says which zone it is typing in" — and every one of them carried nothing but "Starts", "Ends",
+  // "Until", "from", "From" or "To", including the one the specification named. The only mention of
+  // a zone anywhere near them was a source comment. Reviewer P1 on the NFR-025 contract audit.
+  // No count is written in this comment: the first one said six and there were eight.
   //
   // So the exemption is a CHECK now: a file that renders one of these controls must render the
   // matching hint at least as many times as it has controls. A seventh input added tomorrow with
-  // no hint fails here by file name, which is what an allow-list of five views would not do.
+  // no hint fails here by file name, which is what an allow-list of views would not do.
   it("gives every zone-free INPUT a surface that names the zone it is read in (NFR-025)", () => {
     const CONTROLS: [RegExp, RegExp, string][] = [
-      [/type="datetime-local"/g, /localInputZoneHint\(/g, "localInputZoneHint"],
+      [/type="datetime-local"/g, /(?<!Range)localInputZoneHint\(/g, "localInputZoneHint"],
       [/type="date"/g, /utcDayInputHint\(/g, "utcDayInputHint"],
     ];
     const offenders: string[] = [];
@@ -371,24 +372,53 @@ describe("the mechanism's shape", () => {
     for (const file of walk(SRC).filter((f) => f.endsWith(".vue"))) {
       const rel = file.split("/src/")[1];
       const text = readFileSync(file, "utf8");
-      // One hint may honestly cover a RANGE — `starts → ends` is one subject, and two identical
-      // offsets in one inline row is noise, not honesty. A hint that covers more than its own
-      // control says so with `data-covers="N"`, which keeps the count strict: a seventh input
-      // still needs either its own hint or an explicit, visible decision to be covered.
-      const covers = [...text.matchAll(/data-covers="(\d+)"/g)]
-        .reduce((n, m) => n + Number(m[1]) - 1, 0);
+      // A RANGE hint covers exactly two controls — `starts → ends` is one subject, and two
+      // identical offsets in one inline row is noise rather than honesty. It counts for two
+      // because it READS both values and names both offsets when they differ; the first version
+      // of this rule accepted a single-instant hint beside a `data-covers="2"` attribute, which
+      // is a declaration that one label covers two controls and no evidence that it says the
+      // right thing about the second. Reviewer P1: `data-covers` was a permission slip.
+      const ranges = (text.match(/localInputRangeZoneHint\(/g) ?? []).length;
       for (const [control, hint, name] of CONTROLS) {
         const inputs = (text.match(control) ?? []).length;
         if (inputs === 0) continue;
         controls += inputs;
-        const hints = (text.match(hint) ?? []).length + covers;
+        // a range hint reads two values, so it answers for two controls
+        const hints = (text.match(hint) ?? []).length + (name === "localInputZoneHint" ? ranges * 2 : 0);
         if (hints < inputs) {
-          offenders.push(`${rel}: ${inputs} control(s), ${hints} ${name}() call(s) incl. data-covers`);
+          offenders.push(`${rel}: ${inputs} control(s), ${hints} covered by ${name}() (a range hint counts for two)`);
         }
       }
     }
     expect(controls, "the scan found no zone-free controls at all; it is looking wrong")
       .toBeGreaterThan(8);
+    expect(offenders).toEqual([]);
+  });
+
+  // A RANGE hint counts for two controls because it READS two values — so every call site must
+  // actually pass two DIFFERENT ones. Passing the start twice restores exactly the state the
+  // reviewer refused (`data-covers` beside a single-instant hint) while still satisfying the
+  // counting guard above, and no surface test can catch it in a zone with no DST in the window
+  // under test — which is most zones, most of the year. This one does, in every zone.
+  it("passes two distinct values to every range zone hint", () => {
+    const offenders: string[] = [];
+    let calls = 0;
+    for (const file of walk(SRC).filter((f) => f.endsWith(".vue"))) {
+      const rel = file.split("/src/")[1];
+      const text = readFileSync(file, "utf8");
+      // `callArgs` walks balanced parentheses; a regex stops at the first `)` of a nested call,
+      // and every real call site here contains one (`ovDraft(s.id ?? '').starts_at`).
+      for (const raw of callArgs(text, "localInputRangeZoneHint")) {
+        calls++;
+        const args = splitTopLevel(raw).map((a) => a.trim());
+        if (args.length !== 2) {
+          offenders.push(`${rel}: localInputRangeZoneHint takes two ends, got ${args.length}`);
+        } else if (args[0] === args[1]) {
+          offenders.push(`${rel}: both ends are \`${args[0]}\` — the second control is labelled with the first one's instant`);
+        }
+      }
+    }
+    expect(calls, "no range hint call site found; the scan is looking wrong").toBeGreaterThan(0);
     expect(offenders).toEqual([]);
   });
 
@@ -415,7 +445,7 @@ describe("the mechanism's shape", () => {
     // the derivation itself is asserted, or a broken regex would silently guard nothing
     expect(zoneArg).toEqual({
       instantLabel: 1, instantLabelShort: 1, utcCellExtentLabel: 2, instantRangeLabel: 2,
-      localInputZoneHint: 1,
+      localInputZoneHint: 1, localInputRangeZoneHint: 2,
     });
 
     // IMPORT-AWARE, and it has to be twice over.
@@ -572,6 +602,19 @@ describe("the UTC subjects say UTC", () => {
     // An empty or half-typed control has no instant, so it answers for now rather than guessing.
     expect(localInputZoneHint("", "Europe/Berlin")).toMatch(/^local time \(UTC[+-]\d{2}:\d{2}\)$/);
     expect(localInputZoneHint("not-a-date", "Europe/Berlin")).toMatch(/^local time \(UTC[+-]\d{2}:\d{2}\)$/);
+  });
+
+  it("names BOTH offsets when a range crosses a DST change, and one when it does not", () => {
+    // The case `data-covers="2"` could not answer: End is entered at a different offset from
+    // Start, and a hint computed from Start alone tells the operator the wrong thing about it.
+    expect(localInputRangeZoneHint("2026-03-28T12:00", "2026-03-30T12:00", "Europe/Berlin"))
+      .toBe("local time (UTC+01:00 → UTC+02:00)");
+    expect(localInputRangeZoneHint("2026-03-28T09:00", "2026-03-28T17:00", "Europe/Berlin"))
+      .toBe("local time (UTC+01:00)");
+    // A half-entered range still answers, for the end that exists and for now on the one that
+    // does not — a field with no value has no instant, and guessing one would be the same lie.
+    expect(localInputRangeZoneHint("", "", "Europe/Berlin"))
+      .toMatch(/^local time \(UTC[+-]\d{2}:\d{2}\)$/);
   });
 
   it("says a date control is read in UTC days, the same answer for every viewer", () => {

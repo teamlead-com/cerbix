@@ -365,6 +365,7 @@ describe("the mechanism's shape", () => {
       [/type="date"/g, /utcDayInputHint\(/g, "utcDayInputHint"],
     ];
     const offenders: string[] = [];
+    const inventory: Record<string, Record<string, number>> = {};
     let controls = 0;
     // Only `.vue` files RENDER a control; a `.ts` module that quotes `type="date"` in a comment
     // explaining the contract is documentation, and flagging it would teach a reader that the
@@ -383,6 +384,8 @@ describe("the mechanism's shape", () => {
         const inputs = (text.match(control) ?? []).length;
         if (inputs === 0) continue;
         controls += inputs;
+        const kind = name === "utcDayInputHint" ? "date" : "datetime-local";
+        inventory[rel] = { ...(inventory[rel] ?? {}), [kind]: inputs };
         // a range hint reads two values, so it answers for two controls
         const hints = (text.match(hint) ?? []).length + (name === "localInputZoneHint" ? ranges * 2 : 0);
         if (hints < inputs) {
@@ -390,9 +393,26 @@ describe("the mechanism's shape", () => {
         }
       }
     }
-    expect(controls, "the scan found no zone-free controls at all; it is looking wrong")
-      .toBeGreaterThan(8);
     expect(offenders).toEqual([]);
+
+    // THE EXACT INVENTORY, not a floor. `toBeGreaterThan(8)` stood here and it is the same evasion
+    // as a hand-written total: it stays green while the prose beside it claims a number the scan
+    // never checked — which is precisely how "six controls across five views" survived when there
+    // were eight. Reviewer P1, twice in two commits, on the same class.
+    //
+    // A per-file map rather than one number, because one number cannot say WHERE it changed. A new
+    // control fails this even when it is correctly hinted: adding one is a decision, and a decision
+    // that no one has to make is one nobody records.
+    expect(inventory).toEqual({
+      "components/ServiceGate.vue": { "datetime-local": 1 },
+      "views/EscalationView.vue": { "datetime-local": 3 },
+      "views/GateDecisionsView.vue": { date: 2 },
+      "views/ServiceChangesView.vue": { date: 2 },
+      "views/ServiceDeclarationView.vue": { "datetime-local": 1 },
+      "views/SettingsView.vue": { "datetime-local": 1 },
+      "views/SlaView.vue": { "datetime-local": 2 },
+    });
+    expect(controls, "the totals disagree with the inventory above").toBe(12);
   });
 
   // A RANGE hint counts for two controls because it READS two values — so every call site must

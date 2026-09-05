@@ -343,6 +343,24 @@ old envelopes still queued. Normative:
   claims generation 3; a capability-2 executor handles legacy v1, generation 2 and generation
   3. Jobs **and** tests, AMQP **and** pull — a generation introduced on one of the four paths
   and not the others reproduces exactly the asymmetry that caused the pull blackhole.
+- **The mapping is EXACT on BOTH sides, and it has ONE owner** (added 2026-09-06, iter-0178,
+  `D-0246`; reviewer P0 found auditing `0a1557c..d0a8fed`). `dispatch.EnvelopeForCarrier` is that owner: the
+  materializer picks an envelope generation with it, and every executor checks the delivery
+  against it through `dispatch.CarrierEnvelopeAdmissible`. **An envelope OLDER than its carrier
+  defines is refused exactly like one that is newer.** This is not symmetry for its own sake:
+  generation 3 exists to add the EXECUTION BODY BINDING — from envelope `v: 2` a digest of the
+  body is mixed into every field's AAD, and `bindingFor` computes no digest below that — so
+  accepting `v: 1` on a generation-3 carrier silently reinstates the property the generation was
+  introduced to remove. Under this document's own threat model, where the body is attacker-
+  editable and the carrier is the trusted out-of-band signal, that is a downgrade an attacker
+  selects.
+
+  **It was a real hole, not a hypothetical.** The producing side had been exact since generation 3
+  shipped, while every consumer enforced only a floor: the AMQP jobs consumer checked a capability
+  CEILING (`capability < envelope.V`), the test consumer checked only that an envelope was
+  PRESENT, and `ValidateAndMaterialize` checked only that the carrier was not generation 1. A
+  generation-1 envelope on a generation-3 carrier opened normally and its credential reached the
+  prober. One side of a stated contract, enforced.
 - **The carrier generation is TRUSTED metadata and must arrive out of band.** The mandatory
   entrypoint receives it as a separate argument stamped by the transport adapter — for AMQP,
   the queue the message was consumed from; for pull, the generation the server selected when

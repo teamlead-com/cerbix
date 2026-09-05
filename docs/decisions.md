@@ -7795,3 +7795,79 @@ exactly as written — a renderer added to neither bucket, and a phrase renderer
 **Same shape as the zone-argument guard at party [199]**, whose hand-written list stopped covering
 two exports added later. A claim about a SET, written as prose, outlives the set; the rule that
 follows is to derive every such claim from the thing it describes.
+
+### D-0246 addendum 2 — an envelope OLDER than its carrier defines was admitted, and the producer had been exact all along (reviewer P0 found auditing `0a1557c..d0a8fed`)
+
+`func-secret-inventory.md` §4.7 states the carrier→envelope mapping as "explicit and physical":
+generation 2 carries envelope v1, generation 3 carries envelope v2, jobs and tests, AMQP and pull.
+`store.envelopeForCarrier` had implemented it EXACTLY since generation 3 shipped. Every consumer
+enforced a floor instead — the AMQP jobs consumer a capability ceiling, the test consumer mere
+presence, and `ValidateAndMaterialize` only "not generation 1" — so a generation-1 envelope on a
+generation-3 carrier opened normally and its credential reached the prober, reproduced with
+`used_credential=true` before the fix. **Provenance, stated precisely:** the audit slice is
+`0a1557c..d0a8fed`, the four commits the owner authorized; `4b5939d` and everything after it are
+this session's RESPONSE to that audit and are not part of the slice that was read.
+
+**It is a downgrade, not a cosmetic mismatch.** Generation 3 exists to add the execution body
+binding: from envelope v2 a digest of the body is mixed into every field's AAD, and `bindingFor`
+computes none below that. Accepting v1 there reinstates the replay-against-another-target property
+that generation was introduced to remove, and this specification's own threat model says the body
+is attacker-editable while the carrier is the trusted out-of-band signal.
+
+**Decision: ONE owner, enforced at the gate, with the transport's own disposal beside it.**
+`dispatch.EnvelopeForCarrier` is the sole mapping and `dispatch.CarrierEnvelopeAdmissible` the sole
+rule; `store.envelopeForCarrier` delegates to it, so the two sides are one expression rather than
+two that agree today. `ValidateAndMaterialize` — the gate every executor path crosses — refuses a
+mismatch, and the two AMQP consumers additionally dead-letter it, the same "one predicate, two
+dispositions" split `RequireLedgerFields` uses.
+
+Five mutations killed, including a producer that reinstates a drifting local switch (caught by a
+test that names TWO OWNERS rather than a wrong number) and a pull path that builds a delivery and
+skips the gate (caught by a `go/ast` scan, because enforcing at a single gate is sound only while
+the gate is unavoidable).
+
+**What it says about the repair in D-0246 decision 2.** The generation-3 test carrier had been
+unreachable since it was wired, so nothing had ever ridden it; repairing that did not create this
+hole — the jobs path carried it too — but it did make the test path reach it. **A defect hidden
+behind another defect is the ordinary shape of a second finding, and it is the argument for
+auditing a repair rather than only its symptom.**
+
+Two reviewer P1s on the patch itself, both accepted and both worth keeping:
+
+- **`EnvelopeForCarrier(ProtocolV1)` answered `EnvelopeV1`** — inherited from the switch it was
+  lifted from — while its own documentation and `CarrierEnvelopeAdmissible` say generation 1
+  carries no envelope and refuse every envelope there. A public function that hands a caller a
+  version the next check rejects is a contradiction, and it is an ERROR now. Unreachable from
+  `CarrierFor` today; a function wrong in a way nobody currently exercises is a trap for the next
+  caller, which is why it was raised before it could matter rather than after.
+- **The runner-not-called assertion proved the refusal and not the DISPOSAL.** With a consumer's
+  own check removed, the materializer gate still stops the probe, so "one predicate, two
+  dispositions" was a claim the evidence did not reach. The live test now also requires the poison
+  body on `checks.dead` tagged with the carrier that dropped it (`tests.v3`, `jobs.v3`) — what an
+  operator reads when a Test Connection times out — and two further mutations, a consumer that
+  drops instead of dead-lettering on each path, are killed by that half alone.
+
+Two further P1s, on the RESPONSE rather than on the product, and both about evidence:
+
+- **Provenance.** The records named the P0 as found on `0a1557c..4b5939d`. The audit slice is
+  `0a1557c..d0a8fed`; `4b5939d` is one of this session's answers to that audit. Naming a response
+  commit as the audit's boundary credits the reviewer with reading work he had not seen. Corrected
+  in seven places, source comments included.
+- **A live test that destroyed the evidence it was reading.** The dead-letter assertion consumed
+  the shared `checks.dead` queue with `autoAck` and correlated on a CONSTANT job id: a concurrent
+  run could take another's proof, and the test permanently ate every unrelated operational dead
+  letter — the ones the runbook tells an operator to read. Now a per-run token names the region,
+  the queues and the job id, and acknowledgement is manual: this run's own bodies are acked and
+  everything else is held unacked and requeued when the channel closes. Verified by publishing a
+  foreign message to `checks.dead` and observing it survive the run.
+
+A third P1 on the response, and it is this arc's own defect class again: the fix for the taxonomy
+ordering **did not do what its own comment said**. The legacy-carrier refusal still ran above the
+version check, so a future envelope on a generation-1 carrier reported `decrypt_auth_failed` while
+the comment claimed the version question was "asked first" without exception — and the test
+enumerated carriers 2 to 4, so it did not look where the two differed. The contract is now one
+sentence obeyed by the code: **whether an executor implements an envelope version at all is a
+question about the ENVELOPE, independent of the carrier, and is asked first for every carrier,
+generation 1 included.** A known envelope on a carrier that takes none keeps its own sentence and
+stays in the non-oracular bucket. Two mutations cover the order (P8, P9), the second naming
+generation 1 specifically.

@@ -7954,3 +7954,32 @@ mutations killed.
 `DONE` was premature and is recorded as such. The review is NOT finished: this is one P1 answered,
 and the reviewer continues on the import graph, the operator-facing surfaces and the guards'
 boundaries.
+
+**The NFR-025 requirement review (2026-09-06).** The owner asked for the requirement to be reviewed
+as a CONTRACT rather than as part of the release slice — a different question, since (a) and (b)
+had been in no audit at all and (c) only as a diff. Result on `1cbe5c4`, range `0a1557c..1cbe5c4`:
+**no P0/P1 remains**, with `N1`…`N7` closed and enumerated in `iter-0178` §9.1. The reviewer ran
+the frontend suite himself at three zones, the NFR-025 set in a DST zone, `make docs-check` with
+its checker suite, and `git diff --check`.
+
+**It is a technical result and nothing more** — it closes no iteration, changes no status and
+authorizes no VCS action, and he says so. `DONE` is the maintainer's assertion on that basis.
+
+**What the review established beyond the repairs**, and the reason it was worth asking for:
+
+- A DOCUMENTED EXEMPTION IS A CLAIM. §9 exempted the zone-free HTML controls with a justification
+  no surface implemented — and named as its example the one surface that also did not. An
+  exemption whose reason is prose is an unguarded hole with a note attached.
+- ONE DRIFT, FOUR SHAPES: a total beside its rows, a self-check that was a floor, a range of
+  identifiers in a heading, a suite size in the canonical status. Each correct when written, wrong
+  within the hour, each beside a green test. Only the fourth produced a guard against the SHAPE;
+  the rule that came out of it is that a measurement may be stated when its own sentence says WHEN
+  or on WHAT TREE it was taken.
+- APPLYING AN IMPERFECT FILTER TO MORE PLACES WIDENS THE BYPASS. Whether `//` opens a comment
+  depends on what precedes it; coverage cannot rescue a regex, and the answer was a string-aware
+  lexer plus stripping JS comments only inside `<script>`.
+- A SOURCE SCAN PROVES WHAT IS WRITTEN; ONLY A MOUNTED VIEW PROVES WHAT IS RENDERED. Every control
+  file now has a surface assertion, named in a map checked against the derived inventory.
+- And a process one: nearly every finding was on the fix for the previous finding, and every
+  mutation was aimed at the single view nothing covered. Where a reviewer keeps aiming is where
+  the coverage is not.

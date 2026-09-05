@@ -1004,6 +1004,42 @@ def check_iteration_finding_counts(iteration='docs/iterations/iter-0177.md',
                                f'drifts from its own rows is the one number nobody re-derives')
     return out
 
+def check_status_counts_are_anchored(status='docs/status.md'):
+    """A suite size in the LIVE status document must name the tree it was measured on.
+
+    `status.md` is the current statement of a requirement's state, and a test count is the one
+    figure that every new test invalidates. It said "653 tests over 52 files", then "661 / 53",
+    each correct for about an hour, each sitting beside a green suite — reviewer N7, and the
+    FOURTH shape of one drift after a total beside its own rows, a guard self-check that was a
+    floor, and a range of identifiers in a heading.
+
+    The rule is not "no numbers". A HISTORICAL measurement is a fact and may be stated, as long as
+    it says WHEN or on WHAT it was taken; an unanchored one is a claim about now that nobody
+    re-derives. So a sentence carrying `<n> tests` must also carry a date or a commit-ish, and the
+    iteration reports — which are dated by construction — are where the live figures belong.
+    """
+    out = []
+    if not os.path.exists(status):
+        return out
+    # SUITE SIZE only — `<n> tests / <m> files` and its spellings. A bare "24 tests" is a
+    # per-file figure in an evidence cell, a different claim and legitimately historical; matching
+    # it would flag dozens of closed iterations and teach a reader to skip this guard.
+    size = re.compile(r'\b\d+\s+tests?\s*(?:/|over|in)\s*\d+\s+files?')
+    anchored = re.compile(r'20\d\d-\d\d-\d\d|\b[0-9a-f]{7,40}\b')
+    for para in paragraphs(read(status)):
+        for m in size.finditer(para):
+            # the sentence around the figure, so a date three paragraphs away does not count
+            start = max(para.rfind('.', 0, m.start()), para.rfind(';', 0, m.start())) + 1
+            end = min([i for i in (para.find('.', m.end()), para.find(';', m.end())) if i != -1]
+                      + [len(para)])
+            sentence = para[start:end]
+            if not anchored.search(sentence):
+                out.append(f'{status} states "{m.group(0).strip()}" with nothing saying when or on '
+                           f'what tree it was measured; a live status row cannot carry a figure '
+                           f'every new test invalidates. Anchor it, or drop it and state the '
+                           f'property instead')
+    return out
+
 def check_iter0178_findings(iteration='docs/iterations/iter-0178.md',
                             readers=('docs/status.md', 'docs/decisions.md',
                                      'docs/traceability.md')):
@@ -1513,6 +1549,8 @@ def check_enumerations():
         bad.append(('docs/iterations/iter-0178.md', 1, 'enum', msg))
     for msg in check_iter0178_findings():
         bad.append(('docs/iterations/iter-0178.md', 1, 'enum', msg))
+    for msg in check_status_counts_are_anchored():
+        bad.append(('docs/status.md', 1, 'enum', msg))
     # THESE THREE WERE DEAD. They were indented into the loop above, so they ran only when the
     # finding-count guard FAILED — that is, never, because it was green. The success line of this
     # script named all three by name throughout. Found while fixing a drifted count in `iter-0178`

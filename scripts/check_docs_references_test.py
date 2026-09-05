@@ -1226,6 +1226,37 @@ class FindingCountCountsFindings(unittest.TestCase):
         self.assertIn("five findings", msgs[0])
 
 
+class StatusSuiteCountsAreAnchored(unittest.TestCase):
+    """A suite size in the LIVE status may be stated only with the tree it was measured on."""
+
+    def _check(self, text):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "status.md")
+        pathlib.Path(path).write_text(text + "\n")
+        return cdr.check_status_counts_are_anchored(path)
+
+    def test_an_unanchored_suite_size_is_refused(self):
+        msgs = self._check("The frontend suite is 661 tests / 53 files and green.")
+        self.assertEqual(len(msgs), 1, msgs)
+        self.assertIn("661 tests / 53 files", msgs[0])
+
+    def test_a_dated_measurement_is_a_fact_and_is_allowed(self):
+        self.assertEqual(
+            self._check("**591 tests / 50 files** as measured on that closing tree, 2026-09-03."), [])
+
+    def test_a_commit_anchored_measurement_is_allowed(self):
+        self.assertEqual(self._check("666 tests over 54 files on `49b73d9`."), [])
+
+    def test_a_per_file_figure_is_not_a_suite_size(self):
+        # "24 tests in `wallclock.spec.ts`" is a different claim and legitimately historical;
+        # flagging it would fire on dozens of closed iterations and teach a reader to skip this.
+        self.assertEqual(self._check("14 tests in `wallclock.spec.ts` cover the mechanism."), [])
+
+    def test_a_date_in_another_sentence_does_not_anchor_it(self):
+        msgs = self._check("Closed 2026-09-03. The suite is 661 tests / 53 files.")
+        self.assertEqual(len(msgs), 1, msgs)
+
+
 class EveryGuardIsActuallyReached(unittest.TestCase):
     """The guards are WIRED, not merely defined.
 

@@ -485,3 +485,20 @@ describe("GateDecisionsView — one guard for every read (check 5)", () => {
     expect(has(w, "gate-decisions-more"), "no traversal survives a refusal").toBe(false);
   });
 });
+
+// NFR-025, the control-surface half. These two `<input type="date">` values are read as UTC
+// CALENDAR DAYS — `lib/gateLedger.ts` sends them as the ledger's partition unit — so an operator
+// at UTC+05 picking "05.09.2026" is not asking for their own day. The labels said only From and
+// To. Reviewer P1 on the NFR-025 contract audit; asserted where an operator reads it, because the
+// source guard can only see that a hint exists somewhere in the file.
+describe("the range controls name the zone they are read in", () => {
+  it("says UTC days beside both date inputs", async () => {
+    const w = mountView();
+    await flushPromises();
+    for (const id of ["gate-decisions-from-zone", "gate-decisions-to-zone"]) {
+      const hint = w.find(`[data-testid="${id}"]`);
+      expect(hint.exists(), `${id} is missing`).toBe(true);
+      expect(hint.text()).toContain("UTC days");
+    }
+  });
+});

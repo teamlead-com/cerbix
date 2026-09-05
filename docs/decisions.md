@@ -7916,3 +7916,34 @@ The answer is a test of EXECUTION rather than of definition: every `check_*` in 
 wrapped in a recording proxy, `main()` is run — the entry point, not one of its halves — and any
 guard the run never reached is named. Restoring the dead branch fails it by naming all three, and
 the tree passes all three now that they run.
+
+**NFR-025 reviewed as a whole (2026-09-06), and its documented exemption was false.** The owner
+asked for a review of the requirement rather than of the release slice — a different question,
+since (a) and (b) had been in no audit at all and (c) only as a diff. `func-truthful-rendering.md`
+§9 exempted the zone-free HTML controls because "the surface that owns the input says which zone it
+is typing in". **No surface did.** Six `datetime-local` controls across five views carried only
+"Starts", "Ends", "Until" and "from" — including `SettingsView.vue`, the site §9 NAMED — and the
+only mention of a zone near them was a source comment. Four `date` controls in two further views
+are read by `gateLedger.ts` as UTC calendar days, the ledger's partition unit, and said "From" and
+"To".
+
+**P1 on operational grounds, not on tidiness:** these controls choose a maintenance window, a gate
+override and a backfill. Entered against the wrong clock, each is wrong by hours — alerting
+suppressed over the wrong hours, a block lifted over the wrong hours, history adopted from the
+wrong instant.
+
+**The false prose was mine**, in `lib/datekeys.ts`, written inside the fix for exactly this defect
+class. Third time in this iteration.
+
+**Decision: the exemption becomes a CHECK.** `localInputZoneHint` resolves the offset AT the typed
+instant — a window entered across a DST change is genuinely in the other offset, and a hint taken
+from `now` would mislabel the case an operator is most likely to get wrong — and `utcDayInputHint`
+answers for the UTC-day controls. All ten carry one. `wallclock.spec.ts` fails a `.vue` file that
+renders such a control without the matching hint; a hint covering a RANGE declares `data-covers`,
+so a seventh control needs its own or a visible decision. Surface assertions read what an operator
+sees, because the source guard can only see that a hint exists somewhere in the file. Four
+mutations killed.
+
+`DONE` was premature and is recorded as such. The review is NOT finished: this is one P1 answered,
+and the reviewer continues on the import graph, the operator-facing surfaces and the guards'
+boundaries.

@@ -81,6 +81,7 @@ import {
   transportFailure,
 } from "@/lib/changesTimeline";
 import { useWorkspace } from "@/stores/workspace";
+import { utcDayInputHint } from "@/lib/wallclock";
 
 type Detail = components["schemas"]["ServiceDetail"];
 
@@ -507,7 +508,7 @@ function errCompare(g: ChangeGroup): string | null {
           <h2 class="mr-[6px] self-center text-[13.5px] font-semibold">Changes</h2>
 
           <label class="flex flex-col gap-[3px]">
-            <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">From</span>
+            <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">From <span class="font-normal normal-case tracking-normal" data-testid="changes-from-zone">— {{ utcDayInputHint() }}</span></span>
             <input
               v-model="draft.from"
               type="date"
@@ -516,7 +517,7 @@ function errCompare(g: ChangeGroup): string | null {
             />
           </label>
           <label class="flex flex-col gap-[3px]">
-            <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">To</span>
+            <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">To <span class="font-normal normal-case tracking-normal" data-testid="changes-to-zone">— {{ utcDayInputHint() }}</span></span>
             <input
               v-model="draft.to"
               type="date"

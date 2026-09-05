@@ -8,6 +8,7 @@ import AppShell from "@/components/AppShell.vue";
 import { useWorkspace } from "@/stores/workspace";
 import { sealedLabel } from "@/lib/services";
 import { isoInstant } from "@/lib/datekeys";
+import { localInputZoneHint } from "@/lib/wallclock";
 
 type Detail = components["schemas"]["ServiceDetail"];
 type Monitor = components["schemas"]["Monitor"];
@@ -336,7 +337,7 @@ watch(() => [route.params.id, ws.projectId], load);
           <header class="border-b border-border px-4 py-[10px]"><h2 class="text-[13.5px] font-semibold">Adopt existing history</h2></header>
           <div class="p-4">
             <label class="flex flex-col gap-[5px]">
-              <span class="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">Backfill from</span>
+              <span class="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">Backfill from <span class="font-normal normal-case tracking-normal" data-testid="backfill-zone">— {{ localInputZoneHint(backfillFrom) }}</span></span>
               <input
                 v-model="backfillFrom"
                 type="datetime-local"

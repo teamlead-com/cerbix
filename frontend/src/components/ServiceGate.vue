@@ -83,6 +83,7 @@ import {
 import { relTime } from "@/lib/incident";
 import { sealedLabel } from "@/lib/services";
 import { isoInstant } from "@/lib/datekeys";
+import { localInputZoneHint } from "@/lib/wallclock";
 
 type GatePolicy = components["schemas"]["GatePolicy"];
 type GateOverride = components["schemas"]["GateOverride"];
@@ -1186,7 +1187,7 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
             <span v-if="ovTouched && ovErrors.reason" class="text-[12px] text-down" data-testid="gate-override-field-error-reason">{{ ovErrors.reason }}</span>
           </div>
           <div class="flex flex-col gap-[5px]">
-            <label class="text-[12.5px] font-medium text-ink-2" for="gate-override-until">Until</label>
+            <label class="text-[12.5px] font-medium text-ink-2" for="gate-override-until">Until <span class="font-normal text-ink-3" data-testid="gate-override-until-zone">— {{ localInputZoneHint(ovUntil) }}</span></label>
             <span class="flex flex-wrap items-center gap-[8px]">
               <input
                 id="gate-override-until"

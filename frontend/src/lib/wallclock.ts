@@ -315,3 +315,53 @@ export function utcCompactInstantLabel(
   if (p.year === n.year) return utcDayClockLabel(iso);
   return `${dmy(p)} ${hm(p)} UTC`;
 }
+
+/**
+ * The zone an operator is TYPING IN, for a `<input type="datetime-local">`.
+ *
+ * The HTML format is local and offset-free, so the control's VALUE may not name a zone
+ * (`localDatetimeInputValue` in `lib/datekeys.ts` builds it). That is a fact about the format and
+ * not a licence for the SURFACE to stay silent: an operator scheduling maintenance, lifting a gate
+ * for a bounded time, or backfilling history is choosing an instant, and a field labelled only
+ * "Starts" tells them nothing about which clock it is read against.
+ *
+ * `func-truthful-rendering.md` §9 recorded that exemption with the justification "the surface that
+ * owns the input says which zone it is typing in". **No surface did.** Six controls across five
+ * views carried nothing but "Starts", "Ends", "Until", "from" — including the one the
+ * specification named as the documented case — and the only mention of the zone anywhere near them
+ * was a source comment an operator never sees. Reviewer P1 on the NFR-025 contract audit.
+ *
+ * THE OFFSET IS RESOLVED AT THE TYPED INSTANT, not at `now`, which is the same rule the rest of
+ * this module obeys: a maintenance window entered for a date on the far side of a DST change is
+ * genuinely in the other offset, and a hint taken from the current one would mislabel exactly the
+ * window an operator is most likely to get wrong. An empty or half-typed control has no instant to
+ * resolve against and falls back to now, which is the honest answer for a field with no value yet.
+ *
+ *   localInputZoneHint("2026-09-05T14:05")  ->  "local time (UTC+05:00)"
+ *   localInputZoneHint("")                  ->  "local time (UTC+05:00)"   // resolved at now
+ */
+export function localInputZoneHint(value: string | null | undefined, zone?: string): string {
+  const typed = value ? new Date(value) : null;
+  const at = typed && !Number.isNaN(typed.getTime()) ? typed : new Date();
+  return `local time (${offsetAt(at, zone)})`;
+}
+
+/**
+ * The zone a `<input type="date">` is READ IN, where its value is a UTC calendar day.
+ *
+ * `lib/gateLedger.ts` defines these values as UTC days — the ledger's partition unit — and sends
+ * them to the API as such. So an operator picking "From 05.09.2026" at UTC+05 is not asking for
+ * their own day: they are asking for a UTC one, which began at 05:00 their time. The control
+ * cannot carry a suffix, and the LABEL must therefore say it.
+ *
+ * There is no instant to resolve an offset at, and that is the point rather than a limitation: the
+ * value IS a UTC day, so the answer is the same for every viewer and every date. It is a function
+ * rather than a literal so the wording has one owner and the guard has something to find.
+ *
+ * Reviewer P1 on the NFR-025 contract audit, raised alongside the `datetime-local` surfaces: the
+ * two are the same missing contract — a control whose value carries no zone must be labelled with
+ * the one it is read in.
+ */
+export function utcDayInputHint(): string {
+  return "UTC days";
+}

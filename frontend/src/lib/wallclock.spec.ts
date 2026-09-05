@@ -6,6 +6,7 @@ import {
   instantLabel, instantLabelShort, instantRangeLabel,
   utcCellExtentLabel, utcClockLabel, utcClockRangeLabel,
   utcCompactInstantLabel, utcDayClockLabel, utcDayLabel, utcDayRangeLabel,
+  localInputZoneHint, utcDayInputHint,
   utcExtentLabel, utcInstantLabel, utcMillisLabel, utcSecondsLabel,
 } from "./wallclock";
 
@@ -172,10 +173,11 @@ describe("the mechanism's shape", () => {
     const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
     const exported = [...src.matchAll(/export function (\w+)/g)].map((m) => m[1]).sort();
     expect(exported).toEqual([
-      "instantLabel", "instantLabelShort", "instantRangeLabel",
+      "instantLabel", "instantLabelShort", "instantRangeLabel", "localInputZoneHint",
       "utcCellExtentLabel", "utcClockLabel", "utcClockRangeLabel",
-      "utcCompactInstantLabel", "utcDayClockLabel", "utcDayLabel", "utcDayRangeLabel",
-      "utcExtentLabel", "utcInstantLabel", "utcMillisLabel", "utcSecondsLabel",
+      "utcCompactInstantLabel", "utcDayClockLabel", "utcDayInputHint", "utcDayLabel",
+      "utcDayRangeLabel", "utcExtentLabel", "utcInstantLabel", "utcMillisLabel",
+      "utcSecondsLabel",
     ]);
     // Every one of them has a caller. `clockSecondsLabel` in `lib/changes.ts` was exported,
     // documented as the honest one because it ended in ` Z`, and called by nothing in the
@@ -310,6 +312,12 @@ describe("the mechanism's shape", () => {
       utcMillisLabel: () => utcMillisLabel(A),
       utcSecondsLabel: () => utcSecondsLabel(A),
     };
+    // A third form, and it is a form rather than an exception: a CONTROL hint renders no time at
+    // all. It names the zone an `<input>` whose value carries none is read in, so what it must
+    // contain is the zone — not a suffix on a rendered instant.
+    const CONTROL: Record<string, () => string> = {
+      utcDayInputHint: () => utcDayInputHint(),
+    };
 
     // The two buckets ARE the module's zone-less exports, no more and no less — so a new renderer
     // fails here until somebody decides which form it is in, and a rename cannot leave a stale
@@ -319,7 +327,8 @@ describe("the mechanism's shape", () => {
       .filter((m) => !/\bzone\??\s*:/.test(m[2]))
       .map((m) => m[1])
       .sort();
-    expect(zoneless).toEqual([...Object.keys(PHRASE), ...Object.keys(CANONICAL)].sort());
+    expect(zoneless).toEqual(
+      [...Object.keys(PHRASE), ...Object.keys(CANONICAL), ...Object.keys(CONTROL)].sort());
 
     for (const [name, call] of Object.entries(PHRASE)) {
       const out = call();
@@ -330,6 +339,57 @@ describe("the mechanism's shape", () => {
       expect(out, `${name} -> ${out}`).toMatch(/Z$/);
       expect(out, `${name} must not claim both forms`).not.toMatch(/ UTC$/);
     }
+    for (const [name, call] of Object.entries(CONTROL)) {
+      const out = call();
+      expect(out, `${name} -> ${out} names no zone`).toMatch(/UTC/);
+    }
+  });
+
+  // THE CONTROL-SURFACE CONTRACT, which §9 asserted and no surface implemented.
+  //
+  // An `<input type="datetime-local">` value is local and offset-free, and an `<input type="date">`
+  // value is read by `lib/gateLedger.ts` as a UTC calendar day. Neither can carry a suffix. §9
+  // recorded that as a documented exemption with the justification "the surface that owns the input
+  // says which zone it is typing in" — and SIX datetime-local controls across five views, plus FOUR
+  // date controls across two, carried nothing but "Starts", "Ends", "Until", "from", "From", "To".
+  // Including the one the specification named. The only mention of a zone anywhere near them was a
+  // source comment. Reviewer P1 on the NFR-025 contract audit.
+  //
+  // So the exemption is a CHECK now: a file that renders one of these controls must render the
+  // matching hint at least as many times as it has controls. A seventh input added tomorrow with
+  // no hint fails here by file name, which is what an allow-list of five views would not do.
+  it("gives every zone-free INPUT a surface that names the zone it is read in (NFR-025)", () => {
+    const CONTROLS: [RegExp, RegExp, string][] = [
+      [/type="datetime-local"/g, /localInputZoneHint\(/g, "localInputZoneHint"],
+      [/type="date"/g, /utcDayInputHint\(/g, "utcDayInputHint"],
+    ];
+    const offenders: string[] = [];
+    let controls = 0;
+    // Only `.vue` files RENDER a control; a `.ts` module that quotes `type="date"` in a comment
+    // explaining the contract is documentation, and flagging it would teach a reader that the
+    // guard cries wolf.
+    for (const file of walk(SRC).filter((f) => f.endsWith(".vue"))) {
+      const rel = file.split("/src/")[1];
+      const text = readFileSync(file, "utf8");
+      // One hint may honestly cover a RANGE — `starts → ends` is one subject, and two identical
+      // offsets in one inline row is noise, not honesty. A hint that covers more than its own
+      // control says so with `data-covers="N"`, which keeps the count strict: a seventh input
+      // still needs either its own hint or an explicit, visible decision to be covered.
+      const covers = [...text.matchAll(/data-covers="(\d+)"/g)]
+        .reduce((n, m) => n + Number(m[1]) - 1, 0);
+      for (const [control, hint, name] of CONTROLS) {
+        const inputs = (text.match(control) ?? []).length;
+        if (inputs === 0) continue;
+        controls += inputs;
+        const hints = (text.match(hint) ?? []).length + covers;
+        if (hints < inputs) {
+          offenders.push(`${rel}: ${inputs} control(s), ${hints} ${name}() call(s) incl. data-covers`);
+        }
+      }
+    }
+    expect(controls, "the scan found no zone-free controls at all; it is looking wrong")
+      .toBeGreaterThan(8);
+    expect(offenders).toEqual([]);
   });
 
   it("names two owner modules that exist and that really do build dates", () => {
@@ -355,6 +415,7 @@ describe("the mechanism's shape", () => {
     // the derivation itself is asserted, or a broken regex would silently guard nothing
     expect(zoneArg).toEqual({
       instantLabel: 1, instantLabelShort: 1, utcCellExtentLabel: 2, instantRangeLabel: 2,
+      localInputZoneHint: 1,
     });
 
     // IMPORT-AWARE, and it has to be twice over.
@@ -502,6 +563,19 @@ describe("the UTC subjects say UTC", () => {
     // would call them the same day and drop the date from the label.
     const now = new Date("2026-08-29T01:00:00Z");
     expect(utcCompactInstantLabel("2026-08-28T23:00:00Z", now)).toBe("28.08 23:00 UTC");
+  });
+
+  it("tells an operator which zone a datetime-local control is read in, AT the typed instant", () => {
+    // Late March in Europe/Berlin: the same control, two offsets, depending on what was typed.
+    expect(localInputZoneHint("2026-03-28T12:00", "Europe/Berlin")).toBe("local time (UTC+01:00)");
+    expect(localInputZoneHint("2026-03-30T12:00", "Europe/Berlin")).toBe("local time (UTC+02:00)");
+    // An empty or half-typed control has no instant, so it answers for now rather than guessing.
+    expect(localInputZoneHint("", "Europe/Berlin")).toMatch(/^local time \(UTC[+-]\d{2}:\d{2}\)$/);
+    expect(localInputZoneHint("not-a-date", "Europe/Berlin")).toMatch(/^local time \(UTC[+-]\d{2}:\d{2}\)$/);
+  });
+
+  it("says a date control is read in UTC days, the same answer for every viewer", () => {
+    expect(utcDayInputHint()).toBe("UTC days");
   });
 
   it("returns the absent marker rather than a fabricated date for every UTC subject", () => {

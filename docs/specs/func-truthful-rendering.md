@@ -494,9 +494,32 @@ decision, not a rename. The decisions, as taken:
 | a UTC date that is IDENTITY and should say so rather than be converted | `ServiceReliability.vue` — a segment's range | `utcDayRangeLabel` — `01.08.2026 → 05.08.2026 UTC`, the suffix named once |
 | a compact clock, UTC, mostly unlabelled | `lib/changes.ts`, `lib/changesTimeline.ts` | `utcClockLabel`, `utcClockRangeLabel`, `utcDayClockLabel`, `utcCompactInstantLabel` — all suffixed ` UTC` |
 | the canonical instant a seal or a snapshot is quoted at | `lib/services.ts` `sealedLabel`, `lib/gate.ts` `preciseLabel` | `utcSecondsLabel`, `utcMillisLabel` — the `Z` was already there and is kept |
-| a KEY, a comparison, a wire value or an HTML control value | the three 90-day strips, `lib/gateLedger.ts`, `lib/gate.ts` and `SettingsView.vue`'s `datetime-local` inputs, and ~20 request bodies | `lib/datekeys.ts` — `utcDayKey`, `utcDayBefore`, `utcDayStart`, `isoInstant`, `localDatetimeInputValue`; none of them a rendering, and the module says so |
+| a KEY, a comparison, a wire value or an HTML control value | the three 90-day strips, `lib/gateLedger.ts`, `lib/gate.ts`, every `datetime-local` and `date` input, and ~20 request bodies | `lib/datekeys.ts` — `utcDayKey`, `utcDayBefore`, `utcDayStart`, `isoInstant`, `localDatetimeInputValue`; none of them a rendering, and the module says so |
+| **the SURFACE around a zone-free control** | six `datetime-local` inputs — `SlaView.vue` (Starts, Ends), `ServiceGate.vue` (override Until), `ServiceDeclarationView.vue` (Backfill from), `EscalationView.vue` (vacation Starts/Ends, schedule anchor), `SettingsView.vue` (silence Until) — and four `date` inputs whose value is a UTC calendar day: `ServiceChangesView.vue` and `GateDecisionsView.vue` (From, To) | `localInputZoneHint`, resolving the offset AT the typed instant; `utcDayInputHint` for the UTC-day controls |
 
-**AC-NFR-025c — DONE.** Every site in the first four rows renders through a named §8 function; a
+**AC-NFR-025c — the control-surface half was FALSE and is now a check.** This section recorded the
+zone-free HTML controls as a documented exemption, with the justification that "the surface that
+owns the input says which zone it is typing in". **No surface did.** Six `datetime-local` controls
+across five views carried nothing but "Starts", "Ends", "Until" and "from" — including
+`SettingsView.vue`, the one this section named — and the only mention of a zone anywhere near them
+was a source comment an operator never sees. Four `date` controls in two more views were worse than
+unlabelled: their values are read as UTC CALENDAR DAYS (`lib/gateLedger.ts`, the ledger's partition
+unit), so an operator at UTC+05 picking a day is not asking for their own.
+
+The operational cost is why it is rated P1 rather than cosmetic: a maintenance window, a gate
+override or a backfill entered against the wrong clock suppresses alerting, lifts a block, or
+adopts history over the wrong hours. Reviewer P1 on the NFR-025 contract audit, 2026-09-06.
+
+**The exemption is a CHECK now.** `wallclock.spec.ts` fails any `.vue` file that renders such a
+control without the matching hint, counting controls against hints; a hint that honestly covers a
+RANGE — `starts → ends` is one subject — declares `data-covers="N"`, so a seventh input still
+needs its own hint or a visible decision. Surface assertions in `SlaView.spec.ts` and
+`GateDecisionsView.spec.ts` read what an operator actually sees, because a source guard can only
+see that a hint exists somewhere in the file. Four mutations killed: a surface losing its hint (by
+the guard AND by the surface test, independently), a date surface losing its UTC label, a seventh
+control appearing unhinted, and the offset taken from `now` instead of from the typed instant.
+
+**AC-NFR-025c — the rest, DONE.** Every site in the first four rows renders through a named §8 function; a
 UTC date says UTC. **TWO FORMS, and every UTC renderer is in exactly one of them:** a PHRASE a
 person reads ends in ` UTC` (`utcDayLabel`, `utcDayRangeLabel`, `utcClockLabel`,
 `utcClockRangeLabel`, `utcDayClockLabel`, `utcCompactInstantLabel`); a CANONICAL instant ends in

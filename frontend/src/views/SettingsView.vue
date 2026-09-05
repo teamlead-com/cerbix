@@ -22,7 +22,7 @@ import {
 import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
-import { instantLabelShort } from "@/lib/wallclock";
+import { instantLabelShort, localInputZoneHint } from "@/lib/wallclock";
 import { isoInstant, localDatetimeInputValue } from "@/lib/datekeys";
 
 type Channel = components["schemas"]["NotificationChannel"];
@@ -1206,7 +1206,7 @@ watch(tab, loadActive);
           </div>
           <div v-if="alerting.enabled" class="flex flex-col gap-2 rounded border border-border bg-surface-2 p-4">
             <label class="flex flex-col gap-[6px]">
-              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Until <span class="font-normal normal-case tracking-normal">— optional</span></span>
+              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Until <span class="font-normal normal-case tracking-normal">— optional, {{ localInputZoneHint(alerting.until) }}</span></span>
               <input v-model="alerting.until" type="datetime-local" class="max-w-[240px] rounded-sm border border-border bg-surface px-3 py-2 text-[12.5px] outline-none focus:border-accent" @change="saveAlerting(true)" />
             </label>
             <span class="text-[12px] text-ink-3">Empty — silenced until switched off manually. With a date, alert delivery resumes automatically (facts keep recording either way).</span>

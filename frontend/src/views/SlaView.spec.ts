@@ -443,3 +443,31 @@ describe("SlaView project objective", () => {
     expect(wrapper.find('[data-testid="project-objective-input"]').exists()).toBe(false);
   });
 });
+
+// NFR-025, the control-surface half. A maintenance window is an operator choosing two INSTANTS in
+// a control whose HTML value is local and offset-free, and the labels said only "Starts" and
+// "Ends". Getting the zone wrong here suppresses alerting over the wrong hours, which is why the
+// reviewer rated it P1 on the NFR-025 contract audit rather than as cosmetics.
+describe("the maintenance window names the zone it is typed in", () => {
+  beforeEach(() => {
+    for (const method of Object.values(apiMock)) method.mockReset();
+  });
+
+  it("shows the local offset beside both instants an operator enters", async () => {
+    apiMock.GET.mockImplementation(() => Promise.resolve({ data: [] }));
+    const { wrapper } = mountView();
+    await flushPromises();
+    // The form is behind "Schedule window", which is where an operator meets it.
+    const open = wrapper.findAll("button").find((b) => b.text() === "Schedule window");
+    expect(open, "the Schedule window button is gone").toBeTruthy();
+    await open!.trigger("click");
+    await flushPromises();
+    for (const id of ["maint-starts-zone", "maint-ends-zone"]) {
+      const hint = wrapper.find(`[data-testid="${id}"]`);
+      expect(hint.exists(), `${id} is missing`).toBe(true);
+      // The offset itself belongs to the runner's zone, so the ASSERTION is the shape: an
+      // operator is told this is local time and which offset that is, whatever zone they sit in.
+      expect(hint.text()).toMatch(/local time \(UTC[+-]\d{2}:\d{2}\)/);
+    }
+  });
+});

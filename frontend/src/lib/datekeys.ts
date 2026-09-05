@@ -54,8 +54,13 @@ export function utcDayStart(d: Date): number {
  * and offset-free, because that is what the HTML format is. Labelling it would make the control
  * reject it.
  *
- * The zone is not hidden from the operator — the surface that owns the input says which zone it
- * is typing in, and what the API stores is RFC 3339.
+ * THE VALUE carries no zone; THE SURFACE must. This used to read "the zone is not hidden from the
+ * operator — the surface that owns the input says which zone it is typing in", and it was false of
+ * every surface that had one: six controls across five views said only "Starts", "Ends", "Until"
+ * and "from", including the one `func-truthful-rendering.md` §9 named as the documented case. It
+ * is a check now rather than a promise — `wallclock.ts`'s `localInputZoneHint` renders the offset
+ * AT the typed instant, and `wallclock.spec.ts` fails a `.vue` file that renders such a control
+ * without one. What the API stores is RFC 3339.
  */
 export function localDatetimeInputValue(d: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");

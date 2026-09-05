@@ -6,7 +6,7 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
-import { instantLabelShort } from "@/lib/wallclock";
+import { instantLabelShort, localInputZoneHint } from "@/lib/wallclock";
 import { isoInstant } from "@/lib/datekeys";
 
 type Monitor = components["schemas"]["Monitor"];
@@ -1020,11 +1020,11 @@ watch(() => ws.projectId, () => {
               </select>
             </label>
             <label class="flex flex-col gap-[6px]">
-              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Starts</span>
+              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Starts <span class="font-normal normal-case tracking-normal text-ink-3" data-testid="maint-starts-zone">— {{ localInputZoneHint(maintForm.starts_at) }}</span></span>
               <input v-model="maintForm.starts_at" type="datetime-local" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
             </label>
             <label class="flex flex-col gap-[6px]">
-              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Ends</span>
+              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Ends <span class="font-normal normal-case tracking-normal text-ink-3" data-testid="maint-ends-zone">— {{ localInputZoneHint(maintForm.ends_at) }}</span></span>
               <input v-model="maintForm.ends_at" type="datetime-local" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
             </label>
           </div>

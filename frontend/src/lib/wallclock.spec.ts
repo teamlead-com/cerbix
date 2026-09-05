@@ -160,22 +160,62 @@ describe("the mechanism's shape", () => {
   }
 
   /**
-   * `text` with COMMENTS removed, for any scan that counts occurrences in source.
+   * Strip JS comments from CODE, tracking string context so a `//` inside a literal survives.
    *
-   * A guard that reads raw text cannot tell a rendered hint from a commented-out one. Wrapping a
-   * hint in an HTML comment leaves the helper call in the file and takes the element out of the
-   * DOM, so the operator sees no zone while the count stays satisfied — reviewer finding N4,
-   * reproduced on `ServiceDeclarationView`, the surface no component test covers.
+   * A regex cannot do this. The first version stripped `//` only at line start, to protect
+   * `https://` — and a TRAILING comment then kept a helper's name alive in the stripped text while
+   * the element was gone from the DOM: `const noop = 0; // localInputZoneHint(x)` satisfied the
+   * inventory with nothing rendered. Reviewer finding N5, and he is right that it is the same class
+   * as N4 rather than a style point: the guard reported a hint an operator cannot see.
    *
-   * HTML comments and JS block comments go entirely; line comments only when the slashes start
-   * the line, because a `https://` inside a template is not a comment and eating it would make
-   * the scan lie in the other direction.
+   * KNOWN BOUNDARY, stated rather than claimed away: a backtick is treated as opening a template
+   * literal until the next backtick, so a `${...}` holding another backtick is read
+   * conservatively — it keeps MORE text, never less, so it can only cost a false positive in a
+   * guard and never hide a missing hint. Regex literals containing `//` are the same shape.
+   */
+  function stripScriptComments(code: string): string {
+    let out = "";
+    let i = 0;
+    let quote: string | null = null;
+    while (i < code.length) {
+      const c = code[i];
+      const n = code[i + 1];
+      if (quote) {
+        if (c === "\\") { out += c + (n ?? ""); i += 2; continue; }
+        if (c === quote) quote = null;
+        out += c; i++; continue;
+      }
+      if (c === '"' || c === "'" || c === "`") { quote = c; out += c; i++; continue; }
+      if (c === "/" && n === "/") { while (i < code.length && code[i] !== "\n") i++; out += " "; continue; }
+      if (c === "/" && n === "*") {
+        i += 2;
+        while (i < code.length && !(code[i] === "*" && code[i + 1] === "/")) i++;
+        i += 2; out += " "; continue;
+      }
+      out += c; i++;
+    }
+    return out;
+  }
+
+  /**
+   * `text` with COMMENTS removed, for every scan that reads source.
+   *
+   * `<!-- … -->` goes everywhere. JS comments go only inside `<script>` blocks, because in a Vue
+   * TEMPLATE `//` is not a comment at all — a bare `https://` in visible text would otherwise take
+   * the rest of its line with it, and a filter that eats real markup makes every scan quietly
+   * weaker.
    */
   function stripComments(text: string): string {
-    return text
-      .replace(/<!--[\s\S]*?-->/g, " ")
-      .replace(/\/\*[\s\S]*?\*\//g, " ")
-      .replace(/^[ \t]*\/\/.*$/gm, " ");
+    const noHtml = text.replace(/<!--[\s\S]*?-->/g, " ");
+    // A single-file component is decided by EITHER block. Keying only on `<script>` sent a
+    // template-only fixture down the code path and ate a bare URL in visible text — the exact
+    // damage this split exists to prevent, found by the fixture written for it.
+    const isSFC = /<template[\s>]/.test(noHtml) || /<script[\s>]/.test(noHtml);
+    if (isSFC) {
+      return noHtml.replace(/(<script[^>]*>)([\s\S]*?)(<\/script>)/g,
+        (_m, open: string, body: string, close: string) => open + stripScriptComments(body) + close);
+    }
+    return stripScriptComments(noHtml);
   }
 
   function walk(dir: string): string[] {
@@ -388,9 +428,17 @@ describe("the mechanism's shape", () => {
     expect(stripComments('<!-- {{ localInputZoneHint(x) }} -->')).not.toContain("localInputZoneHint");
     expect(stripComments("/* localInputZoneHint(x) */")).not.toContain("localInputZoneHint");
     expect(stripComments("  // localInputZoneHint(x)")).not.toContain("localInputZoneHint");
-    // NOT a comment: a URL, and a line where the slashes are not the first thing on it.
-    expect(stripComments('const u = "https://example.test/x";')).toContain("https://example.test/x");
+    // A TRAILING comment is a comment. The first version kept it, to protect `https://`, and that
+    // left `const noop = 0; // localInputZoneHint(x)` satisfying the inventory with nothing in the
+    // DOM — reviewer finding N5.
+    expect(stripComments("const noop = 0; // localInputZoneHint(x)")).not.toContain("localInputZoneHint");
     expect(stripComments("const a = 1; // trailing")).toContain("const a = 1;");
+    // NOT a comment: a URL inside a string literal, in code...
+    expect(stripComments('const u = "https://example.test/x";')).toContain("https://example.test/x");
+    expect(stripComments("const u = 'https://example.test/x';")).toContain("https://example.test/x");
+    // ...and a bare URL in TEMPLATE text, where `//` is not a comment marker at all.
+    expect(stripComments("<template><a>https://example.test/x</a>{{ localInputZoneHint(v) }}</template>"))
+      .toContain("localInputZoneHint");
     // Applied to the real tree it must change NO count that any scan above depends on. This is
     // the assertion that a stricter filter cannot quietly shrink the inventory.
     const PATTERNS: [string, RegExp][] = [

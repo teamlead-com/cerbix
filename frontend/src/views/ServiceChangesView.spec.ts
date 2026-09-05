@@ -654,3 +654,18 @@ describe("ServiceChangesView — the empty state and the notes", () => {
     expect(peak).toBe(4);
   });
 });
+
+// NFR-025, the control-surface half. These two `<input type="date">` values are read as UTC
+// CALENDAR DAYS, so an operator at UTC+05 picking a day is not asking for their own. The labels
+// said only From and To.
+describe("the range controls name the zone they are read in", () => {
+  it("says UTC days beside both date inputs", async () => {
+    const w = mountView();
+    await flushPromises();
+    for (const id of ["changes-from-zone", "changes-to-zone"]) {
+      const hint = w.find(`[data-testid="${id}"]`);
+      expect(hint.exists(), `${id} is missing`).toBe(true);
+      expect(hint.text()).toContain("UTC days");
+    }
+  });
+});

@@ -1063,3 +1063,18 @@ describe("ServiceGate — abort and generation guards (check 5)", () => {
     expect(disabled(w, "gate-configure")).toBe(false);
   });
 });
+
+// NFR-025, the control-surface half. The override's `Until` is an operator choosing an INSTANT in a
+// control whose HTML value is local and offset-free; lifting a block against the wrong clock lifts
+// it over the wrong hours. Asserted where an operator reads it, because a source guard proves that
+// a hint is written in the template and not that this view renders one.
+describe("the override deadline names the zone it is typed in", () => {
+  it("shows the local offset beside the Until control", async () => {
+    serve({ policy: ok(POLICY), override: ok(OVERRIDE) });
+    const w = mountGate({ canPolicyWrite: true, canOverride: true });
+    await settle();
+    const hint = w.find('[data-testid="gate-override-until-zone"]');
+    expect(hint.exists(), "the override zone hint is missing").toBe(true);
+    expect(hint.text()).toMatch(/local time \(UTC[+-]\d{2}:\d{2}\)/);
+  });
+});

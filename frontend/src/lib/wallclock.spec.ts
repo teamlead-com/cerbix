@@ -475,21 +475,29 @@ describe("the mechanism's shape", () => {
     for (const file of walk(SRC).filter((f) => f.endsWith(".vue"))) {
       const rel = file.split("/src/")[1];
       const text = stripComments(readFileSync(file, "utf8"));
+      // Controls live in the TEMPLATE and so must their hints — counted inside `{{ … }}`
+      // interpolations rather than anywhere in the file. A helper's NAME in a live string literal
+      // satisfied the file-wide count while the DOM had no hint at all (reviewer N6): the lexer
+      // correctly preserves that string, and a name preserved is not a call rendered. This is a
+      // narrowing of what the SOURCE guard claims; what an operator actually sees is proven by the
+      // per-view surface specs, which is the only evidence that can settle it.
+      const template = (/<template[^>]*>([\s\S]*)<\/template>/.exec(text) ?? ["", ""])[1];
+      const rendered = [...template.matchAll(/\{\{([\s\S]*?)\}\}/g)].map((m) => m[1]).join(" ");
       // A RANGE hint covers exactly two controls — `starts → ends` is one subject, and two
       // identical offsets in one inline row is noise rather than honesty. It counts for two
       // because it READS both values and names both offsets when they differ; the first version
       // of this rule accepted a single-instant hint beside a `data-covers="2"` attribute, which
       // is a declaration that one label covers two controls and no evidence that it says the
       // right thing about the second. Reviewer P1: `data-covers` was a permission slip.
-      const ranges = (text.match(/localInputRangeZoneHint\(/g) ?? []).length;
+      const ranges = (rendered.match(/localInputRangeZoneHint\(/g) ?? []).length;
       for (const [control, hint, name] of CONTROLS) {
-        const inputs = (text.match(control) ?? []).length;
+        const inputs = (template.match(control) ?? []).length;
         if (inputs === 0) continue;
         controls += inputs;
         const kind = name === "utcDayInputHint" ? "date" : "datetime-local";
         inventory[rel] = { ...(inventory[rel] ?? {}), [kind]: inputs };
         // a range hint reads two values, so it answers for two controls
-        const hints = (text.match(hint) ?? []).length + (name === "localInputZoneHint" ? ranges * 2 : 0);
+        const hints = (rendered.match(hint) ?? []).length + (name === "localInputZoneHint" ? ranges * 2 : 0);
         if (hints < inputs) {
           offenders.push(`${rel}: ${inputs} control(s), ${hints} covered by ${name}() (a range hint counts for two)`);
         }
@@ -515,6 +523,25 @@ describe("the mechanism's shape", () => {
       "views/SlaView.vue": { "datetime-local": 2 },
     });
     expect(controls, "the totals disagree with the inventory above").toBe(12);
+
+    // EVERY control file has a SURFACE assertion, named here, and the map is checked against the
+    // inventory rather than written beside it. A source guard cannot prove a render — reviewer N6
+    // reached it with the helper's name in a live string literal — so the guarantee rests on these
+    // specs, and this is what stops a new control file shipping without one.
+    const SURFACES: Record<string, string> = {
+      "components/ServiceGate.vue": "components/ServiceGate.spec.ts",
+      "views/EscalationView.vue": "views/EscalationZoneHints.spec.ts",
+      "views/GateDecisionsView.vue": "views/GateDecisionsView.spec.ts",
+      "views/ServiceChangesView.vue": "views/ServiceChangesView.spec.ts",
+      "views/ServiceDeclarationView.vue": "views/ZoneFreeControlSurfaces.spec.ts",
+      "views/SettingsView.vue": "views/ZoneFreeControlSurfaces.spec.ts",
+      "views/SlaView.vue": "views/SlaView.spec.ts",
+    };
+    expect(Object.keys(SURFACES).sort()).toEqual(Object.keys(inventory).sort());
+    for (const [control, spec] of Object.entries(SURFACES)) {
+      const text = readFileSync(join(SRC, spec), "utf8");
+      expect(text, `${spec} does not assert a zone for ${control}`).toMatch(/-zone"|local time \(UTC|UTC days/);
+    }
   });
 
   // A RANGE hint counts for two controls because it READS two values — so every call site must

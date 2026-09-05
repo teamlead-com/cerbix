@@ -133,10 +133,10 @@ describe("IncidentDetailView — Preceded by (D-0210 item 4, D7)", () => {
     expect(t(w, "incident-preceded-role").text()).toBe("own service");
     expect(t(w, "incident-preceded-kind").text()).toBe("deploy");
     expect(t(w, "incident-preceded-ref").text()).toBe("v4.2.1");
-    expect(t(w, "incident-preceded-anchor").text(), "the phase KNOWN at the open, not the latest one").toBe("started 14:00");
+    expect(t(w, "incident-preceded-anchor").text(), "the phase KNOWN at the open, not the latest one").toBe("started 14:00 UTC");
     expect(t(w, "incident-preceded-lag").text()).toBe("−31 m");
     expect(t(w, "incident-preceded-lag").attributes("title")).toBe("1860 s before the open");
-    expect(t(w, "incident-preceded-sub").text(), "the group's phases TODAY, beside the anchor").toContain("started 08-30 14:00 → succeeded 14:05");
+    expect(t(w, "incident-preceded-sub").text(), "the group's phases TODAY, beside the anchor").toContain("started 30.08 14:00 UTC → succeeded 14:05 UTC");
     expect(t(w, "incident-preceded-sub").text()).toContain("anchored at the started phase known at 14:31");
     expect(w.text(), "preceded is the whole claim").not.toContain("caused");
     expect(t(w, "incident-preceded-hint").text()).toContain("the window is fixed at open");

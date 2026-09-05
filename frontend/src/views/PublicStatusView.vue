@@ -8,6 +8,8 @@ import { componentMeta, summaryHeadline, withheldText } from "@/lib/statuspage";
 import { useBranding } from "@/stores/branding";
 import { impactBadge, relTime, statusBadge } from "@/lib/incident";
 import { renderSections } from "@/lib/postmortem";
+import { utcClockLabel, utcDayLabel } from "@/lib/wallclock";
+import { isoInstant, utcDayBefore, utcDayKey } from "@/lib/datekeys";
 
 type Render = components["schemas"]["StatusPageRender"];
 type ComponentView = components["schemas"]["ComponentView"];
@@ -94,7 +96,7 @@ const summarySub = computed(() => {
 });
 const updatedUTC = computed(() => {
   if (!page.value?.updated_at) return "";
-  return new Date(page.value.updated_at).toISOString().slice(11, 16) + " UTC";
+  return utcClockLabel(page.value.updated_at);
 });
 
 // Past-incidents accordion: which incident is expanded.
@@ -157,11 +159,11 @@ function strip(daily?: ComponentDay[]): { pct: number | null; label: string }[] 
   const out: { pct: number | null; label: string }[] = [];
   const today = new Date();
   for (let i = 89; i >= 0; i--) {
-    const dt = new Date(today);
-    dt.setUTCDate(today.getUTCDate() - i);
-    const key = dt.toISOString().slice(0, 10);
+    const dt = utcDayBefore(today, i);
+    const key = utcDayKey(dt);
     const d = byDay.get(key);
-    out.push({ pct: d && d.total ? (d.uptime_percent ?? 0) : null, label: key });
+    // The key is a lookup; the label is read by a human in a tooltip, so it names its zone.
+    out.push({ pct: d && d.total ? (d.uptime_percent ?? 0) : null, label: utcDayLabel(isoInstant(dt)) });
   }
   return out;
 }
@@ -175,7 +177,7 @@ function dayTitle(d: { pct: number | null; label: string }): string {
   return d.pct === null ? `${d.label} · no data` : `${d.label} · ${d.pct.toFixed(2)}%`;
 }
 function fmtDay(ts?: string): string {
-  return ts ? new Date(ts).toISOString().slice(0, 10) : "";
+  return ts ? utcDayLabel(ts) : "";
 }
 function maintState(m: components["schemas"]["MaintenanceWindow"]): string {
   const now = Date.now();

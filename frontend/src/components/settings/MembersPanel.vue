@@ -6,6 +6,7 @@ import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import AuditRows from "@/components/settings/AuditRows.vue";
 import { relTime } from "@/lib/incident";
+import { utcDayLabel } from "@/lib/wallclock";
 
 type Member = components["schemas"]["Member"];
 type Role = components["schemas"]["Role"];
@@ -110,7 +111,7 @@ function projectScope(m: Member): { label: string; sub: string; dashed: boolean 
   return { label: p?.name || p?.slug || "project", sub: roleLabel(m.role), dashed: !p };
 }
 function fmtDate(ts?: string): string {
-  return ts ? new Date(ts).toISOString().slice(0, 10) : "—";
+  return utcDayLabel(ts);
 }
 
 const filtered = computed(() => {

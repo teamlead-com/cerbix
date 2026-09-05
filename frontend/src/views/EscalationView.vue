@@ -6,6 +6,7 @@ import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { instantRangeLabel } from "@/lib/wallclock";
+import { isoInstant } from "@/lib/datekeys";
 
 type Channel = components["schemas"]["NotificationChannel"];
 type Policy = components["schemas"]["EscalationPolicy"];
@@ -77,7 +78,7 @@ async function addOverride(id: string) {
   if (!f.channel_id || !f.starts_at || !f.ends_at) return;
   await api.POST("/api/v1/oncall-schedules/{scheduleID}/overrides", {
     params: { path: { scheduleID: id } },
-    body: { channel_id: f.channel_id, starts_at: new Date(f.starts_at).toISOString(), ends_at: new Date(f.ends_at).toISOString() },
+    body: { channel_id: f.channel_id, starts_at: isoInstant(new Date(f.starts_at)), ends_at: isoInstant(new Date(f.ends_at)) },
   });
   ovForm[id] = { channel_id: "", starts_at: "", ends_at: "" };
   await loadAll();
@@ -233,7 +234,7 @@ async function createSchedule() {
     scheduleError.value = "Name and at least one participant are required.";
     return;
   }
-  const anchor = scheduleForm.anchor_at ? new Date(scheduleForm.anchor_at).toISOString() : new Date().toISOString();
+  const anchor = scheduleForm.anchor_at ? isoInstant(new Date(scheduleForm.anchor_at)) : isoInstant(new Date());
   savingSchedule.value = true;
   const body = {
     name: scheduleForm.name.trim(),

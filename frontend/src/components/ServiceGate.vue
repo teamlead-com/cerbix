@@ -82,6 +82,7 @@ import {
 } from "@/lib/gate";
 import { relTime } from "@/lib/incident";
 import { sealedLabel } from "@/lib/services";
+import { isoInstant } from "@/lib/datekeys";
 
 type GatePolicy = components["schemas"]["GatePolicy"];
 type GateOverride = components["schemas"]["GateOverride"];
@@ -607,7 +608,7 @@ async function createOverride() {
   const out = await request<{ id: string }>(gen, (signal) =>
     api.POST("/api/v1/projects/{projectID}/services/{serviceID}/gate/override", {
       params: { path: path.value },
-      body: { policy_revision: p.revision, reason: ovReason.value.trim(), expires_at: new Date(ovUntil.value).toISOString() },
+      body: { policy_revision: p.revision, reason: ovReason.value.trim(), expires_at: isoInstant(new Date(ovUntil.value)) },
       signal,
     }),
   );

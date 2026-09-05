@@ -30,7 +30,6 @@ import {
   DEFAULT_HORIZON,
   HORIZONS,
   WITHHELD_HINT,
-  clockLabel,
   deltaChip,
   deltaValueClass,
   describeChangeFailure,
@@ -41,7 +40,6 @@ import {
   kindLabel,
   secondsLabel,
   sideBar,
-  windowLabel,
   withheldLabel,
   type ChangeCompare,
   type ChangeCompareSide,
@@ -49,6 +47,7 @@ import {
   type CompareSideView,
   requestScope,
 } from "@/lib/changes";
+import { utcClockLabel, utcClockRangeLabel } from "@/lib/wallclock";
 import { CHIP_BASE, CHIP_PLAIN, describeFailure, failureOf, isAbort, transportFailure } from "@/lib/gate";
 import { sealedLabel } from "@/lib/services";
 import { useWorkspace } from "@/stores/workspace";
@@ -272,7 +271,7 @@ const KPI_SMALL = "ml-[6px] text-[12px] font-normal tracking-normal text-ink-3";
                 :data-withheld="s.view.kind === 'withheld' ? s.view.reason : undefined"
                 :data-pending="s.view.kind === 'pending' ? 'true' : undefined"
               >
-                <div :class="LBL" :title="`${sealedLabel(s.side.from)} → ${sealedLabel(s.side.to)}`">{{ s.label }} · {{ windowLabel(s.side.from, s.side.to) }}</div>
+                <div :class="LBL" :title="`${sealedLabel(s.side.from)} → ${sealedLabel(s.side.to)}`">{{ s.label }} · {{ utcClockRangeLabel(s.side.from, s.side.to) }}</div>
 
                 <template v-if="s.view.kind === 'figure'">
                   <div :class="KPI" :data-testid="`compare-${s.key}-figure`">
@@ -290,7 +289,7 @@ const KPI_SMALL = "ml-[6px] text-[12px] font-normal tracking-normal text-ink-3";
                   <div :class="[KPI, 'text-ink-3']" :data-testid="`compare-${s.key}-figure`">
                     pending<small v-if="s.view.sealedThrough" :class="KPI_SMALL">sealed through {{ sealedLabel(s.view.sealedThrough) }}</small>
                   </div>
-                  <div class="text-[12px] text-ink-3">the seal must pass {{ clockLabel(s.side.to) }} before this side is quoted; nothing partial is shown</div>
+                  <div class="text-[12px] text-ink-3">the seal must pass {{ utcClockLabel(s.side.to) }} before this side is quoted; nothing partial is shown</div>
                 </template>
 
                 <template v-else>

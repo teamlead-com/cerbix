@@ -5,13 +5,15 @@
 // the wall clock it is. A healthy service is normally a couple of minutes behind — bucket 60s
 // plus the late-arrival grace — so the lag is only worth showing once it exceeds that.
 
+import { utcSecondsLabel } from "@/lib/wallclock";
+
 /** Below this the lag is the normal seal cadence, not something to point at. */
 const HEALTHY_LAG_MS = 5 * 60 * 1000;
 
 export function sealedLabel(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
+  return utcSecondsLabel(iso);
 }
 
 /** Human lag, or "" while the service is sealing at its normal cadence. */

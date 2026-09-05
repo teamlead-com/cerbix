@@ -4,8 +4,7 @@
 // Every rule the change surfaces SHARE — a kind by shape and text (`kindClip`, `kindLabel`), the
 // phases' domain order (`isTerminal`, `terminalOf`, `groupLatest`, `phaseTone`), the identity key
 // (`groupKey`), the decision link (`decisionView`), the horizons, how a comparison side and its delta
-// are quoted (`formatCompareSide`, `deltaChip`, `deltaValueClass`), a lag (`lagText`), a clock
-// (`clockLabel`), the refusal map (`CHANGE_ERROR_TEXT`, `changeCode`, `describeChangeFailure`), the
+// are quoted (`formatCompareSide`, `deltaChip`, `deltaValueClass`), a lag (`lagText`), the refusal map (`CHANGE_ERROR_TEXT`, `changeCode`, `describeChangeFailure`), the
 // 92-day bound and its sentence — lives ONCE in lib/changes.ts (the owner, iter-0165 task 7 part 1)
 // and is RE-EXPORTED here so the two views keep one import; nothing below restates it. What stays is
 // the timeline's own: its calendar-day range (the ledger's date pickers under D6's bound, not the
@@ -17,6 +16,8 @@ import type { components } from "@/api/schema";
 
 import { CHANGE_KINDS, CHANGE_RANGE_MAX_DAYS, type ChangeKind, RANGE_TOO_WIDE_TEXT } from "@/lib/changes";
 import { defaultRange as ledgerDefaultRange, rangeRefusal } from "@/lib/gateLedger";
+import { utcDayKey } from "@/lib/datekeys";
+import { utcClockLabel, utcDayClockLabel } from "@/lib/wallclock";
 
 export {
   CHANGE_ERROR_TEXT,
@@ -30,7 +31,6 @@ export {
   PHASE_ORDER,
   RANGE_TOO_WIDE_TEXT,
   changeCode,
-  clockLabel,
   decisionView,
   deltaChip,
   deltaValueClass,
@@ -72,21 +72,24 @@ export type ChangeLinkRole = Schemas["ChangeIncidentLink"]["role"];
 // ── The phase strip (mock screen 5) ──────────────────────────────────────────────────────────
 
 /**
- * A phase's instant as the timeline's phase strip writes it: `08-28 16:40` for the first phase (and
- * for a phase on a later UTC day than the one before it), `15:25` when the day is the previous
- * phase's. This is relative to the PREVIOUS phase, not to now — the card's `instantLabel` answers a
- * different question ("how long ago"), so the two are not one rule.
+ * A phase's instant as the timeline's phase strip writes it: `28.08 16:40 UTC` for the first phase
+ * (and for a phase on a later UTC day than the one before it), `15:25 UTC` when the day is the
+ * previous phase's. This is relative to the PREVIOUS phase, not to now — the card's compact instant
+ * answers a different question ("how long ago"), so the two are not one rule.
+ *
+ * It used to render `08-28 16:40`, with no zone at all, by slicing a `toISOString` result held in a
+ * LOCAL VARIABLE — which is why the NFR-025c ratchet, whose idiom required the slice to be chained
+ * directly onto the call, never counted it. The guard is absolute now (`wallclock.spec.ts`): no
+ * product file outside `wallclock.ts` and `datekeys.ts` may call `toISOString` at all.
  */
 export function phaseInstantLabel(iso: string, previousIso?: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  const s = d.toISOString();
-  const clock = s.slice(11, 16);
   if (previousIso) {
     const prev = new Date(previousIso);
-    if (!Number.isNaN(prev.getTime()) && prev.toISOString().slice(0, 10) === s.slice(0, 10)) return clock;
+    if (!Number.isNaN(prev.getTime()) && utcDayKey(prev) === utcDayKey(d)) return utcClockLabel(iso);
   }
-  return `${s.slice(5, 10)} ${clock}`;
+  return utcDayClockLabel(iso);
 }
 
 // ── The incident side (D7) ───────────────────────────────────────────────────────────────────

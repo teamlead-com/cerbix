@@ -13,6 +13,8 @@
 //     Retry-After of a 429, the transport's own words for a network failure, an unknown code
 //     verbatim — never swallowed.
 import type { components } from "@/api/schema";
+import { isoInstant, localDatetimeInputValue } from "@/lib/datekeys";
+import { utcDayLabel, utcMillisLabel } from "@/lib/wallclock";
 
 type Schemas = components["schemas"];
 export type GatePolicy = Schemas["GatePolicy"];
@@ -439,7 +441,7 @@ export function shortId(id: string): string {
 export function preciseLabel(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toISOString().replace("T", " ");
+  return utcMillisLabel(iso);
 }
 
 /** A compact duration: "3m 02s", "15m", "22m 10s", "1h 05m", "5h 49m", "24h", "2d 03h". */
@@ -475,11 +477,11 @@ export function fmtPercent(v: number, digits = 2): string {
   return `${v.toFixed(digits)} %`;
 }
 
-/** The date part only: "2026-08-01". */
+/** The UTC day an objective was last changed, said as such: "01.08.2026 UTC". */
 export function dateLabel(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toISOString().slice(0, 10);
+  return utcDayLabel(iso);
 }
 
 // ── Reasons ─────────────────────────────────────────────────────────────────────────────────────
@@ -577,7 +579,7 @@ export function ledgerRange(now: Date = new Date(), days = LEDGER_LOOKBACK_DAYS)
   const span = Math.min(days, LEDGER_MAX_RANGE_DAYS);
   const to = new Date(now.getTime());
   const from = new Date(to.getTime() - span * 86_400_000);
-  return { from: from.toISOString(), to: to.toISOString() };
+  return { from: isoInstant(from), to: isoInstant(to) };
 }
 
 // ── The CLI ─────────────────────────────────────────────────────────────────────────────────────
@@ -599,10 +601,12 @@ export const CLI_EXITS: readonly { code: string; text: string }[] = [
 
 // ── The override form ───────────────────────────────────────────────────────────────────────────
 
-/** A `datetime-local` value in the viewer's zone, minute precision. */
+/**
+ * A `datetime-local` value in the viewer's zone, minute precision. Offset-free because the HTML
+ * format is — see `lib/datekeys.ts`, which is where every value of that kind now lives.
+ */
 export function toDatetimeLocal(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return localDatetimeInputValue(d);
 }
 
 export function defaultOverrideUntil(now: Date = new Date()): string {

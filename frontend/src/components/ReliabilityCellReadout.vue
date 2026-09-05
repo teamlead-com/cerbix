@@ -16,6 +16,7 @@ import { computed } from "vue";
 
 import { CANONICAL_BUCKET_MS, type Cell, type Slice } from "@/lib/reliabilitygeometry";
 import { utcCellExtentLabel, utcExtentLabel } from "@/lib/wallclock";
+import { isoInstant } from "@/lib/datekeys";
 
 const props = defineProps<{ cell: Cell; slices: Slice[]; compact?: boolean }>();
 
@@ -29,8 +30,8 @@ const usToText = (us: number): string => {
 
 const view = computed(() => {
   const cell = props.cell;
-  const fromIso = new Date(cell.startMs).toISOString();
-  const toIso = new Date(cell.endMs).toISOString();
+  const fromIso = isoInstant(new Date(cell.startMs));
+  const toIso = isoInstant(new Date(cell.endMs));
   const extentMinutes = (cell.endMs - cell.startMs) / CANONICAL_BUCKET_MS;
   const rows: { label: string; value: string }[] = [];
   const push = (label: string, us: number) => {

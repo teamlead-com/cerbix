@@ -19,6 +19,7 @@ import type { components } from "@/api/schema";
 
 import { CHIP_ACC, CHIP_DORM, RANGE_TOO_WIDE_TEXT, reasonToneClass } from "@/lib/gate";
 import { humanDuration, sealedLabel } from "@/lib/services";
+import { isoInstant, utcDayKey, utcDayStart } from "@/lib/datekeys";
 
 export {
   CHIP_ACC,
@@ -128,14 +129,17 @@ export const PAGE_SIZE = 50;
 
 const DAY_MS = 86_400_000;
 
-/** A calendar day, `YYYY-MM-DD`, as `<input type="date">` holds it — read as a UTC day, the ledger's partition unit. */
+/**
+ * A calendar day, `YYYY-MM-DD`, as `<input type="date">` holds it — read as a UTC day, the
+ * ledger's partition unit. A KEY and a wire value, never a rendering (`lib/datekeys.ts`).
+ */
 export function isoDay(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  return utcDayKey(d);
 }
 
 /** Today (UTC) and the 29 days before it: 30 calendar days, inclusive of both ends. */
 export function defaultRange(now: Date = new Date()): { from: string; to: string } {
-  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const today = utcDayStart(now);
   return { from: isoDay(new Date(today - (DEFAULT_RANGE_DAYS - 1) * DAY_MS)), to: isoDay(new Date(today)) };
 }
 
@@ -161,7 +165,7 @@ export function rangeBounds(fromDay: string, toDay: string): RangeBounds | null 
 }
 
 function rfc3339(ms: number): string {
-  return new Date(ms).toISOString().replace(".000Z", "Z");
+  return isoInstant(new Date(ms)).replace(".000Z", "Z");
 }
 
 /**

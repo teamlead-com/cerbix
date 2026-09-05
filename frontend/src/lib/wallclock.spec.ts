@@ -4,7 +4,9 @@ import { join, resolve } from "node:path";
 
 import {
   instantLabel, instantLabelShort, instantRangeLabel,
-  utcCellExtentLabel, utcExtentLabel, utcInstantLabel,
+  utcCellExtentLabel, utcClockLabel, utcClockRangeLabel,
+  utcCompactInstantLabel, utcDayClockLabel, utcDayLabel, utcDayRangeLabel,
+  utcExtentLabel, utcInstantLabel, utcMillisLabel, utcSecondsLabel,
 } from "./wallclock";
 
 // func-truthful-rendering §8 (FR-031 / NFR-025a, D-0235): identity is UTC, presentation is local,
@@ -171,8 +173,24 @@ describe("the mechanism's shape", () => {
     const exported = [...src.matchAll(/export function (\w+)/g)].map((m) => m[1]).sort();
     expect(exported).toEqual([
       "instantLabel", "instantLabelShort", "instantRangeLabel",
-      "utcCellExtentLabel", "utcExtentLabel", "utcInstantLabel",
+      "utcCellExtentLabel", "utcClockLabel", "utcClockRangeLabel",
+      "utcCompactInstantLabel", "utcDayClockLabel", "utcDayLabel", "utcDayRangeLabel",
+      "utcExtentLabel", "utcInstantLabel", "utcMillisLabel", "utcSecondsLabel",
     ]);
+    // Every one of them has a caller. `clockSecondsLabel` in `lib/changes.ts` was exported,
+    // documented as the honest one because it ended in ` Z`, and called by nothing in the
+    // repository; its replacement here was deleted rather than kept for symmetry.
+    for (const fn of exported) {
+      const callers = walk(SRC).filter((f) => {
+        if (f.endsWith("wallclock.ts") || f.endsWith(".spec.ts")) return false;
+        // Import statements are stripped FIRST. Matching the bare name counted an unused import
+        // as a caller, which is exactly the state a dropped call site leaves behind — the
+        // mutation that removed `utcMillisLabel`'s only call survived on its own import line.
+        const text = readFileSync(f, "utf8").replace(/import[\s\S]*?from\s*["'][^"']*["'];/g, "");
+        return new RegExp(`\\b${fn}\\s*\\(`).test(text);
+      });
+      expect(callers.length, `${fn} is exported and nothing calls it`).toBeGreaterThan(0);
+    }
     // A name like formatDate / formatTime is exactly what a caller reaches for when it has a
     // bucket and wants "a date"; there is deliberately nothing here to reach for.
     expect(src).not.toMatch(/export function format(Date|Time|Timestamp)?\b/);
@@ -193,44 +211,81 @@ describe("the mechanism's shape", () => {
     expect(offenders).toEqual([]);
   });
 
-  // A RATCHET, not a claim of completeness. Reviewer P1 at party [195] found what the
-  // `toLocaleString` guard above does not reach: timestamps rendered by hand out of a `Date` —
-  // `toISOString().slice(0,10)`, `getUTC*`, `get*` — several of them user-visible with no zone at
-  // all. NFR-025b substituted the five `toLocaleString` sites; these are a DIFFERENT and larger
-  // surface (NFR-025c), and each one needs a decision rather than a substitution: a UTC date must
-  // say UTC, a local one must name its offset, an input value must stay bare because the HTML
-  // format demands it, and a map key is not rendered at all.
+  // NFR-025c's enforcement, and it is a GUARD now rather than a ratchet.
   //
-  // So this test does not assert the surface is clean. It asserts the surface is BOUNDED: exactly
-  // these files, with exactly these counts. A new file or a new call fails it, and so does a count
-  // that shrinks without the list being updated — a stale allow-list is how a ratchet rots.
-  it("keeps the hand-rolled date surface bounded, file by file (NFR-025c ratchet)", () => {
-    const IDIOM = /toISOString\(\)\.(?:slice|substring)|getUTC(?:Date|Month|FullYear|Hours|Minutes|Seconds)\(|\.get(?:Hours|Minutes|Seconds|Date|Month|FullYear)\(/g;
-    // file -> [count, why it is still here]
-    const KNOWN: Record<string, [number, string]> = {
-      "components/ServiceReliability.vue": [3, "dayLabel builds a segment range as a UTC date, unlabelled — that one needs a UTC LABEL, not a conversion"],
-      "components/settings/AgentTokensPanel.vue": [1, "created/revoked as a bare UTC date"],
-      "components/settings/MembersPanel.vue": [1, "added as a bare UTC date"],
-      "components/settings/SecretsPanel.vue": [1, "created/rotated as a bare UTC date"],
-      "lib/changes.ts": [14, "the change timeline's compact clock and date: one rendering already says ` Z`, the rest say nothing — and it defines its OWN `instantLabel(iso, now)`, a name collision with the mechanism that (c) should settle"],
-      "lib/changesTimeline.ts": [1, "a same-day comparison whose branch returns a bare clock"],
-      "lib/gate.ts": [6, "a bare UTC date, plus a datetime-local INPUT value that must stay offset-free by the HTML format"],
-      "lib/gateLedger.ts": [4, "a bare UTC date, plus UTC day boundaries used only for comparison"],
-      "views/DashboardView.vue": [2, "day-grid map keys — never rendered"],
-      "views/MonitorDetailView.vue": [3, "two day-grid keys (not rendered) plus created/updated as a bare UTC date"],
-      "views/PublicStatusView.vue": [4, "one rendering already says ` UTC`, one bare date, two day-grid keys"],
-      "views/SettingsView.vue": [5, "a datetime-local INPUT value that must stay offset-free, and its helpers"],
-      "views/StatusPagesView.vue": [1, "fmtSubDate: a subscriber date as a bare UTC date"],
-    };
-    const found: Record<string, number> = {};
+  // The previous version was an allow-list: thirteen files with a count and a reason each,
+  // failing on a new file, a new call, or a count that shrank without the list being updated. It
+  // was honest about being a bound rather than a fix — and it had a hole exactly where an
+  // allow-list has one. Its idiom required the slice to be CHAINED onto the call, so
+  // `phaseInstantLabel` in `lib/changesTimeline.ts`, which did
+  //
+  //     const s = d.toISOString(); ... s.slice(11, 16)
+  //
+  // and rendered `08-28 16:40` to an operator with no zone at all, was never counted. It was
+  // found by reading, not by the guard that existed to make reading unnecessary.
+  //
+  // So the rule is absolute and needs no list: OUTSIDE `lib/wallclock.ts` (renderings) and
+  // `lib/datekeys.ts` (keys, wire values and control values), no product file calls
+  // `toISOString` or pulls a field off a `Date` at all. There is nothing left to enumerate, and
+  // an indirection cannot walk past it because the call itself is what is banned.
+  it("has no product file building a date by hand — two modules own every one (NFR-025c)", () => {
+    const IDIOM = /toISOString\s*\(|getUTC(?:Date|Month|FullYear|Hours|Minutes|Seconds|Day)\s*\(|\.get(?:Hours|Minutes|Seconds|Date|Month|FullYear|Day)\s*\(/g;
+    const OWNERS = ["lib/wallclock.ts", "lib/datekeys.ts"];
+    const offenders: string[] = [];
     for (const file of walk(SRC)) {
       const rel = file.split("/src/")[1];
-      if (rel.startsWith("lib/wallclock") || rel.endsWith(".spec.ts")) continue;
-      const n = (readFileSync(file, "utf8").match(IDIOM) ?? []).length;
-      if (n > 0) found[rel] = n;
+      if (OWNERS.includes(rel) || rel.endsWith(".spec.ts")) continue;
+      for (const m of readFileSync(file, "utf8").matchAll(IDIOM)) offenders.push(`${rel}: ${m[0]}`);
     }
-    const expected = Object.fromEntries(Object.entries(KNOWN).map(([f, [n]]) => [f, n]));
-    expect(found).toEqual(expected);
+    expect(offenders).toEqual([]);
+  });
+
+  // The guard above is only worth its comment if the two owners really are reachable — a typo in
+  // OWNERS would exempt nothing and the test would still be green while the product was clean by
+  // accident. This asserts the opposite direction: both owners DO contain the banned idiom, so
+  // the exemption is load-bearing and the paths are real.
+  // The UTC subjects take no `zone` parameter ON PURPOSE — their subject IS UTC — which means
+  // nothing in a behaviour test can distinguish "pinned to UTC" from "the runner happens to sit at
+  // UTC". So the property is asserted at the SOURCE, and the selector is the SIGNATURE rather than
+  // the name: a renderer that takes `zone` is local by contract (`utcCellExtentLabel` renders a UTC
+  // cell in the viewer's zone, which is its entire point), and a renderer that does not take one
+  // may never hand `partsAt` anything but the literal "UTC". Dropping that argument — the obvious
+  // refactor, since `partsAt`'s zone is optional — fails here by name.
+  it("pins UTC in every zone-less renderer, so none of them inherits the runner's zone", () => {
+    const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
+    const bodies = [...src.matchAll(/export function (\w+)\(([\s\S]*?)\):[\s\S]*?\n\}/g)];
+    const offenders: string[] = [];
+    let checked = 0;
+    for (const m of bodies) {
+      if (/\bzone\??\s*:/.test(m[2])) continue; // local by contract
+      const calls = [...m[0].matchAll(/partsAt\(([^)]*)\)/g)];
+      if (calls.length === 0) continue; // delegates, or reads the ISO string directly
+      checked++;
+      for (const c of calls) {
+        if (!/,\s*"UTC"\s*,/.test(c[1])) offenders.push(`${m[1]}: partsAt(${c[1]})`);
+      }
+    }
+    expect(checked, "the scan checked no function — it is looking at the wrong shape").toBeGreaterThan(4);
+    expect(offenders, "a zone-less renderer that does not pin UTC renders in whatever zone the viewer has").toEqual([]);
+  });
+
+  // The three 90-day strips shared one shape and one defect: `label: key`, where `key` is a bare
+  // `YYYY-MM-DD` used both to look a row up and to fill a tooltip. The guard above cannot see it —
+  // `utcDayKey` is a legitimate call — so the three builders are held to the split explicitly, and
+  // `MonitorDetailView.spec.ts` proves the rendering reaches a reader on one of them.
+  it("splits the day strips' lookup key from what their tooltip shows", () => {
+    for (const rel of ["views/DashboardView.vue", "views/MonitorDetailView.vue", "views/PublicStatusView.vue"]) {
+      const text = readFileSync(join(SRC, rel), "utf8");
+      expect(text, `${rel} no longer builds a day strip — this guard has to move`).toContain("utcDayBefore(today, i)");
+      expect(text, `${rel} shows its lookup key instead of a labelled day`).toMatch(/label:\s*utcDayLabel\(/);
+    }
+  });
+
+  it("names two owner modules that exist and that really do build dates", () => {
+    for (const rel of ["lib/wallclock.ts", "lib/datekeys.ts"]) {
+      const text = readFileSync(join(SRC, rel), "utf8");
+      expect(text, `${rel} is not where dates are built`).toMatch(/toISOString\s*\(|getUTC\w+\s*\(|\.get(?:Hours|Minutes|Date|Month|FullYear)\s*\(/);
+    }
   });
 
   it("has no product call site passing the test-only zone argument, on ANY export that takes one", () => {
@@ -342,5 +397,72 @@ describe("instantRangeLabel", () => {
   it("is a dash when either end is absent, so a half-known window is never drawn", () => {
     expect(instantRangeLabel(null, "2026-09-03T13:55:00Z")).toBe("—");
     expect(instantRangeLabel("2026-09-03T12:55:00Z", null)).toBe("—");
+  });
+});
+
+// ── The UTC subjects (NFR-025c) ─────────────────────────────────────────────────────────────────
+//
+// These render subjects whose identity IS UTC. The rule the specification states is that such a
+// site SAYS UTC rather than being converted to the viewer's zone — converting it is the boundary
+// lie, and leaving it silent, which is what thirteen files did, is that lie with the evidence
+// removed. So every case below asserts the SUFFIX as much as the digits, and each one is checked
+// from a non-UTC runner zone would give the same answer because the zone is pinned in the call.
+
+describe("the UTC subjects say UTC", () => {
+  it("renders a UTC calendar day as a fact, and says whose day it is", () => {
+    expect(utcDayLabel("2026-09-05T12:04:31Z")).toBe("05.09.2026 UTC");
+  });
+
+  it("keeps the UTC day even for an instant that is already the NEXT day in a viewer's zone", () => {
+    // 23:30Z on the 5th is 04:30 on the 6th at UTC+05. The old code sliced the ISO string and got
+    // the UTC day right by accident while saying nothing; this gets it right and says so.
+    expect(utcDayLabel("2026-09-05T23:30:00Z")).toBe("05.09.2026 UTC");
+  });
+
+  it("names the suffix once for a range of UTC days, not twice", () => {
+    expect(utcDayRangeLabel("2026-08-01T00:00:00Z", "2026-08-05T00:00:00Z")).toBe(
+      "01.08.2026 → 05.08.2026 UTC",
+    );
+  });
+
+  it("renders a UTC clock and a UTC clock range", () => {
+    expect(utcClockLabel("2026-09-05T14:05:12Z")).toBe("14:05 UTC");
+    expect(utcClockRangeLabel("2026-09-05T13:05:00Z", "2026-09-05T14:05:00Z")).toBe("13:05 → 14:05 UTC");
+  });
+
+  it("renders a UTC day-and-clock without the year, for a phase read against the one before it", () => {
+    expect(utcDayClockLabel("2026-08-28T16:40:00Z")).toBe("28.08 16:40 UTC");
+  });
+
+  it("quotes a seal to the second and a snapshot to the millisecond, both canonical", () => {
+    expect(utcSecondsLabel("2026-08-28T14:03:02.417Z")).toBe("2026-08-28 14:03:02Z");
+    expect(utcMillisLabel("2026-08-28T14:03:02.417Z")).toBe("2026-08-28 14:03:02.417Z");
+  });
+
+  it("gives the compact instant three branches against a UTC now, and a zone in all three", () => {
+    const now = new Date("2026-08-28T20:00:00Z");
+    expect(utcCompactInstantLabel("2026-08-28T16:40:00Z", now)).toBe("16:40 UTC");
+    expect(utcCompactInstantLabel("2026-08-27T16:40:00Z", now)).toBe("27.08 16:40 UTC");
+    expect(utcCompactInstantLabel("2025-08-27T16:40:00Z", now)).toBe("27.08.2025 16:40 UTC");
+  });
+
+  it("compares the compact instant's day in UTC, not in the runner's zone", () => {
+    // 23:00Z and 01:00Z the next day are one UTC day apart. A local-day comparison at UTC+05
+    // would call them the same day and drop the date from the label.
+    const now = new Date("2026-08-29T01:00:00Z");
+    expect(utcCompactInstantLabel("2026-08-28T23:00:00Z", now)).toBe("28.08 23:00 UTC");
+  });
+
+  it("returns the absent marker rather than a fabricated date for every UTC subject", () => {
+    for (const v of [null, undefined, "", "not-a-date"]) {
+      expect(utcDayLabel(v)).toBe("—");
+      expect(utcClockLabel(v)).toBe("—");
+      expect(utcDayClockLabel(v)).toBe("—");
+      expect(utcSecondsLabel(v)).toBe("—");
+      expect(utcMillisLabel(v)).toBe("—");
+      expect(utcCompactInstantLabel(v)).toBe("—");
+    }
+    expect(utcDayRangeLabel("2026-08-01T00:00:00Z", null)).toBe("—");
+    expect(utcClockRangeLabel(null, "2026-08-01T00:00:00Z")).toBe("—");
   });
 });

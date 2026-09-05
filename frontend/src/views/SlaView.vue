@@ -7,6 +7,7 @@ import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { instantLabelShort } from "@/lib/wallclock";
+import { isoInstant } from "@/lib/datekeys";
 
 type Monitor = components["schemas"]["Monitor"];
 type WindowSLA = components["schemas"]["WindowSLA"];
@@ -530,8 +531,8 @@ async function addMaintenance(previewID?: string) {
   maintSaving.value = true;
   maintError.value = "";
   const body: components["schemas"]["CreateMaintenance"] = {
-    starts_at: new Date(maintForm.starts_at).toISOString(),
-    ends_at: new Date(maintForm.ends_at).toISOString(),
+    starts_at: isoInstant(new Date(maintForm.starts_at)),
+    ends_at: isoInstant(new Date(maintForm.ends_at)),
     reason: maintForm.reason,
   };
   if (maintForm.monitor_id) body.monitor_id = maintForm.monitor_id;
@@ -579,8 +580,8 @@ async function loadPreview() {
     body: {
       monitor_id: maintForm.monitor_id || undefined,
       mutation: "create",
-      starts_at: new Date(maintForm.starts_at).toISOString(),
-      ends_at: new Date(maintForm.ends_at).toISOString(),
+      starts_at: isoInstant(new Date(maintForm.starts_at)),
+      ends_at: isoInstant(new Date(maintForm.ends_at)),
     },
   });
   if (gen !== loadGen) return;

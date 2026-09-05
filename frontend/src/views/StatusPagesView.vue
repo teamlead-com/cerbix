@@ -6,6 +6,7 @@ import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { componentMeta, reasonText, sourceLabel, summaryHeadline } from "@/lib/statuspage";
+import { utcDayLabel } from "@/lib/wallclock";
 
 type StatusPage = components["schemas"]["StatusPage"];
 type Component = components["schemas"]["Component"];
@@ -91,7 +92,7 @@ async function removeSubscriber(id: string) {
   if (!res.error) subscribers.value = subscribers.value.filter((s) => s.id !== id);
   confirmRemoveSub.value = "";
 }
-const fmtSubDate = (ts?: string) => (ts ? new Date(ts).toISOString().slice(0, 10) : "—");
+const fmtSubDate = (ts?: string) => utcDayLabel(ts);
 
 // Create page.
 const showCreate = ref(false);

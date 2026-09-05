@@ -14,7 +14,6 @@ import {
   CHIP_PLAIN,
   type ChangePhase,
   type IncidentChange,
-  clockLabel,
   describeChangeFailure,
   failureOf,
   kindClip,
@@ -27,6 +26,7 @@ import {
   terminalOf,
   transportFailure,
 } from "@/lib/changesTimeline";
+import { utcClockLabel } from "@/lib/wallclock";
 import { forwardStatuses, impactBadge, relTime, statusBadge, systemNoteKind } from "@/lib/incident";
 import { PM_SECTIONS, emptySections, parsePostmortem, renderSections, serializePostmortem } from "@/lib/postmortem";
 import { sealedLabel } from "@/lib/services";
@@ -385,7 +385,7 @@ watch(() => [id.value, ws.projectId], load);
                 <i class="inline-block h-[10px] w-[10px] flex-none bg-accent" :style="{ clipPath: kindClip(c.change.kind) }" aria-hidden="true"></i>{{ kindLabel(c.change.kind) }}
               </span>
               <span class="font-mono text-[13.5px] font-medium" :class="c.change.ref ? '' : 'text-ink-3'" data-testid="incident-preceded-ref">{{ c.change.ref || c.change.external_id }}</span>
-              <span :class="[CHIP_BASE, CHIP_PLAIN, 'font-mono text-[10.5px]']" :title="c.occurred_at" data-testid="incident-preceded-anchor">{{ phaseLabel(c.change.phase) }} {{ clockLabel(c.occurred_at) }}</span>
+              <span :class="[CHIP_BASE, CHIP_PLAIN, 'font-mono text-[10.5px]']" :title="c.occurred_at" data-testid="incident-preceded-anchor">{{ phaseLabel(c.change.phase) }} {{ utcClockLabel(c.occurred_at) }}</span>
               <span :class="[CHIP_BASE, CHIP_ACC, 'font-mono text-[10.5px]']" :title="`${c.lag_seconds} s before the open`" data-testid="incident-preceded-lag">{{ lagText(c.lag_seconds) }}</span>
               <span class="flex-1"></span>
               <span :class="[CHIP_BASE, CHIP_PLAIN, 'font-mono text-[10.5px]']" data-testid="incident-preceded-source">{{ c.change.source }} · {{ c.change.external_id }}</span>
@@ -400,7 +400,7 @@ watch(() => [id.value, ws.projectId], load);
                 <template v-if="c.role === 'upstream'">
                   on <RouterLink :to="{ name: 'service', params: { id: c.change.service_id } }" class="text-accent hover:underline">{{ upstreamSlug(c) }}</RouterLink>, which the impact graph marks as a probable root of this incident ·
                 </template>
-                anchored at the <span class="font-mono">{{ phaseLabel(c.change.phase) }}</span> phase known at {{ openedAt ? clockLabel(openedAt) : "the open" }}; the group's phases today: <span class="font-mono">{{ phasesToday(c.phases) }}</span>
+                anchored at the <span class="font-mono">{{ phaseLabel(c.change.phase) }}</span> phase known at {{ openedAt ? utcClockLabel(openedAt) : "the open" }}; the group's phases today: <span class="font-mono">{{ phasesToday(c.phases) }}</span>
               </span>
             </div>
           </div>

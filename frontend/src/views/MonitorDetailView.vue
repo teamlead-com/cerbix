@@ -13,7 +13,8 @@ import {
   type EmptySpan, type PanelPoint,
   type ExpectedRunAnswer,
 } from "@/lib/latencypanel";
-import { instantLabel, utcInstantLabel } from "@/lib/wallclock";
+import { instantLabel, utcDayLabel, utcInstantLabel } from "@/lib/wallclock";
+import { isoInstant, utcDayBefore, utcDayKey } from "@/lib/datekeys";
 
 type Monitor = components["schemas"]["Monitor"];
 type WindowSLA = components["schemas"]["WindowSLA"];
@@ -272,7 +273,7 @@ const hoverCell = ref<ExpectationCell | null>(null);
  * find it in `openapi.yaml` and in §14.1, and a paraphrase would cost them that.
  */
 function cellLabel(c: ExpectationCell): string {
-  const due = `window due ${instantLabel(new Date(c.ms).toISOString())}`;
+  const due = `window due ${instantLabel(isoInstant(new Date(c.ms)))}`;
   // UNCONDITIONAL, and before the verdict switch. `ledger_from` outranks every verdict — that is
   // §12.3 — and it has to outrank it in the WORDS as well as in the fill. This test carried an
   // exception for `unknown` at first, so a pre-`ledger_from` window whose stored verdict happened to
@@ -297,7 +298,7 @@ function cellLabel(c: ExpectationCell): string {
     case "unknown":
       return `${due} — unknown: dispatched on a carrier that carries no job identity, so nothing could correlate`;
     case "reserved": {
-      const at = c.reservedAt ? instantLabel(c.reservedAt) : instantLabel(new Date(c.ms).toISOString());
+      const at = c.reservedAt ? instantLabel(c.reservedAt) : instantLabel(isoInstant(new Date(c.ms)));
       const why = c.withheldReason ? ` · ${c.withheldReason}` : "";
       return `${due} — reserved at ${at}: no dispatch recorded${why}`;
     }
@@ -434,7 +435,7 @@ async function pageExpectedRuns(
     const res = await api.GET("/api/v1/projects/{projectID}/monitors/{monitorID}/expected-runs", {
       params: {
         path: { projectID, monitorID },
-        query: { from: from.toISOString(), to: to.toISOString(), limit: expectedRunPageLimit, cursor },
+        query: { from: isoInstant(from), to: isoInstant(to), limit: expectedRunPageLimit, cursor },
       },
     });
     if (!res.data) return null;
@@ -466,7 +467,7 @@ const widestGap = computed(() => widestSpan(rulerSpans.value));
 const hoverPoint = ref<PanelPoint | null>(null);
 const hoverSpan = ref<EmptySpan | null>(null);
 function spanLabel(s: EmptySpan): string {
-  return `no check recorded between ${instantLabel(new Date(s.fromMs).toISOString())} and ${instantLabel(new Date(s.toMs).toISOString())}`;
+  return `no check recorded between ${instantLabel(isoInstant(new Date(s.fromMs)))} and ${instantLabel(isoInstant(new Date(s.toMs)))}`;
 }
 const fmtMs = (v: number) => (v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0).replace(/\.0$/, "") + "s" : Math.round(v) + "ms");
 
@@ -477,11 +478,11 @@ const timeline = computed(() => {
   const out: { pct: number | null; label: string }[] = [];
   const today = new Date();
   for (let i = 89; i >= 0; i--) {
-    const dt = new Date(today);
-    dt.setUTCDate(today.getUTCDate() - i);
-    const key = dt.toISOString().slice(0, 10);
+    const dt = utcDayBefore(today, i);
+    const key = utcDayKey(dt);
     const d = byDay.get(key);
-    out.push({ pct: d && d.total ? (d.uptime_percent ?? 0) : null, label: key });
+    // The key is a lookup; the label is read by a human in a tooltip, so it names its zone.
+    out.push({ pct: d && d.total ? (d.uptime_percent ?? 0) : null, label: utcDayLabel(isoInstant(dt)) });
   }
   return out;
 });
@@ -521,7 +522,7 @@ function relTime(ts?: string) {
 }
 const lastChecked = computed(() => (heartbeats.value[0]?.ts ? relTime(heartbeats.value[0].ts) + " ago" : "—"));
 function fmtDate(ts?: string) {
-  return ts ? new Date(ts).toISOString().slice(0, 10) : "—";
+  return utcDayLabel(ts);
 }
 const projectName = computed(() => ws.projects.find((p) => p.id === monitor.value?.project_id)?.name || "—");
 function heartbeatCode(h: Heartbeat): string {
@@ -952,8 +953,8 @@ watch(
                this panel makes no claim about whether a check was due there. -->
           <p class="mb-2 text-[11.5px] text-ink-3" data-testid="lat-subtitle">
             <template v-if="chart">
-              last {{ stats.drawn }} checks · {{ instantLabel(new Date(chart.t0).toISOString()) }} →
-              {{ instantLabel(new Date(chart.t1).toISOString()) }} · points only, no stroke and no fill —
+              last {{ stats.drawn }} checks · {{ instantLabel(isoInstant(new Date(chart.t0))) }} →
+              {{ instantLabel(isoInstant(new Date(chart.t1))) }} · points only, no stroke and no fill —
               every interval between adjacent points is time cerbix did not observe, and this panel makes
               no claim about whether a check was due there.
             </template>
@@ -1127,7 +1128,7 @@ watch(
              about that window, not what the nearest check measured. -->
         <div v-if="hoverCell" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-cell-readout">
           <p class="text-[12.5px] text-ink-2">{{ cellLabel(hoverCell) }}</p>
-          <p class="mt-[3px] font-mono text-[11.5px] text-ink-3">{{ utcInstantLabel(new Date(hoverCell.ms).toISOString()) }}</p>
+          <p class="mt-[3px] font-mono text-[11.5px] text-ink-3">{{ utcInstantLabel(isoInstant(new Date(hoverCell.ms))) }}</p>
         </div>
         <div v-else-if="hoverPoint" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-point-readout">
           <div class="font-mono text-[12.5px]">
@@ -1144,7 +1145,7 @@ watch(
         <div v-else-if="hoverSpan" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-span-readout">
           <div class="font-mono text-[12.5px]">{{ spanLabel(hoverSpan) }}</div>
           <div class="font-mono text-[11.5px] text-ink-3">
-            {{ utcInstantLabel(new Date(hoverSpan.fromMs).toISOString()) }} → {{ utcInstantLabel(new Date(hoverSpan.toMs).toISOString()) }}
+            {{ utcInstantLabel(isoInstant(new Date(hoverSpan.fromMs))) }} → {{ utcInstantLabel(isoInstant(new Date(hoverSpan.toMs))) }}
           </div>
           <p class="mt-1 text-[11.5px] text-ink-3">
             <template v-if="hoverSpan.merged">
@@ -1158,8 +1159,8 @@ watch(
         </div>
         <p v-else-if="widestGap" class="mx-4 mb-3 text-[11.5px] text-ink-3" data-testid="lat-widest-gap">
           widest interval between two recorded checks: {{ gapLabel(widestGap.toMs - widestGap.fromMs) }},
-          {{ instantLabel(new Date(widestGap.fromMs).toISOString()) }} →
-          {{ instantLabel(new Date(widestGap.toMs).toISOString()) }} — the panel says only that, never
+          {{ instantLabel(isoInstant(new Date(widestGap.fromMs))) }} →
+          {{ instantLabel(isoInstant(new Date(widestGap.toMs))) }} — the panel says only that, never
           that a check was missed.
         </p>
       </section>
@@ -1171,7 +1172,7 @@ watch(
           <span class="ml-auto font-mono text-[12px] text-ink-2">{{ timelineUptime }}</span>
         </div>
         <div class="px-4 pb-4 pt-[14px]">
-          <div class="flex h-[34px] items-stretch gap-[2px]">
+          <div class="flex h-[34px] items-stretch gap-[2px]" data-testid="monitor-timeline">
             <span v-for="(d, i) in timeline" :key="i" class="min-w-0 flex-1 rounded-[2px]" :class="daySegClass(d.pct)" :title="d.pct === null ? d.label + ' · no data' : d.label + ' · ' + d.pct.toFixed(2) + '%'"></span>
           </div>
         </div>

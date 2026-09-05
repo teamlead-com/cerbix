@@ -7,6 +7,7 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import { useWorkspace } from "@/stores/workspace";
 import { sealedLabel } from "@/lib/services";
+import { isoInstant } from "@/lib/datekeys";
 
 type Detail = components["schemas"]["ServiceDetail"];
 type Monitor = components["schemas"]["Monitor"];
@@ -118,7 +119,7 @@ async function save() {
   };
   if (Object.keys(policies.value).length) body.policies = policies.value;
   if (isFirstRevision.value && backfillFrom.value) {
-    body.backfill_from = new Date(backfillFrom.value).toISOString();
+    body.backfill_from = isoInstant(new Date(backfillFrom.value));
   }
   const res = await api.PUT("/api/v1/projects/{projectID}/services/{serviceID}/declaration", {
     params: { path: { projectID: ws.projectId, serviceID: serviceId.value } },

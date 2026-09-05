@@ -23,6 +23,7 @@ import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { instantLabelShort } from "@/lib/wallclock";
+import { isoInstant, localDatetimeInputValue } from "@/lib/datekeys";
 
 type Channel = components["schemas"]["NotificationChannel"];
 type ChannelType = NonNullable<Channel["type"]>;
@@ -211,9 +212,7 @@ const alerting = reactive({ loaded: false, saving: false, saved: false, enabled:
 // <input type=datetime-local> speaks local time without a zone; the API speaks RFC 3339.
 function isoToLocalInput(iso?: string | null): string {
   if (!iso) return "";
-  const d = new Date(iso);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  return localDatetimeInputValue(new Date(iso));
 }
 const monDefaults = reactive({
   loaded: false, saving: false, error: "", saved: false,
@@ -258,7 +257,7 @@ async function saveAlerting(enabled: boolean) {
   alerting.saving = true;
   try {
     // Round-trip the full object — sending only {enabled} used to wipe `until`.
-    const until = alerting.until ? new Date(alerting.until).toISOString() : undefined;
+    const until = alerting.until ? isoInstant(new Date(alerting.until)) : undefined;
     const res = await api.PUT("/api/v1/settings/alerting", { body: { global_silence: { enabled, until } } as never });
     if (!res.error) {
       alerting.enabled = res.data?.global_silence?.enabled ?? enabled;

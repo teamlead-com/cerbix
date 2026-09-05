@@ -168,3 +168,138 @@ export function utcExtentLabel(
   if (!a || !b) return ABSENT;
   return `${utcInstantLabel(fromIso)} → ${utcInstantLabel(toIso)}`;
 }
+
+// ── UTC subjects (NFR-025c) ─────────────────────────────────────────────────────────────────────
+//
+// Everything above renders an instant in the VIEWER's zone and names the offset. What follows
+// renders subjects whose identity IS UTC — a ledger day, a gate window's date, the change
+// timeline's clock — and the honest treatment of those is to SAY UTC rather than convert them
+// (`func-truthful-rendering.md` §9, AC-NFR-025c). Converting a UTC day to the viewer's calendar
+// day is the boundary lie this whole requirement exists to remove; leaving it unlabelled, which
+// is what thirteen files did, is the same lie with the evidence removed.
+//
+// ONE SUFFIX, decided once: every human-facing rendering here ends in ` UTC`. `changes.ts` used
+// to end one of them in ` Z` and the rest in nothing, which is how a reader learns to assume.
+// `utcInstantLabel` above keeps its ISO `Z` because it is a canonical machine-correlatable
+// string, not a phrase.
+//
+// The DATE FORMAT is `dmy`, the same one `instantLabel` uses. The legacy sites wrote
+// `2026-09-05` (an ISO slice) and `05.09.2026` (hand-padded) in roughly equal numbers; one
+// mechanism gets one format.
+
+/**
+ * A UTC calendar day shown as a fact — a token's creation, a secret's rotation, a subscriber's
+ * sign-up, a gate objective's last change.
+ *
+ *   utcDayLabel("2026-09-05T12:04:31Z")  ->  "05.09.2026 UTC"
+ */
+export function utcDayLabel(iso: string | null | undefined): string {
+  const d = parse(iso);
+  if (!d) return ABSENT;
+  const p = partsAt(d, "UTC", { day: "2-digit", month: "2-digit", year: "numeric" });
+  return `${dmy(p)} UTC`;
+}
+
+/**
+ * A range of UTC calendar days — a reliability segment's extent. The suffix is named ONCE: both
+ * ends are UTC by construction, and repeating it is noise rather than honesty.
+ *
+ *   utcDayRangeLabel("2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+ *     ->  "01.09.2026 → 02.09.2026 UTC"
+ */
+export function utcDayRangeLabel(
+  fromIso: string | null | undefined,
+  toIso: string | null | undefined,
+): string {
+  const a = parse(fromIso);
+  const b = parse(toIso);
+  if (!a || !b) return ABSENT;
+  const pa = partsAt(a, "UTC", { day: "2-digit", month: "2-digit", year: "numeric" });
+  const pb = partsAt(b, "UTC", { day: "2-digit", month: "2-digit", year: "numeric" });
+  return `${dmy(pa)} → ${dmy(pb)} UTC`;
+}
+
+/**
+ * The UTC clock of an instant, minute precision — a status page's "updated at", a change phase
+ * anchored beside an incident.
+ *
+ *   utcClockLabel("2026-09-05T14:05:12Z")  ->  "14:05 UTC"
+ */
+export function utcClockLabel(iso: string | null | undefined): string {
+  const d = parse(iso);
+  if (!d) return ABSENT;
+  return `${hm(partsAt(d, "UTC", { hour: "2-digit", minute: "2-digit" }))} UTC`;
+}
+
+/**
+ * A window between two UTC clocks on the compare view — one side's range.
+ *
+ *   utcClockRangeLabel("2026-09-05T13:05:00Z", "2026-09-05T14:05:00Z")  ->  "13:05 → 14:05 UTC"
+ */
+export function utcClockRangeLabel(
+  fromIso: string | null | undefined,
+  toIso: string | null | undefined,
+): string {
+  const a = parse(fromIso);
+  const b = parse(toIso);
+  if (!a || !b) return ABSENT;
+  return `${hm(partsAt(a, "UTC", { hour: "2-digit", minute: "2-digit" }))} → ${hm(partsAt(b, "UTC", { hour: "2-digit", minute: "2-digit" }))} UTC`;
+}
+
+/**
+ * A UTC day-and-clock without the year — a change phase written relative to the phase before it,
+ * where the year is never the thing that changed.
+ *
+ *   utcDayClockLabel("2026-08-28T16:40:00Z")  ->  "28.08 16:40 UTC"
+ */
+export function utcDayClockLabel(iso: string | null | undefined): string {
+  const d = parse(iso);
+  if (!d) return ABSENT;
+  const p = partsAt(d, "UTC", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return `${dm(p)} ${hm(p)} UTC`;
+}
+
+/**
+ * The canonical UTC instant to the SECOND, spaced rather than `T`-joined, as a seal is quoted.
+ *
+ *   utcSecondsLabel("2026-08-28T14:03:02.417Z")  ->  "2026-08-28 14:03:02Z"
+ */
+export function utcSecondsLabel(iso: string | null | undefined): string {
+  const d = parse(iso);
+  if (!d) return ABSENT;
+  return d.toISOString().replace(/\.\d+Z$/, "Z").replace("T", " ");
+}
+
+/** The same with MILLISECONDS kept, for a snapshot instant: "2026-08-28 14:03:02.417Z". */
+export function utcMillisLabel(iso: string | null | undefined): string {
+  const d = parse(iso);
+  if (!d) return ABSENT;
+  return d.toISOString().replace("T", " ");
+}
+
+/**
+ * The change timeline's COMPACT instant: as much date as the reader needs relative to `now`, and
+ * never less zone than the rest of the app.
+ *
+ *   same UTC day as now:  "16:40 UTC"
+ *   same UTC year:        "27.08 16:40 UTC"
+ *   otherwise:            "27.08.2025 16:40 UTC"
+ *
+ * `now` is a parameter rather than a captured clock so the three branches are testable, and it is
+ * compared in UTC because the subject is.
+ */
+export function utcCompactInstantLabel(
+  iso: string | null | undefined,
+  now: Date = new Date(),
+): string {
+  const d = parse(iso);
+  if (!d) return ABSENT;
+  const opts: Intl.DateTimeFormatOptions = {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+  };
+  const p = partsAt(d, "UTC", opts);
+  const n = partsAt(now, "UTC", opts);
+  if (dmy(p) === dmy(n)) return utcClockLabel(iso);
+  if (p.year === n.year) return utcDayClockLabel(iso);
+  return `${dmy(p)} ${hm(p)} UTC`;
+}

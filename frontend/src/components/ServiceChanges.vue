@@ -50,7 +50,6 @@ import {
   requestScope,
   groupLatest,
   horizonLabel,
-  instantLabel,
   kindClip,
   kindLabel,
   lagText,
@@ -69,6 +68,7 @@ import {
   type DeltaChip,
   type StripMark,
 } from "@/lib/changes";
+import { utcCompactInstantLabel } from "@/lib/wallclock";
 import { CHIP_ACC, CHIP_BASE, CHIP_DORM, CHIP_PLAIN, PILL_BASE, PILL_DOT, statePill } from "@/lib/gate";
 import { sealedLabel } from "@/lib/services";
 
@@ -438,7 +438,7 @@ const MARK = "inline-flex items-center gap-[6px] text-[12.5px] font-medium text-
                 data-testid="changes-phase"
                 :data-phase="p.phase"
                 :title="`${sealedLabel(p.occurred_at)} · ${p.actor_label}`"
-              >{{ p.phase }} <span class="font-mono font-normal text-ink-3">{{ instantLabel(p.occurred_at, now) }}</span></span>
+              >{{ p.phase }} <span class="font-mono font-normal text-ink-3">{{ utcCompactInstantLabel(p.occurred_at, now) }}</span></span>
             </template>
           </span>
 

@@ -21,6 +21,8 @@
 import type { components } from "@/api/schema";
 import { CHIP_DOWN, CHIP_PLAIN, describeFailure, failureOf, fmtPercent, shortId, transportFailureOf, type GateFailure } from "@/lib/gate";
 import { humanDuration, sealedLabel } from "@/lib/services";
+import { utcCompactInstantLabel } from "@/lib/wallclock";
+import { isoInstant } from "@/lib/datekeys";
 
 type Schemas = components["schemas"];
 export type ChangeKind = Schemas["ChangeKind"];
@@ -187,7 +189,7 @@ export function defaultRange(days: number = DEFAULT_RANGE_DAYS, now: Date = new 
   const span = Math.min(Math.max(days, 0), CHANGE_RANGE_MAX_DAYS);
   const to = new Date(now.getTime());
   const from = new Date(to.getTime() - span * 86_400_000);
-  return { from: from.toISOString(), to: to.toISOString() };
+  return { from: isoInstant(from), to: isoInstant(to) };
 }
 
 /** "last 30 days" · "last 7 days" · "last 24 hours" — the count chip's words. */
@@ -198,40 +200,14 @@ export function rangeLabel(days: number): string {
 
 // ── Instants ────────────────────────────────────────────────────────────────────────────────────
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const pad = (n: number) => String(n).padStart(2, "0");
 
-/** "14:05" — the UTC clock of an instant; an unparseable value verbatim. */
-export function clockLabel(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-}
-
-/** "14:05:12 Z" — the clock with seconds, as the compare header quotes a phase. */
-export function clockSecondsLabel(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} Z`;
-}
-
-/**
- * The mock's compact instant: "14:05" on the same UTC day as `now`, "Aug 27 16:40" in the same
- * year, "2025-08-27 16:40" otherwise. The full `sealedLabel` always rides in a title beside it.
- */
-export function instantLabel(iso: string, now: Date = new Date()): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const clock = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-  if (d.toISOString().slice(0, 10) === now.toISOString().slice(0, 10)) return clock;
-  if (d.getUTCFullYear() === now.getUTCFullYear()) return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${clock}`;
-  return `${d.toISOString().slice(0, 10)} ${clock}`;
-}
-
-/** "13:05 → 14:05" — a side's window; the full range belongs in a title (`sealedLabel`). */
-export function windowLabel(from: string, to: string): string {
-  return `${clockLabel(from)} → ${clockLabel(to)}`;
-}
+// The change surfaces' clock and compact instant USED to live here, unlabelled, beside a
+// `clockSecondsLabel` that ended in ` Z` and that nothing in the repository ever called. They are
+// now `utcClockLabel`, `utcClockRangeLabel` and `utcCompactInstantLabel` in `lib/wallclock.ts`
+// (NFR-025c): one mechanism, one suffix, and no second `instantLabel` in the app — this file's
+// took `(iso, now)` while the mechanism's takes `(iso, zone)`, which is a collision a reader
+// resolves by luck.
 
 /** "−26 m" · "−0 s" · "−1 h 05 m": the lag a change PRECEDED an incident by (D7's word, never "caused"). */
 export function lagText(lagSeconds: number): string {
@@ -427,7 +403,7 @@ export interface StripMark {
 
 /** "deploy · v4.2.1 · 14:05" — the mark's title; the ref falls back to the external id. */
 export function markLabel(group: Pick<ChangeGroup, "kind" | "ref" | "external_id">, terminal: ChangePhase, now: Date = new Date()): string {
-  return `${kindLabel(group.kind)} · ${group.ref || group.external_id} · ${terminal.phase} ${instantLabel(terminal.occurred_at, now)} (${sealedLabel(terminal.occurred_at)})`;
+  return `${kindLabel(group.kind)} · ${group.ref || group.external_id} · ${terminal.phase} ${utcCompactInstantLabel(terminal.occurred_at, now)} (${sealedLabel(terminal.occurred_at)})`;
 }
 
 /** One mark per TERMINAL phase: a started-only group contributes none (D14). */

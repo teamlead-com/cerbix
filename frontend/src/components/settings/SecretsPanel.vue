@@ -5,6 +5,7 @@ import type { components } from "@/api/schema";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { describeSecretError } from "@/lib/secretErrors";
+import { utcDayLabel } from "@/lib/wallclock";
 
 type ProjectSecret = components["schemas"]["ProjectSecret"];
 
@@ -81,7 +82,7 @@ function resetSensitiveState() {
 }
 
 const monitors = (n: number) => `${n} monitor${n === 1 ? "" : "s"}`;
-const fmtDate = (ts?: string | null) => (ts ? new Date(ts).toISOString().slice(0, 10) : "—");
+const fmtDate = (ts?: string | null) => utcDayLabel(ts);
 const usedTotal = (s: ProjectSecret) => s.used_by?.total ?? 0;
 // Rename is locked while a Monitoring-as-Code file references the name — cerbix never rewrites bundles.
 const renameLocked = (s: ProjectSecret) => (s.used_by?.file_managed ?? 0) > 0;

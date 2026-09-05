@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from "vue";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
+import { utcDayLabel } from "@/lib/wallclock";
 
 type AgentToken = components["schemas"]["AgentToken"];
 
@@ -75,7 +76,7 @@ async function copy() {
     /* clipboard blocked; the value is shown for manual copy */
   }
 }
-const fmtDate = (ts?: string) => (ts ? new Date(ts).toISOString().slice(0, 10) : "—");
+const fmtDate = (ts?: string) => utcDayLabel(ts);
 
 onMounted(load);
 </script>

@@ -9,6 +9,8 @@ import { useLive } from "@/stores/live";
 import { useSession } from "@/stores/session";
 import { useUi } from "@/stores/ui";
 import { useWorkspace } from "@/stores/workspace";
+import { isoInstant, utcDayBefore, utcDayKey } from "@/lib/datekeys";
+import { utcDayLabel } from "@/lib/wallclock";
 
 type Monitor = components["schemas"]["Monitor"];
 type WindowSLA = components["schemas"]["WindowSLA"];
@@ -204,11 +206,11 @@ function buildTimeline(days: DailyAvailability[]): { pct: number | null; label: 
   const out: { pct: number | null; label: string }[] = [];
   const today = new Date();
   for (let i = 89; i >= 0; i--) {
-    const dt = new Date(today);
-    dt.setUTCDate(today.getUTCDate() - i);
-    const key = dt.toISOString().slice(0, 10);
+    const dt = utcDayBefore(today, i);
+    const key = utcDayKey(dt);
     const d = byDay.get(key);
-    out.push({ pct: d && d.total ? (d.uptime_percent ?? 0) : null, label: key });
+    // The key is a lookup; the label is read by a human in a tooltip, so it names its zone.
+    out.push({ pct: d && d.total ? (d.uptime_percent ?? 0) : null, label: utcDayLabel(isoInstant(dt)) });
   }
   return out;
 }

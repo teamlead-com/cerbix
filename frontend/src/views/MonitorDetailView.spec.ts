@@ -87,6 +87,21 @@ function mountWith(delegation?: Delegation, monitorOverrides: Record<string, unk
 
 const CHECKOUT = { id: "svc1", slug: "checkout", name: "Checkout" };
 
+// NFR-025c. The 90-day availability strip's tooltip is the one place where a lookup KEY and a
+// RENDERING were the same string: `label: key`, with `key` a bare `YYYY-MM-DD`. The absolute
+// source guard in `wallclock.spec.ts` cannot see that regression — `utcDayKey(dt)` is a
+// legitimate call — so the rendering is pinned where a reader meets it.
+describe("the 90-day availability strip", () => {
+  it("names the zone of every day it shows, because a UTC day is not the viewer's", async () => {
+    const w = mountWith();
+    await flushPromises();
+    const cells = w.findAll('[data-testid="monitor-timeline"] span[title]');
+    expect(cells.length, "the strip did not render").toBeGreaterThan(0);
+    for (const c of cells) expect(c.attributes("title")).toMatch(/^\d{2}\.\d{2}\.\d{4} UTC · /);
+  });
+});
+
+
 describe("MonitorDetailView delegation", () => {
   it("keeps the real status and names who pages instead", async () => {
     const w = mountWith({

@@ -28,6 +28,8 @@ import {
   type Cell,
 } from "@/lib/reliabilitygeometry";
 import { canonicalObjective } from "@/lib/objective";
+import { utcDayRangeLabel } from "@/lib/wallclock";
+import { isoInstant } from "@/lib/datekeys";
 
 type Report = components["schemas"]["ServiceWindowReport"];
 type Health = components["schemas"]["ServiceHealthNow"];
@@ -152,7 +154,7 @@ async function load() {
     const sealedReq = seriesGET(rep.data.from, rep.data.to);
     const tailReq: Promise<Res<{ points?: SeriesPoint[] }>> =
       tailEndMs > sealedMs
-        ? seriesGET(rep.data.sealed_through, new Date(tailEndMs).toISOString())
+        ? seriesGET(rep.data.sealed_through, isoInstant(new Date(tailEndMs)))
         : Promise.resolve({ data: { points: [] as SeriesPoint[] }, error: undefined });
     const [sealedRes, tailRes] = await Promise.all([sealedReq, tailReq]);
     if (gen !== loadGen) return;
@@ -250,11 +252,6 @@ function fracPct(v?: number | null): string {
 }
 function burnLabel(b: NonNullable<Report["burn"]>[number]): string {
   return b.rate == null ? "—" : `${b.rate.toFixed(1).replace(/\.0$/, "")}×`;
-}
-function dayLabel(iso?: string): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return `${d.getUTCDate().toString().padStart(2, "0")}.${(d.getUTCMonth() + 1).toString().padStart(2, "0")}.${d.getUTCFullYear()}`;
 }
 
 // ── The timeline, on CLOCK TIME (func-truthful-rendering §5, FR-031, D-0235) ──────────
@@ -643,7 +640,7 @@ const pillClass: Record<string, string> = {
               <div class="flex flex-wrap items-center gap-2">
                 <span class="rounded-xs border border-accent/50 px-[7px] py-px font-mono text-[11px] text-accent">rev {{ seg.revision }}</span>
                 <span class="rounded-xs border border-border px-[7px] py-px font-mono text-[11px] text-ink-3">epoch {{ seg.epoch_seq }}</span>
-                <span class="font-mono text-[11.5px] text-ink-3" data-testid="svc-segment-range">{{ dayLabel(seg.from) }} – {{ dayLabel(seg.to) }}</span>
+                <span class="font-mono text-[11.5px] text-ink-3" data-testid="svc-segment-range">{{ utcDayRangeLabel(seg.from, seg.to) }}</span>
                 <span
                   v-if="seg.declared_reconstruction"
                   class="rounded-xs border border-degraded/50 px-[7px] py-px font-mono text-[11px] text-degraded"

@@ -156,7 +156,7 @@ describe("ServiceReliability honesty states", () => {
     expect(segments).toHaveLength(2);
     expect(segments[0].text()).toContain("rev 1");
     expect(segments[0].text()).toContain("availability 99.9%");
-    expect(segments[0].find('[data-testid="svc-segment-range"]').text()).toBe("01.08.2026 – 05.08.2026");
+    expect(segments[0].find('[data-testid="svc-segment-range"]').text()).toBe("01.08.2026 → 05.08.2026 UTC");
     expect(wrapper.find('[data-testid="svc-reconstruction"]').exists()).toBe(true);
     // Unique-epoch strips issued NO per-segment requests: the only series calls are the
     // sealed window and the provisional tail.

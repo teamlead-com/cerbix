@@ -39,6 +39,31 @@ type CheckJob struct {
 	CredentialEnvelope *CredentialEnvelope `json:"credential_envelope,omitempty"`
 }
 
+// WithCarrier stamps a job's carrier generation and strips what that generation does not carry.
+//
+// ONE place decides what a generation means on the wire, and it is the same place
+// `RequireLedgerFields` reads. Without it the two halves of the contract live apart: the consumer
+// insists a generation-4 delivery carry `DueAt`, while a producer is free to put `DueAt` on a
+// generation-1 job — and that is not a symmetric mistake. A v4 job missing the field is caught
+// immediately by the gate; a v1 job CARRYING it is silently correlated by the core, and the
+// window's row then records generation 4 for a run that rode generation 1. Invariant 10c says such
+// a window must read `unknown`; instead it read `covered`, and a stroke would have been drawn
+// across it.
+//
+// Found on a live stack, not in a test: a `role=all` dev instance with `ledger.carrier_enabled`
+// OFF had a window stored with `carrier_generation = 4`, because the materializer stamped `DueAt`
+// from the schedule before the carrier was chosen.
+func WithCarrier(job CheckJob, generation int) CheckJob {
+	job.ProtocolVersion = generation
+	if generation < ProtocolV4 {
+		// `JobID` and `IssuedAt` are deliberately NOT stripped: they predate the ledger, every
+		// generation has carried them since FR-020, and the result path uses them for the
+		// `observed_at >= job_issued_at` comparison. `DueAt` is what generation 4 adds.
+		job.DueAt = time.Time{}
+	}
+	return job
+}
+
 // RequireLedgerFields reports whether a delivery on the given carrier must carry job identity.
 //
 // It takes the CARRIER and not the payload, and that distinction is invariant 10i's whole point:

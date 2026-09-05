@@ -48,12 +48,16 @@ function heartbeats(opts?: { withTimeout?: boolean }) {
   return out.reverse(); // the API returns newest first
 }
 
-async function mountPanel(opts?: { withTimeout?: boolean }) {
+/** The ledger answer the panel gets, or `undefined` for a server that has none (FR-032 §13a). */
+type LedgerFixture = { windows: { due_at: string; verdict: string }[]; ledger_from: string | null };
+
+async function mountPanel(opts?: { withTimeout?: boolean; ledger?: LedgerFixture }) {
   for (const fn of Object.values(apiMock)) fn.mockReset();
   apiMock.GET.mockImplementation((path: string) => {
     if (path.endsWith("/monitors/{monitorID}")) return Promise.resolve({ data: MONITOR });
     if (path.endsWith("/heartbeats")) return Promise.resolve({ data: heartbeats(opts) });
     if (path.endsWith("/sla")) return Promise.resolve({ data: { windows: [] } });
+    if (path.endsWith("/expected-runs")) return Promise.resolve({ data: opts?.ledger });
     return Promise.resolve({ data: [] });
   });
   const w = mount(MonitorDetailView, { global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } } });
@@ -153,5 +157,116 @@ describe("the Response time panel", () => {
     // one object, one hover: the matching Recent-checks row is marked
     const highlighted = w.findAll('[data-testid="recent-check-row"][data-highlighted="true"]');
     expect(highlighted).toHaveLength(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// FR-032 phase E — the stroke, at the REAL panel (§14, D-0240).
+//
+// `lib/latencypanel.spec.ts` pins the rule; these reach the rendered surface, because a test that
+// names a mechanism it never reaches is evidence of nothing. The fixture's heartbeats are one a
+// minute with a REAL six-minute hole (minutes 22–27 are absent), so a window fixture built from
+// them can put the ledger's verdicts exactly where the panel's own geometry is interesting.
+
+/** The instants the fixture's checks were recorded at, oldest first. */
+function fixtureInstants(): number[] {
+  return heartbeats()
+    .map((hb) => Date.parse(hb.ts as string))
+    .sort((a, b) => a - b);
+}
+
+/** One window per interval between adjacent recorded checks, all with the same verdict. */
+function windowsForFixture(verdict: string): { due_at: string; verdict: string }[] {
+  return fixtureInstants()
+    .slice(1)
+    .map((ms) => ({ due_at: new Date(ms).toISOString(), verdict }));
+}
+
+describe("the Response time panel · FR-032 stroke", () => {
+  it("keeps FR-031's picture exactly when the server answers with no ledger", async () => {
+    // An older server, a failed fetch, a push monitor, a disabled one. The panel must not draw a
+    // line because nothing said not to — that is the inference FR-031 removed.
+    const w = await mountPanel();
+    expect(w.findAll('[data-testid="lat-stroke"]')).toHaveLength(0);
+    expect(w.find('[data-testid="lat-expect-ruler"]').exists()).toBe(false);
+    // And the observation ruler is untouched: it answers a different question.
+    expect(w.find('[data-testid="lat-ruler"]').exists()).toBe(true);
+  });
+
+  it("draws ONE stroke when every window across the series is covered", async () => {
+    const w = await mountPanel({
+      ledger: { windows: windowsForFixture("covered"), ledger_from: new Date(0).toISOString() },
+    });
+    const strokes = w.findAll('[data-testid="lat-stroke"]');
+    expect(strokes).toHaveLength(1);
+    // Every drawn check is on it, including the failure that recorded no latency: that check
+    // HAPPENED and answered its window, so skipping it would draw a line across a real run.
+    expect(strokes[0].attributes("points")?.split(" ")).toHaveLength(60);
+    // The expectation ruler appears with it, and its cells carry verdicts rather than colours
+    // borrowed from the status vocabulary.
+    const cells = w.findAll('[data-testid="lat-expect-cell"]');
+    expect(cells.length).toBeGreaterThan(0);
+    expect(cells.every((c) => c.attributes("data-kind") === "covered")).toBe(true);
+  });
+
+  it("splits the stroke AROUND a covered_late window rather than refusing the whole series", async () => {
+    const windows = windowsForFixture("covered");
+    windows[30].verdict = "covered_late";
+    const w = await mountPanel({ ledger: { windows, ledger_from: new Date(0).toISOString() } });
+    // Two segments: a monitor with one late answer still has defensible strokes either side of
+    // it, and refusing them all would understate what the ledger proves.
+    expect(w.findAll('[data-testid="lat-stroke"]')).toHaveLength(2);
+    const late = w.findAll('[data-testid="lat-expect-cell"]').filter((c) => c.attributes("data-kind") === "late");
+    expect(late).toHaveLength(1);
+    expect(late[0].attributes("data-verdict")).toBe("covered_late");
+  });
+
+  it("draws a window nothing ran in as an OUTLINE, never a fill", async () => {
+    const windows = windowsForFixture("covered");
+    for (let i = 20; i <= 24; i++) windows[i].verdict = "expected_never_issued";
+    const w = await mountPanel({ ledger: { windows, ledger_from: new Date(0).toISOString() } });
+    const empty = w.findAll('[data-testid="lat-expect-cell"]').filter((c) => c.attributes("data-kind") === "empty");
+    expect(empty).toHaveLength(5);
+    // A fill would read as a recorded failure. An empty window is a fact about emptiness.
+    expect(empty[0].attributes("fill")).toBe("none");
+    expect(empty[0].attributes("stroke")).toBe("var(--down)");
+    // And the stroke is broken by them.
+    expect(w.findAll('[data-testid="lat-stroke"]').length).toBeGreaterThan(1);
+  });
+
+  it("hatches the span before ledger_from and marks where the ledger starts", async () => {
+    const instants = fixtureInstants();
+    const w = await mountPanel({
+      ledger: {
+        windows: windowsForFixture("covered"),
+        // The ledger starts a third of the way into the drawn series.
+        ledger_from: new Date(instants[20]).toISOString(),
+      },
+    });
+    const cells = w.findAll('[data-testid="lat-expect-cell"]');
+    const notStored = cells.filter((c) => c.attributes("data-kind") === "notStored");
+    expect(notStored.length).toBeGreaterThan(0);
+    // Not covered, and not missed either: the ledger holds nothing there (§12.3).
+    expect(notStored[0].attributes("fill")).toBe("url(#er-hatch)");
+    expect(w.find('[data-testid="lat-ledger-from"]').exists()).toBe(true);
+    // The points before it are still DRAWN — they were really recorded — while no stroke reaches
+    // back past the marker.
+    expect(w.findAll('[data-testid="lat-point"]').length).toBeGreaterThan(0);
+    const strokes = w.findAll('[data-testid="lat-stroke"]');
+    expect(strokes).toHaveLength(1);
+    expect(strokes[0].attributes("points")?.split(" ").length).toBeLessThan(60);
+  });
+
+  it("asks the ledger for the span it actually drew, not a fixed range", async () => {
+    await mountPanel({ ledger: { windows: [], ledger_from: null } });
+    const call = apiMock.GET.mock.calls.find((c: unknown[]) => String(c[0]).endsWith("/expected-runs"));
+    expect(call).toBeTruthy();
+    const q = (call![1] as { params: { query: { from: string; to: string; limit: number } } }).params.query;
+    const instants = fixtureInstants();
+    // A fixed range would fetch windows for time the panel is not showing and could miss the ones
+    // it is.
+    expect(Date.parse(q.from)).toBe(instants[0]);
+    expect(Date.parse(q.to)).toBeGreaterThan(instants[instants.length - 1]);
+    expect(q.limit).toBe(200);
   });
 });

@@ -1667,16 +1667,15 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					resolveLedgerCarrier()
 					regionGeneration = carrierGeneration[m.Region]
 				}
-				job := dispatch.CheckJob{
-					Monitor:         m,
-					ProtocolVersion: dispatch.CarrierFor(regionGeneration, false, expectOK, m.Type),
-				}
-				if job.ProtocolVersion >= dispatch.ProtocolV4 {
-					// The identity is stamped ONLY onto a carrier that is defined by carrying it,
-					// so "generation 4 carries JobID, IssuedAt and DueAt" is exactly true rather
-					// than nearly true, and a v4 consumer may insist on all three.
+				job := dispatch.CheckJob{Monitor: m}
+				if expectOK {
+					// The identity is stamped, and `WithCarrier` below strips `DueAt` again if the
+					// region did not earn generation 4 — so "generation 4 carries JobID, IssuedAt
+					// and DueAt" is exactly true rather than nearly true, and a v4 consumer may
+					// insist on all three.
 					job.JobID, job.IssuedAt, job.DueAt = expect.JobID, expect.IssuedAt, expect.DueAt
 				}
+				job = dispatch.WithCarrier(job, dispatch.CarrierFor(regionGeneration, false, expectOK, m.Type))
 				// FR-029 D9/D9a. BOTH dispatch paths take the lease: a canary with no binding never
 				// reaches the credential branch below, and the first version of this change put the
 				// claim only there — so a canary without secrets kept every guarantee off.

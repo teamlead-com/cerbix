@@ -320,7 +320,12 @@ tested against every clause. What has NOT changed is this section's reasoning: t
 refused for want of care, and it is not restored by an allowance. It is restored, where it is
 restored at all, by evidence the panel did not have.
 
-Until the stroke's RENDER is mocked and approved, the panel keeps everything below.
+**The render landed on 2026-09-05** (mock `docs/design/mock-expected-run-stroke.html`, `D-0241`).
+Where the ledger can defend a span the panel now strokes it; everywhere else it keeps exactly what
+this section describes, and the observation ruler is untouched because it answers a question the
+ledger does not: what cerbix SAW, as against what it EXPECTED. On an instance whose ledger carrier
+is off — which is every instance until an operator turns it on — every window reads `unknown` and
+the panel below is what you get, unchanged.
 
 **So the panel draws points, no connecting stroke and no area fill** — the fill implies the same
 continuity as the line and goes with it — and absence is rendered **positively** instead of being

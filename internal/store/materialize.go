@@ -204,7 +204,10 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 		// envelope at all, exactly as before (FR-028 stage 2 adds the second half of this
 		// condition and nothing else to the ordinary path).
 		if !domain.CredentialedType(m.Type) && len(scenarioRefKeys) == 0 && len(canaryRefKeys) == 0 {
-			entry.Job = job
+			// A monitor with no envelope rides generation 1 or, with a window and a ledger-ready
+			// region, generation 4. `WithCarrier` strips `DueAt` when it is neither, so a job can
+			// never carry the field that DEFINES a generation it is not riding.
+			entry.Job = dispatch.WithCarrier(job, dispatch.CarrierFor(regionGeneration, false, hasWindow, m.Type))
 			byID[m.ID] = entry
 			continue
 		}
@@ -331,7 +334,7 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 				byID[m.ID] = entry
 				continue
 			}
-			job.ProtocolVersion = carrierGeneration
+			job = dispatch.WithCarrier(job, carrierGeneration)
 			job.CredentialEnvelope = envelope
 			body, err := json.Marshal(job)
 			if err != nil || len(body) > maxMaterializedJobBytes {
@@ -456,7 +459,7 @@ func (s *Store) MaterializeTestExecutionConfig(ctx context.Context, m domain.Mon
 	if err != nil {
 		return MaterializedExecution{MonitorID: monitorID, Reason: MaterializeDecryptFailed}, nil
 	}
-	job.ProtocolVersion = carrierGeneration
+	job = dispatch.WithCarrier(job, carrierGeneration)
 	job.CredentialEnvelope = envelope
 	return MaterializedExecution{MonitorID: monitorID, Job: job}, nil
 }

@@ -65,11 +65,25 @@ func TestOnlyStampResultCopiesTheWindowOntoAResult(t *testing.T) {
 		}
 	}
 	sort.Strings(copiers)
-	want := []string{"./dispatch.go:StampResult"}
+	// TWO functions touch the field, and they do opposite things — which is why this is an
+	// enumerated SET and not a count.
+	//
+	// `StampResult` COPIES the window onto a result, and is the single owner invariant 25f is
+	// about: three executors publish results, and a stamp each applied separately would drift the
+	// first time one was edited.
+	//
+	// `WithCarrier` STRIPS it from a job whose carrier does not define it. That is the producer
+	// half of the same contract, and it belongs beside `RequireLedgerFields` rather than anywhere
+	// a caller might forget it. It was added after a live stack stored a window with
+	// `carrier_generation = 4` while the flag was off, because the materializer stamped `DueAt`
+	// before the carrier was chosen — and this guard caught the fix, which is what a guard over a
+	// SET is for: a new assignment is a decision, and it has to be named here.
+	want := []string{"./dispatch.go:StampResult", "./dispatch.go:WithCarrier"}
 	if strings.Join(copiers, ",") != strings.Join(want, ",") {
 		t.Fatalf("DueAt is assigned in %v, want exactly %v.\n"+
-			"One owner, because three executors publish results and a stamp each applied "+
-			"separately would drift the first time one was edited (invariant 25f).", copiers, want)
+			"StampResult is the one COPIER onto a result (invariant 25f); WithCarrier is the one "+
+			"place a carrier decides what it does not carry. Anything else is a third opinion "+
+			"about a field two functions already own.", copiers, want)
 	}
 }
 
@@ -235,4 +249,48 @@ func parseGoPackage(t *testing.T, dir string) map[string]*ast.File {
 		t.Fatalf("no sources parsed from %s; the guard would report green over nothing", dir)
 	}
 	return out
+}
+
+// A job may never carry a field its CARRIER does not define, and this is the producer half of the
+// same contract `RequireLedgerFields` enforces on the consumer.
+//
+// The asymmetry is why it matters. A generation-4 delivery MISSING `DueAt` is caught immediately —
+// the gate dead-letters it. A generation-1 job CARRYING `DueAt` is silently correlated by the core,
+// and the window's row then records generation 4 for a run that rode generation 1: invariant 10c
+// says such a window reads `unknown`, and instead it reads `covered` and licenses a stroke.
+//
+// Found on a LIVE STACK and not in a test: a `role=all` dev instance with
+// `ledger.carrier_enabled` OFF had a window stored with `carrier_generation = 4`, because the
+// materializer stamped `DueAt` from the schedule before the carrier was chosen.
+//
+// The mutation that must kill this: let `WithCarrier` set only `ProtocolVersion`.
+func TestAJobNeverCarriesAFieldItsCarrierDoesNotDefine(t *testing.T) {
+	at := time.Now().UTC()
+	full := CheckJob{
+		Monitor:  domain.Monitor{ID: "m", ExecutionRevision: 3},
+		JobID:    "11111111-1111-4111-8111-111111111111",
+		IssuedAt: at,
+		DueAt:    at.Add(-time.Minute),
+	}
+	for _, generation := range []int{ProtocolV1, ProtocolV2, ProtocolV3} {
+		job := WithCarrier(full, generation)
+		if job.ProtocolVersion != generation {
+			t.Fatalf("WithCarrier stamped generation %d, want %d", job.ProtocolVersion, generation)
+		}
+		if !job.DueAt.IsZero() {
+			t.Fatalf("a generation-%d job carries DueAt %s. The core will correlate it, and the "+
+				"window will record generation 4 for a run that rode %d — which invariant 10c says "+
+				"must read `unknown`", generation, job.DueAt, generation)
+		}
+		// The identity that PREDATES the ledger survives: every generation has carried it since
+		// FR-020, and the result path compares `observed_at` against `job_issued_at` with it.
+		if job.JobID != full.JobID || !job.IssuedAt.Equal(full.IssuedAt) {
+			t.Errorf("generation %d lost the identity it has always carried: %+v", generation, job)
+		}
+	}
+	// At generation 4 the whole contract survives, or the carrier would be undeliverable.
+	v4 := WithCarrier(full, ProtocolV4)
+	if v4.LedgerFieldsMissing() != "" {
+		t.Fatalf("a generation-4 job lost %s", v4.LedgerFieldsMissing())
+	}
 }

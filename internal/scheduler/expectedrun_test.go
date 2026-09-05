@@ -558,3 +558,85 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// With the ledger carrier OFF, a monitor with a standing expectation STILL records its window —
+// on the carrier the job actually rode, with the job's real id.
+//
+// This is the defect a live stack found and no unit test had: the plain path stamped `JobID` only
+// when it had already reached generation 4, so with the flag off it recorded an advance carrying
+// neither a job nor a skip reason. `AdvanceExpectations` refused the whole batch — correctly, it
+// cannot represent that — and the leader logged `advance_expectations_failed` once a second while
+// **not a single window was written**. The ledger was inert in the deployment shape that has the
+// flag off, which is every deployment until an operator turns it on.
+//
+// The window is a fact about EXPECTATION, and it does not depend on the carrier: what the carrier
+// decides is whether the run can ever be CORRELATED back to it, which is invariant 10c's `unknown`.
+// Recording nothing would lose the expectation as well as the answer.
+//
+// The mutation that must kill this: stamp `JobID` only at generation 4, as the committed code did.
+func TestAWindowIsRecordedEvenWhenTheLedgerCarrierIsOff(t *testing.T) {
+	due := time.Now().UTC().Add(-30 * time.Second).Truncate(time.Second)
+	monitor := domain.Monitor{
+		ID: "plain-no-carrier", Type: domain.MonitorHTTP, Target: "https://example.com",
+		Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
+		ExecutionRevision: 2,
+	}
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor},
+		expectations: map[string]store.DueExpectation{
+			monitor.ID: ledgerExpectation(monitor.ID, due, monitor.ExecutionRevision)}}
+	disp := dispatch.NewInProc(8)
+	// No WithLedgerCarrier and no WithLocalLedgerRegions: the default deployment.
+	s := New(fs, disp, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	var delivered dispatch.DeliveredJob
+	select {
+	case delivered = <-disp.Jobs():
+	case <-time.After(3 * time.Second):
+		t.Fatal("the scheduler published no job")
+	}
+	if delivered.Job.ProtocolVersion >= dispatch.ProtocolV4 {
+		t.Fatalf("a job rode generation %d with the ledger carrier off", delivered.Job.ProtocolVersion)
+	}
+	// The job carries its identity — every generation has since FR-020 — and NOT the window, which
+	// is what generation 4 adds.
+	if delivered.Job.JobID == "" {
+		t.Error("the job carries no id; the result cannot then be correlated to anything at all")
+	}
+	if !delivered.Job.DueAt.IsZero() {
+		t.Errorf("a generation-%d job carries DueAt %s: the core would correlate it and record "+
+			"generation 4 for a run that rode %d", delivered.Job.ProtocolVersion,
+			delivered.Job.DueAt, delivered.Job.ProtocolVersion)
+	}
+
+	waitUntil(t, 3*time.Second, "the advance to be recorded", func() bool {
+		return len(advancesFrom(fs)) > 0
+	})
+	advance := advancesFrom(fs)[0]
+	// The advance is REPRESENTABLE — this is what the committed code got wrong.
+	if err := advance.Validate(); err != nil {
+		t.Fatalf("the advance the leader built is unrepresentable and the whole batch is refused, "+
+			"so NOT ONE window is written: %v", err)
+	}
+	if advance.JobID != delivered.Job.JobID {
+		t.Errorf("the advance records job %q, the job published %q", advance.JobID, delivered.Job.JobID)
+	}
+	// It records the carrier the job ACTUALLY rode, so the window reads `unknown` rather than
+	// claiming a generation nothing selected.
+	if advance.CarrierGeneration != delivered.Job.ProtocolVersion {
+		t.Errorf("the advance records carrier %d, the job rode %d",
+			advance.CarrierGeneration, delivered.Job.ProtocolVersion)
+	}
+	row := domain.ExpectedRun{
+		MonitorID: monitor.ID, DueAt: due, IntervalSeconds: 60,
+		JobID: advance.JobID, CarrierGeneration: advance.CarrierGeneration,
+	}
+	if got := row.Verdict(); got != domain.VerdictUnknown {
+		t.Fatalf("the window reads %q, want %q: below the ledger carrier no result can correlate "+
+			"to it, and any other reading would claim more than the ledger holds (invariant 10c)",
+			got, domain.VerdictUnknown)
+	}
+}

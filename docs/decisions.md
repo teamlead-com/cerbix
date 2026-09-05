@@ -7334,3 +7334,63 @@ process the owner set.
 **Status.** FR-032's design is fully implemented and **all 68 invariants are DISCHARGED**, with one
 recorded withdrawal. The requirement stays `IN_PROGRESS` for one reason: the FR-031 stroke's render
 awaits its mock. Everything is a LOCAL commit. **Push, tag and release remain unauthorized.**
+
+## D-0241 — the stroke returns, and a running instance finds what no unit suite could (FR-032 phase E's render)
+
+**Date.** 2026-09-05. **Iteration.** iter-0175. **Requirement.** FR-032.
+**Spec.** `docs/specs/func-expected-run-ledger.md` revision 30, §14, §17.11.
+**Mock.** `docs/design/mock-expected-run-stroke.html`, approved by the owner on 2026-09-05.
+
+**Context.** Phase E shipped §14's gate as a tested pure function and deliberately left the drawing
+unbuilt, because `CLAUDE.md` requires an approved mock before frontend code for any SPA surface.
+The mock answered the three questions §17.10 put to it and was approved; this record is what the
+render decided and what starting the stack found.
+
+**Decision 1: where a segment ends, the stroke STOPS.** It is not dashed across the gap and the
+endpoints are not joined by anything fainter. A dashed line through unprovable time says "probably
+continuous", which is precisely the inference FR-031 removed — the same claim in a costume.
+
+**Decision 2: the observation ruler stays, and gains a second band beneath it.** They answer
+different questions and neither replaces the other: one tick per recorded check is what cerbix SAW;
+one cell per due window is what cerbix EXPECTED. A monitor can have a dense band above and a broken
+one below — checks arriving, windows answered late — or the reverse, and collapsing them into one
+band would make those two states look identical.
+
+**Decision 3: a window nothing ran in is OUTLINED, never filled.** A fill would read as a recorded
+failure, and an empty window is a fact about emptiness. No new colour and no new status vocabulary
+enters the panel: the hatch is the one FR-031 introduced for `not stored`, and `covered_late` takes
+the hue this product already spends on "answered, but not well enough".
+
+**Decision 4: the panel asks the ledger for the span it actually DREW.** A fixed range would fetch
+windows for time the panel is not showing and — worse — could miss the ones it is.
+
+**Decision 5: a missing ledger answer keeps FR-031's picture exactly.** An older server, a failed
+fetch, a push monitor, a disabled one: points, no stroke. The alternative is a line drawn because
+nothing said not to, which is the shape of every over-claim this requirement exists to prevent.
+
+**Then the stack was started, and it found two defects every unit suite had passed.** Both are
+recorded in §17.11 with regressions.
+
+**The ledger was INERT in the deployment shape that has the carrier off** — which is every
+deployment until an operator turns it on. The plain path stamped `JobID` only once it had already
+reached generation 4, so the advance carried neither a job nor a skip reason,
+`AdvanceExpectations` refused the whole batch, and NOT ONE window was written. B2's own tests
+missed it because every scheduler fixture that asserted an advance had also turned the carrier ON:
+the phase proved what the feature does when ENABLED and never what it does at rest. A window is a
+fact about EXPECTATION and does not depend on the carrier; what the carrier decides is whether a
+run can ever be CORRELATED back to it.
+
+**A job carried a field its carrier does not define.** The materializer stamped `DueAt` before the
+carrier was chosen, so a generation-1 job carried its window, the core correlated it, and a row
+recorded `carrier_generation = 4` for a run that rode generation 1 — which invariant 10c says must
+read `unknown` and which instead read `covered`, licensing a stroke. The asymmetry is why it
+survived review: a v4 delivery MISSING the field is dead-lettered at once, while a v1 job CARRYING
+it is caught by nothing, because every older consumer ignores it. `dispatch.WithCarrier` is the
+producer half of that contract now, beside `RequireLedgerFields` which reads the same rule from the
+other side. `JobID` and `IssuedAt` are deliberately not stripped: they predate this requirement and
+the result path compares `observed_at` against `job_issued_at` with them.
+
+**Status.** FR-032 is **DONE**. Every phase is implemented, all 68 invariants are discharged with
+one recorded withdrawal, and the gates are green: the store suite under `-race` (ok 713s, isolated
+database), 620 frontend tests, and `make dev-test` at **68 passed** on a live stack. Everything is a
+LOCAL commit. **Push, tag and release remain unauthorized.**

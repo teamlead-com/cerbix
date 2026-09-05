@@ -1,7 +1,7 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
 > **Lifecycle: DESIGN APPROVED AT REVISION 22 — approved range `9f46f40..9e114a4`, D-0237.**
-> **Document revision 29: AMENDMENT UNDER REVIEW.** The approval is the RANGE; the revision number
+> **Document revision 30: AMENDMENT UNDER REVIEW.** The approval is the RANGE; the revision number
 > tracks the DOCUMENT, and later revisions never extend the range. Each amendment gets its own
 > disposition, and this line states the CURRENT one only — it accumulated four superseded clauses
 > before revision 26 rewrote it whole, which is the same defect `6b47bad` fixed in the status cell.
@@ -16,11 +16,13 @@
 > | 27 | **design** — B2's four implementation findings, §17.7 and §17.8 | UNDER REVIEW |
 > | 28 | **design** — C's claim shape, the agent stamp-ceiling defect, §17.9 | UNDER REVIEW |
 > | 29 | **design** — D's retention and read API, E's stroke rule, §17.10 | UNDER REVIEW |
+> | 30 | **design** — E's render, and two defects a live stack found, §17.11 | UNDER REVIEW |
 >
-> **EVERY PHASE IMPLEMENTED. All 68 invariants are DISCHARGED and one is a recorded withdrawal**
-> (§17.2). The one thing deliberately NOT built is phase E's RENDER — the decision procedure for the
-> FR-031 stroke is implemented and tested, and drawing the line waits on the UI mock `CLAUDE.md`
-> requires before frontend code (§17.10). The owner authorized implementation
+> **EVERY PHASE IMPLEMENTED, INCLUDING E'S RENDER. All 68 invariants are DISCHARGED and one is a
+> recorded withdrawal** (§17.2). The mock was approved on 2026-09-05 and the panel now strokes what
+> the ledger can defend. Starting the stack immediately found TWO defects every unit suite had
+> passed — the ledger was inert with the carrier off, and a job carried a field its carrier does not
+> define — both recorded in §17.11 with regressions. The owner authorized implementation
 > by phases and then, on 2026-09-04, directed the remaining phases to be implemented without
 > stopping, with ONE review submission covering all of them. §17.7 records what that costs: B2's
 > entry gate was written alongside its code rather than before it, which is the sequence §17.2's
@@ -1606,7 +1608,7 @@ and this document still does not claim that benefit, because nothing has been an
 | **B2** | Payload and ledger, together and only together: `DueAt`/`JobID` minting on **every** dispatch path (created on the two that mint none, converted on the three that do — §13), `monitor_schedule`, `expected_runs`, §7.1's primitive, **§10's segment close**, and the gate **on**. **IMPLEMENTED.** It also carries the `expected_runs` PARTITIONS and the DEFAULT partition, which §16 had assigned to D — B2's own inserts have nowhere to land without them, and a table left DEFAULT-only cannot acquire daily partitions later because the default already holds rows in their ranges. Invariants 16a and 23a move to B2 with the code, by the same rule that moved §10's segment close out of A: each row belongs to the earliest phase in which it becomes testable | `-race`; a leader restart leaves a past `next_due_at` with its gap rows; and the §16.1 mixed-version matrix |
 | **C** | The claim event, IMPLEMENTED. `Dispatcher` grows NOTHING — the claim is a typed MEMBER of `domain.Heartbeat` riding the results path, exactly as `ProbeError` is, which is what §4a actually requires and what keeps invariant 11's five-method set true through this phase. `worker` and `agent` emit it; §8.1's merge, with its admissibility predicate extracted so the claim and the terminal share ONE expression (invariant 7a) | `-race`; the ingest fake breaks on interface growth, which is intended. A live distributed stack is NOT claimed for this phase and the reason is stated in §17.9 rather than left as a gap |
 | **D** | Retention, `ledger_from`, the read API returning computed verdicts, and the HOT-ratio gauge. IMPLEMENTED. The partitions and the DEFAULT partition moved to B2 (above); `gap_truncated_before` is WRITTEN by §7.1 in B2 and READ here, which is the half D owns | `-race`; the capacity measurement of invariant 22. BOTH storage modes is satisfied by construction rather than by two runs: `expected_runs` is declaratively partitioned in both, so there is no hypertable branch to diverge — stated here rather than left as an unrun gate |
-| **E** | The FR-031 stroke, behind §14's gate. The DECISION PROCEDURE is implemented and tested (`strokeSegments`); the RENDER awaits an approved UI mock, which `CLAUDE.md` requires before frontend code for any SPA surface — §17.10 states what the mock has to decide | unit tests over every clause of §14's gate, with four mutations killed. E2E belongs with the render |
+| **E** | The FR-031 stroke, behind §14's gate. IMPLEMENTED: the rule (`strokeSegments`), the render (segments plus the expectation ruler), and the mock that decided how it looks (`docs/design/mock-expected-run-stroke.html`, approved 2026-09-05) | unit tests over every clause of §14's gate with four mutations killed; the panel's own surface tests with four more; and `e2e/tests/expected-runs.spec.ts` on a LIVE stack, which is where §17.11's two defects were found |
 
 ### 16.1 The mixed-version matrix
 
@@ -2818,6 +2820,65 @@ than the process the owner set. So phase E ships the decision procedure, tested,
 drawing points until a mock says how the stroke looks: what it does where a segment ends, whether
 the observation ruler stays, and what a partially-strokable series reads as at a glance. None of
 that is derivable from the spec, and inventing it would be answering a question nobody asked me.
+
+### 17.11 Phase E's render — and two defects only a LIVE STACK could find
+
+The mock was approved on 2026-09-05 and the render landed with it: the panel calls §13a for the
+span it actually drew, strokes the segments `strokeSegments` returns, and carries a second ruler
+band — one cell per due window, beside the observation ruler rather than instead of it. Three
+questions §17.10 put to the mock are answered there, and the answers are in `docs/design/mock-expected-run-stroke.html`.
+
+**Then the stack was started, and it found two defects that every unit suite had passed.**
+
+**Defect 1 — the ledger was INERT in the deployment shape that has the flag off, which is every
+deployment until an operator turns it on.** The plain dispatch path stamped `JobID` only once it
+had already reached generation 4, so with `ledger.carrier_enabled` false it built an advance
+carrying neither a job nor a skip reason. `AdvanceExpectations` refused the whole batch — correctly,
+it cannot represent that — and the leader logged `advance_expectations_failed` once a second while
+**not one window was written**. B2's own tests missed it because every scheduler fixture that
+asserted an advance also turned the carrier on: the phase proved what it does when the feature is
+ENABLED and never what it does at rest.
+
+The fix separates two things the code had fused. A window is a fact about EXPECTATION and does not
+depend on the carrier; what the carrier decides is whether a run can ever be CORRELATED back to it,
+which is invariant 10c's `unknown`. So the identity is stamped whenever the monitor has a standing
+expectation, and the window records the carrier the job actually rode.
+
+**Defect 2 — a job carried a field its carrier does not define, and the window then recorded a
+generation nothing selected.** `MaterializeExecutionConfigs` stamped `DueAt` from the schedule
+before the carrier was chosen, so a generation-1 job carried the window it answered. The core
+correlated it, and `expected_runs` stored `carrier_generation = 4` for a run that rode generation 1
+— on a stack with the flag OFF. Invariant 10c says such a window reads `unknown`; it read `covered`,
+and a stroke would have been drawn across it.
+
+**The asymmetry is why this one is worth stating.** A generation-4 delivery MISSING `DueAt` is
+caught immediately: the consumer gate dead-letters it (invariant 10i). A generation-1 job CARRYING
+`DueAt` is caught by nothing, because every consumer of an older carrier simply ignores the field.
+The producer half of that contract had no owner, and now it does: `dispatch.WithCarrier` stamps the
+generation and strips what the generation does not carry, beside `RequireLedgerFields` which reads
+the same rule from the other side.
+
+`JobID` and `IssuedAt` are deliberately NOT stripped. They predate this requirement — every
+generation has carried them since FR-020 — and the result path compares `observed_at` against
+`job_issued_at` with them. `DueAt` is what generation 4 ADDS, and it is the only field that follows
+the carrier.
+
+**Both are regressions now**, each with a test that fails against the code as committed:
+`TestAWindowIsRecordedEvenWhenTheLedgerCarrierIsOff` (`internal/scheduler`) and
+`TestAJobNeverCarriesAFieldItsCarrierDoesNotDefine` (`internal/dispatch`), plus
+`e2e/tests/expected-runs.spec.ts`, which asserts on a running instance that no window claims a
+generation the stack never selected.
+
+**What the E2E gate is for, stated because it is easy to mistake for duplication.** The unit suites
+pin the arithmetic and the rules; the live run proves the ledger WRITES — that a leader tick
+materializes a window, that a real result closes it, and that the carrier a row records is the one
+the job rode. Both defects above are invisible to a test that supplies its own expectations, and
+both were obvious within thirty seconds of a running leader.
+
+**One more thing the live run settled.** With the carrier off, every window reads `unknown` and the
+panel draws NO stroke while still showing the expectation ruler. That is the honest picture of an
+instance that records what was expected and cannot yet correlate answers to it — and it is the
+state most installations will be in on the day they upgrade.
 
 ## 18. Open items
 

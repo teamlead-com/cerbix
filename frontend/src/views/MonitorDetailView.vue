@@ -9,8 +9,9 @@ import { useLive } from "@/stores/live";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import {
-  buildPoints, emptySpans, gapLabel, panelStats, widestSpan,
+  buildPoints, emptySpans, gapLabel, panelStats, strokeSegments, widestSpan,
   type EmptySpan, type PanelPoint,
+  type ExpectedRunAnswer,
 } from "@/lib/latencypanel";
 import { instantLabel, utcInstantLabel } from "@/lib/wallclock";
 
@@ -118,7 +119,7 @@ const chart = computed(() => {
   const X = (ms: number) => pl + ((ms - t0) / span) * (W - pl - pr);
   const Y = (v: number) => pt + (1 - v / max) * (H - pt - pb);
   return {
-    W, H, baseY: H - pb, t0, t1,
+    W, H, baseY: H - pb, t0, t1, yOf: Y,
     dots: pts.filter((p) => p.latency != null).map((p) => ({ p, x: X(p.ms), y: Y(p.latency as number) })),
     // a failure with no latency is a baseline mark: visible, and never a fabricated value
     marks: pts.filter((p) => p.latency == null).map((p) => ({ p, x: X(p.ms) })),
@@ -127,6 +128,73 @@ const chart = computed(() => {
     timeoutY: stats.value.timeoutInScale ? Y(timeoutMs.value) : null,
     x: X,
   };
+});
+
+// ── FR-032 phase E: the stroke, and the second ruler band (§14, D-0240) ───────────────
+// The line is back, and it is back for ONE reason: the ledger now records that a run was
+// EXPECTED, so "a check was due and missing" is a stored fact rather than a chart heuristic.
+// The rule itself lives in `strokeSegments` — this view only draws what it returns, and the
+// expectation ruler below is drawn from the SAME windows, so the band cannot disagree with the
+// line it explains.
+//
+// A null answer keeps FR-031's behaviour exactly: points, no stroke. That covers an older
+// server, a failed fetch, a push monitor and a disabled one — none of which may be read as
+// "probably continuous".
+const expectedRuns = ref<ExpectedRunAnswer | null>(null);
+
+const strokeRuns = computed(() => strokeSegments(panelPoints.value, expectedRuns.value));
+
+/** The polylines, one per segment. Nothing is drawn BETWEEN them, which is the whole rule. */
+const strokePaths = computed(() => {
+  const c = chart.value;
+  if (!c) return [];
+  const pts = panelPoints.value;
+  return strokeRuns.value
+    .map((seg) => {
+      const run: string[] = [];
+      for (let i = seg.fromIndex; i <= seg.toIndex; i++) {
+        const p = pts[i];
+        // A failure carrying no latency sits on the baseline: the stroke passes through it at
+        // the baseline rather than skipping it, because the check DID happen and the window it
+        // answered is `covered`. Skipping it would draw a line across a run that exists.
+        run.push(`${c.x(p.ms)},${p.latency == null ? c.baseY : c.yOf(p.latency)}`);
+      }
+      return run.join(" ");
+    })
+    .filter((d) => d.includes(" "));
+});
+
+/** One cell per due window, carrying its verdict. Only windows inside the drawn span are shown. */
+const expectationCells = computed(() => {
+  const c = chart.value;
+  const answer = expectedRuns.value;
+  if (!c || !answer) return [];
+  const ledgerFrom = answer.ledger_from == null ? Number.POSITIVE_INFINITY : Date.parse(answer.ledger_from);
+  const pts = panelPoints.value;
+  const cw = Math.max(1.2, ((c.W - 16) / Math.max(1, pts.length - 1)) * 0.62);
+  const out: { x: number; w: number; kind: string; verdict: string; ms: number }[] = [];
+  for (const w of answer.windows) {
+    const ms = Date.parse(w.due_at);
+    if (Number.isNaN(ms) || ms < c.t0 || ms > c.t1) continue;
+    // Before `ledger_from` the ledger holds nothing, and the cell says exactly that — not
+    // covered, and not missed either (§12.3).
+    const kind = ms < ledgerFrom ? "notStored"
+      : w.verdict === "covered" ? "covered"
+      : w.verdict === "covered_late" ? "late"
+      : "empty";
+    out.push({ x: c.x(ms) - cw / 2, w: cw, kind, verdict: w.verdict, ms });
+  }
+  return out;
+});
+
+/** Where `ledger_from` falls inside the drawn span, if it does. */
+const ledgerFromX = computed(() => {
+  const c = chart.value;
+  const from = expectedRuns.value?.ledger_from;
+  if (!c || from == null) return null;
+  const ms = Date.parse(from);
+  if (Number.isNaN(ms) || ms <= c.t0 || ms > c.t1) return null;
+  return c.x(ms);
 });
 
 const rulerSpans = computed(() => {
@@ -231,12 +299,34 @@ async function load() {
   const pid = monitor.value?.project_id;
   if (pid) {
     await ws.init();
-    const [av, inc, mons] = await Promise.all([
+    // FR-032 §13a. The window the panel actually drew, so the ledger answer and the points
+    // describe the same span: asking for a fixed range would fetch windows for time the panel is
+    // not showing, and — worse — could miss the ones it is.
+    const drawn = panelPoints.value;
+    const [av, inc, mons, runs] = await Promise.all([
       api.GET("/api/v1/monitors/{monitorID}/availability", { params: { path: { monitorID }, query: { days: 90 } } }),
       api.GET("/api/v1/projects/{projectID}/incidents", { params: { path: { projectID: pid } } }),
       api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID: pid } } }),
+      drawn.length >= 2
+        ? api.GET("/api/v1/projects/{projectID}/monitors/{monitorID}/expected-runs", {
+            params: {
+              path: { projectID: pid, monitorID },
+              query: {
+                from: new Date(drawn[0].ms).toISOString(),
+                // Half-open at the top, so the last point's own window is included.
+                to: new Date(drawn[drawn.length - 1].ms + 1000).toISOString(),
+                limit: 200,
+              },
+            },
+          })
+        : Promise.resolve({ data: undefined }),
     ]);
     if (ticket !== loadTicket) return;
+    // A failed or absent answer leaves the panel exactly as FR-031 left it: points, no stroke.
+    // That is the honest default — the alternative is a line drawn because nothing said not to.
+    expectedRuns.value = runs?.data
+      ? { windows: runs.data.windows ?? [], ledger_from: runs.data.ledger_from ?? null }
+      : null;
     availability.value = av.data ?? [];
     projectMonitors.value = mons.data ?? [];
     openIncident.value = (inc.data ?? []).find((i) => i.monitor_id === monitorID && i.status !== "resolved") ?? null;
@@ -655,6 +745,21 @@ watch(
               :data-ts="m.p.hb.ts"
               @pointerenter="hoverPoint = m.p" @pointerleave="hoverPoint = null"
             />
+            <!-- FR-032 §14: the stroke, one polyline per DEFENSIBLE segment and nothing between
+                 them. Drawn before the points so a marker always sits on top of its own line.
+                 Where a segment ends the line simply stops: no dash, no fainter join. A dashed
+                 line through unprovable time is the same claim in a costume. -->
+            <polyline
+              v-for="(d, i) in strokePaths"
+              :key="'stroke' + i"
+              :points="d"
+              fill="none"
+              stroke="var(--accent)"
+              stroke-width="1.8"
+              stroke-linejoin="round"
+              stroke-linecap="round"
+              data-testid="lat-stroke"
+            />
             <circle
               v-for="(d, i) in chart.dots"
               :key="'d' + i"
@@ -700,6 +805,51 @@ watch(
               @focus="hoverSpan = sp" @blur="hoverSpan = null"
             />
           </svg>
+
+          <!-- The expectation ruler (FR-032 §14): one cell per DUE window, carrying its verdict.
+               It does not replace the observation ruler above and could not: that one is what
+               cerbix SAW, this one is what cerbix EXPECTED, and a monitor can have a dense band
+               above and a broken one below. Collapsing them would make those states identical.
+               The cells and the stroke come from the same windows, so the band is a legend for
+               the line rather than a second opinion about it. -->
+          <svg
+            v-if="chart && expectedRuns"
+            :viewBox="`0 0 ${chart.W} 14`"
+            class="block w-full"
+            :style="{ height: '14px' }"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="expectation ruler: one cell per due window"
+            data-testid="lat-expect-ruler"
+          >
+            <defs>
+              <pattern id="er-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                <rect width="6" height="6" fill="var(--inset)" />
+                <rect width="2" height="6" fill="var(--border-strong)" />
+              </pattern>
+            </defs>
+            <line x1="8" y1="7" :x2="chart.W - 8" y2="7" stroke="var(--border)" stroke-width="1" />
+            <!-- A window nothing ran in is OUTLINED, never filled: a fill would read as a
+                 recorded failure, and an empty window is a fact about emptiness. -->
+            <rect
+              v-for="(c, i) in expectationCells"
+              :key="'ec' + i"
+              :x="c.kind === 'empty' ? c.x + 0.6 : c.x"
+              :y="c.kind === 'empty' ? 2.6 : 2"
+              :width="c.kind === 'empty' ? Math.max(0.4, c.w - 1.2) : c.w"
+              :height="c.kind === 'empty' ? 8.8 : 10"
+              rx="1.5"
+              :fill="c.kind === 'notStored' ? 'url(#er-hatch)' : c.kind === 'late' ? 'var(--degraded)' : c.kind === 'covered' ? 'var(--ink-3)' : 'none'"
+              :opacity="c.kind === 'covered' ? 0.5 : 1"
+              :stroke="c.kind === 'empty' ? 'var(--down)' : 'none'"
+              :stroke-width="c.kind === 'empty' ? 1.4 : 0"
+              data-testid="lat-expect-cell"
+              :data-kind="c.kind"
+              :data-verdict="c.verdict"
+            />
+            <!-- Where the ledger starts answering at all. -->
+            <rect v-if="ledgerFromX != null" :x="ledgerFromX - 0.9" y="0" width="1.8" height="14" fill="var(--ink-2)" data-testid="lat-ledger-from" />
+          </svg>
         </div>
 
         <div class="flex flex-wrap gap-x-4 gap-y-1 px-4 pb-3 pt-2 text-[12px] text-ink-3">
@@ -707,6 +857,11 @@ watch(
           <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[9px] w-[3px] rounded-xs bg-down"></i> down with no latency recorded — drawn on the baseline, not dropped</span>
           <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-0 w-[14px] border-t-2 border-dashed border-degraded"></i> p95 · last {{ stats.drawn }} checks</span>
           <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[11px] w-[2px] bg-ink-2"></i> observation ruler — its empty spans ARE unobserved time</span>
+          <template v-if="expectedRuns">
+            <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-0 w-[14px] border-t-2 border-accent"></i> stroke — every window across it is <span class="font-mono">covered</span></span>
+            <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[9px] w-[9px] rounded-xs bg-degraded"></i> <span class="font-mono">covered_late</span> — answered too far from its window</span>
+            <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[9px] w-[9px] rounded-xs border-[1.5px] border-down"></i> a window nothing ran in</span>
+          </template>
         </div>
 
         <!-- Readouts. Times are local with the offset named, over the canonical UTC instant. -->

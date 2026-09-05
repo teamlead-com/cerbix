@@ -1,0 +1,500 @@
+<title>The Stroke Cerbix Can Defend</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css, and from mock-truthful-rendering.html which this
+   mock continues. This change adds NO new colour and NO new status vocabulary. It reuses:
+     · the HATCH mock-truthful-rendering introduced for `not-stored` — because time before
+       `ledger_from` is exactly that, and absence is not a verdict;
+     · --degraded for `covered_late`, the hue this product already spends on "answered, but not
+       well enough";
+     · --down as an OUTLINE (never a fill) for a window nothing ran in — a missing run is a fact
+       about emptiness, and filling it would read as a recorded failure.
+   Spec: docs/specs/func-expected-run-ledger.md (FR-032) §14, §17.10. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+
+.page{max-width:1180px; margin:0 auto; padding:28px 22px 80px; display:flex; flex-direction:column; gap:40px}
+.head h1{font-size:21px; letter-spacing:-.01em}
+.head p{margin-top:8px; color:var(--ink-2); font-size:13.5px; max-width:900px}
+.note{
+  border:1px solid var(--note-border); background:var(--note-bg); color:var(--ink-2);
+  border-radius:6px; padding:11px 13px; font-size:12.5px; line-height:1.55;
+}
+.note b{color:var(--note)}
+.sec{display:flex; flex-direction:column; gap:14px}
+.sec>h2{font-size:15px; letter-spacing:-.005em}
+.sec>h2 small{font-weight:400; color:var(--ink-3); font-size:12px; margin-left:8px}
+.card{border:1px solid var(--border); background:var(--surface); border-radius:6px; box-shadow:var(--shadow)}
+.card-h{display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card-h h3{font-size:13px; font-weight:600}
+.card-b{padding:16px; overflow-x:auto}
+.stateline{display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--ink-3); margin-bottom:6px}
+.stateline .pill{
+  border:1px solid var(--border-strong); border-radius:3px; padding:1px 7px;
+  font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-2);
+}
+.legend{display:flex; flex-wrap:wrap; gap:6px 18px; margin-top:12px; font-size:11.5px; color:var(--ink-3)}
+.legend i{display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:-2px; margin-right:6px}
+.grow{flex:1}
+.chip{border:1px solid var(--border-strong); border-radius:3px; padding:1px 7px; font-size:11px; color:var(--ink-3)}
+.chip.warn{border-color:color-mix(in srgb, var(--degraded) 50%, transparent); color:var(--degraded)}
+.chip.acc{border-color:color-mix(in srgb, var(--accent) 50%, transparent); color:var(--accent)}
+.tbl{width:100%; border-collapse:collapse; font-size:13px}
+.tbl th{text-align:left; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); border-bottom:1px solid var(--border); padding:9px 14px; font-weight:600}
+.tbl td{border-bottom:1px solid var(--border); padding:9px 14px}
+.tbl td.n{text-align:right; font-variant-numeric:tabular-nums}
+.q{display:grid; grid-template-columns:auto 1fr; gap:10px 14px; align-items:start; font-size:12.5px; color:var(--ink-2)}
+.q dt{font-weight:600; color:var(--ink); white-space:nowrap}
+.q dd{margin:0}
+@media (max-width:860px){.q{grid-template-columns:1fr}}
+</style>
+
+<div class="page">
+
+<div class="head">
+  <h1>The stroke cerbix can defend</h1>
+  <p>Mock for <b>FR-032 phase E</b> — <span class="mono">docs/specs/func-expected-run-ledger.md</span>
+  §14, §17.10. FR-031 removed the connecting line because the subject of any allowance — that a run
+  was <i>expected</i> — was not in the data. FR-032 records it. This is what the panel looks like
+  when the line comes back, and what it does everywhere it may not. The rule is implemented and
+  tested (<span class="mono">strokeSegments</span>); only the drawing below is undecided.</p>
+</div>
+
+<div class="note">
+  <b>Every segment on this page is COMPUTED, not drawn by hand.</b> One fixture of heartbeats and
+  one fixture of ledger windows feed the same decision procedure the product runs —
+  <span class="mono">strokeSegments</span> from
+  <span class="mono">frontend/src/lib/latencypanel.ts</span>, transcribed verbatim into the script
+  below — and the polylines are whatever it returns. A mock about a line that may not claim too
+  much would be a poor thing if the line were positioned by eye, which is the defect the FR-031
+  mock's own note records one level up.
+</div>
+
+<!-- ════════════════ 1 · The four readings ════════════════ -->
+<div class="sec">
+  <h2>1 · One panel, four states <small>§14 — the gate, drawn open</small></h2>
+
+  <div class="card">
+    <div class="card-h">
+      <h3>Response time</h3>
+      <span class="mono" id="hdr" style="font-size:11.5px;color:var(--ink-3)">—</span>
+      <span class="grow"></span>
+      <span class="chip acc">FR-032 · ledger on</span>
+    </div>
+    <div class="card-b">
+      <div id="panels"></div>
+
+      <div class="legend">
+        <span><i style="background:var(--accent);border-radius:50%;width:8px;height:8px"></i>a recorded check</span>
+        <span><i style="width:16px;height:0;border-top:2px solid var(--accent)"></i>stroke — every window across it is <span class="mono">covered</span></span>
+        <span><i style="width:2px;height:11px;background:var(--ink-2)"></i>observation ruler — one tick per recorded check</span>
+        <span><i style="background:var(--ink-3);opacity:.5"></i>expectation ruler: <span class="mono">covered</span></span>
+        <span><i style="background:var(--degraded)"></i><span class="mono">covered_late</span></span>
+        <span><i style="border:1.5px solid var(--down);background:transparent"></i><span class="mono">expected_never_issued</span></span>
+        <span><i id="lg-hatch"></i>before <span class="mono">ledger_from</span> — not stored</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════ 2 · The three questions the mock exists to answer ════════════════ -->
+<div class="sec">
+  <h2>2 · The decisions this mock is asking for <small>§17.10 — none of these is derivable from the spec</small></h2>
+
+  <div class="card"><div class="card-b">
+    <dl class="q">
+      <dt>Where a segment ends</dt>
+      <dd><b>The stroke stops. It is not dashed across the gap, and the endpoints are not joined by
+      anything fainter.</b> A dashed line through unprovable time is the same claim in a costume —
+      it says "probably continuous", which is precisely the inference FR-031 removed. The two
+      endpoints keep their point markers, so the eye reads two runs of measurement rather than one
+      interrupted one.</dd>
+
+      <dt>Whether the ruler stays</dt>
+      <dd><b>It stays, and it gains a second band beneath it.</b> They answer different questions
+      and neither replaces the other: the <i>observation</i> ruler is one tick per recorded check —
+      what cerbix SAW — and its empty spans are unobserved time. The <i>expectation</i> ruler is one
+      cell per due window — what cerbix EXPECTED — and its cells carry verdicts. A monitor can have
+      a dense observation ruler and a broken expectation ruler (checks arriving, windows answered
+      late), or the reverse (nothing ran, but the ledger knows it should have). Collapsing them into
+      one band would make those two states look identical.</dd>
+
+      <dt>How a partly-strokable series reads at a glance</dt>
+      <dd><b>From the expectation ruler, in one pass.</b> The stroke above and the solid run of cells
+      below start and stop together, by construction — both come from the same
+      <span class="mono">strokeSegments</span> call — so the band is a legend for the line rather
+      than a second opinion about it. Where the band breaks, the line breaks, and the cell that
+      broke it says why.</dd>
+    </dl>
+  </div></div>
+</div>
+
+<!-- ════════════════ 3 · What each verdict does ════════════════ -->
+<div class="sec">
+  <h2>3 · Every verdict, and what it draws <small>§14.1, §12.3 — the whole vocabulary</small></h2>
+
+  <div class="card"><div class="card-b" style="padding:0">
+    <table class="tbl">
+      <thead><tr>
+        <th>Verdict</th><th>Stroke</th><th>Expectation cell</th><th style="width:46%">Why it draws that</th>
+      </tr></thead>
+      <tbody id="verdicts"></tbody>
+    </table>
+  </div></div>
+
+  <div class="note">
+    <b><span class="mono">interval_assumed</span> changes nothing on this page, and that is the
+    point.</b> A <span class="mono">covered_late</span> window whose threshold was assumed rather
+    than measured (§14.2) is still <span class="mono">covered_late</span>: it breaks the stroke, it
+    is excluded from the coverage numerator, and the flag appears only in the window's readout as
+    confidence. Reading it as licence to promote the window is how this gate would be widened
+    without anyone deciding to widen it — which is why invariant 20g exists, and why the drawing
+    code never consults the flag at all.
+  </div>
+</div>
+
+<!-- ════════════════ 4 · The numbers, derived ════════════════ -->
+<div class="sec">
+  <h2>4 · Coverage, from the same windows <small>§14.1 — the denominator keeps what the numerator drops</small></h2>
+
+  <div class="card"><div class="card-b" style="padding:0">
+    <table class="tbl">
+      <thead><tr>
+        <th>Panel</th><th class="n">Windows</th><th class="n">Covered</th><th class="n">Coverage</th>
+        <th class="n">Stroked intervals</th><th style="width:34%">What the number does not say</th>
+      </tr></thead>
+      <tbody id="coverage"></tbody>
+    </table>
+  </div></div>
+
+  <div class="note">
+    <b>A <span class="mono">covered_late</span> window counts in the denominator and not in the
+    numerator.</b> It is not a failure — a run happened and produced an admissible outcome — so
+    dropping it from both would quietly raise the coverage of a monitor that answered its windows
+    from too far away. Panel B's coverage is lower than panel A's for exactly one window, and the
+    stroke it lost is the same window. The two numbers move together because they read the same
+    fact.
+  </div>
+</div>
+
+<div class="note" style="margin-top:-16px">
+  <b>Nothing here is implemented.</b> §14's decision procedure is —
+  <span class="mono">strokeSegments</span>, with every clause tested and four mutations killed — and
+  the panel keeps drawing points until this drawing is approved. What needs a ruling is above: the
+  broken stroke, the second ruler band, and whether the expectation ruler earns its row on a panel
+  that is already dense.
+</div>
+
+</div>
+
+<script>
+"use strict";
+const SVGNS = "http://www.w3.org/2000/svg";
+const el = (n, a) => { const e = document.createElementNS(SVGNS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+/* ─── the decision procedure, transcribed VERBATIM from frontend/src/lib/latencypanel.ts ───
+   Every polyline below is what this returns. Editing the mock's picture without editing this
+   function is impossible, which is the property a mock about over-claiming ought to have. */
+function strokeSegments(points, answer) {
+  if (!answer || answer.ledger_from == null || points.length < 2) return [];
+  const ledgerFrom = Date.parse(answer.ledger_from);
+  if (Number.isNaN(ledgerFrom)) return [];
+  const windows = answer.windows
+    .map((w) => ({ ms: Date.parse(w.due_at), verdict: w.verdict }))
+    .filter((w) => !Number.isNaN(w.ms))
+    .sort((a, b) => a.ms - b.ms);
+  const segments = [];
+  let start = -1;
+  for (let i = 1; i < points.length; i++) {
+    if (coversInterval(windows, points[i - 1].ms, points[i].ms, ledgerFrom)) {
+      if (start < 0) start = i - 1;
+      continue;
+    }
+    if (start >= 0) { segments.push({ fromIndex: start, toIndex: i - 1 }); start = -1; }
+  }
+  if (start >= 0) segments.push({ fromIndex: start, toIndex: points.length - 1 });
+  return segments;
+}
+function coversInterval(windows, fromMs, toMs, ledgerFrom) {
+  if (fromMs < ledgerFrom) return false;
+  let sawWindow = false;
+  for (const w of windows) {
+    if (w.ms <= fromMs) continue;
+    if (w.ms > toMs) break;
+    sawWindow = true;
+    if (w.verdict !== "covered") return false;
+  }
+  return sawWindow;
+}
+
+/* ─── fixtures ─── 40 checks a minute apart, one monitor, interval 60s. */
+const T0 = Date.UTC(2026, 8, 5, 9, 20, 0);
+const N = 40, STEP = 60_000;
+const iso = (ms) => new Date(ms).toISOString();
+const LAT = [188,171,203,164,215,177,192,168,240,183,159,206,174,229,181,166,198,187,172,211,
+             163,195,179,222,168,190,176,204,185,161,199,173,218,180,193,167,208,175,189,182];
+
+function series() {
+  return Array.from({ length: N }, (_, i) => ({ ms: T0 + i * STEP, latency: LAT[i], hb: {} }));
+}
+/* One window per interval between adjacent points: the leader was due once a minute. */
+function windowsAll(verdict) {
+  return Array.from({ length: N - 1 }, (_, i) => ({ due_at: iso(T0 + (i + 1) * STEP), verdict }));
+}
+
+const PANELS = [
+  {
+    key: "A", title: "Every window covered",
+    sub: "the line the ledger can defend end to end",
+    points: series(),
+    answer: { windows: windowsAll("covered"), ledger_from: iso(T0 - 3_600_000) },
+    caption: "Nothing here is new except the stroke. The observation ruler is unchanged from FR-031, and the expectation ruler is solid because every window was answered inside the interval that spaced it.",
+  },
+  {
+    key: "B", title: "One window answered too late",
+    sub: "covered_late — a run happened, and its observation is too far from the window to prove it",
+    points: series(),
+    answer: (() => {
+      const w = windowsAll("covered");
+      w[21].verdict = "covered_late";
+      return { windows: w, ledger_from: iso(T0 - 3_600_000) };
+    })(),
+    caption: "The stroke splits AROUND the window, not for the whole series: a monitor with one late answer still has defensible strokes either side of it, and refusing them all would understate what the ledger proves. That is why the rule returns segments rather than a yes or no.",
+  },
+  {
+    key: "C", title: "The leader was away",
+    sub: "expected_never_issued — the windows are stored facts, and nothing ran in them",
+    points: (() => {
+      const p = series();
+      /* Six minutes with no checks: the leader was gone and nothing was dispatched. */
+      return p.filter((_, i) => i < 14 || i > 19);
+    })(),
+    answer: (() => {
+      const w = windowsAll("covered");
+      for (let i = 14; i <= 19; i++) w[i].verdict = "expected_never_issued";
+      return { windows: w, ledger_from: iso(T0 - 3_600_000) };
+    })(),
+    caption: "This is the case FR-031 could not tell from the one above it. The gap in the observation ruler says only that no check was recorded; the outlined cells beneath say six runs were DUE and never made. The stroke stops because the windows say so, not because the points are far apart.",
+  },
+  {
+    key: "D", title: "The ledger does not reach back this far",
+    sub: "before ledger_from — claimable as nothing, not as covered and not as missed",
+    points: series(),
+    answer: { windows: windowsAll("covered"), ledger_from: iso(T0 + 18 * STEP) },
+    caption: "Retention dropped the older windows, or this monitor was created here. Either way the ledger holds nothing before the marker and may not be read as saying the time was fine. The points are still drawn — they were really recorded — and the hatch is the same one FR-031 introduced for `not stored`.",
+  },
+];
+
+/* ─── drawing ─── */
+const W = 1088, H = 168, PAD_L = 46, PAD_R = 14, PAD_T = 12, PAD_B = 10;
+const RULER_H = 16, EXP_H = 18;
+
+function hatchDef(svg, id) {
+  const d = el("defs", {});
+  const p = el("pattern", { id, width: 6, height: 6, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
+  p.appendChild(el("rect", { width: 6, height: 6, fill: "var(--inset)" }));
+  p.appendChild(el("rect", { width: 2, height: 6, fill: "var(--border-strong)" }));
+  d.appendChild(p); svg.appendChild(d);
+  return id;
+}
+
+function drawPanel(host, panel, idx) {
+  const pts = panel.points, ans = panel.answer;
+  const segs = strokeSegments(pts, ans);
+  const t0 = pts[0].ms, t1 = pts[pts.length - 1].ms;
+  const x = (ms) => PAD_L + ((ms - t0) / (t1 - t0)) * (W - PAD_L - PAD_R);
+  const top = Math.max(...pts.map((p) => p.latency)) * 1.15;
+  const y = (v) => PAD_T + (1 - v / top) * (H - PAD_T - PAD_B);
+  const ledgerMs = Date.parse(ans.ledger_from);
+
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "margin-top:" + (idx ? "26px" : "0");
+
+  const line = document.createElement("div");
+  line.className = "stateline";
+  line.innerHTML = '<span class="pill">' + panel.key + '</span><b style="color:var(--ink);font-weight:600">' +
+    panel.title + '</b><span>' + panel.sub + '</span>';
+  wrap.appendChild(line);
+
+  const svg = el("svg", { width: W, height: H, role: "img", "aria-label": panel.title });
+  const hid = hatchDef(svg, "hatch" + panel.key);
+
+  /* the plot ground, and the not-stored region before ledger_from */
+  svg.appendChild(el("rect", { x: PAD_L, y: 0, width: W - PAD_L - PAD_R, height: H, fill: "var(--inset)", rx: 3 }));
+  if (ledgerMs > t0) {
+    const cut = Math.min(x(ledgerMs), W - PAD_R);
+    svg.appendChild(el("rect", { x: PAD_L, y: 0, width: cut - PAD_L, height: H, fill: "url(#" + hid + ")", rx: 3 }));
+    svg.appendChild(el("rect", { x: cut - 1, y: 0, width: 2, height: H, fill: "var(--ink-2)" }));
+    const t = el("text", { x: cut + 6, y: 14, fill: "var(--ink-2)", "font-size": 10.5, "font-family": "ui-monospace,monospace" });
+    t.textContent = "ledger_from"; svg.appendChild(t);
+  }
+
+  /* y axis: two labelled values, both reached by the data */
+  for (const v of [Math.round(top / 2 / 10) * 10, Math.round(top * 0.9 / 10) * 10]) {
+    svg.appendChild(el("line", { x1: PAD_L, y1: y(v), x2: W - PAD_R, y2: y(v), stroke: "var(--border)", "stroke-width": 1 }));
+    const t = el("text", { x: PAD_L - 8, y: y(v) + 3.5, fill: "var(--ink-3)", "font-size": 10, "text-anchor": "end", "font-family": "ui-monospace,monospace" });
+    t.textContent = v + "ms"; svg.appendChild(t);
+  }
+
+  /* THE STROKE — one polyline per segment, and nothing between them */
+  for (const s of segs) {
+    const d = pts.slice(s.fromIndex, s.toIndex + 1).map((p) => x(p.ms) + "," + y(p.latency)).join(" ");
+    svg.appendChild(el("polyline", { points: d, fill: "none", stroke: "var(--accent)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  }
+  for (const p of pts) {
+    svg.appendChild(el("circle", { cx: x(p.ms), cy: y(p.latency), r: 2.6, fill: "var(--accent)" }));
+  }
+  wrap.appendChild(svg);
+
+  /* observation ruler — unchanged from FR-031: one tick per recorded check, no threshold */
+  const ruler = el("svg", { width: W, height: RULER_H, role: "img", "aria-label": "observation ruler" });
+  ruler.appendChild(el("rect", { x: PAD_L, y: 4, width: W - PAD_L - PAD_R, height: 8, fill: "var(--surface-2)", rx: 2 }));
+  for (const p of pts) ruler.appendChild(el("rect", { x: x(p.ms) - 0.75, y: 2, width: 1.5, height: 12, fill: "var(--ink-2)" }));
+  const rl = el("text", { x: PAD_L - 8, y: 12, fill: "var(--ink-3)", "font-size": 9.5, "text-anchor": "end", "font-family": "ui-monospace,monospace" });
+  rl.textContent = "seen"; ruler.appendChild(rl);
+  wrap.appendChild(ruler);
+
+  /* expectation ruler — one cell per due window, carrying its verdict */
+  const exp = el("svg", { width: W, height: EXP_H, role: "img", "aria-label": "expectation ruler: one cell per due window" });
+  const ehid = hatchDef(exp, "ehatch" + panel.key);
+  exp.appendChild(el("rect", { x: PAD_L, y: 4, width: W - PAD_L - PAD_R, height: 10, fill: "var(--surface-2)", rx: 2 }));
+  for (const w of ans.windows) {
+    const ms = Date.parse(w.due_at);
+    if (ms < t0 || ms > t1) continue;
+    const cw = ((W - PAD_L - PAD_R) / (pts.length - 1)) * 0.62;
+    const cx = x(ms) - cw / 2;
+    if (ms < ledgerMs) {
+      exp.appendChild(el("rect", { x: cx, y: 4, width: cw, height: 10, fill: "url(#" + ehid + ")", rx: 1.5 }));
+    } else if (w.verdict === "covered") {
+      exp.appendChild(el("rect", { x: cx, y: 4, width: cw, height: 10, fill: "var(--ink-3)", opacity: .5, rx: 1.5 }));
+    } else if (w.verdict === "covered_late") {
+      exp.appendChild(el("rect", { x: cx, y: 4, width: cw, height: 10, fill: "var(--degraded)", rx: 1.5 }));
+    } else {
+      exp.appendChild(el("rect", { x: cx + .75, y: 4.75, width: cw - 1.5, height: 8.5, fill: "none", stroke: "var(--down)", "stroke-width": 1.5, rx: 1.5 }));
+    }
+  }
+  const xl = el("text", { x: PAD_L - 8, y: 13, fill: "var(--ink-3)", "font-size": 9.5, "text-anchor": "end", "font-family": "ui-monospace,monospace" });
+  xl.textContent = "due"; exp.appendChild(xl);
+  wrap.appendChild(exp);
+
+  const cap = document.createElement("p");
+  cap.className = "note";
+  cap.style.cssText = "margin-top:10px";
+  cap.innerHTML = "<b>" + panel.key + ".</b> " + panel.caption;
+  wrap.appendChild(cap);
+
+  host.appendChild(wrap);
+  return segs;
+}
+
+/* ─── render ─── */
+const host = document.getElementById("panels");
+const results = PANELS.map((p, i) => ({ panel: p, segs: drawPanel(host, p, i) }));
+
+document.getElementById("hdr").textContent =
+  PANELS[0].points.length + " checks · 60s interval · " +
+  new Date(T0).toISOString().slice(11, 16) + "–" +
+  new Date(T0 + (N - 1) * STEP).toISOString().slice(11, 16) + " UTC";
+
+/* the hatch swatch in the legend, drawn with the same pattern as the plots */
+{
+  const s = document.getElementById("lg-hatch");
+  s.style.cssText = "display:inline-block;width:12px;height:12px;border-radius:2px;vertical-align:-2px;margin-right:6px;" +
+    "background:repeating-linear-gradient(45deg,var(--border-strong) 0 2px,var(--inset) 2px 6px);border:1px solid var(--border-strong)";
+}
+
+/* verdict table */
+const VERDICTS = [
+  ["covered", "drawn", "solid, muted", "A terminal outcome exists and the run answered its window inside the interval that spaced it. The only verdict that licenses a line."],
+  ["covered_late", "broken", "solid, amber", "A run happened and produced an admissible outcome, later than the window's own interval. Not a failure — a statement that the observation is too far from the window to prove it."],
+  ["expected_never_issued", "broken", "outlined", "A window was due and nothing was dispatched, or cerbix deliberately skipped it. The outline says the window exists and holds nothing; a fill would read as a recorded failure."],
+  ["issued_never_claimed", "broken", "outlined", "A job was published and no executor reported taking it. The loss the broker's ack policy has always accepted, visible for the first time."],
+  ["claimed_never_finished", "broken", "outlined", "An executor started and no admissible outcome arrived."],
+  ["unknown", "broken", "hatched", "Dispatched on a carrier that does not carry job identity, so no result could correlate. Ordinary during a rollout, permanent for async canaries."],
+];
+document.getElementById("verdicts").innerHTML = VERDICTS.map(([v, stroke, cell, why]) => {
+  const sw = stroke === "drawn"
+    ? '<span style="color:var(--accent)">drawn</span>'
+    : '<span style="color:var(--ink-3)">stops here</span>';
+  return '<tr><td class="mono" style="font-size:12px">' + v + "</td><td>" + sw +
+    '</td><td style="color:var(--ink-2)">' + cell + '</td><td style="color:var(--ink-2);font-size:12.5px">' + why + "</td></tr>";
+}).join("");
+
+/* coverage, derived from the same fixtures */
+document.getElementById("coverage").innerHTML = results.map(({ panel, segs }) => {
+  const t0 = panel.points[0].ms, t1 = panel.points[panel.points.length - 1].ms;
+  const ledgerMs = Date.parse(panel.answer.ledger_from);
+  const inRange = panel.answer.windows.filter((w) => {
+    const ms = Date.parse(w.due_at);
+    return ms >= t0 && ms <= t1 && ms >= ledgerMs;
+  });
+  const covered = inRange.filter((w) => w.verdict === "covered").length;
+  const pct = inRange.length ? ((covered / inRange.length) * 100).toFixed(1) + "%" : "—";
+  const intervals = segs.reduce((a, s) => a + (s.toIndex - s.fromIndex), 0);
+  const notes = {
+    A: "That every window was answered — not that the target was healthy. Latency and status are other questions.",
+    B: "The late window is IN this denominator. Dropping it from both would quietly raise the number.",
+    C: "Windows before `ledger_from` are in neither column: they are claimable as nothing at all.",
+    D: "Eighteen windows are outside the answerable range and are excluded rather than counted as missed.",
+  }[panel.key];
+  return '<tr><td><b>' + panel.key + "</b> " + panel.title + '</td><td class="n mono">' + inRange.length +
+    '</td><td class="n mono">' + covered + '</td><td class="n mono">' + pct +
+    '</td><td class="n mono">' + intervals + '</td><td style="color:var(--ink-2);font-size:12.5px">' + notes + "</td></tr>";
+}).join("");
+</script>

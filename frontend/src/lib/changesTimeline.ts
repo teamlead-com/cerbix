@@ -77,7 +77,7 @@ export type ChangeLinkRole = Schemas["ChangeIncidentLink"]["role"];
  * previous phase's. This is relative to the PREVIOUS phase, not to now — the card's compact instant
  * answers a different question ("how long ago"), so the two are not one rule.
  *
- * It used to render `08-28 16:40`, with no zone at all, by slicing a `toISOString` result held in a
+ * It used to render `08-28 16:40`, with no zone at all, by slicing a `toISOString()` held in a
  * LOCAL VARIABLE — which is why the NFR-025c ratchet, whose idiom required the slice to be chained
  * directly onto the call, never counted it. The guard is absolute now (`wallclock.spec.ts`): no
  * product file outside `wallclock.ts` and `datekeys.ts` may call `toISOString` at all.

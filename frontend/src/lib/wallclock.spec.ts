@@ -159,6 +159,25 @@ describe("the mechanism's shape", () => {
     return out;
   }
 
+  /**
+   * `text` with COMMENTS removed, for any scan that counts occurrences in source.
+   *
+   * A guard that reads raw text cannot tell a rendered hint from a commented-out one. Wrapping a
+   * hint in an HTML comment leaves the helper call in the file and takes the element out of the
+   * DOM, so the operator sees no zone while the count stays satisfied — reviewer finding N4,
+   * reproduced on `ServiceDeclarationView`, the surface no component test covers.
+   *
+   * HTML comments and JS block comments go entirely; line comments only when the slashes start
+   * the line, because a `https://` inside a template is not a comment and eating it would make
+   * the scan lie in the other direction.
+   */
+  function stripComments(text: string): string {
+    return text
+      .replace(/<!--[\s\S]*?-->/g, " ")
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/^[ \t]*\/\/.*$/gm, " ");
+  }
+
   function walk(dir: string): string[] {
     const out: string[] = [];
     for (const name of readdirSync(dir)) {
@@ -238,7 +257,9 @@ describe("the mechanism's shape", () => {
     for (const file of walk(SRC)) {
       const rel = file.split("/src/")[1];
       if (OWNERS.includes(rel) || rel.endsWith(".spec.ts")) continue;
-      for (const m of readFileSync(file, "utf8").matchAll(IDIOM)) offenders.push(`${rel}: ${m[0]}`);
+      // Comments are stripped here too: a commented-out `toISOString` is not a call, and a
+      // guard that reports one teaches its reader to ignore it.
+      for (const m of stripComments(readFileSync(file, "utf8")).matchAll(IDIOM)) offenders.push(`${rel}: ${m[0]}`);
     }
     expect(offenders).toEqual([]);
   });
@@ -372,7 +393,7 @@ describe("the mechanism's shape", () => {
     // guard cries wolf.
     for (const file of walk(SRC).filter((f) => f.endsWith(".vue"))) {
       const rel = file.split("/src/")[1];
-      const text = readFileSync(file, "utf8");
+      const text = stripComments(readFileSync(file, "utf8"));
       // A RANGE hint covers exactly two controls — `starts → ends` is one subject, and two
       // identical offsets in one inline row is noise rather than honesty. It counts for two
       // because it READS both values and names both offsets when they differ; the first version
@@ -425,7 +446,7 @@ describe("the mechanism's shape", () => {
     let calls = 0;
     for (const file of walk(SRC).filter((f) => f.endsWith(".vue"))) {
       const rel = file.split("/src/")[1];
-      const text = readFileSync(file, "utf8");
+      const text = stripComments(readFileSync(file, "utf8"));
       // `callArgs` walks balanced parentheses; a regex stops at the first `)` of a nested call,
       // and every real call site here contains one (`ovDraft(s.id ?? '').starts_at`).
       for (const raw of callArgs(text, "localInputRangeZoneHint")) {
@@ -444,7 +465,7 @@ describe("the mechanism's shape", () => {
 
   it("names two owner modules that exist and that really do build dates", () => {
     for (const rel of ["lib/wallclock.ts", "lib/datekeys.ts"]) {
-      const text = readFileSync(join(SRC, rel), "utf8");
+      const text = stripComments(readFileSync(join(SRC, rel), "utf8"));
       expect(text, `${rel} is not where dates are built`).toMatch(/toISOString\s*\(|getUTC\w+\s*\(|\.get(?:Hours|Minutes|Date|Month|FullYear)\s*\(/);
     }
   });

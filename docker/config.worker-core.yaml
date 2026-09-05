@@ -19,3 +19,31 @@ rabbitmq:
 prober:
   allow_private_ips: true                       # internal targets
   allow_metadata_ips: false
+
+# FR-020's executor half, and the reason it is here at all.
+#
+# `config.dev.yaml` — which the api and scheduler of the DISTRIBUTED topology mount — enforces
+# credential envelopes, so a credentialed job or Test Connection is published to the v2/v3 carrier.
+# This worker served only the v1 consumers, because `secrets.dispatch_envelope` was absent here and
+# `EnvelopeEnforced()` is what starts the others. The publish was then unroutable and the API
+# answered `no worker queue for region "core" (AMQP 312 NO_ROUTE)` — a red `make dev-test-distributed`
+# that had nothing to do with the code it was testing.
+#
+# The two sides of one topology must agree: an API that enforces envelopes needs an executor that
+# can open them. Until this block existed, FR-020's credentialed dispatch was exercised ONLY by the
+# single-process stack, which is how a capability nobody runs by accident stays broken.
+secrets:
+  enabled: true
+  dispatch_envelope: "enforced"
+
+# The executor half of the keyring, and ONLY that half. An executor holds its own region's dispatch
+# keys and never the at-rest master: `ValidateSecretsForRole` REJECTS a worker config carrying
+# `security.encryption_key` or `previous_keys`, so a leaked executor exposes at most its own
+# region's payloads. Same fixed, public, DEVELOPMENT-ONLY key as `config.dev.yaml` publishes with —
+# they must match or every dispatch fails to open — and the same disposable-stack caveat applies.
+security:
+  dispatch:
+    regions:
+      core:
+        primary: {id: "dev-2026a", key: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="}
+        previous: []

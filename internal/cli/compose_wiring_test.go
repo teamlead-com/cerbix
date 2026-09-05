@@ -121,6 +121,37 @@ func TestDevRoleConfigsKeepAtRestMasterOutOfWorker(t *testing.T) {
 	if err := worker.ValidateSecretsForRole("worker", "core"); err != nil {
 		t.Fatalf("config.worker-core.yaml invalid for worker: %v", err)
 	}
+
+	// The half this test did NOT assert until the distributed gate failed on it.
+	//
+	// It checked that the master keyring is ABSENT from the executor and never that the executor's
+	// own keyring is PRESENT, so a worker with no dispatch keys at all passed — which is exactly
+	// what shipped. `config.dev.yaml` enforces envelopes for the api and scheduler of this
+	// topology, the worker enforced nothing, and a credentialed Test Connection was published to a
+	// v2/v3 queue no consumer had ever declared: `no worker queue for region "core"
+	// (AMQP 312 NO_ROUTE)`, a red `make dev-test-distributed` with no defect in the code it tested.
+	//
+	// So the property is the AGREEMENT between the two sides of one topology, asserted in both
+	// directions rather than as two independent facts.
+	if dev.Secrets.EnvelopeEnforced() != worker.Secrets.EnvelopeEnforced() {
+		t.Fatalf("the distributed topology disagrees with itself: config.dev.yaml enforces=%v and "+
+			"config.worker-core.yaml enforces=%v. An API that publishes credential envelopes needs "+
+			"an executor that declares the consumers for them, or every credentialed dispatch is "+
+			"unroutable", dev.Secrets.EnvelopeEnforced(), worker.Secrets.EnvelopeEnforced())
+	}
+	if worker.Secrets.EnvelopeEnforced() {
+		keys := worker.Security.Dispatch.Regions["core"]
+		if keys.Primary.ID == "" || keys.Primary.Key == "" {
+			t.Fatal("the worker enforces envelopes and holds no dispatch keyring for its own " +
+				"region: it can declare the consumers and cannot open what arrives on them")
+		}
+		devKeys := dev.Security.Dispatch.Regions["core"]
+		if keys.Primary.ID != devKeys.Primary.ID || keys.Primary.Key != devKeys.Primary.Key {
+			t.Fatalf("the executor's core key %q is not the one the API publishes with (%q): a "+
+				"keyring that does not match seals payloads nobody can open, which fails LATER and "+
+				"less legibly than having none", keys.Primary.ID, devKeys.Primary.ID)
+		}
+	}
 }
 
 func TestComposeRequiresPinnedRabbitMQImage(t *testing.T) {

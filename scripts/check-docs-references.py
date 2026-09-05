@@ -990,7 +990,10 @@ def check_iteration_finding_counts(iteration='docs/iterations/iter-0177.md',
             if name not in line:
                 continue
             scoped = unquoted(' '.join(regions_naming(line, name)))
-            for stated in re.findall(r'\b(\d+|' + '|'.join(words.values()) + r')\s+findings\b',
+            # "one findings TABLE" counts tables, not findings. Without the exclusion the guard
+            # reports the very sentence that explains how it derives its number.
+            for stated in re.findall(r'\b(\d+|' + '|'.join(words.values()) +
+                                     r')\s+findings\b(?!\s+(?:table|tables|row|rows|ledger))',
                                      scoped, re.I):
                 low = stated.lower()
                 value = int(low) if low.isdigit() else next(

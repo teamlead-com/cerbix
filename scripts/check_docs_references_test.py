@@ -1202,6 +1202,30 @@ class IterationFindingCountTest(unittest.TestCase):
         self.assertEqual(len(found), 1, found)
         self.assertIn("no numbered findings table", found[0])
 
+class FindingCountCountsFindings(unittest.TestCase):
+    """"N findings TABLE" is a count of tables, and the guard must not read it as a count of
+    findings — it reported the very sentence explaining how it derives its number."""
+
+    def _iteration(self, rows, reader_line):
+        d = tempfile.mkdtemp()
+        it = os.path.join(d, "iter-0999.md")
+        pathlib.Path(it).write_text("# iter-0999\n\n" + rows + "\n")
+        rd = os.path.join(d, "reader.md")
+        pathlib.Path(rd).write_text(reader_line + "\n")
+        return cdr.check_iteration_finding_counts(it, (rd,))
+
+    def test_a_findings_table_is_not_a_finding_count(self):
+        rows = "| 1 | a |\n| 2 | b |"
+        self.assertEqual(
+            self._iteration(rows, "iter-0999 keeps one findings table and not two."), [])
+
+    def test_a_real_drift_is_still_caught(self):
+        rows = "| 1 | a |\n| 2 | b |"
+        msgs = self._iteration(rows, "iter-0999 recorded five findings.")
+        self.assertEqual(len(msgs), 1, msgs)
+        self.assertIn("five findings", msgs[0])
+
+
 class EveryGuardIsActuallyReached(unittest.TestCase):
     """The guards are WIRED, not merely defined.
 

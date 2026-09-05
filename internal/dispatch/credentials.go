@@ -313,6 +313,89 @@ type Materialized struct {
 	UsedCredential bool
 }
 
+// EnvelopeForCarrier is the ONE owner of the carrier -> envelope mapping
+// (`func-secret-inventory.md` §4.7, D-0160). The producer picks an envelope generation with it and
+// every executor checks the delivery against it, so the two sides cannot drift: they are the same
+// expression. `internal/store`'s materializer delegates here rather than restating the switch.
+//
+// The mapping is stated in the specification as "explicit and physical": carrier generation 2
+// (`checks.{jobs,tests}.v2.<region>`, `/v2/{jobs,tests}`) carries envelope v1; generation 3 carries
+// envelope v2; generation 4 adds job identity on top of what 3 carries and its envelope is still
+// v2. Generation 1 is the legacy carrier and carries no envelope at all.
+// **Generation 1 has NO mapping and is an ERROR here**, not `EnvelopeV1`. It answered `EnvelopeV1`
+// in the switch this function was lifted from, and that made the function contradict its own
+// documentation and `CarrierEnvelopeAdmissible`, which refuses every envelope on that carrier: a
+// caller would have been handed a version the very next check rejects. Unreachable from
+// `CarrierFor` today — it returns generation 1 only when there is no envelope — and a public
+// function that is wrong in a way nobody currently exercises is a trap laid for the next caller
+// (reviewer P1 on this patch). A sealing site that reaches it now gets a local, named refusal
+// instead of a job the executor would reject remotely.
+func EnvelopeForCarrier(carrierGeneration int) (int, error) {
+	switch carrierGeneration {
+	case ProtocolV2:
+		return EnvelopeV1, nil
+	case ProtocolV3, ProtocolV4:
+		return EnvelopeV2, nil
+	case ProtocolV1:
+		return 0, fmt.Errorf("dispatch: carrier generation %d carries no credential envelope", carrierGeneration)
+	default:
+		return 0, fmt.Errorf("dispatch: no envelope generation for carrier %d", carrierGeneration)
+	}
+}
+
+// CarrierEnvelopeAdmissible reports whether a delivery's envelope belongs on the carrier it
+// arrived from. A missing envelope is always admissible here — whether this monitor REQUIRED one
+// is a separate question, answered by the credential requirement below.
+//
+// EXACT, not a floor, and that distinction is the whole point. Generation 3 exists to add the
+// EXECUTION BODY BINDING: from envelope v2 a digest of the body is mixed into every field's AAD,
+// so a credential cannot be replayed against a different target, type or transport. Envelope v1
+// computes no such digest (`bindingFor` returns an empty binding below v2). So accepting a v1
+// envelope on a generation-3 carrier silently reinstates exactly the property the generation was
+// introduced to remove — and under this specification's OWN threat model, where the body is
+// attacker-editable and the carrier is the trusted out-of-band signal, that is a downgrade an
+// attacker chooses rather than an accident.
+//
+// It was reachable: `Jobs()` checked only the capability CEILING (`capability < envelope.V`), the
+// test consumer checked only that an envelope was present, and this gate checked only that the
+// carrier was not generation 1 — while `store.envelopeForCarrier` had been exact on the producing
+// side since generation 3 shipped. One side of a contract, enforced.
+func CarrierEnvelopeAdmissible(carrierGeneration int, envelope *CredentialEnvelope) error {
+	if envelope == nil {
+		return nil
+	}
+	// THE ORDER IS PART OF THE CONTRACT, so it is stated as one sentence and then obeyed: the
+	// question "is this a version this executor implements at all?" is about the ENVELOPE alone,
+	// does not depend on the carrier, and is therefore asked FIRST — for every carrier, generation
+	// 1 included.
+	//
+	// It has to be, because that question already owns an honest member of the bounded probe-error
+	// vocabulary. Answering a FUTURE envelope as a carrier problem reports it as
+	// `decrypt_auth_failed` and sends an operator hunting a key failure in the middle of a rolling
+	// upgrade. The taxonomy is a wire contract and is NOT widened here; only the order changes.
+	//
+	// An earlier revision of this function put the legacy-carrier refusal above this check while
+	// the comment claimed "asked first" without exception — so a future envelope on a generation-1
+	// carrier still read as `decrypt_auth_failed` and the described wire order did not match the
+	// code. Reviewer P1 on the response to the P0.
+	if envelope.V != EnvelopeV1 && envelope.V != EnvelopeV2 {
+		return fmt.Errorf("dispatch: unsupported credential envelope version %d", envelope.V)
+	}
+	// A version we DO implement, on the carrier that takes none. Its own sentence, and it stays in
+	// the non-oracular bucket with every other structural rejection.
+	if carrierGeneration < ProtocolV2 {
+		return fmt.Errorf("dispatch: credential envelope on carrier generation %d", carrierGeneration)
+	}
+	want, err := EnvelopeForCarrier(carrierGeneration)
+	if err != nil {
+		return err
+	}
+	if envelope.V != want {
+		return fmt.Errorf("dispatch: envelope generation %d on carrier generation %d, which carries envelope %d", envelope.V, carrierGeneration, want)
+	}
+	return nil
+}
+
 // ValidateAndMaterialize is the ONE gate every executor path crosses before a prober sees
 // a job — AMQP jobs, AMQP test-RPC, pull jobs, pull tests alike (func-secret-inventory
 // §4.7, D-0160).
@@ -335,11 +418,10 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 	plain := Materialized{Monitor: job.Monitor, Cleanup: func() {}}
 	envelope := job.CredentialEnvelope
 
-	// 1. Carrier consistency. The carrier is the executor's only authenticated signal
-	// about which contract applies, so it is normative: an envelope on a legacy-generation
-	// carrier is a mismatch, never a job to execute.
-	if envelope != nil && delivered.CarrierGeneration < ProtocolV2 {
-		return Materialized{}, fmt.Errorf("dispatch: credential envelope on carrier generation %d", delivered.CarrierGeneration)
+	// 1. Carrier consistency. The carrier is the executor's only authenticated signal about
+	// which contract applies, so it is normative — and the mapping is EXACT, not a floor.
+	if err := CarrierEnvelopeAdmissible(delivered.CarrierGeneration, envelope); err != nil {
+		return Materialized{}, err
 	}
 
 	// 1b. FR-032 invariant 10i, the same rule one layer in. A generation-4 carrier is DEFINED by

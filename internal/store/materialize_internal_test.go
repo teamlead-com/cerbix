@@ -246,7 +246,13 @@ func TestMaterializeSealsTheEnvelopeItsCarrierCarries(t *testing.T) {
 		carrier int
 		want    int
 	}{
-		{dispatch.ProtocolV1, dispatch.EnvelopeV1},
+		// Generation 1 is NOT here any more: it carries no envelope, and answering `EnvelopeV1`
+		// for it contradicted `dispatch.CarrierEnvelopeAdmissible`, which refuses every envelope
+		// on that carrier. It is asserted as an error below with the unknown generations
+		// (iter-0178, reviewer P1). No sealing site reaches it — `CarrierFor` returns generation 1
+		// only when there is no envelope to seal — and a wrong answer nobody currently asks for is
+		// a trap for the next caller.
+		//
 		// Generation 2 already means envelope v1 to every deployed executor.
 		{dispatch.ProtocolV2, dispatch.EnvelopeV1},
 		{dispatch.ProtocolV3, dispatch.EnvelopeV2},
@@ -269,9 +275,35 @@ func TestMaterializeSealsTheEnvelopeItsCarrierCarries(t *testing.T) {
 	// A carrier we do not know is a wiring bug, not something to guess at: neither the
 	// newest envelope (nobody downstream could open it) nor the oldest (it would ship
 	// under a binding the caller did not ask for).
-	for _, unknown := range []int{0, 5, 99, -1} {
-		if _, err := envelopeForCarrier(unknown); err == nil {
-			t.Fatalf("carrier %d silently mapped to an envelope", unknown)
+	for _, none := range []int{dispatch.ProtocolV1, 0, 5, 99, -1} {
+		if _, err := envelopeForCarrier(none); err == nil {
+			t.Fatalf("carrier %d silently mapped to an envelope", none)
+		}
+	}
+}
+
+// TestTheCarrierMappingHasONEOwner pins that the producer does not hold a SECOND opinion about
+// which envelope a carrier carries. It did, and the two sides disagreed in the direction that
+// matters: this file was EXACT from the day generation 3 shipped, while every consumer enforced
+// only a floor — `Jobs()` a capability ceiling, the test consumer mere presence, and
+// `ValidateAndMaterialize` "not generation 1". So a generation-1 envelope rode the generation-3
+// carrier to the prober without the execution-body binding generation 3 exists to add (reviewer P0
+// found auditing `0a1557c..d0a8fed`).
+//
+// The repair is not a matching `if` on the other side: `envelopeForCarrier` DELEGATES to
+// `dispatch.EnvelopeForCarrier`, and this asserts the delegation by comparing answers rather than
+// by reading the source, so reinstating a local switch that agrees today and drifts tomorrow still
+// fails the moment it drifts.
+func TestTheCarrierMappingHasONEOwner(t *testing.T) {
+	for _, carrier := range []int{
+		dispatch.ProtocolV1, dispatch.ProtocolV2, dispatch.ProtocolV3, dispatch.ProtocolV4,
+		0, 5, 99, -1,
+	} {
+		mine, myErr := envelopeForCarrier(carrier)
+		theirs, theirErr := dispatch.EnvelopeForCarrier(carrier)
+		if (myErr == nil) != (theirErr == nil) || mine != theirs {
+			t.Errorf("carrier %d: store says (%d, %v) and dispatch says (%d, %v) — two owners",
+				carrier, mine, myErr, theirs, theirErr)
 		}
 	}
 }

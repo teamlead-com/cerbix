@@ -52,8 +52,8 @@ func TestCredentialHealthDegradesAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	monitor := domain.Monitor{ID: "m1", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
-	badEnvelope, _ := otherRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-bad", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
-	goodEnvelope, _ := workerRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-good", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
+	badEnvelope, _ := otherRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV2, Region: "pull1", JobID: "job-bad", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
+	goodEnvelope, _ := workerRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV2, Region: "pull1", JobID: "job-good", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	// TWO mismatched envelopes before the good one: readiness degrades on a PERSISTENT key
 	// mismatch (§4.7), so a single retired-key or corrupt payload — ordinary traffic during
 	// a dispatch-key rotation — must not take the agent out of its region.
@@ -109,7 +109,7 @@ func TestFutureCredentialEnvelopeIsProbeErrorWithoutReadinessDowngrade(t *testin
 		t.Fatal(err)
 	}
 	monitor := domain.Monitor{ID: "m-future", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
-	envelope, err := ring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-future", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
+	envelope, err := ring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV2, Region: "pull1", JobID: "job-future", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,8 +431,14 @@ func TestClaimResponseDesyncIsRefusedNotGuessed(t *testing.T) {
 		t.Fatal(err)
 	}
 	monitor := domain.Monitor{ID: "m-desync", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	// Envelope v2, because the ONE case here that reaches the gate — "field absent entirely
+	// (older core)" — falls back to the generation of the endpoint this agent polls, `/v3/jobs`,
+	// and generation 3 carries envelope v2 exactly. The fixture sealed v1, which no core would
+	// put on that endpoint, and after the carrier rule became exact the case failed for a reason
+	// it does not name. Every other case is refused at DECODE time and never reaches the gate at
+	// all (reviewer sweep on the iter-0178 P0 patch).
 	envelope, err := ring.Seal(dispatch.SealContext{
-		EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-desync",
+		EnvelopeVersion: dispatch.EnvelopeV2, Region: "pull1", JobID: "job-desync",
 		MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor,
 	}, map[string][]byte{"password": []byte("secret")})
 	if err != nil {
@@ -599,7 +605,7 @@ func TestTestClaimStampPresenceContract(t *testing.T) {
 	}
 	monitor := domain.Monitor{ID: "m-null", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
 	envelope, err := ring.Seal(dispatch.SealContext{
-		EnvelopeVersion: dispatch.EnvelopeV1, Region: "pull1", JobID: "job-null",
+		EnvelopeVersion: dispatch.EnvelopeV2, Region: "pull1", JobID: "job-null",
 		MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor,
 	}, map[string][]byte{"password": []byte("secret")})
 	if err != nil {

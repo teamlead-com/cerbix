@@ -688,6 +688,23 @@ func (d *AMQP) Jobs() <-chan DeliveredJob {
 					d.deadLetter(source, body)
 					return true
 				}
+				// The carrier -> envelope mapping is EXACT, and the check above is only a CEILING:
+				// it stops an envelope NEWER than this executor can open and says nothing about one
+				// that is older than its carrier defines. A v1 envelope on the generation-3 queue
+				// passed it, passed the gate (which only refused generation 1), and reached the
+				// prober with no execution-body binding — the property generation 3 exists to add.
+				//
+				// One predicate, two dispositions, exactly as `RequireLedgerFields` above: here the
+				// poison body is dead-lettered so it survives for inspection, and the pull and
+				// in-process paths get the typed refusal from `ValidateAndMaterialize`, which
+				// enforces the same rule for every path that does not pass through this consumer.
+				if err := CarrierEnvelopeAdmissible(generation, job.CredentialEnvelope); err != nil {
+					d.logger.Error("dispatch_job_envelope_carrier_mismatch",
+						"monitor_id", job.Monitor.ID, "carrier", generation,
+						"envelope", job.CredentialEnvelope.V, "error", err.Error())
+					d.deadLetter(source, body)
+					return true
+				}
 				select {
 				case d.jobsCh <- DeliveredJob{Job: job, CarrierGeneration: generation}:
 					return true
@@ -923,6 +940,18 @@ func serveEnvelopeTestsOnce(d *AMQP, conn *amqp.Connection, queue string, genera
 			// violation on this queue and is dead-lettered for inspection.
 			var job CheckJob
 			if err := json.Unmarshal(msg.Body, &job); err != nil || job.CredentialEnvelope == nil {
+				d.deadLetter(deadLetterSourceForTests(generation), msg.Body)
+				_ = msg.Nack(false, false)
+				continue
+			}
+			// ...and it must be the envelope THIS carrier defines. Presence alone admitted a
+			// generation-1 envelope onto the generation-3 test queue, where it opened without the
+			// execution-body binding that generation exists to provide. Same predicate as the jobs
+			// consumer and the materializer gate, so the three cannot drift.
+			if err := CarrierEnvelopeAdmissible(generation, job.CredentialEnvelope); err != nil {
+				d.logger.Error("dispatch_test_envelope_carrier_mismatch",
+					"queue", queue, "carrier", generation,
+					"envelope", job.CredentialEnvelope.V, "error", err.Error())
 				d.deadLetter(deadLetterSourceForTests(generation), msg.Body)
 				_ = msg.Nack(false, false)
 				continue

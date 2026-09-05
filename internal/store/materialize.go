@@ -45,33 +45,15 @@ type materializedRef struct {
 // It reads every execution field plus tenant-safe refs/ciphertexts in ONE statement, then
 // immediately decrypts and re-wraps credentials. Plaintext never enters a returned DTO,
 // scheduler snapshot, cache, database queue, or broker payload.
-// envelopeForCarrier maps a carrier generation to the envelope generation it carries. The
-// mapping is EXACT: an unknown carrier is an error, not a guess. The earlier version
-// promised to "degrade to the oldest envelope" and then returned the NEWEST for anything
-// above 3, leaving the job's protocol version at the unknown value — the comment and the
-// code disagreed, and the honest answer is that a carrier we do not know is a wiring bug we
-// must not paper over on either side.
+// envelopeForCarrier maps a carrier generation to the envelope generation it carries.
+//
+// It DELEGATES to `dispatch.EnvelopeForCarrier`, which is the single owner of that mapping, so
+// the producer and every executor evaluate one expression rather than two that agree today. They
+// did not agree: this side was exact from the day generation 3 shipped, while the consuming side
+// enforced only a floor, and a generation-1 envelope rode the generation-3 carrier to the prober
+// with no execution-body binding (reviewer P0 found auditing `0a1557c..d0a8fed`).
 func envelopeForCarrier(carrierGeneration int) (int, error) {
-	switch carrierGeneration {
-	case dispatch.ProtocolV1, dispatch.ProtocolV2:
-		return dispatch.EnvelopeV1, nil
-	case dispatch.ProtocolV3:
-		return dispatch.EnvelopeV2, nil
-	// Generation 4 adds JOB IDENTITY on top of what generation 3 carries, so its envelope is
-	// still v2 (FR-032 §13.0). B1 could not observe this gap — it refused the setting that
-	// selects the carrier — and without the case a credentialed monitor in a ledger-announcing
-	// region would have failed materialization with "no envelope generation for carrier 4",
-	// which reads as a wiring bug and is really a missing line.
-	//
-	// A v4 announcement also proves the executor's CODE is at least as new as v3, so envelope v2
-	// is supported there by construction; whether its region has a dispatch KEY provisioned is a
-	// separate, pre-existing concern already signalled by the `no_dispatch_key` probe error, and
-	// it is not a version question.
-	case dispatch.ProtocolV4:
-		return dispatch.EnvelopeV2, nil
-	default:
-		return 0, fmt.Errorf("store: no envelope generation for carrier %d", carrierGeneration)
-	}
+	return dispatch.EnvelopeForCarrier(carrierGeneration)
 }
 
 // MaterializeExecutionConfigs builds dispatch-ready jobs for the given monitors.

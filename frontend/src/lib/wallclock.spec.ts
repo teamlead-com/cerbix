@@ -380,6 +380,39 @@ describe("the mechanism's shape", () => {
   // So the exemption is a CHECK now: a file that renders one of these controls must render the
   // matching hint at least as many times as it has controls. A seventh input added tomorrow with
   // no hint fails here by file name, which is what an allow-list of views would not do.
+  // The comment filter is itself a mechanism, so it is pinned rather than trusted. Two dangers,
+  // opposite in direction: it must remove what an operator cannot see, and it must NOT remove code
+  // that only LOOKS like a comment — a `https://` in a template, a glob in a doc comment — because
+  // a filter that eats real source makes every scan above quietly weaker.
+  it("removes comments and nothing else", () => {
+    expect(stripComments('<!-- {{ localInputZoneHint(x) }} -->')).not.toContain("localInputZoneHint");
+    expect(stripComments("/* localInputZoneHint(x) */")).not.toContain("localInputZoneHint");
+    expect(stripComments("  // localInputZoneHint(x)")).not.toContain("localInputZoneHint");
+    // NOT a comment: a URL, and a line where the slashes are not the first thing on it.
+    expect(stripComments('const u = "https://example.test/x";')).toContain("https://example.test/x");
+    expect(stripComments("const a = 1; // trailing")).toContain("const a = 1;");
+    // Applied to the real tree it must change NO count that any scan above depends on. This is
+    // the assertion that a stricter filter cannot quietly shrink the inventory.
+    const PATTERNS: [string, RegExp][] = [
+      ["datetime-local", /type="datetime-local"/g],
+      ["date", /type="date"/g],
+      ["hint", /(?<!Range)localInputZoneHint\(/g],
+      ["range", /localInputRangeZoneHint\(/g],
+      ["utcDay", /utcDayInputHint\(/g],
+    ];
+    const changed: string[] = [];
+    for (const file of walk(SRC).filter((f) => f.endsWith(".vue"))) {
+      const raw = readFileSync(file, "utf8");
+      const stripped = stripComments(raw);
+      for (const [name, pat] of PATTERNS) {
+        const a = (raw.match(pat) ?? []).length;
+        const b = (stripped.match(pat) ?? []).length;
+        if (a !== b) changed.push(`${file.split("/src/")[1]}: ${name} ${a} -> ${b}`);
+      }
+    }
+    expect(changed, "the comment filter changed a count on the real tree").toEqual([]);
+  });
+
   it("gives every zone-free INPUT a surface that names the zone it is read in (NFR-025)", () => {
     const CONTROLS: [RegExp, RegExp, string][] = [
       [/type="datetime-local"/g, /(?<!Range)localInputZoneHint\(/g, "localInputZoneHint"],

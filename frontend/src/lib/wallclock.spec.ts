@@ -189,7 +189,7 @@ describe("the mechanism's shape", () => {
   }
 
   it("exports named instant and cell-extent functions and no generic date formatter", () => {
-    const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
+    const src = stripComments(readFileSync(join(SRC, "lib/wallclock.ts"), "utf8"));
     const exported = [...src.matchAll(/export function (\w+)/g)].map((m) => m[1]).sort();
     expect(exported).toEqual([
       "instantLabel", "instantLabelShort", "instantRangeLabel",
@@ -208,7 +208,7 @@ describe("the mechanism's shape", () => {
         // Import statements are stripped FIRST. Matching the bare name counted an unused import
         // as a caller, which is exactly the state a dropped call site leaves behind — the
         // mutation that removed `utcMillisLabel`'s only call survived on its own import line.
-        const text = readFileSync(f, "utf8").replace(/import[\s\S]*?from\s*["'][^"']*["'];/g, "");
+        const text = stripComments(readFileSync(f, "utf8")).replace(/import[\s\S]*?from\s*["'][^"']*["'];/g, "");
         return new RegExp(`\\b${fn}\\s*\\(`).test(text);
       });
       expect(callers.length, `${fn} is exported and nothing calls it`).toBeGreaterThan(0);
@@ -225,7 +225,7 @@ describe("the mechanism's shape", () => {
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
       if (file.endsWith("wallclock.ts") || file.endsWith("wallclock.spec.ts")) continue;
-      const text = readFileSync(file, "utf8");
+      const text = stripComments(readFileSync(file, "utf8"));
       for (const m of text.matchAll(/toLocale(?:Date|Time)?String\s*\(/g)) {
         offenders.push(`${file.split("/src/")[1]}: ${m[0]}`);
       }
@@ -276,7 +276,7 @@ describe("the mechanism's shape", () => {
   // may never hand `partsAt` anything but the literal "UTC". Dropping that argument — the obvious
   // refactor, since `partsAt`'s zone is optional — fails here by name.
   it("pins UTC in every zone-less renderer, so none of them inherits the runner's zone", () => {
-    const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
+    const src = stripComments(readFileSync(join(SRC, "lib/wallclock.ts"), "utf8"));
     const bodies = [...src.matchAll(/export function (\w+)\(([\s\S]*?)\):[\s\S]*?\n\}/g)];
     const offenders: string[] = [];
     let checked = 0;
@@ -299,7 +299,7 @@ describe("the mechanism's shape", () => {
   // `MonitorDetailView.spec.ts` proves the rendering reaches a reader on one of them.
   it("splits the day strips' lookup key from what their tooltip shows", () => {
     for (const rel of ["views/DashboardView.vue", "views/MonitorDetailView.vue", "views/PublicStatusView.vue"]) {
-      const text = readFileSync(join(SRC, rel), "utf8");
+      const text = stripComments(readFileSync(join(SRC, rel), "utf8"));
       expect(text, `${rel} no longer builds a day strip — this guard has to move`).toContain("utcDayBefore(today, i)");
       expect(text, `${rel} shows its lookup key instead of a labelled day`).toMatch(/label:\s*utcDayLabel\(/);
     }
@@ -344,7 +344,7 @@ describe("the mechanism's shape", () => {
     // The two buckets ARE the module's zone-less exports, no more and no less — so a new renderer
     // fails here until somebody decides which form it is in, and a rename cannot leave a stale
     // entry behind.
-    const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
+    const src = stripComments(readFileSync(join(SRC, "lib/wallclock.ts"), "utf8"));
     const zoneless = [...src.matchAll(/export function (\w+)\(([\s\S]*?)\):/g)]
       .filter((m) => !/\bzone\??\s*:/.test(m[2]))
       .map((m) => m[1])
@@ -509,7 +509,7 @@ describe("the mechanism's shape", () => {
     // take `zone`, and the guard did not follow them — reviewer P2 at party [199]. A hand list is
     // what rots, so this one reads the parameter position out of the source and a future export
     // taking a `zone` is covered the moment it exists.
-    const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
+    const src = stripComments(readFileSync(join(SRC, "lib/wallclock.ts"), "utf8"));
     const zoneArg: Record<string, number> = {};
     for (const m of src.matchAll(/export function (\w+)\(([\s\S]*?)\):/g)) {
       const params = splitTopLevel(m[2]);
@@ -544,7 +544,7 @@ describe("the mechanism's shape", () => {
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
       if (file.endsWith("wallclock.ts") || file.endsWith("wallclock.spec.ts")) continue;
-      const text = readFileSync(file, "utf8");
+      const text = stripComments(readFileSync(file, "utf8"));
       const WC = /["'][^"']*lib\/wallclock["']/;
       /** what this file calls it -> what the module exports */
       const local: Record<string, string> = {};

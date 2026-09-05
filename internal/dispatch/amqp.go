@@ -640,6 +640,29 @@ func (d *AMQP) Jobs() <-chan DeliveredJob {
 					d.deadLetter(source, body)
 					return false
 				}
+				// FR-032 invariant 10i. A generation-4 delivery is DEFINED by carrying job
+				// identity, so one missing a field is a PROTOCOL VIOLATION and not a
+				// rolling-upgrade case. The distinction is drawn on the CARRIER — the queue this
+				// message was consumed from — and never on the body's own ProtocolVersion, which
+				// is the field an attacker can edit and the tolerant branch below is one `if`
+				// away from covering.
+				//
+				// The same absence on an OLDER carrier is ordinary: an executor that predates
+				// generation 4 drops the unknown field, the result returns with DueAt zero, and
+				// the window is simply not ledger-eligible. That is the case `RequireLedgerFields`
+				// exists to separate.
+				//
+				// Dead-lettered rather than dropped: `deadLetter` forwards the poison body to the
+				// durable queue so it survives for inspection instead of vanishing, and a silent
+				// drop would satisfy any assertion that only checks "no probe ran".
+				if RequireLedgerFields(generation) {
+					if missing := job.LedgerFieldsMissing(); missing != "" {
+						d.logger.Error("dispatch_v4_job_missing_identity",
+							"monitor_id", job.Monitor.ID, "field", missing, "carrier", generation)
+						d.deadLetter(source, body)
+						return true
+					}
+				}
 				select {
 				case d.jobsCh <- DeliveredJob{Job: job, CarrierGeneration: generation}:
 					return true

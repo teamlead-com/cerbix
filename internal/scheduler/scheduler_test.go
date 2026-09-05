@@ -46,6 +46,18 @@ type fakeStore struct {
 	// carrierPolicies records every carrier-generation map the materializer was handed, so a test
 	// can assert what generation core DECIDED a region may receive.
 	carrierPolicies []map[string]int
+	// FR-032 phase B2 fixtures and recordings.
+	expectations     map[string]store.DueExpectation
+	expectationsErr  error
+	expectationLoads [][]string
+	advances         []store.ExpectationAdvance
+	advanceNow       time.Time
+	advanceErr       error
+	pullV4Payloads   [][]byte
+	// FR-032 phase D recordings.
+	expectedRunCutoffs []time.Time
+	hotSamples         int
+	hotStat            metrics.ExpectedRunHOTStat
 	// ledgerReadyPullRegions is what the PULL half of FR-032's capability question answers.
 	ledgerReadyPullRegions map[string]bool
 
@@ -163,7 +175,18 @@ func (f *fakeStore) MaterializeExecutionConfigs(_ context.Context, ids []string,
 		if g := carrier[m.Region]; g > generation {
 			generation = g
 		}
-		out = append(out, store.MaterializedExecution{MonitorID: id, Job: dispatch.CheckJob{Monitor: m, ProtocolVersion: generation}})
+		// FR-032: the real materializer joins monitor_schedule in the SAME statement that mints
+		// the job identity, so a job on the ledger carrier ALWAYS carries the window it answers
+		// and a monitor with no schedule row is capped below it. A fake that skipped that would
+		// let a test pass while core published a v4 delivery a v4 consumer must dead-letter.
+		job := dispatch.CheckJob{Monitor: m, ProtocolVersion: generation}
+		if exp, ok := f.expectations[id]; ok {
+			job.DueAt, job.JobID, job.IssuedAt = exp.DueAt, exp.JobID, exp.IssuedAt
+		} else if generation >= dispatch.ProtocolV4 {
+			generation = dispatch.ProtocolV3
+			job.ProtocolVersion = generation
+		}
+		out = append(out, store.MaterializedExecution{MonitorID: id, Job: job})
 	}
 	return out, nil
 }
@@ -362,8 +385,62 @@ func (f *fakeStore) EnqueuePullJobV3(context.Context, string, []byte, int, int, 
 	return nil
 }
 
-// LiveCredentialReadyAgentRegions mirrors the real predicate: a region is ready at a floor when a live
-// agent announced at least that envelope capability. Nothing announced by default.
+func (f *fakeStore) EnqueuePullJobV4(_ context.Context, _ string, payload []byte, _, _ int, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pullGenerations = append(f.pullGenerations, dispatch.ProtocolV4)
+	f.pullV4Payloads = append(f.pullV4Payloads, payload)
+	return nil
+}
+
+// FR-032 phase B2. The ledger's three leader-side statements, recorded rather than executed: the
+// fake is what lets a scheduler test assert on the ARGUMENTS of an advance — which window it
+// fenced against, which skip reason it carried, which carrier it recorded — without a database.
+func (f *fakeStore) LoadDueExpectations(_ context.Context, monitorIDs []string) (map[string]store.DueExpectation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.expectationLoads = append(f.expectationLoads, append([]string(nil), monitorIDs...))
+	if f.expectationsErr != nil {
+		return nil, f.expectationsErr
+	}
+	out := map[string]store.DueExpectation{}
+	for _, id := range monitorIDs {
+		if exp, ok := f.expectations[id]; ok {
+			out[id] = exp
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) AdvanceExpectations(_ context.Context, now time.Time, items []store.ExpectationAdvance) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.advanceNow = now
+	f.advances = append(f.advances, items...)
+	if f.advanceErr != nil {
+		return 0, f.advanceErr
+	}
+	return len(items), nil
+}
+
+func (f *fakeStore) EnsureExpectedRunPartitions(context.Context, int) error { return nil }
+
+// FR-032 phase D. The fake records the cutoff the LEADER computed, which is the half the scheduler
+// owns: what a cutoff means once given belongs to the store and is tested there.
+func (f *fakeStore) PurgeOldExpectedRuns(_ context.Context, cutoff time.Time) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.expectedRunCutoffs = append(f.expectedRunCutoffs, cutoff)
+	return 0, nil
+}
+
+func (f *fakeStore) ExpectedRunHOTRatio(context.Context) (metrics.ExpectedRunHOTStat, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hotSamples++
+	return f.hotStat, nil
+}
+
 func (f *fakeStore) LiveCredentialReadyAgentRegions(_ context.Context, _ time.Duration, minCapability int) (map[string]bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

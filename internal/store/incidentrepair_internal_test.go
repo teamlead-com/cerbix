@@ -308,12 +308,23 @@ func probeDatabaseAt(
 	}
 	return db, notices, func() {
 		_ = db.Close()
-		// The drop runs under its OWN deadline — the test's context may be nearly spent by the time
-		// cleanup runs (a declarative full-suite run under load saw "drop probe database: timeout:
-		// context deadline exceeded" after the test body had passed) — terminates any straggling
-		// session on the probe first, and retries once. A leaked probe database still fails the
-		// test: leaks must be visible, not silent.
-		dctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		// The drop runs under its OWN deadline, terminates any straggling session on the probe
+		// first, and retries once. A leaked probe database still fails the test: leaks must be
+		// visible, not silent.
+		//
+		// The budget is THREE MINUTES, matching `TestDailyStripDaysAreUTCUnderANonUTCSession`'s
+		// probe cleanup, which reached the same conclusion first and wrote down why: `DROP
+		// DATABASE` queues behind the catalog work of every other package creating and migrating
+		// databases during a full run, and a short budget fails the test for a reason that says
+		// nothing about the code under test. This site kept 45 seconds and FR-032's phase B2 —
+		// which adds about five percent to this package's work — turned that into a reproducible
+		// failure: three runs of the new tree, three failures, against two green runs of a parked
+		// baseline on the same host. Polling `pg_stat_activity` through a failing run showed the
+		// drop parked on `IPC/CheckpointDone` for 47 seconds, and the same run's `tzprobe` drop
+		// waiting 47.8 seconds and passing — the same operation, tolerated at one site and not the
+		// other. Requesting an explicit CHECKPOINT first does not help, because that statement
+		// waits for the in-flight checkpoint too and spends the same budget.
+		dctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		var lastErr error
 		for attempt := 0; attempt < 2; attempt++ {

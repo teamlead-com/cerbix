@@ -689,6 +689,85 @@ Migration `00063` refuses to roll back while any generation-3 row exists in eith
 reports the total. That refusal is step 5 enforced where a rollback would otherwise discard
 pending jobs and in-flight Test Connections.
 
+### Carrier generation 4 — the expected-run ledger, and what a rollback costs
+
+Generation 4 (`checks.jobs.v4.<region>`, `/api/v1/agent/v4/jobs`) carries JOB IDENTITY: the job id,
+its issue instant, and the DUE WINDOW the run answers (FR-032). It is not an envelope generation —
+it adds identity on top of what generation 3 carries, and its envelope is still v2 — so everything
+in "Carrier generations" above applies to it unchanged, with three additions.
+
+**1. Selection needs an announcement AND the flag.** A region is emitted at generation 4 only when
+its executors announce the capability — an AMQP worker by consuming the v4 queue, a pull agent by
+declaring `capabilities.ledger` on its heartbeat, an in-process `role=all` runner by being this
+binary — and `ledger.carrier_enabled` is on. Check both before concluding the ledger is broken:
+
+```sql
+SELECT region, agent_id, capabilities->>'ledger' AS ledger
+  FROM agent_heartbeats WHERE seen_at > now() - interval '2 min' ORDER BY region, agent_id;
+```
+
+and the consumer count on `checks.jobs.v4.<region>` for AMQP. An agent announces the capability
+only after a v4 claim has actually SERVED it, so a fresh agent advertises nothing until its first
+successful claim — that is deliberate: announcing what you do not claim authorizes core to place a
+row nobody will take, and the monitor then has no outcome until the row's TTL.
+
+**2. With the flag OFF the ledger still records, and every window reads `unknown`.** Recording what
+was EXPECTED is not gated; only the carrier is. So turning the flag on starts producing truth from
+the next tick with no backfill, and turning it off costs TRUTH rather than correctness — windows
+stop being answerable, and nothing is lost or double-probed.
+
+**3. A rollback drains through paths that already exist, and TTL is the bounded fallback rather
+than the drain.** On rollback the scheduler stops selecting 4 and immediately resumes publishing at
+the region's previous generation. In-flight work then reaches a terminal state on FOUR paths across
+two surfaces, which is worth stating because every earlier version of this rule named one:
+
+| Surface | The ordinary path | The bounded fallback |
+| --- | --- | --- |
+| `pull_jobs` | `AckPullJobs` deletes the row once the agent has reported | `PurgeExpiredPullJobs` removes it past its TTL |
+| `pull_tests` | `GetPullTestResult` deletes the row as its caller CONSUMES the result | `PurgeExpiredPullTests` removes it past its TTL |
+
+On `pull_tests` that distinction has teeth: a row whose probe has finished holds an answer nobody
+has read yet, so treating expiry as the drain describes discarding it as routine. Follow steps 1–5
+of "Dropping support for an old generation" with `protocol_version = 4`, and note that migration
+`00102`'s rollback drops `expected_runs` and `monitor_schedule` — the ledger's own history — while
+`00101`'s refuses while any generation-4 pull row is pending. The second is boundary safety; the
+first is a deliberate data loss you are accepting when you roll back past the ledger, and the
+windows it drops cannot be reconstructed.
+
+**Async canaries have no generation-4 carrier in this release**, so their windows read `unknown`
+permanently rather than transiently. That is a stated limitation, not a symptom.
+
+### The expected-run ledger: what to watch, and what a number there means
+
+`expected_run_retention_days` (14, bounds 2–90) is the ledger's own window and is deliberately below
+the heartbeats' 30 and the gate ledger's 90: a window's evidentiary value decays faster than a
+heartbeat's. The leader's hourly maintenance pass creates tomorrow's partitions, drops those whose
+whole range is past the cutoff, and purges rows that leaked into the DEFAULT partition — the last of
+which the gate ledger's retention never has to do, because this table has a default partition
+precisely so an insert is never lost and having one means retention must reach into it.
+
+`cerbix_expected_runs_hot_update_ratio` is the storage design's own gate (spec §11). It is ONE
+unlabelled gauge over the retention window — partition names are unbounded over time, so labelling
+by them would be a high-cardinality mistake — and it is **not published at all** while nothing has
+updated: the ratio is undefined then, and 0 or 1 would be a lie in whichever direction happened to
+be convenient. The counters `cerbix_expected_runs_updates_total` and
+`cerbix_expected_runs_hot_updates_total` are always exported once the pass has sampled.
+
+**A ratio below 0.90, sustained past 1,000 updates, is a design signal rather than an incident.**
+It says HOT pruning is not reclaiming versions fast enough at this installation's arrival spread,
+and the response is the append-only variant the spec keeps specified for exactly this outcome — a
+storage-layer swap behind the same read API. Do not respond by lowering `fillfactor` expectations or
+by widening retention; neither addresses what the number says.
+
+**Reading a window's verdict.** `covered` is the only verdict that licenses a stroke on the Response
+time panel. `covered_late` means a run happened and produced an admissible outcome but was issued
+later than the interval that spaced its window, so the observation is too far away to prove it — it
+is not a failure and not an alert. `unknown` means the window was dispatched below the ledger
+carrier, which is the ordinary reading during a rollout and permanent for async canaries.
+`expected_never_issued` covers both a window nothing ran in and one cerbix deliberately skipped,
+with `skip_reason` telling them apart. And **before `ledger_from` a surface may claim nothing at
+all** — not covered, and not never-issued either.
+
 ### Rotate a regional dispatch key
 
 At-rest `reencrypt` does not touch broker or pull payloads. For one region:

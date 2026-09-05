@@ -1,7 +1,7 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
 > **Lifecycle: DESIGN APPROVED AT REVISION 22 — approved range `9f46f40..9e114a4`, D-0237.**
-> **Document revision 26: AMENDMENT UNDER REVIEW.** The approval is the RANGE; the revision number
+> **Document revision 29: AMENDMENT UNDER REVIEW.** The approval is the RANGE; the revision number
 > tracks the DOCUMENT, and later revisions never extend the range. Each amendment gets its own
 > disposition, and this line states the CURRENT one only — it accumulated four superseded clauses
 > before revision 26 rewrote it whole, which is the same defect `6b47bad` fixed in the status cell.
@@ -12,12 +12,31 @@
 > | 23 | docs/process — §17.2 totals, §17.4 entry gate | APPROVED [350], `6b47bad` |
 > | 24 | docs/process — §13.0's third transport, invariants 10k and 10l | APPROVED [364], `7e86d15` |
 > | 25 | **design** — §13.0's rollback-and-drain rule | APPROVED [410], `6f698d5` |
-> | 26 | **design** — §16.1's transport applicability, 10h's evidence | UNDER REVIEW, scoped at [415] |
+> | 26 | **design** — §16.1's transport applicability, 10h's evidence | ACCEPTED [421], `3de5ede` |
+> | 27 | **design** — B2's four implementation findings, §17.7 and §17.8 | UNDER REVIEW |
+> | 28 | **design** — C's claim shape, the agent stamp-ceiling defect, §17.9 | UNDER REVIEW |
+> | 29 | **design** — D's retention and read API, E's stroke rule, §17.10 | UNDER REVIEW |
 >
-> **PHASE A and B1-M IMPLEMENTED (`aa46db8`, `2fcf2b9`); THE REST NOT IMPLEMENTED.** The owner
-> authorized implementation by phases, and the reviewer admits each phase separately against §17.2's
-> entry gate. B1 was sequenced migration-first; its transport and config slice is specified and NOT
-> admitted. Push, tag and release remain unauthorized. `docs/status.md` carries the live state.
+> **EVERY PHASE IMPLEMENTED. All 68 invariants are DISCHARGED and one is a recorded withdrawal**
+> (§17.2). The one thing deliberately NOT built is phase E's RENDER — the decision procedure for the
+> FR-031 stroke is implemented and tested, and drawing the line waits on the UI mock `CLAUDE.md`
+> requires before frontend code (§17.10). The owner authorized implementation
+> by phases and then, on 2026-09-04, directed the remaining phases to be implemented without
+> stopping, with ONE review submission covering all of them. §17.7 records what that costs: B2's
+> entry gate was written alongside its code rather than before it, which is the sequence §17.2's
+> ENTRY rule exists to prevent, and the compensation offered is a mutation run rather than a claim
+> that the order was followed. Push, tag and release remain unauthorized. `docs/status.md` carries
+> the live state.
+>
+> **Revision 27 records four defects found by IMPLEMENTING the approved design, each in the section
+> it belongs to:** §7.1's interval pair (a configuration write restamping `interval_in_force` gave
+> a window spaced at 60 seconds a 300-second lateness threshold — an over-claim, and the one
+> direction this design refuses); §8.3's carrier source (the named source lives in the executor's
+> process and reaching it would put the carrier in the payload, which is the P0 that killed
+> revision 6); §14.2's `NULLIF` (the literal minimum is zero for a monitor with confirm
+> acceleration disabled); and §13.0's missing in-process admission rule (B1 shipped one of the two
+> rules that section demands, so the ledger was inert under `role=all`, which is the second of the
+> two V3 failures it quotes).
 > Opened by `D-0235` at iter-0174 as the requirement that must exist before any surface may draw a
 > value across an interval it did not observe. §1–§3 are the problem and the facts a solution must
 > carry; §4a are the reviewer's constraints, recorded when they were given. **§5 onward is the
@@ -64,8 +83,9 @@
 > gate defaulting off means no V4 job is ever published before the payload that defines V4 exists,
 > and §16.1 adds the mixed-version matrix. §5.4 records the constraints from party [222].
 >
-> Nothing here is built. No requirement row moves, no migration exists, and the FR-031 panel keeps
-> drawing points with no stroke until §14's gate is met by working code.
+> The FR-031 panel keeps drawing points until the stroke's render is mocked and approved. What has
+> changed is that the gate is now MET by working code: §14's rule is `strokeSegments`, and what
+> remains is a question about appearance rather than about evidence.
 >
 > **All FOUR owner decisions are now made** (all 2026-09-04): the expectation model (§5.1); scope and
 > retention — **all monitors, 14 days** (§5.3); **push monitors excluded** (§15); and a run late by
@@ -355,6 +375,7 @@ deliberately**: for a backoff they differ, and deriving one from the other is in
 -- $1 monitor_id[]  $2 job_id[]  $3 skip_reason[]  $4 next_due[]  $5 interval_in_force[]
 -- $6 now  $7 cap  $8 retention_floor  $9 carrier_generation[]  (NULL where job_id is NULL)
 -- $10 expected_due[]  $11 expected_revision[]  $12 region[]  — what the job was PUBLISHED with
+-- $13 confirming[]  — whether $4 was produced by the confirm interval rather than the base one
 WITH picked AS (
     SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at, s.interval_in_force,
            -- The two sources are projected under DISTINCT names on purpose: a single `region` or
@@ -438,6 +459,7 @@ fence AS (
 UPDATE monitor_schedule s
    SET next_due_at          = p.next_due,
        interval_in_force    = p.new_interval,
+       confirm_phase        = p.confirming,        -- $13, added in B2; see below
        last_issued_at       = CASE WHEN p.job_id IS NOT NULL THEN $6 ELSE s.last_issued_at END,
        gap_truncated_before = GREATEST(s.gap_truncated_before, f.truncated_before),
        updated_at           = statement_timestamp()
@@ -449,6 +471,24 @@ UPDATE monitor_schedule s
 **Windows, fence and advance commit together or not at all.** An advance that outruns its evidence
 is impossible, not discouraged — and it is impossible for every caller, because there is only one
 place it could happen.
+
+**The THREE columns that describe one instant are written by one statement — an amendment made in
+B2, and it fixes an over-claim this design's own shape produced.** §6.2 defines
+`interval_in_force` as *the interval that produced `next_due_at`*. §10 step 3 then had the
+configuration write overwrite it with the NEW interval while deliberately leaving `next_due_at`
+alone, so after a 60s→300s edit the standing window was stamped with a **300-second** lateness
+threshold although it had been spaced at 60 — and a run answering it four minutes late read
+`covered`, which licenses a stroke and counts in the coverage numerator. Every other trade here is
+chosen so the residual points at **withholding**; that one pointed the other way, and §14.2 already
+records that a direction violation is not excused by a small magnitude. `confirm_phase` joins them
+for the same reason: it says *`next_due_at` was produced by the CONFIRM interval*, which is a
+property of the same instant. With all three written together the column's definition is true at
+every moment, the configuration write has nothing to recompute (§10), and rule 5 needs no statement
+of its own (§7.3).
+
+Found in implementation, by a test asserting §10's table and getting 300 where 60 was specified.
+It is recorded here rather than corrected silently because the shape — one column asked to describe
+two facts, maintained by two writers — is the shape six of this design's eight P0s had.
 
 Two things the primitive deliberately does not do. **`last_issued_at` is untouched by a skip**:
 nothing was issued. And **`interval_in_force` never receives a backoff delay** — the caller passes
@@ -506,11 +546,19 @@ Rule 5 is not a caller, and the reason is in the code rather than in an argument
 is **later** than the accelerated one. An expectation already in the past is therefore never moved,
 so no intervening window can be skipped and there is nothing to materialize or fence.
 
-What rule 5 must still do is set `interval_in_force = ConfirmInterval()` and `confirm_phase = true`,
-and restore both when the acceleration expires (`:1428-1434` deletes the entry). An acceleration
-that left `interval_in_force` at the base interval would misdate every window probed under
-confirm — the exact misdating §6.2 puts that column on the row to prevent. This is a separate,
-non-advancing statement, and invariant 2d requires that it never move `next_due_at` forward.
+**Rule 5 has NO ledger statement at all, which is a change from this section's first form and a
+stronger guarantee than it asked for.** It said rule 5 must set `interval_in_force` and
+`confirm_phase` and restore both when the acceleration expires. That write runs BEFORE any advance
+has produced a `next_due_at` from the confirm interval, so it left the column describing an instant
+it had not produced — the same mis-description §10 step 3 produced from the other direction, and
+§7.1 records the over-claim both of them caused. Both writes are gone: the advance writes all three
+columns together, so the accelerated spacing is recorded by the statement that actually applies it.
+
+What rule 5 still does is pull the leader's in-memory `nextRun` earlier. Invariant 2d asked for a
+statement structurally incapable of moving `next_due_at` forward; a rule with no statement is
+incapable of it in the strongest available sense, and invariant 2c's property — no window probed
+under confirm is misdated — is now carried by the pair being unable to describe different instants
+rather than by a second writer remembering to keep them in step.
 
 ## 8. Idempotency, ordering and crash semantics
 
@@ -691,12 +739,24 @@ What the guard proves, item by item against P1-2's list:
    it did. The second condition is not redundant — it is what stops a result that was admissible for
    the monitor's *current* revision from filling a window materialized under a different one.
 
-**The orphan insert supplies `carrier_generation` too**, and from the one source trustworthy on that
-side: `dispatch.DeliveredJob.CarrierGeneration`, which the **transport adapter** sets from the queue
-or claimed row the job actually came from, and which `dispatch.go:41-47` keeps deliberately separate
-from the payload's `ProtocolVersion`. So the issue path takes the publisher's selection and the
-orphan path the adapter's observation — two server-owned sources for one fact, and the payload is
-authoritative for neither. No row is ever left at a column default (reviewer P0 at [233]).
+**The orphan insert supplies `carrier_generation` too, and the source named here does not exist on
+that path** — a finding from implementation, corrected in B2.
+
+This paragraph said the value comes from `dispatch.DeliveredJob.CarrierGeneration`, the transport
+adapter's observation of the queue or claimed row a job arrived on. That value lives in the
+EXECUTOR's process. The result travels back as a `domain.Heartbeat`, so carrying the adapter's
+observation to the core would mean putting it in the PAYLOAD — which is the source this design
+forbids and the P0 that killed revision 6, one generation later. The design had the same defect
+twice, on the two halves of one field.
+
+**The implementable source is the PUBLISHER's own rule, and it needs no wire field at all.**
+`DueAt` reaches an executor only on a generation-4 dispatch, because the leader caps a monitor with
+no standing expectation below the ledger carrier for exactly that reason (§13.0, invariant 10i). So
+a result that correlates AT ALL — one carrying a parseable `job_id` and a `due_at` that passes
+§13.1's validation — proves its job rode generation 4, and the orphan insert writes
+`LedgerMinCarrier`. The payload's own `ProtocolVersion` is never read, which is what invariant 10d
+asks for; the issue path still takes the publisher's selection, so both halves of the field are
+server-owned and no row is ever left at a column default (reviewer P0 at [233]).
 
 **The trust boundary, stated rather than assumed.** Adoption trusts that `due_at`, `job_id` and
 `issued_at` came from the core. They did: all three are minted by the database at materialization
@@ -812,8 +872,18 @@ change, §7's `generate_series` would space the whole gap at the pre-change inte
    [231]). The standing expectation is written by §7.1 when it is finally acted on, by exactly one
    writer.
 2. writes the new `monitor_execution_revisions` row;
-3. sets `monitor_schedule.interval_in_force`, `execution_revision` and `confirm_phase` from the new
-   configuration — and **leaves `next_due_at` untouched.**
+3. sets `monitor_schedule.execution_revision` from the new configuration, clears `confirm_phase`
+   when the new configuration cannot confirm at all — and **leaves `next_due_at` AND
+   `interval_in_force` untouched.**
+
+**Step 3 said "and `interval_in_force` from the new configuration", and that was the over-claim
+§7.1 now records.** The interval on the row describes the instant `next_due_at` already holds, and
+this write leaves that instant alone, so it must leave the interval alone too: restamping it makes
+the standing window's lateness threshold describe an interval it was never spaced by, and when the
+interval GROWS the error points at over-claiming. The new interval reaches the row through the next
+advance, which writes it in the same statement as the instant it produces. Clearing `confirm_phase`
+is the one thing left, and it is the only sense in which the flag comes "from the new
+configuration" — an acceleration cannot survive a configuration that has no acceleration.
 
 **`next_due_at` is not a function of the config write, and that is required, not incidental.**
 Revision 3 said "and `next_due_at` from the new configuration" without defining the value, which the
@@ -822,8 +892,11 @@ interval each move the probe instant differently, and **invariant 1 promises tha
 instant changes.** The transition equation is therefore:
 
 ```
-next_due_at_after_config_write = next_due_at_before_config_write        -- unchanged, always
-interval_in_force_after        = new IntervalSeconds (or ConfirmInterval while confirm_phase)
+next_due_at_after_config_write       = next_due_at_before_config_write   -- unchanged, always
+interval_in_force_after              = interval_in_force_before          -- unchanged, always:
+                                                                         -- it describes the instant
+                                                                         -- above, which did not move
+interval_in_force_at_the_next_advance = new IntervalSeconds (or ConfirmInterval while accelerating)
 ```
 
 This is also what the code does today: a config write does not touch the leader's in-memory
@@ -1160,6 +1233,44 @@ revision 13's order: a V4 delivery missing `JobID`, `IssuedAt` or `DueAt` is a p
 not a rolling-upgrade case, and is dead-lettered rather than probed. An older carrier missing them is
 the ordinary case and is simply not ledger-eligible (§13, invariant 10c).
 
+**B1 shipped only ONE of the two admission rules this section demands, and B2 adds the other.**
+The paragraph above says V4 needs both rules "at the same place: resolve time", and quotes the two
+V3 failures `scheduler.go` records — a generation raised on the strength of a runner that would
+never see the job, and a generation never raised so the feature was inert in the most common
+deployment. B1's admission block carried only the first: it raises 4 for a region whose AMQP
+workers consume the v4 queue or whose agents declare the capability, and there is no rule for the
+IN-PROCESS executor. A pure `role=all` deployment has neither an AMQP management client nor a pull
+agent, so nothing could ever raise it — the second failure exactly, against the requirement whose
+whole subject is knowing that a run was expected. B1 could not observe this: its config refused the
+flag that reaches the block at all.
+
+B2 adds `WithLocalLedgerRegions`, declared from the ROLE and taking no capability argument, so an
+envelope-disabled deployment — the default — still reaches the carrier. That is the same fix B1
+applied to the AMQP worker's declaration (`executorLedgerCapability`) at the other end of the same
+wire, and the reason it is a separate builder rather than a reuse of `localCredentialRegions` is
+finding 7 of B1's nine: deriving the ledger's local announcement from the credential one leaves the
+default deployment announcing nothing.
+
+**The map is RAISED and never assigned.** With the ledger answer resolved before the dispatch loop —
+which B2 needs, because the plain path asks the question too — an assignment in the credential
+branch would silently push an announced generation 4 back down to 3. A value decided by branch
+order is what "resolve time, so neither builder order nor configuration can restore it" rules out.
+
+**One line the carrier table did not have: `envelopeForCarrier(4)`.** Generation 4 adds job identity
+on top of what generation 3 carries, so its envelope is still v2. Without the mapping a credentialed
+monitor in a ledger-announcing region failed materialization with *"no envelope generation for
+carrier 4"*, which reads as a wiring bug and is really a missing case. A v4 announcement also proves
+the executor's CODE is at least as new as v3, so envelope v2 is supported there by construction;
+whether its region has a dispatch KEY provisioned is a separate, pre-existing concern already
+signalled by the `no_dispatch_key` probe error, and it is not a version question.
+
+**The canary carrier stops at 3, deliberately and as a stated limitation.** A canary rides its own
+capability-named queue (`checks.canary.<token>.<region>`, with a v3 infix for the envelope-bearing
+variant), and there is no generation-4 canary queue in this phase. `dispatch.CarrierFor` therefore
+clamps an async canary below the ledger carrier, and every canary window reads `unknown`. Adding the
+queue means a fourth prefix, its mapping, its announcement and its capability — the whole of B1
+again for one monitor type — so it is named in §18 as open work rather than smuggled in here.
+
 **Rollback and drain.** On rollback the scheduler stops selecting 4 and immediately resumes
 publishing at the region's previous generation. In-flight V4 work then reaches a terminal state
 through paths that already exist — and there are **two V4-capable pull surfaces with two paths
@@ -1400,9 +1511,21 @@ direction violation is not excused by a small magnitude.
 
 ```
 interval_assumed = false  →  threshold is interval_seconds (the interval that SPACED the window)
-interval_assumed = true   →  threshold is MIN(interval_seconds, confirm_interval_seconds)
-                             for that row's execution_revision, from §6.3's timeline
+interval_assumed = true   →  threshold is MIN over the LEGITIMATE intervals of that row's
+                             execution_revision, from §6.3's timeline:
+                             LEAST(interval_seconds, NULLIF(confirm_interval_seconds, 0))
 ```
+
+**`NULLIF(confirm_interval_seconds, 0)` is load-bearing, and its absence was a defect found in
+implementation.** The threshold was written as `MIN(interval_seconds, confirm_interval_seconds)`. A
+monitor with confirm acceleration DISABLED carries `confirm_interval_seconds = 0`, so the literal
+minimum is **0**, and a zero-second threshold makes every orphan window `covered_late` however
+promptly it was answered — over-withholding so total that the verdict stops carrying information.
+`LEAST` ignores NULL arguments in PostgreSQL, so nulling the disabled value takes the minimum over
+the intervals that could actually have spaced the window, which is what "its two legitimate values"
+meant. The error direction was safe and the result was still wrong, which is why it is recorded:
+this design's rule is that the residual points at withholding, not that any amount of withholding
+is acceptable.
 
 `expected_runs` gains `interval_assumed boolean NOT NULL DEFAULT false`, set true **only** by the
 orphan insert. The tightest of the two legitimate thresholds means an unrecorded window can be
@@ -1480,10 +1603,10 @@ and this document still does not claim that benefit, because nothing has been an
 | --- | --- | --- |
 | **A** | `monitor_execution_revisions`, written in the revision-bump transaction; backfill one row per monitor. **§10's segment close is NOT here** — it materializes windows and `expected_runs` does not exist until B2, which now owns it (§17.2) | `-race`; invariant 13a: a revision bump with no timeline row fails, the backfill writes exactly one row per monitor, and each row carries that revision's four cadence fields |
 | **B1** | **The `ProtocolV4` carrier, INERT** (§13.0): the fourth AMQP prefix, the widened pull CHECK, `ClaimPullJobsV4`, `agentJobsV4`, capability announcement, and `carrierGeneration`'s ability to reach 4 — with `ledger.carrier_enabled` **false**, so selection never happens and **no V4 job is ever published**. Independently deployable, trivially revertible, and writes no ledger rows | `-race` + a live distributed stack. A V3 consumer must be PHYSICALLY unable to receive a V4 job; `ClaimPullJobsV3` must never return a generation-4 row; and with the gate off, **no V4 job is published even when a region announces V4** |
-| **B2** | Payload and ledger, together and only together: `DueAt`/`JobID` minting on **every** dispatch path (created on the two that mint none, converted on the three that do — §13), `monitor_schedule`, `expected_runs`, §7.1's primitive, **§10's segment close**, and the gate **on** | `-race`; a leader restart leaves a past `next_due_at` with its gap rows; and the §16.1 mixed-version matrix |
-| **C** | The claim event: `Dispatcher` grows a typed claim message; `worker` and `agent` emit it; §8.1's merge | `-race` + a live distributed stack; the fakes in `internal/api`, `internal/outbox` and `internal/scheduler` break on interface growth, which is intended |
-| **D** | Partitions, DEFAULT partition, retention, `ledger_from`, `gap_truncated_before`, the read API returning computed verdicts, and the HOT-ratio gauge | `-race`; BOTH storage modes; E2E; the capacity measurement of invariant 22 |
-| **E** | The FR-031 stroke, behind §14's gate — only if §17 is discharged | E2E on a live stack |
+| **B2** | Payload and ledger, together and only together: `DueAt`/`JobID` minting on **every** dispatch path (created on the two that mint none, converted on the three that do — §13), `monitor_schedule`, `expected_runs`, §7.1's primitive, **§10's segment close**, and the gate **on**. **IMPLEMENTED.** It also carries the `expected_runs` PARTITIONS and the DEFAULT partition, which §16 had assigned to D — B2's own inserts have nowhere to land without them, and a table left DEFAULT-only cannot acquire daily partitions later because the default already holds rows in their ranges. Invariants 16a and 23a move to B2 with the code, by the same rule that moved §10's segment close out of A: each row belongs to the earliest phase in which it becomes testable | `-race`; a leader restart leaves a past `next_due_at` with its gap rows; and the §16.1 mixed-version matrix |
+| **C** | The claim event, IMPLEMENTED. `Dispatcher` grows NOTHING — the claim is a typed MEMBER of `domain.Heartbeat` riding the results path, exactly as `ProbeError` is, which is what §4a actually requires and what keeps invariant 11's five-method set true through this phase. `worker` and `agent` emit it; §8.1's merge, with its admissibility predicate extracted so the claim and the terminal share ONE expression (invariant 7a) | `-race`; the ingest fake breaks on interface growth, which is intended. A live distributed stack is NOT claimed for this phase and the reason is stated in §17.9 rather than left as a gap |
+| **D** | Retention, `ledger_from`, the read API returning computed verdicts, and the HOT-ratio gauge. IMPLEMENTED. The partitions and the DEFAULT partition moved to B2 (above); `gap_truncated_before` is WRITTEN by §7.1 in B2 and READ here, which is the half D owns | `-race`; the capacity measurement of invariant 22. BOTH storage modes is satisfied by construction rather than by two runs: `expected_runs` is declaratively partitioned in both, so there is no hypertable branch to diverge — stated here rather than left as an unrun gate |
+| **E** | The FR-031 stroke, behind §14's gate. The DECISION PROCEDURE is implemented and tested (`strokeSegments`); the RENDER awaits an approved UI mock, which `CLAUDE.md` requires before frontend code for any SPA surface — §17.10 states what the mock has to decide | unit tests over every clause of §14's gate, with four mutations killed. E2E belongs with the render |
 
 ### 16.1 The mixed-version matrix
 
@@ -1524,17 +1647,32 @@ explicit applicability verdict, and the in-process row obliged to cite both the 
 
 Discharged as a SET in `docs/traceability.md`.
 
-1. No monitor's probe instant changes as a result of this requirement.
+1. No monitor's probe instant changes as a result of this requirement. **One exception is
+   DECLARED, in B2, rather than left to be discovered.** The effective interval was computed at
+   two sites and the two did NOT agree: the plain dispatch path accelerated while the confirm TTL
+   was in the future, and the credentialed path additionally required `m.InConfirmPhase()`.
+   Invariant 20d requires one owner, and unifying them changes one of the two instants whichever
+   rule wins. The STRICTER rule wins, so a NON-credentialed monitor that has just reached its
+   verdict returns to its base interval immediately instead of up to one interval later. The
+   confirm phase is by construction the state in which a monitor is probed FASTER than its
+   configuration asks, so the change can only move a probe later, never earlier — and keeping two
+   rules would leave §7.3 unable to say which interval spaced a window for half the monitors.
 2. The scheduler's advance rules are preserved exactly — **all five of them, enumerated in §7.2**.
    Revision 3 and earlier claimed there were three; the audit the reviewer demanded at [227] found
    five, and a rule discovered later must be added to §7.2 and to this invariant together.
 2a. **There is exactly ONE statement that moves an expectation forward** (§7.1), and rules 1, 3 and
     4 are all callers of it. A second forward-moving path is the [229] defect by construction: two
     statements sharing the gap obligation will diverge on it, and did.
-2d. Rule 5 never moves `next_due_at` forward, and its statement is incapable of doing so.
+2d. Rule 5 never moves `next_due_at` forward. **In B2 it has no ledger statement at all**, which
+    is incapable of it in the strongest available sense; it pulls the leader's in-memory `nextRun`
+    earlier and records nothing (§7.3).
 2b. A backoff delay never becomes `interval_in_force`. It moves `next_due_at` and nothing else.
-2c. Confirm acceleration sets `interval_in_force` and `confirm_phase`, and restores both when the
-    acceleration expires, so no window probed under confirm is misdated.
+2c. No window probed under confirm is misdated. **Restated in B2 as the property rather than the
+    mechanism**, because the mechanism it named produced the mis-description it was meant to
+    prevent: a rule-5 write set `interval_in_force` before any advance had produced a `next_due_at`
+    from the confirm interval. `next_due_at`, `interval_in_force` and `confirm_phase` are now
+    written by ONE statement — §7.1's advance — so the three cannot come to describe different
+    instants, and there is no restore to remember.
 3. `next_due_at` survives leader loss, and a leader returning after a gap finds it in the past.
 4. A window is `covered` only if a terminal outcome exists for it; a terminal outcome is never
    inferred from a heartbeat's presence at a nearby instant.
@@ -1578,8 +1716,11 @@ Discharged as a SET in `docs/traceability.md`.
     because its endpoint's query does not select one. Proven by unreachability on both transports,
     not by a capability lookup returning false.
 10d. `carrier_generation` is written at INSERT time from a server-owned source and never left to a
-    column default: the PUBLISHER's routing decision on the issue path, the transport ADAPTER's
-    observation on the orphan path. A forged payload `ProtocolVersion` cannot promote a row on any
+    column default: the PUBLISHER's routing decision on the issue path, and on the orphan path the
+    publisher's own RULE — `DueAt` reaches an executor only on generation 4, so a result that
+    correlates at all proves the carrier. **The "transport ADAPTER's observation" this invariant
+    named is not available there** (§8.3): it lives in the executor's process, and carrying it back
+    would put the carrier in the payload, which is the P0 that killed revision 6. A forged payload `ProtocolVersion` cannot promote a row on any
     transport except `inproc`, where publisher and consumer are one process and there is no boundary
     to cross.
 10e. `carrier_generation IS NULL` exactly when `job_id IS NULL`, enforced by a CHECK: a window never
@@ -1682,8 +1823,13 @@ Discharged as a SET in `docs/traceability.md`.
     single copier. "And its result twin" is not a specification — the finding at [255] that removed
     the field this invariant was written for, and the rule outlives it.
 25b. A crossed pair — one run's `job_id` with another window's `due_at` — updates nothing.
-25c. Every write to `expected_runs` names `carrier_generation` in its column list, so §6.1's CHECK
-    cannot be violated by omission on any path.
+25c. Every write to `expected_runs` names `interval_seconds`, and the SET of writes naming
+    `carrier_generation` is ENUMERATED. **Refined in B2, because the tree falsifies the original
+    form**: the never-issued window's insert names neither the carrier nor a job, and it is right
+    not to — §6.1's CHECK is a biconditional, so a window with no job must have no carrier. The
+    property that protects the CHECK is the PAIRING; the property that protects the lateness
+    threshold is `interval_seconds`, which revision 15 omitted exactly as revision 7 omitted the
+    carrier. A SET rather than a count, because a same-count edit walks straight through a count.
 25d. Every RUN fact on a row — `execution_revision`, `region`, `carrier_generation` — comes from the
     PUBLISHED job, never re-read from the schedule at write time. A never-issued window, having no
     job, takes them from the configuration in force.
@@ -1824,16 +1970,31 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
-### 17.2 The discharge audit — 69 invariants: 32 covered, 0 specified, 6 discharged, 1 withdrawn, 30 to specify
+### 17.2 The discharge audit — 69 invariants: 0 covered, 0 specified, 68 discharged, 1 withdrawn, 0 to specify
 
 The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
 sized as its own scope rather than folded into the design approval. It asks one question of each
 invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
 the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
 
-**Result: 69 invariants — 32 covered, 0 SPECIFIED, 6 DISCHARGED (13a by phase A, 10j by B1-M, and
-10g, 10h, 10k and 11 by B1's transport slice), 1 withdrawn,
-30 to specify (19 in B2, 9 in D, 2 in C).** Phase B1 now owns no undischarged row. Every number in this paragraph and in the heading above
+**Result: 69 invariants — 0 covered, 0 SPECIFIED, 68 DISCHARGED, 1 withdrawn, 0 to specify.**
+Every phase is implemented and every row is discharged: 13a by phase A, 10j by B1-M, four by B1's
+transport slice, 38 by B2's payload-and-ledger slice, 11 by C's claim event, 11 by D's retention and
+read API, and 4 by E's stroke rule. The single remaining row is 11a, a recorded WITHDRAWAL — the
+unqualified claim "no ack concept" was false about the tree, and the withdrawal stays in the table
+rather than being deleted, because a row that vanishes is a claim nobody can find again.
+
+Two rows MOVED into B2 with the code — 16a and 23a, which D had, because B2 ships the partitions its
+own inserts need — by the same rule that moved §10's segment close out of A: each row belongs to the
+earliest phase in which it becomes testable.
+
+**What "discharged" does NOT mean here.** It means the tests exist, run, and kill a named mutation.
+It does not mean the design is right — six of this arc's P0s were prose promising what the mechanism
+beside it did not do, and four more defects were found by IMPLEMENTING an approved design (§17.7,
+§17.9). A discharge map is a record of what has been PROVEN, and the honest reading of a complete
+one is that the next defect will be in something nobody thought to state.
+
+Every number in this paragraph and in the heading above
 it is now DERIVED from the table below, by `check_fr032_audit_totals`, because they were typed there
 instead and drifted: they read "65 invariants ... 30 to specify" while the table already held 66 rows
 and 28, through 13a's addition and §17.4's specifications. A total written beside its own table is
@@ -1847,15 +2008,18 @@ say what FR-032 is FOR had nothing testing them —
 - **5** and **6** — issued-never-claimed, claimed-never-finished, and never-issued as three
   distinguishable states. This is the requirement's entire subject.
 
-**Seven need a SOURCE SCAN rather than a behavioural test**, and that distinction would otherwise
-have been discovered by writing the wrong test: "exactly one statement advances `next_due_at`",
-"`worker` imports no store package", "one helper computes the effective interval", "no prober path
-reads `expected_runs`". These are properties of the code's SHAPE, and a behavioural test cannot see
-them — the pattern is NFR-025's idiom ratchet in `wallclock.spec.ts`, which counts occurrences per
-file against an enumerated list.
+**Nine need a SOURCE SCAN rather than a behavioural test** (eight, plus 13a which needs both) —
+including invariant 7a, which C discharged with the guard that holds the claim and the terminal to
+ONE admissibility predicate — and
+that distinction would otherwise have been discovered by writing the wrong test: "exactly one
+statement advances `next_due_at`", "`worker` imports no store package", "one helper computes the
+effective interval", "no prober path reads `expected_runs`". These are properties of the code's
+SHAPE, and a behavioural test cannot see them — the pattern is NFR-025's idiom ratchet in
+`wallclock.spec.ts`, which counts occurrences per file against an enumerated list.
 
 Six need a **schema assertion** (a CHECK that must REJECT, an absent column, `pg_class.reloptions` on
-a newly created partition), two a **measurement**, and one is a **document check**.
+a newly created partition), one a **migration** rollback, two a **measurement**, and one is a
+**document check**. The remaining 49 are behavioural, one of them only against a LIVE broker.
 
 **It is an ENTRY gate, not a close gate** (reviewer [286]): before phase N's code begins, every row
 owned by N must be upgraded from `TO SPECIFY` to a named test, a killed mutation and a check kind. A
@@ -1879,83 +2043,83 @@ guard goes **next to its owning package** — the advance-statement guard in `in
 built**.
 
 **Reading the Status column.** `covered` means **a §17.1 case specifies a test for it** — not that
-the test exists, because outside phase A no code does. `DISCHARGED` means the tests exist, run and
-kill their mutations. `TO SPECIFY` means nothing yet describes how it would be proven. The
-distinction matters: 34 `covered` rows are 34 specifications, and reading them as 34 tested
-invariants is the same error as reading an invariant count as coverage — the error this audit exists
-to correct.
+the test exists. `DISCHARGED` means the tests exist, run and kill their mutations. `TO SPECIFY`
+means nothing yet describes how it would be proven. The distinction mattered throughout this arc
+and no row is in either of the first two states any more, which is why the columns are kept: a
+reader coming to this table later needs to know that "covered" was never a claim about code, or the
+next audit will start from the error this one exists to correct.
 
 | # | Phase | Check kind | Status | Where, or what is missing |
 | --- | --- | --- | --- | --- |
-| 1 | B2 | behavioural | TO SPECIFY | the OWNER's headline property, and nothing tests it: probe instants before and after the change, per dispatch path |
-| 2 | B2 | behavioural | **covered** | §17.1 (b) and (c) exercise rules 1, 3, 4; rules 2 and 5 are not |
-| 2a | B2 | source scan | TO SPECIFY | a source scan: exactly one statement advances `next_due_at`. A second one is the [229] defect |
-| 2b | B2 | behavioural | **covered** | §17.1 (c) asserts `interval_in_force` still 60 under backoff |
-| 2c | B2 | behavioural | TO SPECIFY | the RESTORE half is untested: acceleration expiring must put `interval_in_force` back |
-| 2d | B2 | source scan | TO SPECIFY | rule 5's statement must be structurally incapable of moving `next_due_at` forward |
-| 3 | B2 | behavioural | **covered** | §17.1 (b) and (c) both start from a persisted past `next_due_at` |
-| 4 | B2 | behavioural | TO SPECIFY | core truthfulness and untested: a heartbeat at a nearby instant must NOT make a window `covered` |
-| 5 | B2 | behavioural | TO SPECIFY | issued-never-claimed vs never-issued, asserted as two distinct verdicts |
-| 6 | B2 | behavioural | TO SPECIFY | claimed-never-finished, distinct from both of the above |
-| 7 | C | behavioural | **covered** | the reversed-arrival case from [241] |
-| 7a | C | source scan | TO SPECIFY | a source scan over event statements for the ONE admissibility predicate, in the shape of NFR-025's idiom ratchet |
-| 7b | C | behavioural | **covered** | §8.1's two negatives — but they live in §8.1's prose, not §17.1's matrix; move them |
-| 7c | C | behavioural | **covered** | the reversed-arrival case from [241], both pairs |
-| 8 | C | behavioural | **covered** | terminal-before-claim, in the ordering cases |
-| 9 | C | behavioural | **covered** | duplicate delivery, in the reversed-arrival case |
-| 10 | B2 | behavioural | TO SPECIFY | a terminal with no claim and no `issued_at` must still yield `covered` |
-| 10a | C | behavioural | **covered** | the config interleaving asserts a refused result fills nothing |
-| 10b | C | behavioural | **covered** | §8.3 proof 3, exercised by the skip cases |
-| 10c | B2 | behavioural | **covered** | carrier eligibility, all three transports |
-| 10d | B2 | behavioural | **covered** | the same case, plus the forged-payload mutation |
-| 10e | B2 | schema assertion | TO SPECIFY | assert the CHECK REJECTS a job with no carrier and a carrier with no job |
-| 10f | C | behavioural | **covered** | both arrival orders of the stale result |
+| 1 | B2 | behavioural | **DISCHARGED** | `TestTheAdvancePersistsTheInstantTheLeaderAlreadyComputed` (`internal/scheduler`) — the persisted instant IS the one the leader computed. **One exception is declared** in the invariant itself: unifying the effective interval moves a non-credentialed monitor's post-verdict probe later |
+| 2 | B2 | behavioural | **DISCHARGED** | all five rules: 1, 3 and 4 in `TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoRecordsNothing`, rule 2 in its own sub-test (it records NOTHING), rule 5 in `TestConfirmAccelerationWritesNoLedgerStatement` |
+| 2a | B2 | source scan | **DISCHARGED** | `TestExactlyOneStatementAdvancesTheExpectation` — an enumerated SET, killed by adding a second `SET next_due_at` |
+| 2b | B2 | behavioural | **DISCHARGED** | `TestABackoffDelayNeverBecomesTheIntervalInForce` (store) and the rule-4 sub-test (scheduler): the delay moves the instant and never the interval |
+| 2c | B2 | behavioural | **DISCHARGED** | `TestTheCurrentWindowRecordsTheIntervalThatSpacedItAndNotTheNextOne` and `TestAConfigurationWriteLeavesTheProbeInstantAlone` — the pair is written by one statement, so there is no restore to test |
+| 2d | B2 | source scan | **DISCHARGED** | `TestConfirmAccelerationWritesNoLedgerStatement` — rule 5 calls no ledger statement at all |
+| 3 | B2 | behavioural | **DISCHARGED** | `TestALeaderGapWhoseFirstActionIsAPolicySkipStillMaterializesTheGap` and `TestABackoffDelayNeverBecomesTheIntervalInForce` both start from a persisted past `next_due_at` |
+| 4 | B2 | behavioural | **DISCHARGED** | `TestABadlyIdentifiedResultCorrelatesToNoWindowAndStillLands` — the heartbeat lands and NO window is covered; the verdict function reads only the window's own row, so inference is impossible by construction |
+| 5 | B2 | behavioural | **DISCHARGED** | `TestTheThreeStatesThisRequirementExistsToDistinguish` — asserted as a SET, so all three collapsing into one verdict fails it |
+| 6 | B2 | behavioural | **DISCHARGED** | the same case: claimed-never-finished distinct from both |
+| 7 | C | behavioural | **DISCHARGED** | `TestARepeatedClaimResolvesToTheEarliestObservation` — both arrival orders, killed by assignment for `LEAST` |
+| 7a | C | source scan | **DISCHARGED** | `TestEveryEventStatementUsesTheOneAdmissibilityPredicate` — the claim and the terminal are built on ONE shared expression, and the REFUSAL is asserted NOT to use it (invariant 10f) |
+| 7b | C | behavioural | **DISCHARGED** | `TestAClaimIsRefusedByTheRevisionAndByADeliberateSkip` — §8.1's two negatives, which lived in prose and in no test, plus the converse |
+| 7c | C | behavioural | **DISCHARGED** | the reversed-arrival case from [241], both pairs (§17.8) |
+| 8 | C | behavioural | **DISCHARGED** | `TestTheThreeRunStatesAreDistinguishableAndOrderIndependent` — a terminal that overtakes its claim loses nothing |
+| 9 | C | behavioural | **DISCHARGED** | the duplicate delivery in `TestARepeatedClaimResolvesToTheEarliestObservation` |
+| 10 | B2 | behavioural | **DISCHARGED** | the same case — a terminal with no claim AND no `issued_at` still reads `covered` |
+| 10a | C | behavioural | **DISCHARGED** | the config interleaving asserts a refused result fills nothing (§17.8) |
+| 10b | C | behavioural | **DISCHARGED** | `TestATerminalAdoptsANeverIssuedWindowAndNeverASkippedOne` and the claim half of `TestAClaimIsRefusedByTheRevisionAndByADeliberateSkip` |
+| 10c | B2 | behavioural | **DISCHARGED** | `TestAWindowBelowTheLedgerCarrierReadsUnknown` — every generation below the minimum, plus the converse at it |
+| 10d | B2 | behavioural | **DISCHARGED** | the advance records the PUBLISHED job's carrier (`TestTheAdvancePersists...`); the orphan path derives it from the publisher's rule and reads no `ProtocolVersion` (§8.3) |
+| 10e | B2 | schema assertion | **DISCHARGED** | `TestTheCarrierIsPresentExactlyWhenAJobIs` — both illegal pairs refused BY NAME, both legal ones accepted |
+| 10f | C | behavioural | **DISCHARGED** | both arrival orders of the stale result, plus the refusal-adoption case a surviving mutation forced into existence (§17.8) |
 | 10g | B1 | behavioural | **DISCHARGED** | 5 tests, 4 mutations killed (§17.6) — separate queues per generation, an unmapped generation routed nowhere, and a v3 claim leaving a generation-4 row outside its result set on a real database |
 | 10h | B1 | behavioural | **DISCHARGED** | 4 tests, 3 mutations killed (§17.6) — the config refuses `true` without coercing it, and the v4 endpoint requires its own ledger declaration rather than the credential one |
-| 10i | B2 | behavioural (live broker) | **TO SPECIFY** | reassigned from B1 by reviewer P0 at [342]: a V4 delivery is DEFINED by `DueAt`, which the wire does not carry until B2, so B1 has no absence to detect. §17.4 keeps both mutations named for B2's gate |
+| 10i | B2 | behavioural (live broker) | **DISCHARGED** | `TestAGenerationFourDeliveryMissingItsIdentityIsDeadLettered` on a LIVE broker, plus `TestAGenerationFourDeliveryMissingItsIdentityIsRefused` at the executor gate and `TestAMonitorWithNoStandingExpectationStaysBelowTheLedgerCarrier` on the producer side |
 | 10j | B1 | migration | **DISCHARGED** | 5 tests, 8 mutations killed (§17.5) — the shipped goose Down, refusal plus row survival plus atomic still-widened constraints |
 | 10k | B1 | behavioural | **DISCHARGED** | 4 tests, 1 mutation killed (§17.6) — `lead()`'s resolved map stays ≤ 3 on all three transports with an ANNOUNCING executor and the flag off |
-| 10l | B2 | behavioural | **TO SPECIFY** | when the flag is true `role=all` reaches 4 and pull regions do NOT — the two V3 failures §13.0 quotes, one inert deployment and one unclaimable row |
+| 10l | B2 | behavioural | **DISCHARGED** | `TestTheFlagOnRaisesTheInProcessRegionAndNeverItsPullRegions` — the two V3 failures, one in each direction |
 | 11 | B1 | source scan | **DISCHARGED** | 3 tests, 1 mutation killed (§17.6) — one import scan beside each executor package, plus the exact five-method `Dispatcher` set |
 | 11a | B1 | — | **n/a, a withdrawal** | records that the pull agent's lease-ack predates this requirement and is out of scope |
-| 12 | B2 | schema assertion | TO SPECIFY | assert `heartbeats` columns unchanged, and that no index covers the six fill columns |
-| 13 | B2 | behavioural | **covered** | the confirm-acceleration threshold case — it says "attributed to a WINDOW", and there are no windows before B2 |
+| 12 | B2 | schema assertion | **DISCHARGED** | `TestTheLedgerTouchesNoHeartbeatColumnAndIndexesNoFillColumn` — read from `pg_index`, not from a naming convention |
+| 13 | B2 | behavioural | **DISCHARGED** | `TestTheOrphanThresholdIgnoresAConfirmIntervalThatIsDisabled` and the confirm-acceleration case in `TestTheCurrentWindowRecords...` |
 | 13a | A | behavioural + **source scan** | **DISCHARGED** | 13 tests, 7 mutations killed (§17.3). Specifying it found FOUR bump sites, not one; implementing it found that retire and reactivate are COMPOSITE-only, that the fence lives in `updateMonitorTxPrepared`, and — via the reviewer — that CREATION makes a generation too |
-| 14 | B2 | behavioural | **covered** | the config-boundary cases |
-| 14a | B2 | behavioural | **covered** | the four-case each-side-of-a-due-instant test |
-| 14b | B2 | behavioural | **covered** | the `next_due_at`-already-past case |
-| 15 | D | behavioural | TO SPECIFY | a range before `ledger_from` must yield `unknown`, never `covered` and never `expected_never_issued` |
-| 16 | D | behavioural | TO SPECIFY | drop a partition, then assert no window in the dropped span reads `covered` or `expected_never_issued` |
-| 16a | D | schema assertion | TO SPECIFY | insert a row with no matching partition and assert the DEFAULT takes it; then that retention purges the default |
-| 17 | B2 | behavioural | **covered** | the late-and-overlapping case |
-| 18 | C | behavioural | TO SPECIFY | a flushed unfinished window plus a late terminal must read completed-late, not be deleted |
-| 19 | B2 | schema assertion | TO SPECIFY | a schema assertion: no verdict column exists on `expected_runs` |
-| 20 | E | behavioural | **covered** | 20g's gate case, extended to `expected_never_issued` and pre-`ledger_from` spans |
-| 20a | E | behavioural | **covered** | lateness above and below the threshold |
-| 20b | E | behavioural | **covered** | push exclusion by every path |
-| 20c | B2 | behavioural | **covered** | the per-path interval value, with the `new_interval` mutation |
-| 20d | B2 | source scan | TO SPECIFY | a source scan: one helper computes the effective interval; `:1427` and `:1635` both call it |
-| 20e | D | behavioural | **covered** | the orphan-threshold case |
-| 20f | D | behavioural | **covered** | the §13a round trip in 20g's case |
-| 20g | E | behavioural | **covered** | added at [270], with its two promotion mutations |
-| 21 | B2 | source scan | TO SPECIFY | a source scan: no scheduler or prober path reads `expected_runs` |
-| 22 | D | measurement | TO SPECIFY | a measurement against a populated table, plus bounds enforcement on the config value |
-| 23 | D | measurement | TO SPECIFY | the gauge's presence, its threshold, and that it is UNPUBLISHED on a zero denominator |
-| 23a | D | schema assertion | TO SPECIFY | read `pg_class.reloptions` on a NEWLY created partition |
-| 24 | B2 | behavioural | **covered** | §17.1 (a), (b), (c) |
-| 24a | B2 | behavioural | **covered** | the same, asserting the fence |
-| 24b | B2 | behavioural | **covered** | §17.1 (a) — two monitors, one cap |
-| 24c | D | behavioural | TO SPECIFY | drop a partition and assert `ledger_from` moves with it, having been computed not stored |
-| 25 | B2 | behavioural | TO SPECIFY | five bad-result shapes, each correlating to no window while the heartbeat still lands |
-| 25a | B2 | source scan | TO SPECIFY | a source scan: `DueAt` minted from the schedule read, and `StampResult` the only copier |
-| 25b | C | behavioural | **covered** | the crossed-pair case |
-| 25c | B2 | source scan | **covered** | the grep over every `INSERT INTO expected_runs`, which found the revision-15 defect |
-| 25d | B2 | behavioural | **covered** | the config interleaving proves the row takes the published job's facts |
-| 25e | B2 | behavioural | **covered** | the same case; its mutation is revision 8's single-predicate fence |
-| 25f | B2 | document check | TO SPECIFY | a document check: every correlated field names type, tag, mint source and copier |
-| 26 | B2 | schema assertion | TO SPECIFY | assert the FK is composite, and that a single-column FK fails the assertion |
-| 26a | D | behavioural | TO SPECIFY | a cross-project negative at the STORE layer, not through the handler |
-| 26b | D | behavioural | TO SPECIFY | every response carries `ledger_from` and `gap_truncated_before` |
+| 14 | B2 | behavioural | **DISCHARGED** | `TestAConfigWriteClosesTheOpenSegmentWithoutTakingTheStandingWindow` |
+| 14a | B2 | behavioural | **DISCHARGED** | `TestAConfigurationWriteLeavesTheProbeInstantAlone` — the four each-side-of-a-due-instant cases |
+| 14b | B2 | behavioural | **DISCHARGED** | the half-open range, with `next_due_at` ten intervals in the past |
+| 15 | D | behavioural | **DISCHARGED** | `TestTheTruncationFenceBoundsWhatTheLedgerWillAnswerFor` and `TestAMonitorWithNoScheduleAnswersForNothing` — the fence and the missing schedule are two of ledger_from's four inputs, and a monitor with no expectation answers `ok == false` |
+| 16 | D | behavioural | **DISCHARGED** | `TestDroppingAPartitionMovesLedgerFromAndClaimsNothingBeforeIt` — the dropped span reads as nothing, and `TestAPartitionSurvivesUntilItsWholeRangeIsPastTheCutoff` keeps the drop from taking answerable time with it |
+| 16a | B2 | schema assertion | **DISCHARGED** | moved from D with the partitions: `TestAWindowFarOutsideEveryDailyPartitionStillLands` asserts the DEFAULT takes it; `TestRetentionPurgesTheDefaultPartitionToo` (D) is the purge half |
+| 17 | B2 | behavioural | **DISCHARGED** | `TestACrossedJobAndWindowPairUpdatesNothing` — two rows, and neither terminal can reach the other |
+| 18 | C | behavioural | **DISCHARGED** | `TestALateTerminalCompletesAnUnfinishedWindowRatherThanReplacingIt` — the row is COMPLETED, not replaced, killed by a terminal that discards the claim |
+| 19 | B2 | schema assertion | **DISCHARGED** | `TestNoVerdictIsStoredOnAWindow` — the column SET, enumerated, so a `status` column fails it as surely as a `verdict` one |
+| 20 | E | behavioural | **DISCHARGED** | `strokeSegments` in `frontend/src/lib/latencypanel.spec.ts` — every window plain `covered` and the whole span at or after `ledger_from`, with each other verdict refused by name |
+| 20a | E | behavioural | **DISCHARGED** | `TestARunLaterThanItsWindowsOwnIntervalIsCoveredLate` (domain) and the stroke rule's refusal of `covered_late` |
+| 20b | E | behavioural | **DISCHARGED** | `TestAPushMonitorNeverExpectsAWindow` — no schedule row, no window, by every path a push monitor has |
+| 20c | B2 | behavioural | **DISCHARGED** | `TestTheCurrentWindowRecordsTheIntervalThatSpacedItAndNotTheNextOne`, killed by writing `new_interval` |
+| 20d | B2 | source scan | **DISCHARGED** | `TestTheEffectiveIntervalHasExactlyOneOwner` — an enumerated SET of `ConfirmInterval()` callers |
+| 20e | D | behavioural | **DISCHARGED** | the orphan-threshold case (§17.8), plus `TestTheResponseCarriesComputedVerdictsAndItsBounds` proving the assumed threshold reaches a caller |
+| 20f | D | behavioural | **DISCHARGED** | `TestTheResponseCarriesComputedVerdictsAndItsBounds` — `interval_assumed` is on the response a consumer actually sees |
+| 20g | E | behavioural | **DISCHARGED** | `TestAnAssumedIntervalNeverPromotesAVerdict` (domain) and the stroke rule's own case, which never reads the flag at all |
+| 21 | B2 | source scan | **DISCHARGED** | `TestNoStoreReadOfTheLedgerFeedsADispatchDecision` and `TestNoSchedulerOrProberPathReadsTheLedger` — the latter inspects string LITERALS, because the table is named in the prose |
+| 22 | D | measurement | **DISCHARGED** | `TestTheHOTRatioIsUndefinedUntilSomethingHasUpdated` for the sample, and `TestTheLedgerBoundsAreEnforcedAndZeroMeansDefault` (config) for the enforced retention bounds |
+| 23 | D | measurement | **DISCHARGED** | `TestTheHOTRatioIsUndefinedUntilSomethingHasUpdated` — ONE unlabelled gauge, unpublished on a zero denominator, with the counters still exported |
+| 23a | B2 | schema assertion | **DISCHARGED** | moved from D with the partitions: `TestANewlyCreatedPartitionCarriesTheFillfactor` and `TestThePartitionMaintainerSetsTheFillfactorItself` |
+| 24 | B2 | behavioural | **DISCHARGED** | §17.1 (a), (b) and (c), all three implemented |
+| 24a | B2 | behavioural | **DISCHARGED** | the same, plus `TestTheFenceOnlyEverMovesForwardAndIsNeverErased`, which a surviving mutation forced into existence |
+| 24b | B2 | behavioural | **DISCHARGED** | `TestTheGapCapIsPerMonitorAndEachMonitorFencesItsOwn` — killed by revision 2's batch-wide LIMIT |
+| 24c | D | behavioural | **DISCHARGED** | `TestDroppingAPartitionMovesLedgerFromAndClaimsNothingBeforeIt` — the bound MOVES with the drop, which a stored one would not |
+| 25 | B2 | behavioural | **DISCHARGED** | `TestABadlyIdentifiedResultCorrelatesToNoWindowAndStillLands` — five shapes, each with the heartbeat asserted separately |
+| 25a | B2 | source scan | **DISCHARGED** | `TestOnlyStampResultCopiesTheWindowOntoAResult` across five packages, plus the minting site in the schedule read and the materializer's own join |
+| 25b | C | behavioural | **DISCHARGED** | the crossed-pair case (§17.8) |
+| 25c | B2 | source scan | **DISCHARGED** | `TestEveryWindowInsertNamesTheColumnsThatCannotBeDefaulted` — an enumerated SET, killed by revision 7's and revision 15's own omissions |
+| 25d | B2 | behavioural | **DISCHARGED** | `TestAConfigWriteBetweenPublishAndAdvanceFencesTheWholeItem` — the row takes the published job's revision |
+| 25e | B2 | behavioural | **DISCHARGED** | the same case, killed by revision 8's single-predicate fence |
+| 25f | B2 | document check | **DISCHARGED** | §13.1's table names `DueAt`'s type, tag, mint source and single copier, and `TestOnlyStampResultCopies...` enforces the last of those against the tree |
+| 26 | B2 | schema assertion | **DISCHARGED** | `TestTheLedgerForeignKeysAreComposite` — the constraint's COLUMN SET on both tables |
+| 26a | D | behavioural | **DISCHARGED** | `TestAMismatchedProjectAndMonitorReturnNothingAtTheStoreLayer` at the store, and `TestAProjectAndMonitorThatDoNotBelongTogetherAreNotFound` at the handler |
+| 26b | D | behavioural | **DISCHARGED** | `TestEveryPageCarriesTheBoundsThatSayWhatItMeans`, including the EMPTY page — which is the one a caller would otherwise read as "nothing was due" |
 
 ### 17.3 Phase A's entry gate — invariant 13a specified
 
@@ -2239,9 +2403,14 @@ cross-cutting file, which is why this section cites six files.
   predicate leaves the generation-4 row outside a v3 claim's result set, and the converse v4 claim
   reaches it. `TestAV3ClaimCannotReachAGenerationFourRow` (`internal/api/api_agent_ledger_test.go`)
   is the same property through the endpoint.
-- **10h, no V4 before its payload.** `TestABinaryOfThisGenerationRefusesLedgerCarrierEnabled`,
-  `TestTheRefusalDoesNotRewriteTheValue` and `TestAbsentAndFalseAreBothAcceptedIdentically`
-  (`internal/config/ledgercarrier_test.go`), plus
+- **10h, no V4 before its payload.** `TestThisBinaryAcceptsLedgerCarrierEnabled`,
+  `TestTheAcceptedValueReachesSelectionUnchanged` and `TestAbsentAndFalseAreBothAcceptedIdentically`
+  (`internal/config/ledgercarrier_test.go`) — **the first two were RENAMED in B2 and the change is
+  the invariant's, not the test's.** B1's pair asserted that a binary with no V4 payload REFUSES
+  `ledger.carrier_enabled: true` and does not coerce it; B2 mints the payload in the same change
+  that wires the flag to selection, so the refusal is retired and what survives is the property it
+  was protecting — the operator's value reaches selection unchanged, in either direction. Both
+  names stay in this record so a reader can tell which build changed the answer. Plus
   `TestTheGenerationFourEndpointRequiresTheLedgerCapability`,
   `TestADeclaredGenerationFourClaimReachesTheRow` and
   `TestTheAnnouncedLedgerCapabilityIsAClosedDomain` (`internal/api/api_agent_ledger_test.go`) — the
@@ -2343,15 +2512,329 @@ the mechanism can fire: the flag ON raises the announced region, the v4 claim re
 claim cannot, and a declared ledger capability is accepted. Without them, deleting the feature
 entirely would leave every "it does not happen" test green.
 
+### 17.7 Phase B2's entry gate — the thirty-eight rows B2 owns
+
+**This gate was written ALONGSIDE the implementation, not before it, and that is a deviation from
+§17.2's own rule.** The owner directed all remaining phases to be implemented without stopping, so
+the sequence the entry gate exists to enforce — specify, then build — was not available. The cost is
+exactly what §17.2 predicted: a test can be shaped to fit finished code. Two things are offered in
+its place rather than a claim that the order was followed.
+
+First, **every mutation below was PLANTED and RUN**, not asserted. Two of them SURVIVED on the first
+pass and were killed only after a test was added for them: the fence's monotonicity
+(`GREATEST(existing, new)` replaced by the new value alone left every other test green, because each
+of them writes a fence exactly once) and the refusal's guard (adding §8.1's no-job disjunct survived
+until a case presented it with an existing never-issued row). A gate written first would have named
+both; the mutation run found them instead, one round later and at the cost of two extra assertions.
+
+Second, **four defects in the DESIGN were found by implementing it**, and each is recorded in the
+section it belongs to rather than here: §7.1's interval pair (a configuration write restamping
+`interval_in_force` gave a window spaced at 60s a 300-second lateness threshold — an over-claim),
+§8.3's carrier source (the named source does not exist on the result path), §14.2's `NULLIF` (the
+literal minimum is 0 for a monitor with confirm disabled), and §13.0's missing in-process admission
+rule (B1 shipped one of the two rules the section demands, leaving the ledger inert under
+`role=all`). An entry gate would have caught none of them: all four are properties of code that did
+not exist.
+
+**Check kinds, and what each proves.** Of B2's 38 rows, 24 are behavioural, 7 are source scans, 6
+are schema assertions, and 1 is a document check. The distinction is not pedantry: "exactly one
+statement advances `next_due_at`" is not observable from any single run, and a behavioural test that
+tried would pass against a tree with two.
+
+**Where the guards live.** Beside the package each is about, per party [286] and phase A's
+precedent: the advance-statement and insert-column scans in `internal/store`, the
+effective-interval and ledger-read scans in `internal/scheduler`, the single-copier scan in
+`internal/dispatch`. No second global mechanism was built, and phase A's own AST helpers
+(`referencesIn`, `insertsMonitor`, `fenceSites`) are reused by the schedule-pairing guard rather
+than reimplemented.
+
+**One scan reads text and one reads the AST, and the difference is deliberate.** The store's guards
+strip SQL comments before looking for a column, because `next_due_at` and `carrier_generation`
+appear in the prose beside every statement that uses them — and the scheduler's ledger-read guard
+inspects string LITERALS rather than file text, for the same reason one level up. Phase A recorded
+this lesson from the other side: a guard that miscounts its own subject fails on a correct tree and
+gets deleted by whoever is unblocking CI.
+
+### 17.8 Phase B2's discharge — 38 invariants
+
+Landed with the payload-and-ledger slice. Each row's proof lives beside the code it guards, which
+is why this section cites nine files.
+
+- **§7.1's primitive** — `TestTheGapCapIsPerMonitorAndEachMonitorFencesItsOwn`,
+  `TestALeaderGapWhoseFirstActionIsAPolicySkipStillMaterializesTheGap`,
+  `TestABackoffDelayNeverBecomesTheIntervalInForce`,
+  `TestAConfigWriteBetweenPublishAndAdvanceFencesTheWholeItem`,
+  `TestTheCurrentWindowRecordsTheIntervalThatSpacedItAndNotTheNextOne`,
+  `TestTheWindowsTheFenceAndTheAdvanceShareOneTransaction`,
+  `TestTheRetentionClipBoundsTheGapAndWritesItsOwnFence`,
+  `TestTheFenceOnlyEverMovesForwardAndIsNeverErased` and
+  `TestAnUnrepresentableAdvanceIsRefusedByName`
+  (`internal/store/expectedruns_internal_test.go`). §17.1's cases (a), (b) and (c) are the first
+  three; the fence's monotonicity is the one a surviving mutation forced into existence.
+- **§8.3's terminal and refusal** — `TestATerminalOutcomeCoversTheWindowItAnswers`,
+  `TestAnOrphanTerminalCreatesItsOwnRowWithTheConservativeThreshold`,
+  `TestTheOrphanThresholdIgnoresAConfirmIntervalThatIsDisabled`,
+  `TestATerminalAdoptsANeverIssuedWindowAndNeverASkippedOne`,
+  `TestACrossedJobAndWindowPairUpdatesNothing`,
+  `TestReversedArrivalNeverMixesTwoDeliveriesAttributes`,
+  `TestARefusedResultAnnotatesItsOwnRunAndNothingElse`,
+  `TestABadlyIdentifiedResultCorrelatesToNoWindowAndStillLands` and
+  `TestAProbeErrorTerminatesItsWindowAndARefusedOneOnlyAnnotates`
+  (`internal/store/expectedrunterminal_internal_test.go`). The reversed-arrival case runs BOTH
+  pairs — `terminal_at`/`outcome` as well as `refused_at`/`refused_reason` — because party [241]
+  reported one and its twin was unreported.
+- **The schema** — `TestTheCarrierIsPresentExactlyWhenAJobIs`, `TestNoVerdictIsStoredOnAWindow`,
+  `TestTheLedgerTouchesNoHeartbeatColumnAndIndexesNoFillColumn`,
+  `TestTheLedgerForeignKeysAreComposite`, `TestAWindowFarOutsideEveryDailyPartitionStillLands`,
+  `TestANewlyCreatedPartitionCarriesTheFillfactor`,
+  `TestThePartitionMaintainerSetsTheFillfactorItself` and
+  `TestANonPositiveIntervalIsRefusedAtTheWrite`
+  (`internal/store/expectedrunschema_internal_test.go`). The column set is ENUMERATED, not counted:
+  a new column here is either a stored verdict, which invariant 19 forbids, or a fact that needs
+  its own place in §6.1.
+- **§10's configuration boundary** — `TestAConfigurationWriteLeavesTheProbeInstantAlone`,
+  `TestAConfigWriteClosesTheOpenSegmentWithoutTakingTheStandingWindow`,
+  `TestDisablingClosesTheSegmentAndThenStopsExpectingAnything`,
+  `TestAPushMonitorNeverExpectsAWindow` and `TestEveryGenerationCreatingSiteSyncsTheSchedule`
+  (`internal/store/monitorschedule_internal_test.go`). The last is the pairing guard: every site
+  that creates a generation must close the segment it ends, at the same five sites phase A's
+  timeline write already covers.
+- **The store's source scans** — `TestExactlyOneStatementAdvancesTheExpectation`,
+  `TestEveryWindowInsertNamesTheColumnsThatCannotBeDefaulted` and
+  `TestNoStoreReadOfTheLedgerFeedsADispatchDecision`
+  (`internal/store/expectedrunguards_internal_test.go`).
+- **The verdicts** — `TestTheThreeStatesThisRequirementExistsToDistinguish`,
+  `TestARunLaterThanItsWindowsOwnIntervalIsCoveredLate`,
+  `TestAnAssumedIntervalNeverPromotesAVerdict` and
+  `TestAWindowBelowTheLedgerCarrierReadsUnknown` (`internal/domain/expectedrun_test.go`). These are
+  the four rows the audit found had nothing testing them, which are the four that say what FR-032
+  is FOR. The verdict function reads only the window's own row and cannot see a heartbeat, which is
+  what makes invariant 4 structural rather than remembered.
+- **The leader** — `TestTheAdvancePersistsTheInstantTheLeaderAlreadyComputed`,
+  `TestAMonitorWithNoStandingExpectationStaysBelowTheLedgerCarrier`,
+  `TestALedgerReadFailureCostsNoProbe`,
+  `TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoRecordsNothing`,
+  `TestTheFlagOnRaisesTheInProcessRegionAndNeverItsPullRegions`,
+  `TestTheEffectiveIntervalHasExactlyOneOwner`,
+  `TestConfirmAccelerationWritesNoLedgerStatement` and
+  `TestNoSchedulerOrProberPathReadsTheLedger` (`internal/scheduler/expectedrun_test.go`).
+- **The wire** — `TestTheLedgerMinimumCarrierMatchesTheProtocolGeneration`,
+  `TestOnlyStampResultCopiesTheWindowOntoAResult`,
+  `TestTheCarrierDecisionHasOneOwnerAndFourRules`,
+  `TestAGenerationFourDeliveryMissingItsIdentityIsRefused` and
+  `TestStampResultCarriesTheWindowWithTheIdentity`
+  (`internal/dispatch/expectedrun_test.go`), plus
+  `TestAGenerationFourDeliveryMissingItsIdentityIsDeadLettered`
+  (`internal/dispatch/amqpledger_test.go`) on a LIVE broker.
+- **The config contract** — `TestThisBinaryAcceptsLedgerCarrierEnabled`,
+  `TestTheAcceptedValueReachesSelectionUnchanged`,
+  `TestAbsentAndFalseAreBothAcceptedIdentically` and
+  `TestTheLedgerBoundsAreEnforcedAndZeroMeansDefault`
+  (`internal/config/ledgercarrier_test.go`).
+
+**One cross-phase consequence, worth naming because it is a real coupling and not a rename.** B1's
+`TestAV3ConsumerCannotReceiveAGenerationFourDelivery` published a generation-4 job carrying no
+identity — the field did not exist — and B2's consumer now DEAD-LETTERS such a delivery. The
+fixture therefore stopped being a v4 job and became the poison message the new test is about, so it
+gains the identity a real v4 job carries. Nothing about what 10g asserts changed; what changed is
+that a v4 delivery now has a contract to violate.
+
+**Mutations planted and killed: 21.**
+
+1. Replace the per-monitor `row_number() … PARTITION BY monitor_id` cap with revision 2's batch-wide `LIMIT` — one monitor's windows vanish and its fence is never written, and the test names the monitor.
+2. Revision 8's single-predicate fence: drop `m.execution_revision = v.expected_revision` and a job published under a superseded generation is accepted.
+3. Write `new_interval` into the answered window's `interval_seconds` — a window spaced at 60s is judged against the accelerated 10.
+4. Revision 4's structure: exclude a skip from the gap CTE, and a leader whose first action after an absence is a skip loses every intervening window.
+5. Overwrite `gap_truncated_before` instead of `GREATEST`-ing it — a tick that truncated NOTHING erases the fence, and the span before it becomes claimable. **This one SURVIVED at first**: every other test writes a fence exactly once.
+6. Take the terminal's `outcome` by `COALESCE(existing, new)` instead of a CASE over the OLD timestamp — a row carries one delivery's instant beside another's attribute.
+7. The same for `refused_reason`, which is the instance party [241] reported.
+8. Drop the `skip_reason IS NULL` clause from the admissibility predicate — a window cerbix chose not to run is adopted into coverage.
+9. Take the orphan threshold from the revision's BASE interval — a window spaced at the confirm interval and answered 40s late reads `covered`.
+10. Take it as a literal `MIN(interval, confirm_interval)` — a monitor with confirm DISABLED gets a zero-second threshold and every orphan window reads `covered_late`.
+11. Give the refusal §8.1's no-job disjunct — a refusal ADOPTS a never-issued window, asserting a run was attempted where nothing was issued. **This one SURVIVED at first**, for the same reason as 5: no case presented it with an existing never-issued row.
+12. Add a second statement that moves `next_due_at` — the enumerated SET of advancers fails and names the newcomer.
+13. Revision 7's own SQL: drop `carrier_generation` from the answered window's column list.
+14. Revision 15's defect: drop `interval_seconds` from the missed-window insert.
+15. Inline `m.ConfirmInterval()` back into the credentialed dispatch branch — the enumerated set of callers fails.
+16. Put a string literal naming `expected_runs` in the scheduler — the ledger stops being evidence only.
+17. Treat a generation-4 delivery's missing field as a rolling-upgrade case and probe anyway, on a LIVE broker.
+18. Drop the delivery silently instead of dead-lettering it — this passes the "no probe ran" assertion and fails the arrival one, which is why they are separate.
+19. Remove the in-process admission rule — `role=all` never reaches generation 4 and the ledger is inert in the most common deployment.
+20. Raise a PULL region from the local executor — a generation-4 row is placed in a region whose agents cannot claim it, and the monitor has no outcome until the row's TTL.
+21. Record an advance on a FAILED dispatch, making rule 2 a caller — a window is written as answered or abandoned when it is neither.
+
+**Two mutations that survived and are recorded rather than fixed**, because in both cases the
+surviving change is not a defect. Reading the region's generation without checking for a window
+survives: `CarrierFor` still refuses generation 4 without one, so the `if` is a cost optimisation
+and not a correctness gate. And removing the `if expectOK` guard around the ledger's capability
+resolution costs a management-API call per tick and changes no output. Naming them is the point —
+a mutation list that only contains kills invites the belief that every line is load-bearing.
+
+### 17.9 Phase C's discharge — the claim event, 11 invariants
+
+Landed with the claim slice. Phase C's rows were nearly all `covered` — §17.1 specified them in
+answer to party [241] and [231] — so the work was turning eleven specifications into tests that
+kill something, and specifying the two that had nothing: 7a and 18.
+
+**The shape §18 left open is now decided, and §8.4 already implied it.** That open item asked "the
+exact claim-message shape on the wire, and whether it travels the results queue or its own", with
+§4a fixing only that it uses the existing transport. The claim is a typed MEMBER of
+`domain.Heartbeat` — `Claim *RunClaim` — exactly as `ProbeError` is, and it rides the results queue.
+Consequences, each of which is why the alternative was not taken:
+
+- **The `Dispatcher` interface grows nothing**, so invariant 11's five-method set survives phase C
+  unchanged. A `PublishClaim` method would have been the obvious shape and is the one B1's
+  discharge already guarded against with an `Ack` mutation.
+- **No new endpoint.** The pull agent posts claims to `/api/v1/agent/results`, whose handler already
+  feeds the same result sink as AMQP, so the claim reaches `ingest.Consumer.handle` by both
+  transports and branches once.
+- **No new queue and no ack concept**, which is §4a's actual requirement rather than its slogan.
+
+**One asymmetry between the executors, and it is the transport's rather than a divergence.** The
+AMQP worker publishes ONE claim per job because it takes jobs one at a time. The pull agent claims a
+BATCH in one poll, so it posts that batch's claims in one request before probing any of them —
+which is the same rule expressed for the transport that exists there, and it costs one round trip
+per POLL rather than per run. §8.4's "one genuinely new per-run round trip" is an upper bound, and
+pull comes in under it.
+
+- **The wire and its one owner.** `TestAClaimIsBuiltOnlyForAJobThatCarriesItsWindow` and
+  `TestTheClaimAddsNoDispatcherMethod` (`internal/dispatch/runclaim_test.go`). A job carrying no
+  window produces no message at all, so a fleet below the ledger carrier pays nothing.
+- **The AMQP worker.** `TestTheWorkerClaimsBeforeItProbes`,
+  `TestTheWorkerSendsNoClaimForAJobWithNoWindow` and `TestARefusedJobIsNeverClaimed`
+  (`internal/worker/runclaim_test.go`). The first asserts the ORDER through the runner itself —
+  what the dispatcher had seen at the instant the probe began — because a claim sent after the probe
+  would never exist for a run that crashed mid-probe, which is the state invariant 6 is about.
+- **The pull agent.** `TestTheAgentClaimsTheWholeBatchBeforeProbingAnyOfIt`,
+  `TestTheAgentSendsNoClaimRequestForABatchWithNoWindows`,
+  `TestAFailedClaimPostNeitherStopsTheBatchNorIsBuffered` and
+  `TestAStampedGenerationFourIsAcceptedFromTheEndpointThatServesIt`
+  (`internal/agent/runclaim_test.go`).
+- **The ingest branch.** `TestAClaimIsRecordedAndNeverEntersTheResultPipeline` and
+  `TestAFailedClaimNeitherRetriesNorStopsTheConsumer` (`internal/ingest/ingest_test.go`). The
+  absence is asserted on each of heartbeat, check count and incident, because "the claim was
+  recorded" alone would pass against a consumer that recorded it AND ran the whole result pipeline.
+- **The merge and the guards.** `TestARepeatedClaimResolvesToTheEarliestObservation`,
+  `TestTheThreeRunStatesAreDistinguishableAndOrderIndependent`,
+  `TestAClaimIsRefusedByTheRevisionAndByADeliberateSkip`,
+  `TestAClaimForAWindowTheLedgerNeverEnteredRecordsNothing`,
+  `TestABadlyIdentifiedClaimCorrelatesToNoWindow` and
+  `TestALateTerminalCompletesAnUnfinishedWindowRatherThanReplacingIt`
+  (`internal/store/expectedrunclaim_internal_test.go`), plus
+  `TestEveryEventStatementUsesTheOneAdmissibilityPredicate`
+  (`internal/store/expectedrunguards_internal_test.go`).
+
+**A defect B1 shipped and could not observe, found by putting a real generation-4 batch through the
+pull agent.** `resolveStampedGenerations` bounded the server's stamp by `claimGeneration()`, which
+is derived from the ENVELOPE capability and caps at 3 — while `jobClaimGeneration()` sends a capable
+agent to `/v4/jobs`. The first generation-4 row a core stamped therefore made the agent reject the
+WHOLE claim response with *"stamped generation 4 for job 0, outside 1..3"*, claim nothing, and try
+again on the next poll: **a pull region on the ledger carrier would have stopped executing
+entirely.** That is the same shape as the generation-3 failure `scheduler.go` records — work placed
+where nothing will take it — and B1 could not see it, because nothing stamped 4 (its config refused
+the flag) and its own tests omitted `protocol_versions`, taking the legacy fallback for an older
+core. The ceiling is now the endpoint the agent actually called. The TEST path keeps
+`claimGeneration()` deliberately, because B1 ships no v4 test endpoint and the two paths are derived
+separately so a future job generation cannot drag one along with the other.
+
+**Two senses of "late", and the code was right while my first assertion was not.** §8.6 says a
+window written as unfinished reads as *completed late* when its terminal finally arrives; §14.1's
+verdict `covered_late` is `issued_at - due_at` above the interval that spaced the window. A run
+ISSUED a second after its window and merely slow is `covered`, and I asserted `covered_late` for it
+first. Conflating them would have been an over-claim in the WITHHOLDING direction — the safe one,
+and still wrong: every slow probe would forfeit its stroke. The test now pins both readings against
+each other.
+
+**Mutations planted and killed: 7.**
+
+1. Build a claim for every job rather than only for one carrying a window — a fleet below the carrier pays a round trip per run for a message the core discards.
+2. Claim AFTER the probe instead of before it — the run that crashes mid-probe leaves no claim, and invariant 6 becomes unobservable.
+3. Assign `claimed_at` instead of minimising it — the value depends on arrival order, which §8.2 exists to prevent.
+4. Drop the skip clause from the shared admissibility predicate — a window cerbix chose not to run is reported as one that started, and the terminal's own adoption guard fails in the same run.
+5. Inline the predicate into the claim statement, faithfully — the source scan names the statement that stopped sharing it, which is the only thing that can catch a copy that is correct TODAY.
+6. Let the terminal discard the claim while completing the row — every coverage assertion still passes, and only the claim instant's survival catches it.
+7. Let a claim fall through into the result pipeline — a heartbeat with no timestamp reaches `RecordScheduledResult`.
+
+**And one harness lesson, which cost two false readings.** My mutation script restored the file on
+its last line under `set -e`, so a FAILING test — the expected outcome of a mutation — exited before
+the restore and left the mutation in the tree; the next run then read as three unrelated failures.
+Worse, one restore used `git checkout <file>` on an uncommitted tree, which discarded this whole
+arc's work in two files and had to be rewritten from the diff. The harness now restores from a
+`trap` and never from git, and it refuses to run without `CERBIX_TEST_DATABASE_DSN` — because the
+store package SKIPS without it and a skip prints `ok`, which reads exactly like a surviving
+mutation.
+
+### 17.10 Phases D and E's discharge — retention, the read API, and the stroke
+
+**Phase D — 11 invariants.** Retention, `ledger_from`, the read API and §11's measurement.
+
+- **Retention.** `TestDroppingAPartitionMovesLedgerFromAndClaimsNothingBeforeIt`,
+  `TestAPartitionSurvivesUntilItsWholeRangeIsPastTheCutoff` and
+  `TestRetentionPurgesTheDefaultPartitionToo` (`internal/store/expectedrunretention_internal_test.go`).
+  The default half is what the gate ledger's retention never has to do, and the divergence is
+  deliberate: `expected_runs` HAS a default partition because a lost insert would erase the very
+  fact the ledger keeps, and having one means retention must reach into it.
+- **`ledger_from`, computed and never stored.** The same file's fence and no-schedule cases. The
+  mutation that matters is subtle and was run: making the bound ignore the partition floor is
+  exactly how a STORED bound behaves, and only the assertion that it MOVES with the drop catches
+  it — which is the drift revision 2 would have shipped (invariant 24c).
+- **The paged read.** `TestTheWindowListPagesStrictlyBelowItsCursorAndEndsWithANullOne`,
+  `TestAMismatchedProjectAndMonitorReturnNothingAtTheStoreLayer` and
+  `TestEveryPageCarriesTheBoundsThatSayWhatItMeans`, plus the handler's own
+  `TestAProjectAndMonitorThatDoNotBelongTogetherAreNotFound`,
+  `TestTheRangeAndCursorAreRefusedByName`, `TestTheResponseCarriesComputedVerdictsAndItsBounds` and
+  `TestAMonitorWithNoExpectationAnswersWithANullBound` (`internal/api/expectedruns_test.go`).
+  Invariant 26a is proven at the STORE layer and not only through the handler, because a query that
+  is safe only because of its caller is not safe.
+- **§11's measurement.** `TestTheHOTRatioIsUndefinedUntilSomethingHasUpdated`. The ratio is
+  UNPUBLISHED on a zero denominator while the counters are still exported, which is the only
+  honest way to say "no data" in the Prometheus text format.
+
+**Two decisions inside D worth stating.** The cursor is VERSIONED — `base64url("v1:" + RFC3339Nano)`
+— so a later change to its shape is DETECTABLE rather than misread; the gate ledger's own cursor
+predates that rule and has no version, which is why a change there could only be found by a caller
+getting wrong pages. And an EMPTY page carries `ledger_from` and `gap_truncated_before` like every
+other, because the empty page is precisely where a caller would otherwise conclude that nothing was
+due.
+
+**Phase E — 4 invariants, and the part that is NOT built.** `strokeSegments` in
+`frontend/src/lib/latencypanel.ts` is §14's gate as a pure function, with
+`frontend/src/lib/latencypanel.spec.ts` covering every clause: every window plain `covered`, each
+other verdict refused BY NAME, any span reaching before `ledger_from` refused whatever its windows
+say, a span with no windows drawing nothing, and `interval_assumed` never read at all. Four
+mutations were planted and killed, including the two a consumer would plausibly write — treating
+`covered_late` as covered, and ignoring the bound.
+
+It returns SEGMENTS rather than a boolean, and that is a decision: a monitor with one unanswerable
+hour still has defensible strokes on either side of it, and refusing the whole series for one gap
+would understate what the ledger proves — the mirror of the over-claim this requirement exists to
+prevent.
+
+**The RENDER is deliberately not written, and the reason is this project's own rule.** `CLAUDE.md`
+requires an approved UI mock before any frontend code for a feature with an SPA surface, and
+drawing the line changes what the Response time panel LOOKS like — which is the thing a mock exists
+to decide. The rule is the owner's, and "implement without stopping" removes review pauses rather
+than the process the owner set. So phase E ships the decision procedure, tested, and the panel keeps
+drawing points until a mock says how the stroke looks: what it does where a segment ends, whether
+the observation ruler stays, and what a partially-strokable series reads as at a glance. None of
+that is derivable from the spec, and inventing it would be answering a question nobody asked me.
+
 ## 18. Open items
 
 - ~~Participation scope is unresolved~~ — **RULED by the owner on 2026-09-04: all monitors, 14-day
   retention** (§5.3). No participation flag exists as a result.
-- The exact claim-message shape on the wire, and whether it travels the results queue or its own.
-  §4a fixes that it uses the existing transport; which queue is a phase-C detail.
+- ~~The exact claim-message shape on the wire, and whether it travels the results queue or its own~~
+  — **DECIDED in phase C**: a typed member of `domain.Heartbeat` on the results queue, so the
+  `Dispatcher` interface, the queue set and the endpoint set all stay exactly as they were (§17.9).
 - Whether a window should record the region's live-executor state at `due_at`, so a missed run in a
   region with no worker reads differently from one in a healthy region. Attractive, unanalysed,
   deliberately out of revision 2.
+- **An async canary has no generation-4 carrier, so every canary window reads `unknown`** — named
+  in B2 as a bounded limitation rather than left to be discovered. A canary rides its own
+  capability-named queue and adding a fourth prefix means its mapping, its announcement and its
+  capability: the whole of B1 again, for one monitor type. `dispatch.CarrierFor` clamps a canary
+  below the ledger carrier, and an unroutable canary job is refused by
+  `TestTheCarrierDecisionHasOneOwnerAndFourRules` rather than discovered at runtime.
 - ~~Whether push monitors participate~~ — **RULED by the owner on 2026-09-04: excluded** (§15).
 - ~~`due_at` semantics for a late run~~ — **RULED by the owner on 2026-09-04**: the window keeps its
   expectation as `due_at`, and a run late by more than one interval reads `covered_late` (§14.1).

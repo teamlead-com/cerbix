@@ -48,6 +48,11 @@ type fakeStore struct {
 	// its principal, which is the property FR-026 exists for.
 	auditActors []string
 
+	// FR-032 §13a fixtures and recordings.
+	expectedRunQueries []store.ExpectedRunQuery
+	expectedRunPage    store.ExpectedRunPage
+	expectedRunErr     error
+
 	// announcedWorkflowKinds records what an agent's heartbeat claimed it can run (FR-029
 	// invariant 6). A fake that dropped it would let a receiver test pass while announcing
 	// nothing, which is exactly the silent-incapability failure the invariant guards.
@@ -568,6 +573,14 @@ func (f *fakeStore) ReplaceMonitorDependencies(_ context.Context, monitorID, pro
 }
 func (f *fakeStore) ListRecentHeartbeats(_ context.Context, _ string, _ int) ([]domain.Heartbeat, error) {
 	return nil, nil
+}
+
+// FR-032 §13a. The fake RECORDS the query and returns a planted page, which is what lets a handler
+// test assert the parameters the handler DERIVED — the range, the limit, the decoded cursor — as
+// well as the body it renders. The store's own SQL is tested against a real database.
+func (f *fakeStore) ListExpectedRuns(_ context.Context, q store.ExpectedRunQuery) (store.ExpectedRunPage, error) {
+	f.expectedRunQueries = append(f.expectedRunQueries, q)
+	return f.expectedRunPage, f.expectedRunErr
 }
 func (f *fakeStore) PasswordHashByID(_ context.Context, id string) (string, error) {
 	h, ok := f.passwords[id]

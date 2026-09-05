@@ -783,6 +783,13 @@ func insertMonitorTx(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor)
 	if err := writeRevisionTimeline(ctx, tx, created.ProjectID, created.ID); err != nil {
 		return domain.Monitor{}, err
 	}
+	// A created monitor has no old segment to close, and it still needs its expectation: the
+	// schedule row is what makes its first window a stored fact rather than a recomputation. One
+	// call rather than a create-only variant, because §10's three steps are one contract and a
+	// second entry point into it is how the two would diverge.
+	if err := syncMonitorScheduleTx(ctx, tx, s, created.ProjectID, created.ID); err != nil {
+		return domain.Monitor{}, err
+	}
 	return created, nil
 }
 

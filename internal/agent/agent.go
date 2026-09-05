@@ -306,6 +306,18 @@ func (a *Agent) poll(ctx context.Context) {
 	// than being silently deleted with no result — a correctness bug in the prior version,
 	// which acked every claimed token including a skipped one.
 	ackTokens := make([]string, 0, len(jobs))
+	// FR-032 §8.4: the claims for this whole batch go out BEFORE the first probe, in ONE post.
+	//
+	// The AMQP worker publishes one claim per job because it takes jobs one at a time; an agent
+	// claims a batch in one poll, so batching the claims is the same rule expressed for the
+	// transport that actually exists here. It costs one round trip per POLL rather than per job —
+	// §8.4's "one genuinely new per-run round trip" is an upper bound, and the pull transport
+	// comes in under it.
+	//
+	// They are collected in a first pass rather than emitted inside the execution loop, because
+	// the ordering is the whole point: a claim sent after its probe would never exist for a run
+	// that crashed mid-probe, which is the state invariant 6 is about.
+	a.publishClaims(ctx, jobs)
 	for i, raw := range jobs {
 		var job dispatch.CheckJob
 		if err := json.Unmarshal(raw, &job); err != nil {
@@ -349,6 +361,40 @@ func (a *Agent) poll(ctx context.Context) {
 	}
 	a.flushBuffer(ctx) // connectivity is back — drain any buffered historical results
 	a.logger.Info("agent_batch_done", "jobs", len(jobs), "results", len(results))
+}
+
+// publishClaims reports that this agent has taken a batch of jobs and is about to probe them.
+//
+// BEST-EFFORT (§8.4): a failure is logged at DEBUG and the batch runs anyway, so a missing claim
+// means "unwitnessed" and never "did not happen". It is deliberately NOT buffered like a result:
+// `bufferResults` exists so a network outage does not lose SLA evidence, and a claim is a
+// diagnostic whose value is its timing — replaying one an hour later would assert that the run
+// started then.
+//
+// Jobs carrying no window produce no message, and a batch of only such jobs produces no request at
+// all: a region below the ledger carrier pays nothing.
+func (a *Agent) publishClaims(ctx context.Context, jobs []json.RawMessage) {
+	at := time.Now().UTC()
+	claims := make([]domain.Heartbeat, 0, len(jobs))
+	for _, raw := range jobs {
+		var job dispatch.CheckJob
+		if err := json.Unmarshal(raw, &job); err != nil {
+			// The execution loop below logs and skips this job; a claim for a body we cannot read
+			// would name nothing, so this pass stays silent about it rather than logging twice.
+			continue
+		}
+		if claim, ok := dispatch.ClaimHeartbeat(job, at); ok {
+			claims = append(claims, claim)
+		}
+	}
+	if len(claims) == 0 {
+		return
+	}
+	// No ack tokens: acking DELETES the leased job, and these jobs have not run yet. The results
+	// post below carries the tokens, exactly as it did before.
+	if err := a.postResults(ctx, claims, nil); err != nil && ctx.Err() == nil {
+		a.logger.Debug("agent_run_claims_failed", "claims", len(claims), "error", err.Error())
+	}
 }
 
 // bufferResults appends to the edge buffer, dropping the oldest past the cap (a ring).
@@ -481,10 +527,31 @@ func (a *Agent) decodeClaim(resp *http.Response) (jobs []json.RawMessage, tokens
 // the two apart and `"protocol_versions": null` would take the legacy fallback — the same
 // bypass through a different door.
 func (a *Agent) resolveStampedGenerations(jobs, tokens int, stamped json.RawMessage) ([]int, error) {
+	return a.resolveStampedGenerationsAt(a.jobClaimGeneration(), jobs, tokens, stamped)
+}
+
+// resolveStampedGenerationsAt takes the endpoint's OWN generation, and that parameter is the fix
+// for a defect B1 shipped and could not observe (FR-032 phase C).
+//
+// The ceiling here bounds what the SERVER may stamp, so it has to be the generation of the endpoint
+// the agent actually called. It read `claimGeneration()` instead, which is derived from the
+// ENVELOPE capability and therefore caps at 3 — while `jobClaimGeneration()` sends a capable agent
+// to `/v4/jobs`. So the first real generation-4 row a core stamped made the agent reject the WHOLE
+// response with "stamped generation 4 for job 0, outside 1..3", claim nothing, and try again on the
+// next poll: a pull region on the ledger carrier would have stopped executing entirely.
+//
+// B1 could not see it. Nothing stamped 4 — its config refused the flag that selects the carrier —
+// and its own tests omitted `protocol_versions` altogether, which takes the legacy fallback for an
+// older core. It surfaced the moment phase C put a real v4 batch through this function.
+//
+// The two questions stay SEPARATE rather than being unified, because they are separate: the
+// envelope capability says what this agent can OPEN, and the endpoint says what it may be HANDED.
+// A v4 claim returns every older generation too, so the envelope floor still applies to it — which
+// is why `mayTryLedgerEndpoint` asks for `EnvelopeV2` before ever reaching the v4 path.
+func (a *Agent) resolveStampedGenerationsAt(endpoint, jobs, tokens int, stamped json.RawMessage) ([]int, error) {
 	if jobs != tokens {
 		return nil, fmt.Errorf("claim response desync: %d jobs but %d tokens", jobs, tokens)
 	}
-	endpoint := a.claimGeneration()
 	if len(stamped) == 0 { // key absent: an older core that predates stamping
 		out := make([]int, jobs)
 		for i := range out {
@@ -512,6 +579,11 @@ func (a *Agent) resolveStampedGenerations(jobs, tokens int, stamped json.RawMess
 
 // resolveTestGeneration is the same contract for the single-row test claim, including the
 // null-versus-absent distinction.
+//
+// Its ceiling is `claimGeneration()` and NOT the job path's, and that is correct rather than the
+// same defect twice: the TEST path is deliberately derived separately, so a future job generation
+// cannot drag it along — B1 shipped no v4 test endpoint, `claimTest` calls `claimPath("tests")`,
+// and a server stamping 4 here would be stamping a generation this endpoint does not serve.
 func (a *Agent) resolveTestGeneration(stamped json.RawMessage) (int, error) {
 	endpoint := a.claimGeneration()
 	if len(stamped) == 0 {

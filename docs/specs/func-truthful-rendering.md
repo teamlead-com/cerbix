@@ -311,6 +311,17 @@ Therefore two received heartbeats bound **observed spacing** and nothing more. B
 trouble makes queue wait unbounded, leader absence leaves no trace, and cerbix cannot witness its
 own absence. No additional term rescues a formula whose subject is not in the data.
 
+**FR-032 has since made the stroke ANSWERABLE, and the rule is written down** (`func-expected-run-ledger.md`
+§14, §17.10). The ledger records that a run was expected, so "a due check is missing" stops being a
+chart heuristic and becomes a stored fact: a stroke is permissible across a span only when EVERY
+window in it is plain `covered` — never `covered_late` — and the whole span lies at or after
+`ledger_from`. The decision procedure is `strokeSegments` in `frontend/src/lib/latencypanel.ts`,
+tested against every clause. What has NOT changed is this section's reasoning: the line was never
+refused for want of care, and it is not restored by an allowance. It is restored, where it is
+restored at all, by evidence the panel did not have.
+
+Until the stroke's RENDER is mocked and approved, the panel keeps everything below.
+
 **So the panel draws points, no connecting stroke and no area fill** — the fill implies the same
 continuity as the line and goes with it — and absence is rendered **positively** instead of being
 left as whitespace:

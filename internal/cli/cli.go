@@ -736,6 +736,11 @@ func runServe(args []string) int {
 		// retention floor below which a result is ignored (= the raw heartbeat window).
 		st.WithResultPolicy(cfg.Result.AllowedSkew.Std(), time.Duration(cfg.Heartbeats.RetentionDays)*24*time.Hour)
 		st.WithResultRevisionMode(cfg.Result.RevisionMode)
+		// FR-032: the expected-run ledger's two bounds, wired ONCE here for every role. The store
+		// owns them because §7.1's advance runs in the scheduler and §10's segment close runs in
+		// the API role, and a bound each caller supplied for itself is a bound two roles would
+		// eventually disagree about — the failure §16.1 exists to describe, one layer down.
+		st.WithExpectedRunPolicy(cfg.Ledger.ExpectedRunRetentionDays, cfg.Ledger.ExpectedRunGapWindowsMax)
 		// Service-reliability EVENT counters (§21) fire at their store-side event sites.
 		st.WithServiceEvents(registry)
 		// Secret-at-rest encryption (validated in config; empty key = disabled).
@@ -1091,6 +1096,10 @@ func runServe(args []string) int {
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
 				WithLocalCredentialRegions(domain.DefaultRegion).
+				// FR-032: the in-proc worker IS the ledger announcement in role=all, and it is
+				// declared from the ROLE rather than from any capability — an envelope-disabled
+				// deployment is the default and must still reach the carrier.
+				WithLocalLedgerRegions(domain.DefaultRegion).
 				WithLocalCanaryRegions(localCanaryRegions...). // FR-029: the in-proc worker IS the announcement in role=all
 				WithPullRegions(cfg.Pull.Regions).             // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
 				WithPullMetrics(registry).

@@ -162,6 +162,11 @@ func (s *Store) RetireMonitor(ctx context.Context, projectID, monitorID string, 
 	if err := writeRevisionTimeline(ctx, tx, projectID, monitorID); err != nil {
 		return domain.Monitor{}, err
 	}
+	// FR-032 §10's last paragraph: disabling CLOSES the segment and then deletes the schedule row,
+	// so the span up to this instant is recorded and a retired monitor expects nothing after it.
+	if err := syncMonitorScheduleTx(ctx, tx, s, projectID, monitorID); err != nil {
+		return domain.Monitor{}, err
+	}
 	// §6.2 fan-out, the half `retired_at` alone would miss: a service whose SLI names this
 	// monitor now executes under different semantics — its input stopped producing observations —
 	// so every referencing service opens a new evaluation epoch in THIS transaction. Without it,
@@ -231,6 +236,12 @@ func (s *Store) ReactivateMonitor(ctx context.Context, projectID, monitorID stri
 	// Restoring is a configuration change too, and its generation needs its row for the same
 	// reason retiring's does (FR-032 invariant 13a).
 	if err := writeRevisionTimeline(ctx, tx, projectID, monitorID); err != nil {
+		return domain.Monitor{}, err
+	}
+	// Enabling CREATES the expectation, at `next_due_at = now`: nothing recorded an expectation
+	// while the monitor was retired, so `schedule_created_at` bounds `ledger_from` and the span
+	// before this instant is claimable as nothing (FR-032 §10, invariant 15).
+	if err := syncMonitorScheduleTx(ctx, tx, s, projectID, monitorID); err != nil {
 		return domain.Monitor{}, err
 	}
 	// §6.2 fan-out, the half `retired_at` alone would miss: a service whose SLI names this

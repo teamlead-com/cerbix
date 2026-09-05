@@ -53,6 +53,18 @@ type Config struct {
 // mints the payload is the one that changes this rule.
 type LedgerConfig struct {
 	CarrierEnabled bool `yaml:"carrier_enabled"`
+	// ExpectedRunRetentionDays is how long a due window is kept, and therefore the primary bound
+	// on gap materialization: §7.1's series never starts before the retention floor, because a
+	// window older than that would be dropped unread. 14 by the owner's ruling of 2026-09-04 —
+	// a fortnight of incident review, and where the stroke is actually wanted — with 2 and 90 as
+	// the enforced bounds. It sits BELOW both the heartbeat default (30) and the gate ledger's
+	// (90) deliberately: a window's evidentiary value decays faster than a heartbeat's.
+	ExpectedRunRetentionDays int `yaml:"expected_run_retention_days"`
+	// ExpectedRunGapWindowsMax is the per-monitor safety VALVE, not a policy: it bounds one
+	// statement's work when a leader has been absent, and the retention clip above is the rule.
+	// Per monitor and never per batch — a batch-wide LIMIT was the P0 that killed revision 2,
+	// because one monitor's volume erased another monitor's evidence.
+	ExpectedRunGapWindowsMax int `yaml:"expected_run_gap_windows_max"`
 }
 
 // PullConfig configures the HTTP-pull transport (an alternative to RabbitMQ for a geo
@@ -568,15 +580,29 @@ func defaults() *Config {
 const ledgerCarrierPayloadPhase = "B2"
 
 func (c *Config) Validate() error {
-	// FR-032 phase B1: the generation-4 carrier is deployed INERT. Refuse the key rather than
-	// coercing it — an operator who set it must learn that it did nothing, not discover later
-	// that a gate they believed on was silently off.
-	if c.Ledger.CarrierEnabled {
-		return fmt.Errorf(
-			"ledger.carrier_enabled must not be true in this build: the generation-4 carrier is "+
-				"deployed but inert, and the job identity it carries (DueAt and its issue "+
-				"timestamps) is added in phase %s. Remove the key or set it to false",
-			ledgerCarrierPayloadPhase)
+	// FR-032 phase B2: the payload that DEFINES generation 4 now exists, so `carrier_enabled` is
+	// an admissible input and this refusal is retired. It is retired rather than deleted from the
+	// record: `ledgerCarrierPayloadPhase` remains below with the phase it named, because the
+	// contract was VERSIONED and a reader needs to know which build changed the answer.
+	//
+	// The versioned half that survives is the direction of the change. B1 refused `true` and did
+	// not coerce it, so an operator who set the key learned that it did nothing. B2 accepts the
+	// SAME validated snapshot and wires it to selection in the change that mints the payload —
+	// which is what "atomically" in §16 means, and why there is no build in which the flag is
+	// accepted and the payload is absent.
+	if c.Ledger.ExpectedRunRetentionDays != 0 &&
+		(c.Ledger.ExpectedRunRetentionDays < domain.MinExpectedRunRetentionDays ||
+			c.Ledger.ExpectedRunRetentionDays > domain.MaxExpectedRunRetentionDays) {
+		return fmt.Errorf("ledger.expected_run_retention_days must be between %d and %d (0 takes the default of %d): %d",
+			domain.MinExpectedRunRetentionDays, domain.MaxExpectedRunRetentionDays,
+			domain.DefaultExpectedRunRetentionDays, c.Ledger.ExpectedRunRetentionDays)
+	}
+	if c.Ledger.ExpectedRunGapWindowsMax != 0 &&
+		(c.Ledger.ExpectedRunGapWindowsMax < domain.MinExpectedRunGapWindowsMax ||
+			c.Ledger.ExpectedRunGapWindowsMax > domain.MaxExpectedRunGapWindowsMax) {
+		return fmt.Errorf("ledger.expected_run_gap_windows_max must be between %d and %d (0 takes the default of %d): %d",
+			domain.MinExpectedRunGapWindowsMax, domain.MaxExpectedRunGapWindowsMax,
+			domain.DefaultExpectedRunGapWindowsMax, c.Ledger.ExpectedRunGapWindowsMax)
 	}
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return fmt.Errorf("server.listen must not be empty")

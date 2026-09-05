@@ -525,11 +525,25 @@ flowchart TB
 - **PostgreSQL 15+ required, 16 used everywhere here** — the schema uses the column-list `ON DELETE SET NULL (col)` form from PG15 in five migrations; `Migrate` refuses an older server before applying anything.
 - **Postgres 16 (TimescaleDB image)** — primary + streaming replica; time series on regular
   RANGE partitions + the `heartbeats_daily` rollup, retention drops old partitions (leader).
+  `expected_runs` (FR-032) is declaratively partitioned by `due_at` in BOTH storage modes —
+  TimescaleDB never owns it — plus a DEFAULT partition, so an insert is never lost to a missing
+  partition: a row there is evidence that a run did not complete, and losing it would erase exactly
+  the fact the ledger exists to keep. Every partition carries `fillfactor = 70`, set on the
+  PARTITION because storage parameters are not inherited from a partitioned parent. Its retention is
+  its own (14 days by default, against the heartbeats' 30), and the pass purges the DEFAULT
+  partition as well as dropping dated ones — a table that has a default partition so inserts are
+  never lost is a table whose retention must reach into it.
 - **RabbitMQ 4.3** — preferred cluster after the staged upgrade; durable regional
   `checks.jobs.<region>` / `checks.jobs.v2.<region>` / `checks.jobs.v3.<region>` /
-  `checks.jobs.v4.<region>` queues — generation 4 carries job identity (FR-032) and is deployed
-  INERT: nothing publishes into it while `ledger.carrier_enabled` is off, which a binary of this
-  generation refuses to have set on — the
+  `checks.jobs.v4.<region>` queues — generation 4 carries job identity (FR-032): the job id, its
+  issue instant and the DUE WINDOW it answers. It is selected for a region only when that region's
+  executors ANNOUNCE it (an AMQP worker by consuming the v4 queue, a pull agent by declaring
+  `capabilities.ledger`, an in-process `role=all` runner by being this binary) AND
+  `ledger.carrier_enabled` is on. With the flag off the ledger still records what was EXPECTED and
+  every window reads `unknown`, because no result can carry the identity that correlates it —
+  turning the flag on starts producing truth from the next tick with no backfill. A generation-4
+  delivery MISSING one of those three fields is a protocol violation and is dead-lettered rather
+  than probed; the same absence on an older carrier is the ordinary rolling-upgrade case. Then the
   per-capability `checks.canary.[v3.]<kind>@<version>.<region>` (FR-029) plus shared
   `checks.results` / `checks.dead` and auto-delete regional test queues. A queue per carrier and per
   capability is deliberate: an executor that cannot open or cannot run a payload must be unable to

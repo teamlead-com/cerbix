@@ -139,3 +139,117 @@ export function gapLabel(ms: number): string {
   const rm = m % 60;
   return rm ? `${h}h ${rm}m` : `${h}h`;
 }
+
+// ---------------------------------------------------------------------------------------------
+// FR-032 phase E — when a stroke between two adjacent points is defensible (§14).
+//
+// FR-031 removed the line because nothing could defend one: two received heartbeats bound OBSERVED
+// SPACING and nothing more, and the frontend may not decide from `interval_seconds` plus a
+// tolerance that a check was due and missing. FR-032 records the missing subject — that a run was
+// EXPECTED — so the question becomes answerable, and this is the answer.
+//
+// The rule is deliberately the strictest reading of §14, and every clause of it removes a way to
+// draw through time nobody can vouch for:
+//
+//   - EVERY window between the two points must be plain `covered`. Not `covered_late`: a run that
+//     answered its window from too far away proves the target's state at the observation, not
+//     across the window (§14.1, and the owner's ruling of 2026-09-04).
+//   - The span must lie entirely at or after `ledger_from`. Before it the ledger holds nothing,
+//     and "no window says otherwise" is not evidence — it is the absence of evidence, which is
+//     what §12.3 means by claimable as nothing.
+//   - A span with NO windows at all draws nothing. Two adjacent heartbeats with no expectation
+//     between them are exactly the pre-FR-032 situation, and the answer there was already no.
+//
+// `interval_assumed` is not consulted anywhere in this file, and that is invariant 20g rather than
+// an omission: a `covered_late` whose threshold was assumed is still `covered_late`, and reading
+// the flag as licence to promote it is how this gate would be widened without anyone deciding to
+// widen it.
+
+/** One window as the API renders it — the fields this decision needs, and no others. */
+export type ExpectedRunWindowLike = {
+  due_at: string;
+  verdict: string;
+};
+
+/** What the API returns for one monitor's windows, plus the bound that says what it means. */
+export type ExpectedRunAnswer = {
+  windows: ExpectedRunWindowLike[];
+  /** null when the monitor has no expectation at all: the whole range renders as not stored. */
+  ledger_from: string | null;
+};
+
+export type StrokeSegment = {
+  /** index into the points array of the segment's first point */
+  fromIndex: number;
+  /** index of its last point; a segment always spans at least two points */
+  toIndex: number;
+};
+
+/**
+ * The segments of the series a stroke may be drawn across.
+ *
+ * Returns a list rather than a boolean because the panel is not all-or-nothing: a monitor with one
+ * unanswerable hour still has defensible strokes on either side of it, and refusing the whole
+ * series for one gap would understate what the ledger actually proves.
+ *
+ * Adjacent points join into one segment only while every intervening window is `covered`; the
+ * first window that is not ends the segment AT the earlier point, and the next segment starts at
+ * the later one. A single point on its own is not a segment: there is nothing to stroke between.
+ */
+export function strokeSegments(points: PanelPoint[], answer: ExpectedRunAnswer | null): StrokeSegment[] {
+  if (!answer || answer.ledger_from == null || points.length < 2) return [];
+  const ledgerFrom = Date.parse(answer.ledger_from);
+  if (Number.isNaN(ledgerFrom)) return [];
+
+  // Windows, oldest first, with unparseable instants dropped rather than guessed at.
+  const windows = answer.windows
+    .map((w) => ({ ms: Date.parse(w.due_at), verdict: w.verdict }))
+    .filter((w) => !Number.isNaN(w.ms))
+    .sort((a, b) => a.ms - b.ms);
+
+  const segments: StrokeSegment[] = [];
+  let start = -1;
+  for (let i = 1; i < points.length; i++) {
+    const fromMs = points[i - 1].ms;
+    const toMs = points[i].ms;
+    if (coversInterval(windows, fromMs, toMs, ledgerFrom)) {
+      if (start < 0) start = i - 1;
+      continue;
+    }
+    if (start >= 0) {
+      segments.push({ fromIndex: start, toIndex: i - 1 });
+      start = -1;
+    }
+  }
+  if (start >= 0) segments.push({ fromIndex: start, toIndex: points.length - 1 });
+  return segments;
+}
+
+/**
+ * Whether one interval between adjacent points is defensible.
+ *
+ * The interval is half-open `(fromMs, toMs]`: a window due exactly AT the earlier point is the one
+ * that point answers and says nothing about the time after it, while a window due at the later
+ * point is answered by that point. Getting this boundary wrong in the other direction would let a
+ * covered window at the segment's start vouch for an interval it does not touch.
+ */
+function coversInterval(
+  windows: { ms: number; verdict: string }[],
+  fromMs: number,
+  toMs: number,
+  ledgerFrom: number,
+): boolean {
+  // Before `ledger_from` the ledger holds nothing, so no interval reaching back past it can be
+  // defended — whatever the windows inside it happen to say.
+  if (fromMs < ledgerFrom) return false;
+  let sawWindow = false;
+  for (const w of windows) {
+    if (w.ms <= fromMs) continue;
+    if (w.ms > toMs) break;
+    sawWindow = true;
+    if (w.verdict !== 'covered') return false;
+  }
+  // No window between the two points is the pre-FR-032 situation: observed spacing and nothing
+  // more. The panel draws points there, as it always did.
+  return sawWindow;
+}

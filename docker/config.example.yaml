@@ -237,12 +237,40 @@ pull:
 #         max_monitors_per_bundle: 1000
 #         max_managed_monitors: 5000
 
-# FR-032 — the expected-run ledger's carrier.
+# FR-032 — the expected-run ledger.
 #
-# A default is not a contract, so this key is stated rather than left absent. `false` and absent are
-# identical; `true` is REFUSED at startup by a binary of this generation, naming the key, because the
-# job identity that generation-4 jobs carry is added in a later phase. Accepting it would publish
-# jobs carrying no identity; coercing it to false silently would leave an operator believing a gate
-# is on that is off.
+# `carrier_enabled` gates SELECTION of carrier generation 4, the one that carries the window a run
+# answers. A default is not a contract, so the key is stated rather than left absent: `false` and
+# absent are identical, and this build ACCEPTS `true` because the payload that defines generation 4
+# now exists. The binary before it refused `true` outright rather than coercing it, which is why an
+# operator who set the key on an older build learned that it did nothing instead of believing a
+# gate was on that was off.
+#
+# With the flag off the ledger still records what was EXPECTED — that is not gated — but every
+# window reads `unknown`, because no result can carry the identity that correlates it. Turning the
+# flag on starts producing truth from the next tick, with no backfill.
+#
+# Generation 4 is selected for a region only when its executors ANNOUNCE it: an AMQP worker by
+# consuming the v4 queue, a pull agent by declaring `capabilities.ledger` on its heartbeat. So a
+# job is never published to a queue nobody consumes, and a half-deployed cluster degrades in truth
+# rather than in delivery.
 ledger:
   carrier_enabled: false
+  # How long a due window is kept. 14 by the owner's ruling; 2..90 enforced, 0 takes the default.
+  # This is also the PRIMARY bound on gap materialization: a window older than retention would be
+  # dropped unread, so it is never materialized in the first place.
+  expected_run_retention_days: 14
+  # Per-monitor safety valve on one advance statement's work — not a policy, and per MONITOR rather
+  # than per batch, because a batch-wide limit lets one monitor's volume erase another's evidence.
+  # 100..100000 enforced, 0 takes the default of 10000.
+  expected_run_gap_windows_max: 10000
+  #
+  # Retention is enforced by the leader's hourly maintenance pass: it drops a dated partition only
+  # once its WHOLE range is past the cutoff, and purges rows that leaked into the DEFAULT partition.
+  # The default partition exists so an insert is never lost — a window is evidence that a run did
+  # not complete, and losing one would erase exactly the fact this ledger keeps — and having one is
+  # why retention has to reach into it.
+  #
+  # Watch `cerbix_expected_runs_hot_update_ratio`. It is unpublished until something has updated,
+  # because an undefined ratio has no honest value; sustained below 0.90 past a thousand updates it
+  # says the storage shape needs the append-only variant rather than a tuning change.

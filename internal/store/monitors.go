@@ -948,6 +948,12 @@ func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.
 	if err := writeRevisionTimeline(ctx, tx, updated.ProjectID, updated.ID); err != nil {
 		return domain.Monitor{}, err
 	}
+	// FR-032 §10: close the window segment this write ends at the OLD interval, then record the
+	// new configuration on the schedule row — leaving `next_due_at` untouched, so the pending
+	// probe fires when it was already going to (invariants 14, 14a, 14b).
+	if err := syncMonitorScheduleTx(ctx, tx, s, updated.ProjectID, updated.ID); err != nil {
+		return domain.Monitor{}, err
+	}
 	return updated, nil
 }
 
@@ -1289,33 +1295,83 @@ type ProbeErrorOutcome struct {
 // RecordProbeError stores a revision-fenced executor diagnostic without touching the
 // heartbeat/SLA/status/counter/incident/outbox paths. The UPDATE is the CAS/linearization
 // point; a stale revision is rejected exactly like a stale normal result.
-func (s *Store) RecordProbeError(ctx context.Context, monitorID string, revision int64, probeErr domain.ProbeError) (ProbeErrorOutcome, error) {
-	if monitorID == "" || revision < 1 || !domain.ValidProbeErrorReason(probeErr.Reason) {
+func (s *Store) RecordProbeError(ctx context.Context, hb domain.Heartbeat) (ProbeErrorOutcome, error) {
+	if hb.ProbeError == nil {
+		return ProbeErrorOutcome{}, errors.New("store: probe_error result carries no diagnostic")
+	}
+	probeErr := *hb.ProbeError
+	if hb.MonitorID == "" || hb.ExecutionRevision < 1 || !domain.ValidProbeErrorReason(probeErr.Reason) {
 		return ProbeErrorOutcome{}, errors.New("store: invalid probe_error result")
 	}
-	ct, err := s.pool.Exec(ctx,
+	// ONE transaction, and the reason is FR-032. A probe_error is a TERMINAL outcome — §6.1's
+	// CHECK admits it beside 'result' — so the diagnostic and the window it closes must land
+	// together or not at all. The shipped code was a bare Exec; adding the ledger fill beside it
+	// as a second statement would have left a crash between them recording a run cerbix could no
+	// longer say had finished, which reads as `issued_never_claimed` forever.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ProbeErrorOutcome{}, fmt.Errorf("store: begin record probe error: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	var dbNow time.Time
+	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&dbNow); err != nil {
+		return ProbeErrorOutcome{}, fmt.Errorf("store: probe error clock: %w", err)
+	}
+	ct, err := tx.Exec(ctx,
 		`UPDATE monitors
 		    SET last_probe_error_reason=$3,
 		        last_probe_error_at=statement_timestamp(),
 		        last_probe_error_job_id=NULLIF($4,'')
 		  WHERE id=$1 AND execution_revision=$2 AND enabled`,
-		monitorID, revision, probeErr.Reason, probeErr.JobID)
+		hb.MonitorID, hb.ExecutionRevision, probeErr.Reason, probeErr.JobID)
 	if err != nil {
 		return ProbeErrorOutcome{}, fmt.Errorf("store: record probe error: %w", err)
 	}
+	// Which window this diagnostic answers, resolved ONCE for both branches below.
+	ref := s.correlateExpectedRun(hb, dbNow)
 	if ct.RowsAffected() == 1 {
+		// The gate passed, so the window this diagnostic answers has an ADMISSIBLE outcome: the
+		// run happened and it produced a typed non-liveness result. That is coverage — the
+		// requirement is that a run FINISHED, not that it was up (§6.1's outcome vocabulary).
+		if ref.OK {
+			if err := fillExpectedRunTerminalTx(ctx, tx, expectedRunTerminal{
+				MonitorID: hb.MonitorID, DueAt: ref.DueAt, JobID: ref.JobID,
+				Revision: hb.ExecutionRevision, TerminalAt: dbNow, IssuedAt: ref.IssuedAt,
+				Outcome: ExpectedRunOutcomeProbeError,
+			}); err != nil {
+				return ProbeErrorOutcome{}, err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return ProbeErrorOutcome{}, fmt.Errorf("store: commit probe error: %w", err)
+		}
 		return ProbeErrorOutcome{Recorded: true}, nil
 	}
 	var currentRevision int64
-	if err := s.pool.QueryRow(ctx, `SELECT execution_revision FROM monitors WHERE id=$1`, monitorID).Scan(&currentRevision); noRows(err) {
+	if err := tx.QueryRow(ctx, `SELECT execution_revision FROM monitors WHERE id=$1`, hb.MonitorID).Scan(&currentRevision); noRows(err) {
 		return ProbeErrorOutcome{}, ErrNotFound
 	} else if err != nil {
 		return ProbeErrorOutcome{}, fmt.Errorf("store: classify rejected probe error: %w", err)
 	}
-	if currentRevision != revision {
-		return ProbeErrorOutcome{Reason: ReasonStaleRevision}, nil
+	out := ProbeErrorOutcome{Reason: MaterializeSkippedCurrentState}
+	if currentRevision != hb.ExecutionRevision {
+		out = ProbeErrorOutcome{Reason: ReasonStaleRevision}
 	}
-	return ProbeErrorOutcome{Reason: MaterializeSkippedCurrentState}, nil
+	// A refused diagnostic annotates its own run's row and never inserts (invariant 10f): "a
+	// result arrived and was inadmissible" is a different fact from silence, and it is recorded in
+	// refused_at/refused_reason rather than in terminal_at, so coverage stays the single test
+	// `terminal_at IS NOT NULL`.
+	if ref.OK {
+		if err := noteExpectedRunRefusalTx(ctx, tx, hb.MonitorID, ref.DueAt, ref.JobID,
+			hb.ExecutionRevision, dbNow, out.Reason); err != nil {
+			return ProbeErrorOutcome{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ProbeErrorOutcome{}, fmt.Errorf("store: commit rejected probe error: %w", err)
+	}
+	return out, nil
 }
 
 // withMissing tags the outcome as an observe-mode missing-revision acceptance.
@@ -1376,10 +1432,23 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	if err != nil {
 		return ResultOutcome{}, fmt.Errorf("store: record result lock: %w", err)
 	}
+	// FR-032 §13.1: which due window, if any, this result answers. Resolved ONCE and BEFORE every
+	// gate, so each path below reads one answer rather than re-deriving it — the shape that has
+	// diverged three times in this design. `ledger.OK` false means the result correlates to no
+	// window: it is still recorded as a heartbeat exactly as today, and the ledger is untouched
+	// (invariant 25).
+	ledger := s.correlateExpectedRun(hb, dbNow)
+
 	// A disable committed before this authoritative ingest lock invalidates the
 	// in-flight probe. It must not add an SLA row or mutate liveness.
+	//
+	// It IS a refusal, so it annotates the window whose job it answers: a run that was issued and
+	// then invalidated by a disable is a different fact from silence, and the disable's own segment
+	// close (§10) has already recorded the windows after it. The annotation reaches only a row
+	// carrying this job's id — a refusal never adopts a window (invariant 10f) — so a monitor
+	// disabled before it was ever dispatched has nothing here to annotate.
 	if !enabled {
-		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: MaterializeSkippedCurrentState})
+		return s.refuseWithLedger(ctx, tx, hb, ledger, dbNow, ResultOutcome{Reason: MaterializeSkippedCurrentState})
 	}
 
 	// Step 3 — revision gate (BEFORE any insert): a result produced under a stale config
@@ -1389,11 +1458,11 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	missingObserved := false
 	if hb.ExecutionRevision == 0 {
 		if s.resultRevisionMode != "observe" {
-			return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonMissingRevision})
+			return s.refuseWithLedger(ctx, tx, hb, ledger, dbNow, ResultOutcome{Reason: ReasonMissingRevision})
 		}
 		missingObserved = true
 	} else if hb.ExecutionRevision != curRev {
-		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonStaleRevision})
+		return s.refuseWithLedger(ctx, tx, hb, ledger, dbNow, ResultOutcome{Reason: ReasonStaleRevision})
 	}
 
 	// Step 4 — timestamp bounds, BEFORE the insert so a bad row never lands.
@@ -1402,10 +1471,10 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 		skew = 5 * time.Minute
 	}
 	if ts.After(dbNow.Add(skew)) {
-		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonFutureTimestamp}.withMissing(missingObserved))
+		return s.refuseWithLedger(ctx, tx, hb, ledger, dbNow, ResultOutcome{Reason: ReasonFutureTimestamp}.withMissing(missingObserved))
 	}
 	if s.resultRetention > 0 && ts.Before(dbNow.Add(-s.resultRetention)) {
-		return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonOutsideRetention}.withMissing(missingObserved))
+		return s.refuseWithLedger(ctx, tx, hb, ledger, dbNow, ResultOutcome{Reason: ReasonOutsideRetention}.withMissing(missingObserved))
 	}
 	// Step 4b — a result cannot have been observed before the job that asked for it was issued
 	// (func-result-protocol §9, deferred there with "not here"). `job_issued_at` comes from the
@@ -1417,9 +1486,29 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 	// rather than everything being rejected.
 	if !hb.JobIssuedAt.IsZero() && ts.Before(hb.JobIssuedAt) {
 		if ts.Before(hb.JobIssuedAt.Add(-skew)) {
-			return s.commitOutcome(ctx, tx, ResultOutcome{Reason: ReasonObservedBeforeIssue}.withMissing(missingObserved))
+			return s.refuseWithLedger(ctx, tx, hb, ledger, dbNow, ResultOutcome{Reason: ReasonObservedBeforeIssue}.withMissing(missingObserved))
 		}
 		if err := bumpMetricEventTx(ctx, tx, metricEventObservedBeforeIssue, 1); err != nil {
+			return ResultOutcome{}, err
+		}
+	}
+
+	// Step 4c — FR-032 §8.3: the window this result answers becomes COVERED, in this same
+	// transaction and BEHIND THE SAME GATE as the heartbeat. Every refusing path above returned
+	// already, so the statement is UNREACHABLE for a refused result — which is stronger than
+	// remembering a condition, and is what invariant 10a actually asks for: a result refused as
+	// evidence for a heartbeat must never become evidence for a stroke.
+	//
+	// It runs BEFORE the duplicate short-circuit deliberately. A re-delivery converges on the
+	// same row by §8.1's merge rule, so letting it through costs one idempotent update and keeps
+	// the ledger correct when the heartbeat was inserted by a delivery whose transaction died
+	// after step 5 and before commit.
+	if ledger.OK {
+		if err := fillExpectedRunTerminalTx(ctx, tx, expectedRunTerminal{
+			MonitorID: hb.MonitorID, DueAt: ledger.DueAt, JobID: ledger.JobID,
+			Revision: hb.ExecutionRevision, TerminalAt: dbNow, IssuedAt: ledger.IssuedAt,
+			Outcome: ExpectedRunOutcomeResult,
+		}); err != nil {
 			return ResultOutcome{}, err
 		}
 	}

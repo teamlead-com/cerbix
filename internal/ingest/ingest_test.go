@@ -26,6 +26,8 @@ type fakeStore struct {
 	lastTs      map[string]time.Time // freshness watermark (last applied result ts)
 	seq         int64                // monotonic synthetic clock for zero-Ts heartbeats
 	forceReason string               // if set, RecordScheduledResult returns this non-applied outcome
+	claims      []domain.Heartbeat   // FR-032 phase C: every claim the consumer routed to the store
+	claimErr    error                // if set, RecordRunClaim fails
 	nextInc     int
 	// createErrs is a queue of errors CreateIncident returns on successive calls
 	// (nil = success); createCalls counts how many times it was invoked.
@@ -104,7 +106,8 @@ func (f *fakeStore) RecordScheduledResult(_ context.Context, hb domain.Heartbeat
 	return store.ResultOutcome{Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed}, nil
 }
 
-func (f *fakeStore) RecordProbeError(_ context.Context, monitorID string, revision int64, probeErr domain.ProbeError) (store.ProbeErrorOutcome, error) {
+func (f *fakeStore) RecordProbeError(_ context.Context, hb domain.Heartbeat) (store.ProbeErrorOutcome, error) {
+	monitorID, revision, probeErr := hb.MonitorID, hb.ExecutionRevision, *hb.ProbeError
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	m, ok := f.monitors[monitorID]
@@ -118,6 +121,15 @@ func (f *fakeStore) RecordProbeError(_ context.Context, monitorID string, revisi
 	m.LastProbeErrorJobID = probeErr.JobID
 	f.monitors[monitorID] = m
 	return store.ProbeErrorOutcome{Recorded: true}, nil
+}
+
+// FR-032 phase C. The fake RECORDS rather than executes, which is what lets an ingest test assert
+// that a claim reached the store and that it reached it INSTEAD of the result pipeline.
+func (f *fakeStore) RecordRunClaim(_ context.Context, hb domain.Heartbeat) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claims = append(f.claims, hb)
+	return f.claimErr
 }
 
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {
@@ -586,5 +598,102 @@ func TestReconcilerClosesIncidentOnPendingToUp(t *testing.T) {
 	rc.Reconcile(ctx, domain.Heartbeat{MonitorID: "m1", Up: true}, domain.StatusPending, domain.StatusUp, false)
 	if o, r := fs.openAutoIncidentCount("m1"); o != 0 || r != 1 {
 		t.Fatalf("pending→up must resolve the stale incident: open=%d resolved=%d, want 0/1", o, r)
+	}
+}
+
+// FR-032 phase C — a claim is routed to the ledger and NOT into the result pipeline.
+//
+// The branch sits beside the probe-error one and before anything a result does: no heartbeat row,
+// no status transition, no SLA sample, no incident. The assertions below are written as an ABSENCE
+// on each of those, because "the claim was recorded" alone would pass against a consumer that
+// recorded it AND ran the whole result pipeline over a heartbeat with no timestamp.
+func TestAClaimIsRecordedAndNeverEntersTheResultPipeline(t *testing.T) {
+	fs := newFakeStore()
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ExecutionRevision: 3}
+	rec := &fakeRecorder{}
+	disp := dispatch.NewInProc(8)
+	c := New(fs, disp, rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	at := time.Now().UTC()
+	_ = disp.PublishResult(ctx, domain.Heartbeat{
+		MonitorID: "m1", ExecutionRevision: 3,
+		JobID: "11111111-1111-4111-8111-111111111111", JobIssuedAt: at, DueAt: at.Add(-time.Minute),
+		Claim: &domain.RunClaim{At: at},
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		fs.mu.Lock()
+		claims, hbs := len(fs.claims), len(fs.hbs)
+		fs.mu.Unlock()
+		if claims == 1 {
+			if hbs != 0 {
+				t.Fatalf("the claim inserted %d heartbeat(s): a heartbeat carrying a claim is not a "+
+					"result, and the ingest branch exists before any of the result pipeline", hbs)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the claim was not routed to the store (claims=%d, heartbeats=%d)", claims, hbs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rec.mu.Lock()
+	checks, opened := rec.up+rec.down, rec.incidentsOpen
+	rec.mu.Unlock()
+	if checks != 0 {
+		t.Errorf("the claim was counted as %d check(s); RecordCheck marks an observation, and a "+
+			"claim is the statement that one has not happened yet", checks)
+	}
+	if opened != 0 {
+		t.Errorf("the claim opened %d incident(s)", opened)
+	}
+}
+
+// A store failure on the claim path is logged and DROPPED, never retried and never fatal.
+//
+// The direction is the one this design accepts everywhere: a missing claim reads
+// `issued_never_claimed`, which is WITHHOLDING — the ledger cannot witness that the run started,
+// which is a different statement from the run not happening. A terminal always outranks a missing
+// claim, so the loss costs a diagnostic and never a coverage verdict. The proof is that the
+// consumer keeps working afterwards.
+func TestAFailedClaimNeitherRetriesNorStopsTheConsumer(t *testing.T) {
+	fs := newFakeStore()
+	fs.claimErr = errors.New("ledger unavailable")
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ExecutionRevision: 3}
+	rec := &fakeRecorder{}
+	disp := dispatch.NewInProc(8)
+	c := New(fs, disp, rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	at := time.Now().UTC()
+	_ = disp.PublishResult(ctx, domain.Heartbeat{
+		MonitorID: "m1", ExecutionRevision: 3, JobID: "11111111-1111-4111-8111-111111111111",
+		JobIssuedAt: at, DueAt: at.Add(-time.Minute), Claim: &domain.RunClaim{At: at},
+	})
+	// An ordinary result behind it: if the failed claim had been retried in place or had stopped
+	// the loop, this would never land.
+	_ = disp.PublishResult(ctx, domain.Heartbeat{MonitorID: "m1", ExecutionRevision: 3, Up: true, Ts: at})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		fs.mu.Lock()
+		claims, hbs := len(fs.claims), len(fs.hbs)
+		fs.mu.Unlock()
+		if hbs == 1 {
+			if claims != 1 {
+				t.Errorf("the failed claim was attempted %d times; it is dropped, not retried", claims)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the consumer stopped after a failed claim (claims=%d, heartbeats=%d)", claims, hbs)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

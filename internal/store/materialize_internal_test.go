@@ -250,6 +250,16 @@ func TestMaterializeSealsTheEnvelopeItsCarrierCarries(t *testing.T) {
 		// Generation 2 already means envelope v1 to every deployed executor.
 		{dispatch.ProtocolV2, dispatch.EnvelopeV1},
 		{dispatch.ProtocolV3, dispatch.EnvelopeV2},
+		// FR-032 phase B2: generation 4 adds JOB IDENTITY on top of what generation 3 carries, so
+		// its envelope is still v2. This case was `{4 → unknown}` in B1, where the generation
+		// existed on the wire and nothing could select it — and the missing mapping was a real
+		// defect that phase could not observe: a credentialed monitor in a ledger-announcing region
+		// failed materialization with "no envelope generation for carrier 4", which reads as a
+		// wiring bug and is really a missing line. A v4 announcement also proves the executor's
+		// CODE is at least as new as v3, so envelope v2 is supported there by construction; whether
+		// its region has a dispatch KEY is the pre-existing `no_dispatch_key` question and not a
+		// version one.
+		{dispatch.ProtocolV4, dispatch.EnvelopeV2},
 	} {
 		got, err := envelopeForCarrier(tc.carrier)
 		if err != nil || got != tc.want {
@@ -259,7 +269,7 @@ func TestMaterializeSealsTheEnvelopeItsCarrierCarries(t *testing.T) {
 	// A carrier we do not know is a wiring bug, not something to guess at: neither the
 	// newest envelope (nobody downstream could open it) nor the oldest (it would ship
 	// under a binding the caller did not ask for).
-	for _, unknown := range []int{0, 4, 99, -1} {
+	for _, unknown := range []int{0, 5, 99, -1} {
 		if _, err := envelopeForCarrier(unknown); err == nil {
 			t.Fatalf("carrier %d silently mapped to an envelope", unknown)
 		}

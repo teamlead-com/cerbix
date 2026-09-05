@@ -1,0 +1,771 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
+)
+
+// FR-032 phase B2 (D-0237): the durable expected-run ledger.
+//
+// The load-bearing rule of this file is that there is exactly ONE statement that moves an
+// expectation forward (spec §7.1, invariant 2a). Revision 4 of the design had two — the issue path
+// and the policy-skip path — and was rejected because they diverged on the obligation they shared:
+// the skip one argued its way out of gap materialization, so a leader whose first action after an
+// absence was a skip advanced past every intervening window while writing neither the windows nor
+// the truncation fence. The advance OVERWRITES the only record of the old expectation, so evidence
+// not written in the same statement can never be recovered. Callers therefore differ only in their
+// arguments.
+
+// expectedRunSkipReason values are the CHECK'd vocabulary of `expected_runs.skip_reason`. They are
+// constants rather than literals at the call sites because each one names a scheduler rule, and a
+// typo would be accepted by Go and refused by the database at 3am.
+const (
+	// SkipNoCapableRunner is advance rule 3: no region announced it can run this canary.
+	SkipNoCapableRunner = "no_capable_runner"
+	// SkipNoInflightSlot is advance rule 3: the canary's in-flight lease was already held.
+	SkipNoInflightSlot = "no_inflight_slot"
+	// SkipCredentialUnresolved is advance rule 4: the authoritative read could not resolve or
+	// seal this monitor's secrets.
+	SkipCredentialUnresolved = "credential_unresolved"
+	// SkipNoCapableExecutor is advance rule 4: the region proved no executor able to open the
+	// carrier this job needs.
+	SkipNoCapableExecutor = "no_capable_executor"
+	// SkipTransportBackoff is advance rule 4: the publish itself failed.
+	SkipTransportBackoff = "transport_backoff"
+)
+
+// ExpectationAdvance is one monitor's forward move through §7.1's primitive.
+//
+// JobID set means a dispatch succeeded; SkipReason set means it did not happen, and why. Exactly
+// one of the two is set — Validate refuses both and neither, because a row with both would violate
+// §6.1's carrier CHECK and a row with neither would record an advance nothing caused.
+//
+// NextDue and IntervalInForce are separate and deliberately so: for a backoff they DIFFER, and
+// deriving one from the other is invariant 2b's defect — a backoff delay that became
+// `interval_in_force` would misspace every later gap window, invisibly and permanently.
+type ExpectationAdvance struct {
+	MonitorID  string
+	JobID      string
+	SkipReason string
+	// Confirming says the NextDue below was produced by the monitor's confirm interval rather than
+	// its base one. It travels with the interval because the two describe the same instant.
+	Confirming bool
+	// NextDue is the new expectation. For a backoff it carries the delay; for an issue or a
+	// policy skip it is the caller's `now + interval`, which is the same value the leader has
+	// already written to its in-memory nextRun map. Persisting the instant the leader ALREADY
+	// computes is what keeps invariant 1 true: no monitor's probe instant changes.
+	NextDue time.Time
+	// IntervalInForce is the monitor's real effective interval in seconds — never a backoff delay.
+	IntervalInForce int
+	// CarrierGeneration is the carrier the PUBLISHER selected for this job, and it is meaningful
+	// only alongside a JobID. It is never recovered from a payload: on AMQP it is the queue the
+	// leader published to, on pull the generation stamped into the row, in-process the field the
+	// core itself put on the job (§13's transport table, invariant 10d).
+	CarrierGeneration int
+	// ExpectedDue and ExpectedRevision are the optimistic fence (§13.2, invariant 25e). TWO
+	// predicates, because fencing on `next_due_at` alone fenced the one datum §10 guarantees does
+	// NOT change: a config write between publish and here passed the old check while having
+	// changed the revision, the interval and possibly the region.
+	ExpectedDue      time.Time
+	ExpectedRevision int64
+	// Region is the region the job was PUBLISHED to, an authoritative-read fact on the
+	// credentialed path and the snapshot's on the plain one. Both are the publisher's decision.
+	Region string
+}
+
+// Validate refuses an item the ledger cannot represent. It is called for every element rather than
+// trusted, because a single bad element aborts the whole tick's statement and would take every
+// other monitor's evidence down with it.
+func (a ExpectationAdvance) Validate() error {
+	if a.MonitorID == "" {
+		return errors.New("store: expectation advance without a monitor")
+	}
+	if (a.JobID == "") == (a.SkipReason == "") {
+		return fmt.Errorf("store: expectation advance for %s must carry exactly one of job_id and skip_reason", a.MonitorID)
+	}
+	if (a.JobID != "") != (a.CarrierGeneration > 0) {
+		// §6.1's `expected_runs_carrier_iff_job` says the same thing in the database. Saying it
+		// here too is not redundancy: the CHECK aborts a batch, this names the offending monitor.
+		return fmt.Errorf("store: expectation advance for %s must carry a carrier generation exactly when it carries a job", a.MonitorID)
+	}
+	if a.IntervalInForce <= 0 {
+		return fmt.Errorf("store: expectation advance for %s has a non-positive interval", a.MonitorID)
+	}
+	if a.NextDue.IsZero() || a.ExpectedDue.IsZero() {
+		return fmt.Errorf("store: expectation advance for %s is missing an instant", a.MonitorID)
+	}
+	if a.ExpectedRevision < 1 {
+		return fmt.Errorf("store: expectation advance for %s has no expected revision", a.MonitorID)
+	}
+	if a.Region == "" {
+		return fmt.Errorf("store: expectation advance for %s has no region", a.MonitorID)
+	}
+	return nil
+}
+
+// expectedRunAdmissibleSQL is §8.1's admissibility predicate — the ONE boundary every event
+// statement uses, written once and used verbatim (invariant 7a).
+//
+// Revision 5 had two event statements with two different guards, and the claim one was WRONG: it
+// admitted `job_id IS NULL`, which is also true of a deliberately skipped window, and carried no
+// revision predicate at all — so a late or stale claim could mark a window cerbix CHOSE not to run
+// as claimed, breaking invariants 7 and 10b through the SQL that was supposed to uphold them
+// (reviewer P1-1 at party [231]). That is the [229] lesson in a second place: two statements
+// sharing an obligation diverge on it.
+//
+// It takes the parameter POSITIONS rather than being a bare string, because the two statements
+// that use it bind their arguments in different orders — and a predicate copied to renumber it is
+// a predicate that has been copied.
+func expectedRunAdmissibleSQL(jobParam, revisionParam string) string {
+	return `(expected_runs.job_id = ` + jobParam + `
+        OR (expected_runs.job_id IS NULL                -- a window with no run,
+            AND expected_runs.skip_reason IS NULL))     -- but NOT a deliberate skip
+   AND expected_runs.execution_revision = ` + revisionParam
+}
+
+// expectedRunGapCTESQL is the ONE expression of "which windows were missed, and was anything older
+// cut off" — the obligation §7's rejection of revision 4 is about.
+//
+// TWO statements materialize gap windows: §7.1's forward-moving primitive and §10's configuration
+// segment close. They are necessarily different statements — one advances `next_due_at` and writes
+// the window it answers, the other must touch neither — so the lesson of party [229] ("two
+// statements sharing one obligation will diverge on it") is honoured by sharing the TEXT rather
+// than by pretending one statement can do both. Each caller supplies its own `picked` CTE exposing
+// (monitor_id, project_id, schedule_revision, monitor_region, interval_in_force, first_expected)
+// and its own bound parameters; everything about the cap, the clip, the numbering and the fence is
+// written once, here.
+func expectedRunGapCTESQL(upperBound, capParam, floorParam string) string {
+	// The two instants are CAST explicitly. Without it PostgreSQL has no type to infer them from —
+	// `$n - interval '1 microsecond'` resolves the parameter to `interval`, and the whole statement
+	// fails with "function generate_series(timestamp with time zone, interval, interval) does not
+	// exist". Found by running it, which is the reason a bare parameter in an arithmetic position
+	// is worth naming here rather than leaving as a habit.
+	upperBound += "::timestamptz"
+	floorParam += "::timestamptz"
+	return `
+-- Windows strictly between the old expectation and the bound, clipped at the retention floor
+-- because a window older than that would be dropped unread. Numbered PER MONITOR, newest first,
+-- so the cap keeps the most recent and the choice is deterministic. Revision 2 used a batch-wide
+-- LIMIT and was rejected for it: one monitor's volume erased another monitor's evidence, and
+-- invariant 24b exists to keep that from returning.
+candidate AS (
+    SELECT p.monitor_id, p.project_id, p.schedule_revision, p.monitor_region,
+           p.interval_in_force, p.first_expected, w.due_at,
+           row_number() OVER (PARTITION BY p.monitor_id ORDER BY w.due_at DESC) AS rn
+      FROM picked p
+      CROSS JOIN LATERAL generate_series(
+              GREATEST(p.first_expected, ` + floorParam + `),
+              ` + upperBound + ` - interval '1 microsecond',
+              make_interval(secs => p.interval_in_force)) AS w(due_at)
+),
+missed AS (
+    INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id,
+                               execution_revision, region, interval_seconds)
+    -- A never-issued window has no published job, so its revision and region come from the
+    -- schedule and the monitor: it is attributed to the configuration that was in force while
+    -- nothing ran, not to a run that never happened.
+    SELECT c.project_id, c.monitor_id, c.due_at, NULL, c.schedule_revision, c.monitor_region,
+           c.interval_in_force
+      FROM candidate c
+     WHERE c.rn <= ` + capParam + `
+    ON CONFLICT (monitor_id, due_at) DO NOTHING
+),
+-- ONE rule covers BOTH truncation causes: if the oldest window materialized is later than the
+-- first window expected, something older was skipped — cap or clip, it does not matter which.
+-- Before the fence the span is treated exactly as pre-ledger_from: not stored, claimable as
+-- nothing (invariant 24a).
+fence AS (
+    SELECT c.monitor_id, min(c.due_at) AS truncated_before
+      FROM candidate c
+     WHERE c.rn <= ` + capParam + `
+     GROUP BY c.monitor_id
+    HAVING min(c.due_at) > min(c.first_expected)
+)`
+}
+
+// advanceExpectationsSQL is §7.1's primitive.
+//
+// $1 monitor_id[]  $2 job_id[]  $3 skip_reason[]  $4 next_due[]  $5 interval_in_force[]
+// $6 now  $7 cap  $8 retention_floor  $9 carrier_generation[]  $10 expected_due[]
+// $11 expected_revision[]  $12 region[]  $13 confirming[]
+var advanceExpectationsSQL = `
+WITH picked AS (
+    SELECT s.monitor_id, s.project_id, s.next_due_at AS due_at, s.interval_in_force,
+           -- The two sources are projected under DISTINCT names on purpose: a single "region"
+           -- or "execution_revision" in scope is how a "comes from the job" rule silently
+           -- becomes "comes from whatever the planner resolved".
+           s.execution_revision AS schedule_revision, m.region AS monitor_region,
+           v.expected_revision  AS job_revision,      v.region AS job_region,
+           v.job_id, v.skip_reason, v.next_due, v.new_interval, v.carrier, v.confirming,
+           s.next_due_at + make_interval(secs => s.interval_in_force) AS first_expected
+      FROM monitor_schedule s
+      JOIN unnest($1::uuid[], $2::uuid[], $3::text[], $4::timestamptz[], $5::int[], $9::int[],
+                  $10::timestamptz[], $11::bigint[], $12::text[], $13::boolean[])
+             AS v(monitor_id, job_id, skip_reason, next_due, new_interval, carrier,
+                  expected_due, expected_revision, region, confirming)
+        ON v.monitor_id = s.monitor_id
+      JOIN monitors m ON m.id = s.monitor_id
+     -- The optimistic fence. TWO predicates, because the first one alone fenced the only datum
+     -- that provably does NOT change: §10 leaves next_due_at untouched on purpose, so a config
+     -- write between publish and here PASSED the old check while having changed the revision, the
+     -- interval and possibly the region (reviewer P0 at party [237]).
+     -- "m.execution_revision" is deliberately the column the ingest gate reads in
+     -- RecordScheduledResult, so this fence and the result-rejection rule cannot drift.
+     WHERE s.next_due_at = v.expected_due
+       AND m.execution_revision = v.expected_revision
+     ORDER BY s.monitor_id
+       FOR UPDATE OF s
+),
+-- The window this action answers. ONE shape for both callers: issued rows carry a job and an
+-- issued_at, skipped rows carry a reason and neither.
+current_window AS (
+    INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
+                               region, issued_at, skip_reason, carrier_generation,
+                               interval_seconds)
+    -- Every RUN fact comes from the PUBLISHED job: revision, region, carrier. Only the WINDOW
+    -- facts come from the schedule. That is what makes a crossed generation impossible rather
+    -- than merely detected (invariant 25d).
+    SELECT p.project_id, p.monitor_id, p.due_at, p.job_id, p.job_revision, p.job_region,
+           CASE WHEN p.job_id IS NOT NULL THEN $6::timestamptz END,
+           p.skip_reason,
+           p.carrier,
+           -- The interval that SPACED this window is the one in force BEFORE this advance, never
+           -- new_interval: that one spaces the NEXT window (invariant 20c).
+           p.interval_in_force
+      FROM picked p
+    ON CONFLICT (monitor_id, due_at) DO NOTHING
+),` + expectedRunGapCTESQL("$6", "$7", "$8") + `
+UPDATE monitor_schedule s
+   -- The THREE columns that describe one instant are written by ONE statement, always. That is an
+   -- amendment to §7.1 and it fixes a real over-claim the spec's own shape produced: §6.2 defines
+   -- interval_in_force as "the interval that PRODUCED next_due_at", while §10 step 3 had the
+   -- configuration write overwrite it with the NEW interval and deliberately leave next_due_at
+   -- alone. After a 60s→300s edit the standing window was therefore stamped with a 300-second
+   -- lateness threshold although it had been spaced at 60 — a run answering it four minutes late
+   -- read "covered", which licenses a stroke. Every other trade in this design points the residual
+   -- at WITHHOLDING; that one pointed the other way, and a direction violation is not excused by
+   -- being small. With the pair written together the column's definition is true at every instant
+   -- and the configuration write has nothing to recompute.
+   SET next_due_at          = p.next_due,
+       interval_in_force    = p.new_interval,
+       -- confirm_phase joins them for the same reason: it says "next_due_at was produced by the
+       -- CONFIRM interval", which is a property of the same instant and cannot be maintained by a
+       -- second writer without the two disagreeing (invariant 2c).
+       confirm_phase        = p.confirming,
+       last_issued_at       = CASE WHEN p.job_id IS NOT NULL THEN $6::timestamptz ELSE s.last_issued_at END,
+       -- GREATEST ignores NULL arguments in PostgreSQL, returning NULL only when all are NULL:
+       -- a monitor with no truncation this tick keeps the fence it had, a first truncation sets
+       -- it, and a later one can only move it forward. In standard SQL the NULL would propagate
+       -- and ERASE the fence — exactly the failure this statement exists to prevent — so the
+       -- dependency is named rather than assumed.
+       gap_truncated_before = GREATEST(s.gap_truncated_before, f.truncated_before),
+       updated_at           = statement_timestamp()
+  FROM picked p
+  LEFT JOIN fence f ON f.monitor_id = p.monitor_id
+ WHERE s.monitor_id = p.monitor_id`
+
+// AdvanceExpectations moves every given monitor's expectation forward, writing the window it
+// answers, the windows it skipped past and the truncation fence in the SAME statement. It returns
+// the number of schedule rows advanced, which is below len(items) exactly when the fence refused an
+// item — a monitor whose configuration changed between publish and here, or one with no schedule
+// row (a push monitor, a disabled one, or one whose row a concurrent write removed).
+//
+// The per-monitor cap and the retention floor are read from the STORE's policy rather than passed
+// in. That is deliberate: §10's segment close needs exactly the same two bounds from a different
+// role's process, and a value each caller supplied for itself is a bound two callers would
+// eventually disagree about — the shape of every divergence this design has been bitten by.
+func (s *Store) AdvanceExpectations(ctx context.Context, now time.Time, items []ExpectationAdvance) (int, error) {
+	if len(items) == 0 {
+		return 0, nil
+	}
+	gapCap, retentionFloor := s.expectedRunGapWindowsMax(), now.Add(-s.expectedRunRetention())
+	monitorIDs := make([]string, len(items))
+	jobIDs := make([]*string, len(items))
+	skipReasons := make([]*string, len(items))
+	nextDue := make([]time.Time, len(items))
+	intervals := make([]int32, len(items))
+	carriers := make([]*int32, len(items))
+	expectedDue := make([]time.Time, len(items))
+	expectedRev := make([]int64, len(items))
+	regions := make([]string, len(items))
+	confirming := make([]bool, len(items))
+	for i, it := range items {
+		if err := it.Validate(); err != nil {
+			return 0, err
+		}
+		monitorIDs[i] = it.MonitorID
+		if it.JobID != "" {
+			job := it.JobID
+			jobIDs[i] = &job
+			carrier := int32(it.CarrierGeneration)
+			carriers[i] = &carrier
+		}
+		if it.SkipReason != "" {
+			reason := it.SkipReason
+			skipReasons[i] = &reason
+		}
+		nextDue[i] = it.NextDue
+		intervals[i] = int32(it.IntervalInForce)
+		expectedDue[i] = it.ExpectedDue
+		expectedRev[i] = it.ExpectedRevision
+		regions[i] = it.Region
+		confirming[i] = it.Confirming
+	}
+	ct, err := s.pool.Exec(ctx, advanceExpectationsSQL,
+		monitorIDs, jobIDs, skipReasons, nextDue, intervals,
+		now, gapCap, retentionFloor, carriers, expectedDue, expectedRev, regions, confirming)
+	if err != nil {
+		return 0, fmt.Errorf("store: advance expectations: %w", err)
+	}
+	return int(ct.RowsAffected()), nil
+}
+
+// DueExpectation is one monitor's standing expectation plus the identity the core mints for the
+// job that will answer it.
+//
+// The identity comes from the DATABASE in the same statement that reads the expectation —
+// `gen_random_uuid()` and `statement_timestamp()`, the shape MaterializeExecutionConfigs already
+// uses — so `observed_at >= job_issued_at` compares an executor's clock against the core's rather
+// than two readings of the same unknown clock, and `DueAt` is minted from
+// `monitor_schedule.next_due_at` rather than from the leader's 15-second snapshot, which would be
+// stale by design (invariant 25a).
+type DueExpectation struct {
+	MonitorID       string
+	DueAt           time.Time
+	IntervalInForce int
+	Revision        int64
+	JobID           string
+	IssuedAt        time.Time
+}
+
+// LoadDueExpectations reads the standing expectation for the given monitors and mints one job
+// identity per row. A monitor absent from the result has no schedule row — it does not
+// participate, or a concurrent write removed it — and the caller must then publish it BELOW the
+// ledger carrier, because a generation-4 job is DEFINED by carrying `DueAt` and one without it is a
+// protocol violation rather than a rolling-upgrade case (invariant 10i).
+func (s *Store) LoadDueExpectations(ctx context.Context, monitorIDs []string) (map[string]DueExpectation, error) {
+	if len(monitorIDs) == 0 {
+		return map[string]DueExpectation{}, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT s.monitor_id, s.next_due_at, s.interval_in_force, s.execution_revision,
+		        gen_random_uuid()::text, statement_timestamp()
+		   FROM monitor_schedule s
+		  WHERE s.monitor_id = ANY($1::uuid[])`, monitorIDs)
+	if err != nil {
+		return nil, fmt.Errorf("store: load due expectations: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]DueExpectation, len(monitorIDs))
+	for rows.Next() {
+		var d DueExpectation
+		if err := rows.Scan(&d.MonitorID, &d.DueAt, &d.IntervalInForce, &d.Revision, &d.JobID, &d.IssuedAt); err != nil {
+			return nil, fmt.Errorf("store: scan due expectation: %w", err)
+		}
+		out[d.MonitorID] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate due expectations: %w", err)
+	}
+	return out, nil
+}
+
+// Advance rule 5 — confirm acceleration — has NO statement in this file, and that is a change
+// from §7.3 worth stating rather than leaving as an absence.
+//
+// §7.3 gave rule 5 its own write: set `interval_in_force = ConfirmInterval()` and
+// `confirm_phase = true`, then restore both when the acceleration expires. That write happens
+// BEFORE any advance has produced a `next_due_at` from the confirm interval, so it left the column
+// describing an instant it had not produced — the same mis-description §10's step 3 produced from
+// the other direction. Both are gone: the advance writes all three columns together, so the
+// accelerated spacing is recorded by the statement that actually applies it.
+//
+// What rule 5 still does is pull the leader's in-memory `nextRun` earlier, and only when the
+// standing expectation is LATER than the accelerated instant — so an expectation already in the
+// past is never moved, no intervening window can be skipped, and there is nothing to materialize
+// or fence. Invariant 2d asked for a statement structurally incapable of moving `next_due_at`
+// forward; a rule with no statement is incapable of it in the strongest available sense.
+
+// expectedRunPartitionPrefix names the daily range partitions of expected_runs
+// (expected_runs_pYYYYMMDD, UTC-aligned), mirroring heartbeatPartitionPrefix.
+const expectedRunPartitionPrefix = "expected_runs_p"
+
+// expectedRunFillfactor is the storage parameter every partition is created with.
+//
+// It is on the PARTITION and never only on the parent, and that is a defect the reviewer found in
+// the spec's own DDL: in PostgreSQL storage parameters are per-relation and
+// `CREATE TABLE ... PARTITION OF` does NOT inherit them, so a `WITH (fillfactor = 70)` on the
+// partitioned parent would have applied to nothing that ever holds a row. Invariant 23a therefore
+// asserts it by reading `pg_class.reloptions` on a NEWLY created partition — parent DDL proves
+// nothing.
+//
+// 70 leaves ~18 tuples' worth of free space per 8 KB page at ~136 bytes per tuple. That is NOT a
+// proof on its own and the spec says so: each row takes up to two updates, so a page whose rows
+// all update twice would want ~84 new versions against ~18 slots. What closes the gap is HOT
+// pruning, which reclaims a dead version in a HOT chain on page access without vacuum — so the
+// requirement is headroom for the versions live at ONE moment, which depends on arrival spread and
+// cannot be computed from the schema. Hence the measured gauge of phase D rather than an assertion
+// here.
+const expectedRunFillfactor = 70
+
+// EnsureExpectedRunPartitions creates daily partitions for the UTC days in [today, today+ahead].
+//
+// `expected_runs` is declaratively partitioned in BOTH storage modes: TimescaleDB never owns it.
+// The reason is not preference — a hypertable creates chunks on demand and would make the
+// `fillfactor` question and the retention path two different mechanisms depending on which image
+// the operator installed, and this ledger's whole subject is being able to say what a span means.
+//
+// Best-effort, exactly as the heartbeat twin is: a day whose rows already sit in the DEFAULT
+// partition cannot get a dated one, and that day stays in the default until retention purges it.
+// The default is what makes that safe rather than lossy, and it is the direction this ledger must
+// fail in — an insert lost to a missing partition would erase the very fact the ledger exists to
+// keep (invariant 16a).
+func (s *Store) EnsureExpectedRunPartitions(ctx context.Context, ahead int) error {
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	var errs []error
+	for i := 0; i <= ahead; i++ {
+		day := today.AddDate(0, 0, i)
+		name := expectedRunPartitionPrefix + day.Format("20060102")
+		q := fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s PARTITION OF expected_runs
+			   FOR VALUES FROM ('%s') TO ('%s') WITH (fillfactor = %d)`,
+			name, day.Format(pgTimestamp), day.AddDate(0, 0, 1).Format(pgTimestamp),
+			expectedRunFillfactor)
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// expectedRunTerminal is one admissible outcome for one window.
+//
+// Every field is either minted by the CORE and copied back verbatim by the executor (DueAt, JobID,
+// IssuedAt) or read from the monitor's own row. NOTHING here is an executor's invention, and the
+// carrier is the one field where that took a correction — see terminalCarrierGeneration.
+type expectedRunTerminal struct {
+	MonitorID string
+	DueAt     time.Time
+	JobID     string
+	Revision  int64
+	// TerminalAt is the instant the outcome became known to the core. It is the ingest
+	// transaction's own clock rather than the observation timestamp: `terminal_at` answers "when
+	// did an admissible outcome exist", and the observation instant is already recorded on the
+	// heartbeat.
+	TerminalAt time.Time
+	IssuedAt   time.Time
+	// Outcome is 'result' or 'probe_error', the two members §6.1's CHECK admits.
+	Outcome string
+}
+
+// terminalCarrierGeneration is the carrier a correlatable result proves, and the source is a
+// finding rather than a transcription.
+//
+// §8.3 names `dispatch.DeliveredJob.CarrierGeneration` — the transport adapter's observation of
+// the queue or claimed row a job arrived on. That value exists in the EXECUTOR's process. The
+// result travels back as a `domain.Heartbeat`, so carrying the adapter's observation to the core
+// would mean putting it in the payload, which is precisely the source the design forbids and the
+// P0 that killed revision 6.
+//
+// The implementable source is the PUBLISHER's own rule, which needs no wire field at all: `DueAt`
+// reaches an executor only on a generation-4 dispatch, because the leader caps a monitor with no
+// standing expectation below the ledger carrier for exactly that reason. So a result that
+// correlates AT ALL — one carrying a parseable `JobID` and a `DueAt` that passes §13.1's
+// validation — proves its job rode generation 4. The payload's own `ProtocolVersion` is never
+// read, which is what invariant 10d actually asks for.
+func terminalCarrierGeneration() int { return domain.LedgerMinCarrier }
+
+// fillExpectedRunTerminalSQL is §8.3's upsert.
+//
+// $1 monitor  $2 due_at  $3 job_id  $4 revision  $5 carrier  $6 issued_at  $7 terminal_at
+// $8 outcome
+var fillExpectedRunTerminalSQL = `
+INSERT INTO expected_runs (project_id, monitor_id, due_at, job_id, execution_revision,
+                           region, carrier_generation, interval_seconds, interval_assumed,
+                           issued_at, terminal_at, outcome)
+SELECT m.project_id, m.id, $2, $3, $4, m.region, $5,
+       -- The CONSERVATIVE threshold of §14.2. The core does not know which of the revision's two
+       -- legitimate intervals spaced an orphan window, so it takes the TIGHTEST: an unrecorded
+       -- window can then read covered_late when the truth might have been covered, which is an
+       -- error toward WITHHOLDING and the only direction this design accepts.
+       --
+       -- NULLIF(confirm, 0) is load-bearing and is a defect found in implementation: the spec
+       -- writes the threshold as MIN(interval_seconds, confirm_interval_seconds), and a monitor
+       -- with confirm acceleration DISABLED carries confirm_interval_seconds = 0. A literal
+       -- minimum would be 0, and a 0-second threshold makes every orphan window covered_late no
+       -- matter how promptly it was answered — over-withholding so total it destroys the verdict.
+       -- LEAST ignores NULL arguments in PostgreSQL, so nulling the disabled value takes the
+       -- minimum over the LEGITIMATE intervals, which is what "its two legitimate values" meant.
+       COALESCE(LEAST(r.interval_seconds, NULLIF(r.confirm_interval_seconds, 0)),
+                LEAST(m.interval_seconds, NULLIF(m.confirm_interval_seconds, 0))),
+       true, $6, $7, $8
+  FROM monitors m
+  -- The revision timeline is what makes execution_revision mean anything historically (phase A).
+  -- A revision with no row falls back to the monitor's CURRENT fields, which is the only value
+  -- available and is why the timeline's limitation is stated rather than discovered: revisions
+  -- that predate migration 00100 cannot be reconstructed.
+  LEFT JOIN monitor_execution_revisions r
+         ON r.monitor_id = m.id AND r.project_id = m.project_id AND r.execution_revision = $4
+ -- The ORPHAN path is the one write with no schedule row to consult, so it is the one write that
+ -- must apply the participation rule itself — through the SAME expression the schedule sync uses,
+ -- not a second copy of it. Without this a crafted result carrying a job id and a due instant
+ -- would create a window for a PUSH monitor, which §15 excludes: "checkStalePush" already detects
+ -- and records a push that did not arrive, and a window beside it is a second mechanism for one
+ -- obligation (invariant 20b).
+ WHERE m.id = $1 AND ` + scheduleParticipantSQL + `
+ON CONFLICT (monitor_id, due_at) DO UPDATE
+   -- COALESCE(existing, new) is first-writer-wins, for the two facts that cannot arrive twice
+   -- with different values. It is what makes ADOPTION fill the carrier on a no-job window while
+   -- a row that already has one keeps it.
+   SET job_id             = COALESCE(expected_runs.job_id, $3),
+       carrier_generation = COALESCE(expected_runs.carrier_generation, $5),
+       issued_at          = LEAST(COALESCE(expected_runs.issued_at, $6), $6),
+       -- The attribute is selected by a CASE over the OLD timestamp and the timestamp is
+       -- minimised, so the pair always describes the SAME delivery whichever order two arrive in
+       -- (invariant 7c). Both SET expressions see the pre-update row in PostgreSQL, so the CASE
+       -- reads the old timestamp regardless of clause order — a property worth naming, because a
+       -- reader who assumed sequential assignment would "fix" it into a bug. Reverting either to
+       -- COALESCE(existing, new) is the shape this statement shipped with through revision 10 and
+       -- is the mutation the reversed-arrival test must kill.
+       outcome            = CASE WHEN expected_runs.terminal_at IS NULL
+                                      OR $7 < expected_runs.terminal_at THEN $8
+                                 ELSE expected_runs.outcome END,
+       terminal_at        = LEAST(COALESCE(expected_runs.terminal_at, $7), $7)
+ -- §8.1's ONE admissibility predicate: the same run, or a window with no run AND no skip_reason,
+ -- and the same generation. The skip clause is what stops a window cerbix CHOSE not to run from
+ -- being reported as one that happened (invariant 10b), and the revision equality is what stops a
+ -- result admissible for the monitor's CURRENT generation from filling a window materialized under
+ -- a different one.
+ WHERE ` + expectedRunAdmissibleSQL("$3", "$4")
+
+// fillExpectedRunTerminalTx records an admissible outcome, creating the window's row if the ledger
+// never entered the run (§7's crash-after-publish). It runs in the SAME transaction as the
+// heartbeat insert and BEHIND THE SAME GATE — a refused result must fill nothing, and making the
+// statement unreachable for one is stronger than remembering a condition (invariant 10a).
+//
+// Zero rows affected is a NORMAL outcome and never an error: a conflict on a row that fails the
+// admissibility predicate means this result correlates to no window.
+func fillExpectedRunTerminalTx(ctx context.Context, tx pgx.Tx, in expectedRunTerminal) error {
+	// The column list names carrier_generation and interval_seconds explicitly, and both are
+	// there because they were once only in the prose: revision 7 left the carrier out (reviewer
+	// P0-1 at party [235]) and revision 15 did the same to the interval. §6.1's CHECK requires
+	// the carrier non-NULL whenever job_id is, so an orphan insert omitting it FAILS the
+	// constraint — the reconciliation path would have errored on exactly the case it exists to
+	// serve (invariant 25c).
+	_, err := tx.Exec(ctx, fillExpectedRunTerminalSQL,
+		in.MonitorID, in.DueAt, in.JobID, in.Revision, terminalCarrierGeneration(),
+		in.IssuedAt, in.TerminalAt, in.Outcome)
+	if err != nil {
+		return fmt.Errorf("store: fill expected run terminal: %w", err)
+	}
+	return nil
+}
+
+// noteExpectedRunRefusalTx records that a result arrived and was inadmissible — a different fact
+// from silence, and one nothing in cerbix recorded before.
+//
+// It is an UPDATE and NEVER an insert, and the asymmetry with the terminal is deliberate. A
+// terminal proves both that the run happened and that it produced an admissible outcome, so it may
+// create its own row. A refusal proves only that something was DELIVERED: creating a row from it
+// would invent an issued run whose sole evidence is inadmissible, and it would occupy the window's
+// primary key against a legitimate re-dispatch — the second horn of the trilemma at party [239].
+//
+// The guard is `job_id = $4` ALONE, without §8.1's no-job disjunct: a refusal must never adopt a
+// window, because adoption asserts a run happened there (invariant 10f). Zero rows affected is the
+// normal outcome for a refusal whose job the ledger never entered.
+func noteExpectedRunRefusalTx(ctx context.Context, tx pgx.Tx, monitorID string, dueAt time.Time, jobID string, revision int64, at time.Time, reason string) error {
+	// A revision below 1 is the missing-revision case, which invariant 25 lists among the shapes
+	// that correlate to NO window: with nothing to compare, the guard's `execution_revision = $4`
+	// could only ever match by accident.
+	if jobID == "" || dueAt.IsZero() || reason == "" || revision < 1 {
+		// A result carrying no correlation cannot annotate a window. It is still recorded
+		// wherever refused results are already counted — cerbix_result_ignored_total and its
+		// siblings — and the ledger adds nothing by duplicating that.
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+UPDATE expected_runs
+   -- One event, two columns, ONE comparison (invariant 7c). Revision 10 took
+   -- refused_at = LEAST(...) beside refused_reason = COALESCE(...), so a later refusal arriving
+   -- first followed by an earlier one left the EARLIER timestamp beside the LATER reason and the
+   -- pair stopped describing one event.
+   SET refused_reason = CASE WHEN refused_at IS NULL OR $5 < refused_at THEN $6
+                             ELSE refused_reason END,
+       refused_at     = LEAST(COALESCE(refused_at, $5), $5)
+ WHERE monitor_id = $1 AND due_at = $2
+   AND job_id = $3
+   AND execution_revision = $4`,
+		monitorID, dueAt, jobID, revision, at, reason)
+	if err != nil {
+		return fmt.Errorf("store: note expected run refusal: %w", err)
+	}
+	return nil
+}
+
+// expectedRunRef is the correlation a result carries: which window it answers.
+//
+// The zero value means NO correlation, and that is a first-class outcome rather than an error. A
+// result that carries no usable identity is still recorded as a heartbeat exactly as today and
+// contributes nothing to the ledger (invariant 25). It is never coerced, never defaulted and never
+// silently dropped.
+type expectedRunRef struct {
+	DueAt    time.Time
+	JobID    string
+	IssuedAt time.Time
+	OK       bool
+}
+
+// validJobUUID reports whether a wire `job_id` is a UUID, without coercing it.
+//
+// The wire type stays `string` because `dispatch.CheckJob.JobID` is JSON on a queue that may hold
+// messages published by the PREVIOUS version across a rolling upgrade, while the column is `uuid`
+// — it saves ~42 bytes per window across the tuple and the partial index and the value is already
+// a UUID, since `gen_random_uuid()::text` merely stringifies it. So the boundary parses and
+// validates rather than casting: a `job_id` that is absent or not a UUID means this result
+// correlates to no window (§13).
+//
+// Hand-written rather than importing a UUID package: this is the whole of what the boundary needs,
+// and it refuses the shapes a permissive parser accepts — braces, a urn prefix, or the 32-hex
+// form without dashes — none of which any producer here emits.
+func validJobUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := s[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// correlateExpectedRun applies §13.1's validation table to one result.
+//
+// Every failure below refuses CORRELATION and nothing else — the heartbeat still lands, and the
+// window simply stays unanswered, which is the withholding direction this design accepts
+// everywhere. A violation is never treated as `due_at = epoch`, because an invented window would
+// either fabricate coverage or collide with a real expectation.
+func (s *Store) correlateExpectedRun(hb domain.Heartbeat, dbNow time.Time) expectedRunRef {
+	if !validJobUUID(hb.JobID) || hb.DueAt.IsZero() || hb.JobIssuedAt.IsZero() {
+		return expectedRunRef{}
+	}
+	// An expectation cannot POSTDATE its own dispatch. An old executor drops the unknown field
+	// and returns `DueAt` zero, which the check above already refuses; this one catches a value
+	// that arrived but cannot describe a window this job answered.
+	if hb.DueAt.After(hb.JobIssuedAt) {
+		return expectedRunRef{}
+	}
+	// Outside the retention window there is no row to answer and no partition to hold one: a
+	// window that far back was dropped unread, and writing it now would make a span the ledger
+	// cannot bound look answered.
+	if hb.DueAt.Before(dbNow.Add(-s.expectedRunRetention())) || hb.DueAt.After(dbNow) {
+		return expectedRunRef{}
+	}
+	return expectedRunRef{DueAt: hb.DueAt, JobID: hb.JobID, IssuedAt: hb.JobIssuedAt, OK: true}
+}
+
+// Expected-run terminal outcomes — the two members §6.1's CHECK admits. Constants because a typo
+// in a literal is accepted by Go and refused by the database, at whatever hour the first
+// probe_error of the week arrives.
+const (
+	ExpectedRunOutcomeResult     = "result"
+	ExpectedRunOutcomeProbeError = "probe_error"
+)
+
+// refuseWithLedger records that a result arrived and was inadmissible, then commits the outcome.
+//
+// It exists so the refusal has ONE call shape across the five rejecting paths of
+// RecordScheduledResult. Five sites each writing their own `noteExpectedRunRefusalTx` call is the
+// [231] P1-1 defect in miniature: two statements sharing an obligation diverge on it, and five
+// would diverge faster.
+//
+// A result that correlates to no window refuses silently and correctly. Such a refusal is already
+// counted where discarded results are counted — cerbix_result_ignored_total,
+// cerbix_result_missing_revision_total, cerbix_result_clock_skew_total,
+// cerbix_result_observed_before_issue_total — and the ledger adds nothing by duplicating that.
+func (s *Store) refuseWithLedger(ctx context.Context, tx pgx.Tx, hb domain.Heartbeat, ref expectedRunRef, at time.Time, out ResultOutcome) (ResultOutcome, error) {
+	if ref.OK {
+		if err := noteExpectedRunRefusalTx(ctx, tx, hb.MonitorID, ref.DueAt, ref.JobID,
+			hb.ExecutionRevision, at, out.Reason); err != nil {
+			return ResultOutcome{}, err
+		}
+	}
+	return s.commitOutcome(ctx, tx, out)
+}
+
+// recordExpectedRunClaimSQL is §8.1's claim merge: the admissibility predicate plus ONE column.
+//
+// $1 monitor  $2 due_at  $3 job_id  $4 revision  $5 claimed_at
+//
+// `LEAST(COALESCE(claimed_at, $5), $5)` is the whole of it: idempotent, commutative, and monotone
+// downward, so replays and reorderings converge on the same value. "Earliest wins" rather than
+// "first writer wins" because the first CLAIM is the real one — a duplicate delivery arriving later
+// must not redate it.
+//
+// It is an UPDATE and never an insert, and the reasoning is the refusal statement's rather than the
+// terminal's: a claim proves that an executor took a job off the transport, not that a run produced
+// an admissible outcome. Creating a row from one would invent an issued run whose only evidence is
+// that somebody started it, and it would occupy the window's primary key against the legitimate
+// materialization. Zero rows affected is the NORMAL outcome for a claim whose window the ledger has
+// not entered — the crash-after-publish case, where the terminal will create the row later and
+// adopt it (§8.3). A claim that arrives before its own window is materialized therefore records
+// nothing, which is correct: `claimed_at` is a diagnostic, and a terminal always outranks a missing
+// claim (invariant 10).
+var recordExpectedRunClaimSQL = `
+UPDATE expected_runs
+   SET claimed_at = LEAST(COALESCE(claimed_at, $5), $5)
+ WHERE monitor_id = $1 AND due_at = $2
+   AND ` + expectedRunAdmissibleSQL("$3", "$4")
+
+// RecordRunClaim fills `claimed_at` for the window this claim answers.
+//
+// It is NOT in the heartbeat transaction and needs no transaction of its own: it is one idempotent
+// statement over one row, and it shares nothing with any other write. That is the difference
+// between a claim and a terminal — the terminal must land with the heartbeat it accompanies or
+// neither, while a claim accompanies nothing.
+//
+// A result that correlates to no window returns silently. `ErrNotFound` is never returned for a
+// missing window either: the caller cannot act on it, and the fact is already visible where it
+// belongs — as a window that stays `issued_never_claimed` (§8.5).
+func (s *Store) RecordRunClaim(ctx context.Context, hb domain.Heartbeat) error {
+	if hb.Claim == nil || hb.Claim.At.IsZero() {
+		return errors.New("store: run claim carries no instant")
+	}
+	if hb.MonitorID == "" || hb.ExecutionRevision < 1 {
+		return errors.New("store: invalid run claim")
+	}
+	var dbNow time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&dbNow); err != nil {
+		return fmt.Errorf("store: run claim clock: %w", err)
+	}
+	// The SAME correlation validation every other event uses, so a claim carrying a bad job id or
+	// a window outside retention is refused exactly as a result would be (invariant 25). A claim
+	// is the one event with an executor-supplied INSTANT, and that instant is deliberately NOT
+	// validated against the core's clock: `claimed_at` decides no verdict, so a skewed one costs a
+	// diagnostic's precision rather than a coverage claim, and rejecting it would lose the only
+	// evidence that the run started at all.
+	ref := s.correlateExpectedRun(hb, dbNow)
+	if !ref.OK {
+		return nil
+	}
+	if _, err := s.pool.Exec(ctx, recordExpectedRunClaimSQL,
+		hb.MonitorID, ref.DueAt, ref.JobID, hb.ExecutionRevision, hb.Claim.At); err != nil {
+		return fmt.Errorf("store: record run claim: %w", err)
+	}
+	return nil
+}

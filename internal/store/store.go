@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teamlead-com/cerbix/internal/dispatch"
+	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/secret"
 )
 
@@ -195,6 +196,56 @@ type Store struct {
 	// It exists for tests — production uses the default.
 	previewBudget      time.Duration
 	resultRevisionMode string // "enforce" (default) | "observe"
+	// Expected-run ledger policy (FR-032, spec func-expected-run-ledger §9.3/§12.3). The two
+	// bounds live on the STORE and not on each caller because §7.1's advance and §10's segment
+	// close both need them, from two different roles' processes: the scheduler leader and the API
+	// role's configuration write. A bound each caller supplied for itself is a bound two callers
+	// would eventually disagree about. Zero takes the documented defaults, so a test store and a
+	// role that never wires the policy still write correct windows.
+	expectedRunRetentionDays int
+	expectedRunGapCap        int
+}
+
+// WithExpectedRunPolicy sets the ledger's retention window and per-monitor gap cap. Out-of-range
+// and zero values take the defaults rather than being clamped silently at the store: the config
+// layer refuses an out-of-range value before business logic starts (AGENTS.md), so anything
+// arriving here outside the bounds is a caller that never went through config — a test, or a role
+// that forgot to wire it — and the default is the honest answer for both.
+func (s *Store) WithExpectedRunPolicy(retentionDays, gapWindowsMax int) *Store {
+	if retentionDays < domain.MinExpectedRunRetentionDays || retentionDays > domain.MaxExpectedRunRetentionDays {
+		retentionDays = domain.DefaultExpectedRunRetentionDays
+	}
+	if gapWindowsMax < domain.MinExpectedRunGapWindowsMax || gapWindowsMax > domain.MaxExpectedRunGapWindowsMax {
+		gapWindowsMax = domain.DefaultExpectedRunGapWindowsMax
+	}
+	s.expectedRunRetentionDays = retentionDays
+	s.expectedRunGapCap = gapWindowsMax
+	return s
+}
+
+// expectedRunRetentionDaysOrDefault is the retention window in DAYS, defaulted for a store nobody
+// wired. Days rather than a duration because §10's segment close derives its floor inside SQL from
+// the same `statement_timestamp()` that bounds it, so the value has to cross the boundary in the
+// unit `make_interval` takes.
+func (s *Store) expectedRunRetentionDaysOrDefault() int {
+	if s.expectedRunRetentionDays <= 0 {
+		return domain.DefaultExpectedRunRetentionDays
+	}
+	return s.expectedRunRetentionDays
+}
+
+// expectedRunRetention is the same window as a duration, for the callers that compute the floor in
+// Go — §7.1's advance, whose upper bound is the leader's own instant, and the ingest correlation.
+func (s *Store) expectedRunRetention() time.Duration {
+	return time.Duration(s.expectedRunRetentionDaysOrDefault()) * 24 * time.Hour
+}
+
+// expectedRunGapWindowsMax is the per-monitor cap, defaulted for a store nobody wired.
+func (s *Store) expectedRunGapWindowsMax() int {
+	if s.expectedRunGapCap <= 0 {
+		return domain.DefaultExpectedRunGapWindowsMax
+	}
+	return s.expectedRunGapCap
 }
 
 // WithResultPolicy sets the timestamp bounds used by RecordScheduledResult. Returns the

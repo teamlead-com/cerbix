@@ -23,7 +23,15 @@ type Store interface {
 	// live state was applied, whether a heartbeat was inserted (SLA), the prev/new status,
 	// maintenance suppression, and — when not applied — the outcome reason for metrics.
 	RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) (store.ResultOutcome, error)
-	RecordProbeError(ctx context.Context, monitorID string, revision int64, probeErr domain.ProbeError) (store.ProbeErrorOutcome, error)
+	// RecordProbeError stores a revision-fenced executor diagnostic. It takes the whole
+	// heartbeat rather than three fields of it because a probe_error is a TERMINAL outcome for
+	// the due window the result answers (FR-032 §6.1), and the window's identity — DueAt beside
+	// JobID and JobIssuedAt — travels on the result exactly as it does for an ordinary one.
+	RecordProbeError(ctx context.Context, hb domain.Heartbeat) (store.ProbeErrorOutcome, error)
+	// RecordRunClaim fills `claimed_at` on the window this claim answers (FR-032 §8.4). It is
+	// one idempotent statement over one row and takes no transaction: unlike a terminal, a claim
+	// accompanies nothing that must land with it.
+	RecordRunClaim(ctx context.Context, hb domain.Heartbeat) error
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	FindOpenAutoIncidentByMonitor(ctx context.Context, monitorID string) (domain.Incident, error)
 	CreateIncidentBySystem(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
@@ -124,6 +132,13 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 		c.handleProbeError(ctx, hb)
 		return
 	}
+	// FR-032 §8.4: a claim is a statement that an executor took this job off the transport and is
+	// about to probe. It is NOT a result — no heartbeat row, no status, no SLA, no incident — so
+	// it branches out here beside the probe-error member and before any of that begins.
+	if hb.Claim != nil {
+		c.handleClaim(ctx, hb)
+		return
+	}
 	// One transaction runs the ordered pipeline (missing → lock → revision gate → bounds →
 	// insert/dedup → watermark): a duplicate re-delivery is deduped, a stale/out-of-order
 	// probe is kept for SLA only, a future/out-of-window one is quarantined without an
@@ -161,8 +176,21 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 	}
 }
 
+// handleClaim records the claim and nothing else.
+//
+// A failure is logged and dropped rather than retried, and the direction is the one this design
+// accepts everywhere: a missing claim reads `issued_never_claimed`, which is WITHHOLDING — it says
+// the ledger cannot witness that the run started, never that the run did not happen. A terminal
+// outcome always outranks a missing claim (invariant 10), so the loss costs a diagnostic and never
+// a coverage verdict.
+func (c *Consumer) handleClaim(ctx context.Context, hb domain.Heartbeat) {
+	if err := c.store.RecordRunClaim(ctx, hb); err != nil {
+		c.logger.Warn("record_run_claim_failed", "monitor_id", hb.MonitorID, "error", err.Error())
+	}
+}
+
 func (c *Consumer) handleProbeError(ctx context.Context, hb domain.Heartbeat) {
-	o, err := c.store.RecordProbeError(ctx, hb.MonitorID, hb.ExecutionRevision, *hb.ProbeError)
+	o, err := c.store.RecordProbeError(ctx, hb)
 	if errors.Is(err, store.ErrNotFound) {
 		c.logger.Info("probe_error_for_deleted_monitor", "monitor_id", hb.MonitorID)
 		return

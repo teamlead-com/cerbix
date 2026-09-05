@@ -628,6 +628,18 @@ type Heartbeat struct {
 	// then the ordering check does not apply.
 	JobID       string    `json:"job_id,omitempty"`
 	JobIssuedAt time.Time `json:"job_issued_at,omitempty"`
+	// DueAt is the WINDOW this result answers — the instant a run was expected, minted by the
+	// core from `monitor_schedule.next_due_at` and copied back by `dispatch.StampResult` alongside
+	// the two fields above (FR-032 §13.1, invariants 25a and 25f). It identifies the
+	// `expected_runs` row a terminal outcome fills, which is why a pure job-id lookup does not
+	// replace it: the ORPHAN case has no row to look up and must CREATE one, and creating it needs
+	// the window's identity. Guessing it from `JobIssuedAt` would invent a window or collide with
+	// a real one.
+	//
+	// Wire-only, like the three fields above: §4a forbids overloading the `heartbeats` TABLE, and
+	// this touches no column of it. Zero from a push result or from an executor older than the
+	// generation-4 carrier, and then the result correlates to NO window rather than to `epoch`.
+	DueAt time.Time `json:"due_at,omitempty"`
 	// CanaryRunKey is the SCHEDULED RUN this result answers, carried back so the in-flight slot is
 	// released by the run that took it and not merely by monitor id. Without it a LATE result from
 	// run 1 — arriving after run 1's lease expired and run 2 claimed the slot — deleted run 2's row
@@ -639,6 +651,16 @@ type Heartbeat struct {
 	// authenticate/materialize a credential envelope. When set, the ingest path records
 	// diagnostics only: no heartbeat, status, SLA, incident, or transition mutation.
 	ProbeError *ProbeError `json:"probe_error,omitempty"`
+	// Claim is the typed non-result member an executor sends when it takes a job off the
+	// transport, before the first attempt (FR-032 §8.4, phase C). When set, the ingest path
+	// records ONLY the claim: no heartbeat, status, SLA, incident or transition mutation, exactly
+	// as ProbeError above records only a diagnostic.
+	//
+	// A heartbeat may carry a claim or a probe error, never both: they are two different moments
+	// of one run, and one message asserting both would be an executor telling the core that it
+	// started and failed in the same breath, which the two-member ingest branch cannot represent
+	// and does not need to.
+	Claim *RunClaim `json:"claim,omitempty"`
 }
 
 const (
@@ -656,6 +678,36 @@ type ProbeError struct {
 }
 
 func (e ProbeError) Error() string { return "probe_error: " + e.Reason }
+
+// RunClaim is an executor's statement that it took a job OFF THE TRANSPORT and is about to probe
+// (FR-032 §8.4, phase C).
+//
+// It is a member of `Heartbeat` for the same reason `ProbeError` is: §4a requires that `worker` and
+// `agent` gain no database handle and no new transport concept, so the claim rides the path a
+// result already rides and the `Dispatcher` interface grows nothing (invariant 11's five-method
+// set). A heartbeat carrying one is a claim and NOT a result: it inserts no `heartbeats` row,
+// touches no status, no SLA and no incident. The ingest consumer branches on it exactly as it
+// branches on `ProbeError`.
+//
+// What it buys is the state §8.5 makes visible for the first time. `internal/dispatch/amqp.go`
+// acks a delivery once it is handed to the in-process channel and says so plainly: *"Losing a
+// single check on a hard crash is acceptable — the scheduler re-emits on the next interval."* That
+// trade is unchanged. What changes is that a worker dying between ack and probe now leaves
+// `issued_at` set, `claimed_at` NULL and `terminal_at` NULL — `issued_never_claimed` — so the
+// justification becomes a queryable fact rather than an assurance.
+//
+// Folding the claim into the result was considered and REJECTED (§8.4): it would remove the round
+// trip entirely, since an executor knows when it started probing, but the claim would then only
+// ever arrive attached to a result — and a run that crashed mid-probe produces no result, which is
+// most of the point.
+type RunClaim struct {
+	// At is the instant the executor took the job off the transport, from the EXECUTOR's clock.
+	// That is unavoidable and bounded: it is the only clock present at that moment, and the same
+	// trust the product already extends to an executor for `observed_at`. It is never used to
+	// decide coverage — `terminal_at` is — so a skewed claim costs a diagnostic's precision and
+	// never a verdict.
+	At time.Time `json:"at"`
+}
 
 func ValidProbeErrorReason(reason string) bool {
 	switch reason {

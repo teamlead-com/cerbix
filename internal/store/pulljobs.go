@@ -27,6 +27,16 @@ func (s *Store) EnqueuePullJobV3(ctx context.Context, region string, payload []b
 	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 3, workflowKind)
 }
 
+// EnqueuePullJobV4 enqueues on the carrier generation that carries JOB IDENTITY — the window a run
+// answers (FR-032, D-0237). It is used only for a region whose AGENTS have declared the ledger
+// capability, and only while `ledger.carrier_enabled` is on, so a generation-4 row is never left
+// for an agent whose claim predicate cannot select it: that is the generation-3 failure
+// `scheduler.go` records in its own comments, where a row nobody could claim left the monitor with
+// no outcome at all until the row's TTL.
+func (s *Store) EnqueuePullJobV4(ctx context.Context, region string, payload []byte, ttlSeconds, leaseSeconds int, workflowKind string) error {
+	return s.enqueuePullJob(ctx, region, payload, ttlSeconds, leaseSeconds, 4, workflowKind)
+}
+
 // leaseSeconds is the per-JOB claim lease (FR-029 §4.2). Zero means "the endpoint's default", which
 // is what every existing caller and every short probe passes — a monitor whose probe outlives the
 // default is the only one that needs its own, and a job re-claimed while it still runs is a duplicate

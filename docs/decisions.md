@@ -7208,3 +7208,129 @@ spec keeps every rejection and its prose quotes superseded numbers on purpose.
 **Status.** FR-032 is `IN_PROGRESS`. Phase A is implemented and approved for a LOCAL commit only. B1
 is specified, corrected, and NOT admitted. B2 carries 18 `TO SPECIFY` rows, C two, D nine, E the
 FR-031 stroke. **Push, tag and release remain unauthorized.**
+
+## D-0239 — the expected-run ledger's payload and rows land together, and implementing an approved design found four defects in it (FR-032 phase B2)
+
+**Date.** 2026-09-04. **Iteration.** iter-0175. **Requirement.** FR-032.
+**Spec.** `docs/specs/func-expected-run-ledger.md` revision 27, §7.1, §7.3, §8.3, §10, §13.0, §14.2,
+§16, §17.7, §17.8.
+
+**Context.** The owner directed the remaining phases to be implemented without stopping, with ONE
+review submission covering all of them. B2 is the phase §16 defines as "payload and ledger, together
+and only together": `DueAt`/`JobID` minting on every dispatch path, `monitor_schedule`,
+`expected_runs`, §7.1's primitive, §10's segment close, and the carrier gate ON.
+
+**Decision 1: the payload and the gate move in ONE change, and the config refusal is retired rather
+than deleted from the record.** B1 REFUSED `ledger.carrier_enabled: true` and did not coerce it, so
+an operator who set it learned that it did nothing. B2 mints the payload in the same change that
+wires the flag to selection, so there is no build in which the flag is accepted and the payload is
+absent. Both test names stay in §17.6 so a reader can tell which build changed the answer; what
+survives is the property the refusal protected — the operator's value reaches selection unchanged,
+in either direction.
+
+**Decision 2: three columns that describe one instant are written by one statement.** §6.2 defines
+`interval_in_force` as the interval that PRODUCED `next_due_at`, and §10 step 3 had the
+configuration write restamp it with the new interval while leaving the instant alone. A 60s→300s
+edit therefore gave the standing window a 300-second lateness threshold although it had been spaced
+at 60, so a run four minutes late read `covered` — a stroke licensed and a coverage numerator
+credited. Every other trade here points the residual at WITHHOLDING and this one pointed the other
+way. `next_due_at`, `interval_in_force` and `confirm_phase` are now one write, which also removes
+rule 5's statement: it ran before any advance had produced the instant it claimed to describe.
+Invariants 2c and 2d are restated as the PROPERTY rather than the mechanism, and both are stronger
+for it.
+
+**Decision 3: the orphan carrier comes from the publisher's rule, because the source §8.3 named does
+not exist on that path.** `DeliveredJob.CarrierGeneration` lives in the executor's process; the
+result travels back as a `domain.Heartbeat`, so reaching it would put the carrier in the PAYLOAD —
+the source the design forbids and the P0 that killed revision 6. `DueAt` reaches an executor only on
+generation 4, so a result that correlates at all proves its carrier, and no `ProtocolVersion` is
+ever read.
+
+**Decision 4: generation 4 is raised for the IN-PROCESS executor too, from the ROLE.** §13.0 demands
+both admission rules at resolve time and quotes the two V3 failures; B1 shipped only the first, so a
+pure `role=all` deployment — a PRODUCTION topology — could never raise the generation and the ledger
+would have been inert in the most common installation. `WithLocalLedgerRegions` takes no capability
+argument, so the coupling B1 removed from the worker's declaration cannot be threaded back in at the
+scheduler's end of the same wire. The carrier map is RAISED and never assigned, so no branch order
+can undo an announcement.
+
+**Decision 5: the partitions land in B2, not D, and two invariants move with them.** B2's own
+inserts have nowhere to land without a partition, and a table left DEFAULT-only cannot acquire daily
+partitions afterwards because the default already holds rows in their ranges. 16a and 23a move to
+B2 by the rule that moved §10's segment close out of A: a row belongs to the earliest phase in which
+it becomes testable.
+
+**Decision 6: an async canary has no generation-4 carrier, and that is a stated limitation.** Its
+queue is capability-named and a fourth prefix means its mapping, announcement and capability — the
+whole of B1 again for one monitor type. `CarrierFor` clamps a canary below the ledger carrier, every
+canary window reads `unknown`, and an unroutable canary job is refused by a test rather than
+discovered at runtime. §18 carries it as open work.
+
+**One exception to invariant 1, declared.** Unifying the effective interval — invariant 20d — moves
+one of two disagreeing instants whichever rule wins. The stricter rule wins, so a non-credentialed
+monitor that has just reached its verdict returns to its base interval immediately rather than up to
+one interval later. It can only ever move a probe later, never earlier, because the confirm phase is
+the state in which a monitor is probed faster than its configuration asks.
+
+**Status.** FR-032 stays `IN_PROGRESS`. Phases A, B1-M, B1 and B2 are implemented as LOCAL commits;
+C, D and E remain, and the review submission the owner asked for covers all of them together.
+**Push, tag and release remain unauthorized.**
+
+## D-0240 — the claim rides the results path, the ledger answers for what it kept, and the stroke's rule is code (FR-032 phases C, D, E)
+
+**Date.** 2026-09-05. **Iteration.** iter-0175. **Requirement.** FR-032.
+**Spec.** `docs/specs/func-expected-run-ledger.md` revision 29, §8.4, §12.3, §13a, §14, §16, §17.9,
+§17.10, §18.
+
+**Context.** The owner directed every remaining phase implemented without stopping, with ONE review
+submission covering all of them. This record is what C, D and E decided and what implementing them
+found.
+
+**Decision 1: the claim is a MEMBER of the result, and the `Dispatcher` interface grows nothing.**
+§16 said the interface would grow a typed claim message. It does not. §4a's actual requirement is
+that `worker` and `agent` stay DB-less executors returning idempotent events over the EXISTING
+transport, so the claim is `domain.Heartbeat.Claim *RunClaim`, exactly as `ProbeError` is, riding
+the results queue. No new method, no new queue, no new endpoint: the pull agent posts to
+`/api/v1/agent/results`, whose handler already feeds the same sink AMQP does, and the ingest
+consumer branches once for both transports. Invariant 11's five-method set survives the phase most
+likely to break it, and §18's open item about the wire shape is closed.
+
+**Decision 2: the claim batches on pull and does not on AMQP.** The worker takes jobs one at a
+time; the agent claims a batch in one poll and posts that batch's claims in one request before
+probing any of it. This is the same rule expressed for the transport that exists, and it costs one
+round trip per POLL rather than per run — §8.4's "one genuinely new per-run round trip" is an upper
+bound.
+
+**Decision 3: the stamp ceiling is the ENDPOINT, which fixes a defect B1 shipped.**
+`resolveStampedGenerations` bounded the server's stamp by the envelope-derived generation, capping
+at 3, while a capable agent polls `/v4/jobs`. The first generation-4 row a core stamped made the
+agent reject the whole response and claim nothing: **a pull region on the ledger carrier would have
+stopped executing entirely** — the generation-3 failure `scheduler.go` records, one generation
+later. B1 could not observe it, because nothing stamped 4 and its own tests took the legacy
+fallback. The TEST path keeps its own ceiling deliberately, so a future job generation cannot drag
+it along.
+
+**Decision 4: retention reaches into the DEFAULT partition, and `ledger_from` stays computed.**
+`expected_runs` has a default partition because a lost insert would erase the fact the ledger keeps,
+and having one means retention must purge it — which the gate ledger's retention never has to do.
+`ledger_from` is the latest of four inputs and is never stored: the mutation that proves it makes
+the bound ignore the partition floor, because that is exactly how a stored bound behaves, and it is
+the drift revision 2 would have shipped.
+
+**Decision 5: the read API's cursor is VERSIONED.** `base64url("v1:" + RFC3339Nano)`, so a later
+change to its shape is DETECTABLE rather than misread. The gate ledger's own cursor predates the
+rule and has none, which is why a change there could only be found by a caller getting wrong pages.
+An EMPTY page carries `ledger_from` and `gap_truncated_before` like every other, because the empty
+page is precisely where a caller would otherwise conclude that nothing was due.
+
+**Decision 6: phase E ships the RULE and not the render.** §14's gate is `strokeSegments` — every
+window plain `covered`, the whole span at or after `ledger_from`, a span with no windows drawing
+nothing, `interval_assumed` never consulted — returning SEGMENTS rather than a boolean, so one
+unanswerable hour does not forfeit the strokes on either side of it. The RENDER is deliberately not
+written: `CLAUDE.md` requires an approved UI mock before frontend code for any SPA surface, and how
+the line looks is what a mock decides. "Implement without stopping" removes review pauses, not the
+process the owner set.
+
+**Status.** FR-032's design is fully implemented and **all 68 invariants are DISCHARGED**, with one
+recorded withdrawal. The requirement stays `IN_PROGRESS` for one reason: the FR-031 stroke's render
+awaits its mock. Everything is a LOCAL commit. **Push, tag and release remain unauthorized.**

@@ -62,6 +62,11 @@ type Store interface {
 	FileProviderDiagnostics(ctx context.Context, orgID string) ([]store.FileProviderDiagnostic, error)
 	ReplaceMonitorDependencies(ctx context.Context, monitorID, projectID string, parents []string) error
 	ListRecentHeartbeats(ctx context.Context, monitorID string, limit int) ([]domain.Heartbeat, error)
+	// FR-032 §13a. One page of a monitor's due windows plus the two facts that bound what the
+	// answer means. The project predicate is in the query's own SQL and not only in the handler
+	// above it, which is invariant 26a: a handler check alone is one refactor away from being
+	// bypassed, and a query that is safe only because of its caller is not safe.
+	ListExpectedRuns(ctx context.Context, q store.ExpectedRunQuery) (store.ExpectedRunPage, error)
 	PasswordHashByID(ctx context.Context, id string) (string, error)
 	SetPassword(ctx context.Context, id, passwordHash string) error
 	DeleteSessionsByUser(ctx context.Context, userID, exceptToken string) (int64, error)
@@ -597,6 +602,11 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("PATCH /api/v1/monitors/{monitorID}", h.updateMonitor)
 	mux.HandleFunc("DELETE /api/v1/monitors/{monitorID}", h.deleteMonitor)
 	mux.HandleFunc("GET /api/v1/monitors/{monitorID}/heartbeats", h.listHeartbeats)
+	// FR-032 §13a. Project-NESTED, unlike the flat monitor routes above and unlike the gate
+	// ledger, which is project-scoped and never service-nested because it OUTLIVES services. This
+	// ledger does not outlive its monitor — `expected_runs` cascades on monitor deletion — so
+	// monitor-nesting is correct here, and the two conventions differ for a reason.
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/monitors/{monitorID}/expected-runs", h.listExpectedRuns)
 	mux.HandleFunc("GET /api/v1/monitors/{monitorID}/sla", h.monitorSLA)
 	mux.HandleFunc("PUT /api/v1/monitors/{monitorID}/sla-target", h.setMonitorSLATarget)
 	mux.HandleFunc("GET /api/v1/monitors/{monitorID}/availability", h.monitorAvailability)

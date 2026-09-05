@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/secret"
@@ -226,6 +227,13 @@ func CredentialProbeErrorReason(err error) string {
 	if errors.Is(err, errNoDispatchKey) {
 		return domain.ProbeErrorNoDispatchKey
 	}
+	if errors.Is(err, ErrLedgerIdentityMissing) {
+		// `unsupported_version` is the honest member of the existing vocabulary: the executor
+		// received a carrier generation whose contract the delivery did not honour. No new
+		// reason is minted, because the ingest side's CHECK'd vocabulary is a wire contract and
+		// widening it for one diagnostic would need a migration for no gain.
+		return domain.ProbeErrorUnsupportedVersion
+	}
 	message := err.Error()
 	switch {
 	case strings.Contains(message, "unsupported credential envelope version"):
@@ -257,9 +265,43 @@ func ProbeErrorHeartbeat(job CheckJob, reason string) domain.Heartbeat {
 	}, job)
 }
 
+// ClaimHeartbeat is the message an executor sends when it takes a job OFF THE TRANSPORT and is
+// about to probe (FR-032 §8.4, phase C). ONE owner, for the reason `StampResult` has one: three
+// executors publish results — the AMQP worker pool, the pull agent's batch and the probe-error
+// path — and a message each of them assembled separately would drift the first time one was edited.
+//
+// It returns `ok == false` for a job that carries no window, and that refusal is the whole of the
+// carrier rule on this side: a claim exists to fill `claimed_at` on ONE row, identified by
+// `(monitor_id, due_at)` plus the job's id, so a job below generation 4 has nothing to correlate to
+// and the message would be pure cost. The caller therefore never has to know what a carrier is.
+//
+// The instant comes from the caller rather than from `time.Now()` inside, so the value a test
+// asserts is the value the caller observed — and so a batch of claims taken in one poll can share
+// the instant the poll actually happened at.
+func ClaimHeartbeat(job CheckJob, at time.Time) (domain.Heartbeat, bool) {
+	if job.JobID == "" || job.DueAt.IsZero() || job.IssuedAt.IsZero() {
+		return domain.Heartbeat{}, false
+	}
+	return StampResult(domain.Heartbeat{
+		MonitorID:         job.Monitor.ID,
+		ExecutionRevision: job.Monitor.ExecutionRevision,
+		Claim:             &domain.RunClaim{At: at},
+	}, job), true
+}
+
 // errNoDispatchKey is the one structural failure that keeps its own bounded reason: an
 // executor holding no keyring at all is an operator/config fact, not a payload anomaly.
 var errNoDispatchKey = errors.New("dispatch: no dispatch key")
+
+// ErrLedgerIdentityMissing is a generation-4 delivery that does not carry the identity that
+// DEFINES generation 4 (FR-032 invariant 10i).
+//
+// It is a sentinel and not a message the reason function pattern-matches. Every credential
+// rejection is deliberately funnelled into one non-oracular reason so a prober is never told which
+// way its forgery was wrong — but this is not a credential rejection at all, and phrasing it as
+// one to reach the mapping would have made the taxonomy lie about what happened. A protocol
+// violation on a carrier the CORE selected is a wiring fault an operator must be able to read.
+var ErrLedgerIdentityMissing = errors.New("dispatch: generation-4 job is missing its identity")
 
 // Materialized is the result of the executor gate: the monitor to probe, the cleanup that
 // wipes any injected credential, and whether a credential was actually materialized —
@@ -298,6 +340,23 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 	// carrier is a mismatch, never a job to execute.
 	if envelope != nil && delivered.CarrierGeneration < ProtocolV2 {
 		return Materialized{}, fmt.Errorf("dispatch: credential envelope on carrier generation %d", delivered.CarrierGeneration)
+	}
+
+	// 1b. FR-032 invariant 10i, the same rule one layer in. A generation-4 carrier is DEFINED by
+	// carrying the window a run answers, so a delivery missing one of its three identity fields is
+	// a protocol violation and never a job to execute. The same absence on an older carrier is the
+	// ordinary rolling-upgrade case and is not checked at all.
+	//
+	// The AMQP consumer dead-letters such a body before it reaches this gate, because there the
+	// fault is a transport one and the poison message must survive for inspection. The pull and
+	// in-process paths have no dead-letter queue, so they get the typed refusal here — the same
+	// PREDICATE, `RequireLedgerFields` and `LedgerFieldsMissing`, with the disposal each transport
+	// actually has. One predicate, two dispositions: a rule assembled separately on two sides is
+	// what nine of B1's findings were.
+	if RequireLedgerFields(delivered.CarrierGeneration) {
+		if missing := job.LedgerFieldsMissing(); missing != "" {
+			return Materialized{}, fmt.Errorf("%w: carrier %d, field %s", ErrLedgerIdentityMissing, delivered.CarrierGeneration, missing)
+		}
 	}
 
 	// 2. Tri-state credential requirement. A type with no credential schema at all is an

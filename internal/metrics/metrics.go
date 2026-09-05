@@ -74,13 +74,17 @@ type Registry struct {
 	statusPageUnreadable uint64
 	pullStats            []PullStat
 	serviceStats         *ServiceReliabilityStat
-	serviceSlices        map[string]uint64 // outcome → count (worked|empty|error)
-	serviceWedgedSet     bool
-	serviceWedged        bool
-	serviceWedgedReason  string
-	factMaintTracked     bool
-	factMaintFailing     bool
-	factMaintLastOKUnix  int64
+	// expectedRunHOT is FR-032 §11's measurement, and it is a POINTER because the ratio can be
+	// UNDEFINED: with no updates yet there is no ratio, and a gauge reporting 0 or 1 for "no data"
+	// is a lie in whichever direction happens to be convenient (invariant 23).
+	expectedRunHOT      *ExpectedRunHOTStat
+	serviceSlices       map[string]uint64 // outcome → count (worked|empty|error)
+	serviceWedgedSet    bool
+	serviceWedged       bool
+	serviceWedgedReason string
+	factMaintTracked    bool
+	factMaintFailing    bool
+	factMaintLastOKUnix int64
 	// Service-reliability EVENT counters (§21): fan-out, terminal rejections, lifecycle
 	// outcomes, late-excluded arrivals. Monotonic — unlike a gauge over a table sum, they
 	// cannot decrease when a service (and its rows) is deleted.
@@ -168,6 +172,28 @@ type PullStat struct {
 	Region     string
 	Pending    int
 	LagSeconds float64
+}
+
+// ExpectedRunHOTStat is FR-032 §11's HOT-update sample, in the package the store already imports —
+// the same direction `PullStat` crosses, because `store` depends on `metrics` and never the reverse.
+//
+// §11's arithmetic explicitly does not settle whether `fillfactor = 70` suffices: what closes the
+// gap is HOT pruning, whose effect depends on arrival spread and access rate and cannot be computed
+// from the schema. So the design is gated on a measurement rather than on an assertion.
+type ExpectedRunHOTStat struct {
+	Updates    int64
+	HOTUpdates int64
+	// Defined is false when the denominator is zero. The ratio is then UNDEFINED and the gauge is
+	// not published at all (invariant 23).
+	Defined bool
+}
+
+// Ratio is HOT updates over all updates. Only meaningful when Defined.
+func (s ExpectedRunHOTStat) Ratio() float64 {
+	if !s.Defined || s.Updates == 0 {
+		return 0
+	}
+	return float64(s.HOTUpdates) / float64(s.Updates)
 }
 
 // New creates a Registry for the given build info and role.
@@ -815,6 +841,18 @@ func (r *Registry) SetServiceReliabilityStats(st ServiceReliabilityStat) {
 	r.serviceStats = &st
 }
 
+// SetExpectedRunHOT records FR-032's HOT-update sample. Calling it marks the ledger's storage as
+// measured, so the gauge is exported only by the process that runs the maintenance pass.
+//
+// A nil sample UNPUBLISHES the gauge, which is how "the denominator is zero" is expressed: §11
+// requires that the gate neither pass nor fail in that state, and the only honest way to say so in
+// the Prometheus text format is to emit nothing.
+func (r *Registry) SetExpectedRunHOT(stat *ExpectedRunHOTStat) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.expectedRunHOT = stat
+}
+
 func (r *Registry) SetPullStats(stats []PullStat) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -905,6 +943,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	serviceAlertStats := r.serviceAlertStats
 	pullStats := r.pullStats
 	serviceStats := r.serviceStats
+	expectedRunHOT := r.expectedRunHOT
 	serviceWedgedSet, serviceWedged := r.serviceWedgedSet, r.serviceWedged
 	factMaintTracked, factMaintFailing, factMaintLastOKUnix := r.factMaintTracked, r.factMaintFailing, r.factMaintLastOKUnix
 	serviceRejections := r.serviceRejections
@@ -954,6 +993,23 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	out.println("# HELP cerbix_ready Whether the service reports ready (1) or not (0).")
 	out.println("# TYPE cerbix_ready gauge")
 	out.printf("cerbix_ready %d\n", b2i(ready))
+
+	// FR-032 §11. The counters are monotonic and always exported once the pass has sampled at all;
+	// the RATIO is exported only when it is defined, because an undefined ratio has no honest
+	// value (invariant 23).
+	if expectedRunHOT != nil {
+		out.println("# HELP cerbix_expected_runs_updates_total Updates to expected_runs rows across the retained partitions.")
+		out.println("# TYPE cerbix_expected_runs_updates_total counter")
+		out.printf("cerbix_expected_runs_updates_total %d\n", expectedRunHOT.Updates)
+		out.println("# HELP cerbix_expected_runs_hot_updates_total Updates to expected_runs rows that were HOT.")
+		out.println("# TYPE cerbix_expected_runs_hot_updates_total counter")
+		out.printf("cerbix_expected_runs_hot_updates_total %d\n", expectedRunHOT.HOTUpdates)
+		if expectedRunHOT.Defined {
+			out.println("# HELP cerbix_expected_runs_hot_update_ratio Fraction of expected_runs updates that were HOT, over the current retention window. Unpublished while no update has been observed: the ratio is then undefined, and 0 or 1 would be a lie in whichever direction happened to be convenient.")
+			out.println("# TYPE cerbix_expected_runs_hot_update_ratio gauge")
+			out.printf("cerbix_expected_runs_hot_update_ratio %g\n", expectedRunHOT.Ratio())
+		}
+	}
 
 	out.println("# HELP cerbix_dispatch_shared_trust Whether one acknowledged fallback dispatch key can open more than one region's retained credential payloads.")
 	out.println("# TYPE cerbix_dispatch_shared_trust gauge")

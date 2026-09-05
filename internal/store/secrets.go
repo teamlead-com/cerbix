@@ -443,6 +443,11 @@ func (s *Store) fenceSecretMonitors(ctx context.Context, tx pgx.Tx, projectID, s
 	if err := writeRevisionTimeline(ctx, tx, projectID, ids...); err != nil {
 		return 0, err
 	}
+	// The same BULK case for FR-032 §10: every fenced monitor's open segment closes at its own
+	// old interval, in one statement, because the rotation raised every one of their generations.
+	if err := syncMonitorScheduleTx(ctx, tx, s, projectID, ids...); err != nil {
+		return 0, err
+	}
 	// A rotation changes the referenced secret's generation, and the generation is IN the
 	// epoch snapshot (`CredentialGenerations`) — so it changes evaluation semantics and owes
 	// an epoch, in this same transaction. The shipped code advanced execution_revision here

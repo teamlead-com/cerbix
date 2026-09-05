@@ -2741,6 +2741,67 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/monitors/{monitorID}/expected-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                monitorID: components["parameters"]["MonitorID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The monitor's expected-run windows, newest first (viewer+)
+         * @description FR-032 §13a. MONITOR-nested, unlike the gate ledger, and the two differ for a reason: the gate ledger OUTLIVES services, while this ledger does not outlive its monitor — `expected_runs` cascades on monitor deletion. A `projectID`/`monitorID` pair that does not belong together is 404, because the PAIR is validated rather than each half.
+         *
+         *     The range is half-open `[from, to)`, both REQUIRED, `from < to`, at most the retention window (14 days). Order is `due_at DESC`; no tiebreak is needed and the reason is structural — the route is monitor-scoped and the primary key is `(monitor_id, due_at)`, so `due_at` is unique within one monitor. `cursor` is an opaque keyset of the LAST RETURNED item, the next page is bound strictly below it, and `next_cursor` is null on the last page. A cursor outside `[from, to)` is 400 rather than ignored: it cannot belong to this traversal, and ignoring it would return a page from a different query than the caller asked for.
+         *
+         *     Every verdict is COMPUTED from the row''s timestamps and never stored, so a late terminal changes a window''s reading with nothing to keep consistent. `ledger_from` and `gap_truncated_before` travel with EVERY page, because a caller holding the rows and not the bounds reads an empty range as "nothing was due" when the truth is "the ledger cannot say". A range reaching before `ledger_from` returns the windows it has plus that bound, never a page silently clipped to a later start. A null `ledger_from` means the monitor has no expectation at all — it does not participate (push monitors are excluded) or it is disabled — and the whole range must render as not stored.
+         *
+         *     `interval_assumed` is EXPLANATORY ONLY. It says a `covered_late` window''s lateness threshold was the conservative minimum of §14.2 rather than the interval that actually spaced the window, so a caller can see the verdict''s confidence. It may NEVER be read as licence to treat such a window as `covered`: not by a stroke, not by a coverage numerator.
+         *
+         *     Errors: 400 `range_required` | `range_invalid` | `range_too_wide` | `limit_invalid` (0, negative, non-integer or above 200) | `cursor_invalid`; 404 project or monitor not visible, or a pair that does not belong together.
+         */
+        get: {
+            parameters: {
+                query: {
+                    from: string;
+                    to: string;
+                    /** @description Opaque; the `next_cursor` of the previous page. */
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    monitorID: components["parameters"]["MonitorID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ExpectedRunList"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/gate/decisions/{decisionID}": {
         parameters: {
             query?: never;
@@ -8585,6 +8646,74 @@ export interface components {
         /** @description One page of the ledger (FR-024 §5); `next_cursor` is null on the last page. */
         GateDecisionList: {
             items: components["schemas"]["GateDecisionSummary"][];
+            next_cursor: string | null;
+        };
+        /**
+         * @description FR-032. The reading of one due window, COMPUTED from its timestamps and never stored. `covered` is the ONLY verdict that may license a stroke on the Response time panel; `covered_late` means a run happened and produced an admissible outcome but was issued later than the interval that spaced the window, so the observation is too far from it to prove it — it licenses no stroke and is excluded from the coverage numerator while still counting in the denominator. `expected_never_issued` covers both a window nothing ran in and one cerbix deliberately skipped, with `skip_reason` telling them apart. `unknown` means the window was dispatched on a carrier that does not carry job identity, so no result could ever correlate to it.
+         * @enum {string}
+         */
+        ExpectedRunVerdict: "covered" | "covered_late" | "expected_never_issued" | "issued_never_claimed" | "claimed_never_finished" | "unknown";
+        /** @description One due window (FR-032 §6.1). Every verdict is computed; none is stored. */
+        ExpectedRunWindow: {
+            /**
+             * Format: date-time
+             * @description The EXPECTED instant — the window''s identity.
+             */
+            due_at: string;
+            verdict: components["schemas"]["ExpectedRunVerdict"];
+            /**
+             * Format: uuid
+             * @description Absent when no job was ever issued for this window.
+             */
+            job_id?: string;
+            /** @description The carrier the PUBLISHER selected. Absent exactly when `job_id` is absent: a window never dispatched has no carrier, which is a different fact from one dispatched on an old carrier. */
+            carrier_generation?: number;
+            /** Format: int64 */
+            execution_revision: number;
+            region: string;
+            /** @description The interval that SPACED this window and the threshold its lateness is judged against — never the monitor''s current interval, which says nothing true about last week. */
+            interval_seconds: number;
+            /** @description The threshold above was ASSUMED rather than observed (§14.2). EXPLANATORY ONLY: it may never be read as licence to promote a `covered_late` window to `covered`. */
+            interval_assumed: boolean;
+            /** Format: date-time */
+            issued_at?: string;
+            /**
+             * Format: date-time
+             * @description An executor reported taking the job off the transport.
+             */
+            claimed_at?: string;
+            /**
+             * Format: date-time
+             * @description An ADMISSIBLE outcome exists. Coverage is exactly this being present.
+             */
+            terminal_at?: string;
+            /** @enum {string} */
+            outcome?: "result" | "probe_error";
+            /**
+             * Format: date-time
+             * @description A result arrived and the revision or timestamp gate refused it. Never coverage.
+             */
+            refused_at?: string;
+            refused_reason?: string;
+            /**
+             * @description cerbix chose not to run this window, and why.
+             * @enum {string}
+             */
+            skip_reason?: "no_capable_runner" | "no_inflight_slot" | "credential_unresolved" | "no_capable_executor" | "transport_backoff";
+        };
+        /** @description One page of a monitor''s windows (FR-032 §13a), newest first, with the two facts that bound what the answer MEANS. `next_cursor` is null on the last page. */
+        ExpectedRunList: {
+            windows: components["schemas"]["ExpectedRunWindow"][];
+            /**
+             * Format: date-time
+             * @description The earliest instant this monitor can be answered for. Before it a surface may claim NOTHING — not `covered`, and not `expected_never_issued` either — and must render the span as not stored. Null means the monitor has no expectation at all.
+             */
+            ledger_from: string | null;
+            /**
+             * Format: date-time
+             * @description Windows before this instant were advanced past and NOT materialized, because a cap or the retention clip stopped the leader writing them. The span is claimable as nothing.
+             */
+            gap_truncated_before: string | null;
             next_cursor: string | null;
         };
         /**

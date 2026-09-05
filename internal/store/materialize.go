@@ -57,6 +57,18 @@ func envelopeForCarrier(carrierGeneration int) (int, error) {
 		return dispatch.EnvelopeV1, nil
 	case dispatch.ProtocolV3:
 		return dispatch.EnvelopeV2, nil
+	// Generation 4 adds JOB IDENTITY on top of what generation 3 carries, so its envelope is
+	// still v2 (FR-032 §13.0). B1 could not observe this gap — it refused the setting that
+	// selects the carrier — and without the case a credentialed monitor in a ledger-announcing
+	// region would have failed materialization with "no envelope generation for carrier 4",
+	// which reads as a wiring bug and is really a missing line.
+	//
+	// A v4 announcement also proves the executor's CODE is at least as new as v3, so envelope v2
+	// is supported there by construction; whether its region has a dispatch KEY provisioned is a
+	// separate, pre-existing concern already signalled by the `no_dispatch_key` probe error, and
+	// it is not a version question.
+	case dispatch.ProtocolV4:
+		return dispatch.EnvelopeV2, nil
 	default:
 		return 0, fmt.Errorf("store: no envelope generation for carrier %d", carrierGeneration)
 	}
@@ -82,7 +94,26 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 	defer cancel()
 	rows, err := s.pool.Query(queryCtx,
 		`SELECT `+monitorColumns+`, m.config, gen_random_uuid()::text, statement_timestamp(),
-		        COALESCE(refs.bound, '{}'::jsonb)
+		        COALESCE(refs.bound, '{}'::jsonb),
+		        -- FR-032 §13.1: the WINDOW this dispatch answers, minted by the CORE from
+		        -- monitor_schedule in the SAME statement that mints the job identity. Not from the
+		        -- leader's 15-second snapshot, which is stale by design (invariant 25a), and not
+		        -- passed in by the caller, which would have made the carrier decision and the
+		        -- field it depends on two separate answers. A monitor with no schedule row — a
+		        -- non-participant, or one a concurrent configuration write removed — gets NULL and
+		        -- is published below the ledger carrier.
+		        --
+		        -- A correlated SCALAR SUBQUERY and not a JOIN, which is not a style choice:
+		        -- monitorColumns is a shared const whose column names are UNQUALIFIED, so ANY new
+		        -- table in this query's FROM makes project_id (and updated_at, and
+		        -- execution_revision) ambiguous and every materialization fails with
+		        -- SQLSTATE 42702. CLAUDE.md warns that the const is shared when APPENDING to it;
+		        -- the adjacent hazard is that using it constrains the query's shape. The first
+		        -- draft of this line was a LEFT JOIN, and only the full store suite caught it --
+		        -- none of this phase's own tests call the materializer. The depends_on aggregate
+		        -- inside monitorColumns is the same shape for the same reason.
+		        (SELECT sch.next_due_at FROM monitor_schedule sch
+		          WHERE sch.monitor_id = m.id AND sch.project_id = m.project_id)
 		   FROM monitors m
 		   LEFT JOIN LATERAL (
 		     SELECT jsonb_object_agg(r.setting_key,
@@ -108,12 +139,13 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 		var rawConfig, rawRefs []byte
 		var jobID string
 		var issuedAt time.Time
+		var dueAt *time.Time
 		// FR-028: the job needs the SCENARIO decrypted (it is execution input), and must
 		// still never receive the credential in config — that arrives as an envelope. The
 		// safe reader used here before stage 1 omitted nothing, because nothing in config was
 		// encrypted except the credential; once the scenario joined the encrypted set, this
 		// line silently stripped it and every synthetic probe would have run with no scenario.
-		m, err := s.scanMonitorForExecution(rows, &rawConfig, &jobID, &issuedAt, &rawRefs)
+		m, err := s.scanMonitorForExecution(rows, &rawConfig, &jobID, &issuedAt, &rawRefs, &dueAt)
 		if err != nil {
 			return nil, fmt.Errorf("store: scan materialized execution: %w", err)
 		}
@@ -124,6 +156,13 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 			continue
 		}
 		job := dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1, JobID: jobID, IssuedAt: issuedAt}
+		// The region's proven generation, read ONCE per monitor from the authoritative region so
+		// the two carrier decisions below cannot disagree with each other.
+		regionGeneration := carrierByRegion[m.Region]
+		hasWindow := dueAt != nil
+		if hasWindow {
+			job.DueAt = *dueAt
+		}
 		stored := map[string]string{}
 		if err := json.Unmarshal(rawConfig, &stored); err != nil {
 			entry.Reason = MaterializeDecryptFailed
@@ -184,11 +223,8 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 		// anti-relocation property depends on it, so a region still on an older carrier gets
 		// a per-monitor reason rather than a job that looks protected and is not.
 		if len(scenarioRefKeys)+len(canaryRefKeys) > 0 {
-			generation := dispatch.ProtocolV2
-			if g, ok := carrierByRegion[m.Region]; ok && g > 0 {
-				generation = g
-			}
-			version, verr := envelopeForCarrier(generation)
+			version, verr := envelopeForCarrier(
+				dispatch.CarrierFor(regionGeneration, true, hasWindow, m.Type))
 			if verr != nil || version < dispatch.EnvelopeV2 {
 				entry.Reason = MaterializeCarrierTooOld
 				byID[m.ID] = entry
@@ -268,11 +304,12 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 				continue
 			}
 			// The AUTHORITATIVE region decides the carrier, exactly as it already decides
-			// the keyring — the two must come from the same row or they can disagree.
-			carrierGeneration := dispatch.ProtocolV2
-			if g, ok := carrierByRegion[m.Region]; ok && g > 0 {
-				carrierGeneration = g
-			}
+			// the keyring — the two must come from the same row or they can disagree. The
+			// selection itself has ONE owner in `dispatch.CarrierFor`, shared with the
+			// scheduler's plain branch: a job with no standing expectation is capped BELOW
+			// generation 4 there rather than published as a v4 delivery missing the field that
+			// defines it (invariant 10i).
+			carrierGeneration := dispatch.CarrierFor(regionGeneration, true, hasWindow, m.Type)
 			envelopeVersion, err := envelopeForCarrier(carrierGeneration)
 			if err != nil {
 				dispatch.WipeCredentialFields(fields)

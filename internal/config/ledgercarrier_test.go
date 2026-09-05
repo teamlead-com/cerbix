@@ -3,14 +3,22 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
-// FR-032: `ledger.carrier_enabled` is a versioned contract, not a default.
+// FR-032: `ledger.carrier_enabled` is a versioned contract, not a default, and phase B2 is the
+// version that changes the answer.
 //
-// A default describes only ABSENCE. An operator can supply the key, and both silent readings are
-// wrong: accepting it in a binary with no V4 payload publishes generation-4 jobs carrying no
-// identity (invariant 10h), and coercing it to false is the self-healing runtime AGENTS.md rules
-// out — the operator would believe a gate is on that is off, and no inertness test can see that.
+// A default describes only ABSENCE. B1 shipped the carrier with no payload behind it, so it
+// REFUSED `true` — accepting it would have published generation-4 jobs carrying no identity
+// (invariant 10h), and coercing it to false would have been the self-healing AGENTS.md rules out,
+// with the operator believing a gate is on that is off and no inertness test able to see it.
+//
+// B2 mints `JobID`, `IssuedAt` and `DueAt` on every dispatch path in the same change that wires
+// this flag to selection, so there is no build in which the flag is accepted and the payload is
+// absent. The refusal is therefore retired, and what survives is the property it was protecting:
+// the value the operator supplied reaches selection UNCHANGED, in either direction.
 
 func validateWithLedger(t *testing.T, enabled bool) error {
 	t.Helper()
@@ -19,30 +27,27 @@ func validateWithLedger(t *testing.T, enabled bool) error {
 	return c.Validate()
 }
 
-func TestABinaryOfThisGenerationRefusesLedgerCarrierEnabled(t *testing.T) {
+// The mirror of B1's refusal test, and the reason both exist in the record: an assertion that a
+// gate is refused and an assertion that it is accepted are the same invariant read at two phases,
+// and deleting the first would leave a reader unable to tell which build changed.
+func TestThisBinaryAcceptsLedgerCarrierEnabled(t *testing.T) {
 	err := validateWithLedger(t, true)
-	if err == nil {
-		t.Fatal("Validate accepted ledger.carrier_enabled=true; a binary with no V4 payload would " +
-			"publish generation-4 jobs carrying no identity")
-	}
-	// The refusal has to be actionable, not merely a failure: an operator reading it must learn
-	// which key, and why setting it did nothing they wanted.
-	for _, want := range []string{"ledger.carrier_enabled", "inert", "phase B2"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal does not say %q; message: %v", want, err)
-		}
+	if err != nil && strings.Contains(err.Error(), "ledger.carrier_enabled") {
+		t.Fatalf("Validate still refuses ledger.carrier_enabled=true after the payload landed: %v", err)
 	}
 }
 
-// The refusal must not be a coercion. This is the mutation no inertness test can catch: with the
-// value silently rewritten to false, every "is it inert?" assertion still passes while the
-// operator believes the gate is on.
-func TestTheRefusalDoesNotRewriteTheValue(t *testing.T) {
-	c := &Config{}
-	c.Ledger.CarrierEnabled = true
-	_ = c.Validate()
-	if !c.Ledger.CarrierEnabled {
-		t.Fatal("Validate coerced ledger.carrier_enabled to false instead of refusing it")
+// The value must not be rewritten in EITHER direction. B1 asserted this against a coercion to
+// false; B2 asserts it against a coercion of any kind, because a validator that normalises a gate
+// leaves the operator's configuration and the running behaviour describing different things.
+func TestTheAcceptedValueReachesSelectionUnchanged(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		c := &Config{}
+		c.Ledger.CarrierEnabled = want
+		_ = c.Validate()
+		if c.Ledger.CarrierEnabled != want {
+			t.Fatalf("Validate rewrote ledger.carrier_enabled from %v to %v", want, c.Ledger.CarrierEnabled)
+		}
 	}
 }
 
@@ -61,5 +66,38 @@ func TestAbsentAndFalseAreBothAcceptedIdentically(t *testing.T) {
 	// out of the way and the rest of validation proceeds.
 	if absent != nil && strings.Contains(absent.Error(), "ledger.carrier_enabled") {
 		t.Fatalf("a config without the key still failed on it: %v", absent)
+	}
+}
+
+// The two ledger bounds are enforced BEFORE business logic starts, which is what makes the store's
+// own defaulting a fallback for a caller that never went through config rather than a second
+// policy. Zero is accepted on purpose: it means "unset", and the store applies the documented
+// default — a config that must name a number to get the recommended one is a config that drifts.
+func TestTheLedgerBoundsAreEnforcedAndZeroMeansDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		retention int
+		gapCap    int
+		wantKey   string
+	}{
+		{name: "retention-below-minimum", retention: domain.MinExpectedRunRetentionDays - 1, wantKey: "expected_run_retention_days"},
+		{name: "retention-above-maximum", retention: domain.MaxExpectedRunRetentionDays + 1, wantKey: "expected_run_retention_days"},
+		{name: "cap-below-minimum", gapCap: domain.MinExpectedRunGapWindowsMax - 1, wantKey: "expected_run_gap_windows_max"},
+		{name: "cap-above-maximum", gapCap: domain.MaxExpectedRunGapWindowsMax + 1, wantKey: "expected_run_gap_windows_max"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{}
+			c.Ledger.ExpectedRunRetentionDays = tc.retention
+			c.Ledger.ExpectedRunGapWindowsMax = tc.gapCap
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantKey) {
+				t.Fatalf("out-of-range %s was not refused by name: %v", tc.wantKey, err)
+			}
+		})
+	}
+	// Zero for both, and the only complaint left is the one every empty config gets.
+	c := &Config{}
+	if err := c.Validate(); err == nil || strings.Contains(err.Error(), "expected_run") {
+		t.Fatalf("zero was treated as out of range: %v", err)
 	}
 }

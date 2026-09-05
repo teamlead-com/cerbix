@@ -20,16 +20,18 @@ func TestProbeErrorIsDiagnosticOnlyAndRevisionFenced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := st.RecordProbeError(ctx, monitor.ID, monitor.ExecutionRevision, domain.ProbeError{
-		Reason: domain.ProbeErrorDecryptAuthFailed, JobID: "job-1",
+	result, err := st.RecordProbeError(ctx, domain.Heartbeat{
+		MonitorID: monitor.ID, ExecutionRevision: monitor.ExecutionRevision,
+		ProbeError: &domain.ProbeError{Reason: domain.ProbeErrorDecryptAuthFailed, JobID: "job-1"},
 	})
 	if err != nil || !result.Recorded {
 		t.Fatalf("record probe error: result=%+v err=%v", result, err)
 	}
 	assertProbeDiagnosticOnly(t, st, ctx, monitor.ID, domain.ProbeErrorDecryptAuthFailed, "job-1", domain.StatusPending, 0)
 
-	stale, err := st.RecordProbeError(ctx, monitor.ID, monitor.ExecutionRevision+1, domain.ProbeError{
-		Reason: domain.ProbeErrorUnknownKeyID, JobID: "stale-job",
+	stale, err := st.RecordProbeError(ctx, domain.Heartbeat{
+		MonitorID: monitor.ID, ExecutionRevision: monitor.ExecutionRevision + 1,
+		ProbeError: &domain.ProbeError{Reason: domain.ProbeErrorUnknownKeyID, JobID: "stale-job"},
 	})
 	if err != nil || stale.Recorded || stale.Reason != ReasonStaleRevision {
 		t.Fatalf("stale outcome=%+v err=%v", stale, err)
@@ -52,7 +54,10 @@ func TestProbeErrorClearsOnlyOnLiveAppliedNormalResult(t *testing.T) {
 	if outcome, err := st.RecordScheduledResult(ctx, domain.Heartbeat{MonitorID: monitor.ID, ExecutionRevision: monitor.ExecutionRevision, Ts: base, Up: true}); err != nil || !outcome.Applied {
 		t.Fatalf("seed heartbeat: outcome=%+v err=%v", outcome, err)
 	}
-	if _, err := st.RecordProbeError(ctx, monitor.ID, monitor.ExecutionRevision, domain.ProbeError{Reason: domain.ProbeErrorUnknownKeyID, JobID: "job-new"}); err != nil {
+	if _, err := st.RecordProbeError(ctx, domain.Heartbeat{
+		MonitorID: monitor.ID, ExecutionRevision: monitor.ExecutionRevision,
+		ProbeError: &domain.ProbeError{Reason: domain.ProbeErrorUnknownKeyID, JobID: "job-new"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 

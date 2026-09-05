@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPoints, emptySpans, gapLabel, panelStats, widestSpan, type HeartbeatLike } from "./latencypanel";
+import { buildPoints, emptySpans, gapLabel, panelStats, strokeSegments, widestSpan, type HeartbeatLike } from "./latencypanel";
 
 // func-truthful-rendering §6 (FR-031, D-0235).
 const T0 = Date.UTC(2026, 8, 3, 14, 12, 0);
@@ -134,5 +134,138 @@ describe("gapLabel — an interval in a unit that fits it", () => {
   it("reaches hours for a long silence", () => {
     expect(gapLabel(3 * 3_600_000)).toBe("3h");
     expect(gapLabel(3 * 3_600_000 + 20 * 60_000)).toBe("3h 20m");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// FR-032 phase E — when a stroke is defensible (§14).
+//
+// FR-031 removed the line because the subject of any allowance — that a run was EXPECTED — was not
+// in the data. FR-032 records it, and these cases are the whole of what the panel may now claim.
+
+/** Points a minute apart, oldest first, as `buildPoints` produces them. */
+function pointsEveryMinute(count: number, startMs = Date.UTC(2026, 8, 5, 10, 0, 0)) {
+  return Array.from({ length: count }, (_, i) => ({
+    ms: startMs + i * 60_000,
+    latency: 100,
+    hb: {},
+  }));
+}
+
+/** One window per interval between the points, all with the same verdict. */
+function windowsBetween(points: { ms: number }[], verdict: string) {
+  return points.slice(1).map((p) => ({ due_at: new Date(p.ms).toISOString(), verdict }));
+}
+
+describe("strokeSegments — a stroke only across time the ledger can defend", () => {
+  it("joins the whole series when every window between the points is covered", () => {
+    const points = pointsEveryMinute(5);
+    const segments = strokeSegments(points, {
+      windows: windowsBetween(points, "covered"),
+      ledger_from: new Date(points[0].ms - 3_600_000).toISOString(),
+    });
+    expect(segments).toEqual([{ fromIndex: 0, toIndex: 4 }]);
+  });
+
+  it("refuses covered_late, which licenses no stroke however small the lateness", () => {
+    const points = pointsEveryMinute(5);
+    const windows = windowsBetween(points, "covered");
+    windows[2].verdict = "covered_late";
+    const segments = strokeSegments(points, {
+      windows,
+      ledger_from: new Date(points[0].ms - 3_600_000).toISOString(),
+    });
+    // The series splits AROUND the offending interval: a monitor with one unanswerable minute
+    // still has defensible strokes on either side of it, and refusing the whole series would
+    // understate what the ledger proves.
+    expect(segments).toEqual([
+      { fromIndex: 0, toIndex: 2 },
+      { fromIndex: 3, toIndex: 4 },
+    ]);
+  });
+
+  it.each(["expected_never_issued", "issued_never_claimed", "claimed_never_finished", "unknown"])(
+    "refuses %s",
+    (verdict) => {
+      const points = pointsEveryMinute(3);
+      const windows = windowsBetween(points, "covered");
+      windows[1].verdict = verdict;
+      const segments = strokeSegments(points, {
+        windows,
+        ledger_from: new Date(points[0].ms - 3_600_000).toISOString(),
+      });
+      expect(segments).toEqual([{ fromIndex: 0, toIndex: 1 }]);
+    },
+  );
+
+  it("refuses any interval reaching back before ledger_from, whatever its windows say", () => {
+    const points = pointsEveryMinute(5);
+    const segments = strokeSegments(points, {
+      windows: windowsBetween(points, "covered"),
+      // The bound sits between the second and third point: everything before it is unanswerable,
+      // and "no window says otherwise" is the ABSENCE of evidence rather than evidence.
+      ledger_from: new Date(points[2].ms).toISOString(),
+    });
+    expect(segments).toEqual([{ fromIndex: 2, toIndex: 4 }]);
+  });
+
+  it("draws nothing where there are no windows at all — the pre-FR-032 situation", () => {
+    const points = pointsEveryMinute(4);
+    const segments = strokeSegments(points, {
+      windows: [],
+      ledger_from: new Date(points[0].ms - 3_600_000).toISOString(),
+    });
+    expect(segments).toEqual([]);
+  });
+
+  it("draws nothing when the monitor has no expectation at all", () => {
+    const points = pointsEveryMinute(4);
+    // A push monitor, or a disabled one: `ledger_from` is null and the whole range is not stored.
+    expect(strokeSegments(points, { windows: windowsBetween(points, "covered"), ledger_from: null })).toEqual([]);
+    // And with no answer at all — an older server, or a failed fetch — the panel keeps FR-031's
+    // behaviour rather than assuming the best.
+    expect(strokeSegments(points, null)).toEqual([]);
+  });
+
+  it("treats the interval as half-open, so a window at the earlier point vouches for nothing after it", () => {
+    const points = pointsEveryMinute(2);
+    // The ONLY window is due exactly at the first point. That point answers it; it says nothing
+    // about the minute that follows.
+    const segments = strokeSegments(points, {
+      windows: [{ due_at: new Date(points[0].ms).toISOString(), verdict: "covered" }],
+      ledger_from: new Date(points[0].ms - 3_600_000).toISOString(),
+    });
+    expect(segments).toEqual([]);
+  });
+
+  it("never reads interval_assumed as licence to promote a covered_late window", () => {
+    const points = pointsEveryMinute(3);
+    const windows = windowsBetween(points, "covered_late").map((w) => ({
+      ...w,
+      // The flag is EXPLANATORY ONLY (invariant 20g). A consumer that softened the verdict here
+      // would widen the truthfulness gate without anyone deciding to widen it, which is why the
+      // rule requires deleting a clause rather than reinterpreting one.
+      interval_assumed: true,
+    }));
+    expect(
+      strokeSegments(points, {
+        windows,
+        ledger_from: new Date(points[0].ms - 3_600_000).toISOString(),
+      }),
+    ).toEqual([]);
+  });
+
+  it("needs two points to stroke between", () => {
+    const points = pointsEveryMinute(1);
+    expect(
+      strokeSegments(points, { windows: [], ledger_from: new Date(0).toISOString() }),
+    ).toEqual([]);
+  });
+
+  it("ignores an unparseable bound rather than guessing at it", () => {
+    const points = pointsEveryMinute(3);
+    expect(
+      strokeSegments(points, { windows: windowsBetween(points, "covered"), ledger_from: "not-a-time" }),
+    ).toEqual([]);
   });
 });

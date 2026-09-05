@@ -497,9 +497,23 @@ decision, not a rename. The decisions, as taken:
 | a KEY, a comparison, a wire value or an HTML control value | the three 90-day strips, `lib/gateLedger.ts`, `lib/gate.ts` and `SettingsView.vue`'s `datetime-local` inputs, and ~20 request bodies | `lib/datekeys.ts` — `utcDayKey`, `utcDayBefore`, `utcDayStart`, `isoInstant`, `localDatetimeInputValue`; none of them a rendering, and the module says so |
 
 **AC-NFR-025c — DONE.** Every site in the first four rows renders through a named §8 function; a
-UTC date says UTC. **ONE SUFFIX, decided once:** every human-facing UTC rendering ends in ` UTC`.
-`utcInstantLabel` keeps its ISO `Z` because it is a canonical machine-correlatable string rather
-than a phrase.
+UTC date says UTC. **TWO FORMS, and every UTC renderer is in exactly one of them:** a PHRASE a
+person reads ends in ` UTC` (`utcDayLabel`, `utcDayRangeLabel`, `utcClockLabel`,
+`utcClockRangeLabel`, `utcDayClockLabel`, `utcCompactInstantLabel`); a CANONICAL instant ends in
+ISO `Z` (`utcInstantLabel`, `utcExtentLabel`, `utcSecondsLabel`, `utcMillisLabel` —
+`2026-08-28 14:03:02Z`), because those four exist so an engineer can paste the value into a log
+query and `Z` is the designator that form uses. What is forbidden is a THIRD answer: a rendering
+naming no zone at all.
+
+**That rule is a test, not this sentence.** `wallclock.spec.ts` CALLS every zone-less renderer and
+requires each to end in ` UTC` or in `Z`, with the two buckets checked against the module's own
+exports in both directions — so a new renderer cannot be added until somebody decides which form
+it is in, and a rename cannot leave a stale entry behind. **This paragraph first read "ONE SUFFIX,
+decided once: every human-facing UTC rendering ends in ` UTC`", carving out `utcInstantLabel`
+alone; `utcSecondsLabel` and `utcMillisLabel` were added beside it and the sentence did not
+follow.** The reviewer found it on `0a1557c..d0a8fed`. Same shape as the zone-argument guard whose
+hand list stopped covering two later exports (party [199]) — a claim about a SET, written as prose,
+outliving the set.
 
 **THREE CLAIMS IN THE TABLE ABOVE WERE FALSE WHEN THIS SECTION FIRST CARRIED THEM**, and the
 corrections are the substance of the work rather than a footnote to it:
@@ -534,7 +548,7 @@ variable-indirection slice, a panel reverted to a bare UTC date, a renderer that
 `"UTC"`, an export whose only call site is removed, and a strip tooltip shown its lookup key.
 
 **Proven zone-independently.** The whole frontend suite runs green at `TZ=UTC` and again at
-`TZ=Asia/Yekaterinburg` — 652 tests, 52 files, both — which is what makes "these renderers do not
+`TZ=Asia/Yekaterinburg` — 653 tests, 52 files, both — which is what makes "these renderers do not
 inherit the runner's zone" evidence rather than a claim.
 
 **NFR-025 is `DONE`:** (a) the mechanism and the FR-031 surfaces, iter-0174; (b) the five

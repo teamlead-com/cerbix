@@ -178,10 +178,22 @@ export function utcExtentLabel(
 // day is the boundary lie this whole requirement exists to remove; leaving it unlabelled, which
 // is what thirteen files did, is the same lie with the evidence removed.
 //
-// ONE SUFFIX, decided once: every human-facing rendering here ends in ` UTC`. `changes.ts` used
-// to end one of them in ` Z` and the rest in nothing, which is how a reader learns to assume.
-// `utcInstantLabel` above keeps its ISO `Z` because it is a canonical machine-correlatable
-// string, not a phrase.
+// TWO FORMS, and every UTC rendering is in exactly one of them — asserted in `wallclock.spec.ts`
+// by calling each one, not promised here:
+//
+//   a PHRASE a person reads   ends in ` UTC`   (utcDayLabel, utcClockLabel, utcCompactInstantLabel …)
+//   a CANONICAL instant       ends in `Z`      (utcInstantLabel, utcExtentLabel, utcSecondsLabel,
+//                                               utcMillisLabel — `2026-08-28 14:03:02Z`)
+//
+// The second form is not an exception being tolerated: those four exist so an engineer can paste
+// the value into a log query, and `Z` is the designator that form uses. What is NOT allowed is a
+// third answer — a rendering that names no zone at all, which is what `changes.ts` did to five of
+// its six.
+//
+// This comment said "one suffix, ` UTC`, decided once" and carved out only `utcInstantLabel`.
+// That was false the moment `utcSecondsLabel` and `utcMillisLabel` were added beside it, and the
+// sentence outlived them the same way the zone-argument guard outlived its own list (party [199]).
+// The rule is a test now, so a new renderer cannot join without landing in one bucket or the other.
 //
 // The DATE FORMAT is `dmy`, the same one `instantLabel` uses. The legacy sites wrote
 // `2026-09-05` (an ISO slice) and `05.09.2026` (hand-padded) in roughly equal numbers; one

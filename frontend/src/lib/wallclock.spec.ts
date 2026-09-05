@@ -281,6 +281,57 @@ describe("the mechanism's shape", () => {
     }
   });
 
+  // THE SUFFIX RULE, as a call rather than as a sentence.
+  //
+  // Every zone-less renderer is called with one real instant and must end in ` UTC` (a phrase a
+  // person reads) or in `Z` (a canonical instant an engineer pastes into a log query). Which
+  // bucket each one is in is ENUMERATED, so a new renderer cannot be added without landing in one
+  // — and the enumeration is checked against the module's own exports in both directions, so a
+  // rename cannot leave a stale entry behind.
+  //
+  // The prose in `wallclock.ts` claimed a single ` UTC` suffix and carved out `utcInstantLabel`
+  // alone; `utcSecondsLabel` and `utcMillisLabel` were added beside it and the sentence did not
+  // follow. Reviewer finding on `0a1557c..d0a8fed`. It is a test now.
+  it("gives every UTC renderer one of exactly two suffixes, and says which", () => {
+    const A = "2026-08-28T14:03:02.417Z";
+    const B = "2026-08-29T15:04:03.000Z";
+    // Each renderer is CALLED, with the arguments its own signature takes, and placed in a bucket.
+    const PHRASE: Record<string, () => string> = {
+      utcClockLabel: () => utcClockLabel(A),
+      utcClockRangeLabel: () => utcClockRangeLabel(A, B),
+      utcCompactInstantLabel: () => utcCompactInstantLabel(A, new Date(B)),
+      utcDayClockLabel: () => utcDayClockLabel(A),
+      utcDayLabel: () => utcDayLabel(A),
+      utcDayRangeLabel: () => utcDayRangeLabel(A, B),
+    };
+    const CANONICAL: Record<string, () => string> = {
+      utcExtentLabel: () => utcExtentLabel(A, B),
+      utcInstantLabel: () => utcInstantLabel(A),
+      utcMillisLabel: () => utcMillisLabel(A),
+      utcSecondsLabel: () => utcSecondsLabel(A),
+    };
+
+    // The two buckets ARE the module's zone-less exports, no more and no less — so a new renderer
+    // fails here until somebody decides which form it is in, and a rename cannot leave a stale
+    // entry behind.
+    const src = readFileSync(join(SRC, "lib/wallclock.ts"), "utf8");
+    const zoneless = [...src.matchAll(/export function (\w+)\(([\s\S]*?)\):/g)]
+      .filter((m) => !/\bzone\??\s*:/.test(m[2]))
+      .map((m) => m[1])
+      .sort();
+    expect(zoneless).toEqual([...Object.keys(PHRASE), ...Object.keys(CANONICAL)].sort());
+
+    for (const [name, call] of Object.entries(PHRASE)) {
+      const out = call();
+      expect(out, `${name} -> ${out}`).toMatch(/ UTC$/);
+    }
+    for (const [name, call] of Object.entries(CANONICAL)) {
+      const out = call();
+      expect(out, `${name} -> ${out}`).toMatch(/Z$/);
+      expect(out, `${name} must not claim both forms`).not.toMatch(/ UTC$/);
+    }
+  });
+
   it("names two owner modules that exist and that really do build dates", () => {
     for (const rel of ["lib/wallclock.ts", "lib/datekeys.ts"]) {
       const text = readFileSync(join(SRC, rel), "utf8");

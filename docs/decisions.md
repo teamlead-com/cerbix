@@ -7763,7 +7763,7 @@ productive place to look.
 **Gates.** `make dev-test-distributed` red twice and then green (11 passed / 1 skipped), with both
 red runs preserved rather than rewritten — the second is what a config repair looks like when it
 works and something else is behind it. Geo topology 13 passed. `make secret-smoke` and
-`make mac-smoke` green. Frontend 652 tests over 52 files, green at `TZ=UTC` and at
+`make mac-smoke` green. Frontend 653 tests over 52 files, green at `TZ=UTC` and at
 `TZ=Asia/Yekaterinburg`. Eleven mutations planted and killed across the three decisions.
 
 **The CHANGELOG announced a release that does not exist.** Its top section read
@@ -7771,3 +7771,27 @@ works and something else is behind it. Geo topology 13 passed. `make secret-smok
 before its review closed, and the dated heading outlived it. It is `[Unreleased]` now and carries
 everything since `v0.1.8`, including FR-031/NFR-025 and FR-032, which landed after that heading was
 written. **Nothing here authorizes a tag, a push or a release.**
+
+### D-0246 addendum — a fourth false claim, in this decision's own iteration (reviewer finding on `0a1557c..d0a8fed`)
+
+The suffix rule was stated four times — in `wallclock.ts`, in §9, in `status.md` and in
+`traceability.md` — as **"ONE SUFFIX, decided once: every human-facing UTC rendering ends in
+` UTC`"**, with `utcInstantLabel` carved out as the canonical `Z` form. `utcSecondsLabel` and
+`utcMillisLabel` were added beside it **in this same iteration** and return `…14:03:02Z`; the
+carve-out did not follow them, and the tests asserted precisely what the sentence denied.
+
+It is not a zone leak — `Z` designates UTC unambiguously, and those four renderings exist so an
+engineer can paste the value into a log query. The mechanism was right and the claim about it was
+false, which is the class this arc keeps producing and the reason it keeps producing it: a
+mutation-verified guard suite proves what its guards point at, and no guard pointed at the
+sentence.
+
+**The correction is a derivation, not a better sentence.** `wallclock.spec.ts` now CALLS every
+zone-less renderer and requires each to end in ` UTC` (a phrase a person reads) or in ISO `Z` (a
+canonical instant), with the two buckets asserted against the module's own exports in BOTH
+directions. Three mutations killed: `utcSecondsLabel` placed in the phrase bucket — the claim
+exactly as written — a renderer added to neither bucket, and a phrase renderer dropping its suffix.
+
+**Same shape as the zone-argument guard at party [199]**, whose hand-written list stopped covering
+two exports added later. A claim about a SET, written as prose, outlives the set; the rule that
+follows is to derive every such claim from the thing it describes.

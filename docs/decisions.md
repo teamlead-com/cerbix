@@ -7871,3 +7871,18 @@ question about the ENVELOPE, independent of the carrier, and is asked first for 
 generation 1 included.** A known envelope on a carrier that takes none keeps its own sentence and
 stays in the non-oracular bucket. Two mutations cover the order (P8, P9), the second naming
 generation 1 specifically.
+
+**The independent audit's result (2026-09-06).** The owner-authorized slice `0a1557c..d0a8fed` was
+read; the P0 and the P1s found in it were resolved in a response tree examined separately through
+`8175cd0`, and the three P1s raised on that response are closed verifiably. **No blocking findings
+remain in the verified final tree.** The reviewer ran scoped Go tests, `git diff --check`,
+`make docs-check`, the final response diff and the provenance himself; the stable `-race` run and
+every live gate stay attributed to this session as consistent evidence rather than his own runs.
+
+**It is an audit conclusion and nothing else.** It does not close `iter-0178`, does not change
+`status.md`, and authorizes no commit, push, tag or release — the commits here were made on the
+owner's instruction, before this result existed. `iter-0177` was once marked closed on a result of
+exactly this shape and three more findings arrived afterwards, which is why the distinction is
+written down rather than assumed. **The lifecycle and the VCS belong to the owner.** The three open
+items — silence as a refusal, credentialed dispatch unexercised in geo, and the untested
+dead-letter label — are untouched by it.

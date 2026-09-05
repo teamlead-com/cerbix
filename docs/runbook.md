@@ -260,7 +260,9 @@ First migrate the Cerbix test-queue shape while the broker is still 3.12:
 1. Stop new Test Connection requests and drain/stop every old worker in the region.
 2. Run `docker compose --env-file <deployment.env> -f <compose.yml> exec rabbitmq rabbitmqctl
    list_queues name durable auto_delete exclusive consumers messages` and wait until
-   `checks.tests.<region>` / `checks.tests.v2.<region>` have no consumers and auto-delete.
+   `checks.tests.<region>` / `checks.tests.v2.<region>` / `checks.tests.v3.<region>` have no
+   consumers and auto-delete. The v3 test carrier is served whenever `secrets.dispatch_envelope`
+   is `enforced`, alongside v2 and by the same consumer code.
    If an empty stale queue remains, delete only that named empty test queue; never delete a queue
    with messages.
 3. Deploy the new worker binary against 3.12. Worker readiness now waits for both enabled test
@@ -269,8 +271,13 @@ First migrate the Cerbix test-queue shape while the broker is still 3.12:
 
 ```bash
 CERBIX_TEST_RABBITMQ_URL='amqp://user:pass@broker:5672/' \
-  go test -race ./internal/dispatch -run TestAMQPRoundTrip -count=1 -v
+  go test -race ./internal/dispatch -run 'TestAMQPRoundTrip|TestEveryTestCarrierAnswersOnItsOwnQueue' -count=1 -v
 ```
+
+The second test publishes a Test Connection on **every** carrier an executor serves — v1, v2 with
+envelope v1, v3 with envelope v2 — and fails if any of them does not answer. It exists because the
+v3 carrier once had a consumer that admitted nothing (D-0246): the queue was declared and bound,
+and every delivery on it was dead-lettered.
 
 Then advance the broker one supported hop at a time. The commands below use `docker/.env.dev`;
 production uses its filled `docker/.env`. Before each next image, enable all stable feature flags,
@@ -851,6 +858,8 @@ credential at the monitored target.
 | `CerbixCredentialEnvelopeFailures`, executor `/readyz` 503 | A job could not be opened. Readiness degrades on a PERSISTENT mismatch, so a 503 means repeated failures; a single mismatch does not by itself degrade readiness but is still actionable, never expected. During a CORRECT rotation the old key is still in `previous`, so its envelopes open normally and produce no error at all — an `unknown_key_id` means the key was removed too early or a payload was left undrained, which is a real fault. Compare region and key ids across core/executor configs; retain both rotation keys. Values and ciphertext must never be copied into tickets or logs. A successful decrypt restores readiness. |
 | Monitor detail shows `last_probe_error` | Typed execution diagnostic only: no heartbeat/status/SLA mutation occurred. A revision-valid live UP or DOWN result clears it; stale or SLA-only results do not. |
 | Secret ref bundle is rejected/frozen | Create the named secret in the bundle's project, or correct `password_ref`. The file provider preserves last-known-good and never resolves across projects. |
+| Test Connection answers `no worker queue for region "R" (AMQP 312 NO_ROUTE)` **immediately** | The API published on a carrier NOBODY in that region has bound. The commonest cause is not a dead region but a fleet that disagrees with itself: the API enforces credential envelopes (`secrets.dispatch_envelope: "enforced"`) and the region's executor does not, so the executor started only the v1 test consumer while the API published on v2/v3. Compare `secrets.dispatch_envelope` across the API/scheduler config and every executor config for that region, then `rabbitmqctl list_queues name consumers` and look for `checks.tests.v2.R` / `checks.tests.v3.R` with a consumer. An executor that enforces MUST also hold that region's `security.dispatch` key — and MUST NOT hold `security.encryption_key`, which `ValidateSecretsForRole` refuses. |
+| Test Connection answers `no worker responded in region "R"` **after the full timeout** | The queue exists and has a consumer, and the consumer REFUSED the delivery — a refusal is not answered, so the caller waits out its timeout and reports the same sentence an empty region produces. **The refusal is visible in `checks.dead`**, not in the worker log: `rabbitmqctl list_queues name messages \| grep checks.dead`, then read the message through the management API and look at its `x-cerbix-source` header (`tests.v1`/`tests.v2`/`tests.v3`) and its `credential_envelope`. A generation ≥ 2 test carrier admits only a delivery that CARRIES an envelope; anything else is dead-lettered for exactly this inspection. Do not read the delivery's own `protocol_version` as the carrier — the queue is the carrier (§4.7, D-0160). |
 | PostgreSQL `sslmode=require` | Transport is encrypted but server identity is not verified. Use `verify-ca`/`verify-full` for identity verification. MySQL/Redis ref monitors default to verified TLS; disabling TLS or `tls_skip_verify` is an explicit audited posture. |
 
 Prometheus rules are in `docker/alerts/secret-inventory.rules.yml`. The live smoke

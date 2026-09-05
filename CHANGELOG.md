@@ -6,7 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
-## [v0.1.9] - 2026-09-03
+## [Unreleased] — everything since `v0.1.8`
+
+**This section carried the heading `[v0.1.9] - 2026-09-03` and there is no such tag.** The tag was
+created and then **deleted by hand** before the review that gates it had closed — see
+`8ee023c docs(v0.1.9): the tag is dropped, not moved, until the review closes`. The dated heading
+outlived the tag and announced a release that does not exist, which is exactly the claim a
+changelog must not make. `v0.1.8` (2026-09-03) is the newest tag in the repository.
+
+Renamed rather than deleted: the work below shipped into `main` and is real; only the version
+number was not. When a release is cut, this heading takes its number and its date, and nothing
+under it needs rewriting.
+
+Two clusters of work landed after that heading was written and are recorded below it: **the
+truthful-rendering package (FR-031 / NFR-025)** and **the expected-run ledger (FR-032)**.
+
+### Part 1 — the canary release that was prepared as v0.1.9
 
 Four things in one release, in the order the owner set: a **typed external canary** for async API
 journeys, an **audit trail for writes that change something** — incidents and now monitors — the
@@ -209,6 +224,92 @@ reviewer · full `-race` suite green (33 packages), vitest 46 files / 514 tests,
 / 1 skipped, geo topology suite 12 passed · hosted CI green on the pushed head, all seven jobs,
 including `Backend (timescaledb hypertables)` — the job whose two failures D-0225 could not read until
 the annotations step made a red run legible</sub>
+
+### Part 2 — a rendering claims no more than the facts behind it (FR-031 / NFR-025)
+
+Three surfaces drew two different states identically, so a reader could not tell them apart — and
+one of them quoted availability over a range it had never stored.
+
+- **The reliability timeline is on CLOCK TIME.** Cells come from the requested range at the rollup
+  grain, so a step with nothing stored occupies its own real width in its own encoding instead of
+  vanishing and letting its neighbours stretch over it. Five encodings that cannot be confused:
+  `unknown` is a solid neutral slice (a decided verdict, never a status hue), `not-stored` is a
+  hatch with an outline, and opacity means `provisional` and nothing else. Height carries QUANTITY.
+  **A problem is never hidden:** a slice too small to draw is MARKED non-geometrically and named in
+  the readout rather than being silently rounded away.
+- **A segment states its STORAGE verdict and withholds availability while that storage is
+  incomplete.** This closed a real defect in the old numbers: a segment could quote
+  `availability 100%` over a range it never materialized. Coverage is still printed, as its own
+  separately named fraction.
+- **The Response time panel draws every heartbeat at its real timestamp** — including the
+  zero-latency failures that used to be filtered out and disappear — as points only, with no
+  connecting stroke and no fill, because neither can span time nothing was measured in. Absence is
+  drawn POSITIVELY by an observation ruler: one tick per recorded check, and the empty spans
+  between them are focusable and say only what is known.
+- **The `/sla` objective card says which state it is in.** Read-only with an explicit Edit, a
+  guarded save, the draft cleared on success, and both writers gated on their load generation — so
+  a save that started under one project can no longer land under another.
+- **NFR-025 — no timestamp is rendered without naming its zone, and it is enforced rather than
+  fixed.** One mechanism, a NAMED RENDERER PER SUBJECT and deliberately no generic date formatter,
+  with the UTC offset resolved AT the instant (a 30-day window in late March or October crosses a
+  DST change, so this is the ordinary case). Identity stays UTC; presentation is local and always
+  names its offset. **Every hand-rolled date site in the SPA is gone**: outside two modules — one
+  for renderings, one for keys, wire values and HTML control values — no product file calls
+  `toISOString` or pulls a field off a `Date` at all. The suite runs green at `TZ=UTC` and at
+  `TZ=Asia/Yekaterinburg`, which is what makes that a fact rather than a claim.
+
+<sub>Decisions D-0235 … D-0236, D-0246 · FR-031, NFR-025a/b/c DONE · iterations iter-0174 and the
+NFR-025c half in iter-0178 · no Go code and no API change in the FR-031 half: all four surfaces are
+the SPA and the storage verdict reads a field the payload already carried</sub>
+
+### Part 3 — cerbix records that a run was expected (FR-032)
+
+Until now a check that never ran left nothing behind. A gap in the heartbeats meant "we do not
+know", and the product could not tell "the monitor was fine and nothing was due" from "a run was
+due and never happened" — so no rendering could honestly connect two points across it.
+
+- **An expected-run ledger.** The scheduler now persists the window it already computed:
+  `expected_runs`, range-partitioned by `due_at`, one row per `(monitor, due window)`, with a
+  `monitor_schedule` segment history behind it so a monitor whose interval changed is read against
+  the interval that was in force. Every window ends in a verdict — covered, covered late, missed,
+  withheld, reserved — and the ledger **withholds** rather than guesses whenever it cannot defend
+  an answer.
+- **RESERVE → PUBLISH → CONFIRM.** The window is recorded BEFORE the job leaves the process, and
+  `issued_at` is written only by the CONFIRM that follows a successful publish. A running instance
+  produced a false `expected_never_issued` under the older advance-then-publish ordering; this is
+  the fix, and only the windows whose reservation was proved durable are published.
+- **A fourth carrier generation that announces itself.** `checks.jobs.v4.<region>` and its
+  HTTP-pull twin carry job identity; a region gets ledger-eligible jobs only where an executor has
+  ANNOUNCED it can consume them, so a half-upgraded fleet degrades to "not eligible" instead of
+  losing runs. Rolling back the migration REFUSES while generation-4 rows are pending rather than
+  discarding them.
+- **The panel may draw a connecting stroke again — but only across a span the ledger says was
+  covered.** That is the whole point of the requirement: the stroke returns as a claim the product
+  can defend.
+- **Reading it:** `GET …/expected-runs` with a versioned cursor, a `ledger_from` fence so nothing
+  before the ledger existed is presented as a missed run, retention that includes the DEFAULT
+  partition, and an unlabelled HOT-ratio gauge sampled by the leader.
+
+<sub>Decisions D-0237 … D-0245 · FR-032 DONE · iterations iter-0174 … iter-0177 · schema `00100`
+`monitor_execution_revisions`, `00101` the generation-4 pull boundary, `00102` the ledger itself,
+`00103` the reservation columns — all additive</sub>
+
+### Fixed — two things only a live distributed stack could show
+
+- **A credentialed Test Connection failed in the distributed topology with `no worker queue for
+  region "core"`.** The API enforced credential envelopes and the core worker's config did not, so
+  the API published on a carrier that worker had never bound. The two halves of one topology now
+  agree, and a regression fails if they ever disagree again — in either direction, and also if the
+  executor is handed the at-rest master key it must never hold.
+- **Every generation-3 Test Connection was dead-lettered by the consumer bound to its own queue.**
+  One function serves both envelope test carriers and its admission check compared against a
+  hardcoded generation, so the newer carrier accepted nothing. Because the caller is answered only
+  on success, this surfaced as a ten-second timeout reported as `no worker responded in region …` —
+  the same message an empty region gives. The queue is the generation now, as it already was on the
+  jobs path, and a table-driven regression publishes on every carrier an executor serves.
+
+<sub>iter-0178, `D-0246` · `make dev-test-distributed` 11 passed / 1 skipped · geo topology 13 passed
+· `make secret-smoke` and `make mac-smoke` green · **not a release: nothing here is tagged**</sub>
 
 ---
 

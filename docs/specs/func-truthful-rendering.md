@@ -32,6 +32,12 @@ one rule, three surfaces, one iteration.
     onto that mechanism. NFR-025b remains `TODO` until they are, and iter-0174 may not be
     recorded as closing it.
 
+  **AMENDED 2026-09-06 (iter-0178, `D-0246`):** the sentence above is kept as the record of what
+  iter-0174 shipped, and it is no longer the requirement's shape. There turned out to be THREE
+  halves, not two — NFR-025c, the hand-rolled date surface, was invisible to the enumeration that
+  produced this list and to the guard written for it. All three are `DONE`; §9 carries the
+  decisions and the corrections.
+
   The halves are stated separately because an instance-wide sentence and §9's deliberate
   exclusion of those five sites cannot both be the shipped contract. This document asserted both
   in its first revision; corrected on reviewer P1 at party [153]. The follow-up is NOT weakened
@@ -477,30 +483,62 @@ NO product file renders a timestamp through `toLocaleString`/`toLocaleDateString
 fails it by name, which is how *that* construct stays gone rather than being removed once. A surface
 assertion in `SlaView.spec.ts` reaches what an operator actually reads.
 
-### NFR-025c — the hand-rolled date surface, `TODO`
+### NFR-025c — the hand-rolled date surface, **DONE 2026-09-06** (iter-0178, `D-0246`)
 
-A **different and larger** surface from NFR-025b, and not a substitution: each site needs a
-decision, not a rename.
+A **different and larger** surface from NFR-025b, and not a substitution: each site needed a
+decision, not a rename. The decisions, as taken:
 
-| What it is | Where |
-| --- | --- |
-| a bare UTC date shown as a fact | `AgentTokensPanel.vue` (created/revoked), `SecretsPanel.vue` (created/rotated), `MembersPanel.vue` (added), `StatusPagesView.vue` (subscriber), `MonitorDetailView.vue` (created/updated), `PublicStatusView.vue`, `lib/gate.ts`, `lib/gateLedger.ts` |
-| a UTC date that is IDENTITY and should say so rather than be converted | `ServiceReliability.vue` `dayLabel` — a segment's range |
-| a compact clock, UTC, mostly unlabelled | `lib/changes.ts`, `lib/changesTimeline.ts` — one rendering there already says `` Z`` |
-| already honest in its own words | `PublicStatusView.vue` (` UTC`), `lib/changes.ts` (` Z`) |
-| **legitimately bare, and must stay so** | `datetime-local` INPUT values (`lib/gate.ts`, `SettingsView.vue`) — the HTML format is local and offset-free; day-grid MAP KEYS (`DashboardView.vue`, `MonitorDetailView.vue`, `PublicStatusView.vue`) and day-boundary comparisons (`gateLedger.ts`) — never rendered |
+| What it is | Where | What it renders now |
+| --- | --- | --- |
+| a bare UTC date shown as a fact | `AgentTokensPanel.vue`, `SecretsPanel.vue`, `MembersPanel.vue`, `StatusPagesView.vue`, `MonitorDetailView.vue`, `PublicStatusView.vue`, `lib/gate.ts`, `lib/gateLedger.ts` | `utcDayLabel` — `05.09.2026 UTC` |
+| a UTC date that is IDENTITY and should say so rather than be converted | `ServiceReliability.vue` — a segment's range | `utcDayRangeLabel` — `01.08.2026 → 05.08.2026 UTC`, the suffix named once |
+| a compact clock, UTC, mostly unlabelled | `lib/changes.ts`, `lib/changesTimeline.ts` | `utcClockLabel`, `utcClockRangeLabel`, `utcDayClockLabel`, `utcCompactInstantLabel` — all suffixed ` UTC` |
+| the canonical instant a seal or a snapshot is quoted at | `lib/services.ts` `sealedLabel`, `lib/gate.ts` `preciseLabel` | `utcSecondsLabel`, `utcMillisLabel` — the `Z` was already there and is kept |
+| a KEY, a comparison, a wire value or an HTML control value | the three 90-day strips, `lib/gateLedger.ts`, `lib/gate.ts` and `SettingsView.vue`'s `datetime-local` inputs, and ~20 request bodies | `lib/datekeys.ts` — `utcDayKey`, `utcDayBefore`, `utcDayStart`, `isoInstant`, `localDatetimeInputValue`; none of them a rendering, and the module says so |
 
-**AC-NFR-025c:** every site in the first three rows renders through a named §8 function — a UTC
-date says UTC, a local one names its offset — and the last row is exempt with its reason recorded.
+**AC-NFR-025c — DONE.** Every site in the first four rows renders through a named §8 function; a
+UTC date says UTC. **ONE SUFFIX, decided once:** every human-facing UTC rendering ends in ` UTC`.
+`utcInstantLabel` keeps its ISO `Z` because it is a canonical machine-correlatable string rather
+than a phrase.
 
-**The remainder is BOUNDED rather than described.** `wallclock.spec.ts` carries a ratchet: the
-hand-rolled idiom is counted per file and compared against an enumerated list with a reason each. A
-new file or a new call fails it, and so does a listed count that shrinks without the list being
-updated — a stale allow-list is how a ratchet rots. Both directions are mutation-verified.
+**THREE CLAIMS IN THE TABLE ABOVE WERE FALSE WHEN THIS SECTION FIRST CARRIED THEM**, and the
+corrections are the substance of the work rather than a footnote to it:
 
-**NFR-025 is `IN_PROGRESS`, not `DONE`:** (a) the mechanism and the FR-031 surfaces, done at
-iter-0174; (b) the five `toLocaleString` sites, done 2026-09-04; (c) this. Any row that says
-otherwise repeats the over-claim above.
+1. **"day-grid MAP KEYS … never rendered" was wrong for all three strips.** Each one wrote
+   `label: key` and put that label in a tooltip: `2026-06-08 · no data`. The key and the rendering
+   were the same string, so exempting the key exempted a rendering. They are split now — the key
+   is `utcDayKey`, the label is `utcDayLabel` — and `MonitorDetailView.spec.ts` asserts what the
+   tooltip actually says, because a source guard cannot see this one: `utcDayKey` is a legitimate
+   call.
+2. **"already honest in its own words: `lib/changes.ts` (` Z`)" pointed at dead code.**
+   `clockSecondsLabel` was exported, documented as the honest one, and called by nothing in the
+   repository. It is deleted. The exports of §8's mechanism are now asserted to have a caller each,
+   with import statements stripped first — an unused import counted as a caller and let the first
+   version of that check pass a mutation.
+3. **The enumeration missed a site entirely, and the ratchet is why.** Its idiom required the
+   slice to be CHAINED onto the call, so `phaseInstantLabel` in `lib/changesTimeline.ts`, which
+   held `d.toISOString()` in a local variable and sliced THAT, rendered `08-28 16:40` to an
+   operator with no zone at all and was never counted. It was found by reading, not by the guard
+   that exists so reading is not required.
+
+**The enforcement is now a GUARD, not a ratchet.** Outside `lib/wallclock.ts` (renderings) and
+`lib/datekeys.ts` (keys, wire values, control values), no product file calls `toISOString` or
+pulls a field off a `Date` at all. There is nothing left to enumerate and no allow-list to rot,
+and an indirection cannot walk past it because the CALL is what is banned. Four further guards
+sit beside it in `wallclock.spec.ts`: every export has a real caller; every zone-less renderer
+pins the literal `"UTC"` in its `partsAt` call, selected by SIGNATURE rather than by name (a
+renderer that takes `zone` is local by contract); the two owner modules are asserted to exist and
+to really contain the banned idiom, so the exemption is load-bearing rather than a typo; and the
+three day strips are held to the key/label split. Five mutations planted and killed — the
+variable-indirection slice, a panel reverted to a bare UTC date, a renderer that drops its pinned
+`"UTC"`, an export whose only call site is removed, and a strip tooltip shown its lookup key.
+
+**Proven zone-independently.** The whole frontend suite runs green at `TZ=UTC` and again at
+`TZ=Asia/Yekaterinburg` — 652 tests, 52 files, both — which is what makes "these renderers do not
+inherit the runner's zone" evidence rather than a claim.
+
+**NFR-025 is `DONE`:** (a) the mechanism and the FR-031 surfaces, iter-0174; (b) the five
+`toLocaleString` sites, 2026-09-04; (c) this, iter-0178.
 
 Deliberately not in this package's scope: widening it to four unrelated views. The reviewer
 approved this split at party [143] on that ground.
@@ -568,6 +606,9 @@ Discharged as a SET in `docs/traceability.md`.
 4. The iteration report, `docs/decisions.md`, and the FR-031 / NFR-025 rows of
    `docs/status.md` and `docs/traceability.md` — FR-031 and **NFR-025a** as `DONE`, **NFR-025b**
    as `TODO` with its five sites named. A row that collapses the two is a false claim (§9).
+   *(This is iter-0174's plan, kept as written. NFR-025b closed 2026-09-04 and NFR-025c closed at
+   iter-0178; the rule against collapsing rows still holds — it is what caught the over-claim
+   twice.)*
 
 ## 12. Declined and out of scope
 

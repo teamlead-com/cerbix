@@ -7697,3 +7697,77 @@ scope" (party [81]). The scope is the one accepted at [62] and nothing outside i
 CLEAN; the frontend suite and the full `-race` remain developer-provided evidence rather than the
 reviewer's own runs, because his workspace has no local `npm`; `make docs-check` and
 `git diff --check` he ran himself. No VCS or release authority follows from any of it.
+
+## D-0246 — a capability nobody runs by accident stays broken: two halves of one topology, a carrier that admitted nothing, and the last half of NFR-025 (iter-0178, 2026-09-06)
+
+**Context.** The owner asked whether cerbix is ready to release. The honest answer was that the
+gates which would tell you had not all been run since FR-032 landed — only the single-process
+stack had. Running them turned two defects up, one behind the other, and closing the remaining
+half of NFR-025 turned up three more in the enumeration that was supposed to bound it.
+
+**Decision 1 — the two halves of one topology must agree about credential envelopes, and a test
+must say so in both directions.** `docker/config.dev.yaml` (api + scheduler) enforces envelopes
+and `docker/config.worker-core.yaml` did not, so the API published credentialed work on a carrier
+the worker had never bound: `no worker queue for region "core" (AMQP 312 NO_ROUTE)`. The executor
+now enforces and holds the API's region key — and, equally, must NOT hold the at-rest master, which
+is the easy wrong fix. `TestDevRoleConfigsKeepAtRestMasterOutOfWorker` asserts both directions over
+the real files through the real loader. Four mutations killed, including a keyring that is present
+but is not the API's: a mismatched key seals what nobody can open and fails later and less legibly
+than having none.
+
+**Geo is deliberately unchanged, and that is a finding rather than a shortcut.** `config.geo.yaml`,
+`config.worker.yaml` and `config.agent.yaml` carry no `secrets` block at all, so that topology
+publishes generation-1 carriers and its executors have nothing to open — internally consistent.
+Giving the geo worker a keyring would start consumers nobody publishes to. **Recorded as an open
+coverage gap:** FR-020's credentialed dispatch is exercised by no geo run at all. Pre-existing, not
+a regression, not closed here.
+
+**Decision 2 — the QUEUE is the carrier generation on the test path too, as it already was on the
+jobs path.** `serveEnvelopeTestsOnce` serves both envelope test carriers, and its admission check
+compared the delivery's own `ProtocolVersion` against a hardcoded `ProtocolV2`. Every generation-3
+Test Connection was therefore dead-lettered by the consumer bound to its own queue. It was wrong
+twice over: §4.7 and D-0160 already say the body's claim is never consulted, because it is the
+field an attacker can edit, and the value it was compared to was the wrong one anyway. The body is
+no longer asked; what remains is the one property a generation ≥ 2 test carrier is DEFINED by — it
+carries an envelope.
+
+**The failure mode is the reason this cost a debugging cycle.** The consumer answers only on
+success, so a refusal is silence, and silence reaches the operator as `no worker responded in
+region …` — the same sentence an empty region produces. Answering a refusal with a `ProbeError`
+heartbeat would fix that; it is a change in wire behaviour, the reviewer withheld it from the
+scope grant, and it is recorded as OPEN rather than done quietly.
+
+**Decision 3 — NFR-025c is closed by a GUARD, not by a ratchet.** Outside `lib/wallclock.ts`
+(renderings) and the new `lib/datekeys.ts` (keys, wire values, control values), no product file
+calls `toISOString` or pulls a field off a `Date`. The previous state was an allow-list of thirteen
+files with a count and a reason each — honest about being a bound, and holed exactly where an
+allow-list is holed: its idiom required the slice to be CHAINED onto the call, so
+`phaseInstantLabel`, which held `d.toISOString()` in a local variable and sliced THAT, rendered an
+unlabelled clock to an operator and was never counted. **It was found by reading, not by the guard
+whose purpose is to make reading unnecessary.**
+
+**What the enumeration also got wrong, recorded because the corrections are the substance.** The
+"day-grid map keys, never rendered" exemption was false for all three 90-day strips — each wrote
+`label: key` and put that key in a tooltip, so exempting the key exempted a rendering. The "already
+honest in its own words" example pointed at `clockSecondsLabel`, which nothing in the repository
+called. And the first version of the guard that would have caught the second of those — every
+export must have a caller — passed its own mutation, because an unused `import` line satisfied a
+bare-name match.
+
+**Why all three defects have the same shape.** A capability whose two halves live in two files, a
+consumer wired for a carrier it cannot admit, a guard whose idiom does not cover an indirection:
+in each case both ends were tested and the JOIN between them was tested by nothing. That is the
+same class as the wiring-boundary defect recorded in D-0239, and it is now the arc's most
+productive place to look.
+
+**Gates.** `make dev-test-distributed` red twice and then green (11 passed / 1 skipped), with both
+red runs preserved rather than rewritten — the second is what a config repair looks like when it
+works and something else is behind it. Geo topology 13 passed. `make secret-smoke` and
+`make mac-smoke` green. Frontend 652 tests over 52 files, green at `TZ=UTC` and at
+`TZ=Asia/Yekaterinburg`. Eleven mutations planted and killed across the three decisions.
+
+**The CHANGELOG announced a release that does not exist.** Its top section read
+`[v0.1.9] - 2026-09-03` while `v0.1.8` is the newest tag: the tag was created and deleted by hand
+before its review closed, and the dated heading outlived it. It is `[Unreleased]` now and carries
+everything since `v0.1.8`, including FR-031/NFR-025 and FR-032, which landed after that heading was
+written. **Nothing here authorizes a tag, a push or a release.**
